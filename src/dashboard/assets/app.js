@@ -64,23 +64,23 @@ function icon(name, cls) {
 }
 
 const LEG_STAGE = {
-  queued: { label: 'queued', tone: 'idle' },
-  delivered: { label: 'delivered', tone: 'flight' },
+  queued: { label: 'not sent yet', tone: 'idle' },
+  delivered: { label: 'received', tone: 'flight' },
   working: { label: 'working on it', tone: 'flight' },
   replied: { label: 'replied', tone: 'done' },
   completed: { label: 'done', tone: 'done' },
-  held: { label: 'held', tone: 'alert' },
+  held: { label: 'on hold', tone: 'alert' },
   failed: { label: 'failed', tone: 'alert' },
   cancelled: { label: 'cancelled', tone: 'idle' },
 };
 
 const DELIVERY = {
-  queued: { label: 'queued', tone: 'idle', glyph: null },
-  dispatching: { label: 'dispatching', tone: 'idle', glyph: null },
-  submitted: { label: 'delivered, unread', tone: 'flight', glyph: null },
+  queued: { label: 'not sent yet', tone: 'idle', glyph: null },
+  dispatching: { label: 'sending', tone: 'idle', glyph: null },
+  submitted: { label: 'not picked up yet', tone: 'flight', glyph: null },
   acknowledged: { label: 'working on it', tone: 'wait', glyph: null },
-  settled: { label: 'settled', tone: 'done', glyph: null },
-  held: { label: 'held', tone: 'alert', glyph: 'held' },
+  settled: { label: 'done', tone: 'done', glyph: null },
+  held: { label: 'on hold', tone: 'alert', glyph: 'held' },
   failed: { label: 'failed', tone: 'alert', glyph: 'failed' },
   cancelled: { label: 'cancelled', tone: 'idle', glyph: 'cancelled' },
 };
@@ -99,13 +99,13 @@ const MESSAGE_KIND = {
   reply: 'Reply',
   handoff: 'Handoff',
   result_set: 'Result',
-  nudge: 'Nudge',
-  hook: 'Hook',
+  nudge: 'Reminder',
+  hook: 'Automatic',
 };
 
 const HEALTH = {
   calm: () => ({ tone: 'done', label: 'All calm' }),
-  busy: (h) => ({ tone: 'flight', label: `Busy · ${h.in_flight} in flight` }),
+  busy: (h) => ({ tone: 'flight', label: `Busy · ${h.in_flight} in progress` }),
   needs_you: (h) => ({ tone: 'alert', label: h.items === 1 ? '1 needs you' : `${h.items} need you` }),
   paused: () => ({ tone: 'wait', label: 'Paused' }),
   inactive: () => ({ tone: 'idle', label: 'Inactive' }),
@@ -459,7 +459,7 @@ function mailTip(item) {
   return [
     el('div', { class: 'tip-head' }, 'from ', el('b', { text: item.from }), ' · ', d.label),
     el('div', { class: 'tip-body', text: item.preview.text + (item.preview.truncated ? '…' : '') }),
-    el('div', { class: 'tip-foot' }, 'since ', when(item.since_ms), item.attempts > 1 ? ` · attempt ${item.attempts}` : null),
+    el('div', { class: 'tip-foot' }, 'since ', when(item.since_ms), item.attempts > 1 ? ` · try ${item.attempts}` : null),
   ];
 }
 
@@ -468,9 +468,9 @@ function renderTray(model, p) {
   if (p.address_id === 'human' && !items.length) return null;
   const visible = items.slice(0, TRAY_VISIBLE);
   const urgent = items.filter((item) => (DELIVERY[item.state] || DELIVERY.queued).tone === 'alert').length;
-  const label = !items.length ? 'mailbox empty'
-    : urgent ? (urgent === items.length ? `${urgent} held` : `${urgent} held of ${items.length}`)
-      : `${items.length} in mailbox`;
+  const label = !items.length ? 'nothing waiting'
+    : urgent ? (urgent === items.length ? `${urgent} on hold` : `${urgent} on hold of ${items.length}`)
+      : `${items.length} waiting`;
   return el('div', { class: ['tray', items.length ? null : 'is-empty', urgent ? 'tone-alert' : null] },
     el('div', { class: 'envelopes' },
       visible.map((item) => {
@@ -519,7 +519,7 @@ function renderRows(model) {
   if (!snap.messages.length) {
     return el('div', { class: 'rows empty-rows' }, emptyPanel('No messages yet',
       el('p', { text: 'When you or an agent @mentions someone, the message appears here as an arrow from its author to each recipient.' }),
-      el('p', { class: 'muted', text: 'The mark at each arrowhead shows how far delivery got: queued, delivered, working, replied, or held.' })));
+      el('p', { class: 'muted', text: 'The mark at each arrowhead shows how far each message got: not sent yet, received, working on it, replied, or on hold.' })));
   }
   const rows = [];
   const threadOrder = new Map();
@@ -604,9 +604,9 @@ function stageMini(leg) {
 function legTitle(model, leg) {
   const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
   const who = aliasOf(model, leg.to);
-  if (leg.stage.stage === 'working') return `${who} is working on it (acknowledged ${ago(leg.stage.acked_at_ms)})`;
+  if (leg.stage.stage === 'working') return `${who} is working on it (picked up ${ago(leg.stage.acked_at_ms)})`;
   if (leg.stage.stage === 'replied') return `${who} replied. Click to jump to the reply.`;
-  if (leg.stage.stage === 'held') return `Delivery to ${who} is held`;
+  if (leg.stage.stage === 'held') return `Message to ${who} is on hold`;
   return `${who}: ${st.label}`;
 }
 
@@ -754,7 +754,7 @@ function renderKey() {
     el('div', { class: 'key-grid' },
       Object.entries(LEG_STAGE).map(([stage, st]) => el('span', { class: 'key-item' },
         el('span', { class: ['leg', 'static', 'tone-' + st.tone, 'stage-' + stage] }, icon(stage)), st.label))),
-    el('p', { class: 'muted small', text: 'Each arrow runs from the author to a recipient. The mark at its end shows how far delivery got. Dashed arrows are replies.' }),
+    el('p', { class: 'muted small', text: 'Each arrow runs from the author to a recipient. The mark at its end shows how far the message got. Dashed arrows are replies.' }),
     el('div', { class: 'key-grid' },
       ['queued', 'submitted', 'acknowledged', 'held'].map((st) => el('span', { class: 'key-item' },
         el('span', { class: ['env', 'static', 'env-' + st, 'tone-' + DELIVERY[st].tone] }, envelopeIcon(st)), DELIVERY[st].label))));
@@ -770,12 +770,12 @@ function renderRail(model) {
   const sections = [
     handoffs.length ? railSection('Handoffs', handoffs.length,
       railList('handoffs', handoffs.filter((m) => !handoffDone(m)), handoffs.filter(handoffDone), (m) => renderHandoff(model, m))) : null,
-    coords.length ? railSection('Coordinations', coords.length,
+    coords.length ? railSection('Tracked work', coords.length,
       railList('coords', coords.filter((c) => rank(c) < 2), coords.filter((c) => rank(c) === 2), (c) => renderCoordination(model, c))) : null,
     runs.length ? railSection('Terminal runs', null, el('ul', { class: 'runs' }, runs.map((r) => renderRun(model, r)))) : null,
   ].filter(Boolean);
   return el('aside', { class: 'rail', 'aria-label': 'Work in progress' },
-    sections.length ? sections : el('p', { class: 'rail-empty muted', text: 'Handoffs, coordinations, and terminal runs show up here as they happen.' }),
+    sections.length ? sections : el('p', { class: 'rail-empty muted', text: 'Handoffs, tracked work, and terminal commands show up here as they happen.' }),
     renderKey());
 }
 
@@ -824,7 +824,7 @@ function renderDrawer(snap) {
         parent ? el('button', { class: 'linkish', type: 'button', onclick: () => { closeDrawer(); jumpTo(parent.message_id); } },
           'In reply to ', el('b', { text: aliasOf(model, parent.author) }), ': ', parent.body.text.slice(0, 60) + (parent.body.text.length > 60 ? '…' : '')) : null,
         el('div', { class: 'full-body', text: m.body.text }),
-        m.body.truncated ? el('p', { class: 'muted small', text: 'Shortened for the dashboard. The full message is in the recipient panes.' }) : null,
+        m.body.truncated ? el('p', { class: 'muted small', text: 'Shortened for the dashboard. Each recipient got the full message.' }) : null,
         el('h3', { text: m.legs.length === 1 ? 'Recipient' : `${m.legs.length} recipients` }),
         el('ol', { class: 'timeline' }, m.legs.map((leg) => renderLegDetail(model, m, leg)))))];
 }
@@ -841,21 +841,21 @@ function renderLegDetail(model, m, leg) {
   const mail = recipient ? recipient.mailbox.find((item) => item.message_id === m.message_id) : null;
   let detail = null;
   const stage = leg.stage;
-  if (stage.stage === 'working') detail = el('span', null, 'acknowledged ', when(stage.acked_at_ms));
+  if (stage.stage === 'working') detail = el('span', null, 'picked up ', when(stage.acked_at_ms));
   else if (stage.stage === 'replied') {
     const reply = model.messages.get(stage.reply_id);
     detail = el('button', { class: 'linkish', type: 'button', onclick: () => { closeDrawer(); jumpTo(stage.reply_id); } },
       reply ? `replied ${duration(reply.at_ms - m.at_ms)} later` : 'replied', ' · view reply');
   } else if (stage.stage === 'completed') detail = el('span', { text: stage.kind === 'no_reply' ? 'finished without a reply' : 'finished' });
-  else if (stage.stage === 'held') detail = el('span', { text: 'waiting for the recipient pane to come back' });
-  else if (stage.stage === 'failed') detail = el('span', { text: 'could not be delivered' });
+  else if (stage.stage === 'held') detail = el('span', { text: 'waiting for the recipient to come back' });
+  else if (stage.stage === 'failed') detail = el('span', { text: 'could not be sent' });
   return el('li', { class: ['tl-item', 'tone-' + st.tone] },
     avatarFor(model, leg.to),
     el('div', { class: 'tl-text' },
       el('div', null, el('b', { text: aliasOf(model, leg.to) }), ' ', chip(st.tone, stage.stage, st.label)),
       detail ? el('div', { class: 'muted small' }, detail) : null,
-      mail ? el('div', { class: 'muted small' }, `in mailbox: ${(DELIVERY[mail.state] || DELIVERY.queued).label}`,
-        mail.attempts > 1 ? ` · attempt ${mail.attempts}` : null, ' · since ', when(mail.since_ms)) : null));
+      mail ? el('div', { class: 'muted small' }, `waiting: ${(DELIVERY[mail.state] || DELIVERY.queued).label}`,
+        mail.attempts > 1 ? ` · try ${mail.attempts}` : null, ' · since ', when(mail.since_ms)) : null));
 }
 
 const SPACE_STATE = {
