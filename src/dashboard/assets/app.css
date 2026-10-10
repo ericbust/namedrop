@@ -122,8 +122,6 @@ button { font: inherit; color: inherit; }
 }
 .chip .icon { width: 12px; height: 12px; }
 
-/* ---------- header ---------- */
-
 .top {
   display: flex; align-items: center; gap: 16px;
   padding: 0 18px; height: 52px; flex: none;
@@ -159,8 +157,6 @@ button { font: inherit; color: inherit; }
 }
 .banner > .icon { color: var(--tone); }
 
-/* ---------- board ---------- */
-
 .board { flex: 1; min-height: 0; display: flex; }
 .board.solo, .board.loading { align-items: center; justify-content: center; }
 .stage { flex: 1; min-width: 0; position: relative; overflow: auto; }
@@ -185,8 +181,6 @@ button { font: inherit; color: inherit; }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ---------- index ---------- */
-
 .index { flex: 1; overflow: auto; padding: 32px 18px; width: 100%; max-width: 720px; margin: 0 auto; }
 .lede { margin-bottom: 18px; }
 .spaces { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
@@ -201,8 +195,6 @@ button { font: inherit; color: inherit; }
 .space-name { font-weight: 600; }
 .space-card .go { color: var(--muted); }
 .space-error { color: var(--text-2); }
-
-/* ---------- identity ---------- */
 
 .id-0 { --id: var(--id-0); }
 .id-1 { --id: var(--id-1); }
@@ -236,8 +228,6 @@ button { font: inherit; color: inherit; }
 .avatar.lg.act-idle::after { border-color: var(--line-strong); border-width: 1px; inset: -3px; }
 .avatar.act-offline, .avatar.act-retired { opacity: 0.45; }
 .avatar.lg.act-offline::after { border-color: var(--idle); border-style: dotted; }
-
-/* ---------- stage, roster, lanes ---------- */
 
 .stage-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
 .sheet {
@@ -398,8 +388,6 @@ button { font: inherit; color: inherit; }
 }
 .new-pill[hidden] { display: none; }
 
-/* ---------- drawer ---------- */
-
 .scrim { position: fixed; inset: 0; z-index: 19; background: rgba(5, 8, 12, 0.38); }
 .drawer {
   position: fixed; top: 0; right: 0; bottom: 0; z-index: 20;
@@ -435,8 +423,6 @@ button { font: inherit; color: inherit; }
 .tl-item { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--line); }
 .tl-item b { font-family: var(--mono); font-size: 13px; }
 .tl-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-
-/* ---------- mailbox tray ---------- */
 
 .tray {
   display: flex; align-items: center; gap: 8px;
@@ -481,8 +467,6 @@ button { font: inherit; color: inherit; }
 .tip-body { margin: 4px 0; line-height: 1.4; }
 .tip-foot { color: var(--muted); font-size: 11.5px; }
 
-/* ---------- attention ribbon ---------- */
-
 .attention {
   flex: none; display: flex; flex-direction: column; gap: 2px;
   padding: 8px 18px;
@@ -493,8 +477,6 @@ button { font: inherit; color: inherit; }
 .attn-item > .icon { color: var(--tone); width: 16px; height: 16px; }
 .attn-text { flex: 1; min-width: 0; }
 .attn-when { color: var(--text-2); font-size: 12px; font-weight: 400; white-space: nowrap; }
-
-/* ---------- work rail ---------- */
 
 .rail {
   width: var(--rail); flex: none; overflow: auto;
@@ -582,8 +564,6 @@ button.work-card:hover { border-color: var(--line-strong); }
 .leg.static .icon { width: 11px; height: 11px; }
 .env.static { cursor: default; margin: 0; }
 
-/* ---------- motion: only what changed in the latest frame moves ---------- */
-
 .conn .dot.pulse-0 { animation: live-a 900ms ease-out; }
 .conn .dot.pulse-1 { animation: live-b 900ms ease-out; }
 @keyframes live-a { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--tone) 70%, transparent); } 100% { box-shadow: 0 0 0 9px transparent; } }
@@ -624,8 +604,6 @@ button.work-card:hover { border-color: var(--line-strong); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
-
-/* ---------- narrow screens: lanes become a feed, the rail a tab ---------- */
 
 .tabs { display: none; }
 

@@ -1,5 +1,3 @@
-//! Fixtures shared by integration tests: a disposable state directory, a
-//! canned Herdr, a fixed clock, sequential ids, and a seeded four-address space.
 #![allow(dead_code)]
 
 use namedrop::{

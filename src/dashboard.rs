@@ -1,5 +1,3 @@
-//! `namedrop dashboard`: a loopback page that shows one Herdr space's agents,
-//! mailboxes and conversation as it happens.
 pub use crate::store::dashboard as rows;
 mod http;
 mod hub;
@@ -23,8 +21,6 @@ use std::{
 
 const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
 
-/// Ensures the server runs and returns this workspace's page URL, opening
-/// it in a browser when one can be reached.
 pub fn open(
     runtime: &LifecycleRuntime<'_, impl HerdrCommandExecutor, impl Clock, impl IdGenerator>,
     open_browser: bool,
@@ -137,8 +133,6 @@ fn launch_browser(url: &str) -> bool {
         .is_ok()
 }
 
-/// Runs the singleton server for `state` until it idles out or hands off to
-/// a newer release. A second server for the same state exits at once.
 pub fn serve(state: &Path, command_gate: Option<File>) -> ExitCode {
     match run_server(state, command_gate) {
         Ok(()) => ExitCode::SUCCESS,

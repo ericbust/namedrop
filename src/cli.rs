@@ -192,7 +192,6 @@ impl Cli {
         }
     }
 
-    /// Whether `namedrop dashboard` should open a browser; `None` for other commands.
     pub fn dashboard(&self) -> Option<bool> {
         match &self.command {
             Command::Dashboard(args) => Some(!args.no_open),

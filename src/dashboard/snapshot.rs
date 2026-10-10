@@ -213,8 +213,6 @@ impl MessageKind {
         }
     }
 
-    /// Whether its author now waits for an answer; replies, results and
-    /// nudges close or prod work rather than open it.
     fn opens_request(self) -> bool {
         matches!(self, Self::Mention | Self::Handoff | Self::Hook)
     }
@@ -333,7 +331,6 @@ impl SpaceSummary {
 }
 
 impl DashboardSnapshot {
-    /// The page for a key no registered space hashes to.
     pub fn unknown(key: SpaceKey, label: Option<&str>, now_ms: i64) -> Self {
         Self {
             wire: WIRE_VERSION,
@@ -497,7 +494,6 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
         }
     };
 
-    // First appearance in the conversation decides lane order.
     let mut order: Vec<&str> = Vec::new();
     for m in messages {
         for id in std::iter::once(m.author.as_str()).chain(m.legs.iter().map(|l| l.to.as_str())) {

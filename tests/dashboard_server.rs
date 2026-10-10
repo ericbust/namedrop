@@ -142,7 +142,6 @@ struct EventStream {
 }
 
 impl EventStream {
-    /// Reads until one whole event satisfies `wanted`, or fails after `limit`.
     fn until(&mut self, limit: Duration, wanted: impl Fn(&str) -> bool) -> String {
         let deadline = Instant::now() + limit;
         loop {
@@ -263,7 +262,6 @@ fn state(directory: &TestDirectory) -> PathBuf {
     directory.path().join("state")
 }
 
-/// Writes a one-shot entry the way `namedrop dashboard` does.
 fn mint_entry(state: &Path) -> String {
     use std::os::unix::fs::PermissionsExt;
     let entries = state.join("dashboard/entry");
@@ -490,7 +488,6 @@ fn fake_herdr(root: &Path) -> PathBuf {
     herdr
 }
 
-/// Runs `namedrop dashboard --no-open --json` as a pane in `workspace` would.
 fn open_dashboard(root: &Path, workspace: &str) -> serde_json::Value {
     let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
         .args(["--json", "--plugin-state"])

@@ -38,9 +38,7 @@ pub(crate) enum Frame {
 }
 
 pub(crate) enum Verdict {
-    /// A newer release or schema owns the state: restart into it.
     Handoff(&'static str),
-    /// No tab for the idle window; the browser session rotates.
     Idle,
     Exit(&'static str),
 }
@@ -197,7 +195,6 @@ impl Hub<'_> {
         None
     }
 
-    /// Rebuilds subscribed spaces only when another connection committed.
     fn refresh(&mut self) {
         if self.store.is_none() {
             self.open_store();
@@ -238,7 +235,6 @@ impl Hub<'_> {
                 self.drop_subscriber(id);
             }
         }
-        // An unrecorded version retries every space on the next tick.
         if !failed {
             self.data_version = Some(version);
         }
@@ -263,7 +259,6 @@ impl Hub<'_> {
         }
     }
 
-    /// Logs a failure once, not on every tick it repeats.
     fn log(&mut self, message: String) {
         if self.last_error.as_ref() != Some(&message) {
             eprintln!("dashboard: {message}");
@@ -271,7 +266,6 @@ impl Hub<'_> {
         }
     }
 
-    /// Builds `key`'s snapshot, records its hash, and returns its frame.
     fn publish(&mut self, key: &SpaceKey) -> Option<Arc<str>> {
         if self.store.is_none() {
             self.open_store();

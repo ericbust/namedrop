@@ -14,7 +14,6 @@ fn attribution() -> MutationAttribution {
     MutationAttribution::new(ActorKind::Plugin, "test", 10)
 }
 
-/// Activates `space` with bound, occupied agents named by `aliases` and one thread.
 fn seed_space(store: &mut StateStore, space: &str, aliases: &[&str]) -> StateNamespace {
     let namespace = StateNamespace::for_space("socket-a", space);
     store
@@ -122,7 +121,6 @@ fn send_as(
         .unwrap();
 }
 
-/// Leases `to`'s mailbox head and submits it into the agent's session.
 fn submit(
     store: &mut StateStore,
     namespace: &StateNamespace,

@@ -1,5 +1,3 @@
-//! A std-only HTTP/1.1 front: GET only, loopback only, one thread per
-//! connection. Every security check lives in `route`.
 use super::hub::{Frame, HubCommand};
 use super::server_files::{ServerFiles, Token};
 use super::snapshot::SpaceKey;
@@ -20,7 +18,6 @@ const APP_JS: &str = include_str!("assets/app.js");
 const APP_CSS: &str = include_str!("assets/app.css");
 const HEADER_LIMIT: u64 = 8 * 1024;
 const PING_EVERY: Duration = Duration::from_secs(15);
-/// Each connection is a thread; past this, new ones get 503 instead of another.
 const MAX_CONNECTIONS: usize = 64;
 const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
 style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; \
@@ -62,7 +59,6 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>) {
     }
 }
 
-/// Frees its connection's place in the cap however the thread ends.
 struct Slot(Arc<AtomicUsize>);
 
 impl Drop for Slot {
@@ -139,8 +135,6 @@ enum Asset {
 }
 
 enum Route {
-    /// Swap a one-shot `?n=` nonce for the session cookie, then land on
-    /// the clean URL.
     Enter {
         location: String,
         nonce: String,

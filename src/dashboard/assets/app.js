@@ -1,8 +1,5 @@
 'use strict';
 
-// Every node is built through el()/svg(), which only ever set textContent.
-// Collaborator text is untrusted; it must never reach an HTML parser.
-
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
 function append(node, children) {
@@ -41,8 +38,6 @@ function clear(node) {
   return node;
 }
 
-// ---------- icons (16x16 strokes, colored by currentColor) ----------
-
 const ICON_PATHS = {
   queued: [['circle', { cx: 8, cy: 8, r: 4.5 }]],
   delivered: [['circle', { cx: 8, cy: 8, r: 4.5 }], ['path', { d: 'M8 3.5a4.5 4.5 0 0 1 0 9z', class: 'fill' }]],
@@ -68,9 +63,6 @@ function icon(name, cls) {
   return svg('svg', { class: ['icon', 'icon-' + name, cls], viewBox: '0 0 16 16', 'aria-hidden': 'true' }, parts);
 }
 
-// ---------- domain tables: one row per wire enum value ----------
-
-// Tones are the only state colors: flight (in progress), wait, alert (needs you), done, idle.
 const LEG_STAGE = {
   queued: { label: 'queued', tone: 'idle' },
   delivered: { label: 'delivered', tone: 'flight' },
@@ -128,8 +120,6 @@ const CONNECTION = {
 
 const RUNTIME = { 'claude-code': 'Claude Code', codex: 'Codex' };
 
-// ---------- time ----------
-
 const clock = { skew: 0 };
 const serverNow = () => Date.now() - clock.skew;
 
@@ -153,7 +143,6 @@ function clockTime(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-// A live relative time; tick() rewrites every one of these in place.
 function when(ms, prefix) {
   return el('time', { class: 'ago', datetime: new Date(ms).toISOString(), title: new Date(ms).toLocaleString(), data: { at: String(ms), prefix: prefix || '' } },
     (prefix || '') + ago(ms));
@@ -164,8 +153,6 @@ function tick() {
     node.textContent = node.dataset.prefix + ago(Number(node.dataset.at));
   }
 }
-
-// ---------- shared view helpers ----------
 
 function chip(tone, iconName, label, cls) {
   return el('span', { class: ['chip', 'tone-' + tone, cls] }, iconName ? icon(iconName) : null, label);
@@ -178,8 +165,6 @@ function code(text) {
 function emptyPanel(title, ...lines) {
   return el('div', { class: 'empty' }, el('div', { class: 'empty-mark' }, icon('inbox')), el('h2', { text: title }), lines);
 }
-
-// ---------- state ----------
 
 const state = {
   snap: null,
@@ -196,8 +181,6 @@ const state = {
 };
 
 const root = document.getElementById('app');
-
-// ---------- header ----------
 
 function renderHeader(snap) {
   const conn = CONNECTION[state.connection];
@@ -221,8 +204,6 @@ function renderDisconnected() {
   return el('div', { class: 'banner tone-alert', role: 'alert' }, icon('alert'),
     el('span', null, 'Lost the dashboard server. Run ', code('namedrop dashboard'), ' in this workspace to start it again; this page reconnects on its own.'));
 }
-
-// ---------- space page ----------
 
 function renderSpace() {
   const snap = state.snap;
@@ -279,8 +260,6 @@ function syncNewPill() {
   pill.lastChild.textContent = state.unseen === 1 ? '1 new message' : `${state.unseen} new messages`;
 }
 
-// ---------- the model the views read ----------
-
 // Identity follows the participant, never its lane rank: a slot is assigned the
 // first time an address appears and kept for the life of the page.
 const IDENTITY_SLOTS = 6;
@@ -332,7 +311,6 @@ function legKey(messageId, to) {
   return messageId + '\u0000' + to;
 }
 
-// What changed since the previous frame. The first frame animates nothing.
 function diffSnapshot(prev, next) {
   const fresh = { messages: new Set(), legs: new Set(), mail: new Set() };
   const memo = {
@@ -353,8 +331,6 @@ function diffSnapshot(prev, next) {
   }
   return { memo, fresh };
 }
-
-// ---------- board ----------
 
 function renderBoard(snap) {
   const model = indexSnapshot(snap);
@@ -391,8 +367,6 @@ function motionOk() {
   return !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
-// ---------- roster: one sticky header per lane ----------
-
 function renderRoster(model) {
   return el('div', { class: 'roster' },
     el('div', { class: 'gutter-cell' }, renderDormantToggle(model)),
@@ -426,7 +400,6 @@ function runtimeLabel(p) {
   return RUNTIME[p.kind.runtime] || p.kind.runtime || 'agent';
 }
 
-// The alias is already the lane title, so a role that only repeats it says nothing.
 function subtitle(p) {
   if (p.address_id === 'human') return 'at the keyboard';
   const bare = (text) => text.replace(/^@/, '').toLowerCase();
@@ -457,8 +430,6 @@ function renderLaneHead(model, p) {
       : null,
     renderTray(model, p));
 }
-
-// ---------- mailbox tray ----------
 
 const TRAY_VISIBLE = 3;
 
@@ -515,7 +486,6 @@ function renderTray(model, p) {
     el('span', { class: 'tray-label', text: label }));
 }
 
-// One floating tooltip for the whole page; content is built on demand.
 const tip = el('div', { class: 'tip', role: 'tooltip', hidden: true });
 document.body.appendChild(tip);
 
@@ -541,8 +511,6 @@ document.addEventListener('focusin', (e) => {
   if (e.target instanceof Element && e.target.classList.contains('has-tip')) showTip(e.target);
 });
 document.addEventListener('focusout', () => { tip.hidden = true; });
-
-// ---------- the sequence diagram ----------
 
 const GAP_MS = 2 * 60_000;
 
@@ -667,8 +635,6 @@ function jumpTo(messageId) {
   row.classList.add('flash');
 }
 
-// ---------- attention ribbon ----------
-
 function renderAttention(snap) {
   if (!snap || !snap.attention.length) return null;
   return el('section', { class: 'attention tone-alert', 'aria-label': 'Needs your attention' },
@@ -677,8 +643,6 @@ function renderAttention(snap) {
       el('span', { class: 'attn-text', text: item.summary.text }),
       el('span', { class: 'attn-when' }, when(item.opened_at_ms)))));
 }
-
-// ---------- work rail ----------
 
 const WORK_OUTCOME = {
   pending: { tone: 'idle', label: 'not started', icon: 'queued' },
@@ -710,7 +674,6 @@ function railSection(title, count, body) {
     body);
 }
 
-// Live work first; finished work beyond the newest few folds behind a toggle.
 function railList(key, live, finished, render) {
   const open = state.showFinished[key];
   const extra = finished.length - FINISHED_SHOWN;
@@ -816,8 +779,6 @@ function renderRail(model) {
     renderKey());
 }
 
-// ---------- message drawer ----------
-
 function openDrawer(messageId) {
   state.drawerEntering = !state.selected;
   state.selected = messageId;
@@ -897,8 +858,6 @@ function renderLegDetail(model, m, leg) {
         mail.attempts > 1 ? ` · attempt ${mail.attempts}` : null, ' · since ', when(mail.since_ms)) : null));
 }
 
-// ---------- index page ----------
-
 const SPACE_STATE = {
   active: { tone: 'done', label: 'active' },
   paused: { tone: 'wait', label: 'paused' },
@@ -937,8 +896,6 @@ async function renderIndex() {
       icon('arrow', 'go'))));
   }
 }
-
-// ---------- live connection ----------
 
 const DISCONNECT_AFTER_MS = 30_000;
 
@@ -991,8 +948,6 @@ function applySnapshot(snap) {
   // (drawer, connection changes) must not replay them.
   state.fresh = { messages: new Set(), legs: new Set(), mail: new Set() };
 }
-
-// ---------- boot ----------
 
 if (/^\/w\/[^/]+\/?$/.test(location.pathname)) {
   renderSpace();

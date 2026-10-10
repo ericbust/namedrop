@@ -1,6 +1,3 @@
-//! Everything under `<state>/dashboard/`: the singleton lock, the published
-//! `server.json`, the secrets, one-shot entry nonces, workspace labels, and
-//! the log.
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -13,7 +10,6 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-/// How long a printed entry link stays usable before its first visit.
 const ENTRY_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -30,9 +26,6 @@ pub(crate) struct SingletonLock {
     _file: File,
 }
 
-/// A 32-byte hex secret, compared in constant time and never logged. The
-/// `token` is shared only by the CLI and the server; the browser's cookie is
-/// the separate `session`, so neither ever leaves the state directory as the other.
 #[derive(Clone)]
 pub(crate) struct Token(String);
 
@@ -82,7 +75,6 @@ impl ServerFiles {
         }
     }
 
-    /// Whether a live server holds the claim right now.
     pub fn claimed(&self) -> Result<bool, String> {
         match self.lock_file()?.try_lock_shared() {
             Ok(()) => Ok(false),
@@ -227,8 +219,6 @@ impl ServerFiles {
             })
     }
 
-    /// The one way a server process starts: detached, in its own process
-    /// group, belonging to no pane or workspace.
     pub fn spawn(&self) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
         let log = OpenOptions::new()

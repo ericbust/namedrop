@@ -3,7 +3,6 @@
 //! never selected, so no later layer can render them.
 use super::*;
 
-/// Newest messages the dashboard shows; older history stays in threads.
 pub const MESSAGE_WINDOW: i64 = 150;
 pub const TERMINAL_RUN_WINDOW: i64 = 20;
 pub const COORDINATION_WINDOW: i64 = 20;
@@ -35,7 +34,6 @@ pub struct AddressRow {
     pub pane_type: crate::PaneType,
     pub retired: bool,
     pub bound: bool,
-    /// The bound pane's latest observation carries an Agent Session.
     pub occupied: bool,
     pub agent_status: Option<String>,
 }
@@ -110,7 +108,6 @@ pub struct TerminalRunRow {
     pub exit_code: Option<i32>,
 }
 
-/// One registered space, as the `worktrees` registry records it.
 pub struct SpaceRow {
     pub namespace: StateNamespace,
     pub state: crate::WorktreeState,
