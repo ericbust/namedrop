@@ -1,0 +1,2171 @@
+[
+ {
+  "wire": 1,
+  "generated_at_ms": 1791644020000,
+  "space": {
+   "key": "9f2c41d07ab3e815c2d4",
+   "workspace_id": "w3",
+   "label": {
+    "text": "namedrop/dashboard",
+    "truncated": false
+   },
+   "state": "active"
+  },
+  "health": {
+   "level": "busy",
+   "in_flight": 1
+  },
+  "participants": [
+   {
+    "address_id": "human",
+    "alias": "you",
+    "kind": {
+     "type": "human"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": [
+     "@planner"
+    ]
+   },
+   {
+    "address_id": "pane-address-7c1e9a",
+    "alias": "@planner",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Plans and splits work",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "planner",
+     "truncated": false
+    },
+    "activity": "working",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-1",
+      "message_id": "msg-5e0c0001",
+      "from": "you",
+      "preview": {
+       "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use a",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644004000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-2b8f04",
+    "alias": "@reviewer",
+    "kind": {
+     "type": "agent",
+     "runtime": "codex"
+    },
+    "role": {
+     "text": "Code review",
+     "truncated": false
+    },
+    "persona": {
+     "text": "Skeptical senior reviewer",
+     "truncated": false
+    },
+    "pane_label": {
+     "text": "reviewer",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-d93a61",
+    "alias": "@tester",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Writes and runs tests",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "tester",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-41f0c7",
+    "alias": "@build",
+    "kind": {
+     "type": "terminal"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": {
+     "text": "build shell",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   }
+  ],
+  "messages": [
+   {
+    "message_id": "msg-5e0c0001",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644000000,
+    "author": "human",
+    "kind": "mention",
+    "body": {
+     "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use and the old one must be revoked within the same transaction. Split it between review and tests, and keep me posted.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644004000
+      }
+     }
+    ]
+   }
+  ],
+  "threads": [
+   {
+    "thread_id": "thr-auth-rotation",
+    "title": {
+     "text": "Auth token rotation",
+     "truncated": false
+    },
+    "message_count": 1
+   }
+  ],
+  "coordinations": [],
+  "terminal_runs": [],
+  "attention": []
+ },
+ {
+  "wire": 1,
+  "generated_at_ms": 1791644363000,
+  "space": {
+   "key": "9f2c41d07ab3e815c2d4",
+   "workspace_id": "w3",
+   "label": {
+    "text": "namedrop/dashboard",
+    "truncated": false
+   },
+   "state": "active"
+  },
+  "health": {
+   "level": "busy",
+   "in_flight": 3
+  },
+  "participants": [
+   {
+    "address_id": "human",
+    "alias": "you",
+    "kind": {
+     "type": "human"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": [
+     "@planner"
+    ]
+   },
+   {
+    "address_id": "pane-address-7c1e9a",
+    "alias": "@planner",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Plans and splits work",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "planner",
+     "truncated": false
+    },
+    "activity": "waiting",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-1",
+      "message_id": "msg-5e0c0001",
+      "from": "you",
+      "preview": {
+       "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use a",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644004000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": [
+     "@reviewer",
+     "@tester"
+    ]
+   },
+   {
+    "address_id": "pane-address-2b8f04",
+    "alias": "@reviewer",
+    "kind": {
+     "type": "agent",
+     "runtime": "codex"
+    },
+    "role": {
+     "text": "Code review",
+     "truncated": false
+    },
+    "persona": {
+     "text": "Skeptical senior reviewer",
+     "truncated": false
+    },
+    "pane_label": {
+     "text": "reviewer",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-2",
+      "message_id": "msg-5e0c0002",
+      "from": "@planner",
+      "preview": {
+       "text": "Handoff: token rotation is implemented on branch auth/rotate.  @reviewer please ",
+       "truncated": true
+      },
+      "state": "queued",
+      "since_ms": 1791644360000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-d93a61",
+    "alias": "@tester",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Writes and runs tests",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "tester",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-3",
+      "message_id": "msg-5e0c0002",
+      "from": "@planner",
+      "preview": {
+       "text": "Handoff: token rotation is implemented on branch auth/rotate.  @reviewer please ",
+       "truncated": true
+      },
+      "state": "dispatching",
+      "since_ms": 1791644360000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-41f0c7",
+    "alias": "@build",
+    "kind": {
+     "type": "terminal"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": {
+     "text": "build shell",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   }
+  ],
+  "messages": [
+   {
+    "message_id": "msg-5e0c0001",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644000000,
+    "author": "human",
+    "kind": "mention",
+    "body": {
+     "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use and the old one must be revoked within the same transaction. Split it between review and tests, and keep me posted.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644004000
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0002",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644360000,
+    "author": "pane-address-7c1e9a",
+    "kind": "handoff",
+    "body": {
+     "text": "Handoff: token rotation is implemented on branch auth/rotate.\n\n@reviewer please review src/auth/refresh.rs, especially the revoke-then-issue ordering and the error path when the store is locked.\n@tester please add a regression test for reuse of a revoked refresh token and run the auth suite.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "queued"
+      }
+     },
+     {
+      "to": "pane-address-d93a61",
+      "stage": {
+       "stage": "queued"
+      }
+     }
+    ]
+   }
+  ],
+  "threads": [
+   {
+    "thread_id": "thr-auth-rotation",
+    "title": {
+     "text": "Auth token rotation",
+     "truncated": false
+    },
+    "message_count": 2
+   }
+  ],
+  "coordinations": [],
+  "terminal_runs": [],
+  "attention": []
+ },
+ {
+  "wire": 1,
+  "generated_at_ms": 1791644410000,
+  "space": {
+   "key": "9f2c41d07ab3e815c2d4",
+   "workspace_id": "w3",
+   "label": {
+    "text": "namedrop/dashboard",
+    "truncated": false
+   },
+   "state": "active"
+  },
+  "health": {
+   "level": "needs_you",
+   "items": 1
+  },
+  "participants": [
+   {
+    "address_id": "human",
+    "alias": "you",
+    "kind": {
+     "type": "human"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": [
+     "@planner"
+    ]
+   },
+   {
+    "address_id": "pane-address-7c1e9a",
+    "alias": "@planner",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Plans and splits work",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "planner",
+     "truncated": false
+    },
+    "activity": "waiting",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-1",
+      "message_id": "msg-5e0c0001",
+      "from": "you",
+      "preview": {
+       "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use a",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644004000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": [
+     "@reviewer",
+     "@tester"
+    ]
+   },
+   {
+    "address_id": "pane-address-2b8f04",
+    "alias": "@reviewer",
+    "kind": {
+     "type": "agent",
+     "runtime": "codex"
+    },
+    "role": {
+     "text": "Code review",
+     "truncated": false
+    },
+    "persona": {
+     "text": "Skeptical senior reviewer",
+     "truncated": false
+    },
+    "pane_label": {
+     "text": "reviewer",
+     "truncated": false
+    },
+    "activity": "working",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-2",
+      "message_id": "msg-5e0c0002",
+      "from": "@planner",
+      "preview": {
+       "text": "Handoff: token rotation is implemented on branch auth/rotate.  @reviewer please ",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644369000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-d93a61",
+    "alias": "@tester",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Writes and runs tests",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "tester",
+     "truncated": false
+    },
+    "activity": "offline",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-3",
+      "message_id": "msg-5e0c0002",
+      "from": "@planner",
+      "preview": {
+       "text": "Handoff: token rotation is implemented on branch auth/rotate.  @reviewer please ",
+       "truncated": true
+      },
+      "state": "held",
+      "since_ms": 1791644372000,
+      "attempts": 2
+     }
+    ],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-41f0c7",
+    "alias": "@build",
+    "kind": {
+     "type": "terminal"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": {
+     "text": "build shell",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   }
+  ],
+  "messages": [
+   {
+    "message_id": "msg-5e0c0001",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644000000,
+    "author": "human",
+    "kind": "mention",
+    "body": {
+     "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use and the old one must be revoked within the same transaction. Split it between review and tests, and keep me posted.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644004000
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0002",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644360000,
+    "author": "pane-address-7c1e9a",
+    "kind": "handoff",
+    "body": {
+     "text": "Handoff: token rotation is implemented on branch auth/rotate.\n\n@reviewer please review src/auth/refresh.rs, especially the revoke-then-issue ordering and the error path when the store is locked.\n@tester please add a regression test for reuse of a revoked refresh token and run the auth suite.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644369000
+      }
+     },
+     {
+      "to": "pane-address-d93a61",
+      "stage": {
+       "stage": "held"
+      }
+     }
+    ]
+   }
+  ],
+  "threads": [
+   {
+    "thread_id": "thr-auth-rotation",
+    "title": {
+     "text": "Auth token rotation",
+     "truncated": false
+    },
+    "message_count": 2
+   }
+  ],
+  "coordinations": [],
+  "terminal_runs": [],
+  "attention": [
+   {
+    "source_kind": "delivery_held",
+    "summary": {
+     "text": "Delivery to @tester is held: its pane closed before the handoff arrived.",
+     "truncated": false
+    },
+    "opened_at_ms": 1791644372000
+   }
+  ]
+ },
+ {
+  "wire": 1,
+  "generated_at_ms": 1791644570000,
+  "space": {
+   "key": "9f2c41d07ab3e815c2d4",
+   "workspace_id": "w3",
+   "label": {
+    "text": "namedrop/dashboard",
+    "truncated": false
+   },
+   "state": "active"
+  },
+  "health": {
+   "level": "busy",
+   "in_flight": 3
+  },
+  "participants": [
+   {
+    "address_id": "human",
+    "alias": "you",
+    "kind": {
+     "type": "human"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": [
+     "@planner"
+    ]
+   },
+   {
+    "address_id": "pane-address-7c1e9a",
+    "alias": "@planner",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Plans and splits work",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "planner",
+     "truncated": false
+    },
+    "activity": "waiting",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-1",
+      "message_id": "msg-5e0c0001",
+      "from": "you",
+      "preview": {
+       "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use a",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644004000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": [
+     "@reviewer",
+     "@tester"
+    ]
+   },
+   {
+    "address_id": "pane-address-2b8f04",
+    "alias": "@reviewer",
+    "kind": {
+     "type": "agent",
+     "runtime": "codex"
+    },
+    "role": {
+     "text": "Code review",
+     "truncated": false
+    },
+    "persona": {
+     "text": "Skeptical senior reviewer",
+     "truncated": false
+    },
+    "pane_label": {
+     "text": "reviewer",
+     "truncated": false
+    },
+    "activity": "working",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-2",
+      "message_id": "msg-5e0c0002",
+      "from": "@planner",
+      "preview": {
+       "text": "Handoff: token rotation is implemented on branch auth/rotate.  @reviewer please ",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644369000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-d93a61",
+    "alias": "@tester",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Writes and runs tests",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "tester",
+     "truncated": false
+    },
+    "activity": "blocked",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-3",
+      "message_id": "msg-5e0c0002",
+      "from": "@planner",
+      "preview": {
+       "text": "Handoff: token rotation is implemented on branch auth/rotate.  @reviewer please ",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644520000,
+      "attempts": 3
+     }
+    ],
+    "waiting_on": [
+     "@build"
+    ]
+   },
+   {
+    "address_id": "pane-address-41f0c7",
+    "alias": "@build",
+    "kind": {
+     "type": "terminal"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": {
+     "text": "build shell",
+     "truncated": false
+    },
+    "activity": "working",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-4",
+      "message_id": "msg-5e0c0003",
+      "from": "@tester",
+      "preview": {
+       "text": "Run `cargo test -p auth` for me? I need to know whether the fixture loader still",
+       "truncated": true
+      },
+      "state": "submitted",
+      "since_ms": 1791644542000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": []
+   }
+  ],
+  "messages": [
+   {
+    "message_id": "msg-5e0c0001",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644000000,
+    "author": "human",
+    "kind": "mention",
+    "body": {
+     "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use and the old one must be revoked within the same transaction. Split it between review and tests, and keep me posted.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644004000
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0002",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644360000,
+    "author": "pane-address-7c1e9a",
+    "kind": "handoff",
+    "body": {
+     "text": "Handoff: token rotation is implemented on branch auth/rotate.\n\n@reviewer please review src/auth/refresh.rs, especially the revoke-then-issue ordering and the error path when the store is locked.\n@tester please add a regression test for reuse of a revoked refresh token and run the auth suite.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644369000
+      }
+     },
+     {
+      "to": "pane-address-d93a61",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644520000
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0003",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644540000,
+    "author": "pane-address-d93a61",
+    "kind": "mention",
+    "body": {
+     "text": "Run `cargo test -p auth` for me? I need to know whether the fixture loader still builds before I write the reuse test.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-41f0c7",
+      "stage": {
+       "stage": "delivered"
+      }
+     }
+    ]
+   }
+  ],
+  "threads": [
+   {
+    "thread_id": "thr-auth-rotation",
+    "title": {
+     "text": "Auth token rotation",
+     "truncated": false
+    },
+    "message_count": 3
+   }
+  ],
+  "coordinations": [
+   {
+    "id": "coord-auth-rotation",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Ship refresh-token rotation with review and a reuse regression test",
+     "truncated": false
+    },
+    "outcome": "open",
+    "updated_at_ms": 1791644550000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "pending",
+      "blocked_reason": null,
+      "waiting_on": null
+     },
+     {
+      "assignee": "pane-address-d93a61",
+      "work_outcome": "blocked",
+      "blocked_reason": {
+       "text": "Fixture loader fails to build; waiting on a cargo test run",
+       "truncated": false
+      },
+      "waiting_on": "pane-address-41f0c7"
+     }
+    ]
+   }
+  ],
+  "terminal_runs": [
+   {
+    "terminal": "pane-address-41f0c7",
+    "command": {
+     "text": "cargo test -p auth",
+     "truncated": false
+    },
+    "started_at_ms": 1791644545000,
+    "exit_code": null
+   }
+  ],
+  "attention": []
+ },
+ {
+  "wire": 1,
+  "generated_at_ms": 1791644675000,
+  "space": {
+   "key": "9f2c41d07ab3e815c2d4",
+   "workspace_id": "w3",
+   "label": {
+    "text": "namedrop/dashboard",
+    "truncated": false
+   },
+   "state": "active"
+  },
+  "health": {
+   "level": "needs_you",
+   "items": 1
+  },
+  "participants": [
+   {
+    "address_id": "human",
+    "alias": "you",
+    "kind": {
+     "type": "human"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": [
+     "@planner"
+    ]
+   },
+   {
+    "address_id": "pane-address-7c1e9a",
+    "alias": "@planner",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Plans and splits work",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "planner",
+     "truncated": false
+    },
+    "activity": "working",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-1",
+      "message_id": "msg-5e0c0001",
+      "from": "you",
+      "preview": {
+       "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use a",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644004000,
+      "attempts": 1
+     },
+     {
+      "delivery_id": "dlv-5",
+      "message_id": "msg-5e0c0004",
+      "from": "@reviewer",
+      "preview": {
+       "text": "Two issues. First, refresh.rs issues the new token before revoking the old one, ",
+       "truncated": true
+      },
+      "state": "submitted",
+      "since_ms": 1791644661000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": [
+     "@tester"
+    ]
+   },
+   {
+    "address_id": "pane-address-2b8f04",
+    "alias": "@reviewer",
+    "kind": {
+     "type": "agent",
+     "runtime": "codex"
+    },
+    "role": {
+     "text": "Code review",
+     "truncated": false
+    },
+    "persona": {
+     "text": "Skeptical senior reviewer",
+     "truncated": false
+    },
+    "pane_label": {
+     "text": "reviewer",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-d93a61",
+    "alias": "@tester",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Writes and runs tests",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "tester",
+     "truncated": false
+    },
+    "activity": "blocked",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-3",
+      "message_id": "msg-5e0c0002",
+      "from": "@planner",
+      "preview": {
+       "text": "Handoff: token rotation is implemented on branch auth/rotate.  @reviewer please ",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644520000,
+      "attempts": 3
+     }
+    ],
+    "waiting_on": [
+     "@build"
+    ]
+   },
+   {
+    "address_id": "pane-address-41f0c7",
+    "alias": "@build",
+    "kind": {
+     "type": "terminal"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": {
+     "text": "build shell",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   }
+  ],
+  "messages": [
+   {
+    "message_id": "msg-5e0c0001",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644000000,
+    "author": "human",
+    "kind": "mention",
+    "body": {
+     "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use and the old one must be revoked within the same transaction. Split it between review and tests, and keep me posted.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644004000
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0002",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644360000,
+    "author": "pane-address-7c1e9a",
+    "kind": "handoff",
+    "body": {
+     "text": "Handoff: token rotation is implemented on branch auth/rotate.\n\n@reviewer please review src/auth/refresh.rs, especially the revoke-then-issue ordering and the error path when the store is locked.\n@tester please add a regression test for reuse of a revoked refresh token and run the auth suite.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0004"
+      }
+     },
+     {
+      "to": "pane-address-d93a61",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644520000
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0003",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644540000,
+    "author": "pane-address-d93a61",
+    "kind": "mention",
+    "body": {
+     "text": "Run `cargo test -p auth` for me? I need to know whether the fixture loader still builds before I write the reuse test.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-41f0c7",
+      "stage": {
+       "stage": "completed",
+       "kind": "no_reply"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0004",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0002",
+    "at_ms": 1791644660000,
+    "author": "pane-address-2b8f04",
+    "kind": "reply",
+    "body": {
+     "text": "Two issues. First, refresh.rs issues the new token before revoking the old one, so a crash between the two leaves both valid. Swap the order inside the transaction. Second, the locked-store path returns 500; it should return 503 with Retry-After. Everything else looks right.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "delivered"
+      }
+     }
+    ]
+   }
+  ],
+  "threads": [
+   {
+    "thread_id": "thr-auth-rotation",
+    "title": {
+     "text": "Auth token rotation",
+     "truncated": false
+    },
+    "message_count": 4
+   }
+  ],
+  "coordinations": [
+   {
+    "id": "coord-auth-rotation",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Ship refresh-token rotation with review and a reuse regression test",
+     "truncated": false
+    },
+    "outcome": "blocked",
+    "updated_at_ms": 1791644670000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     },
+     {
+      "assignee": "pane-address-d93a61",
+      "work_outcome": "blocked",
+      "blocked_reason": {
+       "text": "cargo test -p auth exited 1: fixtures/auth.sql has no tokens table",
+       "truncated": false
+      },
+      "waiting_on": null
+     }
+    ]
+   }
+  ],
+  "terminal_runs": [
+   {
+    "terminal": "pane-address-41f0c7",
+    "command": {
+     "text": "cargo test -p auth",
+     "truncated": false
+    },
+    "started_at_ms": 1791644545000,
+    "exit_code": 1
+   }
+  ],
+  "attention": [
+   {
+    "source_kind": "coordination_blocked",
+    "summary": {
+     "text": "@tester is blocked on the auth coordination: the test fixture is missing a table.",
+     "truncated": false
+    },
+    "opened_at_ms": 1791644670000
+   }
+  ]
+ },
+ {
+  "wire": 1,
+  "generated_at_ms": 1791645540000,
+  "space": {
+   "key": "9f2c41d07ab3e815c2d4",
+   "workspace_id": "w3",
+   "label": {
+    "text": "namedrop/dashboard",
+    "truncated": false
+   },
+   "state": "active"
+  },
+  "health": {
+   "level": "busy",
+   "in_flight": 2
+  },
+  "participants": [
+   {
+    "address_id": "human",
+    "alias": "you",
+    "kind": {
+     "type": "human"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": [
+     "@planner"
+    ]
+   },
+   {
+    "address_id": "pane-address-7c1e9a",
+    "alias": "@planner",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Plans and splits work",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "planner",
+     "truncated": false
+    },
+    "activity": "waiting",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-1",
+      "message_id": "msg-5e0c0001",
+      "from": "you",
+      "preview": {
+       "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use a",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644004000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": [
+     "@tester"
+    ]
+   },
+   {
+    "address_id": "pane-address-2b8f04",
+    "alias": "@reviewer",
+    "kind": {
+     "type": "agent",
+     "runtime": "codex"
+    },
+    "role": {
+     "text": "Code review",
+     "truncated": false
+    },
+    "persona": {
+     "text": "Skeptical senior reviewer",
+     "truncated": false
+    },
+    "pane_label": {
+     "text": "reviewer",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-d93a61",
+    "alias": "@tester",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Writes and runs tests",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "tester",
+     "truncated": false
+    },
+    "activity": "working",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-3",
+      "message_id": "msg-5e0c0002",
+      "from": "@planner",
+      "preview": {
+       "text": "Handoff: token rotation is implemented on branch auth/rotate.  @reviewer please ",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644520000,
+      "attempts": 3
+     }
+    ],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-41f0c7",
+    "alias": "@build",
+    "kind": {
+     "type": "terminal"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": {
+     "text": "build shell",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   }
+  ],
+  "messages": [
+   {
+    "message_id": "msg-5e0c0001",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644000000,
+    "author": "human",
+    "kind": "mention",
+    "body": {
+     "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use and the old one must be revoked within the same transaction. Split it between review and tests, and keep me posted.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644004000
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0002",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644360000,
+    "author": "pane-address-7c1e9a",
+    "kind": "handoff",
+    "body": {
+     "text": "Handoff: token rotation is implemented on branch auth/rotate.\n\n@reviewer please review src/auth/refresh.rs, especially the revoke-then-issue ordering and the error path when the store is locked.\n@tester please add a regression test for reuse of a revoked refresh token and run the auth suite.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0004"
+      }
+     },
+     {
+      "to": "pane-address-d93a61",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644520000
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0003",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644540000,
+    "author": "pane-address-d93a61",
+    "kind": "mention",
+    "body": {
+     "text": "Run `cargo test -p auth` for me? I need to know whether the fixture loader still builds before I write the reuse test.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-41f0c7",
+      "stage": {
+       "stage": "completed",
+       "kind": "no_reply"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0004",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0002",
+    "at_ms": 1791644660000,
+    "author": "pane-address-2b8f04",
+    "kind": "reply",
+    "body": {
+     "text": "Two issues. First, refresh.rs issues the new token before revoking the old one, so a crash between the two leaves both valid. Swap the order inside the transaction. Second, the locked-store path returns 500; it should return 503 with Retry-After. Everything else looks right.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0005"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0005",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0004",
+    "at_ms": 1791645500000,
+    "author": "pane-address-7c1e9a",
+    "kind": "reply",
+    "body": {
+     "text": "Fixed both: revoke now happens first in the same transaction, and a locked store returns 503 with Retry-After: 1. Pushed to auth/rotate.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "completed",
+       "kind": "no_reply"
+      }
+     }
+    ]
+   }
+  ],
+  "threads": [
+   {
+    "thread_id": "thr-auth-rotation",
+    "title": {
+     "text": "Auth token rotation",
+     "truncated": false
+    },
+    "message_count": 5
+   }
+  ],
+  "coordinations": [
+   {
+    "id": "coord-auth-rotation",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Ship refresh-token rotation with review and a reuse regression test",
+     "truncated": false
+    },
+    "outcome": "open",
+    "updated_at_ms": 1791645530000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     },
+     {
+      "assignee": "pane-address-d93a61",
+      "work_outcome": "unclassified",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   }
+  ],
+  "terminal_runs": [
+   {
+    "terminal": "pane-address-41f0c7",
+    "command": {
+     "text": "cargo test -p auth",
+     "truncated": false
+    },
+    "started_at_ms": 1791644545000,
+    "exit_code": 1
+   },
+   {
+    "terminal": "pane-address-41f0c7",
+    "command": {
+     "text": "cargo test -p auth",
+     "truncated": false
+    },
+    "started_at_ms": 1791645520000,
+    "exit_code": 0
+   }
+  ],
+  "attention": []
+ },
+ {
+  "wire": 1,
+  "generated_at_ms": 1791645630000,
+  "space": {
+   "key": "9f2c41d07ab3e815c2d4",
+   "workspace_id": "w3",
+   "label": {
+    "text": "namedrop/dashboard",
+    "truncated": false
+   },
+   "state": "active"
+  },
+  "health": {
+   "level": "busy",
+   "in_flight": 1
+  },
+  "participants": [
+   {
+    "address_id": "human",
+    "alias": "you",
+    "kind": {
+     "type": "human"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": [
+     "@planner"
+    ]
+   },
+   {
+    "address_id": "pane-address-7c1e9a",
+    "alias": "@planner",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Plans and splits work",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "planner",
+     "truncated": false
+    },
+    "activity": "working",
+    "mailbox": [
+     {
+      "delivery_id": "dlv-1",
+      "message_id": "msg-5e0c0001",
+      "from": "you",
+      "preview": {
+       "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use a",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791644004000,
+      "attempts": 1
+     },
+     {
+      "delivery_id": "dlv-6",
+      "message_id": "msg-5e0c0006",
+      "from": "@tester",
+      "preview": {
+       "text": "Added auth::refresh::rejects_reused_token. Suite is green: 48 passed, 0 failed. ",
+       "truncated": true
+      },
+      "state": "acknowledged",
+      "since_ms": 1791645625000,
+      "attempts": 1
+     }
+    ],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-2b8f04",
+    "alias": "@reviewer",
+    "kind": {
+     "type": "agent",
+     "runtime": "codex"
+    },
+    "role": {
+     "text": "Code review",
+     "truncated": false
+    },
+    "persona": {
+     "text": "Skeptical senior reviewer",
+     "truncated": false
+    },
+    "pane_label": {
+     "text": "reviewer",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-d93a61",
+    "alias": "@tester",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Writes and runs tests",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "tester",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-41f0c7",
+    "alias": "@build",
+    "kind": {
+     "type": "terminal"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": {
+     "text": "build shell",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   }
+  ],
+  "messages": [
+   {
+    "message_id": "msg-5e0c0001",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644000000,
+    "author": "human",
+    "kind": "mention",
+    "body": {
+     "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use and the old one must be revoked within the same transaction. Split it between review and tests, and keep me posted.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791644004000
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0002",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644360000,
+    "author": "pane-address-7c1e9a",
+    "kind": "handoff",
+    "body": {
+     "text": "Handoff: token rotation is implemented on branch auth/rotate.\n\n@reviewer please review src/auth/refresh.rs, especially the revoke-then-issue ordering and the error path when the store is locked.\n@tester please add a regression test for reuse of a revoked refresh token and run the auth suite.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0004"
+      }
+     },
+     {
+      "to": "pane-address-d93a61",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0006"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0003",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644540000,
+    "author": "pane-address-d93a61",
+    "kind": "mention",
+    "body": {
+     "text": "Run `cargo test -p auth` for me? I need to know whether the fixture loader still builds before I write the reuse test.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-41f0c7",
+      "stage": {
+       "stage": "completed",
+       "kind": "no_reply"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0004",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0002",
+    "at_ms": 1791644660000,
+    "author": "pane-address-2b8f04",
+    "kind": "reply",
+    "body": {
+     "text": "Two issues. First, refresh.rs issues the new token before revoking the old one, so a crash between the two leaves both valid. Swap the order inside the transaction. Second, the locked-store path returns 500; it should return 503 with Retry-After. Everything else looks right.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0005"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0005",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0004",
+    "at_ms": 1791645500000,
+    "author": "pane-address-7c1e9a",
+    "kind": "reply",
+    "body": {
+     "text": "Fixed both: revoke now happens first in the same transaction, and a locked store returns 503 with Retry-After: 1. Pushed to auth/rotate.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "completed",
+       "kind": "no_reply"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0006",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0002",
+    "at_ms": 1791645620000,
+    "author": "pane-address-d93a61",
+    "kind": "reply",
+    "body": {
+     "text": "Added auth::refresh::rejects_reused_token. Suite is green: 48 passed, 0 failed. The fixture loader needed the new tokens table, which I added to fixtures/auth.sql.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "working",
+       "acked_at_ms": 1791645625000
+      }
+     }
+    ]
+   }
+  ],
+  "threads": [
+   {
+    "thread_id": "thr-auth-rotation",
+    "title": {
+     "text": "Auth token rotation",
+     "truncated": false
+    },
+    "message_count": 6
+   }
+  ],
+  "coordinations": [
+   {
+    "id": "coord-auth-rotation",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Ship refresh-token rotation with review and a reuse regression test",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791645628000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     },
+     {
+      "assignee": "pane-address-d93a61",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   }
+  ],
+  "terminal_runs": [
+   {
+    "terminal": "pane-address-41f0c7",
+    "command": {
+     "text": "cargo test -p auth",
+     "truncated": false
+    },
+    "started_at_ms": 1791644545000,
+    "exit_code": 1
+   },
+   {
+    "terminal": "pane-address-41f0c7",
+    "command": {
+     "text": "cargo test -p auth",
+     "truncated": false
+    },
+    "started_at_ms": 1791645520000,
+    "exit_code": 0
+   }
+  ],
+  "attention": []
+ },
+ {
+  "wire": 1,
+  "generated_at_ms": 1791645710000,
+  "space": {
+   "key": "9f2c41d07ab3e815c2d4",
+   "workspace_id": "w3",
+   "label": {
+    "text": "namedrop/dashboard",
+    "truncated": false
+   },
+   "state": "active"
+  },
+  "health": {
+   "level": "calm"
+  },
+  "participants": [
+   {
+    "address_id": "human",
+    "alias": "you",
+    "kind": {
+     "type": "human"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-7c1e9a",
+    "alias": "@planner",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Plans and splits work",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "planner",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-2b8f04",
+    "alias": "@reviewer",
+    "kind": {
+     "type": "agent",
+     "runtime": "codex"
+    },
+    "role": {
+     "text": "Code review",
+     "truncated": false
+    },
+    "persona": {
+     "text": "Skeptical senior reviewer",
+     "truncated": false
+    },
+    "pane_label": {
+     "text": "reviewer",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-d93a61",
+    "alias": "@tester",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": {
+     "text": "Writes and runs tests",
+     "truncated": false
+    },
+    "persona": null,
+    "pane_label": {
+     "text": "tester",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-41f0c7",
+    "alias": "@build",
+    "kind": {
+     "type": "terminal"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": {
+     "text": "build shell",
+     "truncated": false
+    },
+    "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   }
+  ],
+  "messages": [
+   {
+    "message_id": "msg-5e0c0001",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644000000,
+    "author": "human",
+    "kind": "mention",
+    "body": {
+     "text": "Plan the auth token rotation change. Refresh tokens should rotate on every use and the old one must be revoked within the same transaction. Split it between review and tests, and keep me posted.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0007"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0002",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644360000,
+    "author": "pane-address-7c1e9a",
+    "kind": "handoff",
+    "body": {
+     "text": "Handoff: token rotation is implemented on branch auth/rotate.\n\n@reviewer please review src/auth/refresh.rs, especially the revoke-then-issue ordering and the error path when the store is locked.\n@tester please add a regression test for reuse of a revoked refresh token and run the auth suite.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0004"
+      }
+     },
+     {
+      "to": "pane-address-d93a61",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0006"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0003",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": null,
+    "at_ms": 1791644540000,
+    "author": "pane-address-d93a61",
+    "kind": "mention",
+    "body": {
+     "text": "Run `cargo test -p auth` for me? I need to know whether the fixture loader still builds before I write the reuse test.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-41f0c7",
+      "stage": {
+       "stage": "completed",
+       "kind": "no_reply"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0004",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0002",
+    "at_ms": 1791644660000,
+    "author": "pane-address-2b8f04",
+    "kind": "reply",
+    "body": {
+     "text": "Two issues. First, refresh.rs issues the new token before revoking the old one, so a crash between the two leaves both valid. Swap the order inside the transaction. Second, the locked-store path returns 500; it should return 503 with Retry-After. Everything else looks right.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "replied",
+       "reply_id": "msg-5e0c0005"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0005",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0004",
+    "at_ms": 1791645500000,
+    "author": "pane-address-7c1e9a",
+    "kind": "reply",
+    "body": {
+     "text": "Fixed both: revoke now happens first in the same transaction, and a locked store returns 503 with Retry-After: 1. Pushed to auth/rotate.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-2b8f04",
+      "stage": {
+       "stage": "completed",
+       "kind": "no_reply"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0006",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0002",
+    "at_ms": 1791645620000,
+    "author": "pane-address-d93a61",
+    "kind": "reply",
+    "body": {
+     "text": "Added auth::refresh::rejects_reused_token. Suite is green: 48 passed, 0 failed. The fixture loader needed the new tokens table, which I added to fixtures/auth.sql.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "pane-address-7c1e9a",
+      "stage": {
+       "stage": "completed",
+       "kind": "no_reply"
+      }
+     }
+    ]
+   },
+   {
+    "message_id": "msg-5e0c0007",
+    "thread_id": "thr-auth-rotation",
+    "in_reply_to": "msg-5e0c0001",
+    "at_ms": 1791645680000,
+    "author": "pane-address-7c1e9a",
+    "kind": "result_set",
+    "body": {
+     "text": "Token rotation is done and reviewed. Revoke-then-issue in one transaction, 503 on a locked store, and a regression test for token reuse. Branch auth/rotate is ready to merge.",
+     "truncated": false
+    },
+    "legs": [
+     {
+      "to": "human",
+      "stage": {
+       "stage": "delivered"
+      }
+     }
+    ]
+   }
+  ],
+  "threads": [
+   {
+    "thread_id": "thr-auth-rotation",
+    "title": {
+     "text": "Auth token rotation",
+     "truncated": false
+    },
+    "message_count": 7
+   }
+  ],
+  "coordinations": [
+   {
+    "id": "coord-auth-rotation",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Ship refresh-token rotation with review and a reuse regression test",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791645628000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     },
+     {
+      "assignee": "pane-address-d93a61",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   }
+  ],
+  "terminal_runs": [
+   {
+    "terminal": "pane-address-41f0c7",
+    "command": {
+     "text": "cargo test -p auth",
+     "truncated": false
+    },
+    "started_at_ms": 1791644545000,
+    "exit_code": 1
+   },
+   {
+    "terminal": "pane-address-41f0c7",
+    "command": {
+     "text": "cargo test -p auth",
+     "truncated": false
+    },
+    "started_at_ms": 1791645520000,
+    "exit_code": 0
+   }
+  ],
+  "attention": []
+ }
+]
