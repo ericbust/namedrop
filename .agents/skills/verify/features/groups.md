@@ -26,12 +26,15 @@ Preconditions:
 - Run `.agents/skills/verify/scripts/control-namedrop.py --feature groups`.
 - The recipe saves `@reviewer` and `@tester` with agent type, then runs the exact `group set` command above.
 - It runs `group list --json` and asserts one `review-team` group whose member aliases are exactly `reviewer` and `tester`. Inspect `groups.json` and `commands.jsonl`.
-- It removes `review-team`, then reads the list again and requires `data.groups` to be empty. The final database snapshot retains both names.
-- To drive the group prompt entry point in an authorized disposable agent session, enter `@review-team Review this fixture change.`. Observe each recipient envelope and its final reply. Edit the group after the request starts and prove the original request keeps its original recipient IDs. This path is not exercised by the helper.
+- It removes `review-team` and requires `removed: true`. A second group list must return an empty `data.groups`, and `address list` must still contain `reviewer` and `tester`.
+- It requires `group set` with no members to be rejected. It then names the worker pane `@build` as a terminal and records whether a group `ops` containing only `build` is accepted, in `group-probes.json`. Today it is accepted; see Gotchas.
+- To drive the group prompt entry point in an authorized disposable agent session, enter `@review-team Review this fixture change.`. Observe each recipient envelope and its final reply. Edit the group, then repeat the send with the same `request_id`. The replay must return the original message ID and recipient IDs. This path is not exercised by the helper.
 
 ## Gotchas
 
 - `group list` returns an object containing `groups`.
-- Groups need 1–64 existing agent members, cannot contain groups, and cannot claim a reserved agent alias.
+- Groups need 1–64 existing members and cannot contain groups. Members are checked against saved names of any type, so a terminal name is accepted although the error text says "agent members". `group set` also requires an activated space.
+- Group and agent aliases exclude each other in both directions. A group cannot claim an agent's alias, and an agent cannot be named or renamed to a group's alias.
+- Removing a group that does not exist succeeds with `removed: false`. A member whose name was retired lists with a null `alias`.
 - Overlapping group/agent mentions must deliver once per agent. A list check alone does not prove routing.
 - Saved shell-pane agent names do not establish delivery readiness.
