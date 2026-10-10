@@ -225,7 +225,7 @@ function renderSpace() {
   const scroll = before
     ? { top: before.scrollTop, left: before.scrollLeft, atBottom: before.scrollTop + before.clientHeight >= before.scrollHeight - 48 }
     : { top: 0, left: 0, atBottom: true };
-  const view = [renderHeader(snap), renderDisconnected()];
+  const view = [renderHeader(snap), renderDisconnected(), renderAttention(snap)];
   if (!snap) {
     view.push(el('main', { class: 'board loading' }, el('div', { class: 'loading-mark' })));
   } else if (snap.space.state === 'not_activated' || snap.space.state === 'unknown') {
@@ -349,7 +349,8 @@ function renderBoard(snap) {
   return el('main', { class: 'board' },
     el('div', { class: 'stage-wrap' },
       el('section', { class: 'stage', 'aria-label': 'Messages between participants' }, sheet),
-      el('button', { class: 'new-pill', type: 'button', hidden: true, onclick: scrollToEnd }, icon('down'), el('span'))));
+      el('button', { class: 'new-pill', type: 'button', hidden: true, onclick: scrollToEnd }, icon('down'), el('span'))),
+    renderRail(model));
 }
 
 function scrollToEnd() {
@@ -618,6 +619,121 @@ function jumpTo(messageId) {
   row.classList.add('flash');
 }
 
+// ---------- attention ribbon ----------
+
+function renderAttention(snap) {
+  if (!snap || !snap.attention.length) return null;
+  return el('section', { class: 'attention tone-alert', 'aria-label': 'Needs your attention' },
+    snap.attention.map((item) => el('div', { class: 'attn-item' },
+      icon('alert'),
+      el('span', { class: 'attn-text', text: item.summary.text }),
+      el('span', { class: 'attn-when' }, when(item.opened_at_ms)))));
+}
+
+// ---------- work rail ----------
+
+const WORK_OUTCOME = {
+  pending: { tone: 'idle', label: 'not started', icon: 'queued' },
+  unclassified: { tone: 'flight', label: 'reported back', icon: 'delivered' },
+  needs_continuation: { tone: 'wait', label: 'needs follow-up', icon: 'clock' },
+  completed: { tone: 'done', label: 'done', icon: 'completed' },
+  blocked: { tone: 'alert', label: 'blocked', icon: 'held' },
+};
+
+const COORD_OUTCOME = {
+  open: { tone: 'flight', label: 'open' },
+  completed: { tone: 'done', label: 'complete' },
+  blocked: { tone: 'alert', label: 'blocked' },
+  cancelled: { tone: 'idle', label: 'cancelled' },
+};
+
+const HANDOFFS_SHOWN = 4;
+const RUNS_SHOWN = 6;
+
+function who(model, addressId) {
+  return el('span', { class: 'who-inline' }, avatarFor(model, addressId, 'sm'), el('span', { class: 'who-alias', text: aliasOf(model, addressId) }));
+}
+
+function railSection(title, count, body) {
+  return el('section', { class: 'rail-section' },
+    el('h2', { class: 'rail-title' }, title, count != null ? el('span', { class: 'count', text: String(count) }) : null),
+    body);
+}
+
+function isDoneStage(stage) {
+  return stage === 'replied' || stage === 'completed';
+}
+
+function renderHandoff(model, m) {
+  const done = m.legs.filter((leg) => isDoneStage(leg.stage.stage)).length;
+  const stuck = m.legs.some((leg) => (LEG_STAGE[leg.stage.stage] || {}).tone === 'alert');
+  return el('button', { class: ['work-card', 'handoff', stuck ? 'is-stuck' : null], type: 'button', onclick: () => openDrawer(m.message_id) },
+    el('div', { class: 'work-head' }, who(model, m.author), icon('arrow', 'faint'),
+      el('span', { class: 'muted', text: m.legs.length === 1 ? aliasOf(model, m.legs[0].to) : `${m.legs.length} agents` }),
+      el('span', { class: 'spacer' }), when(m.at_ms)),
+    el('div', { class: 'work-text', text: m.body.text }),
+    el('div', { class: 'progress', role: 'img', 'aria-label': `${done} of ${m.legs.length} finished` },
+      m.legs.map((leg) => el('span', { class: ['seg', 'tone-' + (LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued).tone] }))),
+    el('div', { class: 'legs-list' },
+      el('span', { class: 'progress-label', text: `${done} of ${m.legs.length} finished` }),
+      m.legs.map((leg) => {
+        const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
+        return el('span', { class: ['leg-tag', 'tone-' + st.tone], title: `${aliasOf(model, leg.to)}: ${st.label}` },
+          el('span', { text: aliasOf(model, leg.to) }), icon(leg.stage.stage));
+      })));
+}
+
+function renderCoordination(model, c) {
+  const outcome = COORD_OUTCOME[c.outcome] || COORD_OUTCOME.open;
+  return el('div', { class: ['work-card', 'coord', 'outcome-' + c.outcome] },
+    el('div', { class: 'work-head' }, chip(outcome.tone, null, outcome.label), el('span', { class: 'muted small' }, 'owned by '), who(model, c.owner),
+      el('span', { class: 'spacer' }), when(c.updated_at_ms)),
+    el('div', { class: 'deliverable', text: c.deliverable.text }),
+    el('ul', { class: 'assignments' }, c.assignments.map((a) => {
+      const w = WORK_OUTCOME[a.work_outcome] || WORK_OUTCOME.pending;
+      return el('li', { class: 'assignment' },
+        el('div', { class: 'assignment-line' }, who(model, a.assignee), el('span', { class: 'spacer' }), chip(w.tone, w.icon, w.label)),
+        a.blocked_reason ? el('div', { class: 'blocked-reason tone-alert' }, a.blocked_reason.text) : null,
+        a.waiting_on ? el('div', { class: 'waiting tone-wait' }, icon('clock'), 'waiting on ', el('b', { text: aliasOf(model, a.waiting_on) })) : null);
+    })));
+}
+
+function renderRun(model, run) {
+  const status = run.exit_code == null
+    ? chip('flight', 'working', 'running')
+    : run.exit_code === 0 ? chip('done', 'completed', 'exit 0') : chip('alert', 'failed', `exit ${run.exit_code}`);
+  return el('li', { class: ['run', run.exit_code == null ? 'is-running' : null] },
+    el('div', { class: 'run-line' }, who(model, run.terminal), el('span', { class: 'spacer' }), when(run.started_at_ms)),
+    el('div', { class: 'run-line' }, el('code', { class: 'run-cmd', title: run.command.text }, '$ ' + run.command.text), status));
+}
+
+function renderKey() {
+  return el('details', { class: 'key' },
+    el('summary', null, 'How to read this'),
+    el('div', { class: 'key-grid' },
+      Object.entries(LEG_STAGE).map(([stage, st]) => el('span', { class: 'key-item' },
+        el('span', { class: ['leg', 'static', 'tone-' + st.tone, 'stage-' + stage] }, icon(stage)), st.label))),
+    el('p', { class: 'muted small', text: 'Each arrow runs from the author to a recipient. The mark at its end shows how far delivery got. Dashed arrows are replies.' }),
+    el('div', { class: 'key-grid' },
+      ['queued', 'submitted', 'acknowledged', 'held'].map((st) => el('span', { class: 'key-item' },
+        el('span', { class: ['env', 'static', 'env-' + st, 'tone-' + DELIVERY[st].tone] }, envelopeIcon(st)), DELIVERY[st].label))));
+}
+
+function renderRail(model) {
+  const { snap } = model;
+  const handoffs = snap.messages.filter((m) => m.kind === 'handoff' || m.legs.length > 1).slice(-HANDOFFS_SHOWN).reverse();
+  const runs = snap.terminal_runs.slice().sort((a, b) => b.started_at_ms - a.started_at_ms).slice(0, RUNS_SHOWN);
+  const coords = snap.coordinations.slice().sort((a, b) => b.updated_at_ms - a.updated_at_ms);
+  const sections = [
+    handoffs.length ? railSection('Handoffs', handoffs.length, handoffs.map((m) => renderHandoff(model, m))) : null,
+    coords.length ? railSection('Coordinations', coords.length, coords.map((c) => renderCoordination(model, c))) : null,
+    runs.length ? railSection('Terminal runs', null, el('ul', { class: 'runs' }, runs.map((r) => renderRun(model, r)))) : null,
+  ].filter(Boolean);
+  return el('aside', { class: 'rail', 'aria-label': 'Work in progress' },
+    sections.length ? sections : el('p', { class: 'rail-empty muted', text: 'Handoffs, coordinations, and terminal runs show up here as they happen.' }),
+    renderKey());
+}
+
 // ---------- message drawer ----------
 
 function openDrawer(messageId) {
@@ -667,10 +783,10 @@ function renderDrawer(snap) {
         el('ol', { class: 'timeline' }, m.legs.map((leg) => renderLegDetail(model, m, leg)))))];
 }
 
-function avatarFor(model, addressId) {
+function avatarFor(model, addressId, size) {
   const hit = model.byId.get(addressId);
-  if (hit) return avatar(hit.p, 'md');
-  return el('span', { class: 'avatar md id-none' }, el('span', { class: 'disc', text: '?' }));
+  if (hit) return avatar(hit.p, size || 'md');
+  return el('span', { class: ['avatar', size || 'md', 'id-none'] }, el('span', { class: 'disc', text: '?' }));
 }
 
 function renderLegDetail(model, m, leg) {
