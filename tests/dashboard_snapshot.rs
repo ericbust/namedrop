@@ -457,6 +457,27 @@ fn an_agent_working_with_nothing_in_transit_makes_the_space_busy() {
 }
 
 #[test]
+fn a_retired_agent_keeps_its_lane_and_name_after_its_alias_is_released() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    send(&mut store, &ns, "m1", "b", "a", "Done, signing off", None);
+    store
+        .transaction(|tx| {
+            tx.retire_pane_address(&ns, &id(&ns, "b"), &attribution())?;
+            tx.release_alias(&ns, "b", &attribution())
+        })
+        .unwrap();
+
+    let snapshot = snapshot(&mut store, &ns);
+
+    let b = lane(&snapshot, "@b");
+    assert_eq!(b.address_id, id(&ns, "b").as_str());
+    assert_eq!(b.activity, Activity::Retired);
+    assert_eq!(lane(&snapshot, "@a").mailbox[0].from, "@b");
+}
+
+#[test]
 fn a_role_that_repeats_the_alias_is_not_a_subtitle() {
     let directory = TestDirectory::new();
     let mut store = StateStore::open(directory.path()).unwrap();

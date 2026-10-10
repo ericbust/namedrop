@@ -335,19 +335,28 @@ impl StateTransaction<'_> {
                  SELECT address_id, agent_session_id, status, MAX(observed_at_ms) AS observed_at_ms
                  FROM agent_session_observations
                  WHERE session_socket_id = ?1 AND worktree_id = ?2
+                 GROUP BY address_id),
+             released AS (
+                 SELECT address_id, alias, MAX(history_order)
+                 FROM alias_history
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
                  GROUP BY address_id)
-             SELECT a.address_id, c.alias, r.name, a.persona, a.pane_type, a.retired,
+             SELECT a.address_id, COALESCE(c.alias, h.alias, ltrim(r.name, '@')), r.name, a.persona, a.pane_type, a.retired,
                     b.pane_id IS NOT NULL,
                     COALESCE(o.agent_session_id, '') <> '', o.status
              FROM pane_addresses a
              JOIN pane_roles r USING (session_socket_id, worktree_id, role_id)
-             JOIN alias_claims c USING (session_socket_id, worktree_id, address_id)
+             -- A retired agent's alias can be released for reuse; its lane keeps the last one.
+             LEFT JOIN alias_claims c
+               ON c.session_socket_id = a.session_socket_id AND c.worktree_id = a.worktree_id
+              AND c.address_id = a.address_id AND c.claim_state = 'active'
+             LEFT JOIN released h ON h.address_id = a.address_id
              LEFT JOIN pane_bindings b
                ON b.session_socket_id = a.session_socket_id AND b.worktree_id = a.worktree_id
               AND b.address_id = a.address_id AND b.active = 1
              LEFT JOIN latest o
                ON o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
-             WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND c.claim_state = 'active'
+             WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
              ORDER BY a.address_id",
             ns,
             |row| {
