@@ -36,6 +36,7 @@
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
   --radius: 10px;
   --lane-min: 172px;
+  --lane-max: 320px;
   --gutter: 30px;
   --rail: 340px;
 }
@@ -232,6 +233,8 @@ button { font: inherit; color: inherit; }
 .stage-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
 .sheet {
   min-width: calc(var(--gutter) + var(--lanes) * var(--lane-min)); min-height: 100%;
+  /* A few lanes stay lane-width at the left instead of stretching across the page. */
+  max-width: calc(var(--gutter) + var(--lanes) * var(--lane-max));
   position: relative; display: flex; flex-direction: column;
 }
 
