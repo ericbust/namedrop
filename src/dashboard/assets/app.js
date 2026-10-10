@@ -58,7 +58,7 @@ const ICON_PATHS = {
   arrow: [['path', { d: 'M3 8h10m-3.5-3.5L13 8l-3.5 3.5' }]],
   down: [['path', { d: 'M8 3v10m-4-4 4 4 4-4' }]],
   close: [['path', { d: 'm4 4 8 8m0-8-8 8' }]],
-  thread: [['path', { d: 'M4 3.5v9M4 8h5.5a2.5 2.5 0 0 0 0-5H8' }]],
+  thread: [['path', { d: 'M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H7l-3 2.5V11h0A1 1 0 0 1 3 10z' }]],
   inbox: [['path', { d: 'M2.5 9.5 4 4h8l1.5 5.5V12.5h-11zM2.5 9.5h3.2l.8 1.5h3l.8-1.5h3.2' }]],
 };
 
@@ -184,6 +184,10 @@ const state = {
   snap: null,
   connection: 'connecting',
   pulse: 0,
+  memo: null,
+  fresh: { messages: new Set(), legs: new Set(), mail: new Set() },
+  unseen: 0,
+  selected: null,
 };
 
 const root = document.getElementById('app');
@@ -217,6 +221,10 @@ function renderDisconnected() {
 
 function renderSpace() {
   const snap = state.snap;
+  const before = document.querySelector('.stage');
+  const scroll = before
+    ? { top: before.scrollTop, left: before.scrollLeft, atBottom: before.scrollTop + before.clientHeight >= before.scrollHeight - 48 }
+    : { top: 0, left: 0, atBottom: true };
   const view = [renderHeader(snap), renderDisconnected()];
   if (!snap) {
     view.push(el('main', { class: 'board loading' }, el('div', { class: 'loading-mark' })));
@@ -230,13 +238,383 @@ function renderSpace() {
   } else {
     view.push(renderBoard(snap));
   }
+  view.push(renderDrawer(snap));
   clear(root);
   append(root, view);
+
+  const stage = document.querySelector('.stage');
+  if (!stage) return;
+  stage.scrollLeft = scroll.left;
+  if (scroll.atBottom) {
+    stage.scrollTop = stage.scrollHeight;
+    state.unseen = 0;
+  } else {
+    stage.scrollTop = scroll.top;
+  }
+  stage.addEventListener('scroll', onStageScroll, { passive: true });
+  syncNewPill();
 }
 
-function renderBoard(snap) {
-  return el('main', { class: 'board' }, el('section', { class: 'stage' }, emptyPanel('No messages yet')));
+function onStageScroll(event) {
+  const stage = event.currentTarget;
+  if (state.unseen && stage.scrollTop + stage.clientHeight >= stage.scrollHeight - 48) {
+    state.unseen = 0;
+    syncNewPill();
+  }
 }
+
+function syncNewPill() {
+  const pill = document.querySelector('.new-pill');
+  if (!pill) return;
+  pill.hidden = !state.unseen;
+  pill.lastChild.textContent = state.unseen === 1 ? '1 new message' : `${state.unseen} new messages`;
+}
+
+// ---------- the model the views read ----------
+
+// Identity follows the participant, never its lane rank: a slot is assigned the
+// first time an address appears and kept for the life of the page.
+const IDENTITY_SLOTS = 6;
+const identity = new Map();
+
+function identityClass(addressId) {
+  if (addressId === 'human') return 'id-human';
+  if (!identity.has(addressId)) identity.set(addressId, identity.size < IDENTITY_SLOTS ? identity.size : 'none');
+  return 'id-' + identity.get(addressId);
+}
+
+function indexSnapshot(snap) {
+  const lanes = snap.participants;
+  const byId = new Map(lanes.map((p, i) => [p.address_id, { p, i }]));
+  const byAlias = new Map(lanes.map((p) => [p.alias, p]));
+  const messages = new Map(snap.messages.map((m) => [m.message_id, m]));
+  const threads = new Map(snap.threads.map((t) => [t.thread_id, t]));
+  for (const p of lanes) identityClass(p.address_id);
+  return { snap, lanes, byId, byAlias, messages, threads };
+}
+
+function aliasOf(model, addressId) {
+  if (addressId === 'human') return 'You';
+  const hit = model.byId.get(addressId);
+  return hit ? hit.p.alias : addressId;
+}
+
+function laneX(model, addressId) {
+  const hit = model.byId.get(addressId);
+  const i = hit ? hit.i : 0;
+  return ((i + 0.5) / model.lanes.length) * 100;
+}
+
+function initials(p) {
+  if (p.address_id === 'human') return 'You';
+  const words = p.alias.replace(/^@/, '').split(/[-_.\s]+/).filter(Boolean);
+  return (words.length > 1 ? words[0][0] + words[1][0] : (words[0] || '?')[0]).toUpperCase();
+}
+
+function legKey(messageId, to) {
+  return messageId + '\u0000' + to;
+}
+
+// What changed since the previous frame. The first frame animates nothing.
+function diffSnapshot(prev, next) {
+  const fresh = { messages: new Set(), legs: new Set(), mail: new Set() };
+  const memo = {
+    messages: new Set(next.messages.map((m) => m.message_id)),
+    legs: new Map(),
+    mail: new Map(),
+  };
+  for (const m of next.messages) {
+    for (const leg of m.legs) memo.legs.set(legKey(m.message_id, leg.to), JSON.stringify(leg.stage));
+  }
+  for (const p of next.participants) {
+    for (const item of p.mailbox) memo.mail.set(item.delivery_id, item.state);
+  }
+  if (prev) {
+    for (const id of memo.messages) if (!prev.messages.has(id)) fresh.messages.add(id);
+    for (const [key, stage] of memo.legs) if (prev.legs.get(key) !== stage) fresh.legs.add(key);
+    for (const [id, st] of memo.mail) if (prev.mail.get(id) !== st) fresh.mail.add(id);
+  }
+  return { memo, fresh };
+}
+
+// ---------- board ----------
+
+function renderBoard(snap) {
+  const model = indexSnapshot(snap);
+  const lanes = model.lanes.length;
+  const sheet = el('div', { class: 'sheet', css: { '--lanes': String(lanes) } },
+    renderRoster(model),
+    renderRows(model));
+  return el('main', { class: 'board' },
+    el('div', { class: 'stage-wrap' },
+      el('section', { class: 'stage', 'aria-label': 'Messages between participants' }, sheet),
+      el('button', { class: 'new-pill', type: 'button', hidden: true, onclick: scrollToEnd }, icon('down'), el('span'))));
+}
+
+function scrollToEnd() {
+  const stage = document.querySelector('.stage');
+  if (stage) stage.scrollTo({ top: stage.scrollHeight, behavior: motionOk() ? 'smooth' : 'auto' });
+}
+
+function motionOk() {
+  return !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+// ---------- roster: one sticky header per lane ----------
+
+function renderRoster(model) {
+  return el('div', { class: 'roster' },
+    el('div', { class: 'gutter-cell' }),
+    model.lanes.map((p) => renderLaneHead(model, p)));
+}
+
+function avatar(p, size) {
+  const kind = p.kind.type;
+  const act = ACTIVITY[p.activity] || ACTIVITY.idle;
+  return el('span', { class: ['avatar', size, identityClass(p.address_id), 'act-' + p.activity, 'tone-' + act.tone] },
+    el('span', { class: 'disc' }, kind === 'terminal' ? icon('terminal') : initials(p)));
+}
+
+function runtimeLabel(p) {
+  if (p.kind.type === 'terminal') return 'terminal';
+  if (p.kind.type === 'human') return null;
+  return RUNTIME[p.kind.runtime] || p.kind.runtime || 'agent';
+}
+
+function subtitle(p) {
+  if (p.address_id === 'human') return 'at the keyboard';
+  const text = p.role || p.persona || p.pane_label;
+  return text ? text.text : null;
+}
+
+function renderLaneHead(model, p) {
+  const act = ACTIVITY[p.activity] || ACTIVITY.idle;
+  const runtime = runtimeLabel(p);
+  const sub = subtitle(p);
+  const showActivity = p.address_id !== 'human' || p.activity !== 'idle';
+  return el('div', { class: ['lane-head', 'act-' + p.activity], data: { address: p.address_id } },
+    el('div', { class: 'who' },
+      avatar(p, 'lg'),
+      el('div', { class: 'names' },
+        el('div', { class: 'alias', text: p.address_id === 'human' ? 'You' : p.alias }),
+        sub ? el('div', { class: 'sub', text: sub, title: sub }) : null)),
+    el('div', { class: 'meta' },
+      showActivity ? el('span', { class: ['activity', 'tone-' + act.tone] }, el('span', { class: 'act-dot' }), act.label) : null,
+      runtime ? el('span', { class: 'runtime', text: runtime }) : null),
+    p.waiting_on.length
+      ? el('div', { class: 'waiting tone-wait' }, icon('clock'), 'waiting on ', el('b', { text: p.waiting_on.join(', ') }))
+      : null,
+    renderTray(model, p));
+}
+
+function renderTray() {
+  return null;
+}
+
+// ---------- the sequence diagram ----------
+
+const GAP_MS = 2 * 60_000;
+
+function renderRows(model) {
+  const { snap } = model;
+  if (!snap.messages.length) {
+    return el('div', { class: 'rows empty-rows' }, emptyPanel('No messages yet',
+      el('p', { text: 'When you or an agent @mentions someone, the message appears here as an arrow from its author to each recipient.' }),
+      el('p', { class: 'muted', text: 'The mark at each arrowhead shows how far delivery got: queued, delivered, working, replied, or held.' })));
+  }
+  const rows = [];
+  const threadOrder = new Map();
+  let prev = null;
+  for (const m of snap.messages) {
+    if (prev && m.at_ms - prev.at_ms > GAP_MS) {
+      rows.push(el('div', { class: 'gap' }, el('span', { text: `${duration(m.at_ms - prev.at_ms)} later` })));
+    }
+    if (!threadOrder.has(m.thread_id)) threadOrder.set(m.thread_id, threadOrder.size);
+    const band = 'band-' + (threadOrder.get(m.thread_id) % 3);
+    if (!prev || prev.thread_id !== m.thread_id) rows.push(renderThreadHead(model, m, band));
+    rows.push(renderRow(model, m, band));
+    prev = m;
+  }
+  return el('div', { class: 'rows' }, rows);
+}
+
+function renderThreadHead(model, m, band) {
+  const thread = model.threads.get(m.thread_id);
+  const title = thread ? thread.title.text : 'Conversation';
+  const count = thread ? thread.message_count : null;
+  return el('div', { class: ['thread-head', band] },
+    el('div', { class: 'gutter-cell' }, el('span', { class: 'band-bar start' })),
+    el('div', { class: 'thread-title' }, icon('thread'), el('span', { text: title }),
+      count ? el('span', { class: 'muted', text: count === 1 ? '1 message' : `${count} messages` }) : null));
+}
+
+function isReply(m) {
+  return m.kind === 'reply' || m.in_reply_to != null;
+}
+
+function renderRow(model, m, band) {
+  const fresh = state.fresh;
+  const authorX = laneX(model, m.author);
+  const authorIdx = model.byId.has(m.author) ? model.byId.get(m.author).i : 0;
+  const anchorRight = model.lanes.length > 1 && authorIdx > (model.lanes.length - 1) / 2;
+  const isNew = fresh.messages.has(m.message_id);
+  const reply = isReply(m);
+
+  const strip = el('div', { class: 'strip' });
+  for (const leg of m.legs) {
+    if (leg.to === m.author) continue;
+    const toX = laneX(model, leg.to);
+    const rightward = toX > authorX;
+        append(strip, el('span', {
+      class: ['wire', reply ? 'dashed' : null, rightward ? 'rightward' : 'leftward', isNew ? 'draw' : null],
+      css: { left: Math.min(authorX, toX) + '%', width: Math.abs(toX - authorX) + '%' },
+    }));
+    append(strip, el('span', { class: ['head', rightward ? 'rightward' : 'leftward', isNew ? 'late' : null], css: { left: toX + '%' } }));
+  }
+  append(strip, el('span', { class: ['origin', identityClass(m.author), isNew ? 'pop' : null], css: { left: authorX + '%' } }));
+  for (const leg of m.legs) append(strip, legChip(model, m, leg));
+
+  const card = el('article', {
+    class: ['card', identityClass(m.author), anchorRight ? 'anchor-right' : null, isNew ? 'enter' : null],
+    tabindex: '0',
+    onclick: () => openDrawer(m.message_id),
+    onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDrawer(m.message_id); } },
+  },
+  el('header', { class: 'card-head' },
+    el('span', { class: 'author', text: aliasOf(model, m.author) }),
+    el('span', { class: ['kind', 'kind-' + m.kind], text: MESSAGE_KIND[m.kind] || m.kind }),
+    el('span', { class: 'to' }, icon('arrow'), m.legs.map((leg) => el('span', { class: 'to-one' }, aliasOf(model, leg.to), stageMini(leg)))),
+    el('span', { class: 'spacer' }),
+    when(m.at_ms)),
+  el('p', { class: 'body', text: m.body.text }));
+
+  const cardWrap = el('div', { class: ['card-wrap', anchorRight ? 'anchor-right' : null] }, card);
+  if (anchorRight) cardWrap.style.setProperty('--edge', (100 - authorX) + '%');
+  else cardWrap.style.setProperty('--edge', authorX + '%');
+
+  return el('div', { class: ['row', band, state.selected === m.message_id ? 'selected' : null], id: 'msg-' + m.message_id },
+    el('div', { class: 'gutter-cell' }, el('span', { class: 'band-bar' })),
+    el('div', { class: 'lanes-cell' }, strip, cardWrap));
+}
+
+function stageMini(leg) {
+  const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
+  return el('span', { class: ['mini', 'tone-' + st.tone], title: st.label }, icon(leg.stage.stage));
+}
+
+function legTitle(model, m, leg) {
+  const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
+  const who = aliasOf(model, leg.to);
+  if (leg.stage.stage === 'working') return `${who} is working on it (acknowledged ${ago(leg.stage.acked_at_ms)})`;
+  if (leg.stage.stage === 'replied') return `${who} replied. Click to jump to the reply.`;
+  if (leg.stage.stage === 'held') return `Delivery to ${who} is held`;
+  return `${who}: ${st.label}`;
+}
+
+function legChip(model, m, leg) {
+  const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
+  const changed = state.fresh.legs.has(legKey(m.message_id, leg.to)) && !state.fresh.messages.has(m.message_id);
+  return el('button', {
+    class: ['leg', 'tone-' + st.tone, 'stage-' + leg.stage.stage, changed ? 'swap' : null],
+    type: 'button',
+    title: legTitle(model, m, leg),
+    'aria-label': legTitle(model, m, leg),
+    css: { left: laneX(model, leg.to) + '%' },
+    onclick: (e) => {
+      e.stopPropagation();
+      if (leg.stage.stage === 'replied') jumpTo(leg.stage.reply_id);
+      else openDrawer(m.message_id);
+    },
+  }, icon(leg.stage.stage));
+}
+
+function jumpTo(messageId) {
+  const row = document.getElementById('msg-' + messageId);
+  if (!row) return;
+  row.scrollIntoView({ block: 'center', behavior: motionOk() ? 'smooth' : 'auto' });
+  row.classList.remove('flash');
+  void row.offsetWidth;
+  row.classList.add('flash');
+}
+
+// ---------- message drawer ----------
+
+function openDrawer(messageId) {
+  state.selected = messageId;
+  renderSpace();
+  const close = document.querySelector('.drawer .close');
+  if (close) close.focus({ preventScroll: true });
+}
+
+function closeDrawer() {
+  const was = state.selected;
+  state.selected = null;
+  renderSpace();
+  const card = was && document.querySelector(`#msg-${CSS.escape(was)} .card`);
+  if (card) card.focus({ preventScroll: true });
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && state.selected) closeDrawer();
+});
+
+function renderDrawer(snap) {
+  if (!snap || !state.selected) return null;
+  const model = indexSnapshot(snap);
+  const m = model.messages.get(state.selected);
+  if (!m) return null;
+  const thread = model.threads.get(m.thread_id);
+  const parent = m.in_reply_to ? model.messages.get(m.in_reply_to) : null;
+  return [
+    el('div', { class: 'scrim', onclick: closeDrawer }),
+    el('aside', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Message detail' },
+      el('header', { class: 'drawer-head' },
+        el('div', { class: 'drawer-who' },
+          avatarFor(model, m.author),
+          el('div', null,
+            el('div', { class: 'drawer-title' }, el('b', { text: aliasOf(model, m.author) }),
+              el('span', { class: ['kind', 'kind-' + m.kind], text: MESSAGE_KIND[m.kind] || m.kind })),
+            el('div', { class: 'muted small' }, clockTime(m.at_ms), ' · ', when(m.at_ms)))),
+        el('button', { class: 'close', type: 'button', 'aria-label': 'Close', onclick: closeDrawer }, icon('close'))),
+      el('div', { class: 'drawer-body' },
+        thread ? el('div', { class: 'drawer-thread' }, icon('thread'), thread.title.text) : null,
+        parent ? el('button', { class: 'linkish', type: 'button', onclick: () => { closeDrawer(); jumpTo(parent.message_id); } },
+          'In reply to ', el('b', { text: aliasOf(model, parent.author) }), ': ', parent.body.text.slice(0, 60) + (parent.body.text.length > 60 ? '…' : '')) : null,
+        el('div', { class: 'full-body', text: m.body.text }),
+        m.body.truncated ? el('p', { class: 'muted small', text: 'Shortened for the dashboard. The full message is in the recipient panes.' }) : null,
+        el('h3', { text: m.legs.length === 1 ? 'Recipient' : `${m.legs.length} recipients` }),
+        el('ol', { class: 'timeline' }, m.legs.map((leg) => renderLegDetail(model, m, leg)))))];
+}
+
+function avatarFor(model, addressId) {
+  const hit = model.byId.get(addressId);
+  if (hit) return avatar(hit.p, 'md');
+  return el('span', { class: 'avatar md id-none' }, el('span', { class: 'disc', text: '?' }));
+}
+
+function renderLegDetail(model, m, leg) {
+  const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
+  const recipient = model.byId.get(leg.to);
+  const mail = recipient ? recipient.p.mailbox.find((item) => item.message_id === m.message_id) : null;
+  let detail = null;
+  const stage = leg.stage;
+  if (stage.stage === 'working') detail = el('span', null, 'acknowledged ', when(stage.acked_at_ms));
+  else if (stage.stage === 'replied') {
+    const reply = model.messages.get(stage.reply_id);
+    detail = el('button', { class: 'linkish', type: 'button', onclick: () => { closeDrawer(); jumpTo(stage.reply_id); } },
+      reply ? `replied ${duration(reply.at_ms - m.at_ms)} later` : 'replied', ' · view reply');
+  } else if (stage.stage === 'completed') detail = el('span', { text: stage.kind === 'no_reply' ? 'finished without a reply' : 'finished' });
+  else if (stage.stage === 'held') detail = el('span', { text: 'waiting for the recipient pane to come back' });
+  else if (stage.stage === 'failed') detail = el('span', { text: 'could not be delivered' });
+  return el('li', { class: ['tl-item', 'tone-' + st.tone] },
+    avatarFor(model, leg.to),
+    el('div', { class: 'tl-text' },
+      el('div', null, el('b', { text: aliasOf(model, leg.to) }), ' ', chip(st.tone, stage.stage, st.label)),
+      detail ? el('div', { class: 'muted small' }, detail) : null,
+      mail ? el('div', { class: 'muted small' }, `in mailbox: ${(DELIVERY[mail.state] || DELIVERY.queued).label}`,
+        mail.attempts > 1 ? ` · attempt ${mail.attempts}` : null, ' · since ', when(mail.since_ms)) : null));
+}
+
 
 // ---------- index page ----------
 
@@ -322,6 +700,10 @@ function connect() {
 }
 
 function applySnapshot(snap) {
+  const { memo, fresh } = diffSnapshot(state.memo, snap);
+  state.memo = memo;
+  state.fresh = fresh;
+  state.unseen += fresh.messages.size;
   state.snap = snap;
   renderSpace();
 }
