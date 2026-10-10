@@ -40,6 +40,8 @@ pub(crate) enum Frame {
 pub(crate) enum Verdict {
     /// A newer release or schema owns the state: restart into it.
     Handoff(&'static str),
+    /// No tab for the idle window; the browser session rotates.
+    Idle,
     Exit(&'static str),
 }
 
@@ -47,6 +49,7 @@ impl Verdict {
     pub fn reason(&self) -> &'static str {
         match self {
             Self::Handoff(reason) | Self::Exit(reason) => reason,
+            Self::Idle => "idle",
         }
     }
 }
@@ -189,7 +192,7 @@ impl Hub<'_> {
             .idle_since
             .is_some_and(|since| since.elapsed() >= self.idle)
         {
-            return Some(Verdict::Exit("idle"));
+            return Some(Verdict::Idle);
         }
         None
     }

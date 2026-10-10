@@ -1,7 +1,7 @@
 //! A std-only HTTP/1.1 front: GET only, loopback only, one thread per
 //! connection. Every security check lives in `route`.
 use super::hub::{Frame, HubCommand};
-use super::server_files::Token;
+use super::server_files::{ServerFiles, Token};
 use super::snapshot::SpaceKey;
 use std::{
     io::{self, BufRead, BufReader, Read, Write},
@@ -29,7 +29,9 @@ X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control
 
 pub(crate) struct Front {
     pub port: u16,
+    pub files: ServerFiles,
     pub token: Token,
+    pub session: Token,
     pub instance: String,
     pub hub: Sender<HubCommand>,
 }
@@ -84,11 +86,11 @@ impl Request {
             .map(|(_, value)| value.as_str())
     }
 
-    fn query_token(&self) -> Option<&str> {
+    fn query(&self, name: &str) -> Option<&str> {
         self.query
             .as_deref()?
             .split('&')
-            .find_map(|pair| pair.strip_prefix("t="))
+            .find_map(|pair| pair.strip_prefix(name)?.strip_prefix('='))
     }
 
     fn cookie(&self, name: &str) -> Option<&str> {
@@ -137,8 +139,12 @@ enum Asset {
 }
 
 enum Route {
-    /// Swap the one-time `?t=` for a cookie, then land on the clean URL.
-    Enter(String),
+    /// Swap a one-shot `?n=` nonce for the session cookie, then land on
+    /// the clean URL.
+    Enter {
+        location: String,
+        nonce: String,
+    },
     Page,
     Events(SpaceKey),
     Spaces,
@@ -147,7 +153,7 @@ enum Route {
     Health,
 }
 
-fn route(request: &Request, port: u16, token: &Token) -> Result<Route, Status> {
+fn route(request: &Request, port: u16, token: &Token, session: &Token) -> Result<Route, Status> {
     let host = request.header("host").ok_or(Status::Forbidden)?;
     // Exact loopback Host defeats DNS rebinding onto this port.
     if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
@@ -162,7 +168,7 @@ fn route(request: &Request, port: u16, token: &Token) -> Result<Route, Status> {
     let path = request.path.as_str();
     match path {
         "/healthz" => {
-            return match request.query_token() {
+            return match request.query("t") {
                 Some(candidate) if token.matches(candidate) => Ok(Route::Health),
                 _ => Err(Status::Unauthorized),
             };
@@ -183,16 +189,15 @@ fn route(request: &Request, port: u16, token: &Token) -> Result<Route, Status> {
             Some((SpaceKey::parse(segment).ok_or(Status::NotFound)?, events))
         }
     };
-    if let Some(candidate) = request.query_token() {
-        return if token.matches(candidate) {
-            Ok(Route::Enter(path.to_owned()))
-        } else {
-            Err(Status::Unauthorized)
-        };
+    if let Some(nonce) = request.query("n") {
+        return Ok(Route::Enter {
+            location: path.to_owned(),
+            nonce: nonce.to_owned(),
+        });
     }
     if !request
         .cookie(&cookie_name(port))
-        .is_some_and(|candidate| token.matches(candidate))
+        .is_some_and(|candidate| session.matches(candidate))
     {
         return Err(Status::Unauthorized);
     }
@@ -215,13 +220,16 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
         Ok(request) => request,
         Err(status) => return respond_status(&mut writer, status),
     };
-    match route(&request, front.port, &front.token) {
+    match route(&request, front.port, &front.token, &front.session) {
         Err(status) => respond_status(&mut writer, status),
-        Ok(Route::Enter(location)) => {
+        Ok(Route::Enter { nonce, .. }) if !front.files.consume_entry(&nonce) => {
+            respond_status(&mut writer, Status::Unauthorized)
+        }
+        Ok(Route::Enter { location, .. }) => {
             let headers = format!(
                 "Location: {location}\r\nSet-Cookie: {}={}; HttpOnly; SameSite=Strict; Path=/\r\n",
                 cookie_name(front.port),
-                front.token.as_str()
+                front.session.as_str()
             );
             respond(&mut writer, "303 See Other", "text/plain", &headers, b"")
         }

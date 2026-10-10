@@ -59,7 +59,7 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                 if data["opened"] == true {
                     "Opened in your browser. It stops on its own 10 minutes after the last tab closes."
                 } else {
-                    "Open that URL in a browser on this machine. It stops on its own 10 minutes after the last tab closes."
+                    "Open that URL in a browser on this machine within 10 minutes; it works once. The server stops on its own 10 minutes after the last tab closes."
                 }
                 .into(),
             );

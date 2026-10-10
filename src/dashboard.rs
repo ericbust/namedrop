@@ -43,13 +43,12 @@ pub fn open(
     {
         eprintln!("Could not save the workspace label: {error}");
     }
-    let token = files.token()?;
-    let (server, info) = ensure(&files, &token)?;
+    let (server, info) = ensure(&files, &files.token()?)?;
     let url = format!(
-        "http://127.0.0.1:{}/w/{}?t={}",
+        "http://127.0.0.1:{}/w/{}?n={}",
         info.port,
         key.as_str(),
-        token.as_str()
+        files.mint_entry()?
     );
     let opened = open_browser && launch_browser(&url);
     Ok(json!({
@@ -158,6 +157,8 @@ fn run_server(state: &Path, command_gate: Option<File>) -> Result<(), String> {
     // Holding the shared command gate for a long-lived process would make
     // every update time out waiting for it to drain.
     drop(command_gate);
+    // Before server.json, so whoever sees this server can already enter it.
+    let session = files.session()?;
     let listener = bind(files.info().map(|info| info.port))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let instance = server_files::random_hex(16)?;
@@ -175,7 +176,9 @@ fn run_server(state: &Path, command_gate: Option<File>) -> Result<(), String> {
     let (hub, commands) = mpsc::channel();
     let front = Arc::new(http::Front {
         port,
+        files: ServerFiles::at(state)?,
         token: files.token()?,
+        session,
         instance: instance.clone(),
         hub,
     });
@@ -183,9 +186,14 @@ fn run_server(state: &Path, command_gate: Option<File>) -> Result<(), String> {
     eprintln!("dashboard: serving 127.0.0.1:{port}");
     let verdict = hub::run(&files, &instance, idle(), commands);
     eprintln!("dashboard: stopping: {}", verdict.reason());
-    if let hub::Verdict::Handoff(_) = verdict {
-        drop(claim);
-        files.spawn()?;
+    match verdict {
+        hub::Verdict::Handoff(_) => {
+            drop(claim);
+            files.spawn()?;
+        }
+        // Still holding the claim, so no successor reads the old session.
+        hub::Verdict::Idle => files.rotate_session()?,
+        hub::Verdict::Exit(_) => {}
     }
     Ok(())
 }

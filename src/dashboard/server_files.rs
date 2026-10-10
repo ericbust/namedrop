@@ -1,5 +1,6 @@
 //! Everything under `<state>/dashboard/`: the singleton lock, the published
-//! `server.json`, the persistent token, workspace labels, and the log.
+//! `server.json`, the secrets, one-shot entry nonces, workspace labels, and
+//! the log.
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -9,8 +10,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, SystemTime},
 };
+
+/// How long a printed entry link stays usable before its first visit.
+const ENTRY_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ServerInfo {
@@ -26,7 +30,9 @@ pub(crate) struct SingletonLock {
     _file: File,
 }
 
-/// The bearer secret for every page. Compared in constant time and never logged.
+/// A 32-byte hex secret, compared in constant time and never logged. The
+/// `token` is shared only by the CLI and the server; the browser's cookie is
+/// the separate `session`, so neither ever leaves the state directory as the other.
 #[derive(Clone)]
 pub(crate) struct Token(String);
 
@@ -95,7 +101,65 @@ impl ServerFiles {
     }
 
     pub fn token(&self) -> Result<Token, String> {
-        let path = self.dir.join("token");
+        self.secret("token")
+    }
+
+    /// Kept across a handoff so open tabs survive an upgrade.
+    pub fn session(&self) -> Result<Token, String> {
+        self.secret("session")
+    }
+
+    /// A tab that outlives an idle exit keeps retrying the freed port; a
+    /// new session means whoever binds it next receives a dead cookie.
+    pub fn rotate_session(&self) -> Result<(), String> {
+        match fs::remove_file(self.dir.join("session")) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error.to_string()),
+            _ => Ok(()),
+        }
+    }
+
+    fn entries(&self) -> PathBuf {
+        self.dir.join("entry")
+    }
+
+    /// Mints the one-shot nonce an entry URL carries, so argv, terminal
+    /// output and browser history hold nothing that opens a page later.
+    pub fn mint_entry(&self) -> Result<String, String> {
+        let entries = self.entries();
+        fs::create_dir_all(&entries).map_err(|e| format!("{}: {e}", entries.display()))?;
+        fs::set_permissions(&entries, fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+        for entry in fs::read_dir(&entries).into_iter().flatten().flatten() {
+            if !fresh(&entry.path()) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        let nonce = random_hex(16)?;
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(entries.join(&nonce))
+            .map_err(|e| e.to_string())?;
+        Ok(nonce)
+    }
+
+    /// True once per minted nonce: removing the file is the atomic claim.
+    pub fn consume_entry(&self, nonce: &str) -> bool {
+        if nonce.len() != 32
+            || !nonce
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return false;
+        }
+        let path = self.entries().join(nonce);
+        let fresh = fresh(&path);
+        fs::remove_file(&path).is_ok() && fresh
+    }
+
+    fn secret(&self, name: &str) -> Result<Token, String> {
+        let path = self.dir.join(name);
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -118,7 +182,9 @@ impl ServerFiles {
                     }
                     thread::sleep(Duration::from_millis(25));
                 }
-                Err("dashboard token file is malformed; delete it to rotate".to_owned())
+                Err(format!(
+                    "dashboard {name} file is malformed; delete it to rotate"
+                ))
             }
             Err(error) => Err(error.to_string()),
         }
@@ -186,6 +252,16 @@ impl ServerFiles {
             .map(drop)
             .map_err(|e| format!("could not start the dashboard server: {e}"))
     }
+}
+
+fn fresh(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .is_ok_and(|modified| {
+            SystemTime::now()
+                .duration_since(modified)
+                .is_ok_and(|age| age < ENTRY_TTL)
+        })
 }
 
 fn private_file(path: &Path) -> Result<File, String> {

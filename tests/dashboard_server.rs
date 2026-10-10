@@ -22,6 +22,7 @@ struct Server {
     child: Child,
     port: u16,
     token: String,
+    session: String,
 }
 
 impl Server {
@@ -49,11 +50,11 @@ impl Server {
             (info["pid"] == child.id()).then_some(info)
         })
         .expect("server.json published by the started server");
-        let token = fs::read_to_string(state.join("dashboard/token")).unwrap();
         Self {
             child,
             port: info["port"].as_u64().unwrap() as u16,
-            token,
+            token: fs::read_to_string(state.join("dashboard/token")).unwrap(),
+            session: fs::read_to_string(state.join("dashboard/session")).unwrap(),
         }
     }
 
@@ -69,11 +70,11 @@ impl Server {
     }
 
     fn cookie(&self) -> String {
-        format!("namedrop_dashboard_{}={}", self.port, self.token)
+        format!("namedrop_dashboard_{}={}", self.port, self.session)
     }
 
     fn events(&self, key: &SpaceKey) -> EventStream {
-        events(self.port, &self.token, key)
+        events(self.port, &self.session, key)
     }
 
     fn exits_within(&mut self, limit: Duration) -> bool {
@@ -105,8 +106,8 @@ fn connect(port: u16, path: &str, headers: &[(&str, &str)]) -> TcpStream {
     stream
 }
 
-fn events(port: u16, token: &str, key: &SpaceKey) -> EventStream {
-    let cookie = format!("namedrop_dashboard_{port}={token}");
+fn events(port: u16, session: &str, key: &SpaceKey) -> EventStream {
+    let cookie = format!("namedrop_dashboard_{port}={session}");
     EventStream {
         stream: connect(
             port,
@@ -262,6 +263,22 @@ fn state(directory: &TestDirectory) -> PathBuf {
     directory.path().join("state")
 }
 
+/// Writes a one-shot entry the way `namedrop dashboard` does.
+fn mint_entry(state: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let entries = state.join("dashboard/entry");
+    fs::create_dir_all(&entries).unwrap();
+    fs::set_permissions(&entries, fs::Permissions::from_mode(0o700)).unwrap();
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let nonce = format!(
+        "{:016x}{:016x}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    fs::write(entries.join(&nonce), "").unwrap();
+    nonce
+}
+
 #[test]
 fn pages_require_the_token_and_a_loopback_host() {
     let directory = TestDirectory::new();
@@ -277,7 +294,7 @@ fn pages_require_the_token_and_a_loopback_host() {
             .contains("401")
     );
     let rebinding = server.get(
-        &format!("{page}?t={}", server.token),
+        &format!("{page}?n={}", mint_entry(&state(&directory))),
         &[("Host", &format!("evil.example:{}", server.port))],
     );
     assert!(rebinding.status.contains("403"));
@@ -290,7 +307,14 @@ fn pages_require_the_token_and_a_loopback_host() {
     );
     assert!(cross_site.status.contains("403"));
 
-    let enter = server.get(&format!("{page}?t={}", server.token), &[]);
+    assert!(
+        server
+            .get(&format!("{page}?t={}", server.token), &[])
+            .status
+            .contains("401"),
+        "the CLI's token never opens a page"
+    );
+    let enter = server.get(&format!("{page}?n={}", mint_entry(&state(&directory))), &[]);
     assert!(enter.status.contains("303"), "{}", enter.status);
     assert!(enter.headers.contains(&format!("Location: {page}\r\n")));
     let set_cookie = enter
@@ -299,6 +323,10 @@ fn pages_require_the_token_and_a_loopback_host() {
         .find(|line| line.starts_with("Set-Cookie:"))
         .unwrap();
     assert!(set_cookie.contains(&server.cookie()));
+    assert!(
+        !set_cookie.contains(&server.token),
+        "the cookie is the session secret, not the CLI token"
+    );
     assert!(set_cookie.contains("HttpOnly") && set_cookie.contains("SameSite=Strict"));
 
     let landed = server.get(&page, &[("Cookie", &server.cookie())]);
@@ -527,12 +555,70 @@ fn every_workspace_shares_one_server_with_its_own_page() {
     assert_eq!(first["space_key"], key.as_str());
     assert_eq!(live_servers(&state), 1);
 
-    let token = fs::read_to_string(state.join("dashboard/token")).unwrap();
-    let frame = events(port_of(&first), &token, &key)
+    let session = fs::read_to_string(state.join("dashboard/session")).unwrap();
+    let frame = events(port_of(&first), &session, &key)
         .until(Duration::from_secs(5), |e| e.contains("event: snapshot"));
     assert!(
         frame.contains(r#""label":{"text":"label-w1","truncated":false}"#),
         "the CLI records the Herdr label for the server: {frame}"
+    );
+}
+
+#[test]
+fn an_entry_link_works_once_and_carries_no_lasting_secret() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+
+    let opened = open_dashboard(directory.path(), "w1");
+    let url = opened["url"].as_str().unwrap();
+    let token = fs::read_to_string(state.join("dashboard/token")).unwrap();
+    let session = fs::read_to_string(state.join("dashboard/session")).unwrap();
+    assert!(!url.contains(&token) && !url.contains(&session), "{url}");
+    let path = &url[url.find("/w/").unwrap()..];
+
+    let port = port_of(&opened);
+    let enter = |path: &str| {
+        let mut raw = String::new();
+        connect(port, path, &[]).read_to_string(&mut raw).unwrap();
+        Response::parse(&raw)
+    };
+    let first = enter(path);
+    assert!(first.status.contains("303"), "{}", first.status);
+    assert!(
+        first
+            .headers
+            .contains(&format!("namedrop_dashboard_{port}={session};"))
+    );
+    assert!(
+        enter(path).status.contains("401"),
+        "a consumed entry link is rejected"
+    );
+}
+
+#[test]
+fn an_idle_exit_rotates_the_browser_session() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let ns = seed(&state, "w1", &["a"]);
+    let page = format!("/w/{}", SpaceKey::of(&ns).as_str());
+    let mut first = Server::start(&state, Some(300));
+    let stale_cookie = first.cookie();
+    assert!(first.exits_within(Duration::from_secs(3)));
+
+    let next = Server::start(&state, None);
+    assert_eq!(next.port, first.port, "the successor reuses the port");
+    assert!(
+        next.get(&page, &[("Cookie", &stale_cookie)])
+            .status
+            .contains("401")
+    );
+    assert_ne!(next.session, first.session);
+    assert!(
+        next.get(&page, &[("Cookie", &next.cookie())])
+            .status
+            .contains("200")
     );
 }
 
