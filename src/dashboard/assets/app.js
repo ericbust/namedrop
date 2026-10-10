@@ -673,7 +673,7 @@ function legTitle(model, leg) {
   const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
   const who = aliasOf(model, leg.to);
   if (leg.stage.stage === 'working') return `${who} is working on it (picked up ${ago(leg.stage.acked_at_ms)})`;
-  if (leg.stage.stage === 'replied') return `${who} replied. Click to jump to the reply.`;
+  if (leg.stage.stage === 'replied') return `${who} replied. Click to open the reply.`;
   if (leg.stage.stage === 'held') return `Message to ${who} is on hold`;
   return `${who}: ${st.label}`;
 }
@@ -688,10 +688,16 @@ function legChip(model, m, leg) {
     css: { left: lanePos(model, laneIndex(model, leg.to)) },
     onclick: (e) => {
       e.stopPropagation();
-      if (leg.stage.stage === 'replied') jumpTo(leg.stage.reply_id);
+      if (leg.stage.stage === 'replied' && model.messages.has(leg.stage.reply_id)) openMessage(leg.stage.reply_id);
       else openDrawer(m.message_id);
     },
   }, icon(leg.stage.stage)), () => el('div', { class: 'tip-head', text: legTitle(model, leg) }));
+}
+
+// Shows a message in full in the drawer, with the timeline scrolled to it behind.
+function openMessage(messageId) {
+  openDrawer(messageId);
+  jumpTo(messageId);
 }
 
 function jumpTo(messageId) {
@@ -906,7 +912,7 @@ function renderDrawer(snap) {
         el('button', { class: 'close', type: 'button', 'aria-label': 'Close', onclick: closeDrawer }, icon('close'))),
       el('div', { class: 'drawer-body' },
         thread ? el('div', { class: 'drawer-thread' }, icon('thread'), thread.title.text) : null,
-        parent ? el('button', { class: 'linkish', type: 'button', onclick: () => { closeDrawer(); jumpTo(parent.message_id); } },
+        parent ? el('button', { class: 'linkish', type: 'button', onclick: () => openMessage(parent.message_id) },
           'In reply to ', el('b', { text: aliasOf(model, parent.author) }), ': ', parent.body.text.slice(0, 60) + (parent.body.text.length > 60 ? '…' : '')) : null,
         el('div', { class: 'full-body', text: m.body.text }),
         m.body.truncated ? el('p', { class: 'muted small', text: 'Shortened for the dashboard. Each recipient got the full message.' }) : null,
@@ -930,7 +936,7 @@ function renderLegDetail(model, m, leg) {
   else if (stage.stage === 'replied') {
     const reply = model.messages.get(stage.reply_id);
     detail = reply
-      ? el('button', { class: 'linkish', type: 'button', onclick: () => { closeDrawer(); jumpTo(stage.reply_id); } },
+      ? el('button', { class: 'linkish', type: 'button', onclick: () => openMessage(stage.reply_id) },
         `replied ${duration(reply.at_ms - m.at_ms)} later`, ' · view reply')
       : el('span', { text: 'replied (older than this view)' });
   } else if (stage.stage === 'completed') detail = el('span', { text: stage.kind === 'no_reply' ? 'finished without a reply' : 'finished' });
