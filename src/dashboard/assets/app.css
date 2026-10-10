@@ -663,3 +663,16 @@ button.work-card:hover { border-color: var(--line-strong); }
 }
 
 .activity[title], .pill[title], .chip[title], .conn[title] { cursor: help; }
+
+.lane-head.deck {
+  font: inherit; color: inherit; text-align: left; cursor: pointer;
+  box-shadow: 4px 4px 0 -1px var(--surface), 4px 4px 0 0 var(--line), 8px 8px 0 -1px var(--surface), 8px 8px 0 0 var(--line), var(--shadow);
+  margin-right: 13px;
+}
+.lane-head.deck:hover { border-color: var(--line-strong); }
+.lane-head.deck:focus-visible { outline: 2px solid var(--flight); outline-offset: 2px; }
+.lane-head.deck .alias { text-decoration: none; }
+.deck-avatars { display: inline-flex; flex: none; }
+.deck-avatars .avatar + .avatar { margin-left: -4px; }
+.deck-avatars .avatar { box-shadow: 0 0 0 2px var(--surface); border-radius: 50%; }
+.deck-hint { color: var(--muted); font-size: 11px; }

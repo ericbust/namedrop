@@ -283,13 +283,18 @@ function isDormant(p, talking) {
 function indexSnapshot(snap) {
   const talking = new Set(snap.messages.flatMap((m) => [m.author, ...m.legs.map((leg) => leg.to)]));
   const dormant = snap.participants.filter((p) => isDormant(p, talking));
-  const lanes = state.showDormant ? snap.participants : snap.participants.filter((p) => !dormant.includes(p));
-  const byId = new Map(lanes.map((p, i) => [p.address_id, { p, i }]));
+  // Retired agents still in this window share one stacked lane, so live lanes keep the room.
+  const stacked = snap.participants.filter((p) => p.activity === 'retired' && !dormant.includes(p));
+  const spread = state.showDormant || stacked.length < 2;
+  const lanes = spread
+    ? snap.participants.filter((p) => state.showDormant || !dormant.includes(p))
+    : [...snap.participants.filter((p) => !dormant.includes(p) && !stacked.includes(p)), { deck: true, members: stacked }];
+  const byId = new Map(lanes.flatMap((p, i) => (p.deck ? p.members : [p]).map((member) => [member.address_id, { p: member, i }])));
   const people = new Map(snap.participants.map((p) => [p.address_id, p]));
   const messages = new Map(snap.messages.map((m) => [m.message_id, m]));
   const threads = new Map(snap.threads.map((t) => [t.thread_id, t]));
   for (const p of snap.participants) identityClass(p.address_id);
-  return { snap, lanes, byId, people, dormant: dormant.length, messages, threads };
+  return { snap, lanes, byId, people, dormant: dormant.length, foldable: dormant.length + (stacked.length < 2 ? 0 : stacked.length), messages, threads };
 }
 
 function aliasOf(model, addressId) {
@@ -373,21 +378,40 @@ function motionOk() {
 function renderRoster(model) {
   return el('div', { class: 'roster' },
     el('div', { class: 'gutter-cell' }, renderDormantToggle(model)),
-    model.lanes.map((p) => renderLaneHead(model, p)));
+    model.lanes.map((p) => (p.deck ? renderDeck(p) : renderLaneHead(model, p))));
+}
+
+function renderDeck(deck) {
+  const n = deck.members.length;
+  const aliases = deck.members.map((p) => p.alias);
+  return el('button', {
+    class: ['lane-head', 'deck', 'act-retired'],
+    type: 'button',
+    title: `Retired: ${aliases.join(', ')}. Click to give each its own lane.`,
+    onclick: () => { state.showDormant = true; renderSpace(); },
+  },
+  el('div', { class: 'who' },
+    el('span', { class: 'deck-avatars' }, deck.members.slice(0, 4).map((p) => avatar(p, 'sm'))),
+    el('div', { class: 'names' },
+      el('div', { class: 'alias', text: `${n} retired` }),
+      el('div', { class: 'sub', text: aliases.join(', ') }))),
+  el('div', { class: 'meta' },
+    el('span', { class: ['activity', 'tone-idle'], title: ACTIVITY.retired.tip }, el('span', { class: 'act-dot' }), 'stacked'),
+    el('span', { class: 'deck-hint', text: 'click to spread' })));
 }
 
 function renderDormantToggle(model) {
-  if (!model.dormant) return null;
+  if (state.showDormant ? !model.foldable : !model.dormant) return null;
   const n = model.dormant;
   return el('button', {
     class: ['dormant-toggle', state.showDormant ? 'is-open' : null],
     type: 'button',
     'aria-pressed': state.showDormant ? 'true' : 'false',
     title: state.showDormant
-      ? 'Hide retired and offline participants with nothing in this window'
+      ? 'Stack retired agents into one lane and hide idle offline ones'
       : `Show ${n} retired or offline ${n === 1 ? 'participant' : 'participants'} with nothing in this window`,
     onclick: () => { state.showDormant = !state.showDormant; renderSpace(); },
-  }, state.showDormant ? 'hide retired' : `+${n} retired`);
+  }, state.showDormant ? 'stack retired' : `+${n} retired`);
 }
 
 function avatar(p, size) {
@@ -563,9 +587,11 @@ function renderRow(model, m, band) {
   const reply = isReply(m);
 
   const strip = el('div', { class: 'strip' });
+  const drawn = new Set([authorX]);
   for (const leg of m.legs) {
-    if (leg.to === m.author) continue;
     const toX = laneX(model, leg.to);
+    if (drawn.has(toX)) continue;
+    drawn.add(toX);
     const rightward = toX > authorX;
     append(strip, el('span', {
       class: ['wire', reply ? 'dashed' : null, rightward ? 'rightward' : 'leftward', isNew ? 'draw' : null],
