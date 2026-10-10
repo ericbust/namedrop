@@ -188,6 +188,8 @@ const state = {
   fresh: { messages: new Set(), legs: new Set(), mail: new Set() },
   unseen: 0,
   selected: null,
+  drawerEntering: false,
+  tab: 'messages',
 };
 
 const root = document.getElementById('app');
@@ -346,11 +348,24 @@ function renderBoard(snap) {
   const sheet = el('div', { class: 'sheet', css: { '--lanes': String(lanes) } },
     renderRoster(model),
     renderRows(model));
-  return el('main', { class: 'board' },
+  const stuck = snap.coordinations.filter((c) => c.outcome === 'blocked').length;
+  return el('main', { class: ['board', 'tab-' + state.tab] },
+    el('nav', { class: 'tabs', 'aria-label': 'View' },
+      tabButton('messages', 'Messages', snap.messages.length),
+      tabButton('work', 'Work', stuck ? `${stuck} blocked` : null, stuck ? 'alert' : null)),
     el('div', { class: 'stage-wrap' },
       el('section', { class: 'stage', 'aria-label': 'Messages between participants' }, sheet),
       el('button', { class: 'new-pill', type: 'button', hidden: true, onclick: scrollToEnd }, icon('down'), el('span'))),
     renderRail(model));
+}
+
+function tabButton(tab, label, badge, tone) {
+  return el('button', {
+    class: ['tab', state.tab === tab ? 'is-active' : null],
+    type: 'button',
+    'aria-pressed': state.tab === tab ? 'true' : 'false',
+    onclick: () => { state.tab = tab; renderSpace(); },
+  }, label, badge != null ? el('span', { class: ['tab-badge', tone ? 'tone-' + tone : null], text: String(badge) }) : null);
 }
 
 function scrollToEnd() {
@@ -404,7 +419,7 @@ function renderLaneHead(model, p) {
       showActivity ? el('span', { class: ['activity', 'tone-' + act.tone] }, el('span', { class: 'act-dot' }), act.label) : null,
       runtime ? el('span', { class: 'runtime', text: runtime }) : null),
     p.waiting_on.length
-      ? el('div', { class: 'waiting tone-wait' }, icon('clock'), 'waiting on ', el('b', { text: p.waiting_on.join(', ') }))
+      ? el('div', { class: 'waiting tone-wait' }, icon('clock'), el('span', { class: 'waiting-text' }, 'waiting on ', el('b', { text: p.waiting_on.join(', ') })))
       : null,
     renderTray(model, p));
 }
@@ -694,7 +709,7 @@ function renderCoordination(model, c) {
       return el('li', { class: 'assignment' },
         el('div', { class: 'assignment-line' }, who(model, a.assignee), el('span', { class: 'spacer' }), chip(w.tone, w.icon, w.label)),
         a.blocked_reason ? el('div', { class: 'blocked-reason tone-alert' }, a.blocked_reason.text) : null,
-        a.waiting_on ? el('div', { class: 'waiting tone-wait' }, icon('clock'), 'waiting on ', el('b', { text: aliasOf(model, a.waiting_on) })) : null);
+        a.waiting_on ? el('div', { class: 'waiting tone-wait' }, icon('clock'), el('span', { class: 'waiting-text' }, 'waiting on ', el('b', { text: aliasOf(model, a.waiting_on) }))) : null);
     })));
 }
 
@@ -737,6 +752,7 @@ function renderRail(model) {
 // ---------- message drawer ----------
 
 function openDrawer(messageId) {
+  state.drawerEntering = !state.selected;
   state.selected = messageId;
   renderSpace();
   const close = document.querySelector('.drawer .close');
@@ -762,9 +778,11 @@ function renderDrawer(snap) {
   if (!m) return null;
   const thread = model.threads.get(m.thread_id);
   const parent = m.in_reply_to ? model.messages.get(m.in_reply_to) : null;
+  const entering = state.drawerEntering;
+  state.drawerEntering = false;
   return [
-    el('div', { class: 'scrim', onclick: closeDrawer }),
-    el('aside', { class: 'drawer', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Message detail' },
+    el('div', { class: ['scrim', entering ? 'enter' : null], onclick: closeDrawer }),
+    el('aside', { class: ['drawer', entering ? 'enter' : null], role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Message detail' },
       el('header', { class: 'drawer-head' },
         el('div', { class: 'drawer-who' },
           avatarFor(model, m.author),
@@ -903,6 +921,9 @@ function applySnapshot(snap) {
   state.unseen += fresh.messages.size;
   state.snap = snap;
   renderSpace();
+  // Animations belong to the frame that caused them; later re-renders
+  // (drawer, connection changes) must not replay them.
+  state.fresh = { messages: new Set(), legs: new Set(), mail: new Set() };
 }
 
 // ---------- boot ----------
