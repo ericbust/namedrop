@@ -326,10 +326,18 @@ pub(crate) fn track_message<
             }
             let recipient = match draft.recipients.as_slice() {
                 [recipient] if recipient.address_id == owner.address_id => recipient,
-                _ => {
-                    return Err(StoreError::invalid_input(
-                        "tracked replies must return to the original exact lead session",
-                    ));
+                recipients => {
+                    let extra = recipients
+                        .iter()
+                        .filter(|r| r.address_id != owner.address_id)
+                        .map(|r| format!("@{}", r.alias_snapshot))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(StoreError::invalid_input(format!(
+                        "a tracked reply goes only to @{lead}, but this one also addresses {extra}. \
+                         Start the source with @{lead} alone and write any other name without the @",
+                        lead = owner.alias
+                    )));
                 }
             };
             if recipient.agent_session_snapshot != owner.agent_session_id {

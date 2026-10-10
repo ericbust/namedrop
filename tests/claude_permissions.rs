@@ -44,6 +44,8 @@ if args[:2]==['worktree','list']:
     result={'worktrees':[{'path':'/repo','open_workspace_id':w}]}
 elif args[:2]==['pane','list']:
     result={'panes':[{'pane_id':'pane-1','terminal_id':'terminal-1','tab_id':'tab-1','workspace_id':w,'agent':'claude','agent_session':{'value':'session-1'},'agent_status':'idle'}]}
+    if os.environ.get('TEST_PEER_PANE'):
+        result['panes'].append({'pane_id':'pane-2','terminal_id':'terminal-2','tab_id':'tab-1','workspace_id':w,'agent':'claude','agent_session':{'value':'session-2'},'agent_status':'idle'})
 else: result={}
 print(json.dumps({'result':result}))
 "#).unwrap();
@@ -837,13 +839,38 @@ fn input_file_operational_errors_match_inline_errors() {
     let named = f
         .command_for("workspace-1")
         .args(["name", "@author", "--type", "agent"])
+        .env("TEST_PEER_PANE", "1")
         .output()
         .unwrap();
     assert!(named.status.success(), "{named:?}");
+    let peer = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .args([
+            "--plugin-state",
+            f.root.to_str().unwrap(),
+            "--herdr-socket",
+            "socket-a",
+            "--herdr-workspace",
+            "workspace-1",
+            "--herdr-pane",
+            "pane-2",
+            "name",
+            "@peer",
+            "--type",
+            "agent",
+        ])
+        .env("HOME", &f.home)
+        .env("CLAUDE_CONFIG_DIR", &f.claude)
+        .env("CODEX_HOME", f.home.join(".codex"))
+        .env("HERDR_BIN_PATH", f.root.join("herdr"))
+        .env("TEST_WORKSPACE", "workspace-1")
+        .env("TEST_PEER_PANE", "1")
+        .output()
+        .unwrap();
+    assert!(peer.status.success(), "{peer:?}");
     f.run_for(
         "workspace-1",
         "send",
-        json!({"request_id":"reused","source":"@author first"}),
+        json!({"request_id":"reused","source":"@peer first"}),
     );
     for (operation, input, expected) in [
         ("activate", json!({"confirmed":false}), "confirmation"),
@@ -854,7 +881,7 @@ fn input_file_operational_errors_match_inline_errors() {
         ),
         (
             "send",
-            json!({"request_id":"reused","source":"@author changed"}),
+            json!({"request_id":"reused","source":"@peer changed"}),
             "different message content",
         ),
     ] {

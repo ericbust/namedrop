@@ -55,7 +55,26 @@ impl StateTransaction<'_> {
         ))
     }
 
-    pub(crate) fn resolve_recipient_aliases(
+    /// Resolves who a message goes to. The author never receives its own
+    /// message: naming yourself among the leading Mentions labels the message,
+    /// as in "@lead @reviewer top 3", rather than addressing it.
+    pub(crate) fn resolve_message_recipients(
+        &self,
+        namespace: &StateNamespace,
+        aliases: &[String],
+        author: &PaneAddressId,
+    ) -> Result<Vec<RoutingAddressSnapshot>, StoreError> {
+        let mut recipients = self.resolve_recipient_aliases(namespace, aliases)?;
+        recipients.retain(|recipient| &recipient.address_id != author);
+        if recipients.is_empty() {
+            return Err(StoreError::invalid_input(
+                "this message is addressed only to its author; mention at least one other agent",
+            ));
+        }
+        Ok(recipients)
+    }
+
+    fn resolve_recipient_aliases(
         &self,
         namespace: &StateNamespace,
         aliases: &[String],
