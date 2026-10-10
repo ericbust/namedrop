@@ -143,6 +143,15 @@ impl StateStore {
             .connection
             .pragma_query_value(None, "data_version", |row| row.get(0))?)
     }
+
+    pub fn set_busy_timeout(&self, timeout: Duration) -> Result<(), StoreError> {
+        Ok(self.connection.busy_timeout(timeout)?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
 }
 
 impl StateTransaction<'_> {

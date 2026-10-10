@@ -206,13 +206,14 @@ impl Hub<'_> {
         if self.data_version == Some(version) {
             return;
         }
-        self.data_version = Some(version);
         let mut keys: Vec<SpaceKey> = self.subscribers.values().map(|s| s.key.clone()).collect();
         keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         keys.dedup();
+        let mut failed = false;
         for key in keys {
             let before = self.published.get(&key).map(|p| p.hash);
             let Some(frame) = self.publish(&key) else {
+                failed = true;
                 continue;
             };
             if before == self.published.get(&key).map(|p| p.hash) {
@@ -234,11 +235,24 @@ impl Hub<'_> {
                 self.drop_subscriber(id);
             }
         }
+        // An unrecorded version retries every space on the next tick.
+        if !failed {
+            self.data_version = Some(version);
+        }
     }
 
     fn open_store(&mut self) {
         match StateStore::open_read_only(self.files.state()) {
-            Ok(store) => self.store = store,
+            Ok(store) => {
+                // One thread reads for every space, so a long wait on a busy
+                // writer would stall them all; a failed read retries next tick.
+                if let Some(store) = &store
+                    && let Err(error) = store.set_busy_timeout(Duration::from_millis(250))
+                {
+                    self.log(format!("could not set the busy timeout: {error}"));
+                }
+                self.store = store;
+            }
             Err(error) if error.kind() == StoreErrorKind::UnsupportedSchema => {
                 self.unsupported_schema = true;
             }
@@ -329,4 +343,101 @@ fn now_ms() -> i64 {
         .map_or(0, |elapsed| {
             i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ActorKind, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneRoleId};
+    use std::sync::mpsc::sync_channel;
+
+    fn add_address(state: &std::path::Path, namespace: &StateNamespace, alias: &str) {
+        let attribution = MutationAttribution::new(ActorKind::Plugin, "test", 1);
+        StateStore::open(state)
+            .unwrap()
+            .transaction(|tx| {
+                tx.create_pane_address(
+                    namespace,
+                    &PaneAddressDraft {
+                        id: PaneAddressId::new(format!("address-{alias}")),
+                        role_id: PaneRoleId::new(format!("role-{alias}")),
+                        role_name: alias.to_owned(),
+                        role_description: String::new(),
+                        alias: alias.to_owned(),
+                    },
+                    &attribution,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn a_failed_read_is_retried_on_the_next_tick() {
+        let state = std::env::temp_dir().join(format!("namedrop-hub-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let namespace = StateNamespace::for_space("socket-a", "w1");
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                tx.activate_worktree(
+                    &namespace,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 1),
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = Hub {
+            files: &files,
+            instance: "test",
+            idle: Duration::from_secs(60),
+            store: None,
+            data_version: None,
+            spaces: HashMap::new(),
+            subscribers: HashMap::new(),
+            published: HashMap::new(),
+            idle_since: None,
+            unsupported_schema: false,
+            last_error: None,
+        };
+        let (frames, inbox) = sync_channel(8);
+        hub.handle(HubCommand::Subscribe {
+            id: 1,
+            key: SpaceKey::of(&namespace),
+            frames,
+        });
+        hub.refresh();
+        assert!(matches!(inbox.try_recv(), Ok(Frame::Snapshot(_))));
+
+        add_address(&state, &namespace, "late");
+        // A temp table shadows the real one on the hub's connection only, so
+        // the read fails without another commit to bump data_version.
+        let shadow = "CREATE TEMP TABLE pane_addresses(broken INTEGER)";
+        hub.store
+            .as_ref()
+            .unwrap()
+            .connection()
+            .execute_batch(shadow)
+            .unwrap();
+        hub.refresh();
+        assert!(
+            inbox.try_recv().is_err(),
+            "the failed read published nothing"
+        );
+
+        let repair = "DROP TABLE temp.pane_addresses";
+        hub.store
+            .as_ref()
+            .unwrap()
+            .connection()
+            .execute_batch(repair)
+            .unwrap();
+        hub.refresh();
+        match inbox.try_recv() {
+            Ok(Frame::Snapshot(frame)) => assert!(frame.contains("@late"), "{frame}"),
+            _ => panic!("the change committed during the failed read never arrived"),
+        }
+        let _ = fs::remove_dir_all(&state);
+    }
 }
