@@ -661,3 +661,5 @@ button.work-card:hover { border-color: var(--line-strong); }
   .mini { display: inline-flex; }
   .card .body { -webkit-line-clamp: 3; }
 }
+
+.activity[title], .pill[title], .chip[title], .conn[title] { cursor: help; }

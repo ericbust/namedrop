@@ -86,12 +86,12 @@ const DELIVERY = {
 };
 
 const ACTIVITY = {
-  working: { label: 'working', tone: 'flight' },
-  waiting: { label: 'waiting', tone: 'wait' },
-  blocked: { label: 'blocked', tone: 'alert' },
-  idle: { label: 'idle', tone: 'idle' },
-  offline: { label: 'offline', tone: 'idle' },
-  retired: { label: 'retired', tone: 'idle' },
+  working: { label: 'working', tone: 'flight', tip: 'Busy right now: thinking, running tools, or working on a message it picked up.' },
+  waiting: { label: 'waiting', tone: 'wait', tip: 'Asked another agent for something and is waiting for the answer.' },
+  blocked: { label: 'blocked', tone: 'alert', tip: 'Cannot continue: its work is blocked, or a message for it is on hold.' },
+  idle: { label: 'idle', tone: 'idle', tip: 'Ready, with nothing to do right now.' },
+  offline: { label: 'offline', tone: 'idle', tip: 'Its pane is closed or no agent is running in it. Messages wait until it comes back.' },
+  retired: { label: 'retired', tone: 'idle', tip: 'This name is no longer in use. Its past messages stay visible.' },
 };
 
 const MESSAGE_KIND = {
@@ -104,21 +104,21 @@ const MESSAGE_KIND = {
 };
 
 const HEALTH = {
-  calm: () => ({ tone: 'done', label: 'All calm' }),
+  calm: () => ({ tone: 'done', label: 'All calm', tip: 'No agent is working and no message is on its way.' }),
   busy: (h) => ({ tone: 'flight', label: ['Busy',
     h.working ? `${h.working} ${h.working === 1 ? 'agent' : 'agents'} working` : null,
     h.in_flight ? `${h.in_flight} ${h.in_flight === 1 ? 'message' : 'messages'} on the way` : null,
-  ].filter(Boolean).join(' · ') }),
-  needs_you: (h) => ({ tone: 'alert', label: h.items === 1 ? '1 needs you' : `${h.items} need you` }),
-  paused: () => ({ tone: 'wait', label: 'Paused' }),
-  inactive: () => ({ tone: 'idle', label: 'Inactive' }),
+  ].filter(Boolean).join(' · '), tip: 'Agents are working, or messages are on their way between them.' }),
+  needs_you: (h) => ({ tone: 'alert', label: h.items === 1 ? '1 needs you' : `${h.items} need you`, tip: 'Something is stuck and needs a person to look at it. See the red banner.' }),
+  paused: () => ({ tone: 'wait', label: 'Paused', tip: 'Message delivery is paused in this workspace. Work already running continues.' }),
+  inactive: () => ({ tone: 'idle', label: 'Inactive', tip: 'Namedrop is not active in this workspace.' }),
 };
 
 const CONNECTION = {
-  connecting: { tone: 'idle', label: 'Connecting' },
-  live: { tone: 'done', label: 'Live' },
-  restarting: { tone: 'wait', label: 'Updating Namedrop…' },
-  disconnected: { tone: 'alert', label: 'Disconnected' },
+  connecting: { tone: 'idle', label: 'Connecting', tip: 'Connecting to the dashboard server.' },
+  live: { tone: 'done', label: 'Live', tip: 'Connected. The page updates on its own as things change.' },
+  restarting: { tone: 'wait', label: 'Updating Namedrop…', tip: 'Namedrop is restarting after an update. The page reconnects on its own.' },
+  disconnected: { tone: 'alert', label: 'Disconnected', tip: 'Lost the dashboard server. The page keeps trying to reconnect.' },
 };
 
 const RUNTIME = { 'claude-code': 'Claude Code', codex: 'Codex' };
@@ -157,8 +157,8 @@ function tick() {
   }
 }
 
-function chip(tone, iconName, label, cls) {
-  return el('span', { class: ['chip', 'tone-' + tone, cls] }, iconName ? icon(iconName) : null, label);
+function chip(tone, iconName, label, cls, title) {
+  return el('span', { class: ['chip', 'tone-' + tone, cls], title }, iconName ? icon(iconName) : null, label);
 }
 
 function code(text) {
@@ -191,7 +191,7 @@ function renderHeader(snap) {
   const title = space ? (space.label ? space.label.text : space.workspace_id) : 'Namedrop';
   const health = snap ? HEALTH[snap.health.level](snap.health) : null;
   return el('header', { class: 'top' },
-    el('div', { class: ['conn', 'tone-' + conn.tone], role: 'status', title: conn.label },
+    el('div', { class: ['conn', 'tone-' + conn.tone], role: 'status', title: conn.tip },
       el('span', { class: ['dot', state.pulse ? 'pulse-' + (state.pulse % 2) : null] }),
       el('span', { class: 'conn-label', text: conn.label })),
     el('div', { class: 'title' },
@@ -199,7 +199,7 @@ function renderHeader(snap) {
       el('h1', { text: title }),
       space && space.label ? el('span', { class: 'ws', text: space.workspace_id }) : null),
     el('div', { class: 'spacer' }),
-    health ? el('span', { class: ['pill', 'tone-' + health.tone] }, el('span', { class: 'dot' }), health.label) : null);
+    health ? el('span', { class: ['pill', 'tone-' + health.tone], title: health.tip }, el('span', { class: 'dot' }), health.label) : null);
 }
 
 function renderDisconnected() {
@@ -424,7 +424,7 @@ function renderLaneHead(model, p) {
         el('div', { class: 'alias', text: p.address_id === 'human' ? 'You' : p.alias }),
         sub ? el('div', { class: 'sub', text: sub, title: sub }) : null)),
     el('div', { class: 'meta' },
-      showActivity ? el('span', { class: ['activity', 'tone-' + act.tone] }, el('span', { class: 'act-dot' }), act.label) : null,
+      showActivity ? el('span', { class: ['activity', 'tone-' + act.tone], title: act.tip }, el('span', { class: 'act-dot' }), act.label) : null,
       runtime ? el('span', { class: 'runtime', text: runtime }) : null),
     p.waiting_on.length
       ? el('div', { class: 'waiting tone-wait', title: 'waiting on ' + p.waiting_on.join(', ') }, icon('clock'),
@@ -648,19 +648,19 @@ function renderAttention(snap) {
 }
 
 const WORK_OUTCOME = {
-  pending: { tone: 'idle', label: 'not started', icon: 'queued' },
-  working: { tone: 'flight', label: 'working', icon: 'working' },
-  unclassified: { tone: 'flight', label: 'reported back', icon: 'delivered' },
-  needs_continuation: { tone: 'wait', label: 'needs follow-up', icon: 'clock' },
-  completed: { tone: 'done', label: 'done', icon: 'completed' },
-  blocked: { tone: 'alert', label: 'blocked', icon: 'held' },
+  pending: { tone: 'idle', label: 'not started', icon: 'queued', tip: 'The agent has not picked this up yet.' },
+  working: { tone: 'flight', label: 'working', icon: 'working', tip: 'The agent picked this up and is working on it.' },
+  unclassified: { tone: 'flight', label: 'reported back', icon: 'delivered', tip: 'The agent answered without saying whether it finished.' },
+  needs_continuation: { tone: 'wait', label: 'needs follow-up', icon: 'clock', tip: 'The agent made progress and has more to do.' },
+  completed: { tone: 'done', label: 'done', icon: 'completed', tip: 'The agent says this part is finished.' },
+  blocked: { tone: 'alert', label: 'blocked', icon: 'held', tip: 'The agent cannot continue. The reason is shown below.' },
 };
 
 const COORD_OUTCOME = {
-  open: { tone: 'flight', label: 'open' },
-  completed: { tone: 'done', label: 'complete' },
-  blocked: { tone: 'alert', label: 'blocked' },
-  cancelled: { tone: 'idle', label: 'cancelled' },
+  open: { tone: 'flight', label: 'open', tip: 'Still in progress. The owner has not wrapped it up yet.' },
+  completed: { tone: 'done', label: 'complete', tip: 'Finished. The owner reviewed every part and wrapped it up.' },
+  blocked: { tone: 'alert', label: 'blocked', tip: 'Stopped until something outside it is resolved.' },
+  cancelled: { tone: 'idle', label: 'cancelled', tip: 'Stopped on purpose before it was finished.' },
 };
 
 const FINISHED_SHOWN = 3;
@@ -730,13 +730,13 @@ function assignmentOutcome(model, c, a) {
 function renderCoordination(model, c) {
   const outcome = COORD_OUTCOME[c.outcome] || COORD_OUTCOME.open;
   return el('div', { class: ['work-card', 'coord', 'outcome-' + c.outcome] },
-    el('div', { class: 'work-head' }, chip(outcome.tone, null, outcome.label), el('span', { class: 'muted small' }, 'owned by '), who(model, c.owner),
+    el('div', { class: 'work-head' }, chip(outcome.tone, null, outcome.label, null, outcome.tip), el('span', { class: 'muted small' }, 'owned by '), who(model, c.owner),
       el('span', { class: 'spacer' }), when(c.updated_at_ms)),
     el('div', { class: 'deliverable', text: c.deliverable.text }),
     el('ul', { class: 'assignments' }, c.assignments.map((a) => {
       const w = WORK_OUTCOME[assignmentOutcome(model, c, a)] || WORK_OUTCOME.pending;
       return el('li', { class: 'assignment' },
-        el('div', { class: 'assignment-line' }, who(model, a.assignee), el('span', { class: 'spacer' }), chip(w.tone, w.icon, w.label)),
+        el('div', { class: 'assignment-line' }, who(model, a.assignee), el('span', { class: 'spacer' }), chip(w.tone, w.icon, w.label, null, w.tip)),
         a.blocked_reason ? el('div', { class: 'blocked-reason tone-alert' }, a.blocked_reason.text) : null,
         a.waiting_on ? el('div', { class: 'waiting tone-wait' }, icon('clock'), el('span', { class: 'waiting-text' }, 'waiting on ', el('b', { text: aliasOf(model, a.waiting_on) }))) : null);
     })));
@@ -744,8 +744,9 @@ function renderCoordination(model, c) {
 
 function renderRun(model, run) {
   const status = run.exit_code == null
-    ? chip('flight', 'working', 'running')
-    : run.exit_code === 0 ? chip('done', 'completed', 'exit 0') : chip('alert', 'failed', `exit ${run.exit_code}`);
+    ? chip('flight', 'working', 'running', null, 'The command is still running.')
+    : run.exit_code === 0 ? chip('done', 'completed', 'exit 0', null, 'The command finished successfully.')
+      : chip('alert', 'failed', `exit ${run.exit_code}`, null, `The command failed with exit code ${run.exit_code}.`);
   return el('li', { class: ['run', run.exit_code == null ? 'is-running' : null] },
     el('div', { class: 'run-line' }, who(model, run.terminal), el('span', { class: 'spacer' }), when(run.started_at_ms)),
     el('div', { class: 'run-line' }, el('code', { class: 'run-cmd', title: run.command.text }, '$ ' + run.command.text), status));
@@ -862,11 +863,11 @@ function renderLegDetail(model, m, leg) {
 }
 
 const SPACE_STATE = {
-  active: { tone: 'done', label: 'active' },
-  paused: { tone: 'wait', label: 'paused' },
-  not_activated: { tone: 'idle', label: 'not activated' },
-  deactivated: { tone: 'idle', label: 'deactivated' },
-  unknown: { tone: 'idle', label: 'unknown' },
+  active: { tone: 'done', label: 'active', tip: 'Namedrop is on in this workspace.' },
+  paused: { tone: 'wait', label: 'paused', tip: 'Message delivery is paused in this workspace.' },
+  not_activated: { tone: 'idle', label: 'not activated', tip: 'Namedrop was never turned on here.' },
+  deactivated: { tone: 'idle', label: 'deactivated', tip: 'Namedrop was turned off here.' },
+  unknown: { tone: 'idle', label: 'unknown', tip: 'Namedrop has no record of this workspace yet.' },
 };
 
 async function renderIndex() {
@@ -895,7 +896,7 @@ async function renderIndex() {
       el('span', { class: 'space-name', text: space.label ? space.label.text : space.workspace_id }),
       space.label ? el('span', { class: 'ws', text: space.workspace_id }) : null,
       el('span', { class: 'spacer' }),
-      chip(s.tone, null, s.label),
+      chip(s.tone, null, s.label, null, s.tip),
       icon('arrow', 'go'))));
   }
 }
