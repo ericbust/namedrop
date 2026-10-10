@@ -61,7 +61,6 @@ On Linux, use `sha256sum -c` for both checksum files. The outer checksum covers 
 2. Write down the source commit, the executable's SHA-256 and the archive's SHA-256 together. Tag the reviewed commit whose packaged files match the archive. If you change any packaged file, rebuild and check the checksums again. Even a change to the documentation alone gives the archive a new checksum.
 3. Write release notes covering the changes, compatibility, [upgrade and rollback](operations.md#upgrade), and anything that failed, was blocked or wasn't tested. To show the tour to existing users again, ship a new [tour presentation](operations.md#tour-presentations) with a new id and point `CURRENT_ID` at it; never reuse an id. Breaking changes to the runtime integration need fresh agent sessions. Compatible updates let existing sessions keep what they loaded, and new sessions pick up the new instructions.
 4. Attach the archive and its `.sha256` file to the GitHub release. If testing isn't finished, say so and publish it as a draft or prerelease.
-5. Don't publish to the Herdr marketplace yet.
 
 CI runs formatting, Clippy, the tests, crate packaging and archive building on GitHub's `macos-15` (Apple silicon), `ubuntu-24.04` (x86_64) and `ubuntu-24.04-arm` (aarch64) runners. The manual Release artifacts workflow builds one archive per target but doesn't publish a release. CI has no Herdr, no agents and no credentials, so the native Herdr tests and the test with real agents have to be run by hand.
 
