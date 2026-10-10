@@ -197,6 +197,14 @@ fn main() -> ExitCode {
             }
         };
     }
+    if let Some(open_browser) = cli.dashboard() {
+        return finish(
+            "dashboard",
+            with_runtime_options(&cli.runtime, |runtime| {
+                namedrop::dashboard::open(runtime, open_browser)
+            }),
+        );
+    }
     if let Some(config) = cli.shortcuts_config() {
         return finish("ui.install-shortcuts", naming_ui::install_shortcuts(config));
     }

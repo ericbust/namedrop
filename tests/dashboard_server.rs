@@ -65,20 +65,7 @@ impl Server {
     }
 
     fn connect(&self, path: &str, headers: &[(&str, &str)]) -> TcpStream {
-        let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut request = format!("GET {path} HTTP/1.1\r\n");
-        if !headers.iter().any(|(name, _)| *name == "Host") {
-            request.push_str(&format!("Host: 127.0.0.1:{}\r\n", self.port));
-        }
-        for (name, value) in headers {
-            request.push_str(&format!("{name}: {value}\r\n"));
-        }
-        request.push_str("\r\n");
-        stream.write_all(request.as_bytes()).unwrap();
-        stream
+        connect(self.port, path, headers)
     }
 
     fn cookie(&self) -> String {
@@ -86,14 +73,7 @@ impl Server {
     }
 
     fn events(&self, key: &SpaceKey) -> EventStream {
-        let cookie = self.cookie();
-        EventStream {
-            stream: self.connect(
-                &format!("/w/{}/events", key.as_str()),
-                &[("Cookie", &cookie)],
-            ),
-            buffer: String::new(),
-        }
+        events(self.port, &self.token, key)
     }
 
     fn exits_within(&mut self, limit: Duration) -> bool {
@@ -105,6 +85,35 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+fn connect(port: u16, path: &str, headers: &[(&str, &str)]) -> TcpStream {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut request = format!("GET {path} HTTP/1.1\r\n");
+    if !headers.iter().any(|(name, _)| *name == "Host") {
+        request.push_str(&format!("Host: 127.0.0.1:{port}\r\n"));
+    }
+    for (name, value) in headers {
+        request.push_str(&format!("{name}: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
+    stream
+}
+
+fn events(port: u16, token: &str, key: &SpaceKey) -> EventStream {
+    let cookie = format!("namedrop_dashboard_{port}={token}");
+    EventStream {
+        stream: connect(
+            port,
+            &format!("/w/{}/events", key.as_str()),
+            &[("Cookie", &cookie)],
+        ),
+        buffer: String::new(),
     }
 }
 
@@ -406,4 +415,111 @@ fn the_server_stops_once_its_last_tab_closes() {
     drop(events);
 
     assert!(server.exits_within(Duration::from_secs(3)));
+}
+
+fn fake_herdr(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let herdr = root.join("herdr");
+    fs::write(
+        &herdr,
+        "#!/bin/sh\n[ \"$1 $2\" = \"workspace get\" ] || exit 1\n\
+         printf '{\"result\":{\"workspace\":{\"label\":\"label-%s\"}}}' \"$3\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    herdr
+}
+
+/// Runs `namedrop dashboard --no-open --json` as a pane in `workspace` would.
+fn open_dashboard(root: &Path, workspace: &str) -> serde_json::Value {
+    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .args(["--json", "--plugin-state"])
+        .arg(root.join("state"))
+        .args(["--herdr-socket", SOCKET, "--herdr-workspace", workspace])
+        .args(["dashboard", "--no-open"])
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_PLUGIN_STATE_DIR")
+        .env("HERDR_BIN_PATH", root.join("herdr"))
+        .env("NAMEDROP_DASHBOARD_IDLE_MS", "3000")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["data"].clone()
+}
+
+fn port_of(data: &serde_json::Value) -> u16 {
+    let url = data["url"].as_str().unwrap();
+    let authority = url.strip_prefix("http://127.0.0.1:").unwrap();
+    authority.split('/').next().unwrap().parse().unwrap()
+}
+
+fn live_servers(state: &Path) -> usize {
+    let output = Command::new("pgrep")
+        .args(["-f", &format!("{} dashboard-server", state.display())])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).lines().count()
+}
+
+/// Stops the server `namedrop dashboard` started, which no test owns as a child.
+struct StopOnDrop(PathBuf);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        let _ = Command::new("pkill")
+            .args(["-f", &format!("{} dashboard-server", self.0.display())])
+            .status();
+        eventually(Duration::from_secs(5), || {
+            (live_servers(&self.0) == 0).then_some(())
+        });
+    }
+}
+
+#[test]
+fn every_workspace_shares_one_server_with_its_own_page() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+
+    let first = open_dashboard(directory.path(), "w1");
+    let second = open_dashboard(directory.path(), "w2");
+
+    assert_eq!(first["server"], "started");
+    assert_eq!(second["server"], "running");
+    assert_eq!(port_of(&first), port_of(&second));
+    assert_ne!(first["space_key"], second["space_key"]);
+    let key = SpaceKey::of(&StateNamespace::for_space(SOCKET, "w1"));
+    assert_eq!(first["space_key"], key.as_str());
+    assert_eq!(live_servers(&state), 1);
+
+    let token = fs::read_to_string(state.join("dashboard/token")).unwrap();
+    let frame = events(port_of(&first), &token, &key)
+        .until(Duration::from_secs(5), |e| e.contains("event: snapshot"));
+    assert!(
+        frame.contains(r#""label":{"text":"label-w1","truncated":false}"#),
+        "the CLI records the Herdr label for the server: {frame}"
+    );
+}
+
+#[test]
+fn racing_opens_converge_on_one_server() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+
+    let opens: Vec<_> = (0..4)
+        .map(|i| {
+            let root = directory.path().to_owned();
+            thread::spawn(move || port_of(&open_dashboard(&root, &format!("w{i}"))))
+        })
+        .collect();
+    let ports: Vec<u16> = opens.into_iter().map(|open| open.join().unwrap()).collect();
+
+    assert!(ports.windows(2).all(|pair| pair[0] == pair[1]), "{ports:?}");
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(live_servers(&state), 1);
 }

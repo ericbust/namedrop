@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -65,20 +65,23 @@ impl ServerFiles {
         private_file(&self.dir.join("server.lock"))
     }
 
-    /// `None` while another server holds the claim. Waits up to `wait`, so a
-    /// successor started during a handoff outlasts its predecessor's exit.
-    pub fn claim(&self, wait: Duration) -> Result<Option<SingletonLock>, String> {
+    /// `None` while another server holds the claim. A predecessor releases
+    /// it before spawning its successor, so there is nothing to wait for.
+    pub fn claim(&self) -> Result<Option<SingletonLock>, String> {
         let file = self.lock_file()?;
-        let deadline = Instant::now() + wait;
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Some(SingletonLock { _file: file })),
-                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    thread::sleep(Duration::from_millis(50));
-                }
-                Err(fs::TryLockError::WouldBlock) => return Ok(None),
-                Err(fs::TryLockError::Error(error)) => return Err(error.to_string()),
-            }
+        match file.try_lock() {
+            Ok(()) => Ok(Some(SingletonLock { _file: file })),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error.to_string()),
+        }
+    }
+
+    /// Whether a live server holds the claim right now.
+    pub fn claimed(&self) -> Result<bool, String> {
+        match self.lock_file()?.try_lock_shared() {
+            Ok(()) => Ok(false),
+            Err(fs::TryLockError::WouldBlock) => Ok(true),
+            Err(fs::TryLockError::Error(error)) => Err(error.to_string()),
         }
     }
 
@@ -126,6 +129,17 @@ impl ServerFiles {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default()
+    }
+
+    /// The CLI is the only writer; the server only reads.
+    pub fn record_label(&self, key: &str, label: &str) -> Result<(), String> {
+        let mut labels = self.labels();
+        if labels.get(key).map(String::as_str) == Some(label) {
+            return Ok(());
+        }
+        labels.insert(key.to_owned(), label.to_owned());
+        let bytes = serde_json::to_vec(&labels).map_err(|e| e.to_string())?;
+        self.write_atomic("labels.json", &bytes)
     }
 
     fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<(), String> {
