@@ -422,6 +422,35 @@ fn acknowledged_work_outranks_an_unrelated_held_delivery() {
 }
 
 #[test]
+fn a_role_that_repeats_the_alias_is_not_a_subtitle() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a"]);
+    store
+        .transaction(|tx| {
+            let mut lead = address("address-w1-lead", "lead");
+            lead.role_name = "@lead".to_owned();
+            let mut critic = address("address-w1-critic", "critic");
+            critic.role_name = "Code review".to_owned();
+            tx.create_pane_address(&ns, &lead, &attribution())?;
+            tx.create_pane_address(&ns, &critic, &attribution())
+                .map(|_| ())
+        })
+        .unwrap();
+
+    let snapshot = snapshot(&mut store, &ns);
+
+    assert_eq!(lane(&snapshot, "@lead").role, None);
+    assert_eq!(
+        lane(&snapshot, "@critic")
+            .role
+            .as_ref()
+            .map(|r| r.text.as_str()),
+        Some("Code review")
+    );
+}
+
+#[test]
 fn a_space_without_activation_reads_as_not_activated() {
     let directory = TestDirectory::new();
     let mut store = StateStore::open(directory.path()).unwrap();

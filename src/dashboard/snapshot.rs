@@ -599,7 +599,8 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
                         .map(|r| r.runtime.clone()),
                 },
             },
-            role: (address.role_name != address.alias)
+            // Default roles are named `@alias`, which only repeats the lane title.
+            role: (address.role_name.trim_start_matches('@') != address.alias)
                 .then(|| SafeText::from_untrusted(&address.role_name, SHORT_CHARS)),
             persona: SafeText::optional(address.persona.as_deref(), SHORT_CHARS),
             pane_label: None,
