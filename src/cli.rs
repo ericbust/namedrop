@@ -192,7 +192,7 @@ impl Cli {
         }
     }
 
-    pub fn dashboard(&self) -> Option<bool> {
+    pub fn dashboard_open_browser(&self) -> Option<bool> {
         match &self.command {
             Command::Dashboard(args) => Some(!args.no_open),
             _ => None,

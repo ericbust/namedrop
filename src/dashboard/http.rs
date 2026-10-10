@@ -49,19 +49,19 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>) {
             );
             continue;
         }
-        let slot = Slot(open.clone());
+        let permit = ConnectionPermit(open.clone());
         let front = front.clone();
         let next_id = next_id.clone();
         thread::spawn(move || {
-            let _slot = slot;
+            let _permit = permit;
             let _ = serve_connection(stream, &front, &next_id);
         });
     }
 }
 
-struct Slot(Arc<AtomicUsize>);
+struct ConnectionPermit(Arc<AtomicUsize>);
 
-impl Drop for Slot {
+impl Drop for ConnectionPermit {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::AcqRel);
     }
@@ -135,10 +135,7 @@ enum Asset {
 }
 
 enum Route {
-    Enter {
-        location: String,
-        nonce: String,
-    },
+    Redeem { location: String, nonce: String },
     Page,
     Events(SpaceKey),
     Spaces,
@@ -184,7 +181,7 @@ fn route(request: &Request, port: u16, token: &Token, session: &Token) -> Result
         }
     };
     if let Some(nonce) = request.query("n") {
-        return Ok(Route::Enter {
+        return Ok(Route::Redeem {
             location: path.to_owned(),
             nonce: nonce.to_owned(),
         });
@@ -216,10 +213,10 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
     };
     match route(&request, front.port, &front.token, &front.session) {
         Err(status) => respond_status(&mut writer, status),
-        Ok(Route::Enter { nonce, .. }) if !front.files.consume_entry(&nonce) => {
+        Ok(Route::Redeem { nonce, .. }) if !front.files.consume_entry(&nonce) => {
             respond_status(&mut writer, Status::Unauthorized)
         }
-        Ok(Route::Enter { location, .. }) => {
+        Ok(Route::Redeem { location, .. }) => {
             let headers = format!(
                 "Location: {location}\r\nSet-Cookie: {}={}; HttpOnly; SameSite=Strict; Path=/\r\n",
                 cookie_name(front.port),

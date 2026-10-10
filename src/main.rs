@@ -197,7 +197,7 @@ fn main() -> ExitCode {
             }
         };
     }
-    if let Some(open_browser) = cli.dashboard() {
+    if let Some(open_browser) = cli.dashboard_open_browser() {
         return finish(
             "dashboard",
             with_runtime_options(&cli.runtime, |runtime| {
