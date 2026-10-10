@@ -303,10 +303,20 @@ function aliasOf(model, addressId) {
   return p ? p.alias : addressId;
 }
 
-function laneX(model, addressId) {
+function laneIndex(model, addressId) {
   const hit = model.byId.get(addressId);
-  const i = hit ? hit.i : 0;
-  return ((i + 0.5) / model.lanes.length) * 100;
+  return hit ? hit.i : 0;
+}
+
+function laneWidth(model, whole) {
+  return `min(var(--lane-max), ${whole} / ${model.lanes.length})`;
+}
+
+// A lane's centre inside a box `whole` wide: live lanes pack at the left,
+// the retired stack sits at the right edge.
+function lanePos(model, i, whole = '100%') {
+  const width = laneWidth(model, whole);
+  return model.lanes[i] && model.lanes[i].deck ? `calc(${whole} - ${width} / 2)` : `calc(${width} * ${i + 0.5})`;
 }
 
 function initials(p) {
@@ -343,7 +353,10 @@ function diffSnapshot(prev, next) {
 function renderBoard(snap) {
   const model = indexSnapshot(snap);
   const lanes = model.lanes.length;
-  const sheet = el('div', { class: 'sheet', css: { '--lanes': String(lanes) } },
+  const width = laneWidth(model, '(100% - var(--gutter))');
+  const deck = model.lanes.some((p) => p.deck);
+  const columns = `var(--gutter) repeat(${lanes - (deck ? 1 : 0)}, ${width}) 1fr${deck ? ' ' + width : ''}`;
+  const sheet = el('div', { class: 'sheet', css: { '--lanes': String(lanes), '--roster-columns': columns } },
     renderRoster(model),
     renderRows(model));
   const stuck = snap.coordinations.filter((c) => c.outcome === 'blocked').length;
@@ -561,7 +574,8 @@ function renderRows(model) {
     rows.push(renderRow(model, m, band));
     prev = m;
   }
-  return el('div', { class: 'rows' }, rows);
+  const lines = model.lanes.map((p, i) => el('span', { class: 'lane-line', css: { left: `calc(var(--gutter) + ${lanePos(model, i, '(100% - var(--gutter))')})` } }));
+  return el('div', { class: 'rows' }, lines, rows);
 }
 
 function renderThreadHead(model, m, band) {
@@ -580,26 +594,28 @@ function isReply(m) {
 
 function renderRow(model, m, band) {
   const fresh = state.fresh;
-  const authorX = laneX(model, m.author);
-  const authorIdx = model.byId.has(m.author) ? model.byId.get(m.author).i : 0;
+  const authorIdx = laneIndex(model, m.author);
+  const authorX = lanePos(model, authorIdx);
   const anchorRight = model.lanes.length > 1 && authorIdx > (model.lanes.length - 1) / 2;
   const isNew = fresh.messages.has(m.message_id);
   const reply = isReply(m);
 
   const strip = el('div', { class: 'strip' });
-  const drawn = new Set([authorX]);
+  const drawn = new Set([authorIdx]);
   for (const leg of m.legs) {
-    const toX = laneX(model, leg.to);
-    if (drawn.has(toX)) continue;
-    drawn.add(toX);
-    const rightward = toX > authorX;
+    const toIdx = laneIndex(model, leg.to);
+    if (drawn.has(toIdx)) continue;
+    drawn.add(toIdx);
+    const toX = lanePos(model, toIdx);
+    const rightward = toIdx > authorIdx;
+    const [from, to] = rightward ? [authorX, toX] : [toX, authorX];
     append(strip, el('span', {
       class: ['wire', reply ? 'dashed' : null, rightward ? 'rightward' : 'leftward', isNew ? 'draw' : null],
-      css: { left: Math.min(authorX, toX) + '%', width: Math.abs(toX - authorX) + '%' },
+      css: { left: from, width: `calc(${to} - ${from})` },
     }));
-    append(strip, el('span', { class: ['head', rightward ? 'rightward' : 'leftward', isNew ? 'late' : null], css: { left: toX + '%' } }));
+    append(strip, el('span', { class: ['head', rightward ? 'rightward' : 'leftward', isNew ? 'late' : null], css: { left: toX } }));
   }
-  append(strip, el('span', { class: ['origin', identityClass(m.author), isNew ? 'pop' : null], css: { left: authorX + '%' } }));
+  append(strip, el('span', { class: ['origin', identityClass(m.author), isNew ? 'pop' : null], css: { left: authorX } }));
   for (const leg of m.legs) append(strip, legChip(model, m, leg));
 
   const card = el('article', {
@@ -618,7 +634,7 @@ function renderRow(model, m, band) {
     icon('chevron', 'open-hint')),
   el('p', { class: 'body', text: m.body.text }));
 
-  const cardWrap = el('div', { class: ['card-wrap', anchorRight ? 'anchor-right' : null], css: { '--edge': (anchorRight ? 100 - authorX : authorX) + '%' } }, card);
+  const cardWrap = el('div', { class: ['card-wrap', anchorRight ? 'anchor-right' : null], css: { '--edge': anchorRight ? `calc(100% - ${authorX})` : authorX } }, card);
 
   return el('div', { class: ['row', band, state.selected === m.message_id ? 'selected' : null], id: 'msg-' + m.message_id },
     el('div', { class: 'gutter-cell' }, el('span', { class: 'band-bar' })),
@@ -646,7 +662,7 @@ function legChip(model, m, leg) {
     class: ['leg', 'tone-' + st.tone, 'stage-' + leg.stage.stage, changed ? 'swap' : null],
     type: 'button',
     'aria-label': legTitle(model, leg),
-    css: { left: laneX(model, leg.to) + '%' },
+    css: { left: lanePos(model, laneIndex(model, leg.to)) },
     onclick: (e) => {
       e.stopPropagation();
       if (leg.stage.stage === 'replied') jumpTo(leg.stage.reply_id);

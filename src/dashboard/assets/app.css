@@ -233,14 +233,12 @@ button { font: inherit; color: inherit; }
 .stage-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
 .sheet {
   min-width: calc(var(--gutter) + var(--lanes) * var(--lane-min)); min-height: 100%;
-  /* A few lanes stay lane-width at the left instead of stretching across the page. */
-  max-width: calc(var(--gutter) + var(--lanes) * var(--lane-max));
   position: relative; display: flex; flex-direction: column;
 }
 
 .roster {
   position: sticky; top: 0; z-index: 5;
-  display: grid; grid-template-columns: var(--gutter) repeat(var(--lanes), minmax(0, 1fr));
+  display: grid; grid-template-columns: var(--roster-columns);
   padding: 10px 0 10px;
   background: color-mix(in srgb, var(--bg) 86%, transparent);
   backdrop-filter: blur(10px);
@@ -274,12 +272,11 @@ button { font: inherit; color: inherit; }
 .rows {
   flex: 1;
   padding: 4px 0 96px;
-  background-image: linear-gradient(to right, transparent calc(50% - 0.5px), var(--lane) calc(50% - 0.5px), var(--lane) calc(50% + 0.5px), transparent calc(50% + 0.5px));
-  background-size: calc((100% - var(--gutter)) / var(--lanes)) 100%;
-  background-position: var(--gutter) 0;
-  background-repeat: repeat-x;
+  position: relative; z-index: 0;
 }
-.rows.empty-rows { background-image: none; }
+.rows.empty-rows .lane-line { display: none; }
+.lane-line { position: absolute; top: 0; bottom: 0; width: 1px; margin-left: -0.5px; background: var(--lane); pointer-events: none; z-index: -1; }
+.lane-head.deck { grid-column: -2 / -1; }
 
 .gutter-cell { position: relative; }
 .dormant-toggle {
@@ -650,7 +647,8 @@ button.work-card:hover { border-color: var(--line-strong); }
   .avatar.lg { width: 30px; height: 30px; font-size: 12.5px; }
   .tray { padding-top: 6px; min-height: 27px; }
 
-  .rows { background-image: none; padding: 4px 0 80px; }
+  .rows { padding: 4px 0 80px; }
+  .lane-line { display: none; }
   .row, .thread-head { display: block; }
   .row > .gutter-cell, .thread-head > .gutter-cell { display: none; }
   .thread-title { padding: 14px 14px 6px; }
