@@ -3021,3 +3021,55 @@ fn adoption_cancels_queued_replies_pinned_to_the_superseded_session() {
         "settled"
     );
 }
+
+#[test]
+fn a_worker_naming_itself_at_the_start_of_a_tracked_reply_still_reaches_the_lead() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let request = f.send(&id, "self-label", "worker");
+    let reply = execute_message_operation(
+        "reply",
+        json!({"request_id":"self-label-result","source":"@lead @worker top 3: the parser is fine",
+            "author_kind":"agent_session","in_reply_to":request["message_id"],
+            "attempt_id":f.attempt(&request["message_id"],"worker"),"work_outcome":"completed"}),
+        &f.runtime("worker"),
+    )
+    .expect("the author's own name is a label, not a second recipient");
+    let recipients: Vec<&str> = reply["deliveries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|d| d["address_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(recipients, ["lead"]);
+}
+
+#[test]
+fn a_tracked_reply_that_also_names_another_agent_says_which_one_and_how_to_fix_it() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let request = f.send(&id, "extra-recipient", "worker");
+    let refused = execute_message_operation(
+        "reply",
+        json!({"request_id":"extra-recipient-result","source":"@lead @reviewer agreed with this",
+            "author_kind":"agent_session","in_reply_to":request["message_id"],
+            "attempt_id":f.attempt(&request["message_id"],"worker"),"work_outcome":"completed"}),
+        &f.runtime("worker"),
+    )
+    .unwrap_err();
+    assert!(refused.contains("@lead"), "{refused}");
+    assert!(refused.contains("@reviewer"), "{refused}");
+    assert!(refused.contains("without the @"), "{refused}");
+}
+
+#[test]
+fn a_message_addressed_only_to_its_author_is_refused() {
+    let f = Fixture::new();
+    let refused = execute_message_operation(
+        "send",
+        json!({"request_id":"self-only","source":"@worker note to self","author_kind":"agent_session"}),
+        &f.runtime("worker"),
+    )
+    .unwrap_err();
+    assert!(refused.contains("only to its author"), "{refused}");
+}

@@ -509,8 +509,11 @@ where
                 thread_id
             }
         };
-        let recipients =
-            transaction.resolve_recipient_aliases(&namespace, &parsed.recipient_aliases)?;
+        let recipients = transaction.resolve_message_recipients(
+            &namespace,
+            &parsed.recipient_aliases,
+            &author.address_id,
+        )?;
         if (in_reply_to.is_some() || context.is_some()) && recipients.iter().any(|r|
             transaction.pane_type(&namespace,&r.address_id).is_ok_and(|kind|kind==crate::PaneType::Terminal)) {
             return Err(crate::StoreError::invalid_input("terminal recipients accept new shell command requests without agent context attachments"));

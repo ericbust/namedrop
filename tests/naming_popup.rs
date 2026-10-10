@@ -59,7 +59,8 @@ elif [ "$1 $2" = "pane list" ]; then
     fi
     terminal=t9
   fi
-  printf '%s\n' "{\"result\":{\"panes\":[{\"pane_id\":\"p1\",\"terminal_id\":\"$terminal\",\"tab_id\":\"tab1\",\"workspace_id\":\"w1\",$agent\"agent_status\":\"idle\"}]}}"
+  if [ "$TEST_SECOND_PANE" = 1 ]; then second=',{"pane_id":"p2","terminal_id":"t2","tab_id":"tab1","workspace_id":"w1","agent_status":"idle"}'; else second=''; fi
+  printf '%s\n' "{\"result\":{\"panes\":[{\"pane_id\":\"p1\",\"terminal_id\":\"$terminal\",\"tab_id\":\"tab1\",\"workspace_id\":\"w1\",$agent\"agent_status\":\"idle\"}$second]}}"
 elif [ "$1 $2" = "pane process-info" ]; then
   # Only the target pane's detection is the one a test times; the popup's own
   # inherited pane is verified through the same call.
@@ -597,6 +598,27 @@ fn management_removes_only_the_selected_name_after_confirmation() {
     );
 }
 
+// A message never goes to its own author, so terminal work for @build is sent
+// from a second named pane.
+fn name_sender(f: &Fixture) {
+    let named = f
+        .command()
+        .args([
+            "--herdr-workspace",
+            "w1",
+            "--herdr-pane",
+            "p2",
+            "name",
+            "@sender",
+            "--type",
+            "agent",
+        ])
+        .env("TEST_SECOND_PANE", "1")
+        .output()
+        .unwrap();
+    assert!(named.status.success(), "{named:?}");
+}
+
 #[test]
 fn management_refuses_removal_with_pending_work() {
     let f = Fixture::new();
@@ -607,13 +629,14 @@ fn management_refuses_removal_with_pending_work() {
         .output()
         .unwrap();
     assert!(paused.status.success(), "{paused:?}");
+    name_sender(&f);
     let out = f
         .command()
         .args([
             "--herdr-workspace",
             "w1",
             "--herdr-pane",
-            "p1",
+            "p2",
             "send",
             "--input-json",
             r#"{"source":"@build printf hello","request_id":"pending-for-manager"}"#,
@@ -646,11 +669,21 @@ fn management_enable_retries_busy_terminal_work_while_the_menu_stays_open() {
         assert!(out.status.success(), "{out:?}");
     };
     operation(&["space", "pause"]);
-    operation(&[
-        "send",
-        "--input-json",
-        r#"{"source":"@build printf done","request_id":"manager-enable-retry"}"#,
-    ]);
+    name_sender(&f);
+    let sent = f
+        .command()
+        .args([
+            "--herdr-workspace",
+            "w1",
+            "--herdr-pane",
+            "p2",
+            "send",
+            "--input-json",
+        ])
+        .arg(r#"{"source":"@build printf done","request_id":"manager-enable-retry"}"#)
+        .output()
+        .unwrap();
+    assert!(sent.status.success(), "{sent:?}");
     assert!(f.manage("\nd").status.success());
     operation(&["space", "resume"]);
     fs::write(f.0.join("busy"), "busy").unwrap();

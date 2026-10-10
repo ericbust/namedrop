@@ -2005,7 +2005,7 @@ fn a_failing_send_with_context_delivers_no_message_and_no_grant() {
     )
     .unwrap_err();
     assert!(
-        self_grant.contains("source and grantee must differ"),
+        self_grant.contains("addressed only to its author"),
         "{self_grant}"
     );
     let namespace = StateNamespace::for_space("socket-a", "workspace-1");

@@ -179,8 +179,8 @@ where
         .map_err(|e| e.to_string())?
         .ok_or("Namedrop has no saved state")?;
     store.transaction(|tx| {
-        crate::context::registered_current_address(tx,&namespace,pane,&discovered)?;
-        let recipients = tx.resolve_recipient_aliases(&namespace,&parsed.recipient_aliases)?;
+        let author = crate::context::registered_current_address(tx,&namespace,pane,&discovered)?;
+        let recipients = tx.resolve_message_recipients(&namespace,&parsed.recipient_aliases,&author.address_id)?;
         let recipients = recipients.iter().map(|r|tx.recipient_preview(&namespace,&discovered,&r.address_id,None)).collect::<Result<Vec<_>,_>>()?;
         let references = parsed.context_reference_aliases.iter().map(|alias| {
             let address = tx.resolve_routing_alias(&namespace,alias)?;
