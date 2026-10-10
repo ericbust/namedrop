@@ -105,7 +105,10 @@ const MESSAGE_KIND = {
 
 const HEALTH = {
   calm: () => ({ tone: 'done', label: 'All calm' }),
-  busy: (h) => ({ tone: 'flight', label: `Busy · ${h.in_flight} in progress` }),
+  busy: (h) => ({ tone: 'flight', label: ['Busy',
+    h.working ? `${h.working} ${h.working === 1 ? 'agent' : 'agents'} working` : null,
+    h.in_flight ? `${h.in_flight} ${h.in_flight === 1 ? 'message' : 'messages'} on the way` : null,
+  ].filter(Boolean).join(' · ') }),
   needs_you: (h) => ({ tone: 'alert', label: h.items === 1 ? '1 needs you' : `${h.items} need you` }),
   paused: () => ({ tone: 'wait', label: 'Paused' }),
   inactive: () => ({ tone: 'idle', label: 'Inactive' }),

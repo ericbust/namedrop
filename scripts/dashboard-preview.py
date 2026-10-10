@@ -39,7 +39,7 @@ DELIVERY_STATES = {"queued", "dispatching", "submitted", "acknowledged", "settle
 MESSAGE_KINDS = {"mention", "reply", "handoff", "result_set", "nudge", "hook"}
 LEG_STAGES = {"queued": set(), "delivered": set(), "working": {"acked_at_ms"}, "replied": {"reply_id"},
               "completed": {"kind"}, "held": set(), "failed": set(), "cancelled": set()}
-HEALTH = {"calm": set(), "busy": {"in_flight"}, "needs_you": {"items"}, "paused": set(), "inactive": set()}
+HEALTH = {"calm": set(), "busy": {"in_flight", "working"}, "needs_you": {"items"}, "paused": set(), "inactive": set()}
 OUTCOMES = {"open", "completed", "blocked", "cancelled"}
 WORK_OUTCOMES = {"pending", "unclassified", "completed", "needs_continuation", "blocked"}
 

@@ -187,7 +187,13 @@ fn a_request_moves_from_queued_to_working_to_replied() {
     assert_eq!(lane(&queued, "@b").mailbox[0].from, "@a");
     assert_eq!(lane(&queued, "@a").waiting_on, ["@b"]);
     assert_eq!(lane(&queued, "@a").activity, Activity::Waiting);
-    assert_eq!(queued.health, SpaceHealth::Busy { in_flight: 1 });
+    assert_eq!(
+        queued.health,
+        SpaceHealth::Busy {
+            in_flight: 1,
+            working: 0
+        }
+    );
 
     let attempt = submit(&mut store, &ns, "b");
     store
@@ -420,6 +426,37 @@ fn acknowledged_work_outranks_an_unrelated_held_delivery() {
 }
 
 #[test]
+fn an_agent_working_with_nothing_in_transit_makes_the_space_busy() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    assert_eq!(snapshot(&mut store, &ns).health, SpaceHealth::Calm);
+    store
+        .transaction(|tx| {
+            tx.observe_agent_session(
+                &ns,
+                "observation-w1-a-working",
+                &id(&ns, "a"),
+                &AgentSessionId::new("session-w1-a"),
+                "working",
+                &MutationAttribution::new(ActorKind::Plugin, "test", 20),
+            )
+        })
+        .unwrap();
+
+    let snapshot = snapshot(&mut store, &ns);
+
+    assert_eq!(lane(&snapshot, "@a").activity, Activity::Working);
+    assert_eq!(
+        snapshot.health,
+        SpaceHealth::Busy {
+            in_flight: 0,
+            working: 1
+        }
+    );
+}
+
+#[test]
 fn a_role_that_repeats_the_alias_is_not_a_subtitle() {
     let directory = TestDirectory::new();
     let mut store = StateStore::open(directory.path()).unwrap();
@@ -480,7 +517,7 @@ fn the_wire_json_matches_the_frozen_contract() {
     assert_eq!(json["space"]["state"], "active");
     assert_eq!(
         json["health"],
-        serde_json::json!({"level": "busy", "in_flight": 1})
+        serde_json::json!({"level": "busy", "in_flight": 1, "working": 0})
     );
     let b = &json["participants"][1];
     assert_eq!(b["alias"], "@b");

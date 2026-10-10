@@ -122,7 +122,7 @@ impl SpaceState {
 #[serde(tag = "level", rename_all = "snake_case")]
 pub enum SpaceHealth {
     Calm,
-    Busy { in_flight: u32 },
+    Busy { in_flight: u32, working: u32 },
     NeedsYou { items: u32 },
     Paused,
     Inactive,
@@ -361,6 +361,10 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .iter()
         .filter(|entry| entry.state.awaits_progress())
         .count();
+    let working = participants
+        .iter()
+        .filter(|p| p.activity == Activity::Working)
+        .count();
     DashboardSnapshot {
         wire: WIRE_VERSION,
         generated_at_ms: now_ms,
@@ -370,7 +374,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             label: SafeText::optional(label, SHORT_CHARS),
             state,
         },
-        health: health(state, rows.attention.len(), in_flight),
+        health: health(state, rows.attention.len(), in_flight, working),
         participants,
         threads: threads(rows, &messages),
         messages,
@@ -421,15 +425,16 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
     }
 }
 
-fn health(state: SpaceState, attention: usize, in_flight: usize) -> SpaceHealth {
+fn health(state: SpaceState, attention: usize, in_flight: usize, working: usize) -> SpaceHealth {
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     match state {
         SpaceState::Paused => SpaceHealth::Paused,
         SpaceState::Active if attention > 0 => SpaceHealth::NeedsYou {
             items: count(attention),
         },
-        SpaceState::Active if in_flight > 0 => SpaceHealth::Busy {
+        SpaceState::Active if in_flight > 0 || working > 0 => SpaceHealth::Busy {
             in_flight: count(in_flight),
+            working: count(working),
         },
         SpaceState::Active => SpaceHealth::Calm,
         SpaceState::Unknown | SpaceState::NotActivated | SpaceState::Deactivated => {

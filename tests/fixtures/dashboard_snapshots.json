@@ -13,7 +13,8 @@
   },
   "health": {
    "level": "busy",
-   "in_flight": 1
+   "in_flight": 1,
+   "working": 1
   },
   "participants": [
    {
@@ -276,7 +277,8 @@
   },
   "health": {
    "level": "busy",
-   "in_flight": 3
+   "in_flight": 3,
+   "working": 0
   },
   "participants": [
    {
@@ -922,7 +924,8 @@
   },
   "health": {
    "level": "busy",
-   "in_flight": 3
+   "in_flight": 3,
+   "working": 2
   },
   "participants": [
    {
@@ -1721,7 +1724,8 @@
   },
   "health": {
    "level": "busy",
-   "in_flight": 2
+   "in_flight": 2,
+   "working": 1
   },
   "participants": [
    {
@@ -2133,7 +2137,8 @@
   },
   "health": {
    "level": "busy",
-   "in_flight": 1
+   "in_flight": 1,
+   "working": 1
   },
   "participants": [
    {
