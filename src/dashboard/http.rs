@@ -8,7 +8,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
     },
     thread,
@@ -20,8 +20,11 @@ const APP_JS: &str = include_str!("assets/app.js");
 const APP_CSS: &str = include_str!("assets/app.css");
 const HEADER_LIMIT: u64 = 8 * 1024;
 const PING_EVERY: Duration = Duration::from_secs(15);
+/// Each connection is a thread; past this, new ones get 503 instead of another.
+const MAX_CONNECTIONS: usize = 64;
 const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
-style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'\r\n\
+style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; \
+base-uri 'none'; form-action 'none'\r\nX-Frame-Options: DENY\r\n\
 X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n";
 
 pub(crate) struct Front {
@@ -33,12 +36,36 @@ pub(crate) struct Front {
 
 pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>) {
     let next_id = Arc::new(AtomicU64::new(1));
-    for stream in listener.incoming().flatten() {
+    let open = Arc::new(AtomicUsize::new(0));
+    for mut stream in listener.incoming().flatten() {
+        if open.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+            open.fetch_sub(1, Ordering::AcqRel);
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+            let _ = respond(
+                &mut stream,
+                "503 Service Unavailable",
+                "text/plain; charset=utf-8",
+                "",
+                b"Too many connections.\n",
+            );
+            continue;
+        }
+        let slot = Slot(open.clone());
         let front = front.clone();
         let next_id = next_id.clone();
         thread::spawn(move || {
+            let _slot = slot;
             let _ = serve_connection(stream, &front, &next_id);
         });
+    }
+}
+
+/// Frees its connection's place in the cap however the thread ends.
+struct Slot(Arc<AtomicUsize>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

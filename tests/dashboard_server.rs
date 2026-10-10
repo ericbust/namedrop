@@ -308,6 +308,14 @@ fn pages_require_the_token_and_a_loopback_host() {
             .headers
             .contains("Content-Security-Policy: default-src 'none'; script-src 'self'")
     );
+    for directive in [
+        "base-uri 'none'",
+        "form-action 'none'",
+        "frame-ancestors 'none'",
+    ] {
+        assert!(landed.headers.contains(directive), "{}", landed.headers);
+    }
+    assert!(landed.headers.contains("X-Frame-Options: DENY\r\n"));
     assert!(landed.body.contains("/assets/app.js"));
     assert!(server.get("/assets/app.js", &[]).status.contains("200"));
     assert!(server.get("/favicon.ico", &[]).status.contains("204"));
@@ -323,6 +331,30 @@ fn pages_require_the_token_and_a_loopback_host() {
             .status
             .contains("404")
     );
+}
+
+#[test]
+fn connections_past_the_cap_are_turned_away() {
+    let directory = TestDirectory::new();
+    seed(&state(&directory), "w1", &["a"]);
+    let server = Server::start(&state(&directory), None);
+
+    let held: Vec<TcpStream> = (0..64)
+        .map(|_| TcpStream::connect(("127.0.0.1", server.port)).unwrap())
+        .collect();
+    // The server answers before reading, so the probe sends nothing that an
+    // unread close would turn into a reset.
+    let mut excess = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+    let mut raw = String::new();
+    excess.read_to_string(&mut raw).unwrap();
+    assert!(raw.starts_with("HTTP/1.1 503"), "{raw}");
+
+    drop(held);
+    let admitted = eventually(Duration::from_secs(5), || {
+        let response = server.get("/assets/app.js", &[]);
+        response.status.contains("200").then_some(())
+    });
+    assert!(admitted.is_some(), "slots free up once connections close");
 }
 
 #[test]
