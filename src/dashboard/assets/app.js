@@ -695,6 +695,14 @@ function legChip(model, m, leg) {
 }
 
 function jumpTo(messageId) {
+  // The target may sit on the hidden Messages tab (narrow layout) or be dimmed by a focus.
+  const target = state.snap && state.snap.messages.find((m) => m.message_id === messageId);
+  const unfocus = target && state.focus && !involves(target, state.focus);
+  if (state.tab !== 'messages' || unfocus) {
+    state.tab = 'messages';
+    if (unfocus) state.focus = null;
+    renderSpace();
+  }
   const row = document.getElementById('msg-' + messageId);
   if (!row) return;
   row.scrollIntoView({ block: 'center', behavior: motionOk() ? 'smooth' : 'auto' });
@@ -921,8 +929,10 @@ function renderLegDetail(model, m, leg) {
   if (stage.stage === 'working') detail = el('span', null, 'picked up ', when(stage.acked_at_ms));
   else if (stage.stage === 'replied') {
     const reply = model.messages.get(stage.reply_id);
-    detail = el('button', { class: 'linkish', type: 'button', onclick: () => { closeDrawer(); jumpTo(stage.reply_id); } },
-      reply ? `replied ${duration(reply.at_ms - m.at_ms)} later` : 'replied', ' · view reply');
+    detail = reply
+      ? el('button', { class: 'linkish', type: 'button', onclick: () => { closeDrawer(); jumpTo(stage.reply_id); } },
+        `replied ${duration(reply.at_ms - m.at_ms)} later`, ' · view reply')
+      : el('span', { text: 'replied (older than this view)' });
   } else if (stage.stage === 'completed') detail = el('span', { text: stage.kind === 'no_reply' ? 'finished without a reply' : 'finished' });
   else if (stage.stage === 'held') detail = el('span', { text: 'waiting for the recipient to come back' });
   else if (stage.stage === 'failed') detail = el('span', { text: 'could not be sent' });
