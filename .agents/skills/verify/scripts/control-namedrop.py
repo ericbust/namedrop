@@ -28,7 +28,7 @@ def wait(predicate, label, timeout=30):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--feature", choices=["names", "groups", "controls", "tour"], default="names")
+    parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "handoffs"], default="names")
     parser.add_argument("--binary", type=Path, default=REPO / "target/debug/namedrop")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
@@ -137,9 +137,9 @@ def main():
         before = database_snapshot()
         live = host("pane", "list")["panes"]
         assert server.poll() is None and all(any(p["pane_id"] == pane for p in live) for pane in panes.values())
-        report = cli("doctor", "--json", allowed=(0, 1))
-        assert report["data"]["status"] in ("healthy", "needs_attention"), report
-        assert all(issue["code"] == "ND-SETUP-003" for issue in report["data"]["issues"]), report
+        report = cli("doctor", "--json", allowed=(1,))
+        assert report["data"]["status"] == "needs_attention", report
+        assert [issue["code"] for issue in report["data"]["issues"]] == ["ND-SETUP-003"], report
         assert before == database_snapshot(), "Doctor changed stored state"
         save("doctor.json", report)
 
@@ -147,6 +147,7 @@ def main():
             cli("name", "@build", "--type", "terminal")
             listed = cli("address", "list", "--json")["data"]
             saved = next(a for a in listed if a["alias"] == "build")
+            assert saved["pane_type"] == "terminal", saved
             body("address", "rename", address_id=saved["id"], alias="verify-build")
             listed = cli("address", "list", "--json")["data"]
             assert any(a["alias"] == "verify-build" and a["id"] == saved["id"] for a in listed), listed
@@ -161,6 +162,10 @@ def main():
             roster = cli("address", "list", "--json")["data"]
             assert next(a for a in roster if a["alias"] == "reviewer")["persona"] is None
             save("persona-cleared.json", roster)
+            refused = cli("name", "@verify-build", "--type", "terminal", "--persona", "Probe.", allowed=range(1, 256))
+            assert refused["error"]["message"] == "a named terminal cannot hold a persona", refused
+            roster = cli("address", "list", "--json")["data"]
+            assert next(a for a in roster if a["alias"] == "verify-build")["persona"] is None, roster
         elif args.feature == "groups":
             cli("name", "@reviewer", "--type", "agent", "--persona", "Reviews Rust changes.")
             cli("name", "@tester", "--type", "agent", "--generic", pane=panes["worker"])
@@ -169,8 +174,15 @@ def main():
             assert len(listed) == 1 and listed[0]["alias"] == "review-team", listed
             assert {m["alias"] for m in listed[0]["members"]} == {"reviewer", "tester"}, listed
             save("groups.json", listed)
-            body("group", "remove", alias="review-team")
+            assert body("group", "remove", alias="review-team")["removed"] is True
             assert cli("group", "list", "--json")["data"]["groups"] == []
+            kept = {a["alias"] for a in cli("address", "list", "--json")["data"]}
+            assert {"reviewer", "tester"} <= kept, kept
+            empty = cli("group", "set", "--input-json", json.dumps({"alias": "nobody", "members": []}), allowed=range(1, 256))
+            assert empty["status"] == "rejected", empty
+            cli("name", "@build", "--type", "terminal", pane=panes["worker"])
+            probe = cli("group", "set", "--input-json", json.dumps({"alias": "ops", "members": ["build"]}), allowed=range(256))
+            save("group-probes.json", {"empty_members": empty, "terminal_member": probe})
         elif args.feature == "controls":
             body("space", "pause")
             with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
@@ -190,16 +202,41 @@ def main():
             ready.unlink(missing_ok=True)
             host("pane", "run", panes["lead"], shlex.join(invocation))
 
-            def page(title):
+            def page(*texts):
+                # The footer can draw after the title, so wait for every expected line.
                 result = command(herdr, "pane", "read", panes["lead"], "--source", "visible").stdout
-                return result if title in result else None
+                return result if all(text in result for text in texts) else None
 
-            (evidence / "tour-first.txt").write_text(wait(lambda: page("Welcome to Namedrop"), "first tour page"))
+            (evidence / "tour-first.txt").write_text(wait(lambda: page("Welcome to Namedrop", "Page 1/4"), "first tour page"))
             host("pane", "send-keys", panes["lead"], "right")
-            (evidence / "tour-second.txt").write_text(wait(lambda: page("Mention an agent"), "second tour page"))
+            (evidence / "tour-second.txt").write_text(wait(lambda: page("Mention an agent", "Page 2/4"), "second tour page"))
             host("pane", "send-keys", panes["lead"], "esc")
             wait(ready.exists, "shell prompt after closing tour")
-            cli("address", "list", "--json")
+            assert cli("address", "list", "--json")["data"] == []
+            first_page, second_page = (evidence / "tour-first.txt").read_text(), (evidence / "tour-second.txt").read_text()
+            assert "Page 1/4" in first_page and "Name this pane" in first_page, first_page
+            assert "Page 2/4" in second_page and "Name this pane" not in second_page, second_page
+            marker = state / "tours-shown/welcome-1"
+            assert marker.exists(), "Opening the tour did not record it as shown"
+            cleared = body("ui", "reset-tour")
+            assert cleared == {"presentation_id": "welcome-1", "cleared": True} and not marker.exists(), cleared
+            assert body("ui", "reset-tour")["cleared"] is False
+            save("tour.json", {"marker_written": True, "reset": cleared})
+        elif args.feature == "handoffs":
+            before = database_snapshot()
+            # Run outside the pane's process tree with only the inherited pane variable, as a stale caller would.
+            inherited = command("env", f"HERDR_PANE_ID={panes['lead']}", f"HERDR_WORKSPACE_ID={workspace}", binary,
+                                "--plugin-state", state, "handoff", "status", "--input-json", "{}", check=False)
+            assert inherited.returncode == 65 and "Pass --herdr-pane" in inherited.stdout + inherited.stderr, inherited
+            assert before == database_snapshot(), "A rejected status read changed stored state"
+            cli("name", "@lead", "--type", "agent")
+            cli("name", "@build", "--type", "terminal", pane=panes["worker"])
+            before = database_snapshot()
+            anonymous = cli("handoff", "preview", "--input-json", json.dumps({"source": "@build Check this."}),
+                            allowed=(65,))
+            assert "Agent Session" in anonymous["error"]["message"], anonymous
+            assert before == database_snapshot(), "A rejected handoff changed stored state"
+            save("handoffs.json", {"inherited_exit": inherited.returncode, "preview": anonymous})
         with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as source:
             with sqlite3.connect(evidence / "state.sqlite3") as destination:
                 source.backup(destination)

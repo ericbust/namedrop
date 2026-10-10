@@ -28,7 +28,7 @@ Teardown runs automatically in `finally`, on both success and failure. The helpe
 
 Every helper run performs one read-only instance check before the feature drive: verify the owned server and pane identities, record both executable versions and the Namedrop binary SHA-256, then run `namedrop doctor --json` with explicit fixture state/socket/workspace/pane arguments. It compares database contents before and after Doctor to detect writes.
 
-Exit `0` means healthy, `1` means needs attention, and `2` means unavailable. The model-free fixture initially reports `ND-SETUP-003`, because no supported agent is open. That expected limitation permits the CLI recipes, but does not establish hook or delivery readiness. The helper rejects unavailable health. Inspect `doctor.json`, `instance.json`, and `server.log` whenever a run behaves unexpectedly. Do not automatically execute Doctor's suggested repairs.
+Exit `0` means healthy, `1` means needs attention, and `2` means unavailable. The model-free fixture reports `needs_attention` with exactly one issue, `ND-SETUP-003`, because no supported agent is open. The helper requires exactly that result. That expected limitation permits the CLI recipes, but does not establish hook or delivery readiness. Inspect `doctor.json`, `instance.json`, and `server.log` whenever a run behaves unexpectedly. Do not automatically execute Doctor's suggested repairs.
 
 ## Drive
 
@@ -37,9 +37,10 @@ Exit `0` means healthy, `1` means needs attention, and `2` means unavailable. Th
 .agents/skills/verify/scripts/control-namedrop.py --feature groups
 .agents/skills/verify/scripts/control-namedrop.py --feature controls
 .agents/skills/verify/scripts/control-namedrop.py --feature tour
+.agents/skills/verify/scripts/control-namedrop.py --feature handoffs
 ```
 
-The helper sends public CLI commands through `herdr pane run` into real terminal panes. Each command has its own stdout, stderr, exit-status capture, and terminal transcript. It reads saved values through public list commands or a read-only SQLite connection. The tour recipe sends actual `right` and `esc` keys and captures both pages. It runs the tour renderer in the owned terminal; floating-popup actions and prefix shortcuts require a separately linked disposable plugin instance.
+The helper sends public CLI commands through `herdr pane run` into real terminal panes. Each command has its own stdout, stderr, exit-status capture, and terminal transcript. It reads saved values through public list commands or a read-only SQLite connection. The tour recipe sends actual `right` and `esc` keys and captures both pages. It runs the tour renderer in the owned terminal; floating-popup actions and prefix shortcuts require a separately linked disposable plugin instance. The handoffs recipe proves the model-free rejections only.
 
 The existing native collaboration check is currently blocked by stale inherited pane context:
 
@@ -47,7 +48,7 @@ The existing native collaboration check is currently blocked by stale inherited 
 python3 tests/coordination_native.py --binary target/debug/namedrop
 ```
 
-This command reproduces the blocker; it is not a passing handoff drive. Both this check and `tests/personas_native.py` invoke the candidate from Python with only an inherited `HERDR_PANE_ID`. The current CLI correctly rejects that provenance. Repair those invocations to use explicit fixture pane/socket/workspace arguments, or execute them in the owned pane, before using their intended envelope and hook checks as proof. Read [handoffs](features/handoffs.md) for the intended drives and limits. The four generated recipes already use explicit context and run inside the native panes.
+This command reproduces the blocker; it is not a passing handoff drive. Both this check and `tests/personas_native.py` invoke the candidate from Python with only an inherited `HERDR_PANE_ID`. The current CLI correctly rejects that provenance. Repair those invocations to use explicit fixture pane/socket/workspace arguments, or execute them in the owned pane, before using their intended envelope and hook checks as proof. Read [handoffs](features/handoffs.md) for the intended drives and limits. The helper's recipes already use explicit context and run inside the native panes, except the one handoffs step that deliberately runs outside them.
 
 ## Evidence
 
@@ -55,6 +56,7 @@ The helper prints the retained directory, `.scratch/verify/nd-verify-*/`, on suc
 
 - `commands.jsonl`: actual argument arrays, stdout, stderr, and exit codes, including user actions and resulting reads.
 - Numbered `*-terminal.txt` files, plus `tour-first.txt` and `tour-second.txt` for the tour.
+- `handoffs.json` for the handoff rejections.
 - `instance.json`, `doctor.json`, `server.log`, and feature-specific saved values.
 - `state.sqlite3` after a successful drive, for independent inspection of persisted side effects.
 - `summary.json`: feature, commit, binary identity, limitations, and pass status. The commit alone does not identify uncommitted code; retain the relevant diff with proof of such changes.
@@ -72,6 +74,6 @@ After a run, inspect the printed directory's `summary.json` and `cleanup.json`, 
 
 ## Helpers
 
-`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its four recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
+`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its five recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
 
 Use `/maintain-verification-skill` to reconcile the feature map and recipes as Namedrop changes.
