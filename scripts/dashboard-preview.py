@@ -31,7 +31,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "src" / "dashboard" / "assets"
 FIXTURES = ROOT / "tests" / "fixtures" / "dashboard_snapshots.json"
-CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
+CSP = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
 
 SPACE_STATES = {"unknown", "not_activated", "active", "paused", "deactivated"}
 ACTIVITIES = {"retired", "offline", "blocked", "working", "waiting", "idle"}

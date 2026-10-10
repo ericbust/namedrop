@@ -60,6 +60,7 @@ const ICON_PATHS = {
   close: [['path', { d: 'm4 4 8 8m0-8-8 8' }]],
   thread: [['path', { d: 'M3 4.5A1.5 1.5 0 0 1 4.5 3h7A1.5 1.5 0 0 1 13 4.5v5A1.5 1.5 0 0 1 11.5 11H7l-3 2.5V11h0A1 1 0 0 1 3 10z' }]],
   inbox: [['path', { d: 'M2.5 9.5 4 4h8l1.5 5.5V12.5h-11zM2.5 9.5h3.2l.8 1.5h3l.8-1.5h3.2' }]],
+  chevron: [['path', { d: 'm6 3.5 4.5 4.5L6 12.5' }]],
 };
 
 function icon(name, cls) {
@@ -190,6 +191,8 @@ const state = {
   selected: null,
   drawerEntering: false,
   tab: 'messages',
+  showDormant: false,
+  showFinished: { handoffs: false, coords: false },
 };
 
 const root = document.getElementById('app');
@@ -248,6 +251,8 @@ function renderSpace() {
 
   const stage = document.querySelector('.stage');
   if (!stage) return;
+  const roster = stage.querySelector('.roster');
+  if (roster) stage.style.setProperty('scroll-padding-top', roster.offsetHeight + 12 + 'px');
   stage.scrollLeft = scroll.left;
   if (scroll.atBottom) {
     stage.scrollTop = stage.scrollHeight;
@@ -287,20 +292,28 @@ function identityClass(addressId) {
   return 'id-' + identity.get(addressId);
 }
 
+// Retired or offline, with nothing in this window and nothing in the mailbox:
+// a full lane for them only pushes live recipients off the right edge.
+function isDormant(p, talking) {
+  return (p.activity === 'retired' || p.activity === 'offline') && !p.mailbox.length && !talking.has(p.address_id);
+}
+
 function indexSnapshot(snap) {
-  const lanes = snap.participants;
+  const talking = new Set(snap.messages.flatMap((m) => [m.author, ...m.legs.map((leg) => leg.to)]));
+  const dormant = snap.participants.filter((p) => isDormant(p, talking));
+  const lanes = state.showDormant ? snap.participants : snap.participants.filter((p) => !dormant.includes(p));
   const byId = new Map(lanes.map((p, i) => [p.address_id, { p, i }]));
-  const byAlias = new Map(lanes.map((p) => [p.alias, p]));
+  const people = new Map(snap.participants.map((p) => [p.address_id, p]));
   const messages = new Map(snap.messages.map((m) => [m.message_id, m]));
   const threads = new Map(snap.threads.map((t) => [t.thread_id, t]));
-  for (const p of lanes) identityClass(p.address_id);
-  return { snap, lanes, byId, byAlias, messages, threads };
+  for (const p of snap.participants) identityClass(p.address_id);
+  return { snap, lanes, byId, people, dormant: dormant.length, messages, threads };
 }
 
 function aliasOf(model, addressId) {
   if (addressId === 'human') return 'You';
-  const hit = model.byId.get(addressId);
-  return hit ? hit.p.alias : addressId;
+  const p = model.people.get(addressId);
+  return p ? p.alias : addressId;
 }
 
 function laneX(model, addressId) {
@@ -382,8 +395,22 @@ function motionOk() {
 
 function renderRoster(model) {
   return el('div', { class: 'roster' },
-    el('div', { class: 'gutter-cell' }),
+    el('div', { class: 'gutter-cell' }, renderDormantToggle(model)),
     model.lanes.map((p) => renderLaneHead(model, p)));
+}
+
+function renderDormantToggle(model) {
+  if (!model.dormant) return null;
+  const n = model.dormant;
+  return el('button', {
+    class: ['dormant-toggle', state.showDormant ? 'is-open' : null],
+    type: 'button',
+    'aria-pressed': state.showDormant ? 'true' : 'false',
+    title: state.showDormant
+      ? 'Hide retired and offline participants with nothing in this window'
+      : `Show ${n} retired or offline ${n === 1 ? 'participant' : 'participants'} with nothing in this window`,
+    onclick: () => { state.showDormant = !state.showDormant; renderSpace(); },
+  }, state.showDormant ? 'hide retired' : `+${n} retired`);
 }
 
 function avatar(p, size) {
@@ -399,10 +426,14 @@ function runtimeLabel(p) {
   return RUNTIME[p.kind.runtime] || p.kind.runtime || 'agent';
 }
 
+// The alias is already the lane title, so a role that only repeats it says nothing.
 function subtitle(p) {
   if (p.address_id === 'human') return 'at the keyboard';
-  const text = p.role || p.persona || p.pane_label;
-  return text ? text.text : null;
+  const bare = (text) => text.replace(/^@/, '').toLowerCase();
+  const role = p.role && bare(p.role.text) !== bare(p.alias) ? p.role : null;
+  const text = p.persona || role || p.pane_label;
+  if (text) return text.text;
+  return p.kind.type === 'agent' ? 'Generic' : null;
 }
 
 function renderLaneHead(model, p) {
@@ -420,7 +451,9 @@ function renderLaneHead(model, p) {
       showActivity ? el('span', { class: ['activity', 'tone-' + act.tone] }, el('span', { class: 'act-dot' }), act.label) : null,
       runtime ? el('span', { class: 'runtime', text: runtime }) : null),
     p.waiting_on.length
-      ? el('div', { class: 'waiting tone-wait' }, icon('clock'), el('span', { class: 'waiting-text' }, 'waiting on ', el('b', { text: p.waiting_on.join(', ') })))
+      ? el('div', { class: 'waiting tone-wait', title: 'waiting on ' + p.waiting_on.join(', ') }, icon('clock'),
+        el('span', { class: 'waiting-text' }, 'waiting on ',
+          el('b', { text: p.waiting_on.length === 1 ? p.waiting_on[0] : `${p.waiting_on.length} agents` })))
       : null,
     renderTray(model, p));
 }
@@ -575,6 +608,7 @@ function renderRow(model, m, band) {
   const card = el('article', {
     class: ['card', identityClass(m.author), anchorRight ? 'anchor-right' : null, isNew ? 'enter' : null],
     tabindex: '0',
+    title: 'Open the full message',
     onclick: () => openDrawer(m.message_id),
     onkeydown: (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openDrawer(m.message_id); } },
   },
@@ -583,7 +617,8 @@ function renderRow(model, m, band) {
     el('span', { class: ['kind', 'kind-' + m.kind], text: MESSAGE_KIND[m.kind] || m.kind }),
     el('span', { class: 'to' }, icon('arrow'), m.legs.map((leg) => el('span', { class: 'to-one' }, aliasOf(model, leg.to), stageMini(leg)))),
     el('span', { class: 'spacer' }),
-    when(m.at_ms)),
+    when(m.at_ms),
+    icon('chevron', 'open-hint')),
   el('p', { class: 'body', text: m.body.text }));
 
   const cardWrap = el('div', { class: ['card-wrap', anchorRight ? 'anchor-right' : null] }, card);
@@ -612,10 +647,9 @@ function legTitle(model, m, leg) {
 function legChip(model, m, leg) {
   const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
   const changed = state.fresh.legs.has(legKey(m.message_id, leg.to)) && !state.fresh.messages.has(m.message_id);
-  return el('button', {
+  return tipped(el('button', {
     class: ['leg', 'tone-' + st.tone, 'stage-' + leg.stage.stage, changed ? 'swap' : null],
     type: 'button',
-    title: legTitle(model, m, leg),
     'aria-label': legTitle(model, m, leg),
     css: { left: laneX(model, leg.to) + '%' },
     onclick: (e) => {
@@ -623,7 +657,7 @@ function legChip(model, m, leg) {
       if (leg.stage.stage === 'replied') jumpTo(leg.stage.reply_id);
       else openDrawer(m.message_id);
     },
-  }, icon(leg.stage.stage));
+  }, icon(leg.stage.stage)), () => el('div', { class: 'tip-head', text: legTitle(model, m, leg) }));
 }
 
 function jumpTo(messageId) {
@@ -650,6 +684,7 @@ function renderAttention(snap) {
 
 const WORK_OUTCOME = {
   pending: { tone: 'idle', label: 'not started', icon: 'queued' },
+  working: { tone: 'flight', label: 'working', icon: 'working' },
   unclassified: { tone: 'flight', label: 'reported back', icon: 'delivered' },
   needs_continuation: { tone: 'wait', label: 'needs follow-up', icon: 'clock' },
   completed: { tone: 'done', label: 'done', icon: 'completed' },
@@ -663,8 +698,9 @@ const COORD_OUTCOME = {
   cancelled: { tone: 'idle', label: 'cancelled' },
 };
 
-const HANDOFFS_SHOWN = 4;
+const FINISHED_SHOWN = 3;
 const RUNS_SHOWN = 6;
+const COORD_RANK = { blocked: 0, open: 1 };
 
 function who(model, addressId) {
   return el('span', { class: 'who-inline' }, avatarFor(model, addressId, 'sm'), el('span', { class: 'who-alias', text: aliasOf(model, addressId) }));
@@ -674,6 +710,22 @@ function railSection(title, count, body) {
   return el('section', { class: 'rail-section' },
     el('h2', { class: 'rail-title' }, title, count != null ? el('span', { class: 'count', text: String(count) }) : null),
     body);
+}
+
+// Live work first; finished work beyond the newest few folds behind a toggle.
+function railList(key, live, finished, render) {
+  const open = state.showFinished[key];
+  const extra = finished.length - FINISHED_SHOWN;
+  return [
+    live.map(render),
+    (open ? finished : finished.slice(0, FINISHED_SHOWN)).map(render),
+    extra > 0 ? el('button', {
+      class: 'show-finished',
+      type: 'button',
+      'aria-expanded': open ? 'true' : 'false',
+      onclick: () => { state.showFinished[key] = !open; renderSpace(); },
+    }, open ? 'hide completed' : `show ${extra} completed`) : null,
+  ];
 }
 
 function isDoneStage(stage) {
@@ -699,6 +751,18 @@ function renderHandoff(model, m) {
       })));
 }
 
+// A pending assignment whose delivery the assignee has acknowledged is under
+// way; the store only reclassifies it once the assignee reports back.
+function assignmentOutcome(model, c, a) {
+  if (a.work_outcome !== 'pending' || !(c.outcome in COORD_RANK)) return a.work_outcome;
+  const assignee = model.people.get(a.assignee);
+  const owner = aliasOf(model, c.owner);
+  if (assignee && assignee.mailbox.some((item) => item.from === owner && item.state === 'acknowledged')) return 'working';
+  const latest = model.snap.messages.filter((m) => m.author === c.owner && m.legs.some((leg) => leg.to === a.assignee)).pop();
+  const leg = latest && latest.legs.find((l) => l.to === a.assignee);
+  return leg && leg.stage.stage === 'working' ? 'working' : 'pending';
+}
+
 function renderCoordination(model, c) {
   const outcome = COORD_OUTCOME[c.outcome] || COORD_OUTCOME.open;
   return el('div', { class: ['work-card', 'coord', 'outcome-' + c.outcome] },
@@ -706,7 +770,7 @@ function renderCoordination(model, c) {
       el('span', { class: 'spacer' }), when(c.updated_at_ms)),
     el('div', { class: 'deliverable', text: c.deliverable.text }),
     el('ul', { class: 'assignments' }, c.assignments.map((a) => {
-      const w = WORK_OUTCOME[a.work_outcome] || WORK_OUTCOME.pending;
+      const w = WORK_OUTCOME[assignmentOutcome(model, c, a)] || WORK_OUTCOME.pending;
       return el('li', { class: 'assignment' },
         el('div', { class: 'assignment-line' }, who(model, a.assignee), el('span', { class: 'spacer' }), chip(w.tone, w.icon, w.label)),
         a.blocked_reason ? el('div', { class: 'blocked-reason tone-alert' }, a.blocked_reason.text) : null,
@@ -737,12 +801,16 @@ function renderKey() {
 
 function renderRail(model) {
   const { snap } = model;
-  const handoffs = snap.messages.filter((m) => m.kind === 'handoff' || m.legs.length > 1).slice(-HANDOFFS_SHOWN).reverse();
+  const handoffs = snap.messages.filter((m) => m.kind === 'handoff' || m.legs.length > 1).reverse();
+  const handoffDone = (m) => m.legs.every((leg) => isDoneStage(leg.stage.stage));
   const runs = snap.terminal_runs.slice().sort((a, b) => b.started_at_ms - a.started_at_ms).slice(0, RUNS_SHOWN);
-  const coords = snap.coordinations.slice().sort((a, b) => b.updated_at_ms - a.updated_at_ms);
+  const rank = (c) => COORD_RANK[c.outcome] ?? 2;
+  const coords = snap.coordinations.slice().sort((a, b) => rank(a) - rank(b) || b.updated_at_ms - a.updated_at_ms);
   const sections = [
-    handoffs.length ? railSection('Handoffs', handoffs.length, handoffs.map((m) => renderHandoff(model, m))) : null,
-    coords.length ? railSection('Coordinations', coords.length, coords.map((c) => renderCoordination(model, c))) : null,
+    handoffs.length ? railSection('Handoffs', handoffs.length,
+      railList('handoffs', handoffs.filter((m) => !handoffDone(m)), handoffs.filter(handoffDone), (m) => renderHandoff(model, m))) : null,
+    coords.length ? railSection('Coordinations', coords.length,
+      railList('coords', coords.filter((c) => rank(c) < 2), coords.filter((c) => rank(c) === 2), (c) => renderCoordination(model, c))) : null,
     runs.length ? railSection('Terminal runs', null, el('ul', { class: 'runs' }, runs.map((r) => renderRun(model, r)))) : null,
   ].filter(Boolean);
   return el('aside', { class: 'rail', 'aria-label': 'Work in progress' },
@@ -803,15 +871,15 @@ function renderDrawer(snap) {
 }
 
 function avatarFor(model, addressId, size) {
-  const hit = model.byId.get(addressId);
-  if (hit) return avatar(hit.p, size || 'md');
+  const p = model.people.get(addressId);
+  if (p) return avatar(p, size || 'md');
   return el('span', { class: ['avatar', size || 'md', 'id-none'] }, el('span', { class: 'disc', text: '?' }));
 }
 
 function renderLegDetail(model, m, leg) {
   const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
-  const recipient = model.byId.get(leg.to);
-  const mail = recipient ? recipient.p.mailbox.find((item) => item.message_id === m.message_id) : null;
+  const recipient = model.people.get(leg.to);
+  const mail = recipient ? recipient.mailbox.find((item) => item.message_id === m.message_id) : null;
   let detail = null;
   const stage = leg.stage;
   if (stage.stage === 'working') detail = el('span', null, 'acknowledged ', when(stage.acked_at_ms));

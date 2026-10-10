@@ -122,6 +122,34 @@
     "activity": "idle",
     "mailbox": [],
     "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-5c0a7e",
+    "alias": "@scout",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "retired",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-9e11b2",
+    "alias": "@probe",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "offline",
+    "mailbox": [],
+    "waiting_on": []
    }
   ],
   "messages": [
@@ -157,7 +185,80 @@
     "message_count": 1
    }
   ],
-  "coordinations": [],
+  "coordinations": [
+   {
+    "id": "coord-earlier-0",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Audit session cookie flags",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791640000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-1",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Trim the fixture loader's startup cost",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791636000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-2",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Draft the rotation runbook",
+     "truncated": false
+    },
+    "outcome": "cancelled",
+    "updated_at_ms": 1791632000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "pending",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-3",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Pin the TLS test certificates",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791628000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   }
+  ],
   "terminal_runs": [],
   "attention": []
  },
@@ -313,6 +414,34 @@
     "activity": "idle",
     "mailbox": [],
     "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-5c0a7e",
+    "alias": "@scout",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "retired",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-9e11b2",
+    "alias": "@probe",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "offline",
+    "mailbox": [],
+    "waiting_on": []
    }
   ],
   "messages": [
@@ -374,7 +503,80 @@
     "message_count": 2
    }
   ],
-  "coordinations": [],
+  "coordinations": [
+   {
+    "id": "coord-earlier-0",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Audit session cookie flags",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791640000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-1",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Trim the fixture loader's startup cost",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791636000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-2",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Draft the rotation runbook",
+     "truncated": false
+    },
+    "outcome": "cancelled",
+    "updated_at_ms": 1791632000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "pending",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-3",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Pin the TLS test certificates",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791628000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   }
+  ],
   "terminal_runs": [],
   "attention": []
  },
@@ -530,6 +732,34 @@
     "activity": "idle",
     "mailbox": [],
     "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-5c0a7e",
+    "alias": "@scout",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "retired",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-9e11b2",
+    "alias": "@probe",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "offline",
+    "mailbox": [],
+    "waiting_on": []
    }
   ],
   "messages": [
@@ -592,7 +822,80 @@
     "message_count": 2
    }
   ],
-  "coordinations": [],
+  "coordinations": [
+   {
+    "id": "coord-earlier-0",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Audit session cookie flags",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791640000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-1",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Trim the fixture loader's startup cost",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791636000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-2",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Draft the rotation runbook",
+     "truncated": false
+    },
+    "outcome": "cancelled",
+    "updated_at_ms": 1791632000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "pending",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-3",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Pin the TLS test certificates",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791628000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   }
+  ],
   "terminal_runs": [],
   "attention": [
    {
@@ -772,6 +1075,34 @@
      }
     ],
     "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-5c0a7e",
+    "alias": "@scout",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "retired",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-9e11b2",
+    "alias": "@probe",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "offline",
+    "mailbox": [],
+    "waiting_on": []
    }
   ],
   "messages": [
@@ -880,6 +1211,78 @@
        "truncated": false
       },
       "waiting_on": "pane-address-41f0c7"
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-0",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Audit session cookie flags",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791640000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-1",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Trim the fixture loader's startup cost",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791636000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-2",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Draft the rotation runbook",
+     "truncated": false
+    },
+    "outcome": "cancelled",
+    "updated_at_ms": 1791632000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "pending",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-3",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Pin the TLS test certificates",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791628000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
      }
     ]
    }
@@ -1049,6 +1452,34 @@
     "activity": "idle",
     "mailbox": [],
     "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-5c0a7e",
+    "alias": "@scout",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "retired",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-9e11b2",
+    "alias": "@probe",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "offline",
+    "mailbox": [],
+    "waiting_on": []
    }
   ],
   "messages": [
@@ -1177,6 +1608,78 @@
        "text": "cargo test -p auth exited 1: fixtures/auth.sql has no tokens table",
        "truncated": false
       },
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-0",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Audit session cookie flags",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791640000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-1",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Trim the fixture loader's startup cost",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791636000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-2",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Draft the rotation runbook",
+     "truncated": false
+    },
+    "outcome": "cancelled",
+    "updated_at_ms": 1791632000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "pending",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-3",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Pin the TLS test certificates",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791628000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
       "waiting_on": null
      }
     ]
@@ -1342,6 +1845,34 @@
     "activity": "idle",
     "mailbox": [],
     "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-5c0a7e",
+    "alias": "@scout",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "retired",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-9e11b2",
+    "alias": "@probe",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "offline",
+    "mailbox": [],
+    "waiting_on": []
    }
   ],
   "messages": [
@@ -1488,6 +2019,78 @@
      {
       "assignee": "pane-address-d93a61",
       "work_outcome": "unclassified",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-0",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Audit session cookie flags",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791640000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-1",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Trim the fixture loader's startup cost",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791636000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-2",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Draft the rotation runbook",
+     "truncated": false
+    },
+    "outcome": "cancelled",
+    "updated_at_ms": 1791632000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "pending",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-3",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Pin the TLS test certificates",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791628000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
       "blocked_reason": null,
       "waiting_on": null
      }
@@ -1649,6 +2252,34 @@
      "truncated": false
     },
     "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-5c0a7e",
+    "alias": "@scout",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "retired",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-9e11b2",
+    "alias": "@probe",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "offline",
     "mailbox": [],
     "waiting_on": []
    }
@@ -1822,6 +2453,78 @@
       "waiting_on": null
      }
     ]
+   },
+   {
+    "id": "coord-earlier-0",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Audit session cookie flags",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791640000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-1",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Trim the fixture loader's startup cost",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791636000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-2",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Draft the rotation runbook",
+     "truncated": false
+    },
+    "outcome": "cancelled",
+    "updated_at_ms": 1791632000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "pending",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-3",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Pin the TLS test certificates",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791628000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
    }
   ],
   "terminal_runs": [
@@ -1951,6 +2654,34 @@
      "truncated": false
     },
     "activity": "idle",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-5c0a7e",
+    "alias": "@scout",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "retired",
+    "mailbox": [],
+    "waiting_on": []
+   },
+   {
+    "address_id": "pane-address-9e11b2",
+    "alias": "@probe",
+    "kind": {
+     "type": "agent",
+     "runtime": "claude-code"
+    },
+    "role": null,
+    "persona": null,
+    "pane_label": null,
+    "activity": "offline",
     "mailbox": [],
     "waiting_on": []
    }
@@ -2139,6 +2870,78 @@
      },
      {
       "assignee": "pane-address-d93a61",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-0",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Audit session cookie flags",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791640000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-1",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Trim the fixture loader's startup cost",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791636000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "completed",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-2",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Draft the rotation runbook",
+     "truncated": false
+    },
+    "outcome": "cancelled",
+    "updated_at_ms": 1791632000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
+      "work_outcome": "pending",
+      "blocked_reason": null,
+      "waiting_on": null
+     }
+    ]
+   },
+   {
+    "id": "coord-earlier-3",
+    "owner": "pane-address-7c1e9a",
+    "deliverable": {
+     "text": "Pin the TLS test certificates",
+     "truncated": false
+    },
+    "outcome": "completed",
+    "updated_at_ms": 1791628000000,
+    "assignments": [
+     {
+      "assignee": "pane-address-2b8f04",
       "work_outcome": "completed",
       "blocked_reason": null,
       "waiting_on": null

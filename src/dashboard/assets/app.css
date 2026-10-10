@@ -289,6 +289,15 @@ button { font: inherit; color: inherit; }
 .rows.empty-rows { background-image: none; }
 
 .gutter-cell { position: relative; }
+.dormant-toggle {
+  position: absolute; left: 3px; top: 0; bottom: 0; width: 24px; padding: 6px 0;
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  font-size: 11px; font-weight: 600; color: var(--text-2); white-space: nowrap;
+  background: var(--surface-2); border: 1px dashed var(--line-strong); border-radius: 8px;
+  cursor: pointer;
+}
+.dormant-toggle:hover { color: var(--text); border-style: solid; }
+.dormant-toggle:focus-visible, .show-finished:focus-visible { outline: 2px solid var(--flight); outline-offset: 2px; }
 .band-bar { position: absolute; left: 13px; top: 0; bottom: 0; width: 3px; background: var(--band); }
 .band-bar.start { top: 50%; border-radius: 3px 3px 0 0; }
 .band-0 { --band: color-mix(in srgb, var(--text-2) 30%, transparent); }
@@ -366,6 +375,8 @@ button { font: inherit; color: inherit; }
 .mini { display: none; }
 .mini .icon { width: 12px; height: 12px; color: var(--tone); }
 .card-head time { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.card-head .open-hint { width: 12px; height: 12px; flex: none; color: var(--muted); opacity: 0.55; margin-right: -4px; }
+.card:hover .open-hint, .card:focus-visible .open-hint { opacity: 1; color: var(--text-2); }
 .kind {
   font-size: 10.5px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase;
   color: var(--text-2); padding: 1px 6px; border-radius: 4px; background: var(--surface-3);
@@ -502,6 +513,11 @@ button { font: inherit; color: inherit; }
   background: var(--surface-3); border-radius: 999px; padding: 0 7px; line-height: 18px;
 }
 .rail-empty { font-size: 13px; padding: 4px 2px; }
+.show-finished {
+  align-self: flex-start; padding: 4px 10px; font-size: 12px; color: var(--text-2);
+  background: transparent; border: 1px dashed var(--line-strong); border-radius: 999px; cursor: pointer;
+}
+.show-finished:hover { color: var(--text); border-style: solid; }
 
 .work-card {
   display: flex; flex-direction: column; gap: 7px;
@@ -515,6 +531,7 @@ button.work-card:hover { border-color: var(--line-strong); }
 .work-card.is-stuck, .coord.outcome-blocked { border-color: color-mix(in srgb, var(--alert) 45%, var(--line)); }
 .work-head { display: flex; align-items: center; gap: 6px; font-size: 12px; min-width: 0; }
 .work-head time { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.work-head > .muted { white-space: nowrap; }
 .work-head .faint { color: var(--muted); width: 12px; height: 12px; }
 .who-inline { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .who-alias { font: 600 12.5px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -639,10 +656,15 @@ button.work-card:hover { border-color: var(--line-strong); }
   .sheet { min-width: 0; }
   .roster {
     display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none;
-    padding: 8px 12px;
+    padding: 8px 12px; scroll-padding-inline: 12px;
+    scroll-snap-type: x proximity;
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 12px, #000 calc(100% - 28px), transparent);
   }
-  .roster > .gutter-cell { display: none; }
-  .lane-head { flex: 0 0 172px; margin: 0; padding: 8px 10px; gap: 5px; box-shadow: none; }
+  .roster > .gutter-cell { order: 1; flex: none; }
+  .roster > .gutter-cell:empty { display: none; }
+  .dormant-toggle { position: static; width: auto; height: 100%; padding: 0 12px; writing-mode: horizontal-tb; transform: none; }
+  .lane-head { flex: 0 0 172px; margin: 0; padding: 8px 10px; gap: 5px; box-shadow: none; scroll-snap-align: start; }
   .lane-head .sub, .lane-head .runtime { display: none; }
   .avatar.lg { width: 30px; height: 30px; font-size: 12.5px; }
   .tray { padding-top: 6px; min-height: 27px; }
