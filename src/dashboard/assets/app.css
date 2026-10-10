@@ -18,6 +18,7 @@
   --shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 8px 24px rgba(0, 0, 0, 0.35);
 
   --flight: #5aa9ff;
+  --on-flight: #08111f;
   --wait: #f5b041;
   --alert: #ff6b6b;
   --done: #3ecf8e;
@@ -56,6 +57,7 @@
     --shadow: 0 1px 2px rgba(20, 30, 50, 0.06), 0 6px 18px rgba(20, 30, 50, 0.06);
 
     --flight: #2a78d6;
+    --on-flight: #ffffff;
     --wait: #b77900;
     --alert: #d03b3b;
     --done: #0f9a55;
@@ -95,6 +97,7 @@ button { font: inherit; color: inherit; }
 }
 
 .app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+.app.is-stale .board { opacity: 0.62; filter: saturate(0.5); }
 
 .icon {
   width: 14px; height: 14px; flex: none;
@@ -378,7 +381,7 @@ button { font: inherit; color: inherit; }
   position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 6;
   display: inline-flex; align-items: center; gap: 6px;
   padding: 7px 14px; border: 0; border-radius: 999px;
-  background: var(--flight); color: #fff; font-size: 12.5px; font-weight: 600;
+  background: var(--flight); color: var(--on-flight); font-size: 12.5px; font-weight: 600;
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
   cursor: pointer;
 }
@@ -432,7 +435,7 @@ button { font: inherit; color: inherit; }
 }
 .envelopes { display: flex; align-items: center; }
 .env {
-  position: relative; padding: 0; margin-left: -5px;
+  position: relative; padding: 0; margin-left: 1px;
   width: 25px; height: 20px; display: grid; place-items: center;
   background: none; border: 0; cursor: pointer; color: var(--tone);
 }

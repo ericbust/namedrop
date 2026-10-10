@@ -243,6 +243,7 @@ function renderSpace() {
   view.push(renderDrawer(snap));
   clear(root);
   append(root, view);
+  root.classList.toggle('is-stale', state.connection === 'restarting' || state.connection === 'disconnected');
   tip.hidden = true;
 
   const stage = document.querySelector('.stage');
