@@ -129,6 +129,16 @@ The panel reads recent output from panes in the workspace and asks the invoking 
 
 The panel reuses a description for up to 30 seconds if nothing changed, and a new terminal or agent session clears it. Closing the panel cancels any request still running. Refreshing during a request waits for that request instead of starting another. A request that stays pending may be stuck at the provider, even if its process is running. Close the panel to cancel it. Reading panes and checking sessions have short time limits of their own. If Namedrop can't read its state, the panel shows outstanding requests as unknown. Before a checkout replaces an active installation, its collaboration schema must match the installed one.
 
+## Dashboard
+
+`namedrop dashboard` prints a URL for the current workspace and opens it in a browser when it can reach one: on macOS, or on Linux when `DISPLAY` or `WAYLAND_DISPLAY` is set. Pass `--no-open` to print the URL only. The Herdr action `dashboard` runs the same command from the workspace menu. The URL has the form `http://127.0.0.1:<port>/w/<key>`, where the key is a hash of the Herdr socket and workspace id. The URL stays the same across server restarts, so you can bookmark it. The first visit carries `?t=<token>`. The server exchanges it for a cookie and redirects to the clean URL. `http://127.0.0.1:<port>/` lists the activated workspaces by label.
+
+The first `namedrop dashboard` call starts one background server for your state directory. Later calls from any workspace reuse it and report `"server": "running"`. The server listens on 127.0.0.1 only. It rejects requests whose `Host` is not that address or `localhost`, and pages without the token return 401. The token lives in `<state>/dashboard/token` with mode 0600. Delete the file to rotate the token. Every page sends a strict Content-Security-Policy, and the page inserts collaborator text as text, never as markup.
+
+The server reads state read-only through one connection, a short transaction at a time, so it never holds up a write. It sends a new view only after a write changes what the page shows. The page shows the newest 150 messages of the workspace. Message bodies are capped at 2,000 characters, with secrets redacted and control characters removed. The page never reads shared context payloads, evidence or terminal output. Terminal runs show only the command and its exit code.
+
+The server stops 10 minutes after the last tab closes. Set `NAMEDROP_DASHBOARD_IDLE_MS` to change this. The server does not hold the update lock that commands hold, so it never delays an update. When the update migrates state or a new release becomes current, open tabs show "Updating Namedrop…". A new server then starts on the same port, and the tabs reconnect without a reload. Its log is `<state>/dashboard/server.log`. If a tab stays disconnected, run `namedrop dashboard` again.
+
 ## Tour presentations
 
 Tour presentations live in `tours/<id>.md`, and `src/tour.rs` compiles them into the binary with `include_str!`. The header contains `id: <id>` and `title: <title>`, followed by a line containing only `---`. The id must match `^[a-z0-9][a-z0-9-]{0,63}$`, and titles must be non-empty. The parser rejects unknown header keys.
