@@ -677,3 +677,22 @@ button.work-card:hover { border-color: var(--line-strong); }
 .deck-avatars .avatar + .avatar { margin-left: -4px; }
 .deck-avatars .avatar { box-shadow: 0 0 0 2px var(--surface); border-radius: 50%; }
 .deck-hint { color: var(--muted); font-size: 11px; }
+
+.lane-head[role="button"] { cursor: pointer; transition: opacity 0.2s, border-color 0.2s; }
+.lane-head[role="button"]:hover { border-color: var(--line-strong); }
+.lane-head[role="button"]:focus-visible { outline: 2px solid var(--flight); outline-offset: 2px; }
+.lane-head.is-focused { border-color: var(--flight); box-shadow: 0 0 0 2px color-mix(in srgb, var(--flight) 40%, transparent), var(--shadow); }
+.lane-head.is-faded { opacity: 0.5; }
+.row { transition: opacity 0.2s; }
+.row.is-dim { opacity: 0.22; }
+.row.is-dim:hover, .row.is-dim:focus-within { opacity: 0.75; }
+.focus-bar {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--flight) 45%, var(--line)); border-radius: 10px;
+  background: color-mix(in srgb, var(--flight) 10%, var(--surface)); font-size: 12px;
+}
+.focus-clear {
+  font: inherit; font-size: 12px; color: var(--text-2); cursor: pointer;
+  padding: 2px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface);
+}
+.focus-clear:hover { color: var(--text); border-color: var(--line-strong); }

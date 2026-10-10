@@ -180,6 +180,7 @@ const state = {
   drawerEntering: false,
   tab: 'messages',
   showDormant: false,
+  focus: null,
   showFinished: { handoffs: false, coords: false },
 };
 
@@ -352,6 +353,7 @@ function diffSnapshot(prev, next) {
 
 function renderBoard(snap) {
   const model = indexSnapshot(snap);
+  if (state.focus && !model.byId.has(state.focus)) state.focus = null;
   const lanes = model.lanes.length;
   const width = laneWidth(model, '(100% - var(--gutter))');
   const deck = model.lanes.some((p) => p.deck);
@@ -449,12 +451,32 @@ function subtitle(p) {
   return p.kind.type === 'agent' ? 'Generic' : null;
 }
 
+function involves(m, addressId) {
+  return m.author === addressId || m.legs.some((leg) => leg.to === addressId);
+}
+
+function toggleFocus(addressId) {
+  state.focus = state.focus === addressId ? null : addressId;
+  renderSpace();
+}
+
 function renderLaneHead(model, p) {
   const act = ACTIVITY[p.activity] || ACTIVITY.idle;
   const runtime = runtimeLabel(p);
   const sub = subtitle(p);
   const showActivity = p.address_id !== 'human' || p.activity !== 'idle';
-  return el('div', { class: ['lane-head', 'act-' + p.activity], data: { address: p.address_id } },
+  const focused = state.focus === p.address_id;
+  const name = p.address_id === 'human' ? 'your' : `${p.alias}'s`;
+  return el('div', {
+    class: ['lane-head', 'act-' + p.activity, focused ? 'is-focused' : null, state.focus && !focused ? 'is-faded' : null],
+    data: { address: p.address_id },
+    role: 'button',
+    tabindex: '0',
+    'aria-pressed': focused ? 'true' : 'false',
+    title: focused ? 'Show everyone again' : `Show only ${name} messages and work`,
+    onclick: () => toggleFocus(p.address_id),
+    onkeydown: (e) => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggleFocus(p.address_id); } },
+  },
     el('div', { class: 'who' },
       avatar(p, 'lg'),
       el('div', { class: 'names' },
@@ -519,7 +541,7 @@ function renderTray(model, p) {
           class: ['env', 'env-' + item.state, 'tone-' + d.tone, state.fresh.mail.has(item.delivery_id) ? 'drop' : null],
           type: 'button',
           'aria-label': `From ${item.from}, ${d.label}: ${item.preview.text}`,
-          onclick: () => (model.messages.has(item.message_id) ? jumpTo(item.message_id) : null),
+          onclick: (e) => { e.stopPropagation(); if (model.messages.has(item.message_id)) jumpTo(item.message_id); },
         }, envelopeIcon(item.state)), () => mailTip(item));
       }),
       items.length > TRAY_VISIBLE ? el('span', { class: 'env-more', text: `+${items.length - TRAY_VISIBLE}` }) : null),
@@ -636,7 +658,8 @@ function renderRow(model, m, band) {
 
   const cardWrap = el('div', { class: ['card-wrap', anchorRight ? 'anchor-right' : null], css: { '--edge': anchorRight ? `calc(100% - ${authorX})` : authorX } }, card);
 
-  return el('div', { class: ['row', band, state.selected === m.message_id ? 'selected' : null], id: 'msg-' + m.message_id },
+  const dim = state.focus && !involves(m, state.focus);
+  return el('div', { class: ['row', band, state.selected === m.message_id ? 'selected' : null, dim ? 'is-dim' : null], id: 'msg-' + m.message_id },
     el('div', { class: 'gutter-cell' }, el('span', { class: 'band-bar' })),
     el('div', { class: 'lanes-cell' }, strip, cardWrap));
 }
@@ -808,11 +831,12 @@ function renderKey() {
 
 function renderRail(model) {
   const { snap } = model;
-  const handoffs = snap.messages.filter((m) => m.kind === 'handoff' || m.legs.length > 1).reverse();
+  const f = state.focus;
+  const handoffs = snap.messages.filter((m) => (m.kind === 'handoff' || m.legs.length > 1) && (!f || involves(m, f))).reverse();
   const handoffDone = (m) => m.legs.every((leg) => isDoneStage(leg.stage.stage));
-  const runs = snap.terminal_runs.slice().sort((a, b) => b.started_at_ms - a.started_at_ms).slice(0, RUNS_SHOWN);
+  const runs = snap.terminal_runs.filter((r) => !f || r.terminal === f).sort((a, b) => b.started_at_ms - a.started_at_ms).slice(0, RUNS_SHOWN);
   const rank = (c) => COORD_RANK[c.outcome] ?? 2;
-  const coords = snap.coordinations.slice().sort((a, b) => rank(a) - rank(b) || b.updated_at_ms - a.updated_at_ms);
+  const coords = snap.coordinations.filter((c) => !f || c.owner === f || c.assignments.some((a) => a.assignee === f)).sort((a, b) => rank(a) - rank(b) || b.updated_at_ms - a.updated_at_ms);
   const sections = [
     handoffs.length ? railSection('Handoffs', handoffs.length,
       railList('handoffs', handoffs.filter((m) => !handoffDone(m)), handoffs.filter(handoffDone), (m) => renderHandoff(model, m))) : null,
@@ -820,8 +844,13 @@ function renderRail(model) {
       railList('coords', coords.filter((c) => rank(c) < 2), coords.filter((c) => rank(c) === 2), (c) => renderCoordination(model, c))) : null,
     runs.length ? railSection('Terminal runs', null, el('ul', { class: 'runs' }, runs.map((r) => renderRun(model, r)))) : null,
   ].filter(Boolean);
+  const focusBar = f ? el('div', { class: 'focus-bar' }, el('span', { class: 'muted' }, 'Showing'), who(model, f),
+    el('span', { class: 'spacer' }),
+    el('button', { class: 'focus-clear', type: 'button', title: 'Or press Esc', onclick: () => toggleFocus(f) }, 'Show everyone')) : null;
+  const empty = f ? `Nothing for ${aliasOf(model, f)} here yet.` : 'Handoffs, tracked work, and terminal commands show up here as they happen.';
   return el('aside', { class: 'rail', 'aria-label': 'Work in progress' },
-    sections.length ? sections : el('p', { class: 'rail-empty muted', text: 'Handoffs, tracked work, and terminal commands show up here as they happen.' }),
+    focusBar,
+    sections.length ? sections : el('p', { class: 'rail-empty muted', text: empty }),
     renderKey());
 }
 
@@ -842,7 +871,9 @@ function closeDrawer() {
 }
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && state.selected) closeDrawer();
+  if (e.key !== 'Escape') return;
+  if (state.selected) closeDrawer();
+  else if (state.focus) toggleFocus(state.focus);
 });
 
 function renderDrawer(snap) {
