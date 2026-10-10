@@ -63,6 +63,29 @@ fn send(
     body: &str,
     in_reply_to: Option<&str>,
 ) {
+    send_as(
+        store,
+        namespace,
+        "mention/v1",
+        message,
+        from,
+        to,
+        body,
+        in_reply_to,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_as(
+    store: &mut StateStore,
+    namespace: &StateNamespace,
+    grammar_version: &str,
+    message: &str,
+    from: &str,
+    to: &str,
+    body: &str,
+    in_reply_to: Option<&str>,
+) {
     let space = namespace.space_id.as_str();
     store
         .transaction(|tx| {
@@ -81,7 +104,7 @@ fn send(
                     request_id: format!("request-{message}"),
                     authored_source: format!("@{to} {body}"),
                     body: body.to_owned(),
-                    grammar_version: "mention/v1".to_owned(),
+                    grammar_version: grammar_version.to_owned(),
                     recipients: vec![MessageRecipientDraft {
                         address_id: id(namespace, to),
                         alias_snapshot: to.to_owned(),
@@ -247,7 +270,7 @@ fn context_payloads_and_secrets_never_reach_the_wire() {
         "m1",
         "a",
         "b",
-        "\x1b[31mred\x1b[0m <script>alert(1)</script> key ghp_abcdefghijklmnopqrstuvwxyz0123",
+        "\x1b[31mred\x1b[0m <script>alert(1)</script> key ghp_abcdefghijklmnopqrstuvwxyz0123 \u{202E}txt.exe\u{200B}\u{E0041}",
         None,
     );
     store
@@ -288,6 +311,12 @@ fn context_payloads_and_secrets_never_reach_the_wire() {
         !body.contains('\x1b'),
         "control characters are stripped: {body:?}"
     );
+    for invisible in ['\u{202E}', '\u{200B}', '\u{E0041}'] {
+        assert!(
+            !body.contains(invisible),
+            "bidi overrides, zero-width and tag characters are stripped: {body:?}"
+        );
+    }
     assert!(
         body.contains("<script>alert(1)</script>"),
         "markup stays literal text; the browser renders it with textContent"
@@ -313,6 +342,83 @@ fn a_held_delivery_needs_the_human_and_blocks_its_recipient() {
     assert_eq!(held.health, SpaceHealth::NeedsYou { items: 1 });
     assert_eq!(lane(&held, "@b").activity, Activity::Blocked);
     assert_eq!(lane(&held, "@b").mailbox[0].state, DeliveryState::Held);
+}
+
+#[test]
+fn replies_results_and_nudges_are_not_open_requests() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b", "c"]);
+    send(&mut store, &ns, "m1", "a", "b", "Review the diff", None);
+    send(&mut store, &ns, "m2", "b", "a", "Two issues", Some("m1"));
+    send_as(
+        &mut store,
+        &ns,
+        "result-set/v1",
+        "m3",
+        "c",
+        "a",
+        "Findings",
+        None,
+    );
+    send_as(
+        &mut store,
+        &ns,
+        "coordination-nudge/v1",
+        "m4",
+        "c",
+        "b",
+        "Status?",
+        None,
+    );
+
+    let snapshot = snapshot(&mut store, &ns);
+
+    assert!(
+        lane(&snapshot, "@b").waiting_on.is_empty(),
+        "a reply awaits no answer: {:?}",
+        lane(&snapshot, "@b").waiting_on
+    );
+    assert!(
+        lane(&snapshot, "@c").waiting_on.is_empty(),
+        "results and nudges await no answer: {:?}",
+        lane(&snapshot, "@c").waiting_on
+    );
+    assert_eq!(lane(&snapshot, "@a").waiting_on, ["@b"]);
+}
+
+#[test]
+fn acknowledged_work_outranks_an_unrelated_held_delivery() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b", "c"]);
+    send(&mut store, &ns, "m1", "a", "b", "Run the suite", None);
+    let held = submit(&mut store, &ns, "b");
+    store
+        .transaction(|tx| tx.hold_delivery_attempt(&ns, &held, &attribution()))
+        .unwrap();
+    store
+        .transaction(|tx| {
+            tx.observe_agent_session(
+                &ns,
+                "observation-w1-b-working",
+                &id(&ns, "b"),
+                &AgentSessionId::new("session-w1-b"),
+                "working",
+                &MutationAttribution::new(ActorKind::Plugin, "test", 20),
+            )
+        })
+        .unwrap();
+
+    let snapshot = snapshot(&mut store, &ns);
+
+    assert_eq!(lane(&snapshot, "@b").activity, Activity::Working);
+    assert_eq!(
+        lane(&snapshot, "@b").mailbox[0].state,
+        DeliveryState::Held,
+        "the held delivery stays in the tray"
+    );
+    assert_eq!(snapshot.attention.len(), 1, "and in the attention ribbon");
 }
 
 #[test]

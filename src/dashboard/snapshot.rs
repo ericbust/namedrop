@@ -43,7 +43,8 @@ impl SpaceKey {
 }
 
 /// Untrusted collaborator text made safe for the wire: secrets redacted,
-/// control characters removed, length capped. HTML escaping is the browser's
+/// control and invisible formatting characters (bidi overrides, zero-width,
+/// tags) removed, length capped. HTML escaping is the browser's
 /// job (it renders through `textContent` only).
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct SafeText {
@@ -54,9 +55,9 @@ pub struct SafeText {
 impl SafeText {
     pub fn from_untrusted(raw: &str, max_chars: usize) -> Self {
         let redacted = crate::context::redact_disclosure_text(raw);
-        let mut chars = redacted
-            .chars()
-            .filter(|c| *c == '\n' || *c == '\t' || !c.is_control());
+        let mut chars = redacted.chars().filter(|c| {
+            (*c == '\n' || *c == '\t' || !c.is_control()) && !crate::domain::is_invisible_format(*c)
+        });
         let text: String = chars.by_ref().take(max_chars).collect();
         Self {
             text,
@@ -150,7 +151,9 @@ pub enum ParticipantKind {
     Terminal,
 }
 
-/// Precedence runs top to bottom: the first that applies wins.
+/// Mostly first-match top to bottom, except that acknowledged work in
+/// progress outranks a held delivery (which the tray and the attention
+/// ribbon already show); a blocked assignment still wins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activity {
@@ -208,6 +211,12 @@ impl MessageKind {
             _ if is_reply => Self::Reply,
             _ => Self::Mention,
         }
+    }
+
+    /// Whether its author now waits for an answer; replies, results and
+    /// nudges close or prod work rather than open it.
+    fn opens_request(self) -> bool {
+        matches!(self, Self::Mention | Self::Handoff | Self::Hook)
     }
 }
 
@@ -532,6 +541,7 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
         let mut aliases: Vec<String> = Vec::new();
         for entry in rows.mailbox.iter().filter(|e| {
             e.state.awaits_progress()
+                && MessageKind::of(&e.grammar_version, e.in_reply_to.is_some()).opens_request()
                 && e.author_is_human == human
                 && (human || e.author_address_id == author)
                 && e.address_id != author
@@ -629,7 +639,7 @@ fn activity(
         Activity::Retired
     } else if !address.bound || unoccupied {
         Activity::Offline
-    } else if blocked_assignment || inbound.iter().any(|e| e.state == DeliveryState::Held) {
+    } else if blocked_assignment {
         Activity::Blocked
     } else if address.agent_status.as_deref() == Some("working")
         || inbound
@@ -637,6 +647,8 @@ fn activity(
             .any(|e| e.state == DeliveryState::Acknowledged)
     {
         Activity::Working
+    } else if inbound.iter().any(|e| e.state == DeliveryState::Held) {
+        Activity::Blocked
     } else if waiting {
         Activity::Waiting
     } else {

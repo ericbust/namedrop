@@ -74,6 +74,8 @@ pub struct MailboxRow {
     pub author_address_id: String,
     pub author_is_human: bool,
     pub author_alias: String,
+    pub in_reply_to: Option<String>,
+    pub grammar_version: String,
     pub body: String,
     pub since_ms: i64,
     pub attempts: u32,
@@ -211,6 +213,7 @@ impl StateTransaction<'_> {
             &format!(
                 "SELECT d.address_id, d.delivery_id, d.message_id, d.state,
                         m.author_address_id, m.author_kind, m.author_alias_snapshot, m.body,
+                        m.in_reply_to, m.grammar_version,
                         COALESCE(ack.acknowledged_at_ms, a.created_at_ms, d.created_at_ms),
                         (SELECT COUNT(*) FROM delivery_attempts x
                          WHERE x.session_socket_id = d.session_socket_id
@@ -234,8 +237,10 @@ impl StateTransaction<'_> {
                     author_is_human: row.get::<_, String>(5)? == "human",
                     author_alias: row.get(6)?,
                     body: row.get(7)?,
-                    since_ms: row.get(8)?,
-                    attempts: row.get(9)?,
+                    in_reply_to: row.get(8)?,
+                    grammar_version: row.get(9)?,
+                    since_ms: row.get(10)?,
+                    attempts: row.get(11)?,
                 })
             },
         )?;
