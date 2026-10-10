@@ -18,7 +18,7 @@ use std::{
     process::{Command, ExitCode, Stdio},
     sync::{Arc, mpsc},
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
@@ -168,9 +168,7 @@ fn run_server(state: &Path, command_gate: Option<File>) -> Result<(), String> {
             pid: std::process::id(),
             port,
             instance: instance.clone(),
-            started_at_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
+            started_at_ms: hub::now_ms(),
         },
     )?;
     let (hub, commands) = mpsc::channel();

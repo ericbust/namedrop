@@ -596,7 +596,7 @@ function renderRow(model, m, band) {
     if (leg.to === m.author) continue;
     const toX = laneX(model, leg.to);
     const rightward = toX > authorX;
-        append(strip, el('span', {
+    append(strip, el('span', {
       class: ['wire', reply ? 'dashed' : null, rightward ? 'rightward' : 'leftward', isNew ? 'draw' : null],
       css: { left: Math.min(authorX, toX) + '%', width: Math.abs(toX - authorX) + '%' },
     }));
@@ -621,9 +621,7 @@ function renderRow(model, m, band) {
     icon('chevron', 'open-hint')),
   el('p', { class: 'body', text: m.body.text }));
 
-  const cardWrap = el('div', { class: ['card-wrap', anchorRight ? 'anchor-right' : null] }, card);
-  if (anchorRight) cardWrap.style.setProperty('--edge', (100 - authorX) + '%');
-  else cardWrap.style.setProperty('--edge', authorX + '%');
+  const cardWrap = el('div', { class: ['card-wrap', anchorRight ? 'anchor-right' : null], css: { '--edge': (anchorRight ? 100 - authorX : authorX) + '%' } }, card);
 
   return el('div', { class: ['row', band, state.selected === m.message_id ? 'selected' : null], id: 'msg-' + m.message_id },
     el('div', { class: 'gutter-cell' }, el('span', { class: 'band-bar' })),
@@ -635,7 +633,7 @@ function stageMini(leg) {
   return el('span', { class: ['mini', 'tone-' + st.tone], title: st.label }, icon(leg.stage.stage));
 }
 
-function legTitle(model, m, leg) {
+function legTitle(model, leg) {
   const st = LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued;
   const who = aliasOf(model, leg.to);
   if (leg.stage.stage === 'working') return `${who} is working on it (acknowledged ${ago(leg.stage.acked_at_ms)})`;
@@ -650,14 +648,14 @@ function legChip(model, m, leg) {
   return tipped(el('button', {
     class: ['leg', 'tone-' + st.tone, 'stage-' + leg.stage.stage, changed ? 'swap' : null],
     type: 'button',
-    'aria-label': legTitle(model, m, leg),
+    'aria-label': legTitle(model, leg),
     css: { left: laneX(model, leg.to) + '%' },
     onclick: (e) => {
       e.stopPropagation();
       if (leg.stage.stage === 'replied') jumpTo(leg.stage.reply_id);
       else openDrawer(m.message_id);
     },
-  }, icon(leg.stage.stage)), () => el('div', { class: 'tip-head', text: legTitle(model, m, leg) }));
+  }, icon(leg.stage.stage)), () => el('div', { class: 'tip-head', text: legTitle(model, leg) }));
 }
 
 function jumpTo(messageId) {
@@ -734,7 +732,7 @@ function isDoneStage(stage) {
 
 function renderHandoff(model, m) {
   const done = m.legs.filter((leg) => isDoneStage(leg.stage.stage)).length;
-  const stuck = m.legs.some((leg) => (LEG_STAGE[leg.stage.stage] || {}).tone === 'alert');
+  const stuck = m.legs.some((leg) => (LEG_STAGE[leg.stage.stage] || LEG_STAGE.queued).tone === 'alert');
   return el('button', { class: ['work-card', 'handoff', stuck ? 'is-stuck' : null], type: 'button', onclick: () => openDrawer(m.message_id) },
     el('div', { class: 'work-head' }, who(model, m.author), icon('arrow', 'faint'),
       el('span', { class: 'muted', text: m.legs.length === 1 ? aliasOf(model, m.legs[0].to) : `${m.legs.length} agents` }),
@@ -898,7 +896,6 @@ function renderLegDetail(model, m, leg) {
       mail ? el('div', { class: 'muted small' }, `in mailbox: ${(DELIVERY[mail.state] || DELIVERY.queued).label}`,
         mail.attempts > 1 ? ` · attempt ${mail.attempts}` : null, ' · since ', when(mail.since_ms)) : null));
 }
-
 
 // ---------- index page ----------
 

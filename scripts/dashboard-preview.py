@@ -187,6 +187,13 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(f"event: {event}\ndata: {data}\n\n".encode())
         self.wfile.flush()
 
+    def hold(self, snap):
+        self.frame("snapshot", json.dumps(live(snap)))
+        while True:
+            time.sleep(15)
+            self.wfile.write(b": ping\n\n")
+            self.wfile.flush()
+
     def stream(self, key):
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -196,18 +203,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             step = re.fullmatch(r"step-(\d+)", key)
             if step:
-                held = self.snaps[int(step.group(1)) - 1]
-                self.frame("snapshot", json.dumps(live(held)))
-                while True:
-                    time.sleep(15)
-                    self.wfile.write(b": ping\n\n")
-                    self.wfile.flush()
+                return self.hold(self.snaps[int(step.group(1)) - 1])
             if key in ("empty", "not-activated"):
-                self.frame("snapshot", json.dumps(live(variant(self.snaps, key))))
-                while True:
-                    time.sleep(15)
-                    self.wfile.write(b": ping\n\n")
-                    self.wfile.flush()
+                return self.hold(variant(self.snaps, key))
             if key == "restarting":
                 self.frame("snapshot", json.dumps(live(self.snaps[-1])))
                 self.frame("restarting", "{}")
