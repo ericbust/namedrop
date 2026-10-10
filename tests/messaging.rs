@@ -1,14 +1,12 @@
+mod support;
+
 use namedrop::{
-    ActorKind, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,
-    LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneAddressLifecycle,
+    ActorKind, LifecycleRuntime, MutationAttribution, PaneAddressId, PaneAddressLifecycle,
     PaneAddressRecord, PaneBindingId, PaneRoleId, StateNamespace, StateStore,
     execute_message_operation, parse_mentions, parse_prompt_mentions, recipient_outlooks,
 };
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::{path::Path, sync::atomic::AtomicU64};
+use support::{FakeHerdr, FixedClock, SequenceIds, TestDirectory, setup_addresses};
 
 #[test]
 fn mention_parser_separates_recipients_context_and_literals() {
@@ -147,122 +145,6 @@ fn mention_parser_keeps_at_sign_tokens_that_are_not_alias_shaped_literal() {
 @Planner are prose, but @planner is a Mention, and this ends with @"
     );
     assert_eq!(parsed.context_reference_aliases, ["planner"]);
-}
-
-static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
-
-struct TestDirectory {
-    path: PathBuf,
-    home: PathBuf,
-}
-
-impl TestDirectory {
-    fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "namedrop-message-test-{}-{}",
-            std::process::id(),
-            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir(&path).unwrap();
-        let home = path.join("home");
-        fs::create_dir(&home).unwrap();
-        Self { path, home }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Stands in for the user's home directory, so no test installs an Agent
-    /// Integration package into the developer's real user-level skill roots.
-    fn home(&self) -> &Path {
-        &self.home
-    }
-}
-
-impl Drop for TestDirectory {
-    fn drop(&mut self) {
-        fs::remove_dir_all(&self.path).unwrap();
-    }
-}
-
-struct FakeHerdr;
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let stdout = match args {
-            ["worktree", "list", "--cwd", "/repo", "--json"] => {
-                r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
-            }
-            ["pane", "list", "--workspace", "workspace-1"] => {
-                r#"{"result":{"panes":[{"pane_id":"pane-author","terminal_id":"terminal-author","tab_id":"tab-1","workspace_id":"workspace-1","agent_session":{"value":"session-author"},"agent_status":"idle"}]}}"#
-            }
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput {
-            stdout: stdout.to_owned(),
-        })
-    }
-}
-
-struct FixedClock;
-
-impl Clock for FixedClock {
-    fn now_unix_ms(&self) -> u64 {
-        42
-    }
-}
-
-struct SequenceIds(AtomicU64);
-
-impl IdGenerator for SequenceIds {
-    fn next_id(&self, kind: &str) -> String {
-        format!("{kind}-{}", self.0.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
-fn address(id: &str, alias: &str) -> PaneAddressDraft {
-    PaneAddressDraft {
-        id: PaneAddressId::new(id),
-        role_id: PaneRoleId::new(format!("role-{id}")),
-        role_name: alias.to_owned(),
-        role_description: format!("{alias} test role"),
-        alias: alias.to_owned(),
-    }
-}
-
-fn setup_addresses(directory: &TestDirectory) {
-    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
-    let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
-    let mut store = StateStore::open(directory.path()).unwrap();
-    store
-        .transaction(|transaction| {
-            transaction.activate_worktree(&namespace, &attribution)?;
-            for draft in [
-                address("address-author", "author"),
-                address("address-reviewer", "reviewer"),
-                address("address-planner", "planner"),
-                address("address-researcher", "researcher"),
-            ] {
-                transaction.create_pane_address(&namespace, &draft, &attribution)?;
-            }
-            transaction.bind_pane(
-                &namespace,
-                &PaneBindingId::new("binding-author"),
-                &PaneAddressId::new("address-author"),
-                "pane-author",
-                &attribution,
-            )?;
-            transaction.observe_agent_session(
-                &namespace,
-                "observation-author",
-                &PaneAddressId::new("address-author"),
-                &AgentSessionId::new("session-author"),
-                "idle",
-                &attribution,
-            )
-        })
-        .unwrap();
 }
 
 #[test]
