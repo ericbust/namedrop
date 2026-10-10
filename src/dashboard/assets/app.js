@@ -241,6 +241,7 @@ function renderSpace() {
   view.push(renderDrawer(snap));
   clear(root);
   append(root, view);
+  tip.hidden = true;
 
   const stage = document.querySelector('.stage');
   if (!stage) return;
@@ -407,9 +408,89 @@ function renderLaneHead(model, p) {
     renderTray(model, p));
 }
 
-function renderTray() {
-  return null;
+// ---------- mailbox tray ----------
+
+const TRAY_VISIBLE = 3;
+
+function envelopeIcon(mailState) {
+  const open = mailState === 'acknowledged';
+  const parts = open
+    ? [svg('path', { class: 'env-body', d: 'M1.5 7.5h17v7.5h-17z' }), svg('path', { class: 'env-flap', d: 'M1.5 7.5 10 1.8l8.5 5.7' }), svg('path', { class: 'env-fold', d: 'M1.5 7.5 10 12.5l8.5-5' })]
+    : [svg('rect', { class: 'env-body', x: 1.5, y: 3, width: 17, height: 12, rx: 2 }), svg('path', { class: 'env-fold', d: 'M2.2 4 10 9.6 17.8 4' })];
+  const badge = DELIVERY[mailState] && DELIVERY[mailState].glyph;
+  if (badge) {
+    parts.push(svg('circle', { class: 'env-badge', cx: 16.5, cy: 3.8, r: 3.8 }));
+    parts.push(svg('path', { class: 'env-badge-mark', d: badge === 'held' ? 'M15.4 2.4v2.8M17.6 2.4v2.8' : badge === 'failed' ? 'm15.2 2.5 2.6 2.6m0-2.6-2.6 2.6' : 'm15 5.3 3-3' }));
+  }
+  return svg('svg', { class: 'env-icon', viewBox: '0 0 21 16', 'aria-hidden': 'true' }, parts);
 }
+
+const tips = new WeakMap();
+
+function tipped(node, build) {
+  tips.set(node, build);
+  node.classList.add('has-tip');
+  return node;
+}
+
+function mailTip(item) {
+  const d = DELIVERY[item.state] || DELIVERY.queued;
+  return [
+    el('div', { class: 'tip-head' }, 'from ', el('b', { text: item.from }), ' · ', d.label),
+    el('div', { class: 'tip-body', text: item.preview.text + (item.preview.truncated ? '…' : '') }),
+    el('div', { class: 'tip-foot' }, 'since ', when(item.since_ms), item.attempts > 1 ? ` · attempt ${item.attempts}` : null),
+  ];
+}
+
+function renderTray(model, p) {
+  const items = p.mailbox;
+  if (p.address_id === 'human' && !items.length) return null;
+  const visible = items.slice(0, TRAY_VISIBLE);
+  const urgent = items.filter((item) => (DELIVERY[item.state] || DELIVERY.queued).tone === 'alert').length;
+  const label = !items.length ? 'mailbox empty'
+    : urgent ? (urgent === items.length ? `${urgent} held` : `${urgent} held of ${items.length}`)
+      : `${items.length} in mailbox`;
+  return el('div', { class: ['tray', items.length ? null : 'is-empty', urgent ? 'tone-alert' : null] },
+    el('div', { class: 'envelopes' },
+      visible.map((item) => {
+        const d = DELIVERY[item.state] || DELIVERY.queued;
+        return tipped(el('button', {
+          class: ['env', 'env-' + item.state, 'tone-' + d.tone, state.fresh.mail.has(item.delivery_id) ? 'drop' : null],
+          type: 'button',
+          'aria-label': `From ${item.from}, ${d.label}: ${item.preview.text}`,
+          onclick: () => (model.messages.has(item.message_id) ? jumpTo(item.message_id) : null),
+        }, envelopeIcon(item.state)), () => mailTip(item));
+      }),
+      items.length > TRAY_VISIBLE ? el('span', { class: 'env-more', text: `+${items.length - TRAY_VISIBLE}` }) : null),
+    el('span', { class: 'tray-label', text: label }));
+}
+
+// One floating tooltip for the whole page; content is built on demand.
+const tip = el('div', { class: 'tip', role: 'tooltip', hidden: true });
+document.body.appendChild(tip);
+
+function showTip(target) {
+  const build = tips.get(target);
+  if (!build) return;
+  clear(tip);
+  append(tip, build());
+  tip.hidden = false;
+  const r = target.getBoundingClientRect();
+  const w = tip.offsetWidth;
+  const left = Math.max(8, Math.min(window.innerWidth - w - 8, r.left + r.width / 2 - w / 2));
+  tip.style.left = left + 'px';
+  tip.style.top = r.bottom + 8 + 'px';
+}
+
+document.addEventListener('pointerover', (e) => {
+  const target = e.target instanceof Element ? e.target.closest('.has-tip') : null;
+  if (target) showTip(target);
+  else tip.hidden = true;
+});
+document.addEventListener('focusin', (e) => {
+  if (e.target instanceof Element && e.target.classList.contains('has-tip')) showTip(e.target);
+});
+document.addEventListener('focusout', () => { tip.hidden = true; });
 
 // ---------- the sequence diagram ----------
 

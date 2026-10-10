@@ -237,7 +237,10 @@ button { font: inherit; color: inherit; }
 /* ---------- stage, roster, lanes ---------- */
 
 .stage-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
-.sheet { min-width: calc(var(--gutter) + var(--lanes) * var(--lane-min)); position: relative; }
+.sheet {
+  min-width: calc(var(--gutter) + var(--lanes) * var(--lane-min)); min-height: 100%;
+  position: relative; display: flex; flex-direction: column;
+}
 
 .roster {
   position: sticky; top: 0; z-index: 5;
@@ -272,6 +275,7 @@ button { font: inherit; color: inherit; }
 .waiting b { font: 600 12px var(--mono); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .rows {
+  flex: 1;
   padding: 4px 0 96px;
   background-image: linear-gradient(to right, transparent calc(50% - 0.5px), var(--lane) calc(50% - 0.5px), var(--lane) calc(50% + 0.5px), transparent calc(50% + 0.5px));
   background-size: calc((100% - var(--gutter)) / var(--lanes)) 100%;
@@ -416,3 +420,48 @@ button { font: inherit; color: inherit; }
 .tl-item { display: flex; gap: 12px; align-items: flex-start; padding: 10px 0; border-top: 1px solid var(--line); }
 .tl-item b { font-family: var(--mono); font-size: 13px; }
 .tl-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+
+/* ---------- mailbox tray ---------- */
+
+.tray {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: auto; padding-top: 8px;
+  border-top: 1px solid var(--line);
+  min-height: 31px;
+}
+.envelopes { display: flex; align-items: center; }
+.env {
+  position: relative; padding: 0; margin-left: -5px;
+  width: 25px; height: 20px; display: grid; place-items: center;
+  background: none; border: 0; cursor: pointer; color: var(--tone);
+}
+.env:first-child { margin-left: 0; }
+.env-icon { width: 23px; height: 18px; overflow: visible; }
+.env-body { fill: var(--surface); stroke: currentColor; stroke-width: 1.4; stroke-linejoin: round; }
+.env-flap, .env-fold { fill: none; stroke: currentColor; stroke-width: 1.3; stroke-linejoin: round; stroke-linecap: round; }
+.env-submitted .env-body { fill: currentColor; }
+.env-submitted .env-fold { stroke: var(--surface); }
+.env-acknowledged .env-body { fill: color-mix(in srgb, currentColor 20%, var(--surface)); }
+.env-held .env-body, .env-failed .env-body { fill: color-mix(in srgb, currentColor 18%, var(--surface)); }
+.env-badge { fill: currentColor; stroke: var(--surface); stroke-width: 1.2; }
+.env-badge-mark { stroke: #fff; stroke-width: 1.3; stroke-linecap: round; fill: none; }
+.env:hover .env-body { stroke-width: 1.8; }
+.env:focus-visible { outline: 2px solid var(--flight); outline-offset: 1px; border-radius: 4px; }
+.env-more { margin-left: 4px; font-size: 11px; font-weight: 600; color: var(--text-2); }
+.tray-label { font-size: 11.5px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tray.is-empty .tray-label { color: var(--muted); }
+.tray.tone-alert .tray-label { color: var(--tone); font-weight: 600; }
+
+.tip {
+  position: fixed; z-index: 30; max-width: 300px;
+  padding: 9px 11px; border-radius: 9px;
+  background: var(--surface-3); color: var(--text);
+  border: 1px solid var(--line-strong);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  font-size: 12.5px; pointer-events: none;
+}
+.tip[hidden] { display: none; }
+.tip-head { color: var(--text-2); }
+.tip-head b { font-family: var(--mono); color: var(--text); }
+.tip-body { margin: 4px 0; line-height: 1.4; }
+.tip-foot { color: var(--muted); font-size: 11.5px; }
