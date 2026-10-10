@@ -29,5 +29,6 @@ State which paths were exercised and which remain unverified. A successful model
 - [Collaboration controls and Doctor](controls.md) covers workspace pause/resume and health, with address/thread controls as separate drives.
 - [Tour](tour.md) covers page navigation, close, reset, automatic opening, and popup entry points.
 - [Handoffs, terminal work, and context](handoffs.md) covers direct/delegated mentions, preview, replies, tracked reports, shell results, and freshness.
+- [Dashboard](dashboard.md) covers the shared loopback server, one-time links, live per-workspace snapshots, the space list, and idle exit.
 
 Not yet mapped: the `activate`, `deactivate`, `update` and `check` plugin actions, the startup reconcile, and pane lifecycle events. The helper uses activation only as a precondition.

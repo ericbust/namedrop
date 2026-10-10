@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Drive Namedrop's Rust CLI and terminal UI in disposable native Herdr panes, capture evidence, and verify naming, personas, groups, controls, tours, and collaboration behavior after changes.
+description: Drive Namedrop's Rust CLI and terminal UI in disposable native Herdr panes, capture evidence, and verify naming, personas, groups, controls, tours, the dashboard, and collaboration behavior after changes.
 ---
 
 # Verify Namedrop
@@ -37,10 +37,11 @@ Exit `0` means healthy, `1` means needs attention, and `2` means unavailable. Th
 .agents/skills/verify/scripts/control-namedrop.py --feature groups
 .agents/skills/verify/scripts/control-namedrop.py --feature controls
 .agents/skills/verify/scripts/control-namedrop.py --feature tour
+.agents/skills/verify/scripts/control-namedrop.py --feature dashboard
 .agents/skills/verify/scripts/control-namedrop.py --feature handoffs
 ```
 
-The helper sends public CLI commands through `herdr pane run` into real terminal panes. Each command has its own stdout, stderr, exit-status capture, and terminal transcript. It reads saved values through public list commands or a read-only SQLite connection. The tour recipe sends actual `right` and `esc` keys and captures both pages. It runs the tour renderer in the owned terminal; floating-popup actions and prefix shortcuts require a separately linked disposable plugin instance. The handoffs recipe proves the model-free rejections only.
+The helper sends public CLI commands through `herdr pane run` into real terminal panes. Each command has its own stdout, stderr, exit-status capture, and terminal transcript. It reads saved values through public list commands or a read-only SQLite connection. The tour recipe sends actual `right` and `esc` keys and captures both pages. It runs the tour renderer in the owned terminal; floating-popup actions and prefix shortcuts require a separately linked disposable plugin instance. The dashboard recipe starts the dashboard server from an owned pane and reads it over loopback HTTP. The handoffs recipe proves the model-free rejections only.
 
 The existing native collaboration check is currently blocked by stale inherited pane context:
 
@@ -56,11 +57,11 @@ The helper prints the retained directory, `.scratch/verify/nd-verify-*/`, on suc
 
 - `commands.jsonl`: actual argument arrays, stdout, stderr, and exit codes, including user actions and resulting reads.
 - Numbered `*-terminal.txt` files, plus `tour-first.txt` and `tour-second.txt` for the tour.
-- `handoffs.json` for the handoff rejections.
+- `dashboard-snapshot.json` and `dashboard.json` for the dashboard, and `handoffs.json` for the handoff rejections.
 - `instance.json`, `doctor.json`, `server.log`, and feature-specific saved values.
 - `state.sqlite3` after a successful drive, for independent inspection of persisted side effects.
 - `summary.json`: feature, commit, binary identity, limitations, and pass status. The commit alone does not identify uncommitted code; retain the relevant diff with proof of such changes.
-- `cleanup.json`: server exit, owned shell PIDs, remaining sockets, and cleanup verdict.
+- `cleanup.json`: server exit, owned shell PIDs, the dashboard server PID and whether it outlived the run, remaining sockets, and cleanup verdict.
 
 Require the real user action and its observable result. A final list or screenshot alone is insufficient. Verify stored mutations through a second read, and delivery through receipt and final disposition. Only substitute an external system at an existing production boundary, and label what the substitution cannot prove.
 
@@ -68,12 +69,12 @@ Preview is a read-only operation, but verify that claim: compare the fixture dat
 
 ## Cleanup
 
-The helper deletes fixture state only after its own server and shell processes have exited and its sockets have disappeared. Evidence lives outside the fixture and survives deletion. An incomplete cleanup retains the fixture and returns an error; inspect `cleanup.json` and the recorded PIDs before taking further action. Never kill by process name or stop the user's Herdr server.
+The helper deletes fixture state only after its own server and shell processes have exited and its sockets have disappeared. A dashboard server runs detached from Herdr, so the helper stops it by the PID in `server.json` after checking that its command line names the fixture state. Evidence lives outside the fixture and survives deletion. An incomplete cleanup retains the fixture and returns an error; inspect `cleanup.json` and the recorded PIDs before taking further action. Never kill by process name or stop the user's Herdr server.
 
 After a run, inspect the printed directory's `summary.json` and `cleanup.json`, then confirm `commands.jsonl` and the feature evidence still exist. A passed feature with incomplete cleanup is a failed verification run. Native collaboration has its own cleanup and evidence path described in the feature map.
 
 ## Helpers
 
-`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its five recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
+`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its six recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
 
 Use `/maintain-verification-skill` to reconcile the feature map and recipes as Namedrop changes.
