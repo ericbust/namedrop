@@ -1,0 +1,575 @@
+<title>Namedrop, narrated</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap">
+<style>
+  :root {
+    --bg: #000; --ink: #f5f5f7; --mute: #9a9aa3; --faint: #5c5c66; --line: rgba(255, 255, 255, 0.1);
+    --codex: #67e8f9; --claude: #fdba74; --shell: #c4b5fd;
+    --fresh: #34d399; --stale: #f87171;
+    --grad: linear-gradient(92deg, #a5b4ff 0%, #7de2d1 55%, #f0abfc 100%);
+    --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Helvetica Neue", Arial, sans-serif;
+    --hero: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter Tight", "Helvetica Neue", Arial, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    --gutter: max(16px, env(safe-area-inset-left));
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); overflow: hidden; font-family: var(--sans); -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+  button:focus-visible { outline: 2px solid #7de2d1; outline-offset: 2px; border-radius: 8px; }
+  .grad { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+  #stage { position: fixed; inset: 0; overflow: hidden; background:
+    radial-gradient(60% 50% at 50% 52%, rgba(110, 118, 150, 0.14), transparent 70%), #000; }
+
+  .hero { position: absolute; left: 0; right: 0; top: 0; bottom: 0; pointer-events: none; display: flex; align-items: flex-start; justify-content: center; text-align: center;
+    padding: 8.5vh var(--gutter) 0; font: 650 clamp(34px, 5vw, 96px)/1.04 var(--hero); letter-spacing: -0.035em; color: #fff; text-wrap: balance; will-change: opacity, transform, filter; }
+  .hero > div { max-width: 100%; }
+  .hero.center { align-items: center; padding-top: 0; padding-bottom: 2vh; }
+  .hero.center.xl { font-size: clamp(64px, 12vw, 220px); letter-spacing: -0.05em; }
+  .hero.center.xl .grad { padding: 0 0.06em 0.1em; }
+  .hero.left { justify-content: flex-start; align-items: center; text-align: left; padding: 0 0 0 7vw; width: 44vw; }
+  .hero.right { justify-content: flex-end; align-items: center; text-align: right; padding: 0 7vw 0 0; left: auto; width: 44vw; }
+  .hero .claude { color: var(--claude); } .hero .codex { color: var(--codex); } .hero .shell { color: var(--shell); }
+  .tall .hero { font-size: clamp(30px, 8.6vw, 60px); padding-top: 9vh; }
+  .tall .hero.left, .tall .hero.right { width: auto; left: 0; right: 0; justify-content: center; align-items: flex-start; text-align: center; padding: 9vh var(--gutter) 0; }
+  .tall .hero.center { padding-top: 0; }
+  .tall .hero.center.xl { font-size: clamp(56px, 16vw, 120px); }
+
+  .pane { position: absolute; width: 600px; height: 380px; font: 500 15.5px/22px var(--mono); color: #c9cad2; --dim: 0; }
+  .pane.claude { --c: var(--claude); } .pane.codex { --c: var(--codex); } .pane.shell { --c: var(--shell); }
+  .pane .win { position: absolute; inset: 0; border-radius: 14px; overflow: hidden; background: rgba(12, 12, 14, 0.97);
+    border: 1px solid rgba(255, 255, 255, 0.1); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 40px 90px rgba(0, 0, 0, 0.7); }
+  .pane .win::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1.5px; background: var(--c); opacity: 0.6; z-index: 2; }
+  .pane .win::after { content: ""; position: absolute; inset: 0; background: #000; opacity: calc(var(--dim) * 0.75); pointer-events: none; z-index: 3; }
+  .pane .bar { position: relative; height: 36px; display: flex; align-items: center; padding: 0 14px; gap: 8px; background: #141416; border-bottom: 1px solid rgba(255, 255, 255, 0.05); font: 500 13px var(--sans); }
+  .pane .bar i { width: 11px; height: 11px; border-radius: 50%; background: #3a3a40; }
+  .pane .bar i:nth-child(1) { background: #ff5f57; } .pane .bar i:nth-child(2) { background: #febc2e; } .pane .bar i:nth-child(3) { background: #28c840; }
+  .pane .ttl { position: absolute; left: 0; right: 0; text-align: center; color: #c9cad2; font-weight: 600; pointer-events: none; }
+  .pane .rt { margin-left: auto; color: var(--c); letter-spacing: 0.01em; opacity: 0.85; }
+  .pane .body { position: absolute; top: 36px; bottom: 30px; left: 0; right: 0; padding: 10px 16px; display: flex; flex-direction: column; justify-content: flex-end; gap: 3px; overflow: hidden; }
+  .pane .foot { position: absolute; bottom: 0; left: 0; right: 0; height: 30px; padding: 0 16px; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid rgba(255, 255, 255, 0.05); font: 500 12.5px var(--sans); color: var(--faint); }
+  .st { display: inline-flex; align-items: center; gap: 8px; color: var(--mute); }
+  .st i { width: 7px; height: 7px; border-radius: 50%; background: #5c5c66; }
+  .st.work { color: #fde68a; } .st.work i { background: #fbbf24; box-shadow: 0 0 8px #fbbf24; }
+  .st.wait { color: #c7d2fe; } .st.wait i { background: #a5b4ff; box-shadow: 0 0 8px #a5b4ff; }
+  .st.done { color: #a7f3d0; } .st.done i { background: #34d399; box-shadow: 0 0 8px #34d399; }
+  .r { display: flex; gap: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .r b { flex: 0 0 14px; font-weight: 700; text-align: center; }
+  .r > span { flex: 1; min-width: 0; }
+  .r.u { background: rgba(255, 255, 255, 0.07); border-radius: 7px; padding: 4px 9px 4px 6px; color: #fff; }
+  .r.u b { color: var(--c); }
+  .r.sh b { color: var(--shell); } .r.sh { color: #fff; }
+  .r.a { color: #a9aab4; } .r.a b { color: var(--c); } .r.w { color: #a9aab4; } .r.w b { color: #fbbf24; animation: pulse 1.1s ease-in-out infinite; }
+  .r.say { color: #fff; font-weight: 600; } .r.say b { color: var(--c); }
+  .r.ok { color: #b9f5da; } .r.ok b { color: #34d399; } .r.bad { color: #fecaca; } .r.bad b { color: #f87171; }
+  .r.f { color: #35353c; flex: none; } .r.d { color: #5c5c66; } .r.o { color: #7d7e8a; }
+  .caret { display: inline-block; width: 0.55em; height: 1.05em; vertical-align: -3px; background: #e5e5ea; margin-left: 1px; animation: blink 1s steps(1) infinite; }
+  .dots::after { content: "…"; }
+  .mn { font-weight: 700; color: #c9ccff; }
+  .mn.reviewer, .mn.tester { color: var(--claude); } .mn.coder { color: var(--codex); } .mn.build { color: var(--shell); }
+  .mn.review-team { background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes pulse { 50% { opacity: 0.35; } }
+
+  .chip { position: absolute; left: 0; bottom: calc(100% + 14px); padding: 9px 18px 9px 14px; border-radius: 16px;
+    background: rgba(18, 18, 21, 0.92); border: 1px solid rgba(255, 255, 255, 0.12); color: #fff; white-space: nowrap; font: 650 26px/1.1 var(--hero); letter-spacing: -0.02em;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5); }
+  .chip .line { display: flex; align-items: center; gap: 12px; }
+  .chip i { width: 10px; height: 10px; border-radius: 50%; background: var(--c); box-shadow: 0 0 12px var(--c); }
+  .chip em { font-style: normal; font-weight: 500; font-size: 19px; color: var(--c); font-family: var(--sans); letter-spacing: 0; }
+  .chip em.solo { font-weight: 600; color: #f2f3f8; font-size: 22px; }
+  .chip small { display: block; margin-top: 6px; font: 500 16px/1.3 var(--sans); color: #a9aab4; white-space: normal; max-width: 520px; min-height: 20px; letter-spacing: 0; }
+
+  .pop { position: absolute; font-family: var(--sans); color: var(--ink); }
+  .pop h5 { margin: 0 0 10px; font: 600 20px/1.2 var(--hero); letter-spacing: -0.01em; }
+  .node { text-align: center; padding: 12px 22px 14px; border-radius: 18px; background: rgba(18, 18, 21, 0.94); border: 1px dashed rgba(255, 255, 255, 0.3); }
+  .node small { display: block; font: 600 12px var(--sans); letter-spacing: 0.14em; text-transform: uppercase; color: var(--mute); }
+  .node b { display: block; margin-top: 3px; font: 650 32px/1.1 var(--hero); letter-spacing: -0.02em; color: #c3c4cc; text-decoration: line-through; text-decoration-color: transparent; text-decoration-thickness: 3px; }
+  .verdict { padding: 22px 26px 24px; border-radius: 22px; background: rgba(12, 12, 14, 0.96); border: 1px solid color-mix(in srgb, var(--vc) 50%, transparent); box-shadow: 0 0 70px color-mix(in srgb, var(--vc) 18%, transparent), 0 30px 80px rgba(0, 0, 0, 0.6); }
+  .verdict.fresh { --vc: var(--fresh); } .verdict.stale { --vc: var(--stale); }
+  .verdict b { display: block; font: 650 60px/1.05 var(--hero); letter-spacing: -0.035em; color: var(--vc); } .verdict span { display: block; margin-top: 8px; font: 500 21px/1.35 var(--sans); color: #c3c4cc; }
+  .keys { display: flex; align-items: center; justify-content: center; gap: 14px; }
+  .keys em { font: 500 20px var(--sans); color: var(--mute); font-style: normal; }
+  .key { min-width: 62px; padding: 12px 20px 14px; text-align: center; font: 700 28px/1 var(--sans); color: #eef0fa; border-radius: 14px; background: linear-gradient(#26262b, #18181c); border: 1px solid rgba(255, 255, 255, 0.18); box-shadow: 0 6px 0 #0a0a0c, 0 18px 40px rgba(0, 0, 0, 0.5); }
+  .status { padding: 20px 20px 14px; border-radius: 8px; background: #050506; border: 2px solid #5eead4; box-shadow: 0 0 60px rgba(94, 234, 212, 0.2), 0 40px 90px rgba(0, 0, 0, 0.7); font: 500 14.5px/21px var(--mono); color: #e1e4ee; }
+  .status .ttl { position: absolute; top: -13px; left: 14px; padding: 0 8px; background: #050506; color: #5eead4; font: 600 15px var(--mono); }
+  .status .hd { display: flex; flex-wrap: wrap; gap: 0 14px; justify-content: space-between; margin-bottom: 8px; } .status .hd span { color: var(--mute); }
+  .status h6 { margin: 12px 0 2px; font: 700 14.5px var(--mono); color: #fff; }
+  .status p { margin: 0; color: #cdd1e0; } .status p.sub { color: #8a90a6; }
+  .status .aw { display: flex; justify-content: space-between; gap: 16px; color: #cdd1e0; } .status .aw span { text-align: right; }
+  .status .prep { color: #8a90a6; font-style: normal; } .status .ft { margin-top: 12px; color: #aab0c4; } .status .ft b { color: #fff; }
+  .guard { padding: 22px 24px 24px; border-radius: 22px; background: rgba(12, 12, 14, 0.96); border: 1px solid rgba(255, 255, 255, 0.14); box-shadow: 0 30px 90px rgba(0, 0, 0, 0.65); }
+  .guard p { margin: 0 0 8px; font: 500 19px/1.4 var(--sans); color: #a9aab4; } .guard p.big { font-size: 22px; font-weight: 600; color: #fff; margin-bottom: 0; }
+  .guard .quote { padding: 14px 16px; margin-bottom: 12px; border-radius: 12px; background: #0a0a0c; border-left: 3px solid #f87171; font: 500 20px/1.4 var(--sans); color: #c3c4cc; }
+  .cmd .line { display: flex; align-items: center; justify-content: center; gap: 22px; padding: 30px 40px; border-radius: 22px; background: rgba(8, 8, 10, 0.96); border: 1px solid rgba(125, 226, 209, 0.45); box-shadow: 0 0 80px rgba(125, 226, 209, 0.14), 0 30px 90px rgba(0, 0, 0, 0.6); font: 500 36px/1.3 var(--mono); color: #fff; text-align: left; }
+  .cmd .line b { color: #7de2d1; }
+
+  .tall .pane { width: 440px; height: 300px; font-size: 17px; line-height: 24px; }
+  .tall .chip small { max-width: 400px; }
+  .tall .verdict b { font-size: 44px; }
+  .tall .cmd .line { padding: 20px 22px; gap: 14px; font-size: 22px; }
+  .tall .guard { padding: 18px 20px 20px; }
+
+  .card { position: absolute; width: 400px; padding: 14px 20px 16px; border-radius: 20px; color: #ececf1; font-family: var(--sans);
+    background: linear-gradient(rgba(14, 14, 17, 0.97), rgba(14, 14, 17, 0.97)) padding-box, linear-gradient(100deg, var(--from, #a5b4ff), var(--to, #7de2d1)) border-box;
+    border: 1.5px solid transparent; box-shadow: 0 24px 70px rgba(0, 0, 0, 0.6); }
+  .card .hd { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; font: 700 18px var(--sans); }
+  .card .who { display: inline-flex; align-items: center; gap: 8px; color: var(--c, #e5e7f0); }
+  .card .who i { width: 9px; height: 9px; border-radius: 50%; background: var(--c, #e5e7f0); box-shadow: 0 0 10px var(--c, #e5e7f0); }
+  .card .who.you { --c: #e5e5ea; }
+  .card em { font-style: normal; color: var(--faint); font-weight: 500; }
+  .card .lab { margin-left: auto; font: 600 14px var(--sans); color: var(--mute); letter-spacing: 0.02em; }
+  .card .lab.ping { margin: 0; font: 700 24px var(--sans); color: #fff; }
+  .card .msg { margin-top: 8px; font: 500 21px/1.35 var(--sans); }
+  .card .msg.mono { font: 500 18px/1.4 var(--mono); color: #e8eaf3; }
+  .chipsx { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+  .chipx { padding: 4px 11px; border-radius: 999px; font: 600 14px var(--sans); color: #c9ccff; background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.14); }
+
+  #top { position: fixed; left: var(--gutter); right: var(--gutter); top: max(14px, env(safe-area-inset-top)); display: flex; align-items: baseline; justify-content: space-between; pointer-events: none; z-index: 5; transition: opacity 0.5s; }
+  #kicker { display: flex; align-items: baseline; gap: 12px; font: 600 15px var(--sans); color: var(--mute); }
+  #kicker b { flex: none; font: 500 13px var(--mono); color: #7de2d1; letter-spacing: 0.08em; }
+  #kicker span { color: #c3c4cc; font-weight: 600; font-size: 16px; letter-spacing: -0.01em; }
+  #brand { font: 700 18px var(--hero); letter-spacing: -0.03em; }
+  #caption { position: fixed; left: 50%; bottom: 84px; transform: translateX(-50%); width: min(960px, calc(100% - 2 * var(--gutter))); z-index: 5; text-align: center; pointer-events: none; }
+  #caption p { display: inline-block; margin: 0; font: 500 clamp(14px, 1.05vw, 19px)/1.4 var(--sans); color: rgba(255, 255, 255, 0.62); text-wrap: balance; text-shadow: 0 1px 12px #000; }
+  #caption.off, #caption.empty { visibility: hidden; }
+  #progress { position: fixed; left: 0; right: 0; bottom: 0; height: 2px; z-index: 6; background: rgba(255, 255, 255, 0.1); pointer-events: none; }
+  #progress i { display: block; height: 100%; width: 0; background: var(--grad); }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 30px var(--gutter) max(14px, env(safe-area-inset-bottom)); z-index: 8; display: flex; align-items: center; gap: 14px;
+    background: linear-gradient(transparent, rgba(0, 0, 0, 0.85) 55%); transition: opacity 0.5s; }
+  body.idle #bar, body.idle #top, body.idle #hint { opacity: 0; pointer-events: none; }
+  .ctl { width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center; flex: none; background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.14); transition: background 0.2s; }
+  .ctl:hover { background: rgba(255, 255, 255, 0.16); }
+  .ctl svg { width: 18px; height: 18px; fill: #f2f4fb; }
+  .ctl.txt { width: auto; padding: 0 14px; border-radius: 999px; font: 600 14px var(--sans); color: #e8eaf4; }
+  .ctl[aria-pressed="false"] { opacity: 0.55; }
+  #time { font: 500 13px var(--mono); color: var(--mute); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #seek { position: relative; flex: 1; height: 30px; display: flex; align-items: center; gap: 3px; cursor: pointer; touch-action: none; min-width: 60px; }
+  #seek .seg { position: relative; height: 4px; border-radius: 3px; background: rgba(255, 255, 255, 0.16); overflow: hidden; transition: height 0.15s; }
+  #seek:hover .seg { height: 7px; }
+  #seek .seg i { position: absolute; inset: 0; width: 0; background: var(--grad); }
+  #seek .seg.cur { background: rgba(255, 255, 255, 0.28); }
+  #seekTip { position: absolute; bottom: 30px; padding: 5px 11px; border-radius: 8px; background: #111114; border: 1px solid var(--line); font: 600 13px var(--sans); white-space: nowrap; pointer-events: none; opacity: 0; transform: translateX(-50%); }
+  #audioNote { position: fixed; right: var(--gutter); top: 44px; z-index: 5; padding: 6px 12px; border-radius: 10px; background: rgba(251, 191, 36, 0.14); border: 1px solid rgba(251, 191, 36, 0.4); color: #fde68a; font: 500 13px var(--sans); display: none; }
+  #hint { position: fixed; right: var(--gutter); bottom: 74px; z-index: 5; font: 500 12px var(--mono); color: var(--faint); pointer-events: none; transition: opacity 0.5s; }
+  #sheet { position: fixed; top: 0; bottom: 0; left: 0; width: min(380px, 100%); z-index: 9; padding: 70px 16px 24px var(--gutter); background: rgba(0, 0, 0, 0.96); border-right: 1px solid var(--line);
+    transform: translateX(-102%); transition: transform 0.3s ease; overflow-y: auto; }
+  #sheet.open { transform: none; }
+  #sheet h2 { margin: 0 0 14px; font: 600 12px var(--sans); letter-spacing: 0.14em; text-transform: uppercase; color: var(--faint); }
+  #sheet button.chap { display: grid; grid-template-columns: 34px 1fr auto; align-items: baseline; width: 100%; text-align: left; padding: 11px 12px; border-radius: 10px; font: 500 16px/1.3 var(--sans); color: #b8bdd0; }
+  #sheet button.chap:hover { background: rgba(255, 255, 255, 0.06); }
+  #sheet button.chap b { font: 500 12px var(--mono); color: var(--faint); }
+  #sheet button.chap small { font: 500 12px var(--mono); color: var(--faint); }
+  #sheet button.chap[aria-current="true"] { color: #fff; background: rgba(125, 226, 209, 0.1); box-shadow: inset 3px 0 0 #7de2d1; }
+  #sheetClose { position: absolute; top: 14px; right: 14px; }
+
+  .overlay { position: fixed; inset: 0; z-index: 7; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 24px var(--gutter); background: #000; transition: opacity 0.5s; }
+  .overlay[hidden] { display: none; }
+  .overlay h1 { margin: 0; font: 700 clamp(64px, 13vw, 220px)/1 var(--hero); letter-spacing: -0.05em; padding: 0 0.05em 0.1em; }
+  .overlay .what { margin: 6px 0 0; max-width: 30ch; font: 500 clamp(20px, 2.4vw, 38px)/1.25 var(--hero); color: #c3c4cc; letter-spacing: -0.02em; text-wrap: balance; }
+  .play { margin-top: 38px; display: inline-flex; align-items: center; gap: 14px; padding: 18px 40px 18px 32px; border-radius: 999px; font: 700 22px var(--sans); color: #07080d; background: var(--grad); box-shadow: 0 20px 60px rgba(125, 226, 209, 0.22); }
+  .play svg { width: 22px; height: 22px; fill: #07080d; }
+  .play:hover { filter: brightness(1.08); }
+  .overlay .meta { margin: 22px 0 0; font: 500 14px var(--mono); color: var(--faint); letter-spacing: 0.04em; }
+  #end code { display: inline-block; margin-top: 30px; max-width: 100%; padding: 14px 22px; border-radius: 14px; background: rgba(10, 10, 12, 0.9); border: 1px solid rgba(125, 226, 209, 0.45); font: 500 clamp(13px, 1.5vw, 22px) var(--mono); color: #fff; overflow-wrap: anywhere; text-align: left; }
+  #err { margin-top: 18px; max-width: 520px; color: #fecaca; font: 500 15px var(--sans); }
+
+  @media (max-width: 720px) {
+    #hint, #fs { display: none; }
+    #time .tot { display: none; }
+    #bar { gap: 10px; }
+    .ctl.txt { padding: 0 11px; }
+    #kicker span { font-size: 15px; }
+    #brand { display: none; }
+  }
+  @media (max-height: 520px) { #caption { bottom: 70px; } #hint { display: none; } }
+  @media (prefers-reduced-motion: reduce) { .caret, .r.w b { animation: none; } #sheet, .overlay, #bar, #top, #hint { transition: none; } }
+  body.film :is(#top, #bar, #hint, #progress, #caption, #audioNote, #sheet) { display: none; }
+</style>
+
+<div id="stage" aria-hidden="true"></div>
+
+<div id="top">
+  <div id="kicker"><b id="kNum">01 / 08</b><span id="kTitle"></span></div>
+  <div id="brand" class="grad">Namedrop</div>
+</div>
+
+<div id="caption" class="empty" role="status" aria-live="polite"><p id="capText"></p></div>
+<div id="audioNote" role="status">Narration audio is unavailable. Following the script on a clock.</div>
+<div id="hint">Space play · ← → chapters · C captions · T index</div>
+<div id="progress"><i id="progressFill"></i></div>
+
+<div id="bar">
+  <button class="ctl" id="play" aria-label="Play"><svg viewBox="0 0 24 24" id="playIcon"><path d="M7 4.5v15l13-7.5z"/></svg></button>
+  <div id="time"><span id="tNow">0:00</span><span class="tot"> / <span id="tTot">0:00</span></span></div>
+  <div id="seek" role="slider" aria-label="Seek" tabindex="0" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="seekTip"></div></div>
+  <button class="ctl txt" id="chapters" aria-label="Chapter index" aria-expanded="false">Chapters</button>
+  <button class="ctl txt" id="cc" aria-label="Captions" aria-pressed="false">CC</button>
+  <button class="ctl" id="fs" aria-label="Fullscreen"><svg viewBox="0 0 24 24"><path d="M4 4h6v2H6v4H4zm10 0h6v6h-2V6h-4zM4 14h2v4h4v2H4zm14 0h2v6h-6v-2h4z"/></svg></button>
+</div>
+
+<aside id="sheet" aria-label="Chapters">
+  <h2>Chapters</h2>
+  <div id="chapList"></div>
+  <button class="ctl" id="sheetClose" aria-label="Close chapter index"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" stroke="#f2f4fb" stroke-width="2.2" stroke-linecap="round" fill="none"/></svg></button>
+</aside>
+
+<section id="start" class="overlay">
+  <h1 class="grad">Namedrop</h1>
+  <p class="what">@mentions for your agents.</p>
+  <button class="play" id="startPlay"><svg viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5z"/></svg>Play</button>
+  <p class="meta" id="startMeta">2 min 50 s</p>
+  <p id="err" hidden></p>
+</section>
+
+<section id="end" class="overlay" hidden>
+  <h1 class="grad">Namedrop</h1>
+  <code>herdr plugin install ericbust/namedrop --ref main</code>
+  <button class="play" id="replay"><svg viewBox="0 0 24 24"><path d="M12 5a7 7 0 1 1-6.6 4.7H3.3L6.8 5.5l3.5 4.2H8A5 5 0 1 0 12 7z"/></svg>Replay</button>
+</section>
+
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const q = new URLSearchParams(location.search);
+const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+const IDLE_MS = 2500;
+const film = q.has('film');
+
+const S = { ci: 0, t: 0, playing: false, clock: 'audio', ended: false, started: false };
+let tl = null, stage = null, chapStart = [], total = 0, audio = null;
+let wallRef = 0, lastAudioT = -1, progressAt = 0, lastKey = '', capKey = '', idleAt = 0;
+let seekTarget = null;
+const failed = new Set(), blobs = new Map();
+
+async function boot() {
+  try {
+    tl = await (await fetch('timeline.json')).json();
+  } catch (err) {
+    console.error('Could not load timeline.json', err);
+    $('err').hidden = false; $('err').textContent = 'Could not load timeline.json, so there is nothing to play.';
+    return;
+  }
+  tl.chapters.forEach((c) => { chapStart.push(total); total += c.duration; });
+  $('tTot').textContent = fmt(total);
+  $('startMeta').textContent = `${Math.floor(total / 60)} min ${Math.round(total % 60)} s`;
+  buildChapterList(); buildSeek();
+  setCaptions(readCaptions());
+
+  audio = Object.assign(new Audio(), { preload: 'auto' });
+  audio.addEventListener('ended', () => { if (S.clock === 'audio' && S.playing) advance(); });
+  audio.addEventListener('error', () => {
+    const src = audio.getAttribute('src');
+    if (!src) return;
+    // A CSP without blob: in media-src refuses the blob; the plain URL still plays from the top.
+    if (src.startsWith('blob:')) { seekTarget ??= S.t; audio.src = tl.chapters[S.ci].audio; audio.load(); return; }
+    audioFailed('error event');
+  });
+  for (const ev of ['loadedmetadata', 'progress', 'canplaythrough']) audio.addEventListener(ev, applySeek);
+
+  try {
+    const mod = await import('./stage.js');
+    stage = new mod.Stage($('stage'), { reduced });
+    stage.setTimeline(tl);
+    for (const beat of stage.missingBeats()) console.error(`No stage entry for beat "${beat}". Add BEATS["${beat}"] in stage.js.`);
+  } catch (err) {
+    console.error('The 3D stage failed to load. Captions and narration still run.', err);
+  }
+  const startCi = Math.max(0, tl.chapters.findIndex((c) => c.id === q.get('ch')));
+  const startT = clamp(parseFloat(q.get('t')) || 0, 0, tl.chapters[startCi].duration);
+  if (q.has('still') || film) return still(startCi, startT);
+  S.ci = startCi; S.t = startT;
+  loadChapter(S.ci);
+  requestAnimationFrame(tick);
+}
+
+async function still(ci, t) {
+  $('start').hidden = true;
+  document.body.classList.toggle('film', film);
+  S.started = true; S.ci = ci; S.t = t;
+  show();
+  await Promise.race([document.fonts.ready, new Promise((r) => setTimeout(r, 2500))]);
+  show();
+  document.body.dataset.ready = '1';
+}
+
+window.renderAt = (ci, t) => { S.ci = ci; S.t = t; show(true); };
+
+// Each chapter's MP3 plays from a blob URL: a host without Range requests leaves a plain URL
+// unseekable, and Chrome then snaps any seek back to 0.
+function chapterSrc(ci) {
+  if (!blobs.has(ci)) {
+    const p = fetch(tl.chapters[ci].audio).then((r) => (r.ok ? r.blob() : Promise.reject(new Error(`HTTP ${r.status}`)))).then((b) => URL.createObjectURL(b));
+    p.catch(() => blobs.delete(ci));
+    blobs.set(ci, p);
+  }
+  return blobs.get(ci);
+}
+
+function loadChapter(ci) {
+  S.clock = failed.has(ci) ? 'wall' : 'audio';
+  $('audioNote').style.display = S.clock === 'wall' ? 'block' : 'none';
+  wallRef = performance.now() - S.t * 1000;
+  audio.pause();
+  audio.removeAttribute('src');
+  if (S.clock === 'audio') {
+    seekTarget = S.t;
+    chapterSrc(ci).then((url) => {
+      if (S.ci !== ci || S.clock !== 'audio') return;
+      audio.src = url;
+      audio.load();
+      applySeek();
+    }, (err) => { if (S.ci === ci) audioFailed(String(err)); });
+  }
+  if (ci + 1 < tl.chapters.length) chapterSrc(ci + 1).catch(() => {});
+}
+
+// Until the audio can take the target time, the clock holds it; writing currentTime early would snap to 0.
+function seekable(t) {
+  for (let i = 0; i < audio.seekable.length; i++) if (audio.seekable.start(i) <= t && t <= audio.seekable.end(i)) return true;
+  return t < 0.05;
+}
+function applySeek() {
+  if (seekTarget === null || S.clock !== 'audio' || audio.readyState < 1 || !seekable(seekTarget)) return;
+  audio.currentTime = seekTarget;
+  seekTarget = null;
+  if (S.playing) startAudio();
+}
+
+function startAudio() {
+  progressAt = performance.now();
+  if (seekTarget !== null) return;
+  audio.play().catch((err) => {
+    if (err?.name === 'NotAllowedError') { S.playing = false; syncButtons(); } else if (err?.name !== 'AbortError') audioFailed(String(err));
+  });
+}
+
+function audioFailed(why) {
+  if (S.clock === 'wall') return;
+  console.warn(`Narration audio for "${tl.chapters[S.ci].id}" failed (${why}); this chapter follows a wall clock.`);
+  failed.add(S.ci);
+  S.clock = 'wall'; seekTarget = null; wallRef = performance.now() - S.t * 1000;
+  audio.pause();
+  $('audioNote').style.display = 'block';
+}
+
+function play() {
+  if (!S.started) return;
+  if (S.ended) return replay();
+  S.playing = true; wallRef = performance.now() - S.t * 1000;
+  if (S.clock === 'audio') startAudio();
+  syncButtons();
+}
+function pause() { S.playing = false; if (audio) audio.pause(); syncButtons(); }
+const toggle = () => (S.playing ? pause() : play());
+
+function seekTo(ci, t) {
+  ci = clamp(ci, 0, tl.chapters.length - 1);
+  const dur = tl.chapters[ci].duration;
+  t = clamp(t, 0, dur - 0.05);
+  S.ended = false; $('end').hidden = true;
+  const changed = ci !== S.ci;
+  S.ci = ci; S.t = t; lastKey = ''; wallRef = performance.now() - t * 1000;
+  if (changed) loadChapter(ci);
+  else if (S.clock === 'audio') {
+    seekTarget = t;
+    if (S.playing) audio.pause();
+    applySeek();
+  }
+  if (S.playing && S.clock === 'audio') startAudio();
+}
+
+function advance() {
+  if (S.ci + 1 < tl.chapters.length) { seekTo(S.ci + 1, 0); return; }
+  S.t = tl.chapters[S.ci].duration; S.playing = false; S.ended = true;
+  if (audio) audio.pause();
+  $('end').hidden = false; syncButtons();
+}
+
+function replay() { seekTo(0, 0); S.playing = false; play(); }
+
+function startPlaying() {
+  S.started = true;
+  $('start').hidden = true;
+  seekTo(S.ci, S.t);
+  play();
+}
+
+function tick() {
+  const now = performance.now();
+  const dur = tl.chapters[S.ci].duration;
+  if (S.playing) {
+    if (S.clock === 'audio') {
+      if (seekTarget === null && audio.readyState >= 2) S.t = audio.currentTime;
+      if (seekTarget === null && audio.currentTime !== lastAudioT) { lastAudioT = audio.currentTime; progressAt = now; }
+      else if (now - progressAt > 3500) audioFailed(seekTarget === null ? 'no progress' : 'seek target never buffered');
+    } else {
+      S.t = (now - wallRef) / 1000;
+    }
+    if (S.t >= dur - 0.02) advance();
+  }
+  if (S.started) show();
+  document.body.classList.toggle('idle', S.playing && now - idleAt > IDLE_MS && !$('sheet').classList.contains('open'));
+  requestAnimationFrame(tick);
+}
+
+function lineIndex(ci, t) {
+  const lines = tl.chapters[ci].lines;
+  let i = -1;
+  lines.forEach((l, n) => { if (t >= l.start - 0.05) i = n; });
+  return i;
+}
+
+function setCaption(i) {
+  const key = `${S.ci}:${i}`;
+  if (key === capKey) return;
+  capKey = key;
+  $('caption').classList.toggle('empty', i < 0);
+  if (i >= 0) $('capText').textContent = tl.chapters[S.ci].lines[i].say;
+}
+
+function show(force) {
+  const key = `${S.ci}|${S.t.toFixed(3)}|${innerWidth}x${innerHeight}`;
+  if (!force && key === lastKey) return;
+  lastKey = key;
+  stage?.renderAt(S.ci, S.t);
+  const ch = tl.chapters[S.ci];
+  setCaption(lineIndex(S.ci, S.t));
+  $('kNum').textContent = `${String(S.ci + 1).padStart(2, '0')} / ${String(tl.chapters.length).padStart(2, '0')}`;
+  $('kTitle').textContent = ch.title;
+  const g = chapStart[S.ci] + S.t;
+  $('tNow').textContent = fmt(g);
+  $('progressFill').style.width = `${((g / total) * 100).toFixed(2)}%`;
+  $('seek').setAttribute('aria-valuenow', String(Math.round((g / total) * 100)));
+  $('seek').setAttribute('aria-valuetext', `${ch.title}, ${fmt(g)}`);
+  document.querySelectorAll('#seek .seg').forEach((seg, i) => {
+    const c = tl.chapters[i];
+    seg.firstElementChild.style.width = `${clamp(i < S.ci ? 1 : i === S.ci ? S.t / c.duration : 0, 0, 1) * 100}%`;
+    seg.classList.toggle('cur', i === S.ci);
+  });
+  document.querySelectorAll('#chapList .chap').forEach((b, i) => b.setAttribute('aria-current', String(i === S.ci)));
+  if (film) followFilmClock(g);
+}
+
+// The recorder shoots frames slower than real time, and CSS animations run on wall time.
+function followFilmClock(g) {
+  for (const a of document.getAnimations()) { a.pause(); a.currentTime = g * 1000; }
+}
+
+function syncButtons() {
+  $('play').setAttribute('aria-label', S.playing ? 'Pause' : 'Play');
+  $('playIcon').innerHTML = S.playing ? '<path d="M6 4.5h4.2v15H6zm7.8 0H18v15h-4.2z"/>' : '<path d="M7 4.5v15l13-7.5z"/>';
+}
+
+function buildChapterList() {
+  $('chapList').innerHTML = tl.chapters.map((c, i) =>
+    `<button class="chap" data-i="${i}"><b>${String(i + 1).padStart(2, '0')}</b><span>${c.title}</span><small>${fmt(c.duration)}</small></button>`).join('');
+  $('chapList').addEventListener('click', (e) => {
+    const b = e.target.closest('.chap');
+    if (!b) return;
+    chooseChapter(Number(b.dataset.i));
+    setSheet(false);
+  });
+}
+
+function chooseChapter(i) {
+  if (!S.started) { S.started = true; $('start').hidden = true; seekTo(i, 0); play(); return; }
+  seekTo(i, 0);
+}
+
+function buildSeek() {
+  const bar = $('seek');
+  tl.chapters.forEach((c) => {
+    const seg = document.createElement('div');
+    seg.className = 'seg'; seg.style.flex = String(c.duration); seg.title = c.title;
+    seg.innerHTML = '<i></i>';
+    bar.insertBefore(seg, $('seekTip'));
+  });
+  const at = (e) => {
+    const r = bar.getBoundingClientRect();
+    const g = clamp((e.clientX - r.left) / r.width, 0, 1) * total;
+    const ci = chapStart.findLastIndex((s) => s <= g);
+    return [ci, g - chapStart[ci]];
+  };
+  let drag = false;
+  bar.addEventListener('pointerdown', (e) => {
+    if (!S.started) { S.started = true; $('start').hidden = true; }
+    drag = true; bar.setPointerCapture(e.pointerId);
+    seekTo(...at(e));
+    if (S.playing && S.clock === 'audio') audio.pause();
+  });
+  bar.addEventListener('pointermove', (e) => {
+    const [ci, t] = at(e);
+    const tip = $('seekTip');
+    tip.textContent = `${tl.chapters[ci].title} · ${fmt(chapStart[ci] + t)}`;
+    const r = bar.getBoundingClientRect();
+    tip.style.left = `${clamp(e.clientX - r.left, 80, r.width - 80)}px`; tip.style.opacity = '1';
+    if (drag) seekTo(ci, t);
+  });
+  bar.addEventListener('pointerleave', () => { $('seekTip').style.opacity = '0'; });
+  const end = () => { if (!drag) return; drag = false; if (S.playing && S.clock === 'audio') startAudio(); };
+  bar.addEventListener('pointerup', end); bar.addEventListener('pointercancel', end);
+  bar.addEventListener('keydown', (e) => {
+    const step = e.key === 'ArrowRight' ? 5 : e.key === 'ArrowLeft' ? -5 : 0;
+    if (!step) return;
+    e.preventDefault(); e.stopPropagation();
+    const g = clamp(chapStart[S.ci] + S.t + step, 0, total - 0.1);
+    const ci = chapStart.findLastIndex((s) => s <= g);
+    seekTo(ci, g - chapStart[ci]);
+  });
+}
+
+function setSheet(open) {
+  $('sheet').classList.toggle('open', open);
+  $('chapters').setAttribute('aria-expanded', String(open));
+}
+
+// Storage can be absent or refused.
+function readCaptions() { try { return localStorage.getItem('namedrop-captions') === 'on'; } catch { return false; } }
+function setCaptions(on) {
+  $('caption').classList.toggle('off', !on);
+  $('cc').setAttribute('aria-pressed', String(on));
+  try { localStorage.setItem('namedrop-captions', on ? 'on' : 'off'); } catch {}
+}
+const toggleCaptions = () => setCaptions($('caption').classList.contains('off'));
+
+const wake = () => { idleAt = performance.now(); };
+$('startPlay').addEventListener('click', startPlaying);
+$('replay').addEventListener('click', replay);
+$('play').addEventListener('click', () => { if (!S.started) startPlaying(); else toggle(); });
+$('chapters').addEventListener('click', () => setSheet(!$('sheet').classList.contains('open')));
+$('sheetClose').addEventListener('click', () => setSheet(false));
+$('cc').addEventListener('click', toggleCaptions);
+$('fs').addEventListener('click', () => {
+  const el = document.documentElement;
+  (document.fullscreenElement ? document.exitFullscreen() : el.requestFullscreen?.())?.catch(() => {});
+});
+
+addEventListener('keydown', (e) => {
+  wake();
+  if (e.metaKey || e.ctrlKey || e.altKey || !tl) return;
+  const k = e.key.toLowerCase();
+  if (e.key === ' ' || k === 'k') { if (e.target.closest?.('button')) return; e.preventDefault(); if (!S.started) startPlaying(); else toggle(); }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); if (S.started) seekTo(S.ci + 1, 0); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); if (S.started) seekTo(S.t > 2 ? S.ci : S.ci - 1, 0); }
+  else if (k === 'c') toggleCaptions();
+  else if (k === 't') setSheet(!$('sheet').classList.contains('open'));
+  else if (e.key === 'Escape') setSheet(false);
+});
+for (const ev of ['pointermove', 'pointerdown', 'touchstart']) addEventListener(ev, wake, { passive: true });
+
+addEventListener('resize', () => { lastKey = ''; });
+boot();
+</script>

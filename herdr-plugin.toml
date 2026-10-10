@@ -1,0 +1,157 @@
+id = "namedrop"
+name = "Namedrop"
+version = "1.0.0"
+min_herdr_version = "0.7.5"
+description = "Name and @mention AI agents and terminal panes inside Herdr"
+platforms = ["macos", "linux"]
+
+[[build]]
+command = ["sh", "./scripts/build.sh"]
+
+[[startup]]
+command = ["sh", "./scripts/run.sh", "reconcile"]
+
+[[actions]]
+id = "activate"
+title = "Activate Namedrop"
+contexts = ["workspace"]
+command = [
+  "sh", "./scripts/run.sh",
+  "activate",
+  "--input-json",
+  '{"confirmed":true}',
+]
+
+[[actions]]
+id = "name-agent"
+title = "Name this pane"
+contexts = ["pane"]
+command = ["sh", "./scripts/run.sh", "ui", "launch", "name"]
+
+[[actions]]
+id = "manage-addresses"
+title = "Manage Namedrop names and agents"
+contexts = ["pane"]
+command = ["sh", "./scripts/run.sh", "ui", "launch", "manage"]
+
+[[panes]]
+id = "setup"
+title = "Namedrop setup"
+placement = "tab"
+command = ["sh", "./scripts/setup.sh", "activate", "--keep-open"]
+
+[[actions]]
+id = "update"
+title = "Update Namedrop"
+contexts = ["workspace"]
+command = ["sh", "./scripts/update.sh", "--open"]
+
+[[panes]]
+id = "update"
+title = "Update Namedrop"
+placement = "tab"
+command = ["sh", "./scripts/update.sh"]
+
+[[panes]]
+id = "naming"
+title = "Namedrop"
+placement = "popup"
+command = ["sh", "./scripts/run.sh", "ui", "run"]
+
+[[panes]]
+id = "management"
+title = "Namedrop names and agents"
+placement = "popup"
+command = ["sh", "./scripts/run.sh", "ui", "run", "manage"]
+
+[[actions]]
+id = "doctor"
+title = "Namedrop Doctor"
+contexts = ["pane"]
+command = ["sh", "./scripts/run.sh", "ui", "launch", "doctor"]
+
+[[panes]]
+id = "doctor"
+title = "Namedrop Doctor"
+placement = "popup"
+command = ["sh", "./scripts/run.sh", "ui", "run", "doctor"]
+
+[[actions]]
+id = "check"
+title = "Check Namedrop health"
+contexts = ["workspace"]
+command = ["sh", "./scripts/run.sh", "doctor"]
+
+[[actions]]
+id = "agent-status"
+title = "Agent status"
+contexts = ["pane"]
+command = ["sh", "./scripts/run.sh", "ui", "launch", "status"]
+
+[[panes]]
+id = "agent-status"
+title = "Agent status"
+placement = "popup"
+command = ["sh", "./scripts/run.sh", "ui", "run", "status"]
+
+[[actions]]
+id = "deactivate"
+title = "Deactivate Namedrop"
+contexts = ["workspace"]
+command = ["sh", "./scripts/run.sh", "deactivate"]
+
+[[actions]]
+id = "pause"
+title = "Pause Namedrop"
+contexts = ["workspace"]
+command = ["sh", "./scripts/run.sh", "space", "pause"]
+
+[[actions]]
+id = "resume"
+title = "Resume Namedrop"
+contexts = ["workspace"]
+command = ["sh", "./scripts/run.sh", "space", "resume"]
+
+[[actions]]
+id = "tour"
+title = "Namedrop tour"
+contexts = ["pane"]
+command = ["sh", "./scripts/run.sh", "ui", "launch", "tour"]
+
+[[panes]]
+id = "tour"
+title = "Namedrop tour"
+placement = "popup"
+command = ["sh", "./scripts/run.sh", "ui", "run", "tour"]
+
+[[events]]
+on = "pane.created"
+command = ["sh", "./scripts/run.sh", "event", "pane-lifecycle"]
+
+[[events]]
+on = "pane.moved"
+command = ["sh", "./scripts/run.sh", "event", "pane-lifecycle"]
+
+[[events]]
+on = "pane.closed"
+command = ["sh", "./scripts/run.sh", "event", "pane-lifecycle"]
+
+[[events]]
+on = "pane.exited"
+command = ["sh", "./scripts/run.sh", "event", "pane-lifecycle"]
+
+[[events]]
+on = "tab.closed"
+command = ["sh", "./scripts/run.sh", "event", "pane-lifecycle"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = [
+  "sh", "./scripts/run.sh",
+  "hook",
+  "agent-status-changed",
+]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["sh", "./scripts/run.sh", "hook", "agent-status-changed"]

@@ -1,0 +1,10 @@
+{
+  "name": "namedrop-demo",
+  "private": true,
+  "type": "module",
+  "description": "Renders the README demo from captured pane output",
+  "dependencies": {
+    "playwright-core": "1.63.0",
+    "three": "0.170.0"
+  }
+}

@@ -1,0 +1,8 @@
+/target/
+/bin/
+/.scratch/
+__pycache__/
+/.unlazy/
+/docs/demo/node_modules/
+/docs/presentation/node_modules
+/docs/presentation/.cache/

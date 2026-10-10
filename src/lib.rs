@@ -1,0 +1,213 @@
+mod agent_status;
+mod agent_status_model;
+pub mod cli;
+pub use agent_status::collect_agent_status;
+pub use agent_status_model::{suggest_agent_persona, summarize_agent_status};
+mod context;
+mod controls;
+mod coordination;
+mod delivery;
+mod domain;
+mod groups;
+mod handoff;
+mod health;
+mod hook;
+mod install;
+mod installed_runtime;
+mod integration;
+mod lifecycle;
+#[cfg(target_os = "linux")]
+#[doc(hidden)]
+pub mod linux_sandbox;
+mod message;
+mod persona;
+mod ports;
+mod runtime;
+mod shortcuts;
+mod store;
+#[doc(hidden)]
+pub use shortcuts::install_shortcuts;
+mod terminal;
+pub mod tour;
+pub use terminal::{default_pane_type, detect_pane_type, execute_terminal, verify_inherited_pane};
+
+pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integration-package-";
+
+pub use context::{execute_context_operation, execute_human_context_operation};
+pub use controls::execute_control_operation;
+pub use delivery::{DrainReport, drain_mailboxes};
+pub(crate) use delivery::{drain_receipt, publish_status_metadata, reconcile_delivery_state};
+pub use domain::*;
+pub use groups::execute_group_operation;
+pub use handoff::execute_handoff_operation;
+pub use health::{
+    HealthIssue, HealthRepair, HealthRepairKind, HealthReport, HealthSeverity, HealthStatus,
+    diagnose_collaboration, render_health_report_to_text, request_doctor_assistance,
+};
+pub use hook::execute_user_prompt_submit_hook;
+pub use install::{AgentConfigDirectories, install_integration_package, package_directory};
+pub(crate) use install::{
+    IntegrationPackageInstallation, disclosed_user_package_targets,
+    integration_package_attention_source, refresh_user_integration_packages,
+    user_hook_activation_guidance,
+};
+#[doc(hidden)]
+pub use installed_runtime::command_guard as runtime_command_guard;
+#[doc(hidden)]
+pub use installed_runtime::executable as runtime_executable;
+#[doc(hidden)]
+pub use installed_runtime::validate_update_manifest;
+pub use integration::{
+    AgentRuntime, AttachedContext, CONTEXT_DELIVERY_OPERATIONS, CatalogExample, CatalogOperation,
+    ContextRequest, DELIVERY_PERMITTED_OPERATIONS, DeliveryAddress, DeliveryControl,
+    DeliveryControlDraft, DeliveryEnvelope, INTEGRATION_PROTOCOL_VERSION, InputTransport,
+    IntegrationChallenge, IntegrationPackage, IntegrationRegistration, IntegrationToolInvocation,
+    OperationCatalog, REPLY_BODY_PLACEHOLDER, ResultSetCompletion, ResultSetOutcome,
+    ResultSetStatus, TRUSTED_DELIVERY_INSTRUCTION, complete_capability_profile,
+    describe_operations, execute_integration_operation, integration_package,
+    issue_registration_challenge, operation_catalog,
+};
+pub(crate) use integration::{collaboration_executable, tool_environment};
+pub use lifecycle::{
+    DiscoveredPane, DiscoveredWorktree, LifecycleRuntime, discover_worktree,
+    discover_worktree_for_workspace, execute_lifecycle_operation, locate_agent_session_pane,
+    reconcile_discovered_panes,
+};
+pub use message::{
+    ParsedMessage, RecipientOutlook, execute_message_operation, parse_mentions,
+    parse_prompt_mentions, recipient_outlooks, validate_message_input,
+};
+pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
+pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};
+use serde::Serialize;
+mod output;
+pub use output::render_command_result_to_text;
+pub use store::{
+    StateStore, StateTransaction, StoreError, StoreErrorKind, WorktreePurgeResult,
+    WorktreePurgeSummary,
+};
+
+#[derive(Debug, PartialEq, Serialize)]
+pub struct CommandResult {
+    protocol_version: &'static str,
+    status: &'static str,
+    operation: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<CommandError>,
+}
+
+#[derive(Debug, PartialEq, Serialize)]
+struct CommandError {
+    code: &'static str,
+    message: String,
+}
+
+impl CommandResult {
+    pub fn invalid_request(message: impl Into<String>) -> Self {
+        Self {
+            protocol_version: INTEGRATION_PROTOCOL_VERSION,
+            status: "rejected",
+            operation: None,
+            data: None,
+            error: Some(CommandError {
+                code: "invalid_request",
+                message: message.into(),
+            }),
+        }
+    }
+
+    pub fn rejected(
+        operation: &'static str,
+        code: &'static str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            protocol_version: INTEGRATION_PROTOCOL_VERSION,
+            status: "rejected",
+            operation: Some(operation),
+            data: None,
+            error: Some(CommandError {
+                code,
+                message: message.into(),
+            }),
+        }
+    }
+
+    pub fn success(operation: &'static str, data: serde_json::Value) -> Self {
+        Self {
+            protocol_version: INTEGRATION_PROTOCOL_VERSION,
+            status: "ok",
+            operation: Some(operation),
+            data: Some(data),
+            error: None,
+        }
+    }
+}
+
+pub fn is_lifecycle_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "name"
+            | "activate"
+            | "deactivate"
+            | "purge"
+            | "address.create"
+            | "address.list"
+            | "address.bind"
+            | "address.unbind"
+            | "address.rename"
+            | "address.remove"
+            | "address.retire"
+            | "address.release-alias"
+            | "address.persona"
+            | "reconcile"
+            | "event.pane-lifecycle"
+            | "event.agent-status-changed"
+    )
+}
+
+pub fn is_message_operation(operation: &str) -> bool {
+    matches!(operation, "send" | "reply")
+}
+
+pub fn is_integration_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "register" | "ack" | "complete" | "delivery.inbox"
+    )
+}
+
+pub fn is_context_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "context.grant"
+            | "context.revoke"
+            | "snapshot.publish"
+            | "context.inspect"
+            | "context.read"
+    )
+}
+
+pub fn is_control_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "address.enable"
+            | "address.disable"
+            | "delivery.cancel-held"
+            | "delivery.acknowledge"
+            | "handoff.acknowledge"
+            | "thread.pause"
+            | "thread.resume"
+            | "thread.stop"
+            | "thread.continue"
+            | "worktree.pause"
+            | "worktree.resume"
+    )
+}
+
+/// Tag JSON schema failures at the input boundary, before operational work.
+pub(crate) fn input_schema_error(error: serde_json::Error) -> String {
+    format!("invalid operation input: {error}")
+}

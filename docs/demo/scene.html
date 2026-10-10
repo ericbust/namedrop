@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Namedrop demo</title>
+<style>
+  :root {
+    --mono: "SF Mono", "SFMono-Regular", Menlo, monospace;
+    --sans: -apple-system, "SF Pro Display", BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    --cw: 9.03px; /* measured at runtime */
+    --lh: 18px;
+    /* one colour per runtime, used by name plates, message cards and beams */
+    --codex: #67e8f9; --claude: #fdba74; --shell: #c4b5fd; --you: #e5e5ea;
+  }
+  html, body { margin: 0; width: 1920px; height: 1080px; overflow: hidden; background: #040406; }
+  #gl, #css, #hud { position: absolute; inset: 0; width: 1920px; height: 1080px; }
+  #hud { pointer-events: none; font-family: var(--sans); color: #f5f5f7; }
+
+  .cap { position: absolute; left: 0; right: 0; top: 64px; text-align: center; will-change: opacity, transform, filter; }
+  .cap h1 { margin: 0; font-size: 64px; font-weight: 700; letter-spacing: -0.025em; line-height: 1.05; }
+  .cap p { margin: 14px 0 0; font-size: 27px; font-weight: 500; color: #9a9aa3; letter-spacing: -0.01em; }
+  .cap code, .end code { font-family: var(--mono); font-size: 0.9em; color: #c9ccff; }
+  .grad { background: linear-gradient(92deg, #a5b4ff 0%, #7de2d1 55%, #f0abfc 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+  .title { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .title h1 { margin: 0; font-size: 168px; font-weight: 800; letter-spacing: -0.045em; line-height: 1; }
+  .title p { margin: 28px 0 0; font-size: 36px; font-weight: 500; color: #a1a1aa; letter-spacing: -0.01em; }
+
+  .end { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+  .end h1 { margin: 0; font-size: 132px; font-weight: 800; letter-spacing: -0.045em; line-height: 1; }
+  .end p { margin: 22px 0 0; font-size: 32px; font-weight: 500; color: #a1a1aa; }
+  .pill { margin-top: 54px; padding: 20px 34px; border-radius: 999px; background: rgba(255,255,255,0.06);
+          border: 1px solid rgba(255,255,255,0.14); font-family: var(--mono); font-size: 28px; color: #e8e8ee; }
+  .pill b { color: #7de2d1; font-weight: 500; }
+  .small { margin-top: 26px; font-size: 22px; color: #6e6e76; letter-spacing: 0.02em; }
+
+  .win { position: relative; border-radius: 14px; background: #0c0c10; overflow: hidden;
+         border: 1px solid rgba(255,255,255,0.10);
+         box-shadow: 0 50px 120px rgba(0,0,0,0.65), 0 0 0 1px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.06); }
+  .bar { height: 38px; display: flex; align-items: center; justify-content: center; position: relative;
+         background: linear-gradient(#1b1b21, #15151a); border-bottom: 1px solid rgba(255,255,255,0.06);
+         font: 500 14px var(--sans); color: #8e8e96; letter-spacing: 0.01em; }
+  .bar i { position: absolute; top: 13px; width: 12px; height: 12px; border-radius: 50%; }
+  .bar i:nth-child(1) { left: 16px; background: #ff5f57; }
+  .bar i:nth-child(2) { left: 36px; background: #febc2e; }
+  .bar i:nth-child(3) { left: 56px; background: #28c840; }
+  .bar b { color: #e5e5ea; font-weight: 600; }
+  .body { position: relative; overflow: hidden; }
+  .frame { position: absolute; left: 0; right: 0; top: 0; padding: 12px 18px; will-change: opacity; }
+  .row { font-family: var(--mono); font-size: 15px; line-height: var(--lh); height: var(--lh); white-space: pre; color: #d9d9de; position: relative; }
+  .type { display: inline-block; overflow: hidden; vertical-align: top; white-space: pre; }
+  .caret { display: inline-block; width: 0.6em; height: 1.05em; vertical-align: -2px; background: #e5e5ea; margin-left: 1px; }
+  .hl { position: absolute; left: 10px; border-radius: 6px; pointer-events: none;
+        background: linear-gradient(90deg, rgba(125,226,209,0.22), rgba(165,180,255,0.14) 70%, rgba(165,180,255,0));
+        box-shadow: inset 3px 0 0 #7de2d1; }
+  .spot { position: absolute; inset: 0; pointer-events: none; }
+  .spot > div { position: absolute; background: rgba(5,5,9,0.66); }
+  .spot > .ring { background: none; border-radius: 6px; box-shadow: 0 0 0 1.5px rgba(125,226,209,0.55), 0 0 48px rgba(125,226,209,0.22); }
+
+  .tag { position: relative; width: 640px; height: 40px; }
+  .tag-item { position: absolute; left: 0; top: 0; display: inline-flex; align-items: center; gap: 11px; padding: 8px 18px 8px 14px;
+              border-radius: 999px; font: 600 21px var(--sans); letter-spacing: -0.01em; white-space: nowrap;
+              background: rgba(18,18,26,0.88); border: 1px solid rgba(255,255,255,0.13); box-shadow: 0 10px 30px rgba(0,0,0,0.45); }
+  .tag-item i { width: 11px; height: 11px; border-radius: 50%; }
+  .tag-item.work { color: #fde68a; } .tag-item.work i { background: #fbbf24; box-shadow: 0 0 14px #fbbf24; }
+  .tag-item.done { color: #a7f3d0; } .tag-item.done i { background: #34d399; box-shadow: 0 0 14px #34d399; }
+  .tag-item.wait { color: #c7d2fe; } .tag-item.wait i { background: #a5b4ff; box-shadow: 0 0 14px #a5b4ff; }
+  .chip { padding: 9px 18px; border-radius: 999px; font: 600 22px var(--sans); color: #0b0b10; letter-spacing: -0.01em;
+          background: linear-gradient(92deg, #c7d0ff, #8ff0dd); box-shadow: 0 0 34px rgba(125,226,209,0.55); white-space: nowrap; }
+  /* a pane's name plate: who it is and what it runs on */
+  .tag-item.plate { font: 700 26px var(--sans); padding: 9px 20px 9px 15px; gap: 12px; color: #f5f5f7; }
+  .tag-item.plate em { font-style: normal; font-weight: 500; font-size: 20px; letter-spacing: 0.01em; }
+  .tag-item.codex i { background: var(--codex); box-shadow: 0 0 14px var(--codex); } .tag-item.codex em { color: var(--codex); }
+  .tag-item.claude i { background: var(--claude); box-shadow: 0 0 14px var(--claude); } .tag-item.claude em { color: var(--claude); }
+  .tag-item.shell i { background: var(--shell); box-shadow: 0 0 14px var(--shell); } .tag-item.shell em { color: var(--shell); }
+
+  /* a message between panes, quoted from the capture; its border runs from the sender's colour to the recipient's */
+  .card { width: 880px; box-sizing: border-box; padding: 18px 26px 20px; border-radius: 22px; color: #ececf1;
+          background: linear-gradient(rgba(14,14,22,0.96), rgba(14,14,22,0.96)) padding-box,
+                      linear-gradient(100deg, var(--from), var(--to)) border-box;
+          border: 2px solid transparent; box-shadow: 0 30px 90px rgba(0,0,0,0.6); }
+  .card .hd { display: flex; align-items: center; gap: 14px; font: 700 21px var(--sans); color: #f5f5f7; }
+  .card .who { display: inline-flex; align-items: center; gap: 9px; }
+  .card .who i { width: 10px; height: 10px; border-radius: 50%; }
+  .card .who em { font-style: normal; font-weight: 500; font-size: 17px; letter-spacing: 0.02em; }
+  .card .arrow { color: #8e8e96; font-weight: 500; }
+  .card .msg { margin-top: 10px; font: 500 25px/1.34 var(--sans); letter-spacing: -0.005em; }
+  .card .msg code { font-family: var(--mono); font-size: 0.88em; color: #d7dbff; }
+  .card .msg.mono { font: 500 24px/1.4 var(--mono); color: #e8e8ee; }
+  .card .att { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 8px; }
+  .card .att span { font: 600 16px var(--sans); padding: 5px 12px; border-radius: 999px; color: #c9ccff;
+                    background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12); }
+  .card .att .stale { color: #fecaca; background: rgba(248,113,113,0.14); border-color: rgba(248,113,113,0.45); }
+  .card .att .fresh { color: #a7f3d0; background: rgba(52,211,153,0.14); border-color: rgba(52,211,153,0.45); }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="css"></div>
+<div id="hud">
+  <div class="title" id="title"><h1 class="grad">Namedrop</h1><p>@mentions for Codex, Claude Code, and your terminal.</p></div>
+  <div class="cap" id="capName"><h1>Name an agent.</h1><p>Any Claude Code or Codex pane, with a persona if you like.</p></div>
+  <div class="cap" id="capAsk"><h1>Ask for help in plain words.</h1><p>One prompt hands work to <code>@reviewer</code> and <code>@tester</code>.</p></div>
+  <div class="cap" id="capOne"><h1>Get <span class="grad">one answer</span> back.</h1><p>Replies return to the pane that asked, and the lead merges them.</p></div>
+  <div class="cap" id="capPeers"><h1>No lead required.</h1><p>Give each agent its own job. They find each other.</p></div>
+  <div class="cap" id="capDirect"><h1>They reach each other directly.</h1><p><code>@tester</code> runs its tests on <code>@build</code>, a plain shell, and gets the result back.</p></div>
+  <div class="cap" id="capCross"><h1>Codex asks Claude.</h1><p><code>@coder</code> picks a reviewer from the roster by persona.</p></div>
+  <div class="cap" id="capHome"><h1>Every reply lands where it was asked.</h1><p>Codex and Claude Code in one workspace, with no lead.</p></div>
+  <div class="cap" id="capFresh"><h1>Reviews know when code moves.</h1><p>Namedrop flags the old review as stale. A fresh one comes back.</p></div>
+  <div class="cap" id="capStatus"><h1>See every agent at a glance.</h1><p>Agent status shows who is waiting on whom.</p></div>
+  <div class="end" id="end"><h1 class="grad">Namedrop</h1><p>Agents that work together, right inside Herdr.</p>
+    <div class="pill"><b>$</b> herdr plugin install ericbust/namedrop</div>
+    <div class="small">MIT licensed · macOS on Apple silicon and Linux</div></div>
+</div>
+<script src="frames.js"></script>
+<script type="importmap">{ "imports": { "three": "./node_modules/three/build/three.module.js", "three/addons/": "./node_modules/three/examples/jsm/" } }</script>
+<script type="module" src="scene.js"></script>
+</body>
+</html>

@@ -1,0 +1,6 @@
+{
+  "name": "namedrop-presentation",
+  "private": true,
+  "type": "module",
+  "description": "Narrated Three.js presentation of Namedrop"
+}

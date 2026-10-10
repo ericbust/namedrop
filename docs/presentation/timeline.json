@@ -1,0 +1,291 @@
+{
+ "voice": "Qwen/Qwen3-TTS-12Hz-1.7B-Base, narrator.flac",
+ "chapters": [
+  {
+   "id": "bus",
+   "title": "The message bus",
+   "audio": "voice/bus.mp3",
+   "duration": 18.734,
+   "lines": [
+    {
+     "beat": "panes",
+     "say": "You probably run more than one coding agent now.",
+     "start": 0.6,
+     "end": 3.346
+    },
+    {
+     "beat": "runtimes",
+     "say": "Claude Code in one pane. Codex in another. A shell for your tests.",
+     "start": 3.946,
+     "end": 8.997
+    },
+    {
+     "beat": "shuttle",
+     "head": "Copy. Paste. Wait.",
+     "say": "And you're the one carrying everything between them. Copy. Paste. Wait. Copy it back.",
+     "start": 9.597,
+     "end": 14.938
+    },
+    {
+     "beat": "you-are-the-bus",
+     "head": "You are the message bus.",
+     "say": "You've become the message bus.",
+     "start": 15.538,
+     "end": 17.334
+    }
+   ]
+  },
+  {
+   "id": "intro",
+   "title": "Namedrop",
+   "audio": "voice/intro.mp3",
+   "duration": 10.967,
+   "lines": [
+    {
+     "beat": "logo",
+     "head": "Namedrop",
+     "say": "This is Namedrop.",
+     "spoken": "This is Name drop.",
+     "start": 0.6,
+     "end": 2.142
+    },
+    {
+     "beat": "promise",
+     "head": "@mentions for your agents.",
+     "say": "At-mentions for your agents. It's a plugin for Herdr that lets every agent in your workspace reach any other, by name.",
+     "spoken": "At mentions for your agents. It's a plugin for Herder that lets every agent in your workspace reach any other, by name.",
+     "start": 2.742,
+     "end": 9.567
+    }
+   ]
+  },
+  {
+   "id": "mention",
+   "title": "Name it. Mention it.",
+   "audio": "voice/mention.mp3",
+   "duration": 27.383,
+   "lines": [
+    {
+     "beat": "type-name",
+     "head": "Give it a name.",
+     "say": "It starts with a name. Tell an agent, name yourself @reviewer.",
+     "show": "Name yourself @reviewer with Namedrop.",
+     "spoken": "It starts with a name. Tell an agent, name yourself at reviewer.",
+     "start": 0.6,
+     "end": 5.941
+    },
+    {
+     "beat": "type-mention",
+     "head": "Mention it.",
+     "say": "Now, from any other pane, just mention it. Ask @reviewer to check the retry logic.",
+     "show": "Ask @reviewer to check the retry logic. Use their feedback to fix any bugs.",
+     "spoken": "Now, from any other pane, just mention it. Ask at reviewer to check the retry logic.",
+     "start": 6.541,
+     "end": 12.534
+    },
+    {
+     "beat": "send",
+     "say": "Your agent sends the request, and keeps working on your goal.",
+     "start": 13.134,
+     "end": 16.323
+    },
+    {
+     "beat": "reply-returns",
+     "head": "The answer comes back.",
+     "say": "When the review is done, the answer comes back to the pane that asked.",
+     "start": 16.923,
+     "end": 20.926
+    },
+    {
+     "beat": "cross-runtime",
+     "head": "Claude Code. Codex. Same names.",
+     "say": "Claude Code or Codex. It works the same either way.",
+     "start": 21.526,
+     "end": 25.983
+    }
+   ]
+  },
+  {
+   "id": "fan-out",
+   "title": "One answer from many",
+   "audio": "voice/fan-out.mp3",
+   "duration": 16.415,
+   "lines": [
+    {
+     "beat": "type-fan-out",
+     "say": "Ask two agents at once. @reviewer checks correctness. @tester looks for missing tests.",
+     "show": "Ask @reviewer to inspect correctness and @tester to find missing test cases. Give me one answer with the changes I should make.",
+     "spoken": "Ask two agents at once. at reviewer checks correctness. at tester looks for missing tests.",
+     "start": 0.6,
+     "end": 6.168
+    },
+    {
+     "beat": "assignments",
+     "head": "Tracked.",
+     "say": "The lead tracks each assignment, and gets a nudge if anything stalls.",
+     "start": 6.768,
+     "end": 10.855
+    },
+    {
+     "beat": "merge",
+     "head": "One answer.",
+     "say": "Then it reviews what comes back, and hands you one answer.",
+     "start": 11.455,
+     "end": 15.015
+    }
+   ]
+  },
+  {
+   "id": "terminals",
+   "title": "Terminals, too",
+   "audio": "voice/terminals.mp3",
+   "duration": 16.265,
+   "lines": [
+    {
+     "beat": "name-build",
+     "head": "Terminals have names too.",
+     "say": "Even a plain shell can have a name.",
+     "show": "namedrop name @build --type terminal",
+     "start": 0.6,
+     "end": 3.208
+    },
+    {
+     "beat": "run-build",
+     "head": "No model. No tokens.",
+     "say": "@build, cargo test. It runs once, in that shell. No model. No tokens.",
+     "show": "@build cargo test --locked --all-targets",
+     "spoken": "at build, cargo test. It runs once, in that shell. No model. No tokens.",
+     "start": 3.808,
+     "end": 10.481
+    },
+    {
+     "beat": "exit-code",
+     "say": "The output and the exit code go straight back to the agent that asked.",
+     "start": 11.081,
+     "end": 14.865
+    }
+   ]
+  },
+  {
+   "id": "team",
+   "title": "A team, not a hierarchy",
+   "audio": "voice/team.mp3",
+   "duration": 22.046,
+   "lines": [
+    {
+     "beat": "no-lead",
+     "head": "No boss required.",
+     "say": "And you don't need a boss agent at the top.",
+     "start": 0.6,
+     "end": 3.05
+    },
+    {
+     "beat": "peers",
+     "say": "Give each agent its own job, and they reach each other directly. @tester runs the suite on @build, and tells @coder what failed.",
+     "seed": 5,
+     "spoken": "Give each agent its own job, and they reach each other directly. at tester runs the suite on at build, and tells at coder what failed.",
+     "start": 3.65,
+     "end": 11.435
+    },
+    {
+     "beat": "persona",
+     "head": "They pick their own collaborators.",
+     "say": "Describe what each agent is good at, and they pick their own collaborators from the roster.",
+     "show": "Reviews Rust changes for correctness and risk",
+     "start": 12.035,
+     "end": 16.637
+    },
+    {
+     "beat": "group",
+     "head": "@review-team",
+     "say": "Save a few of them as a group, and mention the group like a name.",
+     "show": "@review-team Review the authentication changes before I merge them.",
+     "start": 17.237,
+     "end": 20.646
+    }
+   ]
+  },
+  {
+   "id": "trust",
+   "title": "Built to be trusted",
+   "audio": "voice/trust.mp3",
+   "duration": 30.059,
+   "lines": [
+    {
+     "beat": "pin",
+     "head": "Pinned to the code it read.",
+     "say": "Every review can be pinned to the exact code it read.",
+     "start": 0.6,
+     "end": 3.995
+    },
+    {
+     "beat": "verdicts",
+     "head": "Fresh. Or stale.",
+     "say": "When the code moves, Namedrop tells you whether that review is still fresh, or stale.",
+     "spoken": "When the code moves, Name drop tells you whether that review is still fresh, or stale.",
+     "start": 4.595,
+     "end": 9.648
+    },
+    {
+     "beat": "status",
+     "head": "See everything.",
+     "say": "Press Prefix, then Shift S, and see what every agent is doing, and what you're still waiting on.",
+     "start": 10.248,
+     "end": 16.026
+    },
+    {
+     "beat": "doctor",
+     "say": "If something's stuck, namedrop doctor tells you exactly how to fix it.",
+     "show": "namedrop doctor",
+     "spoken": "If something's stuck, Name drop doctor tells you exactly how to fix it.",
+     "start": 16.626,
+     "end": 20.862
+    },
+    {
+     "beat": "guardrails",
+     "head": "Data. Never orders.",
+     "say": "Context you share stays with the session you sent it to. And a message from another agent is always data, never orders.",
+     "start": 21.462,
+     "end": 28.659
+    }
+   ]
+  },
+  {
+   "id": "close",
+   "title": "Namedrop",
+   "audio": "voice/close.mp3",
+   "duration": 16.56,
+   "lines": [
+    {
+     "beat": "decisions",
+     "say": "So you stop being the message bus, and get back to the decisions only you can make.",
+     "start": 0.6,
+     "end": 5.492
+    },
+    {
+     "beat": "wordmark",
+     "head": "Namedrop",
+     "say": "Namedrop.",
+     "spoken": "Name drop.",
+     "start": 6.092,
+     "end": 7.199
+    },
+    {
+     "beat": "tagline",
+     "head": "Name it. Mention it. Get the answer back.",
+     "say": "Give an agent a name. Mention it. Get the answer back where you asked.",
+     "start": 7.799,
+     "end": 12.397
+    },
+    {
+     "beat": "install",
+     "say": "Install it in Herdr today.",
+     "show": "herdr plugin install ericbust/namedrop --ref main",
+     "spoken": "Install it in Herder today.",
+     "start": 12.997,
+     "end": 15.16
+    }
+   ]
+  }
+ ]
+}

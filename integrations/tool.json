@@ -1,0 +1,1461 @@
+{
+  "name": "namedrop",
+  "protocol_version": "collab/v1",
+  "input_transport": {
+    "flag": "--input-json",
+    "schema": {
+      "type": "object"
+    }
+  },
+  "operations": [
+    {
+      "token": "describe",
+      "description": "Describe this tool: every collab/v1 operation with its argument vector, JSON input schema, and valid examples. Add one operation token as a positional argument, as in describe snapshot.publish, to describe only that operation. It reads no collaboration state, grants no operational authority, and needs no Integration Registration.",
+      "argv": ["describe"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "examples": [
+        {
+          "description": "Describe every operation this executable accepts, so an input can be shaped before it is invoked.",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "token": "register",
+      "description": "Answer a Namedrop registration challenge for the exact Agent Session in this pane.",
+      "argv": [
+        "register"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "runtime",
+          "protocol_version",
+          "nonce",
+          "capabilities"
+        ],
+        "properties": {
+          "runtime": {
+            "type": "string",
+            "enum": [
+              "codex",
+              "claude-code"
+            ],
+            "description": "The Agent Integration runtime named in the challenge."
+          },
+          "protocol_version": {
+            "type": "string",
+            "const": "collab/v1"
+          },
+          "nonce": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The exact nonce carried by the registration challenge."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The complete capability profile, in exactly this order."
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Register the challenged Codex session with the complete capability profile.",
+          "input": {
+            "runtime": "codex",
+            "protocol_version": "collab/v1",
+            "nonce": "registration-nonce-1",
+            "capabilities": [
+              "describe",
+              "register",
+              "ack",
+              "send",
+              "reply",
+              "complete.no-reply",
+              "delivery.inbox",
+              "snapshot.publish",
+              "context.inspect",
+              "context.read",
+              "handoff.status",
+              "handoff.results",
+              "handoff.preview",
+              "group.list",
+              "handoff.begin",
+              "handoff.resolve",
+              "handoff.adopt"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "token": "ack",
+      "description": "Acknowledge a delivered Delivery Attempt before doing substantive work on it.",
+      "argv": ["ack"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attempt_id"],
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The delivered control.attempt_id."
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Acknowledge the delivered Delivery Attempt.",
+          "input": {"attempt_id": "delivery-attempt-1"}
+        }
+      ]
+    },
+    {
+      "token": "send",
+      "description": "Send a new collaboration message. Leading Mentions are recipients; later Mentions are Context References.",
+      "argv": [
+        "send"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "source"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Caller-chosen idempotency key; repeating one replays the same message."
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Authored source. It must begin with one or more @alias recipient Mentions."
+          },
+          "author_kind": {
+            "type": "string",
+            "enum": [
+              "human",
+              "agent_session"
+            ],
+            "default": "human",
+            "description": "An Agent Session must send agent_session."
+          },
+          "context": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "snapshot"
+            ],
+            "description": "Optional context handoff: the routing transaction publishes this Working Context Snapshot and activates one Context Grant per recipient. Requires author_kind agent_session; each recipient's delivery envelope binds a snapshot read plus exact pinned-diff reads for diff evidence when git state is captured.",
+            "properties": {
+              "capture_git_state": {
+                "type": "boolean",
+                "default": true,
+                "description": "Pin the current branch, HEAD, merge-base, and uncommitted work (tracked modifications, the index, and untracked files that are not ignored) as a git_state block on the snapshot. On by default for a context handoff; set false to skip the pin (the pin writes one ref under refs/herdr-context/). Readers page the pinned diff with the git_state selection of context.read."
+              },
+              "checkout": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path"],
+                "description": "Bind this snapshot's file and Git context to another registered worktree of this Space's repository. Capture, reads and freshness then use that checkout and never the Space's attached worktree, even when the Space changes. Omitted, the Space's attached worktree; never the command's directory. Requires a Space with an attached Git worktree.",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Absolute path of the worktree root, or a symlink to it. A subdirectory, bare repository, unregistered copy or checkout of another repository is refused."
+                  }
+                }
+              },
+              "snapshot": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "objective",
+                  "applicable_user_instructions",
+                  "decisions",
+                  "completed_work",
+                  "current_work",
+                  "blockers",
+                  "evidence"
+                ],
+                "properties": {
+                  "objective": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "applicable_user_instructions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "decisions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "completed_work": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "current_work": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "blockers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "locator"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "pane_output",
+                            "file",
+                            "diff",
+                            "commit"
+                          ]
+                        },
+                        "locator": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "A Worktree-relative path for file and diff, <commit>:<path> for commit, and a pane output locator for pane_output."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "coordination_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Opt in to an open coordination owned by this session: the lead that began it, or the session of the same address that adopted it with handoff.adopt."
+          },
+        "expected_revision": {"type":"integer","minimum":1,"description":"Required with assignment_id; reject stale continuation decisions."},
+          "assignment_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Continue this existing assignment with a new revision and the same recipient session. Requires coordination_id."
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Send one agent-authored message to the @planner Pane Address.",
+          "input": {
+            "request_id": "send-1",
+            "source": "@planner the parser change is ready for review",
+            "author_kind": "agent_session"
+          }
+        },
+        {
+          "description": "Send a review of another worktree of this Space's repository; capture, reads and freshness use that checkout.",
+          "input": {
+            "request_id": "send-context-checkout-1",
+            "source": "@reviewer please review the retry change in the worker checkout",
+            "author_kind": "agent_session",
+            "context": {
+              "checkout": {
+                "path": "/home/me/work/retry-worker"
+              },
+              "snapshot": {
+                "objective": "Review the retry change",
+                "applicable_user_instructions": [],
+                "decisions": [],
+                "completed_work": [
+                  "Retry change implemented in the worker checkout"
+                ],
+                "current_work": [],
+                "blockers": [],
+                "evidence": [
+                  {
+                    "kind": "diff",
+                    "locator": "src/retry.rs"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "description": "Send a review handoff with an attached Working Context Snapshot and pinned git state.",
+          "input": {
+            "request_id": "send-context-1",
+            "source": "@reviewer please review the parser change; focus on error recovery",
+            "author_kind": "agent_session",
+            "context": {
+              "capture_git_state": true,
+              "snapshot": {
+                "objective": "Ship the parser change",
+                "applicable_user_instructions": [],
+                "decisions": [
+                  "Kept the grammar single-pass"
+                ],
+                "completed_work": [
+                  "Parser change implemented"
+                ],
+                "current_work": [
+                  "Awaiting review"
+                ],
+                "blockers": [],
+                "evidence": [
+                  {
+                    "kind": "diff",
+                    "locator": "src/parser.rs"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "token": "reply",
+      "description": "Reply to a collaboration message. An agent-authored reply also records the Delivery Attempt's reply disposition.",
+      "argv": [
+        "reply"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "source",
+          "in_reply_to"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Caller-chosen idempotency key; repeating one replays the same reply."
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Authored source. It must begin with the @alias recipient Mentions of this reply."
+          },
+          "in_reply_to": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The message being replied to: control.message_id, never control.thread_id."
+          },
+          "reply_all": {
+            "type": "boolean",
+            "default": false,
+            "description": "Human Reply All prefill selection; the submitted source is the stored route."
+          },
+          "author_kind": {
+            "type": "string",
+            "enum": [
+              "human",
+              "agent_session"
+            ],
+            "default": "human",
+            "description": "An Agent Session must send agent_session."
+          },
+          "attempt_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Required for an agent-authored reply: the control.attempt_id being finished."
+          },
+          "request_context": {
+            "type": "boolean",
+            "default": false,
+            "description": "Ask the disposed delivery's sender for its working context from an agent_thread or one-shot return_to_source relay. The reply transaction creates a pending Context Grant whose id is the request; the sender's envelope carries it as context_request with a pre-bound automatic fulfillment reply. Requires author_kind agent_session, and the reply must mention the sender. Cannot be combined with a context block."
+          },
+          "decline_context_request": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Settle a pending context request by refusal: name its control.context_request.grant_id. Only the request's exact source Agent Session may decline; the grant moves pending -> revoked."
+          },
+          "context": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "snapshot"
+            ],
+            "description": "Optional context handoff: the routing transaction publishes this Working Context Snapshot. Without grant_ids it activates one new Context Grant per recipient; with grant_ids it fulfills exactly those pending context requests instead. Requires author_kind agent_session; each grantee's delivery envelope binds a snapshot read plus exact pinned-diff reads for diff evidence when git state is captured.",
+            "properties": {
+              "grant_ids": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "Fulfill exactly these pending Context Grants (from control.context_request). Each named grant's grantee must be a recipient of this reply. Empty or absent means create-mode."
+              },
+              "capture_git_state": {
+                "type": "boolean",
+                "default": true,
+                "description": "Pin the current branch, HEAD, merge-base, and uncommitted work (tracked modifications, the index, and untracked files that are not ignored) as a git_state block on the snapshot. On by default for a context handoff; set false to skip the pin (the pin writes one ref under refs/herdr-context/). Readers page the pinned diff with the git_state selection of context.read."
+              },
+              "checkout": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path"],
+                "description": "Bind this snapshot's file and Git context to another registered worktree of this Space's repository. Capture, reads and freshness then use that checkout and never the Space's attached worktree, even when the Space changes. Omitted, the Space's attached worktree; never the command's directory. Requires a Space with an attached Git worktree.",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Absolute path of the worktree root, or a symlink to it. A subdirectory, bare repository, unregistered copy or checkout of another repository is refused."
+                  }
+                }
+              },
+              "snapshot": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "objective",
+                  "applicable_user_instructions",
+                  "decisions",
+                  "completed_work",
+                  "current_work",
+                  "blockers",
+                  "evidence"
+                ],
+                "properties": {
+                  "objective": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "applicable_user_instructions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "decisions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "completed_work": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "current_work": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "blockers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "locator"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "pane_output",
+                            "file",
+                            "diff",
+                            "commit"
+                          ]
+                        },
+                        "locator": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "A Worktree-relative path for file and diff, <commit>:<path> for commit, and a pane output locator for pane_output."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "work_outcome": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "needs_continuation",
+              "blocked"
+            ],
+            "description": "Tracked worker outcome. Missing means unclassified; never implicit success."
+          },
+          "blocked_reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Required when work_outcome is blocked."
+          },
+          "waiting_on_assignment_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional blocked dependency in the same coordination; cycles are rejected."
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Finish the delivered Delivery Attempt with an agent-authored reply to its sender.",
+          "input": {
+            "request_id": "reply-delivery-attempt-1",
+            "source": "@planner <reply body>",
+            "in_reply_to": "message-1",
+            "author_kind": "agent_session",
+            "attempt_id": "delivery-attempt-1"
+          }
+        },
+        {
+          "description": "Finish the delivered Delivery Attempt and ask its sender for its working context.",
+          "input": {
+            "request_id": "reply-request-context-1",
+            "source": "@planner please share the working context behind this ask",
+            "in_reply_to": "message-1",
+            "author_kind": "agent_session",
+            "attempt_id": "delivery-attempt-1",
+            "request_context": true
+          }
+        },
+        {
+          "description": "Fulfill the pending context request named by control.context_request: the context block's grant_ids activates that exact grant with this snapshot.",
+          "input": {
+            "request_id": "reply-fulfill-context-1",
+            "source": "@reviewer here is the working context you asked for",
+            "in_reply_to": "message-2",
+            "author_kind": "agent_session",
+            "attempt_id": "delivery-attempt-2",
+            "context": {
+              "grant_ids": [
+                "<grant_id from control.context_request>"
+              ],
+              "snapshot": {
+                "objective": "Ship the parser change",
+                "applicable_user_instructions": [],
+                "decisions": [
+                  "Kept the grammar single-pass"
+                ],
+                "completed_work": [
+                  "Parser change implemented"
+                ],
+                "current_work": [
+                  "Handing off review context"
+                ],
+                "blockers": [],
+                "evidence": [
+                  {
+                    "kind": "diff",
+                    "locator": "src/parser.rs"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "description": "Decline the pending context request named by control.context_request; its grant moves pending to revoked.",
+          "input": {
+            "request_id": "reply-decline-context-1",
+            "source": "@reviewer I cannot share working context for this thread",
+            "in_reply_to": "message-2",
+            "author_kind": "agent_session",
+            "attempt_id": "delivery-attempt-2",
+            "decline_context_request": "<grant_id from control.context_request>"
+          }
+        }
+      ]
+    },
+    {
+      "token": "complete.no-reply",
+      "description": "Finish a Delivery Attempt with an explicit no-reply disposition.",
+      "argv": ["complete", "--no-reply"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attempt_id"],
+        "properties": {
+          "attempt_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The acknowledged control.attempt_id being finished without a reply."
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Record the no-reply disposition for the acknowledged Delivery Attempt.",
+          "input": {"attempt_id": "delivery-attempt-1"}
+        }
+      ]
+    },
+    {
+      "token": "delivery.inbox",
+      "description": "Recover the outstanding Delivery Envelopes this exact Agent Session still owes, after a delivery prompt was lost.",
+      "argv": ["delivery", "inbox"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "examples": [
+        {
+          "description": "Recover every Delivery Envelope this registered Agent Session still owes.",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "token": "snapshot.publish",
+      "description": "Publish a Working Context Snapshot, either creating Context Grants for named grantees in one Collaboration Thread or activating existing grants.",
+      "argv": ["snapshot", "publish"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["snapshot"],
+        "properties": {
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The Collaboration Thread the new Context Grants belong to. Required unless grant_ids is given."
+          },
+          "grantee_address_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "description": "Pane Address ids allowed to read this Working Context Snapshot. Required unless grant_ids is given."
+          },
+          "grant_ids": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "description": "Existing Context Grant ids to activate with this snapshot. Cannot be combined with thread_id or grantee_address_ids."
+          },
+          "capture_git_state": {
+            "type": "boolean",
+            "description": "Pin the current branch, HEAD, merge-base, and uncommitted work (tracked modifications, the index, and untracked files that are not ignored) as a git_state block on the snapshot. Off by default; the pin writes one ref under refs/herdr-context/. Readers page the pinned diff with the git_state selection of context.read."
+          },
+          "checkout": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "description": "Bind this snapshot's file and Git context to another registered worktree of this Space's repository. Capture, reads and freshness then use that checkout and never the Space's attached worktree, even when the Space changes. Omitted, the Space's attached worktree; never the command's directory. Requires a Space with an attached Git worktree.",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Absolute path of the worktree root, or a symlink to it. A subdirectory, bare repository, unregistered copy or checkout of another repository is refused."
+              }
+            }
+          },
+          "snapshot": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "objective",
+              "applicable_user_instructions",
+              "decisions",
+              "completed_work",
+              "current_work",
+              "blockers",
+              "evidence"
+            ],
+            "properties": {
+              "objective": {"type": "string", "minLength": 1},
+              "applicable_user_instructions": {"type": "array", "items": {"type": "string"}},
+              "decisions": {"type": "array", "items": {"type": "string"}},
+              "completed_work": {"type": "array", "items": {"type": "string"}},
+              "current_work": {"type": "array", "items": {"type": "string"}},
+              "blockers": {"type": "array", "items": {"type": "string"}},
+              "evidence": {
+                "type": "array",
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["kind", "locator"],
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": ["pane_output", "file", "diff", "commit"]
+                    },
+                    "locator": {
+                      "type": "string",
+                      "minLength": 1,
+                      "description": "A Worktree-relative path for file and diff, <commit>:<path> for commit, and a pane output locator for pane_output."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Publish a Working Context Snapshot to one named grantee in a Collaboration Thread.",
+          "input": {
+            "thread_id": "thread-1",
+            "grantee_address_ids": ["address-planner"],
+            "snapshot": {
+              "objective": "Make the packaged descriptor the canonical operation catalog",
+              "applicable_user_instructions": ["Keep both runtimes identical"],
+              "decisions": ["The capability profile is derived from the catalog"],
+              "completed_work": ["Extended every catalog entry with a schema"],
+              "current_work": ["Binding delivery examples to real control ids"],
+              "blockers": [],
+              "evidence": [{"kind": "file", "locator": "src/integration.rs"}]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "token": "context.inspect",
+      "description": "Inspect what one Context Reference authorizes, or the Thread Context Snapshot of one Collaboration Thread.",
+      "argv": ["context", "inspect"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The message carrying the Context Reference. Pair it with reference_address_id."
+          },
+          "reference_address_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "An address id listed in that message's context_references. The sender is not implicitly a reference."
+          },
+          "thread_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Inspect this Collaboration Thread's Thread Context Snapshot instead. Cannot be combined with a Context Reference inspection."
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Inspect one Context Reference carried by a delivered message.",
+          "input": {
+            "message_id": "message-1",
+            "reference_address_id": "address-reviewer"
+          }
+        }
+      ]
+    },
+    {
+      "token": "context.read",
+      "description": "Read bounded evidence from an active Context Grant that names this Agent Session's Pane Address as grantee.",
+      "argv": ["context", "read"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["grant_id", "selection"],
+        "properties": {
+          "grant_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The grant_id reported by context.inspect."
+          },
+          "selection": {
+            "description": "One bounded evidence selection. Reads are limited to 200 lines.",
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind"],
+                "properties": {"kind": {"const": "snapshot"}}
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "locator", "max_lines"],
+                "properties": {
+                  "kind": {"const": "pane_output"},
+                  "locator": {"type": "string", "minLength": 1},
+                  "max_lines": {"type": "integer", "minimum": 1, "maximum": 200}
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "locator", "start_line", "max_lines"],
+                "properties": {
+                  "kind": {"const": "file"},
+                  "locator": {"type": "string", "minLength": 1},
+                  "start_line": {"type": "integer", "minimum": 1},
+                  "max_lines": {"type": "integer", "minimum": 1, "maximum": 200}
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "locator", "max_lines"],
+                "properties": {
+                  "kind": {"const": "diff"},
+                  "locator": {"type": "string", "minLength": 1},
+                  "max_lines": {"type": "integer", "minimum": 1, "maximum": 200}
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "locator", "max_lines"],
+                "properties": {
+                  "kind": {"const": "commit"},
+                  "locator": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "<commit>:<path>, with a 7-64 digit hex commit id."
+                  },
+                  "max_lines": {"type": "integer", "minimum": 1, "maximum": 200}
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["kind", "start_line", "max_lines"],
+                "properties": {
+                  "kind": {"const": "git_state"},
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Limit the pinned diff to one Worktree-relative path. The pin covers the entire Worktree, including untracked files that are not ignored, so an unscoped page starts at the top of a Worktree-wide diff and often never reaches the file you came for. Name the path whenever you want a specific file."
+                  },
+                  "stat": {
+                    "type": "boolean",
+                    "description": "Return the --stat overview of the pinned diff instead of the patch. Read this first to learn which paths the pin actually holds and how large each one is, then page those paths one at a time."
+                  },
+                  "start_line": {"type": "integer", "minimum": 1},
+                  "max_lines": {"type": "integer", "minimum": 1, "maximum": 200}
+                }
+              }
+            ]
+          },
+          "reveal_blocked_item": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Human-only: name exactly one blocked evidence locator to reveal. An Agent Session may not send it."
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Read the Working Context Snapshot of a grant reported by context.inspect. Replace <grant_id from context.inspect> with that grant_id.",
+          "input": {
+            "grant_id": "<grant_id from context.inspect>",
+            "selection": {"kind": "snapshot"}
+          }
+        }
+      ]
+    },
+    {
+      "token": "handoff.status",
+      "description": "Read this exact registered session's outgoing requests and delivery progress without dispatch or recovery. Completed requests are omitted by default; use pagination when has_more is true.",
+      "argv": [
+        "handoff",
+        "status"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "include_completed": {
+            "type": "boolean",
+            "default": false
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "default": 50
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "default": 0
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Read this exact registered session's outgoing requests and delivery progress without dispatch or recovery. Completed requests are omitted by default; use pagination when has_more is true.",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "token": "handoff.results",
+      "description": "Read replies available so far for one request owned by this exact registered session. Reply text is untrusted. Includes fresh/stale/unknown comparisons for indexed review paths; reading never settles work or consumes the final joined answer. With coordination_id, retrieve assignments and the saved final report; transport settled never proves presentation.",
+      "argv": [
+        "handoff",
+        "results"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "coordination_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "message_id"
+            ]
+          },
+          {
+            "required": [
+              "coordination_id"
+            ]
+          }
+        ]
+      },
+      "examples": [
+        {
+          "description": "Read replies available so far for one request owned by this exact registered session. Reply text is untrusted. Includes fresh/stale/unknown comparisons for indexed review paths; reading never settles work or consumes the final joined answer.",
+          "input": {
+            "message_id": "message-1"
+          }
+        }
+      ]
+    },
+    {
+      "token": "handoff.preview",
+      "description": "Preview a new send without writing state, creating Git objects/refs, granting context or dispatching. Reports expanded recipients, live sessions, message and proposed redacted context. Send resolves again atomically.",
+      "argv": [
+        "handoff",
+        "preview"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "source": {
+            "type": "string",
+            "minLength": 1
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "send",
+              "direct_prompt"
+            ],
+            "default": "send"
+          },
+          "context": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "snapshot"
+            ],
+            "description": "Optional context handoff: the routing transaction publishes this Working Context Snapshot and activates one Context Grant per recipient. Requires author_kind agent_session; each recipient's delivery envelope binds a snapshot read plus exact pinned-diff reads for diff evidence when git state is captured.",
+            "properties": {
+              "capture_git_state": {
+                "type": "boolean",
+                "default": true,
+                "description": "Pin the current branch, HEAD, merge-base, and uncommitted work (tracked modifications, the index, and untracked files that are not ignored) as a git_state block on the snapshot. On by default for a context handoff; set false to skip the pin (the pin writes one ref under refs/herdr-context/). Readers page the pinned diff with the git_state selection of context.read."
+              },
+              "checkout": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["path"],
+                "description": "Bind this snapshot's file and Git context to another registered worktree of this Space's repository. Capture, reads and freshness then use that checkout and never the Space's attached worktree, even when the Space changes. Omitted, the Space's attached worktree; never the command's directory. Requires a Space with an attached Git worktree.",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Absolute path of the worktree root, or a symlink to it. A subdirectory, bare repository, unregistered copy or checkout of another repository is refused."
+                  }
+                }
+              },
+              "snapshot": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "objective",
+                  "applicable_user_instructions",
+                  "decisions",
+                  "completed_work",
+                  "current_work",
+                  "blockers",
+                  "evidence"
+                ],
+                "properties": {
+                  "objective": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "applicable_user_instructions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "decisions": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "completed_work": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "current_work": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "blockers": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "evidence": {
+                    "type": "array",
+                    "maxItems": 64,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "kind",
+                        "locator"
+                      ],
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "pane_output",
+                            "file",
+                            "diff",
+                            "commit"
+                          ]
+                        },
+                        "locator": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "A Worktree-relative path for file and diff, <commit>:<path> for commit, and a pane output locator for pane_output."
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "required": [
+          "source"
+        ]
+      },
+      "examples": [
+        {
+          "description": "Preview a new send without writing state, creating Git objects/refs, granting context or dispatching. Reports expanded recipients, live sessions, message and proposed redacted context. Send resolves again atomically.",
+          "input": {
+            "source": "@reviewer Inspect the current changes."
+          }
+        }
+      ]
+    },
+    {
+      "token": "group.list",
+      "description": "List this space's saved mention groups and current member aliases without modifying state.",
+      "argv": [
+        "group",
+        "list"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "examples": [
+        {
+          "description": "List this space's saved mention groups and current member aliases without modifying state.",
+          "input": {}
+        }
+      ]
+    },
+    {
+      "token": "handoff.begin",
+      "description": "Create an explicit durable human-deliverable obligation owned by this exact registered session. Idempotent by request_id. Requires fresh tracked-work capability registration.",
+      "argv": [
+        "handoff",
+        "begin"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "deliverable"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "deliverable": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Begin authorized multi-step delegation.",
+          "input": {
+            "request_id": "coordination-example",
+            "deliverable": "Produce the reviewed implementation report."
+          }
+        }
+      ]
+    },
+    {
+      "token": "handoff.resolve",
+      "description": "Save a final report and enqueue its report_to_human delivery atomically. Completed requires every assignment completed and reconciled at its current revision. Blocked and cancelled require reasons. Delivery acknowledgement never verifies presentation.",
+      "argv": [
+        "handoff",
+        "resolve"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "coordination_id",
+          "outcome",
+          "report"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "coordination_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "completed",
+              "blocked",
+              "cancelled"
+            ]
+          },
+          "report": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reconciled_assignments": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "assignment_id",
+                "revision"
+              ],
+              "properties": {
+                "assignment_id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              }
+            }
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Save an explicit blocker for the human.",
+          "input": {
+            "request_id": "resolve-example",
+            "coordination_id": "coordination-example",
+            "outcome": "blocked",
+            "report": "Implementation is ready; runtime acceptance is pending.",
+            "reason": "Required runtime unavailable."
+          }
+        }
+      ]
+    },
+    {
+      "token": "handoff.adopt",
+      "description": "Transfer an open coordination from an earlier session of this same registered address to the current session, after that session was replaced in the pane. Idempotent for the same caller. Refused for another address, for the session that already owns it, for a request_id this session used for another coordination, and for a resolved coordination. Assignments and reports are unchanged; worker replies still queued for the earlier session are cancelled, and anything already dispatched or held for it stays as it is. Requires the tracked-work capability registration.",
+      "argv": [
+        "handoff",
+        "adopt"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "request_id",
+          "coordination_id"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "coordination_id": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "After the lead's agent session restarted in the same pane, take its open coordination back.",
+          "input": {
+            "request_id": "adopt-coordination-example",
+            "coordination_id": "coordination-example"
+          }
+        }
+      ]
+    }
+  ],
+  "management_operations": [
+    {
+      "token": "address.list",
+      "automatic_permission": true,
+      "description": "Refresh this workspace's named panes, live registration and availability before selecting collaborators. Read-only management operation outside the registered capability profile; current coordinator callbacks bind it explicitly.",
+      "argv": ["address", "list"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "examples": [{
+        "description": "Read the current roster before choosing workers.",
+        "input": {}
+      }]
+    },
+    {
+      "token": "group.set",
+      "description": "Only on an explicit user request: create or replace a saved group of 1-64 existing agent aliases. Groups cannot contain groups or claim an alias reserved by an agent. Changes affect future sends only. This operation is outside the registered capability and automatic-permission profile.",
+      "argv": [
+        "group",
+        "set"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "alias": {
+            "type": "string",
+            "minLength": 1
+          },
+          "members": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "required": [
+          "alias",
+          "members"
+        ]
+      },
+      "examples": [
+        {
+          "description": "Only on an explicit user request: create or replace a saved group of 1-64 existing agent aliases. Groups cannot contain groups or claim an alias reserved by an agent. Changes affect future sends only. This operation is outside the registered capability and automatic-permission profile.",
+          "input": {
+            "alias": "review-team",
+            "members": [
+              "reviewer",
+              "tester"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "token": "group.remove",
+      "description": "Only on an explicit user request: remove a saved group. Earlier requests retain their recipients. This operation is outside the registered capability and automatic-permission profile.",
+      "argv": [
+        "group",
+        "remove"
+      ],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "alias": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "alias"
+        ]
+      },
+      "examples": [
+        {
+          "description": "Only on an explicit user request: remove a saved group. Earlier requests retain their recipients. This operation is outside the registered capability and automatic-permission profile.",
+          "input": {
+            "alias": "review-team"
+          }
+        }
+      ]
+    },
+    {
+      "token": "handoff.acknowledge",
+      "description": "Only after explicit human review and confirmation: acknowledge a historical blocked or cancelled handoff warning, the warning on an open handoff whose lead address is retired, or the warning on a completed handoff whose saved report's delivery was cancelled. Requires no unfinished linked deliveries, for blocked or cancelled outcomes a saved, settled report, and for completed outcomes a saved report whose delivery was cancelled. Preserves the outcome, report and all deliveries; does not resume work or claim completion. Outside the registered capability and automatic-permission profile.",
+      "argv": ["handoff", "acknowledge"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["coordination_id", "confirmed"],
+        "properties": {
+          "coordination_id": {"type": "string", "minLength": 1},
+          "confirmed": {"type": "boolean", "const": true}
+        }
+      },
+      "examples": [{
+        "description": "After the human reviews a resolved handoff and asks to clear its warning.",
+        "input": {"coordination_id": "coordination-1", "confirmed": true}
+      }]
+    },
+    {
+      "token": "delivery.cancel-held",
+      "description": "Only after explicit human review and confirmation: cancel one held attempt or one unsent held delivery. Sent work is not retracted and the agent is not stopped. No retry is requested. Outside the registered capability and automatic-permission profile.",
+      "argv": ["delivery", "cancel-held"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["confirmed"],
+        "properties": {
+          "attempt_id": {"type": "string", "minLength": 1},
+          "delivery_id": {"type": "string", "minLength": 1},
+          "confirmed": {"type": "boolean", "const": true}
+        },
+        "oneOf": [
+          {"required": ["attempt_id"], "not": {"required": ["delivery_id"]}},
+          {"required": ["delivery_id"], "not": {"required": ["attempt_id"]}}
+        ]
+      },
+      "examples": [
+        {
+          "description": "After the human reviews the held attempt and confirms cancellation.",
+          "input": {"attempt_id": "attempt-1", "confirmed": true}
+        },
+        {
+          "description": "After the human reviews an unsent held delivery and confirms cancellation.",
+          "input": {"delivery_id": "delivery-1", "confirmed": true}
+        }
+      ]
+    },
+    {
+      "token": "delivery.acknowledge",
+      "description": "Only after explicit human review and confirmation: acknowledge the missing-disposition warning on a settled delivery attempt whose recipient address is retired. Records the acknowledgement and clears only that warning; does not record a disposition, change the delivery, or resend anything. Refused while the recipient is not retired. Outside the registered capability and automatic-permission profile.",
+      "argv": ["delivery", "acknowledge"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attempt_id", "confirmed"],
+        "properties": {
+          "attempt_id": {"type": "string", "minLength": 1},
+          "confirmed": {"type": "boolean", "const": true}
+        }
+      },
+      "examples": [{
+        "description": "After the human confirms the recipient is retired and asks to clear the missing-disposition warning.",
+        "input": {"attempt_id": "attempt-1", "confirmed": true}
+      }]
+    },
+    {
+      "token": "address.persona",
+      "description": "Only on an explicit user request: set or clear one agent's persona, the short description of what it specializes in. `description` is required so an edit cannot clear it by omission; null or blank text means Generic, which carries no specialization and stays eligible for ordinary work. At most 1000 characters, no control characters, and refused for a named terminal. A persona guides selection only and grants no permissions. This operation is outside the registered capability and automatic-permission profile.",
+      "argv": ["address", "persona"],
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["address_id", "description"],
+        "properties": {
+          "address_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": ["string", "null"],
+            "maxLength": 1000
+          }
+        }
+      },
+      "examples": [
+        {
+          "description": "Only on an explicit user request: save what this agent specializes in.",
+          "input": {"address_id": "pane-address-1", "description": "Reviews Rust changes for correctness and risk."}
+        },
+        {
+          "description": "Only on an explicit user request: clear the persona so the agent is Generic.",
+          "input": {"address_id": "pane-address-1", "description": null}
+        }
+      ]
+    }
+  ]
+}

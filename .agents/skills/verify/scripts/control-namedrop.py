@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Drive public Namedrop commands in disposable native Herdr terminal panes."""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import time
+
+
+REPO = Path(__file__).resolve().parents[4]
+
+
+def wait(predicate, label, timeout=30):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.1)
+    raise RuntimeError(f"Timed out waiting for {label}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--feature", choices=["names", "groups", "controls", "tour"], default="names")
+    parser.add_argument("--binary", type=Path, default=REPO / "target/debug/namedrop")
+    args = parser.parse_args()
+    binary = args.binary.resolve(strict=True)
+    herdr = shutil.which("herdr")
+    if not herdr:
+        raise RuntimeError("Native Herdr must be on PATH")
+    base = Path(tempfile.mkdtemp(prefix="nd-verify-", dir=os.path.realpath("/tmp")))
+    evidence = REPO / ".scratch/verify" / base.name
+    evidence.mkdir(parents=True)
+    for name in ("home", "config", "state", "data", "run", "workspace", "io"):
+        (base / name).mkdir()
+    env = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TERM") if key in os.environ}
+    env.update(HOME=str(base / "home"), XDG_CONFIG_HOME=str(base / "config"),
+               XDG_STATE_HOME=str(base / "state"), XDG_DATA_HOME=str(base / "data"),
+               XDG_RUNTIME_DIR=str(base / "run"), CODEX_HOME=str(base / "home/.codex"),
+               CLAUDE_CONFIG_DIR=str(base / "home/.claude"), GIT_CONFIG_NOSYSTEM="1",
+               GIT_CONFIG_GLOBAL=str(base / "home/.gitconfig"),
+               HERDR_SOCKET_PATH=str(base / "run/herdr.sock"), SHELL=shutil.which("bash") or "/bin/bash")
+    (base / "home/.bashrc").write_text('PROMPT_COMMAND=\': > "$HOME/ready-$HERDR_PANE_ID"\'\n')
+    (base / "home/.bash_profile").write_text('. "$HOME/.bashrc"\n')
+    state = base / "state/namedrop"
+    server = None
+    shell_pids = []
+    success = False
+    sequence = 0
+    summary = {"feature": args.feature, "fixture": str(base), "binary": str(binary),
+               "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+               "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
+               "limits": "No model sessions; proves CLI and native terminal behavior only."}
+
+    def save(name, value):
+        (evidence / name).write_text(json.dumps(value, indent=2) + "\n")
+
+    def record(row):
+        with (evidence / "commands.jsonl").open("a") as log:
+            log.write(json.dumps(row) + "\n")
+
+    def command(*argv, check=True):
+        result = subprocess.run([str(a) for a in argv], env=env, cwd=base / "workspace",
+                                capture_output=True, text=True, timeout=30)
+        record({"kind": "host", "argv": [str(a) for a in argv], "exit": result.returncode,
+                "stdout": result.stdout, "stderr": result.stderr})
+        if check and result.returncode:
+            raise RuntimeError(result.stderr or result.stdout)
+        return result
+
+    def host(*argv):
+        result = command(herdr, *argv)
+        return json.loads(result.stdout)["result"] if result.stdout.strip() else None
+
+    def cli(*argv, pane=None, allowed=(0,)):
+        nonlocal sequence
+        sequence += 1
+        pane = pane or panes["lead"]
+        prefix = base / "io" / str(sequence)
+        out, err, code = [Path(str(prefix) + suffix) for suffix in (".out", ".err", ".exit")]
+        invocation = [str(binary), "--plugin-state", str(state), "--herdr-socket", env["HERDR_SOCKET_PATH"],
+                      "--herdr-workspace", workspace, "--herdr-pane", pane, *map(str, argv)]
+        script = prefix.with_suffix(".sh")
+        script.write_text(shlex.join(invocation) + " > " + shlex.quote(str(out)) + " 2> " + shlex.quote(str(err))
+                          + "\nresult=$?\ncat " + shlex.quote(str(out)) + "\ncat " + shlex.quote(str(err))
+                          + " >&2\nprintf '%s\\n' \"$result\" > " + shlex.quote(str(code)) + "\n")
+        ready = base / "home" / f"ready-{pane}"
+        ready.unlink(missing_ok=True)
+        host("pane", "run", pane, shlex.join(["sh", str(script)]))
+        wait(lambda: code.exists() and ready.exists(), "CLI exit and idle shell")
+        row = {"kind": "cli", "feature": args.feature, "pane": pane, "argv": invocation,
+               "exit": int(code.read_text()), "stdout": out.read_text(), "stderr": err.read_text()}
+        record(row)
+        transcript = command(herdr, "pane", "read", pane, "--source", "recent-unwrapped", "--lines", "120").stdout
+        (evidence / f"{sequence:02d}-terminal.txt").write_text(transcript)
+        if row["exit"] not in allowed:
+            raise RuntimeError(f"CLI failed: {row}")
+        return json.loads(row["stdout"]) if row["stdout"].strip().startswith("{") else row["stdout"]
+
+    def body(*argv, **payload):
+        return cli(*argv, "--input-json", json.dumps(payload))["data"]
+
+    def database_snapshot():
+        with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
+            return "\n".join(db.iterdump())
+
+    log = (evidence / "server.log").open("w")
+    try:
+        command("git", "init", "--quiet")
+        summary["herdr_version"] = command(herdr, "--version").stdout.strip()
+        summary["namedrop_version"] = command(binary, "--version").stdout.strip()
+        server = subprocess.Popen([herdr, "server"], env=env, cwd=base / "workspace",
+                                  stdout=log, stderr=log, start_new_session=True)
+        wait(lambda: server.poll() is not None or Path(env["HERDR_SOCKET_PATH"]).exists(), "owned server socket")
+        if server.poll() is not None:
+            raise RuntimeError("Disposable server failed; see server.log")
+        created = host("workspace", "create", "--cwd", str(base / "workspace"), "--label", "Namedrop verification")
+        workspace = created["workspace"]["workspace_id"]
+        panes = {"lead": created["root_pane"]["pane_id"]}
+        panes["worker"] = host("tab", "create", "--workspace", workspace, "--cwd", str(base / "workspace"),
+                               "--label", "Verification worker")["root_pane"]["pane_id"]
+        for pane in panes.values():
+            wait(lambda: (base / "home" / f"ready-{pane}").exists(), "native bash prompt")
+            shell_pids.append(host("pane", "process-info", "--pane", pane)["process_info"]["shell_pid"])
+        save("instance.json", {"server_pid": server.pid, "socket": env["HERDR_SOCKET_PATH"],
+                              "state": str(state), "workspace": workspace, "panes": panes})
+        body("activate", confirmed=True)
+
+        # Doctor reads state; the unnamed fixture may legitimately need attention.
+        before = database_snapshot()
+        live = host("pane", "list")["panes"]
+        assert server.poll() is None and all(any(p["pane_id"] == pane for p in live) for pane in panes.values())
+        report = cli("doctor", "--json", allowed=(0, 1))
+        assert report["data"]["status"] in ("healthy", "needs_attention"), report
+        assert all(issue["code"] == "ND-SETUP-003" for issue in report["data"]["issues"]), report
+        assert before == database_snapshot(), "Doctor changed stored state"
+        save("doctor.json", report)
+
+        if args.feature == "names":
+            cli("name", "@build", "--type", "terminal")
+            listed = cli("address", "list", "--json")["data"]
+            saved = next(a for a in listed if a["alias"] == "build")
+            body("address", "rename", address_id=saved["id"], alias="verify-build")
+            listed = cli("address", "list", "--json")["data"]
+            assert any(a["alias"] == "verify-build" and a["id"] == saved["id"] for a in listed), listed
+            assert not any(a["alias"] == "build" for a in listed), listed
+            save("names.json", listed)
+            cli("name", "@reviewer", "--type", "agent", "--persona", "Reviews Rust changes.", pane=panes["worker"])
+            cli("name", "@reviewer", "--type", "agent", pane=panes["worker"])
+            roster = cli("address", "list", "--json")["data"]
+            assert next(a for a in roster if a["alias"] == "reviewer")["persona"] == "Reviews Rust changes."
+            save("persona-saved.json", roster)
+            cli("name", "@reviewer", "--type", "agent", "--generic", pane=panes["worker"])
+            roster = cli("address", "list", "--json")["data"]
+            assert next(a for a in roster if a["alias"] == "reviewer")["persona"] is None
+            save("persona-cleared.json", roster)
+        elif args.feature == "groups":
+            cli("name", "@reviewer", "--type", "agent", "--persona", "Reviews Rust changes.")
+            cli("name", "@tester", "--type", "agent", "--generic", pane=panes["worker"])
+            body("group", "set", alias="review-team", members=["reviewer", "tester"])
+            listed = cli("group", "list", "--json")["data"]["groups"]
+            assert len(listed) == 1 and listed[0]["alias"] == "review-team", listed
+            assert {m["alias"] for m in listed[0]["members"]} == {"reviewer", "tester"}, listed
+            save("groups.json", listed)
+            body("group", "remove", alias="review-team")
+            assert cli("group", "list", "--json")["data"]["groups"] == []
+        elif args.feature == "controls":
+            body("space", "pause")
+            with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
+                paused = db.execute("SELECT paused FROM worktrees").fetchall()
+            assert paused == [(1,)], paused
+            body("space", "resume")
+            with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
+                resumed = db.execute("SELECT paused FROM worktrees").fetchall()
+            assert resumed == [(0,)], resumed
+            save("controls.json", {"paused": paused[0][0], "resumed": resumed[0][0]})
+        elif args.feature == "tour":
+            origin = next(p for p in live if p["pane_id"] == panes["lead"])
+            invocation = ["env", f"NAMEDROP_TARGET_WORKSPACE={workspace}", f"NAMEDROP_TARGET_PANE={panes['lead']}",
+                          f"NAMEDROP_TARGET_TERMINAL={origin['terminal_id']}", str(binary), "--plugin-state", str(state),
+                          "--herdr-socket", env["HERDR_SOCKET_PATH"], "--herdr-pane", panes["lead"], "ui", "run", "tour"]
+            ready = base / "home" / f"ready-{panes['lead']}"
+            ready.unlink(missing_ok=True)
+            host("pane", "run", panes["lead"], shlex.join(invocation))
+
+            def page(title):
+                result = command(herdr, "pane", "read", panes["lead"], "--source", "visible").stdout
+                return result if title in result else None
+
+            (evidence / "tour-first.txt").write_text(wait(lambda: page("Welcome to Namedrop"), "first tour page"))
+            host("pane", "send-keys", panes["lead"], "right")
+            (evidence / "tour-second.txt").write_text(wait(lambda: page("Mention an agent"), "second tour page"))
+            host("pane", "send-keys", panes["lead"], "esc")
+            wait(ready.exists, "shell prompt after closing tour")
+            cli("address", "list", "--json")
+        with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as source:
+            with sqlite3.connect(evidence / "state.sqlite3") as destination:
+                source.backup(destination)
+        success = True
+    finally:
+        if server is not None:
+            if server.poll() is None:
+                server.terminate()
+            try:
+                server.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                server.kill()
+                server.wait(timeout=5)
+        log.close()
+        def live_shells():
+            live_pids = []
+            for pid in shell_pids:
+                try:
+                    os.kill(pid, 0)
+                    live_pids.append(pid)
+                except ProcessLookupError:
+                    pass
+            return live_pids
+
+        remaining = list((base / "run").glob("*.sock"))
+        shells = live_shells()
+        if server is not None:
+            deadline = time.monotonic() + 5
+            while (remaining or shells) and time.monotonic() < deadline:
+                time.sleep(0.1)
+                remaining = list((base / "run").glob("*.sock"))
+                shells = live_shells()
+        clean = (server is None or server.poll() is not None) and not (remaining or shells)
+        save("cleanup.json", {"verified": clean, "server_pid": server.pid if server else None,
+                              "server_exit": server.returncode if server else None,
+                              "owned_shell_pids": shell_pids, "live_shell_pids": shells,
+                              "remaining_sockets": [str(p) for p in remaining]})
+        summary.update(passed=success and clean, cleanup_verified=clean)
+        save("summary.json", summary)
+        if clean:
+            shutil.rmtree(base)
+        else:
+            print(f"Fixture retained for cleanup: {base}")
+        assert (evidence / "commands.jsonl").exists() and (evidence / "cleanup.json").exists()
+        print(f"Evidence: {evidence}")
+        if not clean:
+            raise RuntimeError("Owned server cleanup incomplete; see cleanup.json")
+
+
+if __name__ == "__main__":
+    main()

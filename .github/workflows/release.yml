@@ -1,0 +1,38 @@
+name: Release artifacts
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  archive:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            artifact: namedrop-release-apple-silicon
+          - runner: ubuntu-24.04
+            artifact: namedrop-release-linux-x86_64
+          - runner: ubuntu-24.04-arm
+            artifact: namedrop-release-linux-aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.0
+        with:
+          components: clippy, rustfmt
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends zsh libc6-dev
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: CARGO_TARGET_DIR=target/crate-checks cargo package --locked
+      - run: sh scripts/package-release.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: target/dist/*
+          if-no-files-found: error
