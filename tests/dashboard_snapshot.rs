@@ -389,3 +389,60 @@ fn space_keys_are_twenty_hex_chars_and_parse_only_that_shape() {
         assert_eq!(SpaceKey::parse(bad), None, "{bad:?}");
     }
 }
+
+#[test]
+fn a_human_message_gets_the_you_lane_first() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    store
+        .transaction(|tx| {
+            tx.append_message(
+                &ns,
+                &MessageDraft {
+                    thread_id: ThreadId::new("thread-w1"),
+                    message_id: MessageId::new("m-human"),
+                    in_reply_to: None,
+                    author_address_id: id(&ns, "a"),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: "a".to_owned(),
+                    author_agent_session_snapshot: None,
+                    request_id: "request-human".to_owned(),
+                    authored_source: "@b ship it".to_owned(),
+                    body: "ship it".to_owned(),
+                    grammar_version: "mention/v1".to_owned(),
+                    recipients: vec![MessageRecipientDraft {
+                        address_id: id(&ns, "b"),
+                        alias_snapshot: "b".to_owned(),
+                        agent_session_snapshot: None,
+                        delivery_id: DeliveryId::new("delivery-human"),
+                    }],
+                    context_references: Vec::new(),
+                },
+                &attribution(),
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+
+    let json = serde_json::to_value(snapshot(&mut store, &ns)).unwrap();
+
+    assert_eq!(json["participants"][0]["address_id"], "human");
+    assert_eq!(json["participants"][0]["alias"], "you");
+    assert_eq!(
+        json["participants"][0]["kind"],
+        serde_json::json!({"type": "human"})
+    );
+    assert_eq!(
+        json["participants"][0]["waiting_on"],
+        serde_json::json!(["@b"])
+    );
+    assert_eq!(json["messages"][0]["author"], "human");
+    let b = json["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["alias"] == "@b")
+        .unwrap();
+    assert_eq!(b["mailbox"][0]["from"], "you");
+}

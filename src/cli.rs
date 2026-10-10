@@ -192,6 +192,10 @@ impl Cli {
         }
     }
 
+    pub fn is_dashboard_server(&self) -> bool {
+        matches!(self.command, Command::DashboardServer)
+    }
+
     pub fn is_reset_tour(&self) -> bool {
         matches!(
             self.command,
@@ -280,6 +284,9 @@ enum Command {
         #[command(subcommand)]
         command: EventCommand,
     },
+    /// The singleton dashboard server; `namedrop dashboard` starts it.
+    #[command(hide = true)]
+    DashboardServer,
     /// Runtime hooks installed for supported agents.
     #[command(hide = true)]
     Hook {
@@ -328,6 +335,7 @@ impl Command {
             Self::Space { command } => command.operation(),
             Self::Reconcile => "reconcile",
             Self::Event { command } => command.operation(),
+            Self::DashboardServer => "dashboard.server",
             Self::Hook { command } => command.operation(),
         }
     }

@@ -479,7 +479,7 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
         .collect();
     let at = |address_id: &str, human: bool| {
         if human {
-            "You".to_owned()
+            "you".to_owned()
         } else {
             format!(
                 "@{}",
@@ -549,7 +549,7 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
         let waiting_on = waiting_on(HUMAN, true);
         lanes.push(Participant {
             address_id: HUMAN.to_owned(),
-            alias: "You".to_owned(),
+            alias: "you".to_owned(),
             kind: ParticipantKind::Human,
             role: None,
             persona: None,
