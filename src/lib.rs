@@ -6,6 +6,7 @@ pub use agent_status_model::{suggest_agent_persona, summarize_agent_status};
 mod context;
 mod controls;
 mod coordination;
+pub mod dashboard;
 mod delivery;
 mod domain;
 mod groups;

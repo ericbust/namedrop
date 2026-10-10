@@ -3,7 +3,11 @@ use std::{fs, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
 /// Hold across the command, including dispatch and shared package writes. The
 /// updater takes the exclusive lock while old commands drain and state migrates.
-pub fn command_guard(state: &std::path::Path) -> Result<Option<fs::File>, String> {
+/// `wait` bounds how long to queue behind an update; `None` waits for it.
+pub fn command_guard(
+    state: &std::path::Path,
+    wait: Option<std::time::Duration>,
+) -> Result<Option<fs::File>, String> {
     let runtime = state.join("runtime");
     if !runtime.is_dir() {
         return Ok(None);
@@ -20,7 +24,26 @@ pub fn command_guard(state: &std::path::Path) -> Result<Option<fs::File>, String
         .mode(0o600)
         .open(path)
         .map_err(|error| error.to_string())?;
-    guard.lock_shared().map_err(|error| error.to_string())?;
+    match wait {
+        None => guard.lock_shared().map_err(|error| error.to_string())?,
+        Some(wait) => {
+            let deadline = std::time::Instant::now() + wait;
+            loop {
+                match guard.try_lock_shared() {
+                    Ok(()) => break,
+                    Err(fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    Err(fs::TryLockError::WouldBlock) => {
+                        return Err(
+                            "Namedrop is still updating; try again when it finishes.".into()
+                        );
+                    }
+                    Err(fs::TryLockError::Error(error)) => return Err(error.to_string()),
+                }
+            }
+        }
+    }
     if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
         return Err("Namedrop activation was interrupted. Reopen Update Namedrop to finish; this command made no changes.".into());
     }
