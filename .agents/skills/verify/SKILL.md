@@ -18,11 +18,11 @@ cargo build --locked --bin namedrop
 
 Requires Rust 1.97+, a C compiler, Python 3.9+, Bash, Git, and native Herdr on PATH. The documented distribution build is `sh scripts/build.sh`; verification uses the debug binary to avoid changing an installed runtime. Pass `--binary bin/namedrop` to check a distribution build instead.
 
-The helper starts `herdr server` with an isolated home, configuration, state, data, runtime directory, and Unix socket under `/tmp/nd-verify-*`. It creates a disposable Git workspace and two native Bash panes. Readiness requires the owned server to remain alive, its socket to exist, and each pane's prompt marker to appear. It activates Namedrop through its public CLI within that fixture. Activation writes integration packages and shell configuration only to the fixture home. It does not start a model or install the Codex plugin into your profile.
+The helper starts `herdr server` with an isolated home, configuration, state, data, runtime directory, and Unix socket under `/tmp/nd-verify-*`. It creates a disposable Git workspace and two native Bash panes. The stuck-wake recipe adds a third pane, links the candidate as a disposable plugin and activates it through `scripts/setup.sh activate --json`, so Herdr's real hooks run. That activation path requires `python3`, and it runs the host's `codex` CLI when one is on PATH to install the Namedrop Codex plugin into the fixture's `CODEX_HOME`. The fixture never touches the user's profile. Readiness requires the owned server to remain alive, its socket to exist, and each pane's prompt marker to appear. It activates Namedrop through its public CLI within that fixture. Activation writes integration packages and shell configuration only to the fixture home. It does not start a model or install the Codex plugin into your profile.
 
 Each invocation owns its profile, socket, panes, and state. Concurrent runs are supported. Never replace the helper's environment with the caller's Herdr context or link this checkout into the user's running session for verification. No TCP port, credentials, or seed database are required.
 
-Teardown runs automatically in `finally`, on both success and failure. The helper terminates and waits for its own server process, escalates only that child if necessary, and verifies that its socket and owned pane shells are gone.
+Teardown runs automatically in `finally`, on both success and failure. The helper terminates and waits for its own server process, escalates only that child if necessary, and verifies that its socket and owned pane shells are gone. It then scans `/proc` for processes whose executable or arguments reference the fixture, such as Namedrop's status worker, waits up to 15 s for them to exit, and sends SIGTERM to any that remain. A run that had to end such a process is not clean.
 
 ## Doctor
 
@@ -39,9 +39,12 @@ Exit `0` means healthy, `1` means needs attention, and `2` means unavailable. Th
 .agents/skills/verify/scripts/control-namedrop.py --feature tour
 .agents/skills/verify/scripts/control-namedrop.py --feature handoffs
 .agents/skills/verify/scripts/control-namedrop.py --feature shared-checkout
+.agents/skills/verify/scripts/control-namedrop.py --feature stuck-wake
 ```
 
 The helper sends public CLI commands through `herdr pane run` into real terminal panes. Each command has its own stdout, stderr, exit-status capture, and terminal transcript. It reads saved values through public list commands or a read-only SQLite connection. The tour recipe sends actual `right` and `esc` keys and captures both pages. It runs the tour renderer in the owned terminal; floating-popup actions and prefix shortcuts require a separately linked disposable plugin instance. The handoffs recipe proves the model-free rejections only.
+
+The stuck-wake recipe runs two simulated Codex sessions against the linked candidate, so Herdr's real `pane.agent_status_changed` hook drives Namedrop's status worker. It proves a tracked handoff and a nudge received by a registered session. The lead's turn ends idle inside the 30 s acknowledgement grace without a completion. The recipe then requires the wake to settle as `no_reply`, the report to dispatch, and Doctor to show neither `ND-DELIVERY-003` nor `ND-COORDINATION-001` for that coordination. It runs no model and no real agent hooks. The simulated agent never reads its envelopes, the helper runs the bound operations for it, and its status comes from a rendered screen. Read [stuck wake](features/stuck-wake.md) for the drive and its limits.
 
 The existing native collaboration check is currently blocked by stale inherited pane context:
 
@@ -58,10 +61,11 @@ The helper prints the retained directory, `.scratch/verify/nd-verify-*/`, on suc
 - `commands.jsonl`: actual argument arrays, stdout, stderr, and exit codes, including user actions and resulting reads.
 - Numbered `*-terminal.txt` files, plus `tour-first.txt` and `tour-second.txt` for the tour.
 - `handoffs.json` for the handoff rejections.
+- `stuck-wake.json`, `lead-envelopes.json` and `worker-envelopes.json` for the stuck wake.
 - `instance.json`, `doctor.json`, `server.log`, and feature-specific saved values.
-- `state.sqlite3` after a successful drive, for independent inspection of persisted side effects.
-- `summary.json`: feature, commit, binary identity, limitations, and pass status. The commit alone does not identify uncommitted code; retain the relevant diff with proof of such changes.
-- `cleanup.json`: server exit, owned shell PIDs, remaining sockets, and cleanup verdict.
+- `state.sqlite3` after a successful drive, and after a stuck-wake stall, for independent inspection of persisted side effects.
+- `summary.json`: feature, commit, binary identity, limitations, and pass status, plus `outcome` for the stuck wake. The commit alone does not identify uncommitted code; retain the relevant diff with proof of such changes.
+- `cleanup.json`: server exit, owned shell PIDs, remaining sockets, the owned-process scan with any terminated PIDs, and cleanup verdict.
 
 Require the real user action and its observable result. A final list or screenshot alone is insufficient. Verify stored mutations through a second read, and delivery through receipt and final disposition. Only substitute an external system at an existing production boundary, and label what the substitution cannot prove.
 
@@ -69,12 +73,12 @@ Preview is a read-only operation, but verify that claim: compare the fixture dat
 
 ## Cleanup
 
-The helper deletes fixture state only after its own server and shell processes have exited and its sockets have disappeared. Evidence lives outside the fixture and survives deletion. An incomplete cleanup retains the fixture and returns an error; inspect `cleanup.json` and the recorded PIDs before taking further action. Never kill by process name or stop the user's Herdr server.
+The helper deletes fixture state only after its own server and shell processes have exited, its sockets have disappeared, and no process still references the fixture. Evidence lives outside the fixture and survives deletion. An incomplete cleanup retains the fixture and returns an error; inspect `cleanup.json` and the recorded PIDs before taking further action. Never kill by process name or stop the user's Herdr server.
 
 After a run, inspect the printed directory's `summary.json` and `cleanup.json`, then confirm `commands.jsonl` and the feature evidence still exist. A passed feature with incomplete cleanup is a failed verification run. Native collaboration has its own cleanup and evidence path described in the feature map.
 
 ## Helpers
 
-`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its six recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
+`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its seven recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
 
 Use `/maintain-verification-skill` to reconcile the feature map and recipes as Namedrop changes.

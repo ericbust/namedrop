@@ -153,6 +153,53 @@ impl Fixture {
         attempt_id
     }
 
+    /// One mention the recipient's session has already received, created at
+    /// `created_at_ms`, so a test can place it inside or past the
+    /// acknowledgement grace.
+    fn acknowledged_attempt(&self, created_at_ms: u64) -> DeliveryAttemptId {
+        self.queue_message();
+        let attempt_id = DeliveryAttemptId::new("acknowledged-attempt");
+        let namespace = self.namespace();
+        let attribution = MutationAttribution::new(ActorKind::Plugin, "fixture", created_at_ms);
+        StateStore::open(self.state())
+            .unwrap()
+            .transaction(|tx| {
+                assert!(
+                    tx.lease_mailbox_head(
+                        &namespace,
+                        &PaneAddressId::new("recipient"),
+                        &LeaseDraft {
+                            attempt_id: attempt_id.clone(),
+                            binding_id: PaneBindingId::new("binding-1"),
+                            agent_session_id: AgentSessionId::new("session-1"),
+                            retry_of_attempt_id: None,
+                            owner: "fixture-dispatcher".to_owned(),
+                            acquired_at_ms: created_at_ms,
+                            expires_at_ms: created_at_ms + 30_000,
+                        },
+                        &attribution
+                    )?
+                    .is_some()
+                );
+                tx.transition_delivery_attempt(
+                    &namespace,
+                    &attempt_id,
+                    DeliveryState::Submitted,
+                    &attribution,
+                )?;
+                tx.acknowledge_delivery_attempt(
+                    &namespace,
+                    &attempt_id,
+                    "fixture-receipt",
+                    &AgentSessionId::new("session-1"),
+                    &attribution,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        attempt_id
+    }
+
     fn queue_message(&self) {
         self.queue_message_numbered(1, "review");
     }
@@ -1025,4 +1072,27 @@ fn a_second_disposition_on_an_answered_attempt_is_rejected_and_changes_nothing()
         fixture.inbox_bodies().is_empty(),
         "a rejected disposition must not re-owe the envelope"
     );
+}
+
+/// Namestack verify run v10111443b186, capture `restart-adopt-stall`: an
+/// acknowledged delivery settles by observation only once the session is idle
+/// and thirty seconds have passed since the attempt was created, yet every
+/// drain is event-driven. A turn that ended inside those thirty seconds left
+/// its acknowledged attempt untouched for five idle minutes, and the mailbox
+/// behind it with it. The idle event is the last one the host sends, so the
+/// worker it starts has to carry the attempt through the grace itself.
+#[test]
+fn status_worker_settles_an_acknowledged_attempt_once_the_idle_grace_elapses() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    let attempt = fixture.acknowledged_attempt(now_ms() - 29_000);
+    let marker = fixture.queue_status("turn-ended");
+    let mut worker = fixture.worker();
+    worker.finish();
+    assert_eq!(
+        fixture.attempt_state(&attempt),
+        DeliveryState::Settled,
+        "the one idle event must see the attempt through its grace"
+    );
+    assert!(!marker.exists());
 }

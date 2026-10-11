@@ -381,6 +381,39 @@ impl Fixture {
     fn recipient_session(&self, message: &Value, pane: &str) -> String {
         self.db().query_row("SELECT session_snapshot FROM message_recipients WHERE message_id=?1 AND address_id=?2",rusqlite::params![message.as_str().unwrap(),pane],|r|r.get(0)).unwrap()
     }
+    fn attempt_state(&self, attempt: &str) -> String {
+        self.db()
+            .query_row(
+                "SELECT state FROM delivery_attempt_state WHERE attempt_id=?1",
+                [attempt],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+    fn disposition(&self, attempt: &str) -> Option<String> {
+        self.db()
+            .query_row(
+                "SELECT disposition_kind FROM delivery_dispositions WHERE attempt_id=?1",
+                [attempt],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+    fn unresolved_attention(&self) -> Vec<(String, String)> {
+        let db = self.db();
+        let mut statement = db.prepare("SELECT source_kind,source_id FROM attention_items WHERE resolved_at_ms IS NULL ORDER BY rowid").unwrap();
+        let rows = statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+    fn prompted(&self, message: &Value, pane: &str) -> bool {
+        self.prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(p, prompt)| p == pane && prompt["control"]["message_id"] == *message)
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -3072,4 +3105,72 @@ fn a_message_addressed_only_to_its_author_is_refused() {
     )
     .unwrap_err();
     assert!(refused.contains("only to its author"), "{refused}");
+}
+
+/// Namestack verify run v10111443b186, capture `restart-adopt-stall`: the
+/// restarted sub-lead resolved its coordination inside the post-adoption
+/// nudge's turn and ended that turn without the nudge's bound complete. The
+/// wake attempt then sat acknowledged with no disposition for five idle
+/// minutes, the report_to_human delivery stayed queued behind it, and once a
+/// later prompt got things moving the wake settled with no disposition and
+/// Doctor kept ND-DELIVERY-003 for the rest of the run.
+#[test]
+fn a_nudge_the_lead_acted_on_but_never_completed_settles_as_no_reply_when_its_turn_ends() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    let nudge = f.nudge_prompts().pop().expect("the idle lead is nudged");
+    let wake_attempt = nudge["control"]["attempt_id"].as_str().unwrap().to_owned();
+    assert_eq!(f.attempt_state(&wake_attempt), "acknowledged");
+
+    f.status("lead", "working");
+    let resolved = f.handoff(
+        "handoff.resolve",
+        json!({
+            "request_id":"nudge-turn-resolve",
+            "coordination_id":id,
+            "outcome":"completed",
+            "report":"Synthetic final report.",
+            "reconciled_assignments":[
+                {"assignment_id":a["coordination"][0]["assignment_id"],"revision":1}
+            ]
+        }),
+    );
+    let report = resolved["report_message_id"].clone();
+    f.status("lead", "idle");
+
+    // Inside the acknowledgement grace the host's idle reading may still lag
+    // the submission, so the wake stays acknowledged and the report waits.
+    f.now.store(100 + 10_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&wake_attempt), "acknowledged");
+    assert_eq!(f.delivery(&report, "lead").1, "queued");
+    assert!(!f.prompted(&report, "lead"));
+
+    // Past the grace with the session idle the nudge is finished: no reply was
+    // ever permitted, the coordination already records what the lead did, and
+    // nothing is left for a human to decide about the nudge itself.
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&wake_attempt), "settled");
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "a settled nudge must not raise ND-DELIVERY-003: {:?}",
+        f.unresolved_attention()
+    );
+    assert!(
+        f.prompted(&report, "lead"),
+        "the report must reach the lead"
+    );
+    assert_eq!(f.delivery(&report, "lead").1, "acknowledged");
+
+    f.complete(&f.attempt(&report, "lead"));
+    assert_eq!(f.delivery(&report, "lead").1, "settled");
+    assert_eq!(f.unresolved_attention(), Vec::<(String, String)>::new());
 }
