@@ -7,7 +7,7 @@ Users save several named agents under one alias, then address that group in late
 - `groups-save` creates a group with existing agent aliases.
 - `groups-list` reports the group and exact members.
 - `groups-remove` removes the group without removing its agents.
-- `groups-send` expands mentions once per recipient and retains an existing request's recipients after edits.
+- `groups-send` expands mentions once per recipient, leaves out the sender, and retains an existing request's recipients after edits.
 
 ## How to get to it (user POV)
 
@@ -28,7 +28,8 @@ Preconditions:
 - It runs `group list --json` and asserts one `review-team` group whose member aliases are exactly `reviewer` and `tester`. Inspect `groups.json` and `commands.jsonl`.
 - It removes `review-team` and requires `removed: true`. A second group list must return an empty `data.groups`, and `address list` must still contain `reviewer` and `tester`.
 - It requires `group set` with no members to be rejected. It then names the worker pane `@build` as a terminal and records whether a group `ops` containing only `build` is accepted, in `group-probes.json`. Today it is accepted; see Gotchas.
-- To drive the group prompt entry point in an authorized disposable agent session, enter `@review-team Review this fixture change.`. Observe each recipient envelope and its final reply. Edit the group, then repeat the send with the same `request_id`. The replay must return the original message ID and recipient IDs. This path is not exercised by the helper.
+- It saves a group `solo` whose only member is `reviewer`, the lead pane's own name, then sends `@solo Note to self.` from that pane. The send must be refused with `addressed only to its author` and leave the database unchanged. `group-probes.json` keeps the refusal.
+- To drive the group prompt entry point in an authorized disposable agent session, enter `@review-team Review this fixture change.` from a session that is not a member. Observe each recipient envelope and its final reply. A member that sends to its own group gets no envelope of its own. Edit the group, then repeat the send with the same `request_id`. The replay must return the original message ID and recipient IDs. This path is not exercised by the helper.
 
 ## Gotchas
 
@@ -37,4 +38,5 @@ Preconditions:
 - Group and agent aliases exclude each other in both directions. A group cannot claim an agent's alias, and an agent cannot be named or renamed to a group's alias.
 - Removing a group that does not exist succeeds with `removed: false`. A member whose name was retired lists with a null `alias`.
 - Overlapping group/agent mentions must deliver once per agent. A list check alone does not prove routing.
+- Expansion drops the sender, so a message never reaches its own author. A group mention that leaves only the sender is refused with `this message is addressed only to its author; mention at least one other agent`. Preview applies the same rule.
 - Saved shell-pane agent names do not establish delivery readiness.
