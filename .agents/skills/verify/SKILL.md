@@ -20,7 +20,7 @@ Requires Rust 1.97+, a C compiler, Python 3.9+, Bash, Git, and native Herdr on P
 
 The helper starts `herdr server` with an isolated home, configuration, state, data, runtime directory, and Unix socket under `/tmp/nd-verify-*`. It creates a disposable Git workspace and two native Bash panes. Readiness requires the owned server to remain alive, its socket to exist, and each pane's prompt marker to appear. It activates Namedrop through its public CLI within that fixture. Activation writes integration packages and shell configuration only to the fixture home. It does not start a model or install the Codex plugin into your profile.
 
-Each invocation owns its profile, socket, panes, and state. Concurrent runs are supported. Never replace the helper's environment with the caller's Herdr context or link this checkout into the user's running session for verification. No TCP port, credentials, or seed database are required.
+Each invocation owns its profile, socket, panes, and state. Concurrent runs are supported. Never replace the helper's environment with the caller's Herdr context or link this checkout into the user's running session for verification. No fixed TCP port, credentials, or seed database are required; the dashboard recipe's server picks its own loopback port.
 
 Teardown runs automatically in `finally`, on both success and failure. The helper terminates and waits for its own server process, escalates only that child if necessary, and verifies that its socket and owned pane shells are gone.
 
