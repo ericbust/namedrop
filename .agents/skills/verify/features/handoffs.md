@@ -4,7 +4,7 @@ Users mention collaborators, receive replies where they asked, track partial and
 
 ## Sub-features
 
-- `handoff-direct` routes a leading mention and returns a reply to its requester.
+- `handoff-direct` routes a leading mention and returns a reply to its requester. It never delivers to the sender.
 - `handoff-delegated` leaves a non-leading mention with the current agent to delegate.
 - `handoff-preview` expands recipients and proposed context without sending or capturing state.
 - `handoff-tracked` retains progress, continuation, and one final report.
@@ -27,7 +27,7 @@ Preconditions:
 - Build `target/debug/namedrop` and have native Herdr, Rust, Python, and Bash or zsh available.
 - Real prompt consumption needs two registered authenticated host sessions in an owned workspace. Saved names alone are insufficient.
 
-- Run `.agents/skills/verify/scripts/control-namedrop.py --feature handoffs` for the model-free part. It runs `handoff status` outside the fixture panes with only an inherited `HERDR_PANE_ID` and requires exit `65` with the `Pass --herdr-pane` hint. It then names `@lead` (agent) and `@build` (terminal) and runs `handoff preview` from the lead pane with explicit context. That must exit `65` with `operation requires a current Agent Session`, because a plain shell has no agent session. Both rejections must leave the database unchanged. `handoffs.json` keeps both results. This proves provenance and session checks only, not any delivery.
+- Run `.agents/skills/verify/scripts/control-namedrop.py --feature handoffs` for the model-free part. It runs `handoff status` outside the fixture panes with only an inherited `HERDR_PANE_ID` and requires exit `65` with the `Pass --herdr-pane` hint. It then names `@lead` (agent) and `@build` (terminal) and runs `handoff preview` from the lead pane with explicit context. That must exit `65` with `operation requires a current Agent Session`, because a plain shell has no agent session. Both rejections must leave the database unchanged. `handoffs.json` keeps both results. Finally it sends `@lead Note to self.` as a human from the lead pane. That must be refused with `addressed only to its author` and leave the database unchanged. This proves provenance, session and self-address checks only, not any delivery.
 - The existing native scripts are currently blocked. `python3 tests/coordination_native.py --binary target/debug/namedrop` fails at `name lead --type agent`, and `NAMEDROP_TEST_BINARY="$PWD/target/debug/namedrop" python3 tests/personas_native.py` fails at activation. Both invoke the binary from Python with an inherited `HERDR_PANE_ID`; their process is outside the fixture pane's shell tree. The product returns exit `65` and tells the caller to pass `--herdr-pane`. The coordination check stops at its first direct `name lead --type agent`; the persona check stops at `activate`.
 - Before using those checks, repair the fixture's public CLI invocations with explicit fixture `--herdr-pane`, `--herdr-socket`, and `--herdr-workspace`, or run them from the owned pane. Hook wrappers need their normal in-pane process ancestry; do not forge it. This skill does not bypass provenance checks.
 - The coordination check's intended drive launches isolated Herdr, stages the candidate plugin, uses compiled agent simulators, receives envelopes, executes bound reply/completion tools, reads progress/results, resolves a report, and checks persistence. After repair, require `NAMEDROP_COORDINATION_NATIVE_OK`, successful `cleanup.json`, captured envelopes, `commands.jsonl`, and `state.sqlite3`. Successful evidence lives under `.scratch/leader-continuation/native/namedrop-coordination-*/`. Failure prints its retained `/tmp/namedrop-coordination-*` fixture; preserve evidence before removing scratch state. The persona check prints `/tmp/namedrop-personas-native-*` on failure.
@@ -43,6 +43,7 @@ Preconditions:
 - Simulated native sessions prove transport and public commands, not collaborator selection or provider-backed reasoning.
 - An inherited pane ID can be rejected when the CLI runs outside that pane's process tree. Use the exact bound tool's explicit pane/socket/workspace arguments.
 - Preview requires a currently registered sender and does not establish that a later send will still resolve the same recipients.
+- A message never goes to its author. The sender's own name among the leading mentions is dropped, and a message addressed only to its author is refused. A tracked worker reply that also addresses anyone besides the lead is refused with a message telling the worker to write other names without the `@`.
 - Partial-result reads must not consume the final report. A completed sender turn alone does not prove recipient delivery or reply receipt.
 - Terminal execution and Git context have real side effects. Use only disposable files and panes, retain before/after evidence, and do not resend an uncertain attempt.
 - The stock native checks have their own cleanup behavior. Run their cleanup even after failure and verify the recorded owned handles, never processes selected by name.

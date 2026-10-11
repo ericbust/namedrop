@@ -15,7 +15,8 @@ Users inspect blocked collaboration and pause or resume workspace delivery witho
 
 - Run `namedrop doctor`, optionally with `--json` or `--human`.
 - Press Prefix, release, Shift-H, or run `herdr plugin action invoke doctor --plugin namedrop`.
-- Run `namedrop space pause` and `namedrop space resume`.
+- Run `namedrop space pause` and `namedrop space resume`, or `herdr plugin action invoke pause --plugin namedrop` and `resume`.
+- Run `herdr plugin action invoke check --plugin namedrop` to run Doctor from the workspace menu.
 - Use `namedrop address disable`, `address enable`, or `thread pause`, `thread resume`, `thread stop`, and `thread continue` with structured IDs from the affected name/request.
 - Press Prefix, release, Shift-S, or run `herdr plugin action invoke agent-status --plugin namedrop`.
 - Activation writes the Shift-H, Shift-S, Shift-I, Shift-M and Shift-O bindings into Herdr's configuration; they are not declared in `herdr-plugin.toml`.
@@ -40,6 +41,6 @@ Preconditions:
 - Doctor exits `0` for healthy, `1` for attention, and `2` for unavailable or an unresolvable runtime. Passing it an input payload exits `64`. Only its reported prerequisite gaps determine which drives remain usable.
 - Pause and resume change nothing on a space that is not activated. Deactivating a space also clears its pause.
 - Pause/cancel does not kill a running terminal command. Prove pending delivery separately from already running work.
-- Doctor and Agent status popups are separate entry points; the helper's CLI check does not cover them.
+- Doctor and Agent status popups, and the `check`, `pause` and `resume` Herdr actions, are separate entry points; the helper's CLI check does not cover them.
 - Do not resend held or uncertain work. Read its attempt ID and cause before recovery.
 - Thread stop requires review of the interruption scope; never exercise it against the user's sessions.

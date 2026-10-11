@@ -30,8 +30,8 @@ Preconditions:
 - Renaming runs `address rename --input-json` with the returned `id` as `address_id` and `alias` set to `verify-build`. A fresh list must contain the new alias with the same ID and no old alias. Inspect `names.json` and the command transcript.
 - Persona editing runs `name @reviewer --type agent --persona 'Reviews Rust changes.'` in the second pane, repeats naming without a persona flag, then lists names. `persona-saved.json` must retain the text. Naming with `--generic` and listing again must produce a null persona in `persona-cleared.json`.
 - Finally it asks for a persona on the terminal name. The CLI must refuse with `a named terminal cannot hold a persona`, and the list must still show a null persona.
-- For a linked disposable popup instance, invoke `name-agent`, read the returned/created popup pane, enter `@popup-build`, then accept terminal type with Enter. Enter accepts only when the prompt shows a detected `[terminal]` default; otherwise type `terminal`. List names to prove persistence. Reopen and cancel with Esc, then prove the list is unchanged. The default helper does not drive this entry point.
-- In the manager, use up/down to select, left/right or `<`/`>` to page, Enter to open a name, N to name the invoking pane, R to refresh, and the displayed menu keys for actions. An agent's menu adds P to edit its persona. Name fields and yes/no confirmations require Enter; Esc returns or closes. Capture each action and confirm it with `address list`. Record this separately from CLI proof.
+- For a linked disposable popup instance, invoke `name-agent`, read the returned/created popup pane, enter `@popup-build`, then accept terminal type with Enter. Enter accepts only when the prompt shows a detected `[terminal]` default; otherwise type `terminal` or `t`. List names to prove persistence. Reopen and cancel with Esc, then prove the list is unchanged. The default helper does not drive this entry point.
+- In the manager, use up/down to select, left/right or `<`/`>` to page, Enter to open a name, N to name the invoking pane, R to refresh, T to page the tour while the space has no names, and the displayed menu keys for actions. An agent's menu adds P to edit its persona, and renaming an agent offers the persona editor as an optional second step. Name fields and yes/no confirmations require Enter; Esc returns or closes. Capture each action and confirm it with `address list`. Record this separately from CLI proof.
 
 ## Gotchas
 
@@ -39,4 +39,4 @@ Preconditions:
 - A forced `--type agent` on a shell can save a persona but does not create a registered Codex/Claude session.
 - Naming without `--persona` preserves the description. Use `--generic` to clear it.
 - Terminal names cannot have personas. The CLI refuses `--persona` on a terminal name, and the naming popup never asks a terminal for one. Popups may offer provider-backed suggestions for real agents; that requires a separate authenticated check.
-- The manager removes names rather than panes. Removal can be refused while work is unfinished, and Enter defaults to No on confirmation.
+- The manager removes names rather than panes. Removal can be refused while work is unfinished, and Enter defaults to No on confirmation. To arrange unfinished work, send from a second named pane, because a message addressed only to its author is refused.
