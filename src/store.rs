@@ -5644,6 +5644,48 @@ impl StateTransaction<'_> {
         )
     }
 
+    pub(crate) fn settle_observed_attempt(
+        &mut self,
+        namespace: &StateNamespace,
+        attempt_id: &crate::DeliveryAttemptId,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let (message_id, pinned_session) = self.transaction.query_row(
+            "SELECT d.message_id, a.agent_session_id FROM delivery_attempts a
+             JOIN mailbox_deliveries d USING (
+                session_socket_id, worktree_id, delivery_id, address_id
+             )
+             WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.attempt_id = ?3",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                attempt_id.as_str()
+            ],
+            |row| {
+                Ok((
+                    MessageId::new(row.get::<_, String>(0)?),
+                    crate::AgentSessionId::new(row.get::<_, String>(1)?),
+                ))
+            },
+        )?;
+        if self.wake_identity(namespace, &message_id)?.is_some() {
+            self.record_no_reply_disposition(
+                namespace,
+                attempt_id,
+                &format!("observed-no-reply-{}", attempt_id.as_str()),
+                &pinned_session,
+                attribution,
+            )
+        } else {
+            self.transition_delivery_attempt(
+                namespace,
+                attempt_id,
+                DeliveryState::Settled,
+                attribution,
+            )
+        }
+    }
+
     pub fn record_reply_disposition(
         &mut self,
         namespace: &StateNamespace,

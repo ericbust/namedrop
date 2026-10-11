@@ -2061,7 +2061,7 @@ fn coordination_retired_participant_recovery() {
 }
 
 #[test]
-fn coordination_historical_wake_recovery() {
+fn a_stale_wake_is_rendered_stale_in_flight_and_settles_as_no_reply_after_the_grace() {
     let f = Fixture::new();
     let id = f.begin();
     let first = f.send(&id, "historical-first", "worker");
@@ -2086,20 +2086,73 @@ fn coordination_historical_wake_recovery() {
     send["source"] = json!("@worker Synthetic second round");
     let second = execute_message_operation("send", send, &f.runtime("lead")).unwrap();
     f.status("worker", "working");
+
+    f.now.store(10_100, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(
+        f.attempt_state(&old_attempt),
+        "acknowledged",
+        "inside the grace the stale wake is still in flight"
+    );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
+    let stale = inbox["envelopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["control"]["attempt_id"] == old_attempt)
+        .expect("stale wake in flight");
+    assert_eq!(stale["control"]["coordination_id"], id);
+    assert_eq!(stale["control"]["coordination_nudge_stale"], true);
+    let stale_operations = stale["control"]["tool"]["operations"].as_array().unwrap();
+    assert!(
+        stale_operations
+            .iter()
+            .any(|op| op["token"] == "handoff.results")
+    );
+    assert!(stale_operations.iter().all(|op| !matches!(
+        op["token"].as_str(),
+        Some("send" | "handoff.resolve" | "address.list" | "handoff.preview")
+    )));
+    assert!(
+        stale["control"]["permitted_operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|op| !matches!(
+                op.as_str(),
+                Some("send" | "handoff.resolve" | "address.list" | "handoff.preview")
+            ))
+    );
+    assert!(
+        stale["trusted_instruction"]
+            .as_str()
+            .unwrap()
+            .contains("coordination_nudge_stale true")
+    );
+
     f.now.store(60_100, Ordering::Relaxed);
     f.drain();
-    let old_state: String = f
-        .db()
-        .query_row(
-            "SELECT state FROM delivery_attempt_state WHERE attempt_id=?1",
-            [&old_attempt],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        old_state, "settled",
-        "old attempt must have transport-settled without a disposition"
+    assert_eq!(f.attempt_state(&old_attempt), "settled");
+    assert_eq!(f.disposition(&old_attempt).as_deref(), Some("no_reply"));
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "a settled stale wake must not raise ND-DELIVERY-003: {:?}",
+        f.unresolved_attention()
     );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
+    assert!(
+        inbox["envelopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["control"]["attempt_id"] != old_attempt),
+        "a settled stale wake leaves the inbox"
+    );
+
     let second_reply = f.reply(&second, "worker", "historical-done", "completed", None);
     f.status("worker", "idle");
     let mut completed_second_reply = false;
@@ -2108,9 +2161,7 @@ fn coordination_historical_wake_recovery() {
         let inbox =
             execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
         for envelope in inbox["envelopes"].as_array().unwrap() {
-            if envelope["control"]["attempt_id"] == old_attempt
-                || envelope["control"]["coordination_nudge"] == true
-            {
+            if envelope["control"]["coordination_nudge"] == true {
                 continue;
             }
             completed_second_reply |=
@@ -2130,39 +2181,11 @@ fn coordination_historical_wake_recovery() {
     let inbox =
         execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
     let envelopes = inbox["envelopes"].as_array().unwrap();
-    let historical = envelopes
-        .iter()
-        .find(|e| e["control"]["attempt_id"] == old_attempt)
-        .expect("old obligation");
     let latest = envelopes
         .iter()
         .find(|e| e["control"]["attempt_id"] == current["control"]["attempt_id"])
         .expect("current obligation");
-    assert_eq!(historical["control"]["coordination_id"], id);
-    assert_eq!(historical["control"]["coordination_nudge_stale"], true);
     assert_eq!(latest["control"]["coordination_nudge_stale"], false);
-    let stale_operations = historical["control"]["tool"]["operations"]
-        .as_array()
-        .unwrap();
-    assert!(
-        stale_operations
-            .iter()
-            .any(|op| op["token"] == "handoff.results")
-    );
-    assert!(stale_operations.iter().all(|op| !matches!(
-        op["token"].as_str(),
-        Some("send" | "handoff.resolve" | "address.list" | "handoff.preview")
-    )));
-    assert!(
-        historical["control"]["permitted_operations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|op| !matches!(
-                op.as_str(),
-                Some("send" | "handoff.resolve" | "address.list" | "handoff.preview")
-            ))
-    );
     assert!(
         latest["control"]["tool"]["operations"]
             .as_array()
@@ -2171,11 +2194,11 @@ fn coordination_historical_wake_recovery() {
             .any(|op| op["token"] == "handoff.resolve")
     );
     assert!(
-        historical["trusted_instruction"]
-            .as_str()
-            .unwrap()
-            .contains("coordination_nudge_stale true")
+        envelopes
+            .iter()
+            .all(|e| e["control"]["attempt_id"] != old_attempt)
     );
+
     let before = f.handoff("handoff.results", json!({"coordination_id":id}));
     f.sessions
         .lock()
@@ -3170,7 +3193,50 @@ fn a_nudge_the_lead_acted_on_but_never_completed_settles_as_no_reply_when_its_tu
     );
     assert_eq!(f.delivery(&report, "lead").1, "acknowledged");
 
+    let attention = f.unresolved_attention();
+    f.drain();
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    assert_eq!(f.unresolved_attention(), attention);
+    f.complete(&wake_attempt);
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+
     f.complete(&f.attempt(&report, "lead"));
     assert_eq!(f.delivery(&report, "lead").1, "settled");
     assert_eq!(f.unresolved_attention(), Vec::<(String, String)>::new());
+}
+
+#[test]
+fn an_ignored_nudge_settles_as_no_reply_and_the_coordination_is_flagged_for_a_decision() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    let nudge = f.nudge_prompts().pop().expect("the idle lead is nudged");
+    let wake_attempt = nudge["control"]["attempt_id"].as_str().unwrap().to_owned();
+
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&wake_attempt), "settled");
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    let attention = f.unresolved_attention();
+    assert!(
+        attention
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "an ignored nudge must not raise ND-DELIVERY-003: {attention:?}"
+    );
+    assert_eq!(
+        attention
+            .iter()
+            .filter(|(kind, _)| kind == "coordination")
+            .count(),
+        1,
+        "{attention:?}"
+    );
+    assert_eq!(
+        f.attention_summary(),
+        "The one continuation for this revision ended or is held without a new work decision. Review handoff.results and act explicitly; Namedrop will not repeat the prompt."
+    );
 }

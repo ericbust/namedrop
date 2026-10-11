@@ -3,7 +3,8 @@ mod agent_status_ui;
 mod naming_ui;
 mod popup_input;
 use namedrop::{
-    CommandResult, HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, ProcessIds, SystemClock,
+    Clock, CommandResult, HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, ProcessIds,
+    SystemClock,
     cli::{Cli, RuntimeOptions},
     describe_operations, diagnose_collaboration, execute_context_operation,
     execute_control_operation, execute_group_operation, execute_handoff_operation,
@@ -314,7 +315,7 @@ fn main() -> ExitCode {
     } else {
         Err(format!("unsupported operation: {operation}"))
     };
-    if result.as_ref().is_ok_and(needs_terminal_watcher)
+    if result.as_ref().is_ok_and(needs_mailbox_watcher)
         && let Err(error) = wake_mailboxes(&cli.runtime)
     {
         eprintln!("Command queued; could not start shell watcher: {error}");
@@ -326,12 +327,46 @@ fn wake_mailboxes(options: &RuntimeOptions) -> Result<(), String> {
     with_runtime_options(options, wake_runtime_mailboxes)
 }
 
-fn needs_terminal_watcher(result: &serde_json::Value) -> bool {
-    ["terminal_waiting", "terminal_running"].iter().any(|key| {
-        result["drain"][key]
-            .as_array()
-            .is_some_and(|a| !a.is_empty())
-    })
+fn drain_report(result: &serde_json::Value) -> Result<namedrop::DrainReport, String> {
+    serde_json::from_value(result.get("drain").unwrap_or(result).clone())
+        .map_err(|error| error.to_string())
+}
+
+fn needs_mailbox_watcher(result: &serde_json::Value) -> bool {
+    drain_report(result)
+        .is_ok_and(|report| report.awaits_terminal() || report.next_grace_due_ms().is_some())
+}
+
+#[cfg(test)]
+mod drain_report_tests {
+    use super::{drain_report, needs_mailbox_watcher};
+    use namedrop::{DeliveryAttemptId, DrainReport, GraceDeadline};
+    use serde_json::json;
+
+    #[test]
+    fn an_operation_result_carries_the_drain_report_it_serialized() {
+        let grace = DrainReport {
+            pending_grace: vec![GraceDeadline {
+                attempt_id: DeliveryAttemptId::new("attempt-1"),
+                due_at_ms: 31_000,
+            }],
+            ..DrainReport::default()
+        };
+        let result = json!({"attempt_id": "attempt-1", "drain": grace});
+        assert_eq!(
+            drain_report(&result).unwrap().next_grace_due_ms(),
+            Some(31_000)
+        );
+        assert!(needs_mailbox_watcher(&result));
+
+        let requeued = DrainReport {
+            requeued: vec![DeliveryAttemptId::new("attempt-1")],
+            ..DrainReport::default()
+        };
+        let result = json!({"drain": requeued});
+        assert!(drain_report(&result).unwrap().awaits_retry());
+        assert!(!needs_mailbox_watcher(&result));
+    }
 }
 
 fn wake_runtime_mailboxes(
@@ -816,11 +851,23 @@ fn run_agent_status_worker() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let mut failures = 0_usize;
+    let mut deadline_ms: Option<u64> = None;
     loop {
         let Ok(pending) = pending_agent_status_reconciliations(&directory) else {
             return ExitCode::SUCCESS;
         };
         let Some(marker) = pending.first() else {
+            if let Some(due) = deadline_ms {
+                if SystemClock.now_unix_ms() < due {
+                    wait_for_marker_or_deadline(&directory, due);
+                    continue;
+                }
+                deadline_ms =
+                    with_runtime_options(&RuntimeOptions::default(), namedrop::drain_mailboxes)
+                        .ok()
+                        .and_then(|report| report.next_grace_due_ms());
+                continue;
+            }
             let _ = lock.unlock();
             // A producer can queue after our empty scan, then lose try_lock
             // while we still own it. Recheck only after releasing ownership:
@@ -859,29 +906,42 @@ fn run_agent_status_worker() -> ExitCode {
             )
         };
         match result {
-            Ok(report)
-                if !["requeued", "terminal_waiting", "terminal_running"]
-                    .iter()
-                    .any(|key| {
-                        report
-                            .get("drain")
-                            .unwrap_or(&report)
-                            .get(key)
-                            .and_then(serde_json::Value::as_array)
-                            .is_some_and(|items| !items.is_empty())
-                    }) =>
-            {
-                let _ = fs::remove_file(marker);
-                failures = 0;
-            }
+            Ok(result) => match drain_report(&result) {
+                Ok(report) if report.awaits_retry() => {
+                    wait_for_reconciliation_retry(&mut failures);
+                }
+                Ok(report) => {
+                    let _ = fs::remove_file(marker);
+                    failures = 0;
+                    deadline_ms = deadline_ms
+                        .into_iter()
+                        .chain(report.next_grace_due_ms())
+                        .min();
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(marker);
+                    failures = 0;
+                }
+            },
             Err(error) if !retryable_agent_status_reconciliation(&error) => {
                 let _ = fs::remove_file(marker);
                 failures = 0;
             }
-            _ => {
-                wait_for_reconciliation_retry(&mut failures);
-            }
+            Err(_) => wait_for_reconciliation_retry(&mut failures),
         }
+    }
+}
+
+fn wait_for_marker_or_deadline(directory: &Path, due_ms: u64) {
+    loop {
+        let now = SystemClock.now_unix_ms();
+        if now >= due_ms
+            || pending_agent_status_reconciliations(directory)
+                .is_ok_and(|pending| !pending.is_empty())
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis((due_ms - now).min(100)));
     }
 }
 
