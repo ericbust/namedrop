@@ -1284,6 +1284,58 @@ fn workspace_discovery_rejects_successful_snapshots_that_omit_the_requested_spac
 }
 
 #[test]
+fn workspace_discovery_attaches_a_second_space_on_the_source_checkout() {
+    struct SharedCheckoutHerdr;
+    impl HerdrCommandExecutor for SharedCheckoutHerdr {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            match args {
+                ["worktree", "list", "--workspace", "space-b", "--json"] => {
+                    Ok(HerdrCommandOutput {
+                        stdout: r#"{"result":{"source":{"repo_key":"/repo/.git","repo_name":"repo","repo_root":"/repo","source_checkout_path":"/repo","source_workspace_id":"space-b"},"worktrees":[{"path":"/repo","open_workspace_id":"space-a","label":"repo","branch":"main","is_linked_worktree":false}]}}"#.to_owned(),
+                    })
+                }
+                ["pane", "list", "--workspace", "space-b"] => Ok(HerdrCommandOutput {
+                    stdout: r#"{"result":{"panes":[{"pane_id":"space-b:pane-1","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"space-b"}]}}"#.to_owned(),
+                }),
+                _ => panic!("unexpected Herdr command: {args:?}"),
+            }
+        }
+    }
+
+    let discovered = discover_worktree_for_workspace(&SharedCheckoutHerdr, "space-b").unwrap();
+    assert_eq!(discovered.workspace_id, "space-b");
+    assert_eq!(discovered.worktree_id, WorktreeId::new("/repo"));
+    assert!(discovered.worktree_attached);
+    assert_eq!(discovered.label.as_deref(), Some("repo"));
+    assert_eq!(discovered.branch.as_deref(), Some("main"));
+    assert_eq!(discovered.panes.len(), 1);
+    assert_eq!(discovered.panes[0].pane_id, "space-b:pane-1");
+    assert_eq!(discovered.panes[0].workspace_id, "space-b");
+}
+
+#[test]
+fn workspace_discovery_keeps_failing_closed_when_source_names_another_space() {
+    struct LinkedDuplicateHerdr;
+    impl HerdrCommandExecutor for LinkedDuplicateHerdr {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            match args {
+                ["worktree", "list", "--workspace", "space-b", "--json"] => {
+                    Ok(HerdrCommandOutput {
+                        stdout: r#"{"result":{"source":{"source_checkout_path":"/repo","source_workspace_id":"space-c"},"worktrees":[{"path":"/repo","open_workspace_id":"space-c","label":"repo","branch":"main"},{"path":"/repo-feature","open_workspace_id":"space-a","label":"repo-feature","branch":"feature","is_linked_worktree":true}]}}"#.to_owned(),
+                    })
+                }
+                _ => panic!(
+                    "pane discovery must not run for a linked-worktree duplicate: {args:?}"
+                ),
+            }
+        }
+    }
+
+    let error = discover_worktree_for_workspace(&LinkedDuplicateHerdr, "space-b").unwrap_err();
+    assert!(error.contains("does not contain space space-b"), "{error}");
+}
+
+#[test]
 fn agent_session_lookup_needs_one_exact_herdr_pane() {
     struct PanesHerdr;
     impl HerdrCommandExecutor for PanesHerdr {

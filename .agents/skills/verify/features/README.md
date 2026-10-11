@@ -27,7 +27,8 @@ State which paths were exercised and which remain unverified. A successful model
 - [Names and personas](names.md) covers terminal naming, rename, persona preservation/clearing, and naming/management popups.
 - [Groups](groups.md) covers creation, list, membership, removal, and group mentions.
 - [Collaboration controls and Doctor](controls.md) covers workspace pause/resume and health, with address/thread controls as separate drives.
+- [Shared checkout](shared-checkout.md) covers a second workspace opened on a checkout that another workspace already has open, with Doctor, activation, and separate names in each workspace.
 - [Tour](tour.md) covers page navigation, close, reset, automatic opening, and popup entry points.
 - [Handoffs, terminal work, and context](handoffs.md) covers direct/delegated mentions, preview, replies, tracked reports, shell results, and freshness.
 
-Not yet mapped: the `activate`, `deactivate` and `update` plugin actions, the startup reconcile, and pane lifecycle events. The helper uses activation only as a precondition.
+Not yet mapped: the `activate`, `deactivate` and `update` plugin actions, the startup reconcile, and pane lifecycle events. The helper uses activation as a precondition. The shared-checkout recipe also checks its space and worktree IDs.
