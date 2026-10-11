@@ -1588,12 +1588,26 @@ pub fn discover_worktree_for_workspace(
     };
     let worktrees: WorktreeListEnvelope =
         serde_json::from_str(&worktree_output.stdout).map_err(|error| error.to_string())?;
-    let worktree = worktrees
-        .result
-        .worktrees
-        .into_iter()
-        .find(|worktree| worktree.open_workspace_id.as_deref() == Some(workspace_id));
-    match worktree {
+    let WorktreeListResult {
+        source,
+        mut worktrees,
+    } = worktrees.result;
+    let index = worktrees
+        .iter()
+        .position(|worktree| worktree.open_workspace_id.as_deref() == Some(workspace_id))
+        .or_else(|| {
+            // Herdr lists each checkout path once with its first opener as
+            // open_workspace_id, so a second workspace on the same path never
+            // matches by id. `source` names the requester only when it sits on
+            // the repo root, and then source_checkout_path is its checkout.
+            let source = source
+                .filter(|source| source.source_workspace_id.as_deref() == Some(workspace_id))?;
+            let checkout = source.source_checkout_path?;
+            worktrees
+                .iter()
+                .position(|worktree| Path::new(&worktree.path) == Path::new(&checkout))
+        });
+    match index.map(|index| worktrees.swap_remove(index)) {
         Some(worktree) => discover_panes(
             herdr,
             worktree.path,
@@ -1949,7 +1963,14 @@ struct WorktreeListEnvelope {
 
 #[derive(Deserialize)]
 struct WorktreeListResult {
+    source: Option<WorktreeListSource>,
     worktrees: Vec<WorktreeEntry>,
+}
+
+#[derive(Deserialize)]
+struct WorktreeListSource {
+    source_checkout_path: Option<String>,
+    source_workspace_id: Option<String>,
 }
 
 #[derive(Deserialize)]

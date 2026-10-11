@@ -38,6 +38,7 @@ Exit `0` means healthy, `1` means needs attention, and `2` means unavailable. Th
 .agents/skills/verify/scripts/control-namedrop.py --feature controls
 .agents/skills/verify/scripts/control-namedrop.py --feature tour
 .agents/skills/verify/scripts/control-namedrop.py --feature handoffs
+.agents/skills/verify/scripts/control-namedrop.py --feature shared-checkout
 ```
 
 The helper sends public CLI commands through `herdr pane run` into real terminal panes. Each command has its own stdout, stderr, exit-status capture, and terminal transcript. It reads saved values through public list commands or a read-only SQLite connection. The tour recipe sends actual `right` and `esc` keys and captures both pages. It runs the tour renderer in the owned terminal; floating-popup actions and prefix shortcuts require a separately linked disposable plugin instance. The handoffs recipe proves the model-free rejections only.
@@ -74,6 +75,6 @@ After a run, inspect the printed directory's `summary.json` and `cleanup.json`, 
 
 ## Helpers
 
-`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its five recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
+`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its six recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
 
 Use `/maintain-verification-skill` to reconcile the feature map and recipes as Namedrop changes.

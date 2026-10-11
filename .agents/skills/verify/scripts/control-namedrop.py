@@ -28,7 +28,7 @@ def wait(predicate, label, timeout=30):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "handoffs"], default="names")
+    parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "handoffs", "shared-checkout"], default="names")
     parser.add_argument("--binary", type=Path, default=REPO / "target/debug/namedrop")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
@@ -79,10 +79,11 @@ def main():
         result = command(herdr, *argv)
         return json.loads(result.stdout)["result"] if result.stdout.strip() else None
 
-    def cli(*argv, pane=None, allowed=(0,)):
+    def cli(*argv, pane=None, workspace=None, allowed=(0,)):
         nonlocal sequence
         sequence += 1
         pane = pane or panes["lead"]
+        workspace = workspace or spaces["lead"]
         prefix = base / "io" / str(sequence)
         out, err, code = [Path(str(prefix) + suffix) for suffix in (".out", ".err", ".exit")]
         invocation = [str(binary), "--plugin-state", str(state), "--herdr-socket", env["HERDR_SOCKET_PATH"],
@@ -104,8 +105,8 @@ def main():
             raise RuntimeError(f"CLI failed: {row}")
         return json.loads(row["stdout"]) if row["stdout"].strip().startswith("{") else row["stdout"]
 
-    def body(*argv, **payload):
-        return cli(*argv, "--input-json", json.dumps(payload))["data"]
+    def body(*argv, pane=None, workspace=None, **payload):
+        return cli(*argv, "--input-json", json.dumps(payload), pane=pane, workspace=workspace)["data"]
 
     def database_snapshot():
         with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
@@ -122,16 +123,16 @@ def main():
         if server.poll() is not None:
             raise RuntimeError("Disposable server failed; see server.log")
         created = host("workspace", "create", "--cwd", str(base / "workspace"), "--label", "Namedrop verification")
-        workspace = created["workspace"]["workspace_id"]
+        spaces = {"lead": created["workspace"]["workspace_id"]}
         panes = {"lead": created["root_pane"]["pane_id"]}
-        panes["worker"] = host("tab", "create", "--workspace", workspace, "--cwd", str(base / "workspace"),
+        panes["worker"] = host("tab", "create", "--workspace", spaces["lead"], "--cwd", str(base / "workspace"),
                                "--label", "Verification worker")["root_pane"]["pane_id"]
         for pane in panes.values():
             wait(lambda: (base / "home" / f"ready-{pane}").exists(), "native bash prompt")
             shell_pids.append(host("pane", "process-info", "--pane", pane)["process_info"]["shell_pid"])
         save("instance.json", {"server_pid": server.pid, "socket": env["HERDR_SOCKET_PATH"],
-                              "state": str(state), "workspace": workspace, "panes": panes})
-        body("activate", confirmed=True)
+                              "state": str(state), "workspace": spaces["lead"], "panes": panes})
+        activated = body("activate", confirmed=True)
 
         # Doctor reads state; the unnamed fixture may legitimately need attention.
         before = database_snapshot()
@@ -201,7 +202,7 @@ def main():
             save("controls.json", {"paused": paused[0][0], "resumed": resumed[0][0]})
         elif args.feature == "tour":
             origin = next(p for p in live if p["pane_id"] == panes["lead"])
-            invocation = ["env", f"NAMEDROP_TARGET_WORKSPACE={workspace}", f"NAMEDROP_TARGET_PANE={panes['lead']}",
+            invocation = ["env", f"NAMEDROP_TARGET_WORKSPACE={spaces['lead']}", f"NAMEDROP_TARGET_PANE={panes['lead']}",
                           f"NAMEDROP_TARGET_TERMINAL={origin['terminal_id']}", str(binary), "--plugin-state", str(state),
                           "--herdr-socket", env["HERDR_SOCKET_PATH"], "--herdr-pane", panes["lead"], "ui", "run", "tour"]
             ready = base / "home" / f"ready-{panes['lead']}"
@@ -231,7 +232,7 @@ def main():
         elif args.feature == "handoffs":
             before = database_snapshot()
             # Run outside the pane's process tree with only the inherited pane variable, as a stale caller would.
-            inherited = command("env", f"HERDR_PANE_ID={panes['lead']}", f"HERDR_WORKSPACE_ID={workspace}", binary,
+            inherited = command("env", f"HERDR_PANE_ID={panes['lead']}", f"HERDR_WORKSPACE_ID={spaces['lead']}", binary,
                                 "--plugin-state", state, "handoff", "status", "--input-json", "{}", check=False)
             assert inherited.returncode == 65 and "Pass --herdr-pane" in inherited.stdout + inherited.stderr, inherited
             assert before == database_snapshot(), "A rejected status read changed stored state"
@@ -247,6 +248,36 @@ def main():
             assert "addressed only to its author" in self_send["error"]["message"], self_send
             assert before == database_snapshot(), "A send addressed only to its author changed stored state"
             save("handoffs.json", {"inherited_exit": inherited.returncode, "preview": anonymous, "self_send": self_send})
+        elif args.feature == "shared-checkout":
+            twin = host("workspace", "create", "--cwd", str(base / "workspace"), "--label", "Namedrop verification twin")
+            spaces["twin"] = twin["workspace"]["workspace_id"]
+            panes["twin"] = twin["root_pane"]["pane_id"]
+            wait(lambda: (base / "home" / f"ready-{panes['twin']}").exists(), "twin native bash prompt")
+            shell_pids.append(host("pane", "process-info", "--pane", panes["twin"])["process_info"]["shell_pid"])
+            listing = host("worktree", "list", "--workspace", spaces["twin"], "--json")
+            checkout = next(w for w in listing["worktrees"] if w["path"] == str(base / "workspace"))
+            assert checkout["open_workspace_id"] == spaces["lead"], listing
+            assert listing["source"]["source_workspace_id"] == spaces["twin"], listing
+            twin_report = cli("doctor", "--json", pane=panes["twin"], workspace=spaces["twin"], allowed=(0, 1))
+            assert twin_report["data"]["status"] in ("healthy", "needs_attention"), twin_report
+            assert not any(issue["code"] == "ND-INSPECT-001" for issue in twin_report["data"]["issues"]), twin_report
+            twin_activated = body("activate", pane=panes["twin"], workspace=spaces["twin"], confirmed=True)
+            assert twin_activated["space_id"] == spaces["twin"], twin_activated
+            assert twin_activated["worktree_id"] == str(base / "workspace") == activated["worktree_id"], \
+                (activated, twin_activated)
+            assert activated["space_id"] == spaces["lead"], activated
+            cli("name", "@twin-reviewer", "--type", "terminal", pane=panes["twin"], workspace=spaces["twin"])
+            cli("name", "@verify-build", "--type", "terminal")
+            rosters = {space: cli("address", "list", "--json", pane=panes[space], workspace=spaces[space])["data"]
+                       for space in ("lead", "twin")}
+            assert {a["alias"] for a in rosters["lead"]} == {"verify-build"}, rosters
+            assert {a["alias"] for a in rosters["twin"]} == {"twin-reviewer"}, rosters
+            reports = {space: cli("doctor", "--json", pane=panes[space], workspace=spaces[space], allowed=(0, 1))
+                       for space in ("lead", "twin")}
+            assert not any(issue["code"] == "ND-INSPECT-001" for report in reports.values()
+                           for issue in report["data"]["issues"]), reports
+            save("shared-checkout.json", {"worktrees": listing, "activate": {"lead": activated, "twin": twin_activated},
+                                          "rosters": rosters, "doctor": reports})
         with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as source:
             with sqlite3.connect(evidence / "state.sqlite3") as destination:
                 source.backup(destination)
