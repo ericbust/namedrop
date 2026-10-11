@@ -195,7 +195,13 @@ def main():
             assert empty["status"] == "rejected", empty
             cli("name", "@build", "--type", "terminal", pane=panes["worker"])
             probe = cli("group", "set", "--input-json", json.dumps({"alias": "ops", "members": ["build"]}), allowed=range(256))
-            save("group-probes.json", {"empty_members": empty, "terminal_member": probe})
+            body("group", "set", alias="solo", members=["reviewer"])
+            before = database_snapshot()
+            only_author = cli("send", "--input-json", json.dumps({"request_id": "solo-self", "source": "@solo Note to self."}),
+                              allowed=range(1, 256))
+            assert "addressed only to its author" in only_author["error"]["message"], only_author
+            assert before == database_snapshot(), "A send addressed only to its author changed stored state"
+            save("group-probes.json", {"empty_members": empty, "terminal_member": probe, "only_author": only_author})
         elif args.feature == "controls":
             body("space", "pause")
             with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
@@ -249,7 +255,11 @@ def main():
                             allowed=(65,))
             assert "Agent Session" in anonymous["error"]["message"], anonymous
             assert before == database_snapshot(), "A rejected handoff changed stored state"
-            save("handoffs.json", {"inherited_exit": inherited.returncode, "preview": anonymous})
+            self_send = cli("send", "--input-json", json.dumps({"request_id": "self-only", "source": "@lead Note to self."}),
+                            allowed=range(1, 256))
+            assert "addressed only to its author" in self_send["error"]["message"], self_send
+            assert before == database_snapshot(), "A send addressed only to its author changed stored state"
+            save("handoffs.json", {"inherited_exit": inherited.returncode, "preview": anonymous, "self_send": self_send})
         elif args.feature == "dashboard":
             cli("name", "@build", "--type", "terminal")
             first = cli("dashboard", "--no-open")["data"]
