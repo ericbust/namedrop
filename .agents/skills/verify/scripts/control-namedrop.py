@@ -2,6 +2,7 @@
 """Drive public Namedrop commands in disposable native Herdr terminal panes."""
 import argparse
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+import urllib.parse
 
 
 REPO = Path(__file__).resolve().parents[4]
@@ -28,7 +30,7 @@ def wait(predicate, label, timeout=30):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "handoffs"], default="names")
+    parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "dashboard", "handoffs"], default="names")
     parser.add_argument("--binary", type=Path, default=REPO / "target/debug/namedrop")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
@@ -51,6 +53,7 @@ def main():
     (base / "home/.bash_profile").write_text('. "$HOME/.bashrc"\n')
     state = base / "state/namedrop"
     server = None
+    dashboard_pid = None
     shell_pids = []
     success = False
     sequence = 0
@@ -79,14 +82,14 @@ def main():
         result = command(herdr, *argv)
         return json.loads(result.stdout)["result"] if result.stdout.strip() else None
 
-    def cli(*argv, pane=None, allowed=(0,)):
+    def cli(*argv, pane=None, space=None, allowed=(0,)):
         nonlocal sequence
         sequence += 1
         pane = pane or panes["lead"]
         prefix = base / "io" / str(sequence)
         out, err, code = [Path(str(prefix) + suffix) for suffix in (".out", ".err", ".exit")]
         invocation = [str(binary), "--plugin-state", str(state), "--herdr-socket", env["HERDR_SOCKET_PATH"],
-                      "--herdr-workspace", workspace, "--herdr-pane", pane, *map(str, argv)]
+                      "--herdr-workspace", space or workspace, "--herdr-pane", pane, *map(str, argv)]
         script = prefix.with_suffix(".sh")
         script.write_text(shlex.join(invocation) + " > " + shlex.quote(str(out)) + " 2> " + shlex.quote(str(err))
                           + "\nresult=$?\ncat " + shlex.quote(str(out)) + "\ncat " + shlex.quote(str(err))
@@ -111,6 +114,16 @@ def main():
         with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
             return "\n".join(db.iterdump())
 
+    def dashboard_alive():
+        try:
+            arguments = Path(f"/proc/{dashboard_pid}/cmdline").read_bytes().split(b"\0")
+        except FileNotFoundError:
+            return False
+        return b"dashboard-server" in arguments and str(state).encode() in arguments
+
+    if args.feature == "dashboard":
+        # Panes inherit this, so the server the CLI starts there idles out within the run.
+        env["NAMEDROP_DASHBOARD_IDLE_MS"] = "10000"
     log = (evidence / "server.log").open("w")
     try:
         command("git", "init", "--quiet")
@@ -237,11 +250,99 @@ def main():
             assert "Agent Session" in anonymous["error"]["message"], anonymous
             assert before == database_snapshot(), "A rejected handoff changed stored state"
             save("handoffs.json", {"inherited_exit": inherited.returncode, "preview": anonymous})
+        elif args.feature == "dashboard":
+            cli("name", "@build", "--type", "terminal")
+            first = cli("dashboard", "--no-open")["data"]
+            info = json.loads((state / "dashboard/server.json").read_text())
+            dashboard_pid = info["pid"]
+            assert first["server"] == "started" and first["opened"] is False, first
+            assert first["workspace_id"] == workspace, first
+            url = urllib.parse.urlsplit(first["url"])
+            assert (url.hostname, url.port) == ("127.0.0.1", info["port"]), first
+
+            def get(path, cookie=None):
+                connection = http.client.HTTPConnection("127.0.0.1", info["port"], timeout=10)
+                connection.request("GET", path, headers={"Cookie": cookie} if cookie else {})
+                response = connection.getresponse()
+                record({"kind": "http", "path": path.split("?")[0], "status": response.status})
+                return connection, response
+
+            def snapshot(path, cookie, until=lambda frame: True):
+                # A new stream starts with the cached frame; later frames follow each committed change.
+                connection, response = get(path + "/events", cookie)
+                assert response.status == 200, response.status
+                event, frames = None, []
+                try:
+                    while True:
+                        line = response.readline().decode().rstrip("\n")
+                        assert line or not response.closed, "event stream ended"
+                        if line.startswith("event: "):
+                            event = line[len("event: "):]
+                        elif line.startswith("data: ") and event == "snapshot":
+                            frames.append(json.loads(line[len("data: "):]))
+                            if until(frames[-1]):
+                                return frames[-1]
+                except TimeoutError:
+                    raise AssertionError(f"no matching snapshot on {path}: {frames[-1:]}")
+                finally:
+                    connection.close()
+
+            entry = f"{url.path}?{url.query}"
+            _, redeemed = get(entry)
+            assert redeemed.status == 303 and redeemed.getheader("Location") == url.path, redeemed.status
+            cookie = redeemed.getheader("Set-Cookie").split(";")[0]
+            assert get(entry)[1].status == 401, "A link opened the dashboard twice"
+            assert get(url.path)[1].status == 401, "The dashboard opened without a session"
+            page = get(url.path, cookie)[1]
+            assert page.status == 200 and page.getheader("Content-Type").startswith("text/html"), page.status
+            own = snapshot(url.path, cookie)
+            assert own["space"]["workspace_id"] == workspace and own["space"]["state"] == "active", own["space"]
+            assert [p["alias"] for p in own["participants"] if p["kind"]["type"] == "terminal"] == ["@build"], own
+            save("dashboard-snapshot.json", own)
+            again = cli("dashboard", "--no-open")["data"]
+            assert again["server"] == "running" and again["space_key"] == first["space_key"], again
+            assert urllib.parse.urlsplit(again["url"]).port == info["port"], again
+            command("git", "init", "--quiet", str(base / "workspace-b"))
+            other = host("workspace", "create", "--cwd", str(base / "workspace-b"), "--label", "Namedrop verification B")
+            panes["other"] = other["root_pane"]["pane_id"]
+            wait(lambda: (base / "home" / f"ready-{panes['other']}").exists(), "second workspace prompt")
+            shell_pids.append(host("pane", "process-info", "--pane", panes["other"])["process_info"]["shell_pid"])
+            second = cli("dashboard", "--no-open", pane=panes["other"], space=other["workspace"]["workspace_id"])["data"]
+            assert second["server"] == "running" and second["space_key"] != first["space_key"], second
+            assert urllib.parse.urlsplit(second["url"]).port == info["port"], second
+            other_page = urllib.parse.urlsplit(second["url"]).path
+            unactivated = snapshot(other_page, cookie)
+            assert unactivated["space"]["state"] == "unknown", unactivated["space"]
+            assert unactivated["space"]["label"]["text"] == "Namedrop verification B", unactivated["space"]
+            assert unactivated["participants"] == [], unactivated
+            cli("activate", "--input-json", json.dumps({"confirmed": True}),
+                pane=panes["other"], space=other["workspace"]["workspace_id"])
+            neighbour = snapshot(other_page, cookie, until=lambda frame: frame["space"]["state"] != "unknown")
+            assert neighbour["space"]["workspace_id"] == other["workspace"]["workspace_id"], neighbour["space"]
+            assert neighbour["space"]["state"] == "active", neighbour["space"]
+            assert all(p["alias"] != "@build" for p in neighbour["participants"]), neighbour
+            connection, listing = get("/api/spaces", cookie)
+            spaces = json.loads(listing.read())
+            connection.close()
+            assert {first["space_key"], second["space_key"]} <= {space["key"] for space in spaces}, spaces
+            assert (state / "dashboard/session").exists()
+            # The server sees closed streams at its next keepalive, then waits the idle period.
+            wait(lambda: not dashboard_alive(), "dashboard idle exit", timeout=60)
+            assert "dashboard: stopping: idle" in (state / "dashboard/server.log").read_text()
+            assert not (state / "dashboard/session").exists(), "Idle exit kept the browser session"
+            save("dashboard.json", {"first": first, "again": again, "second": second, "server": info,
+                                    "other_unactivated": unactivated["space"], "other_active": neighbour["space"],
+                                    "spaces": spaces, "idle_exit": True, "session_rotated": True})
         with sqlite3.connect(state.joinpath("namedrop.sqlite3").as_uri() + "?mode=ro", uri=True) as source:
             with sqlite3.connect(evidence / "state.sqlite3") as destination:
                 source.backup(destination)
         success = True
     finally:
+        if dashboard_pid is not None and dashboard_alive():
+            os.kill(dashboard_pid, 15)
+            deadline = time.monotonic() + 5
+            while dashboard_alive() and time.monotonic() < deadline:
+                time.sleep(0.1)
         if server is not None:
             if server.poll() is None:
                 server.terminate()
@@ -269,9 +370,11 @@ def main():
                 time.sleep(0.1)
                 remaining = list((base / "run").glob("*.sock"))
                 shells = live_shells()
-        clean = (server is None or server.poll() is not None) and not (remaining or shells)
+        dashboard_left = dashboard_pid is not None and dashboard_alive()
+        clean = (server is None or server.poll() is not None) and not (remaining or shells or dashboard_left)
         save("cleanup.json", {"verified": clean, "server_pid": server.pid if server else None,
                               "server_exit": server.returncode if server else None,
+                              "dashboard_pid": dashboard_pid, "dashboard_alive": dashboard_left,
                               "owned_shell_pids": shell_pids, "live_shell_pids": shells,
                               "remaining_sockets": [str(p) for p in remaining]})
         summary.update(passed=success and clean, cleanup_verified=clean)

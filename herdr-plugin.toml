@@ -95,6 +95,12 @@ placement = "popup"
 command = ["sh", "./scripts/run.sh", "ui", "run", "status"]
 
 [[actions]]
+id = "dashboard"
+title = "Open Namedrop dashboard"
+contexts = ["workspace"]
+command = ["sh", "./scripts/run.sh", "dashboard"]
+
+[[actions]]
 id = "deactivate"
 title = "Deactivate Namedrop"
 contexts = ["workspace"]
