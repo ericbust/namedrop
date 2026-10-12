@@ -471,6 +471,7 @@ impl StateTransaction<'_> {
         discovered: &crate::DiscoveredWorktree,
         by: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        self.reconcile_missing_dispositions(ns, by)?;
         let mut statement = self.transaction.prepare("SELECT coordination_id FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 ORDER BY rowid")?;
         let ids = statement
             .query_map(params![ns.session_socket_id, ns.space_id.as_str()], |r| {
