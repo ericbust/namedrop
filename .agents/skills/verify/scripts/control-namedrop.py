@@ -350,8 +350,27 @@ def main():
                        for space in ("lead", "twin")}
             assert not any(issue["code"] == "ND-INSPECT-001" for report in reports.values()
                            for issue in report["data"]["issues"]), reports
+            workspaces = host("workspace", "list")["workspaces"]
+            by_path = host("worktree", "list", "--cwd", str(base / "workspace"), "--json")
+            unscoped = {}
+            for case, scope in (("pane", ["--herdr-pane", panes["twin"]]), ("cwd", [])):
+                result = command(binary, "--plugin-state", state, "--herdr-socket", env["HERDR_SOCKET_PATH"], *scope,
+                                 "address", "list", "--json", check=False)
+                unscoped[case] = {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
             save("shared-checkout.json", {"worktrees": listing, "activate": {"lead": activated, "twin": twin_activated},
-                                          "rosters": rosters, "doctor": reports})
+                                          "rosters": rosters, "doctor": reports, "workspaces": workspaces,
+                                          "worktrees_by_path": by_path, "unscoped": unscoped})
+            by_pane = unscoped["pane"]
+            aliases = {a["alias"] for a in json.loads(by_pane["stdout"])["data"]} if by_pane["exit"] == 0 else None
+            assert aliases == {"twin-reviewer"}, (f"--herdr-pane {panes['twin']} without a workspace id read roster "
+                                                  f"{aliases}, not twin workspace {spaces['twin']}'s {{'twin-reviewer'}}: "
+                                                  f"exit {by_pane['exit']} {by_pane['stderr'].strip()}")
+            by_cwd = unscoped["cwd"]
+            refusal = by_cwd["stdout"] + by_cwd["stderr"]
+            assert by_cwd["exit"] == 65 and all(token in refusal for token in (spaces["lead"], spaces["twin"],
+                                                                                "--herdr-workspace")), \
+                (f"a caller with only the shared checkout cwd got exit {by_cwd['exit']} instead of a refusal naming "
+                 f"{spaces['lead']}, {spaces['twin']} and --herdr-workspace: {refusal.strip()}")
         elif args.feature == "stale-runtime":
             # A bare `herdr plugin install` rebuilds <root>/bin/namedrop and never
             # activates. A trailing newline changes the digest and leaves the ELF

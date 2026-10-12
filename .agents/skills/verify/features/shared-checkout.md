@@ -7,6 +7,7 @@ Users open a second Herdr workspace on a checkout that another workspace already
 - `shared-doctor` reports health in the second workspace instead of `ND-INSPECT-001`.
 - `shared-activate` activates the second workspace on the same checkout path under its own space ID.
 - `shared-names` keeps names saved in one workspace out of the other workspace's roster.
+- `shared-unscoped` keeps a caller that names no workspace out of the wrong workspace. With `--herdr-pane` alone it reads the pane's workspace. With only the checkout as cwd it refuses, because two workspaces own that checkout.
 
 ## How to get to it (user POV)
 
@@ -27,7 +28,8 @@ Preconditions:
 - Activation runs `activate --input-json '{"confirmed": true}'` in the twin. The response's `space_id` must be the twin, and its `worktree_id` must equal the fixture workspace path. The primary activation returned the same `worktree_id` under its own `space_id`.
 - Naming runs `name @twin-reviewer --type terminal` in the twin and `name @verify-build --type terminal` in the primary pane. `address list --json` in each workspace must return disjoint rosters, `verify-build` in the primary and `twin-reviewer` in the twin.
 - Doctor runs once more in each workspace. Neither report may carry `ND-INSPECT-001`.
-- `shared-checkout.json` retains the worktree listing, both activation results, both rosters, and both Doctor reports. Teardown verifies that the twin's shell exited with the others.
+- Two `address list --json` calls run from the fixture checkout outside any pane, with no `--herdr-workspace` and no `HERDR_WORKSPACE_ID`. The one with `--herdr-pane <twin root pane>` must return the twin's roster. The one with no pane at all must exit 65 with an error that names both workspace ids and `--herdr-workspace`. The helper saves `herdr workspace list` and `herdr worktree list --cwd <checkout> --json` beside them.
+- `shared-checkout.json` retains the worktree listing, both activation results, both rosters, both Doctor reports, the workspace list, the by-cwd worktree listing, and both unscoped calls. Teardown verifies that the twin's shell exited with the others.
 
 ## Gotchas
 
@@ -35,3 +37,4 @@ Preconditions:
 - A second workspace on a linked worktree that another workspace already has open still fails closed with `ND-INSPECT-001`. For that requester, `source` names whichever workspace holds the repository root, so Namedrop has no proof of the requester's checkout. This boundary is deliberate, and the helper does not drive it.
 - Both workspaces share one `worktree_id`. It identifies the checkout for checkout proofs, not the workspace. Saved state is keyed by workspace. The helper proves that separation through names only.
 - `herdr workspace get <id>` can report a null `worktree.checkout_path` for a workspace created with `--cwd`. Do not use it as the checkout proof.
+- `herdr worktree list --cwd <checkout>` names only the first opener, in `open_workspace_id` and in `source`. The second workspace shows up only in `herdr worktree list --workspace <second>`, through `source`. A caller that names neither a workspace nor a pane cannot be placed from cwd alone when two workspaces own the checkout.
