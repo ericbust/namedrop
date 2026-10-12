@@ -59,7 +59,7 @@ jobs:
       - run: cargo test --locked --all-targets
       - run: CARGO_TARGET_DIR=target/crate-checks cargo package --locked
       - run: sh scripts/package-release.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: target/dist/*
