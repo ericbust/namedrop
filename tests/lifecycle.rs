@@ -1398,12 +1398,12 @@ fn agent_session_lookup_needs_one_exact_herdr_pane() {
 }
 
 /// Herdr with checkout `/repo` (of repository `/repo/.git`, linked when
-/// `linked`) first opened by `opener`. Each space in `stamped` carries
+/// `linked`, unreported when `None`) first opened by `opener`. Each space in `stamped` carries
 /// Herdr's `worktree.checkout_path` in `workspace list`; each space in
 /// `listings` answers `worktree list --workspace` instead.
 struct SpacesHerdr {
     opener: &'static str,
-    linked: bool,
+    linked: Option<bool>,
     stamped: Vec<(&'static str, &'static str)>,
     listings: Vec<(&'static str, Result<&'static str, &'static str>)>,
 }
@@ -1412,10 +1412,19 @@ impl HerdrCommandExecutor for SpacesHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let output = |stdout: String| Ok(HerdrCommandOutput { stdout });
         match args {
-            ["worktree", "list", "--cwd", "/repo", "--json"] => output(format!(
-                r#"{{"result":{{"source":{{"repo_key":"/repo/.git","source_checkout_path":"/repo","source_workspace_id":"{0}"}},"worktrees":[{{"path":"/repo","is_linked_worktree":{1},"open_workspace_id":"{0}"}}]}}}}"#,
-                self.opener, self.linked
-            )),
+            ["worktree", "list", "--cwd", "/repo", "--json"] => {
+                let mut checkout =
+                    serde_json::json!({"path": "/repo", "open_workspace_id": self.opener});
+                if let Some(linked) = self.linked {
+                    checkout["is_linked_worktree"] = linked.into();
+                }
+                output(
+                    serde_json::json!({"result": {"source": {"repo_key": "/repo/.git",
+                        "source_checkout_path": "/repo", "source_workspace_id": self.opener},
+                        "worktrees": [checkout]}})
+                    .to_string(),
+                )
+            }
             ["workspace", "list"] => {
                 let spaces = std::iter::once(serde_json::json!({"workspace_id": self.opener}))
                     .chain(self.stamped.iter().map(|(id, checkout)| {
@@ -1452,7 +1461,7 @@ const NOT_GIT_WORKTREE: &str = r#"{"error":{"code":"not_git_worktree"}}"#;
 fn cwd_discovery_refuses_a_checkout_two_spaces_share() {
     let herdr = SpacesHerdr {
         opener: "space-b",
-        linked: false,
+        linked: Some(false),
         stamped: vec![],
         listings: vec![("space-a", Ok(SECOND_SPACE_ON_REPO))],
     };
@@ -1467,7 +1476,7 @@ fn cwd_discovery_refuses_a_checkout_two_spaces_share() {
 fn cwd_discovery_ignores_spaces_on_other_checkouts_or_none() {
     let herdr = SpacesHerdr {
         opener: "space-a",
-        linked: false,
+        linked: Some(false),
         stamped: vec![],
         listings: vec![
             ("space-c", Err(NOT_GIT_WORKTREE)),
@@ -1489,7 +1498,7 @@ fn cwd_discovery_ignores_spaces_on_other_checkouts_or_none() {
 fn cwd_discovery_fails_closed_when_a_space_cannot_be_read() {
     let herdr = SpacesHerdr {
         opener: "space-a",
-        linked: true,
+        linked: Some(true),
         stamped: vec![],
         listings: vec![("space-b", Err("herdr: connection reset"))],
     };
@@ -1500,14 +1509,14 @@ fn cwd_discovery_fails_closed_when_a_space_cannot_be_read() {
 
 // What Herdr 0.9.1 answers a second space created with `workspace create
 // --cwd` on a linked worktree: the path's first opener, and `source` naming
-// the repository root's opener, or no space when the root has none.
+// the repository root's opener.
 const SECOND_SPACE_ON_LINKED: &str = r#"{"result":{"source":{"repo_key":"/repo/.git","source_checkout_path":"/root"},"worktrees":[{"path":"/root"},{"path":"/repo","is_linked_worktree":true,"open_workspace_id":"space-a"}]}}"#;
 
 #[test]
 fn cwd_discovery_refuses_a_linked_checkout_a_second_space_may_share() {
     let herdr = SpacesHerdr {
         opener: "space-a",
-        linked: true,
+        linked: Some(true),
         stamped: vec![],
         listings: vec![("space-b", Ok(SECOND_SPACE_ON_LINKED))],
     };
@@ -1520,10 +1529,23 @@ fn cwd_discovery_refuses_a_linked_checkout_a_second_space_may_share() {
 }
 
 #[test]
+fn cwd_discovery_treats_an_unreported_checkout_kind_as_linked() {
+    let herdr = SpacesHerdr {
+        opener: "space-a",
+        linked: None,
+        stamped: vec![],
+        listings: vec![("space-b", Ok(SECOND_SPACE_ON_LINKED))],
+    };
+
+    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    assert!(error.contains("space-b"), "{error}");
+}
+
+#[test]
 fn cwd_discovery_counts_a_space_herdr_stamped_on_the_checkout() {
     let herdr = SpacesHerdr {
         opener: "space-a",
-        linked: false,
+        linked: Some(false),
         stamped: vec![("space-b", "/repo"), ("space-c", "/repo-linked")],
         listings: vec![],
     };
@@ -1536,7 +1558,7 @@ fn cwd_discovery_counts_a_space_herdr_stamped_on_the_checkout() {
 fn cwd_discovery_places_an_unreported_space_off_a_root_checkout() {
     let herdr = SpacesHerdr {
         opener: "space-a",
-        linked: false,
+        linked: Some(false),
         stamped: vec![],
         listings: vec![("space-b", Ok(SECOND_SPACE_ON_LINKED))],
     };
@@ -1553,7 +1575,7 @@ fn cwd_discovery_places_an_unreported_space_off_a_root_checkout() {
 fn cwd_discovery_skips_spaces_that_cannot_own_a_linked_checkout() {
     let herdr = SpacesHerdr {
         opener: "space-a",
-        linked: true,
+        linked: Some(true),
         stamped: vec![("space-e", "/repo-other")],
         listings: vec![
             (

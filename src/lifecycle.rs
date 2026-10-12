@@ -1642,8 +1642,11 @@ fn spaces_owning_checkout(
             }
             Some(_) => {}
             // A space on the repository root is always placed, as opener or
-            // through `source`, so only a linked checkout can hide an owner.
-            None if checkout.is_linked_worktree => unknown.push(workspace.workspace_id),
+            // through `source`, so only a checkout not known to be the root
+            // can hide an owner.
+            None if checkout.is_linked_worktree != Some(false) => {
+                unknown.push(workspace.workspace_id)
+            }
             None => {}
         }
     }
@@ -2089,8 +2092,7 @@ struct WorktreeListSource {
 #[derive(Deserialize)]
 struct WorktreeEntry {
     path: String,
-    #[serde(default)]
-    is_linked_worktree: bool,
+    is_linked_worktree: Option<bool>,
     open_workspace_id: Option<String>,
     label: Option<String>,
     branch: Option<String>,
