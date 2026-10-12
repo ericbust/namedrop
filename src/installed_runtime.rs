@@ -1,4 +1,5 @@
 //! Stable command paths and shared-package ownership across compatible updates.
+use sha2::Digest;
 use std::{fs, os::unix::fs::OpenOptionsExt, path::PathBuf};
 
 /// Hold across the command, including dispatch and shared package writes. The
@@ -39,10 +40,9 @@ pub(crate) fn directory() -> Result<Option<PathBuf>, String> {
     };
     if executable.file_name().is_none_or(|name| name != "namedrop")
         || releases.file_name().is_none_or(|name| name != "releases")
-        || !release.file_name().is_some_and(|name| {
-            let name = name.to_string_lossy();
-            name.len() == 64 && name.bytes().all(|c| c.is_ascii_hexdigit())
-        })
+        || !release
+            .file_name()
+            .is_some_and(|name| is_release_name(&name.to_string_lossy()))
     {
         return Ok(None);
     }
@@ -62,6 +62,56 @@ pub(crate) fn directory() -> Result<Option<PathBuf>, String> {
         );
     }
     Ok(Some(runtime.to_path_buf()))
+}
+
+fn is_release_name(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The release that `runtime/current` selects is not the executable the
+/// registered plugin root staged at `bin/namedrop`.
+pub(crate) struct StaleRelease {
+    pub root: PathBuf,
+    pub built: PathBuf,
+    pub active: String,
+}
+
+/// Local checks gate the Herdr read, so dev runs and machines that were never
+/// activated never ask for the plugin root. Only `bin/namedrop` counts: a Mac
+/// dev `cargo build` writes the `target/` fallback, which must not look stale.
+pub(crate) fn stale_release(
+    state: &std::path::Path,
+    plugin_root: impl FnOnce() -> Option<PathBuf>,
+) -> Option<StaleRelease> {
+    let runtime = state.join("runtime");
+    if !fs::symlink_metadata(runtime.join("namedrop")).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    let target = fs::read_link(runtime.join("current")).ok()?;
+    let active = target.strip_prefix("releases").ok()?.to_str()?;
+    if !is_release_name(active) {
+        return None;
+    }
+    let active_len = fs::metadata(runtime.join("current/namedrop")).ok()?.len();
+    let root = plugin_root()?;
+    let built = root.join("bin/namedrop");
+    let built_len = fs::symlink_metadata(&built)
+        .ok()
+        .filter(|m| m.is_file())?
+        .len();
+    // Activation names each release by its digest, so only the staged file is hashed.
+    let same = built_len == active_len && sha256_hex(&built).ok()? == active;
+    (!same).then(|| StaleRelease {
+        root,
+        built,
+        active: active.to_owned(),
+    })
+}
+
+fn sha256_hex(path: &std::path::Path) -> std::io::Result<String> {
+    let mut hasher = sha2::Sha256::new();
+    std::io::copy(&mut fs::File::open(path)?, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// The launcher remains a regular, stable path so cached hooks and exact command

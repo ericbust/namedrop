@@ -220,6 +220,11 @@ where
         );
         issues.push(paused);
     }
+    if let Some(stale) = crate::installed_runtime::stale_release(runtime.state_directory, || {
+        registered_plugin_root(runtime.herdr)
+    }) {
+        issues.push(stale_runtime_issue(&stale));
+    }
 
     let supported_agents = setup
         .panes
@@ -719,6 +724,49 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
             "Review the coordination?",
         ),
     }
+}
+
+/// Advisory, so any Herdr failure is `None`, and bounded so a hung Herdr
+/// cannot stall the Doctor popup.
+fn registered_plugin_root<E: HerdrCommandExecutor>(herdr: &E) -> Option<std::path::PathBuf> {
+    let output = herdr
+        .execute_bounded(
+            &["plugin", "list", "--plugin", "namedrop", "--json"],
+            std::time::Duration::from_secs(2),
+            &std::sync::atomic::AtomicBool::new(false),
+            64 * 1024,
+        )
+        .ok()?;
+    let list: serde_json::Value = serde_json::from_str(&output.stdout).ok()?;
+    let root = list["result"]["plugins"]
+        .as_array()?
+        .iter()
+        .find(|plugin| plugin["plugin_id"] == "namedrop")?["plugin_root"]
+        .as_str()?;
+    Some(std::path::PathBuf::from(root)).filter(|root| root.is_absolute())
+}
+
+fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> HealthIssue {
+    let mut outdated = issue(
+        "ND-SETUP-004",
+        HealthSeverity::Notice,
+        "Namedrop is still running the previous build.",
+        "A reinstall rebuilt Namedrop but did not switch to the new build, so every command still runs the earlier release. Update Namedrop switches builds for you on GitHub installs; a bare `herdr plugin install` does not.",
+        HealthRepairKind::ProductAction,
+        "Switch to the new build? Run the command in this Herdr workspace.",
+    );
+    outdated.diagnostic = serde_json::json!({
+        "path": stale.built,
+        "plugin_root": stale.root,
+        "active_revision": stale.active,
+    });
+    outdated.repair.command = Some(vec![
+        "sh".into(),
+        stale.root.join("scripts/setup.sh").display().to_string(),
+        "activate".into(),
+        "--human".into(),
+    ]);
+    outdated
 }
 
 fn issue(
