@@ -1546,9 +1546,8 @@ pub fn discover_worktree(
     let worktree_output = herdr.execute(&["worktree", "list", "--cwd", cwd, "--json"])?;
     let worktrees: WorktreeListEnvelope =
         serde_json::from_str(&worktree_output.stdout).map_err(|error| error.to_string())?;
+    let WorktreeListResult { source, worktrees } = worktrees.result;
     let worktree = worktrees
-        .result
-        .worktrees
         .into_iter()
         .find(|worktree| Path::new(&worktree.path) == Path::new(cwd))
         .ok_or_else(|| format!("Herdr did not resolve {cwd} as a Worktree"))?;
@@ -1556,14 +1555,28 @@ pub fn discover_worktree(
         .open_workspace_id
         .clone()
         .ok_or_else(|| format!("Worktree {} is not open in Herdr", worktree.path))?;
-    let owners = spaces_owning_checkout(herdr, &worktree.path, &workspace_id)?;
-    if owners.len() > 1 {
+    let repo_key = source
+        .as_ref()
+        .and_then(|source| source.repo_key.as_deref());
+    let (owners, unknown) = spaces_owning_checkout(herdr, &worktree, repo_key, &workspace_id)?;
+    if owners.len() > 1 || !unknown.is_empty() {
+        let open_in = match owners.as_slice() {
+            [owner] => format!("Herdr space {owner}"),
+            owners => format!("more than one Herdr space ({})", owners.join(", ")),
+        };
+        let suspects = if unknown.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " and may be open in {}, whose checkout Herdr does not report",
+                unknown.join(", ")
+            )
+        };
         return Err(format!(
-            "Checkout {} is open in more than one Herdr space ({}), so Namedrop can't tell \
-             which one this command is for. Pass --herdr-workspace <space-id> \
-             (or --herdr-pane <pane-id>).",
-            worktree.path,
-            owners.join(", ")
+            "Checkout {} is open in {open_in}{suspects}, so Namedrop can't tell which one \
+             this command is for. Pass --herdr-workspace <space-id> (or --herdr-pane \
+             <pane-id>).",
+            worktree.path
         ));
     }
     discover_panes(
@@ -1576,32 +1589,67 @@ pub fn discover_worktree(
     )
 }
 
-// `worktree list --cwd` names only the first opener, so each other space is
-// asked what it owns.
+// `worktree list --cwd` names only the first opener. Returns the spaces proven
+// to own `checkout`, and, for a linked checkout, the spaces in the same
+// repository whose checkout Herdr does not report.
 fn spaces_owning_checkout(
     herdr: &impl HerdrCommandExecutor,
-    checkout: &str,
+    checkout: &WorktreeEntry,
+    repo_key: Option<&str>,
     opener: &str,
-) -> Result<Vec<String>, String> {
+) -> Result<(Vec<String>, Vec<String>), String> {
     let output = herdr.execute(&["workspace", "list"])?;
     let workspaces: WorkspaceListEnvelope =
         serde_json::from_str(&output.stdout).map_err(|error| error.to_string())?;
     let mut owners = vec![opener.to_owned()];
+    let mut unknown = Vec::new();
     for workspace in workspaces.result.workspaces {
         if workspace.workspace_id == opener {
             continue;
         }
-        let Some(result) = worktree_list_for_workspace(herdr, &workspace.workspace_id)? else {
+        // Herdr stamps `worktree` only through `worktree open` and
+        // `worktree create`, and then it names the space's own checkout.
+        if let Some(stamped) = workspace.worktree {
+            if Path::new(&stamped.checkout_path) == Path::new(&checkout.path) {
+                owners.push(workspace.workspace_id);
+            }
+            continue;
+        }
+        let listing = match worktree_list_for_workspace(herdr, &workspace.workspace_id) {
+            Ok(listing) => listing,
+            Err(error) if herdr_error_code(&error).as_deref() == Some("workspace_not_found") => {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(result) = listing else {
             continue;
         };
-        if owned_worktree_index(&result, &workspace.workspace_id)
-            .is_some_and(|index| Path::new(&result.worktrees[index].path) == Path::new(checkout))
-        {
-            owners.push(workspace.workspace_id);
+        let other_repo = result
+            .source
+            .as_ref()
+            .and_then(|source| source.repo_key.as_deref())
+            .zip(repo_key)
+            .is_some_and(|(theirs, ours)| theirs != ours);
+        if other_repo {
+            continue;
+        }
+        match owned_worktree_index(&result, &workspace.workspace_id) {
+            Some(index)
+                if Path::new(&result.worktrees[index].path) == Path::new(&checkout.path) =>
+            {
+                owners.push(workspace.workspace_id);
+            }
+            Some(_) => {}
+            // A space on the repository root is always placed, as opener or
+            // through `source`, so only a linked checkout can hide an owner.
+            None if checkout.is_linked_worktree => unknown.push(workspace.workspace_id),
+            None => {}
         }
     }
     owners.sort();
-    Ok(owners)
+    unknown.sort();
+    Ok((owners, unknown))
 }
 
 fn worktree_list_for_workspace(
@@ -1610,7 +1658,9 @@ fn worktree_list_for_workspace(
 ) -> Result<Option<WorktreeListResult>, String> {
     let output = match herdr.execute(&["worktree", "list", "--workspace", workspace_id, "--json"]) {
         Ok(output) => output,
-        Err(error) if is_no_worktree_error(&error) => return Ok(None),
+        Err(error) if herdr_error_code(&error).as_deref() == Some("not_git_worktree") => {
+            return Ok(None);
+        }
         Err(error) => return Err(error),
     };
     let worktrees: WorktreeListEnvelope =
@@ -1709,17 +1759,13 @@ pub fn pane_workspace(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Resul
         })
 }
 
-fn is_no_worktree_error(error: &str) -> bool {
-    serde_json::from_str::<Value>(error)
-        .ok()
-        .and_then(|value| {
-            value
-                .pointer("/error/code")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        == Some("not_git_worktree")
+fn herdr_error_code(error: &str) -> Option<String> {
+    serde_json::from_str::<Value>(error).ok().and_then(|value| {
+        value
+            .pointer("/error/code")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
 }
 
 fn discover_panes(
@@ -2035,6 +2081,7 @@ struct WorktreeListResult {
 
 #[derive(Deserialize)]
 struct WorktreeListSource {
+    repo_key: Option<String>,
     source_checkout_path: Option<String>,
     source_workspace_id: Option<String>,
 }
@@ -2042,6 +2089,8 @@ struct WorktreeListSource {
 #[derive(Deserialize)]
 struct WorktreeEntry {
     path: String,
+    #[serde(default)]
+    is_linked_worktree: bool,
     open_workspace_id: Option<String>,
     label: Option<String>,
     branch: Option<String>,
@@ -2060,6 +2109,12 @@ struct WorkspaceListResult {
 #[derive(Deserialize)]
 struct WorkspaceEntry {
     workspace_id: String,
+    worktree: Option<WorkspaceWorktree>,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceWorktree {
+    checkout_path: String,
 }
 
 #[derive(Deserialize)]
