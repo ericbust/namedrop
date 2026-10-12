@@ -18,7 +18,7 @@ cargo build --locked --bin namedrop
 
 Requires Rust 1.97+, a C compiler, Python 3.9+, Bash, Git, and native Herdr on PATH. The documented distribution build is `sh scripts/build.sh`; verification uses the debug binary to avoid changing an installed runtime. Pass `--binary bin/namedrop` to check a distribution build instead.
 
-The helper starts `herdr server` with an isolated home, configuration, state, data, runtime directory, and Unix socket under `/tmp/nd-verify-*`. It creates a disposable Git workspace and two native Bash panes. The stuck-wake and idle-worker recipes add a third pane, link the candidate as a disposable plugin and activate it through `scripts/setup.sh activate --json`, so Herdr's real hooks run. That activation path requires `python3`, and it runs the host's `codex` CLI when one is on PATH to install the Namedrop Codex plugin into the fixture's `CODEX_HOME`. The fixture never touches the user's profile. Readiness requires the owned server to remain alive, its socket to exist, and each pane's prompt marker to appear. It activates Namedrop through its public CLI within that fixture. Activation writes integration packages and shell configuration only to the fixture home. It does not start a model or install the Codex plugin into your profile.
+The helper starts `herdr server` with an isolated home, configuration, state, data, runtime directory, and Unix socket under `/tmp/nd-verify-*`. It creates a disposable Git workspace and two native Bash panes. The stuck-wake and idle-worker recipes add a third pane. They and the stale-runtime recipe link the candidate as a disposable plugin and activate it through `scripts/setup.sh activate --json`, so Herdr's real hooks run. That activation path requires `python3`, and it runs the host's `codex` CLI when one is on PATH to install the Namedrop Codex plugin into the fixture's `CODEX_HOME`. The fixture never touches the user's profile. Readiness requires the owned server to remain alive, its socket to exist, and each pane's prompt marker to appear. It activates Namedrop through its public CLI within that fixture. Activation writes integration packages and shell configuration only to the fixture home. It does not start a model or install the Codex plugin into your profile.
 
 Each invocation owns its profile, socket, panes, and state. Concurrent runs are supported. Never replace the helper's environment with the caller's Herdr context or link this checkout into the user's running session for verification. No TCP port, credentials, or seed database are required.
 
@@ -41,6 +41,7 @@ Exit `0` means healthy, `1` means needs attention, and `2` means unavailable. Th
 .agents/skills/verify/scripts/control-namedrop.py --feature shared-checkout
 .agents/skills/verify/scripts/control-namedrop.py --feature stuck-wake
 .agents/skills/verify/scripts/control-namedrop.py --feature idle-worker
+.agents/skills/verify/scripts/control-namedrop.py --feature stale-runtime
 ```
 
 The helper sends public CLI commands through `herdr pane run` into real terminal panes. Each command has its own stdout, stderr, exit-status capture, and terminal transcript. It reads saved values through public list commands or a read-only SQLite connection. The tour recipe sends actual `right` and `esc` keys and captures both pages. It runs the tour renderer in the owned terminal; floating-popup actions and prefix shortcuts require a separately linked disposable plugin instance. The handoffs recipe proves the model-free rejections only.
@@ -66,6 +67,7 @@ The helper prints the retained directory, `.scratch/verify/nd-verify-*/`, on suc
 - `handoffs.json` for the handoff rejections.
 - `stuck-wake.json`, `lead-envelopes.json` and `worker-envelopes.json` for the stuck wake.
 - `idle-worker.json`, `lead-envelopes.json` and `worker-envelopes.json` for the idle worker, on every stop.
+- `stale-runtime.json` for the stale runtime, on every stop.
 - `instance.json`, `doctor.json`, `server.log`, and feature-specific saved values.
 - `state.sqlite3` after a successful drive, after a stuck-wake stall, and after any idle-worker stop, for independent inspection of persisted side effects.
 - `summary.json`: feature, commit, binary identity, limitations, and pass status, plus `outcome` for the stuck wake and the idle worker. The commit alone does not identify uncommitted code; retain the relevant diff with proof of such changes.
@@ -83,6 +85,6 @@ After a run, inspect the printed directory's `summary.json` and `cleanup.json`, 
 
 ## Helpers
 
-`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its eight recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
+`scripts/control-namedrop.py` is executable. Run it from the repository root as shown above; `--help` lists its nine recipes and `--binary` option. It uses only Python's standard library. Add new drives at public CLI or terminal entry points, rather than setting application state internally.
 
 Use `/maintain-verification-skill` to reconcile the feature map and recipes as Namedrop changes.

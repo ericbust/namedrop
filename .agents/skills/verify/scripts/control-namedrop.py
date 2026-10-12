@@ -68,7 +68,7 @@ def read_envelopes(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "handoffs", "shared-checkout", "stuck-wake",
-                                              "idle-worker"], default="names")
+                                              "idle-worker", "stale-runtime"], default="names")
     parser.add_argument("--binary", type=Path, default=REPO / "target/debug/namedrop")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
@@ -89,7 +89,7 @@ def main():
                HERDR_SOCKET_PATH=str(base / "run/herdr.sock"), SHELL=shutil.which("bash") or "/bin/bash")
     (base / "home/.bashrc").write_text('PROMPT_COMMAND=\': > "$HOME/ready-$HERDR_PANE_ID"\'\n')
     (base / "home/.bash_profile").write_text('. "$HOME/.bashrc"\n')
-    links_plugin = args.feature in ("stuck-wake", "idle-worker")
+    links_plugin = args.feature in ("stuck-wake", "idle-worker", "stale-runtime")
     state = base / ("state/herdr/plugins/namedrop" if links_plugin else "state/namedrop")
     server = None
     shell_pids = []
@@ -352,6 +352,49 @@ def main():
                            for issue in report["data"]["issues"]), reports
             save("shared-checkout.json", {"worktrees": listing, "activate": {"lead": activated, "twin": twin_activated},
                                           "rosters": rosters, "doctor": reports})
+        elif args.feature == "stale-runtime":
+            # A bare `herdr plugin install` rebuilds <root>/bin/namedrop and never
+            # activates. A trailing newline changes the digest and leaves the ELF
+            # program headers intact, so the staged file still runs.
+            built = root / "bin/namedrop"
+            staged = root / "bin/.namedrop.reinstalled"
+            staged.write_bytes(binary.read_bytes() + b"\n")
+            staged.chmod(0o700)
+            staged.replace(built)
+            reinstalled = hashlib.sha256(built.read_bytes()).hexdigest()
+
+            def active_revision():
+                return os.readlink(state / "runtime/current").rsplit("/", 1)[-1]
+
+            def require(condition, requirement, observed):
+                if not condition:
+                    summary["outcome"] = requirement
+                    raise RuntimeError(f"stale runtime: {requirement}; observed {observed}")
+
+            trace = {"candidate": summary["sha256"], "reinstalled": reinstalled, "active_before_doctor": active_revision()}
+            try:
+                require(reinstalled != summary["sha256"] and active_revision() == summary["sha256"],
+                        "the reinstalled executable differs from the active runtime", trace)
+                version = command(built, "--version").stdout.strip()
+                require(version.startswith("namedrop "), "the reinstalled executable runs", version)
+                stale = trace["doctor_stale"] = cli("doctor", "--json", allowed=(0, 1))["data"]
+                flagged = [issue for issue in stale["issues"] if issue["code"] == "ND-SETUP-004"]
+                require(flagged, "doctor flags the stale runtime as ND-SETUP-004 while bin/ and current/ differ",
+                        [issue["code"] for issue in stale["issues"]])
+                repair = flagged[0]["repair"]["command"]
+                require(repair == ["sh", str(root / "scripts/setup.sh"), "activate", "--human"],
+                        "the repair activates through the registered root's setup helper", repair)
+                repaired = command(*repair, check=False, context=context, timeout=120, kind="repair")
+                trace["repair"] = {"exit": repaired.returncode, "stdout": repaired.stdout, "stderr": repaired.stderr}
+                require(repaired.returncode == 0, "the repair command exits 0", trace["repair"])
+                require(active_revision() == reinstalled, "the repair switches the active runtime to the reinstalled executable",
+                        {"active": active_revision(), "reinstalled": reinstalled})
+                after = trace["doctor_repaired"] = cli("doctor", "--json", allowed=(0, 1))["data"]
+                require([issue["code"] for issue in after["issues"]] == ["ND-SETUP-003"],
+                        "doctor shows only ND-SETUP-003 after the repair", [issue["code"] for issue in after["issues"]])
+                summary["outcome"] = "passed"
+            finally:
+                save("stale-runtime.json", trace)
         elif links_plugin:
             panes["lead-agent"] = host("tab", "create", "--workspace", spaces["lead"], "--cwd", str(base / "workspace"),
                                        "--label", "Verification lead agent")["root_pane"]["pane_id"]

@@ -31,6 +31,8 @@ impl Fixture {
                 missing_session: Cell::new(false),
                 prompts: RefCell::new(Vec::new()),
                 prompt_error: RefCell::new(None),
+                plugin_root: RefCell::new(None),
+                plugin_lists: Cell::new(0),
             },
             ids: Ids(AtomicU64::new(1)),
         }
@@ -100,6 +102,33 @@ impl Fixture {
         .unwrap();
     }
 }
+impl Fixture {
+    fn stage_runtime(&self, active: &[u8], built: Option<&[u8]>, launcher: bool) -> PathBuf {
+        use sha2::Digest;
+        let digest = format!("{:x}", sha2::Sha256::digest(active));
+        let runtime = self.root.join("runtime");
+        let release = runtime.join("releases").join(&digest);
+        fs::create_dir_all(&release).unwrap();
+        fs::write(release.join("namedrop"), active).unwrap();
+        std::os::unix::fs::symlink(format!("releases/{digest}"), runtime.join("current")).unwrap();
+        if launcher {
+            fs::write(runtime.join("namedrop"), "#!/bin/sh\n").unwrap();
+        }
+        let root = self.root.join("plugin");
+        fs::create_dir_all(root.join("bin")).unwrap();
+        if let Some(built) = built {
+            fs::write(root.join("bin/namedrop"), built).unwrap();
+        }
+        *self.host.plugin_root.borrow_mut() = Some(root.clone());
+        root
+    }
+}
+fn stale_runtime(report: &HealthReport) -> Option<&HealthIssue> {
+    report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-SETUP-004")
+}
 impl Drop for Fixture {
     fn drop(&mut self) {
         fs::remove_dir_all(&self.root).unwrap();
@@ -110,6 +139,8 @@ struct Host {
     missing_session: Cell<bool>,
     prompts: RefCell<Vec<(String, String)>>,
     prompt_error: RefCell<Option<String>>,
+    plugin_root: RefCell<Option<PathBuf>>,
+    plugin_lists: Cell<u32>,
 }
 impl HerdrCommandExecutor for Host {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
@@ -131,6 +162,15 @@ impl HerdrCommandExecutor for Host {
                     return Err(error);
                 }
                 json!({})
+            }
+            ["plugin", "list", "--plugin", "namedrop", "--json"] => {
+                self.plugin_lists.set(self.plugin_lists.get() + 1);
+                match self.plugin_root.borrow().as_ref() {
+                    Some(root) => {
+                        json!({"result":{"type":"plugin_list","plugins":[{"plugin_id":"namedrop","plugin_root":root}]}})
+                    }
+                    None => return Err("plugin namedrop is not installed".into()),
+                }
             }
             _ => return Err(format!("unexpected command {args:?}")),
         };
@@ -886,4 +926,87 @@ fn doctor_after_reconciliation_clears_only_completed_settled_report_attention() 
         assert_eq!(saved["outcome"], outcome);
         assert_eq!(saved["report_delivery_state"], "settled");
     }
+}
+
+#[test]
+fn doctor_flags_a_reinstalled_build_the_active_release_does_not_run() {
+    let f = Fixture::new();
+    f.register();
+    let root = f.stage_runtime(b"old build", Some(b"old build\n"), true);
+    let report = diagnose_collaboration(&f.runtime());
+    let stale = stale_runtime(&report).expect("a build the active release does not run");
+    assert_eq!(stale.severity, HealthSeverity::Notice);
+    assert_eq!(stale.repair.kind, HealthRepairKind::ProductAction);
+    assert_eq!(
+        stale.repair.command,
+        Some(vec![
+            "sh".to_owned(),
+            root.join("scripts/setup.sh").display().to_string(),
+            "activate".to_owned(),
+            "--human".to_owned(),
+        ])
+    );
+    assert_eq!(
+        stale.diagnostic["path"],
+        json!(root.join("bin/namedrop").display().to_string())
+    );
+    assert!(stale.explanation.contains("Update Namedrop"));
+}
+
+#[test]
+fn doctor_flags_a_same_size_rebuild_by_digest() {
+    let f = Fixture::new();
+    f.register();
+    f.stage_runtime(b"old!", Some(b"new!"), true);
+    assert!(stale_runtime(&diagnose_collaboration(&f.runtime())).is_some());
+}
+
+#[test]
+fn doctor_stays_quiet_when_the_active_release_is_the_built_one() {
+    let f = Fixture::new();
+    f.register();
+    let baseline = serde_json::to_value(diagnose_collaboration(&f.runtime())).unwrap();
+    f.stage_runtime(b"same build", Some(b"same build"), true);
+    assert_eq!(
+        serde_json::to_value(diagnose_collaboration(&f.runtime())).unwrap(),
+        baseline
+    );
+    assert_eq!(f.host.plugin_lists.get(), 1, "the check did read the root");
+}
+
+#[test]
+fn doctor_ignores_a_root_without_a_staged_build() {
+    let f = Fixture::new();
+    f.register();
+    let root = f.stage_runtime(b"old build", None, true);
+    let target = root.join("target/aarch64-apple-darwin/release");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("namedrop"), b"dev build").unwrap();
+    assert!(stale_runtime(&diagnose_collaboration(&f.runtime())).is_none());
+    assert_eq!(f.host.plugin_lists.get(), 1, "the check did read the root");
+}
+
+#[test]
+fn doctor_skips_the_runtime_check_without_a_launcher() {
+    let f = Fixture::new();
+    f.register();
+    f.stage_runtime(b"old build", Some(b"new build"), false);
+    assert!(stale_runtime(&diagnose_collaboration(&f.runtime())).is_none());
+    assert_eq!(
+        f.host.plugin_lists.get(),
+        0,
+        "no Herdr read without an installed runtime"
+    );
+}
+
+#[test]
+fn doctor_skips_the_runtime_check_when_herdr_has_no_plugin_root() {
+    let f = Fixture::new();
+    f.register();
+    f.stage_runtime(b"old build", Some(b"new build"), true);
+    *f.host.plugin_root.borrow_mut() = None;
+    let report = diagnose_collaboration(&f.runtime());
+    assert!(stale_runtime(&report).is_none());
+    assert_ne!(report.status, HealthStatus::Unavailable);
+    assert_eq!(f.host.plugin_lists.get(), 1);
 }
