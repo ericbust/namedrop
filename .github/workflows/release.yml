@@ -1,13 +1,41 @@
-name: Release artifacts
+name: Release
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: |
+          version=$(sh scripts/release.sh version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Exit status 2 means no such tag; any other failure stops the run.
+          status=0
+          git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null || status=$?
+          case $status in
+            0) echo "Tag v$version already exists, so there is nothing to release."; echo "release=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "release=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$status" ;;
+          esac
+
   archive:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -36,3 +64,24 @@ jobs:
           name: ${{ matrix.artifact }}
           path: target/dist/*
           if-no-files-found: error
+
+  publish:
+    needs: [plan, archive]
+    # A manual run on another branch builds the archives without publishing them.
+    if: needs.plan.outputs.release == 'true' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: |
+          sh scripts/release.sh notes "$VERSION" > "$RUNNER_TEMP/notes.md"
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "Namedrop $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md" dist/*.tar.gz dist/*.tar.gz.sha256

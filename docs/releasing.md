@@ -1,8 +1,8 @@
 # Build a release
 
-Start from a reviewed commit. Build each archive on the machine it's for: `aarch64-apple-darwin` on an Apple silicon Mac, and `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` on GNU/Linux of that architecture. The packager runs the executable to check its version, so it refuses one built for another platform. The Linux aarch64 archive stays a prerelease until someone tests it by hand.
+Start from a reviewed commit. Build each archive on the machine it's for: `aarch64-apple-darwin` on an Apple silicon Mac, and `x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` on GNU/Linux of that architecture. The packager runs the executable to check its version, so it refuses one built for another platform. Each release attaches the Linux aarch64 archive, but [compatibility](compatibility.md) lists it as untested by hand until someone tests it.
 
-Set the same version in `Cargo.toml` and `herdr-plugin.toml`. The packager refuses a mismatch between those two, or between either and the built executable's `--version`. It doesn't read `Cargo.lock`, so refresh that too. Nothing checks versions written in prose, so search `README.md`, `CONTRIBUTING.md` and `docs/*.md` for the old archive name and version by hand.
+Set the same version in `Cargo.toml`, `herdr-plugin.toml` and `Cargo.lock`, and check them with `sh scripts/release.sh version`. The packager also refuses a mismatch between the manifests and the built executable's `--version`. Nothing checks versions written in prose, so search `README.md`, `CONTRIBUTING.md` and `docs/*.md` for the old archive name and version by hand.
 
 Check that the crate includes the source, lockfile and documentation:
 
@@ -20,7 +20,7 @@ cd target/dist
 shasum -a 256 -c namedrop-<version>-aarch64-apple-darwin.tar.gz.sha256   # Linux: sha256sum -c namedrop-<version>-<target>.tar.gz.sha256
 ```
 
-The builder uses `target/release-build`, checks the architecture and version, removes the build step from the distributed manifest, and packs the executable, the manifest, `runtime.json`, the setup, update, and launcher scripts, the documentation, the license, and checksums. It never overwrites existing output. For another local build, pick a fresh directory with `--output`. To package an executable you've already built for the target, pass `--binary`.
+The builder uses `target/release-build`, checks the architecture and version, removes the build step from the distributed manifest, and packs the executable, the manifest, `runtime.json`, the setup, update, and launcher scripts, the documentation, the changelog, the license, and checksums. It never overwrites existing output. For another local build, pick a fresh directory with `--output`. To package an executable you've already built for the target, pass `--binary`.
 
 It refuses a binary that is missing, not executable, the wrong format (it must be an arm64 Mach-O, or an ELF for the Linux architecture using glibc's dynamic loader), or whose `--version` disagrees with `Cargo.toml` (exit 65). It also refuses to write over an existing archive or checksum (exit 73).
 
@@ -55,14 +55,28 @@ file -b bin/namedrop
 
 On Linux, use `sha256sum -c` for both checksum files. The outer checksum covers the archive. `SHA256SUMS` covers every file inside it. The builder doesn't sign or notarize anything, and a locally built archive doesn't go through macOS quarantine, so test a downloaded copy before saying downloads work.
 
+## Choose the version
+
+Releases follow semantic versioning. The version in `Cargo.toml` is the one source; `herdr-plugin.toml` and `Cargo.lock` must match it.
+
+- **MAJOR** when running sessions break or users must migrate by hand: a `live_upgrade_epoch` increase, a `collaboration_protocol` change, a `state_schema` increase that doesn't migrate live, or a higher `min_herdr_version`.
+- **MINOR** for new features, or a `state_schema` increase listed in `live_migrate_from`.
+- **PATCH** for fixes only.
+
 ## Publish
 
-1. Complete the source and archive checks in [CONTRIBUTING.md](../CONTRIBUTING.md). Then install the archive in a fresh Herdr profile, start new Codex and Claude Code sessions, and send a mention each way. Update the tested versions in [compatibility](compatibility.md).
-2. Write down the source commit, the executable's SHA-256 and the archive's SHA-256 together. Tag the reviewed commit whose packaged files match the archive. If you change any packaged file, rebuild and check the checksums again. Even a change to the documentation alone gives the archive a new checksum.
-3. Write release notes covering the changes, compatibility, [upgrade and rollback](operations.md#upgrade), and anything that failed, was blocked or wasn't tested. To show the tour to existing users again, ship a new [tour presentation](operations.md#tour-presentations) with a new id and point `CURRENT_ID` at it; never reuse an id. Breaking changes to the runtime integration need fresh agent sessions. Compatible updates let existing sessions keep what they loaded, and new sessions pick up the new instructions.
-4. Attach the archive and its `.sha256` file to the GitHub release. If testing isn't finished, say so and publish it as a draft or prerelease.
+Users install `main` with `herdr plugin install ericbust/namedrop --ref main`, so every merge to `main` is a release.
 
-CI runs formatting, Clippy, the tests, crate packaging and archive building on GitHub's `macos-15` (Apple silicon), `ubuntu-24.04` (x86_64) and `ubuntu-24.04-arm` (aarch64) runners. The manual Release artifacts workflow builds one archive per target but doesn't publish a release. CI has no Herdr, no agents and no credentials, so the native Herdr tests and the test with real agents have to be run by hand.
+1. In the pull request, raise the version in `Cargo.toml`, `herdr-plugin.toml` and `Cargo.lock` (`cargo update --workspace` refreshes the lockfile). Add a `## [X.Y.Z] - YYYY-MM-DD` section at the top of [CHANGELOG.md](../CHANGELOG.md) that says what changes for users. Breaking changes need fresh agent sessions, so say so. To show the tour to existing users again, ship a new [tour presentation](operations.md#tour-presentations) with a new id and point `CURRENT_ID` at it; never reuse an id.
+2. The Release check workflow runs `sh scripts/release.sh check origin/main`. It fails unless the three files agree, the version is above the one on `main`, and the changelog has its section. Run it locally against your copy of `main` before you push.
+3. Before you merge a pull request that changes runtime behavior, run the test with real agents. Install the plugin from the branch in a fresh Herdr profile, start new Codex and Claude Code sessions, and send a mention each way. Update the tested versions in [compatibility](compatibility.md).
+4. Merge. The Release workflow sees a version with no `vX.Y.Z` tag, builds and tests the three archives, then creates the tag on the merge commit and a GitHub release named `Namedrop X.Y.Z`. Its notes are the changelog section, and the archives and `.sha256` files are attached. A push whose version is already tagged publishes nothing.
+
+Label a pull request `no-release` only when it changes files users never run, such as workflows. `--ref main` ships every file in the repository, so documentation, tours and scripts count as releases.
+
+To ship several pull requests as one release, merge them into a short-lived `release/X.Y.Z` branch, then open one pull request from it to `main` with the bump and changelog section.
+
+CI runs formatting, Clippy, the tests, crate packaging and archive building on GitHub's `macos-15` (Apple silicon), `ubuntu-24.04` (x86_64) and `ubuntu-24.04-arm` (aarch64) runners. The Release workflow repeats those checks before it publishes. Run it by hand on another branch to build the archives without publishing. CI has no Herdr, no agents and no credentials, so the native Herdr tests and the test with real agents have to be run by hand.
 
 ## Live-update compatibility
 

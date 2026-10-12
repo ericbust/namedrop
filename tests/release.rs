@@ -589,6 +589,7 @@ fn the_archive_bundles_every_declared_entrypoint_including_the_naming_popup() {
         "scripts/check-linux-prerequisites.sh",
         "SHA256SUMS",
         "README.md",
+        "CHANGELOG.md",
         "CONTRIBUTING.md",
         "LICENSE",
         "docs/operations.md",
