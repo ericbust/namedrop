@@ -72,7 +72,7 @@ Users install `main` with `herdr plugin install ericbust/namedrop --ref main`, s
 3. Before you merge a pull request that changes runtime behavior, run the test with real agents. Install the plugin from the branch in a fresh Herdr profile, start new Codex and Claude Code sessions, and send a mention each way. Update the tested versions in [compatibility](compatibility.md).
 4. Merge. The Release workflow sees a version with no `vX.Y.Z` tag, builds and tests the three archives, then creates the tag on the merge commit and a GitHub release named `Namedrop X.Y.Z`. Its notes are the changelog section, and the archives and `.sha256` files are attached. A push whose version is already tagged publishes nothing.
 
-Label a pull request `no-release` only when it changes files users never run, such as workflows. `--ref main` ships every file in the repository, so documentation, tours and scripts count as releases.
+Label a pull request `no-release` when it changes nothing users run, such as workflows, tests or documentation. Installs from `--ref main` still pick up a documentation change, but no tagged release carries it until the next version. Release a documentation change on its own only when users need it right away, such as a fix to a step that loses data. Tours and scripts run on users' machines, so they count as releases.
 
 To ship several pull requests as one release, merge them into a short-lived `release/X.Y.Z` branch, then open one pull request from it to `main` with the bump and changelog section.
 
