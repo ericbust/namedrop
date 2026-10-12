@@ -27,7 +27,7 @@ State which paths were exercised and which remain unverified. A successful model
 - [Names and personas](names.md) covers terminal naming, rename, persona preservation/clearing, and naming/management popups.
 - [Groups](groups.md) covers creation, list, membership, removal, and group mentions.
 - [Collaboration controls and Doctor](controls.md) covers workspace pause/resume and health, with address/thread controls as separate drives.
-- [Shared checkout](shared-checkout.md) covers a second workspace opened on a checkout that another workspace already has open, with Doctor, activation, and separate names in each workspace.
+- [Shared checkout](shared-checkout.md) covers a second workspace opened on a checkout that another workspace already has open, on the repository root and on a linked worktree, with Doctor, activation, separate names in each workspace, and refusal of a caller that names no workspace.
 - [Tour](tour.md) covers page navigation, close, reset, automatic opening, and popup entry points.
 - [Handoffs, terminal work, and context](handoffs.md) covers direct/delegated mentions, preview, replies, tracked reports, shell results, and freshness.
 - [Stuck wake](stuck-wake.md) covers a coordination nudge whose turn ends idle inside the acknowledgement grace without a completion, its settle as no-reply, the report dispatch, and Doctor, through real Herdr status hooks against simulated Codex sessions.

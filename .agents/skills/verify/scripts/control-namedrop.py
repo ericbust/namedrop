@@ -109,8 +109,8 @@ def main():
         with (evidence / "commands.jsonl").open("a") as log:
             log.write(json.dumps(row) + "\n")
 
-    def command(*argv, check=True, context=None, timeout=30, kind="host"):
-        result = subprocess.run([str(a) for a in argv], env=dict(env, **(context or {})), cwd=base / "workspace",
+    def command(*argv, check=True, context=None, timeout=30, kind="host", cwd=None):
+        result = subprocess.run([str(a) for a in argv], env=dict(env, **(context or {})), cwd=cwd or base / "workspace",
                                 capture_output=True, text=True, timeout=timeout)
         record({"kind": kind, "argv": [str(a) for a in argv], "exit": result.returncode,
                 "stdout": result.stdout, "stderr": result.stderr})
@@ -371,6 +371,52 @@ def main():
                                                                                 "--herdr-workspace")), \
                 (f"a caller with only the shared checkout cwd got exit {by_cwd['exit']} instead of a refusal naming "
                  f"{spaces['lead']}, {spaces['twin']} and --herdr-workspace: {refusal.strip()}")
+            linked = base / "linked"
+            command("git", "-c", "user.name=verify", "-c", "user.email=verify@example.invalid", "commit", "--quiet",
+                    "--allow-empty", "-m", "fixture")
+            command("git", "worktree", "add", "--quiet", "-b", "verify-linked", linked)
+            opened = host("worktree", "open", "--workspace", spaces["lead"], "--path", linked, "--label",
+                          "Namedrop verification linked")
+            second = host("workspace", "create", "--cwd", linked, "--label", "Namedrop verification linked twin")
+            for role, created in (("linked", opened), ("linked-twin", second)):
+                spaces[role] = created["workspace"]["workspace_id"]
+                panes[role] = created["root_pane"]["pane_id"]
+                wait(lambda: (base / "home" / f"ready-{panes[role]}").exists(), f"{role} native bash prompt")
+                shell_pids.append(host("pane", "process-info", "--pane", panes[role])["process_info"]["shell_pid"])
+            linked_listing = host("worktree", "list", "--workspace", spaces["linked-twin"], "--json")
+            linked_workspaces = host("workspace", "list")["workspaces"]
+            body("activate", pane=panes["linked"], workspace=spaces["linked"], confirmed=True)
+            cli("name", "@linked-build", "--type", "terminal", pane=panes["linked"], workspace=spaces["linked"])
+            linked_roster = cli("address", "list", "--json", pane=panes["linked"], workspace=spaces["linked"])["data"]
+            assert {a["alias"] for a in linked_roster} == {"linked-build"}, linked_roster
+            twin_refused = cli("activate", "--input-json", json.dumps({"confirmed": True}), pane=panes["linked-twin"],
+                               workspace=spaces["linked-twin"], allowed=(65,))
+            linked_unscoped = {}
+            for case, scope, cwd in (("pane", ["--herdr-pane", panes["linked-twin"]], linked), ("cwd", [], linked),
+                                     ("root", [], base / "workspace")):
+                result = command(binary, "--plugin-state", state, "--herdr-socket", env["HERDR_SOCKET_PATH"], *scope,
+                                 "address", "list", "--json", check=False, cwd=cwd)
+                linked_unscoped[case] = {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+            save("shared-linked-checkout.json", {"opened": opened, "worktrees": linked_listing,
+                                                 "workspaces": linked_workspaces, "roster": linked_roster,
+                                                 "twin_activate": twin_refused, "unscoped": linked_unscoped})
+            assert f"does not contain space {spaces['linked-twin']}" in twin_refused["error"]["message"], twin_refused
+            by_pane = linked_unscoped["pane"]
+            assert by_pane["exit"] == 65 and "linked-build" not in by_pane["stdout"], \
+                (f"--herdr-pane {panes['linked-twin']} from the linked checkout got exit {by_pane['exit']} instead of "
+                 f"failing closed: {by_pane['stdout'].strip()} {by_pane['stderr'].strip()}")
+            by_cwd = linked_unscoped["cwd"]
+            refusal = by_cwd["stdout"] + by_cwd["stderr"]
+            assert by_cwd["exit"] == 65 and all(token in refusal for token in (spaces["linked"], spaces["linked-twin"],
+                                                                                "--herdr-workspace")), \
+                (f"a caller with only the linked checkout cwd got exit {by_cwd['exit']} instead of a refusal naming "
+                 f"{spaces['linked']}, {spaces['linked-twin']} and --herdr-workspace: {refusal.strip()}")
+            by_root = linked_unscoped["root"]
+            refusal = json.loads(by_root["stdout"])["error"]["message"] if by_root["exit"] == 65 else by_root["stdout"]
+            assert by_root["exit"] == 65 and spaces["lead"] in refusal and spaces["twin"] in refusal and not any(
+                f"{spaces[role]}," in refusal or f"{spaces[role]})" in refusal for role in ("linked", "linked-twin")), \
+                (f"a caller with only the root checkout cwd got exit {by_root['exit']} instead of a refusal naming "
+                 f"exactly {spaces['lead']} and {spaces['twin']}: {refusal.strip()}")
         elif args.feature == "stale-runtime":
             # A bare `herdr plugin install` rebuilds <root>/bin/namedrop and never
             # activates. A trailing newline changes the digest and leaves the ELF
