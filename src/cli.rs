@@ -483,7 +483,7 @@ enum DeliveryCommand {
     Inbox,
     /// Cancel one held delivery after human confirmation; never retry or stop its agent.
     CancelHeld,
-    /// Acknowledge a settled attempt's missing disposition after human confirmation, only when its recipient is retired.
+    /// Acknowledge a settled attempt's missing disposition after human confirmation, once its recipient is retired or its session was replaced.
     Acknowledge,
 }
 
