@@ -64,7 +64,7 @@ trap 'rm -rf "$stage"' EXIT HUP INT TERM
 package="$stage/$name"
 mkdir -p "$package/bin" "$package/scripts" "$package/docs"
 cp "$binary" "$package/bin/namedrop"
-cp "$namedrop_root/README.md" "$namedrop_root/CONTRIBUTING.md" "$namedrop_root/LICENSE" "$package/"
+cp "$namedrop_root/README.md" "$namedrop_root/CHANGELOG.md" "$namedrop_root/CONTRIBUTING.md" "$namedrop_root/LICENSE" "$package/"
 cp "$namedrop_root/scripts/setup.sh" "$package/scripts/"
 cp "$namedrop_root/scripts/update.sh" "$namedrop_root/scripts/update.py" "$package/scripts/"
 cp "$namedrop_root/scripts/run.sh" "$namedrop_root/scripts/runtime.py" "$package/scripts/"
@@ -85,7 +85,7 @@ awk -v platform="$platform" '
 ' "$namedrop_root/herdr-plugin.toml" > "$package/herdr-plugin.toml"
 (
   cd "$package"
-  sha256 bin/namedrop herdr-plugin.toml runtime.json README.md CONTRIBUTING.md LICENSE scripts/setup.sh scripts/update.sh scripts/update.py scripts/run.sh scripts/runtime.py scripts/check-linux-prerequisites.sh docs/*.md > SHA256SUMS
+  sha256 bin/namedrop herdr-plugin.toml runtime.json README.md CHANGELOG.md CONTRIBUTING.md LICENSE scripts/setup.sh scripts/update.sh scripts/update.py scripts/run.sh scripts/runtime.py scripts/check-linux-prerequisites.sh docs/*.md > SHA256SUMS
 )
 COPYFILE_DISABLE=1 tar -czf "$stage/$name.tar.gz" -C "$stage" "$name"
 (
