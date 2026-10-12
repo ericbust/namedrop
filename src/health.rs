@@ -726,8 +726,6 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
     }
 }
 
-/// Advisory, so any Herdr failure is `None`, and bounded so a hung Herdr
-/// cannot stall the Doctor popup.
 fn registered_plugin_root<E: HerdrCommandExecutor>(herdr: &E) -> Option<std::path::PathBuf> {
     let output = herdr
         .execute_bounded(
@@ -758,7 +756,7 @@ fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> Health
     outdated.diagnostic = serde_json::json!({
         "path": stale.built,
         "plugin_root": stale.root,
-        "active_revision": stale.active,
+        "active_revision": stale.active_digest,
     });
     outdated.repair.command = Some(vec![
         "sh".into(),

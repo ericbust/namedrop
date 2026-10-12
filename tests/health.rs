@@ -103,8 +103,6 @@ impl Fixture {
     }
 }
 impl Fixture {
-    /// Lays out `<state>/runtime` the way activation leaves it, and registers a
-    /// plugin root whose `bin/namedrop` holds `built`.
     fn stage_runtime(&self, active: &[u8], built: Option<&[u8]>, launcher: bool) -> PathBuf {
         use sha2::Digest;
         let digest = format!("{:x}", sha2::Sha256::digest(active));
