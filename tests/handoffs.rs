@@ -121,6 +121,9 @@ impl HerdrCommandExecutor for FakeHerdr {
             // process's directory. Either way the Space's Worktree path comes
             // from Herdr, so both lookups answer identically — unless this Space
             // has no Git Worktree, which Herdr reports as an error code.
+            ["workspace", "list"] => {
+                serde_json::json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}).to_string()
+            }
             ["worktree", "list", "--cwd", cwd, "--json"] if *cwd == self.worktree => {
                 self.worktree_list()?
             }

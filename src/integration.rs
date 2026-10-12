@@ -660,6 +660,9 @@ fn concurrent_native_registration_completes_one_profile() {
     impl HerdrCommandExecutor for Host {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let value = match args {
+                ["workspace", "list"] => {
+                    json!({"result":{"workspaces":[{"workspace_id":"space"}]}})
+                }
                 ["worktree", "list", ..] => {
                     json!({"result":{"worktrees":[{"path":"/repo","open_workspace_id":"space"}]}})
                 }

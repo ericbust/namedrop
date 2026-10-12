@@ -477,6 +477,9 @@ impl IdGenerator for Fixture {
 impl HerdrCommandExecutor for Fixture {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let stdout = match args {
+            ["workspace", "list"] => {
+                json!({"result":{"workspaces":[{"workspace_id":"synthetic-workspace"}]}})
+            }
             ["worktree", "list", ..] => {
                 json!({"result":{"worktrees":[{"path":self.root,"open_workspace_id":"synthetic-workspace"}]}})
             }

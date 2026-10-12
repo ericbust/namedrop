@@ -85,6 +85,10 @@ struct FakeHerdr {
 impl HerdrCommandExecutor for FakeHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let stdout = match args {
+            ["workspace", "list"] => {
+                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                    .to_owned()
+            }
             ["worktree", "list", "--cwd", "/repo", "--json"]
             | ["worktree", "list", "--json"] => {
                 r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -184,6 +188,9 @@ impl DynamicHerdr {
 impl HerdrCommandExecutor for DynamicHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let stdout = match args {
+            ["workspace", "list"] => {
+                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
+            }
             ["worktree", "list", "--cwd", "/repo", "--json"]
             | ["worktree", "list", "--json"]
             | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
