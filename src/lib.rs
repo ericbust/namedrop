@@ -71,7 +71,7 @@ pub(crate) use integration::{collaboration_executable, tool_environment};
 pub use lifecycle::{
     DiscoveredPane, DiscoveredWorktree, LifecycleRuntime, discover_worktree,
     discover_worktree_for_workspace, execute_lifecycle_operation, locate_agent_session_pane,
-    reconcile_discovered_panes,
+    pane_workspace, reconcile_discovered_panes,
 };
 pub use message::{
     ParsedMessage, RecipientOutlook, execute_message_operation, parse_mentions,

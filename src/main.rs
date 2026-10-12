@@ -621,6 +621,11 @@ fn with_runtime_options<T>(
             Err(_) => None,
         },
     };
+    if workspace_id.is_none()
+        && let Some(pane) = pane_id.as_deref()
+    {
+        workspace_id = Some(namedrop::pane_workspace(&herdr, pane)?);
+    }
     // An agent can run commands without the pane's Herdr variables (a shared
     // Codex app-server keeps the environment it started with). The agent's
     // own session ID still arrives, and Herdr knows which pane runs it.

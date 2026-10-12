@@ -919,6 +919,9 @@ struct FakeHerdr {
 impl HerdrCommandExecutor for FakeHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let stdout = match args {
+            ["workspace", "list"] => {
+                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+            }
             ["worktree", "list", "--cwd", "/repo", "--json"] => {
                 r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
             }

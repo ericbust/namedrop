@@ -101,6 +101,8 @@ impl HerdrCommandExecutor for FakeHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         self.commands.fetch_add(1, Ordering::Relaxed);
         let stdout = match args {
+            ["workspace", "list"] => json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
+            .to_string(),
             ["worktree", "list", "--cwd", cwd, "--json"] if *cwd == self.worktree => json!({
                 "result": {"worktrees": [{"path": self.worktree, "open_workspace_id": "workspace-1"}]}
             })

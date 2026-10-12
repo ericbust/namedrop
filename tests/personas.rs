@@ -43,6 +43,9 @@ struct Host;
 impl HerdrCommandExecutor for Host {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let value = match args {
+            ["workspace", "list"] => {
+                json!({"result":{"workspaces":[{"workspace_id":"w1"}]}})
+            }
             ["worktree", "list", ..] => {
                 json!({"result":{"worktrees":[{"path":"/repo","open_workspace_id":"w1"}]}})
             }

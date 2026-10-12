@@ -1556,6 +1556,16 @@ pub fn discover_worktree(
         .open_workspace_id
         .clone()
         .ok_or_else(|| format!("Worktree {} is not open in Herdr", worktree.path))?;
+    let owners = spaces_owning_checkout(herdr, &worktree.path, &workspace_id)?;
+    if owners.len() > 1 {
+        return Err(format!(
+            "Checkout {} is open in more than one Herdr space ({}), so Namedrop can't tell \
+             which one this command is for. Pass --herdr-workspace <space-id> \
+             (or --herdr-pane <pane-id>).",
+            worktree.path,
+            owners.join(", ")
+        ));
+    }
     discover_panes(
         herdr,
         worktree.path,
@@ -1566,17 +1576,75 @@ pub fn discover_worktree(
     )
 }
 
+// `worktree list --cwd` names only the first opener, so each other space is
+// asked what it owns.
+fn spaces_owning_checkout(
+    herdr: &impl HerdrCommandExecutor,
+    checkout: &str,
+    opener: &str,
+) -> Result<Vec<String>, String> {
+    let output = herdr.execute(&["workspace", "list"])?;
+    let workspaces: WorkspaceListEnvelope =
+        serde_json::from_str(&output.stdout).map_err(|error| error.to_string())?;
+    let mut owners = vec![opener.to_owned()];
+    for workspace in workspaces.result.workspaces {
+        if workspace.workspace_id == opener {
+            continue;
+        }
+        let Some(result) = worktree_list_for_workspace(herdr, &workspace.workspace_id)? else {
+            continue;
+        };
+        if owned_worktree_index(&result, &workspace.workspace_id)
+            .is_some_and(|index| Path::new(&result.worktrees[index].path) == Path::new(checkout))
+        {
+            owners.push(workspace.workspace_id);
+        }
+    }
+    owners.sort();
+    Ok(owners)
+}
+
+fn worktree_list_for_workspace(
+    herdr: &impl HerdrCommandExecutor,
+    workspace_id: &str,
+) -> Result<Option<WorktreeListResult>, String> {
+    let output = match herdr.execute(&["worktree", "list", "--workspace", workspace_id, "--json"]) {
+        Ok(output) => output,
+        Err(error) if is_no_worktree_error(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let worktrees: WorktreeListEnvelope =
+        serde_json::from_str(&output.stdout).map_err(|error| error.to_string())?;
+    Ok(Some(worktrees.result))
+}
+
+fn owned_worktree_index(result: &WorktreeListResult, workspace_id: &str) -> Option<usize> {
+    result
+        .worktrees
+        .iter()
+        .position(|worktree| worktree.open_workspace_id.as_deref() == Some(workspace_id))
+        .or_else(|| {
+            // Herdr lists each checkout path once with its first opener as
+            // open_workspace_id, so a second workspace on the same path never
+            // matches by id. `source` names the requester only when it sits on
+            // the repo root, and then source_checkout_path is its checkout.
+            let source = result
+                .source
+                .as_ref()
+                .filter(|source| source.source_workspace_id.as_deref() == Some(workspace_id))?;
+            let checkout = source.source_checkout_path.as_deref()?;
+            result
+                .worktrees
+                .iter()
+                .position(|worktree| Path::new(&worktree.path) == Path::new(checkout))
+        })
+}
+
 pub fn discover_worktree_for_workspace(
     herdr: &impl HerdrCommandExecutor,
     workspace_id: &str,
 ) -> Result<DiscoveredWorktree, String> {
-    let worktree_output =
-        match herdr.execute(&["worktree", "list", "--workspace", workspace_id, "--json"]) {
-            Ok(output) => Some(output),
-            Err(error) if is_no_worktree_error(&error) => None,
-            Err(error) => return Err(error),
-        };
-    let Some(worktree_output) = worktree_output else {
+    let Some(mut result) = worktree_list_for_workspace(herdr, workspace_id)? else {
         return discover_panes(
             herdr,
             format!("herdr-space:{workspace_id}"),
@@ -1586,28 +1654,8 @@ pub fn discover_worktree_for_workspace(
             None,
         );
     };
-    let worktrees: WorktreeListEnvelope =
-        serde_json::from_str(&worktree_output.stdout).map_err(|error| error.to_string())?;
-    let WorktreeListResult {
-        source,
-        mut worktrees,
-    } = worktrees.result;
-    let index = worktrees
-        .iter()
-        .position(|worktree| worktree.open_workspace_id.as_deref() == Some(workspace_id))
-        .or_else(|| {
-            // Herdr lists each checkout path once with its first opener as
-            // open_workspace_id, so a second workspace on the same path never
-            // matches by id. `source` names the requester only when it sits on
-            // the repo root, and then source_checkout_path is its checkout.
-            let source = source
-                .filter(|source| source.source_workspace_id.as_deref() == Some(workspace_id))?;
-            let checkout = source.source_checkout_path?;
-            worktrees
-                .iter()
-                .position(|worktree| Path::new(&worktree.path) == Path::new(&checkout))
-        });
-    match index.map(|index| worktrees.swap_remove(index)) {
+    let index = owned_worktree_index(&result, workspace_id);
+    match index.map(|index| result.worktrees.swap_remove(index)) {
         Some(worktree) => discover_panes(
             herdr,
             worktree.path,
@@ -1641,6 +1689,24 @@ pub fn locate_agent_session_pane(
         .next()
         .is_none()
         .then_some((pane.workspace_id, pane.pane_id))
+}
+
+pub fn pane_workspace(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Result<String, String> {
+    let output = herdr.execute(&["pane", "list"])?;
+    let panes: PaneListEnvelope =
+        serde_json::from_str(&output.stdout).map_err(|error| error.to_string())?;
+    panes
+        .result
+        .panes
+        .into_iter()
+        .find(|pane| pane.pane_id == pane_id)
+        .map(|pane| pane.workspace_id)
+        .ok_or_else(|| {
+            format!(
+                "Herdr has no pane {pane_id}, so its space is unknown. Pass \
+                 --herdr-workspace <space-id>."
+            )
+        })
 }
 
 fn is_no_worktree_error(error: &str) -> bool {
@@ -1979,6 +2045,21 @@ struct WorktreeEntry {
     open_workspace_id: Option<String>,
     label: Option<String>,
     branch: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceListEnvelope {
+    result: WorkspaceListResult,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceListResult {
+    workspaces: Vec<WorkspaceEntry>,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceEntry {
+    workspace_id: String,
 }
 
 #[derive(Deserialize)]
