@@ -327,7 +327,9 @@ def main():
             wait(lambda: (base / "home" / f"ready-{panes['twin']}").exists(), "twin native bash prompt")
             shell_pids.append(host("pane", "process-info", "--pane", panes["twin"])["process_info"]["shell_pid"])
             listing = host("worktree", "list", "--workspace", spaces["twin"], "--json")
-            checkout = next(w for w in listing["worktrees"] if w["path"] == str(base / "workspace"))
+            matches = [w for w in listing["worktrees"] if w["path"] == str(base / "workspace")]
+            assert len(matches) == 1, listing
+            checkout = matches[0]
             assert checkout["open_workspace_id"] == spaces["lead"], listing
             assert listing["source"]["source_workspace_id"] == spaces["twin"], listing
             twin_report = cli("doctor", "--json", pane=panes["twin"], workspace=spaces["twin"], allowed=(0, 1))
