@@ -55,6 +55,7 @@ def main():
     herdr = shutil.which('herdr')
     assert herdr, 'Native Herdr is required for this acceptance check'
     binary = Path(os.environ.get('NAMEDROP_TEST_BINARY', REPO / 'target/debug/namedrop')).resolve()
+    previous = Path(os.environ.get('NAMEDROP_TEST_PREVIOUS_BINARY', binary)).resolve()
     base = Path(tempfile.mkdtemp(prefix='namedrop-native-update-', dir=FIXTURE_ROOT))
     env = {k: v for k, v in os.environ.items() if not k.startswith(('HERDR_', 'CODEX_', 'CLAUDE_', 'NAMEDROP_', 'GIT_CONFIG_'))}
     # Setup runs any codex on PATH, which would install the plugin before the check that it is still missing.
@@ -104,7 +105,7 @@ def main():
     digests = {}
     for version in ('one', 'two'):
         destination = base / f'namedrop-{version}'
-        shutil.copyfile(binary, destination)
+        shutil.copyfile(previous if version == 'one' else binary, destination)
         destination.chmod(0o700)
         if sys.platform == 'darwin':
             command('codesign', '--force', '--sign', '-', '--identifier', f'namedrop-fixture-{version}', destination)
