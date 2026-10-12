@@ -43,6 +43,10 @@ def wait(predicate, label, timeout=30):
     raise RuntimeError(f"Timed out waiting for {label}")
 
 
+def now_ms():
+    return time.time_ns() // 1_000_000
+
+
 def compile_simulator(path):
     subprocess.run(["rustc", "--edition", "2021", "-o", str(path), "-"], check=True, capture_output=True, text=True,
                    input="fn main() { std::io::copy(&mut std::io::stdin().lock(), &mut std::io::stdout().lock()).unwrap(); }")
@@ -63,8 +67,8 @@ def read_envelopes(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "handoffs", "shared-checkout", "stuck-wake"],
-                        default="names")
+    parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "handoffs", "shared-checkout", "stuck-wake",
+                                              "idle-worker"], default="names")
     parser.add_argument("--binary", type=Path, default=REPO / "target/debug/namedrop")
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
@@ -85,7 +89,7 @@ def main():
                HERDR_SOCKET_PATH=str(base / "run/herdr.sock"), SHELL=shutil.which("bash") or "/bin/bash")
     (base / "home/.bashrc").write_text('PROMPT_COMMAND=\': > "$HOME/ready-$HERDR_PANE_ID"\'\n')
     (base / "home/.bash_profile").write_text('. "$HOME/.bashrc"\n')
-    links_plugin = args.feature == "stuck-wake"
+    links_plugin = args.feature in ("stuck-wake", "idle-worker")
     state = base / ("state/herdr/plugins/namedrop" if links_plugin else "state/namedrop")
     server = None
     shell_pids = []
@@ -95,7 +99,7 @@ def main():
                "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                "commit": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip(),
                "limits": ("Hook-driven reconciliation with simulated Codex sessions; no model, no real agent hooks."
-                          if args.feature == "stuck-wake" else
+                          if links_plugin else
                           "No model sessions; proves CLI and native terminal behavior only.")}
 
     def save(name, value):
@@ -346,7 +350,7 @@ def main():
                            for issue in report["data"]["issues"]), reports
             save("shared-checkout.json", {"worktrees": listing, "activate": {"lead": activated, "twin": twin_activated},
                                           "rosters": rosters, "doctor": reports})
-        elif args.feature == "stuck-wake":
+        elif links_plugin:
             panes["lead-agent"] = host("tab", "create", "--workspace", spaces["lead"], "--cwd", str(base / "workspace"),
                                        "--label", "Verification lead agent")["root_pane"]["pane_id"]
             wait(lambda: (base / "home" / f"ready-{panes['lead-agent']}").exists(), "lead agent native bash prompt")
@@ -384,12 +388,12 @@ def main():
 
             def observe(role, status):
                 previous = pane_row(role).get("agent_status")
-                requested_ms = time.time_ns() // 1_000_000
+                requested_ms = now_ms()
                 staged = agents[role]["surface"].with_suffix(".next")
                 staged.write_text(status)
                 staged.replace(agents[role]["surface"])
                 observed = wait(lambda: reported(role, status), f"Herdr to report {role} {status} for session {agents[role]['session']}")
-                observed_ms = time.time_ns() // 1_000_000
+                observed_ms = now_ms()
                 hook_started_ms = None
                 if settled(previous) != settled(status):
                     hook_started_ms = wait(lambda: hook_logged_since(requested_ms),
@@ -417,6 +421,10 @@ def main():
 
             def attempt_state(attempt):
                 found = rows("SELECT state FROM delivery_attempt_state WHERE attempt_id = ?", (attempt,))
+                return found[0][0] if found else None
+
+            def disposition(attempt):
+                found = rows("SELECT disposition_kind FROM delivery_dispositions WHERE attempt_id = ?", (attempt,))
                 return found[0][0] if found else None
 
             def bound(envelope, token, outcome=None, **authored):
@@ -473,99 +481,231 @@ def main():
             roster = cli("doctor", "--json", allowed=(0, 1))
             assert roster["data"]["available_agents"] == 2, roster
 
-            begun = as_agent("handoff", "begin", pane=agents["lead"]["pane"], request_id="stuck-wake-begin",
-                             deliverable="Report the synthetic checksum once the worker replies.")
-            coordination = begun["coordination_id"]
-            sent = as_agent("send", pane=agents["lead"]["pane"], request_id="stuck-wake-send", author_kind="agent_session",
-                            source="@worker Compute the synthetic checksum and reply with it.", coordination_id=coordination)
-            request = envelope("worker", lambda e: e["control"]["message_id"] == sent["message_id"], "the worker's request envelope")
-            replied = bound(request, "reply", source="@lead Checksum 42.", work_outcome="completed")
-            receipt = envelope("lead", lambda e: e["control"]["message_id"] == replied["message_id"], "the lead's reply envelope")
-            bound(receipt, "complete.no-reply")
-            wake = envelope("lead", lambda e: e["control"].get("coordination_nudge") is True, "the coordination nudge envelope")
-            wake_attempt = wake["control"]["attempt_id"]
-            t0 = rows("SELECT created_at_ms FROM delivery_attempts WHERE attempt_id = ?", (wake_attempt,))[0][0]
+            if args.feature == "stuck-wake":
+                begun = as_agent("handoff", "begin", pane=agents["lead"]["pane"], request_id="stuck-wake-begin",
+                                 deliverable="Report the synthetic checksum once the worker replies.")
+                coordination = begun["coordination_id"]
+                sent = as_agent("send", pane=agents["lead"]["pane"], request_id="stuck-wake-send", author_kind="agent_session",
+                                source="@worker Compute the synthetic checksum and reply with it.", coordination_id=coordination)
+                request = envelope("worker", lambda e: e["control"]["message_id"] == sent["message_id"], "the worker's request envelope")
+                replied = bound(request, "reply", source="@lead Checksum 42.", work_outcome="completed")
+                receipt = envelope("lead", lambda e: e["control"]["message_id"] == replied["message_id"], "the lead's reply envelope")
+                bound(receipt, "complete.no-reply")
+                wake = envelope("lead", lambda e: e["control"].get("coordination_nudge") is True, "the coordination nudge envelope")
+                wake_attempt = wake["control"]["attempt_id"]
+                t0 = rows("SELECT created_at_ms FROM delivery_attempts WHERE attempt_id = ?", (wake_attempt,))[0][0]
 
-            observe("lead", "working")
-            resolved = bound(wake, "handoff.resolve", outcome="completed", report="Synthetic checksum 42 reported.")
-            assert resolved["report_saved"] is True and resolved["report_message_id"], resolved
-            report_message = resolved["report_message_id"]
-            idle = observe("lead", "idle")
-            idle_at_ms = idle["observed_ms"]
-            if idle_at_ms - t0 >= 25_000:
-                summary["outcome"] = "inconclusive"
-                raise RuntimeError(f"inconclusive: the nudge turn ended {idle_at_ms - t0} ms after the wake lease, "
-                                   "outside the 25 s budget that keeps it inside the 30 s acknowledgement grace")
+                observe("lead", "working")
+                resolved = bound(wake, "handoff.resolve", outcome="completed", report="Synthetic checksum 42 reported.")
+                assert resolved["report_saved"] is True and resolved["report_message_id"], resolved
+                report_message = resolved["report_message_id"]
+                idle = observe("lead", "idle")
+                idle_at_ms = idle["observed_ms"]
+                if idle_at_ms - t0 >= 25_000:
+                    summary["outcome"] = "inconclusive"
+                    raise RuntimeError(f"inconclusive: the nudge turn ended {idle_at_ms - t0} ms after the wake lease, "
+                                       "outside the 25 s budget that keeps it inside the 30 s acknowledgement grace")
 
-            def ledger():
-                disposition = rows("SELECT disposition_kind FROM delivery_dispositions WHERE attempt_id = ?", (wake_attempt,))
-                report_state = rows("SELECT state FROM mailbox_deliveries WHERE message_id = ? ORDER BY mailbox_order",
-                                    (report_message,))
-                arrived = next((e for e in read_envelopes(agents["lead"]["envelopes"])
-                                if e["control"]["message_id"] == report_message), None)
-                return {"at_ms": time.time_ns() // 1_000_000, "wake_state": attempt_state(wake_attempt),
-                        "disposition": disposition[0][0] if disposition else None,
-                        "report_state": ",".join(row[0] for row in report_state) or None, "report_envelope": arrived}
+                def ledger():
+                    report_state = rows("SELECT state FROM mailbox_deliveries WHERE message_id = ? ORDER BY mailbox_order",
+                                        (report_message,))
+                    arrived = next((e for e in read_envelopes(agents["lead"]["envelopes"])
+                                    if e["control"]["message_id"] == report_message), None)
+                    return {"at_ms": now_ms(), "wake_state": attempt_state(wake_attempt),
+                            "disposition": disposition(wake_attempt),
+                            "report_state": ",".join(row[0] for row in report_state) or None, "report_envelope": arrived}
 
-            def save_wake_evidence(polls, events_in_window, **extra):
-                save("stuck-wake.json", {
-                    "panes": panes, "sessions": {role: agent["session"] for role, agent in agents.items()},
-                    "simulator_pids": {role: agent["pids"].read_text().split() for role, agent in agents.items()},
-                    "registrations": registrations, "coordination_id": coordination, "wake_attempt_id": wake_attempt,
-                    "t0_ms": t0, "idle_at_ms": idle_at_ms, "idle_hook_started_ms": idle["hook_started_ms"],
-                    "wake_row": rows("SELECT attempt_id, state, active FROM delivery_attempt_state WHERE attempt_id = ?",
-                                     (wake_attempt,)),
-                    "dispositions": rows("SELECT disposition_id, disposition_kind, occurred_at_ms FROM delivery_dispositions "
-                                         "WHERE attempt_id = ?", (wake_attempt,)),
-                    "report_delivery_state": ledger()["report_state"], "events_in_window": events_in_window,
-                    "polls": polls, **extra})
-                for role, agent in agents.items():
-                    save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
+                def save_wake_evidence(polls, events_in_window, **extra):
+                    save("stuck-wake.json", {
+                        "panes": panes, "sessions": {role: agent["session"] for role, agent in agents.items()},
+                        "simulator_pids": {role: agent["pids"].read_text().split() for role, agent in agents.items()},
+                        "registrations": registrations, "coordination_id": coordination, "wake_attempt_id": wake_attempt,
+                        "t0_ms": t0, "idle_at_ms": idle_at_ms, "idle_hook_started_ms": idle["hook_started_ms"],
+                        "wake_row": rows("SELECT attempt_id, state, active FROM delivery_attempt_state WHERE attempt_id = ?",
+                                         (wake_attempt,)),
+                        "dispositions": rows("SELECT disposition_id, disposition_kind, occurred_at_ms FROM delivery_dispositions "
+                                             "WHERE attempt_id = ?", (wake_attempt,)),
+                        "report_delivery_state": ledger()["report_state"], "events_in_window": events_in_window,
+                        "polls": polls, **extra})
+                    for role, agent in agents.items():
+                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
 
-            def await_unprompted_settlement():
-                polls = []
-                deadline = time.monotonic() + 50
-                while True:
-                    seen = ledger()
-                    polls.append({**{key: value for key, value in seen.items() if key != "report_envelope"},
-                                  "report_arrived": seen["report_envelope"] is not None})
-                    if seen["report_envelope"] is not None:
-                        return seen, polls
-                    if time.monotonic() >= deadline:
-                        break
-                    time.sleep(0.5)
-                stalled_at_ms = seen["at_ms"]
-                events_in_window = events_between(idle["hook_started_ms"], stalled_at_ms)
-                doctor_at_stall = cli("doctor", "--json", allowed=(0, 1))["data"]
-                backup_database()
-                summary["outcome"] = "stalled"
-                save_wake_evidence(polls, events_in_window, stalled=True, stalled_at_ms=stalled_at_ms, arrived_at_ms=None,
-                                   settled_at_ms=next((poll["at_ms"] for poll in polls if poll["wake_state"] == "settled"), None),
-                                   doctor_at_stall=doctor_at_stall)
-                raise RuntimeError(f"stuck wake: attempt {wake_attempt} still {seen['wake_state']} with disposition "
-                                   f"{seen['disposition'] or 'none'} {(stalled_at_ms - idle_at_ms) // 1000} s after idle; "
-                                   f"report delivery {seen['report_state']}; no report envelope reached the lead")
+                def await_unprompted_settlement():
+                    polls = []
+                    deadline = time.monotonic() + 50
+                    while True:
+                        seen = ledger()
+                        polls.append({**{key: value for key, value in seen.items() if key != "report_envelope"},
+                                      "report_arrived": seen["report_envelope"] is not None})
+                        if seen["report_envelope"] is not None:
+                            return seen, polls
+                        if time.monotonic() >= deadline:
+                            break
+                        time.sleep(0.5)
+                    stalled_at_ms = seen["at_ms"]
+                    events_in_window = events_between(idle["hook_started_ms"], stalled_at_ms)
+                    doctor_at_stall = cli("doctor", "--json", allowed=(0, 1))["data"]
+                    backup_database()
+                    summary["outcome"] = "stalled"
+                    save_wake_evidence(polls, events_in_window, stalled=True, stalled_at_ms=stalled_at_ms, arrived_at_ms=None,
+                                       settled_at_ms=next((poll["at_ms"] for poll in polls if poll["wake_state"] == "settled"), None),
+                                       doctor_at_stall=doctor_at_stall)
+                    raise RuntimeError(f"stuck wake: attempt {wake_attempt} still {seen['wake_state']} with disposition "
+                                       f"{seen['disposition'] or 'none'} {(stalled_at_ms - idle_at_ms) // 1000} s after idle; "
+                                       f"report delivery {seen['report_state']}; no report envelope reached the lead")
 
-            seen, polls = await_unprompted_settlement()
-            arrived_at_ms = seen["at_ms"]
-            assert seen["wake_state"] == "settled" and seen["disposition"] == "no_reply", seen
-            settled_at_ms = next(poll["at_ms"] for poll in polls if poll["wake_state"] == "settled")
-            final_report = seen["report_envelope"]
-            assert final_report["control"]["reply_mode"] == "report_to_human", final_report["control"]
-            events_in_window = events_between(idle["hook_started_ms"], arrived_at_ms)
-            assert events_in_window == [], events_in_window
-            doctor_after_settle = cli("doctor", "--json", allowed=(0, 1))["data"]
-            assert not any(issue["code"] == "ND-DELIVERY-003" for issue in doctor_after_settle["issues"]), doctor_after_settle
-            bound(final_report, "complete.no-reply")
-            doctor_after_report = cli("doctor", "--json", allowed=(0, 1))["data"]
-            issues = doctor_after_report["issues"]
-            assert not any(issue["code"] == "ND-DELIVERY-003" for issue in issues), issues
-            assert not any(issue["code"] == "ND-COORDINATION-001" and issue.get("diagnostic", {}).get("source_id") == coordination
-                           for issue in issues), issues
-            summary["outcome"] = "passed"
-            save_wake_evidence(polls, events_in_window, stalled=False, settled_at_ms=settled_at_ms, arrived_at_ms=arrived_at_ms,
-                               settled_after_ms=settled_at_ms - t0, arrived_after_ms=arrived_at_ms - t0,
-                               doctor_after_settle=doctor_after_settle, doctor_after_report=doctor_after_report)
+                seen, polls = await_unprompted_settlement()
+                arrived_at_ms = seen["at_ms"]
+                assert seen["wake_state"] == "settled" and seen["disposition"] == "no_reply", seen
+                settled_at_ms = next(poll["at_ms"] for poll in polls if poll["wake_state"] == "settled")
+                final_report = seen["report_envelope"]
+                assert final_report["control"]["reply_mode"] == "report_to_human", final_report["control"]
+                events_in_window = events_between(idle["hook_started_ms"], arrived_at_ms)
+                assert events_in_window == [], events_in_window
+                doctor_after_settle = cli("doctor", "--json", allowed=(0, 1))["data"]
+                assert not any(issue["code"] == "ND-DELIVERY-003" for issue in doctor_after_settle["issues"]), doctor_after_settle
+                bound(final_report, "complete.no-reply")
+                doctor_after_report = cli("doctor", "--json", allowed=(0, 1))["data"]
+                issues = doctor_after_report["issues"]
+                assert not any(issue["code"] == "ND-DELIVERY-003" for issue in issues), issues
+                assert not any(issue["code"] == "ND-COORDINATION-001" and issue.get("diagnostic", {}).get("source_id") == coordination
+                               for issue in issues), issues
+                summary["outcome"] = "passed"
+                save_wake_evidence(polls, events_in_window, stalled=False, settled_at_ms=settled_at_ms, arrived_at_ms=arrived_at_ms,
+                                   settled_after_ms=settled_at_ms - t0, arrived_after_ms=arrived_at_ms - t0,
+                                   doctor_after_settle=doctor_after_settle, doctor_after_report=doctor_after_report)
+            else:
+                lead_pane = agents["lead"]["pane"]
+                trace = {"panes": panes, "sessions": {role: agent["session"] for role, agent in agents.items()},
+                         "simulator_pids": {role: agent["pids"].read_text().split() for role, agent in agents.items()},
+                         "registrations": registrations}
+
+                def require(condition, requirement, observed):
+                    if not condition:
+                        summary["outcome"] = requirement
+                        raise RuntimeError(f"idle worker: {requirement}; observed {observed}")
+
+                def doctor_read(case, name):
+                    report = case[name] = cli("doctor", "--json", allowed=(0, 1))["data"]
+                    flagged = [issue for issue in report["issues"] if issue["code"] == "ND-DELIVERY-003"]
+                    require(not flagged, f"{name} shows no ND-DELIVERY-003",
+                            f"{len(flagged)} ND-DELIVERY-003 issue(s) with source_id "
+                            f"{[issue.get('diagnostic', {}).get('source_id') for issue in flagged]}: {json.dumps(flagged)}")
+                    return report
+
+                def names_coordination(report, coordination):
+                    return any(issue["code"] == "ND-COORDINATION-001"
+                               and issue.get("diagnostic", {}).get("source_id") == coordination for issue in report["issues"])
+
+                def nudge_for(coordination, excluding=None):
+                    return envelope("lead", lambda e: e["control"].get("coordination_nudge") is True
+                                    and e["control"].get("coordination_id") == coordination
+                                    and e["control"]["message_id"] != excluding, f"a coordination nudge for {coordination}")
+
+                def idle_assignment(label, task, doctor_name):
+                    case = trace[label] = {}
+                    begun = as_agent("handoff", "begin", pane=lead_pane, request_id=f"idle-worker-{label}-begin",
+                                     deliverable=f"Report the {label} synthetic checksum once the worker replies.")
+                    coordination = case["coordination_id"] = begun["coordination_id"]
+                    sent = as_agent("send", pane=lead_pane, request_id=f"idle-worker-{label}-send", author_kind="agent_session",
+                                    source=f"@worker {task}", coordination_id=coordination)
+                    request = envelope("worker", lambda e: e["control"]["message_id"] == sent["message_id"],
+                                       f"the worker's {label} request envelope")
+                    attempt = request["control"]["attempt_id"]
+                    wait(lambda: attempt_state(attempt) in ("submitted", "acknowledged", "settled"),
+                         f"attempt {attempt} to leave dispatching")
+                    t0 = rows("SELECT created_at_ms FROM delivery_attempts WHERE attempt_id = ?", (attempt,))[0][0]
+                    case.update(assignment=request["control"]["assignments"][0], worker_attempt_id=attempt, request=request,
+                                t0_ms=t0, working_at_ms=observe("worker", "working")["observed_ms"])
+                    time.sleep(max(0, (t0 + 5_000 - now_ms()) / 1000))
+                    idle = observe("worker", "idle")
+                    case.update(idle_at_ms=idle["observed_ms"], idle_hook_started_ms=idle["hook_started_ms"])
+                    if idle["observed_ms"] - t0 >= 25_000:
+                        summary["outcome"] = "inconclusive"
+                        raise RuntimeError(f"inconclusive: the {label} worker went idle {idle['observed_ms'] - t0} ms after its "
+                                           "attempt was created, outside the 25 s budget that keeps it inside the 30 s grace")
+                    polls = []
+                    deadline = time.monotonic() + 50
+                    while True:
+                        seen = {"at_ms": now_ms(), "state": attempt_state(attempt), "disposition": disposition(attempt)}
+                        polls.append(seen)
+                        if seen["state"] == "settled" or time.monotonic() >= deadline:
+                            break
+                        time.sleep(0.5)
+                    settled = seen["state"] == "settled"
+                    case.update(polls=polls, settled_at_ms=seen["at_ms"] if settled else None,
+                                settled_after_ms=seen["at_ms"] - t0 if settled else None,
+                                events_in_window=events_between(idle["hook_started_ms"], seen["at_ms"]))
+                    require(settled, f"the {label} worker attempt settles by observation after the grace", seen)
+                    require(seen["disposition"] is None, f"the {label} worker attempt settles without a disposition", seen)
+                    doctor_read(case, doctor_name)
+                    nudge = nudge_for(coordination)
+                    case.update(nudge=nudge, nudge_completed=bound(nudge, "complete.no-reply"))
+                    return case
+
+                try:
+                    positive = idle_assignment("positive", "Compute the synthetic checksum and reply with it.", "doctor_after_settle")
+                    attempt = positive["worker_attempt_id"]
+                    time.sleep(max(0, (positive["settled_at_ms"] + 10_000 - now_ms()) / 1000))
+                    try:
+                        replied = bound(positive["request"], "reply", source="@lead Checksum 42.", work_outcome="completed")
+                    except RuntimeError as refusal:
+                        require(False, "the worker's late reply exits 0", refusal)
+                    replied_at_ms = now_ms()
+                    positive.update(replied_at_ms=replied_at_ms, replied_after_settle_ms=replied_at_ms - positive["settled_at_ms"],
+                                    replied=replied, dispositions=rows("SELECT disposition_kind, occurred_at_ms FROM delivery_dispositions "
+                                                                       "WHERE attempt_id = ?", (attempt,)))
+                    require(disposition(attempt) == "reply", "the worker attempt records disposition reply after the late reply",
+                            positive["dispositions"])
+                    doctor_read(positive, "doctor_after_reply")
+                    result_envelope = envelope("lead", lambda e: e["control"]["message_id"] == replied["message_id"],
+                                               "the lead's result envelope")
+                    positive.update(result_envelope=result_envelope, result_completed=bound(result_envelope, "complete.no-reply"))
+                    second_nudge = nudge_for(positive["coordination_id"], excluding=positive["nudge"]["control"]["message_id"])
+                    resolved = bound(second_nudge, "handoff.resolve", outcome="completed",
+                                     report="Synthetic checksum 42 reported after the worker's late reply.")
+                    positive.update(second_nudge=second_nudge, resolved=resolved,
+                                    second_nudge_completed=bound(second_nudge, "complete.no-reply"))
+                    report_envelope = envelope("lead", lambda e: e["control"]["message_id"] == resolved["report_message_id"],
+                                               "the completed report envelope")
+                    positive.update(report_envelope=report_envelope, report_completed=bound(report_envelope, "complete.no-reply"))
+                    doctor_read(positive, "doctor_after_resolve")
+                    require(not names_coordination(positive["doctor_after_resolve"], positive["coordination_id"]),
+                            "doctor_after_resolve shows no ND-COORDINATION-001 for the completed coordination",
+                            positive["doctor_after_resolve"]["issues"])
+
+                    negative = idle_assignment("negative", "Compute the second synthetic checksum and reply with it.",
+                                               "doctor_after_second_settle")
+                    attempt = negative["worker_attempt_id"]
+                    cancelled = as_agent("handoff", "resolve", pane=lead_pane, request_id="idle-worker-negative-cancel",
+                                         coordination_id=negative["coordination_id"], outcome="cancelled",
+                                         reason="The worker never replied to its assignment.",
+                                         report="Cancelled: the second synthetic checksum was never reported.")
+                    negative.update(cancelled_at_ms=now_ms(), cancelled=cancelled, doctor_polls=[])
+                    deadline = time.monotonic() + 20
+                    while True:
+                        doctor = cli("doctor", "--json", allowed=(0, 1))["data"]
+                        flagged = [issue for issue in doctor["issues"] if issue["code"] == "ND-DELIVERY-003"
+                                   and issue.get("diagnostic", {}).get("source_id") == attempt]
+                        negative["doctor_polls"].append({"at_ms": now_ms(), "issues": [
+                            [issue["code"], issue.get("diagnostic", {}).get("source_id")] for issue in doctor["issues"]]})
+                        if flagged or time.monotonic() >= deadline:
+                            break
+                        time.sleep(1)
+                    negative.update(doctor_after_cancel=doctor,
+                                    coordination_flagged=names_coordination(doctor, negative["coordination_id"]))
+                    require(flagged, "doctor_after_cancel shows ND-DELIVERY-003 for the second worker attempt once its coordination "
+                            "is cancelled unanswered", negative["doctor_polls"][-1]["issues"])
+                    report_envelope = envelope("lead", lambda e: e["control"]["message_id"] == cancelled["report_message_id"],
+                                               "the cancelled report envelope")
+                    negative.update(report_envelope=report_envelope, report_completed=bound(report_envelope, "complete.no-reply"))
+                    summary["outcome"] = "passed"
+                finally:
+                    if summary.get("outcome") != "passed":
+                        backup_database()
+                    save("idle-worker.json", trace)
+                    for role, agent in agents.items():
+                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
         backup_database()
         success = True
     finally:
