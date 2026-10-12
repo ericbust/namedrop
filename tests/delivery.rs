@@ -1,11 +1,12 @@
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryId, DeliveryState, HealthRepairKind,
-    HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, LifecycleRuntime, MessageDraft,
-    MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore,
-    TRUSTED_DELIVERY_INSTRUCTION, ThreadId, complete_capability_profile, diagnose_collaboration,
-    drain_mailboxes, execute_control_operation, execute_integration_operation,
-    execute_lifecycle_operation, issue_registration_challenge,
+    ActorKind, AgentRuntime, AgentSessionId, AttentionSourceKind, Clock, DeliveryAttemptId,
+    DeliveryId, DeliveryState, GraceDeadline, HealthRepairKind, HerdrCommandExecutor,
+    HerdrCommandOutput, IdGenerator, LeaseDraft, LifecycleRuntime, MessageDraft, MessageId,
+    MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId,
+    PaneRoleId, PromptFailureKind, StateNamespace, StateStore, TRUSTED_DELIVERY_INSTRUCTION,
+    ThreadId, complete_capability_profile, diagnose_collaboration, drain_mailboxes,
+    execute_control_operation, execute_integration_operation, execute_lifecycle_operation,
+    issue_registration_challenge,
 };
 use std::{
     fs,
@@ -1371,6 +1372,228 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
         DeliveryState::Held
     );
     assert_eq!(herdr.prompts.load(Ordering::Relaxed), 2);
+}
+
+const OBSERVED_ATTEMPT_CREATED_AT_MS: u64 = 100;
+
+struct ObservedAttemptFixture {
+    directory: TestDirectory,
+    namespace: StateNamespace,
+    herdr: DynamicHerdr,
+    clock: TestClock,
+    ids: SequenceIds,
+    attempt_id: DeliveryAttemptId,
+}
+
+impl ObservedAttemptFixture {
+    fn new(state: DeliveryState) -> Self {
+        let directory = TestDirectory::new();
+        let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+        let attribution = MutationAttribution::new(ActorKind::Plugin, "test", 10);
+        let leased =
+            MutationAttribution::new(ActorKind::Plugin, "test", OBSERVED_ATTEMPT_CREATED_AT_MS);
+        let author = address("address-author", "author");
+        let recipient = address("address-recipient", "recipient");
+        let thread_id = ThreadId::new("thread-1");
+        let attempt_id = DeliveryAttemptId::new("attempt-observed");
+        let session = AgentSessionId::new("session-1");
+        StateStore::open(directory.path())
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.activate_worktree(&namespace, &attribution)?;
+                transaction.create_pane_address(&namespace, &author, &attribution)?;
+                transaction.create_pane_address(&namespace, &recipient, &attribution)?;
+                transaction.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new("binding-recipient"),
+                    &recipient.id,
+                    "pane-recipient",
+                    &attribution,
+                )?;
+                transaction.observe_agent_session(
+                    &namespace,
+                    "observation-recipient",
+                    &recipient.id,
+                    &session,
+                    "idle",
+                    &attribution,
+                )?;
+                transaction.create_thread(&namespace, &thread_id, "Test thread", &attribution)?;
+                transaction.complete_reconciliation(&namespace)?;
+                transaction.append_message(
+                    &namespace,
+                    &MessageDraft {
+                        thread_id: thread_id.clone(),
+                        message_id: MessageId::new("message-1"),
+                        in_reply_to: None,
+                        author_address_id: author.id.clone(),
+                        author_kind: ActorKind::Human,
+                        author_alias_snapshot: "author".to_owned(),
+                        author_agent_session_snapshot: None,
+                        request_id: "request-1".to_owned(),
+                        authored_source: "@recipient please take a look".to_owned(),
+                        body: "please take a look".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: recipient.id.clone(),
+                            alias_snapshot: "recipient".to_owned(),
+                            agent_session_snapshot: Some(session.clone()),
+                            delivery_id: DeliveryId::new("delivery-1"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &attribution,
+                )?;
+                assert!(
+                    transaction
+                        .lease_mailbox_head(
+                            &namespace,
+                            &recipient.id,
+                            &LeaseDraft {
+                                attempt_id: attempt_id.clone(),
+                                binding_id: PaneBindingId::new("binding-recipient"),
+                                agent_session_id: session.clone(),
+                                retry_of_attempt_id: None,
+                                owner: "test-dispatcher".to_owned(),
+                                acquired_at_ms: OBSERVED_ATTEMPT_CREATED_AT_MS,
+                                expires_at_ms: OBSERVED_ATTEMPT_CREATED_AT_MS + 30_000,
+                            },
+                            &leased,
+                        )?
+                        .is_some()
+                );
+                transaction.transition_delivery_attempt(
+                    &namespace,
+                    &attempt_id,
+                    DeliveryState::Submitted,
+                    &leased,
+                )?;
+                if state == DeliveryState::Acknowledged {
+                    transaction.acknowledge_delivery_attempt(
+                        &namespace,
+                        &attempt_id,
+                        "router-receipt-attempt-observed",
+                        &session,
+                        &leased,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let herdr = DynamicHerdr {
+            session: Mutex::new("session-1".to_owned()),
+            status: Mutex::new("idle".to_owned()),
+            prompts: AtomicU64::new(0),
+            definitive_failures: AtomicU64::new(0),
+            pane_lists_before_working: AtomicU64::new(0),
+        };
+        Self {
+            directory,
+            namespace,
+            herdr,
+            clock: TestClock::default(),
+            ids: SequenceIds(AtomicU64::new(1)),
+            attempt_id,
+        }
+    }
+
+    fn runtime(&self) -> LifecycleRuntime<'_, DynamicHerdr, TestClock, SequenceIds> {
+        LifecycleRuntime {
+            state_directory: self.directory.path(),
+            home_directory: Some(self.directory.home()),
+            agent_config: namedrop::AgentConfigDirectories::default(),
+            cwd: Path::new("/repo"),
+            workspace_id: None,
+            current_pane_id: Some("pane-recipient"),
+            session_socket_id: "socket-a",
+            herdr: &self.herdr,
+            clock: &self.clock,
+            ids: &self.ids,
+        }
+    }
+
+    fn drain_at(&self, elapsed_ms: u64) -> namedrop::DrainReport {
+        self.clock.now_ms.store(
+            OBSERVED_ATTEMPT_CREATED_AT_MS + elapsed_ms,
+            Ordering::Relaxed,
+        );
+        drain_mailboxes(&self.runtime()).unwrap()
+    }
+
+    fn grace_deadline(&self) -> GraceDeadline {
+        GraceDeadline {
+            attempt_id: self.attempt_id.clone(),
+            due_at_ms: OBSERVED_ATTEMPT_CREATED_AT_MS + 30_000,
+        }
+    }
+
+    fn attempt_state(&self) -> DeliveryState {
+        StateStore::open(self.directory.path())
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.delivery_attempt_state(&self.namespace, &self.attempt_id)
+            })
+            .unwrap()
+    }
+
+    fn disposition(&self) -> Option<String> {
+        rusqlite::Connection::open(self.directory.path().join("namedrop.sqlite3"))
+            .unwrap()
+            .query_row(
+                "SELECT disposition_kind FROM delivery_dispositions WHERE attempt_id = ?1",
+                [self.attempt_id.as_str()],
+                |row| row.get(0),
+            )
+            .ok()
+    }
+
+    fn unresolved_attention(&self) -> Vec<(AttentionSourceKind, String)> {
+        StateStore::open(self.directory.path())
+            .unwrap()
+            .transaction(|transaction| transaction.unresolved_attention_items(&self.namespace))
+            .unwrap()
+            .into_iter()
+            .map(|item| (item.source_kind, item.source_id))
+            .collect()
+    }
+}
+
+#[test]
+fn an_acknowledged_mention_waits_out_its_grace_and_then_settles_flagged() {
+    let fixture = ObservedAttemptFixture::new(DeliveryState::Acknowledged);
+
+    let inside_grace = fixture.drain_at(10_000);
+    assert_eq!(inside_grace.pending_grace, vec![fixture.grace_deadline()]);
+    assert!(inside_grace.settled.is_empty());
+    assert_eq!(fixture.attempt_state(), DeliveryState::Acknowledged);
+
+    let past_grace = fixture.drain_at(31_000);
+    assert_eq!(past_grace.settled, vec![fixture.attempt_id.clone()]);
+    assert!(past_grace.pending_grace.is_empty());
+    assert_eq!(fixture.attempt_state(), DeliveryState::Settled);
+    assert_eq!(fixture.disposition(), None);
+    assert_eq!(
+        fixture.unresolved_attention(),
+        vec![(
+            AttentionSourceKind::AgentDisposition,
+            fixture.attempt_id.as_str().to_owned()
+        )]
+    );
+}
+
+#[test]
+fn a_submitted_attempt_on_an_idle_pane_waits_out_its_grace_and_then_holds() {
+    let fixture = ObservedAttemptFixture::new(DeliveryState::Submitted);
+
+    let inside_grace = fixture.drain_at(10_000);
+    assert_eq!(inside_grace.pending_grace, vec![fixture.grace_deadline()]);
+    assert!(inside_grace.held.is_empty());
+    assert_eq!(fixture.attempt_state(), DeliveryState::Submitted);
+
+    let past_grace = fixture.drain_at(30_000);
+    assert_eq!(past_grace.held, vec![fixture.attempt_id.clone()]);
+    assert!(past_grace.pending_grace.is_empty());
+    assert_eq!(fixture.attempt_state(), DeliveryState::Held);
 }
 
 /// A settled attempt without a disposition stays recoverable from the recipient's

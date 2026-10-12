@@ -30,5 +30,7 @@ State which paths were exercised and which remain unverified. A successful model
 - [Shared checkout](shared-checkout.md) covers a second workspace opened on a checkout that another workspace already has open, with Doctor, activation, and separate names in each workspace.
 - [Tour](tour.md) covers page navigation, close, reset, automatic opening, and popup entry points.
 - [Handoffs, terminal work, and context](handoffs.md) covers direct/delegated mentions, preview, replies, tracked reports, shell results, and freshness.
+- [Stuck wake](stuck-wake.md) covers a coordination nudge whose turn ends idle inside the acknowledgement grace without a completion, its settle as no-reply, the report dispatch, and Doctor, through real Herdr status hooks against simulated Codex sessions.
+- [Idle worker](idle-worker.md) covers a tracked request whose worker goes idle inside the acknowledgement grace without replying, its settle by observation, Doctor while the assignment still awaits the worker, a late reply, and the cancel that must raise `ND-DELIVERY-003`.
 
-Not yet mapped: the `activate`, `deactivate` and `update` plugin actions, the startup reconcile, and pane lifecycle events. The helper uses activation as a precondition. The shared-checkout recipe also checks its space and worktree IDs.
+Not yet mapped: the `deactivate` and `update` plugin actions, the startup reconcile, and pane lifecycle events. The helper uses activation as a precondition. The stuck-wake and idle-worker recipes are the drives that link the candidate as a plugin. They exercise the `activate` plugin action through `setup.sh` and the `pane.agent_status_changed` hook. The shared-checkout recipe also checks its space and worktree IDs.

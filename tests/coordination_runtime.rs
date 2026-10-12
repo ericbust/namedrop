@@ -381,6 +381,61 @@ impl Fixture {
     fn recipient_session(&self, message: &Value, pane: &str) -> String {
         self.db().query_row("SELECT session_snapshot FROM message_recipients WHERE message_id=?1 AND address_id=?2",rusqlite::params![message.as_str().unwrap(),pane],|r|r.get(0)).unwrap()
     }
+    fn attempt_state(&self, attempt: &str) -> String {
+        self.db()
+            .query_row(
+                "SELECT state FROM delivery_attempt_state WHERE attempt_id=?1",
+                [attempt],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+    fn disposition(&self, attempt: &str) -> Option<String> {
+        self.db()
+            .query_row(
+                "SELECT disposition_kind FROM delivery_dispositions WHERE attempt_id=?1",
+                [attempt],
+                |r| r.get(0),
+            )
+            .ok()
+    }
+    fn unresolved_attention(&self) -> Vec<(String, String)> {
+        let db = self.db();
+        let mut statement = db.prepare("SELECT source_kind,source_id FROM attention_items WHERE resolved_at_ms IS NULL ORDER BY rowid").unwrap();
+        let rows = statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        rows.collect::<Result<Vec<_>, _>>().unwrap()
+    }
+    fn disposition_summary(&self, attempt: &str) -> Option<String> {
+        self.db().query_row("SELECT summary FROM attention_items WHERE source_kind='agent_disposition' AND source_id=?1",[attempt],|r|r.get(0)).ok()
+    }
+    fn opened_facts(&self, item: &str) -> i64 {
+        self.db().query_row("SELECT count(*) FROM transition_facts WHERE entity_kind='attention_item' AND entity_id=?1 AND transition_kind='opened'",[item],|r|r.get(0)).unwrap()
+    }
+    fn retire(&self, name: &str) {
+        StateStore::open(&self.state)
+            .unwrap()
+            .transaction(|tx| {
+                tx.retire_pane_address(
+                    &self.ns(),
+                    &PaneAddressId::new(name),
+                    &MutationAttribution::new(
+                        ActorKind::Human,
+                        "synthetic-user",
+                        self.now_unix_ms(),
+                    ),
+                )
+            })
+            .unwrap();
+    }
+    fn prompted(&self, message: &Value, pane: &str) -> bool {
+        self.prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(p, prompt)| p == pane && prompt["control"]["message_id"] == *message)
+    }
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -2028,7 +2083,7 @@ fn coordination_retired_participant_recovery() {
 }
 
 #[test]
-fn coordination_historical_wake_recovery() {
+fn a_stale_wake_is_rendered_stale_in_flight_and_settles_as_no_reply_after_the_grace() {
     let f = Fixture::new();
     let id = f.begin();
     let first = f.send(&id, "historical-first", "worker");
@@ -2053,20 +2108,73 @@ fn coordination_historical_wake_recovery() {
     send["source"] = json!("@worker Synthetic second round");
     let second = execute_message_operation("send", send, &f.runtime("lead")).unwrap();
     f.status("worker", "working");
+
+    f.now.store(10_100, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(
+        f.attempt_state(&old_attempt),
+        "acknowledged",
+        "inside the grace the stale wake is still in flight"
+    );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
+    let stale = inbox["envelopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["control"]["attempt_id"] == old_attempt)
+        .expect("stale wake in flight");
+    assert_eq!(stale["control"]["coordination_id"], id);
+    assert_eq!(stale["control"]["coordination_nudge_stale"], true);
+    let stale_operations = stale["control"]["tool"]["operations"].as_array().unwrap();
+    assert!(
+        stale_operations
+            .iter()
+            .any(|op| op["token"] == "handoff.results")
+    );
+    assert!(stale_operations.iter().all(|op| !matches!(
+        op["token"].as_str(),
+        Some("send" | "handoff.resolve" | "address.list" | "handoff.preview")
+    )));
+    assert!(
+        stale["control"]["permitted_operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|op| !matches!(
+                op.as_str(),
+                Some("send" | "handoff.resolve" | "address.list" | "handoff.preview")
+            ))
+    );
+    assert!(
+        stale["trusted_instruction"]
+            .as_str()
+            .unwrap()
+            .contains("coordination_nudge_stale true")
+    );
+
     f.now.store(60_100, Ordering::Relaxed);
     f.drain();
-    let old_state: String = f
-        .db()
-        .query_row(
-            "SELECT state FROM delivery_attempt_state WHERE attempt_id=?1",
-            [&old_attempt],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(
-        old_state, "settled",
-        "old attempt must have transport-settled without a disposition"
+    assert_eq!(f.attempt_state(&old_attempt), "settled");
+    assert_eq!(f.disposition(&old_attempt).as_deref(), Some("no_reply"));
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "a settled stale wake must not raise ND-DELIVERY-003: {:?}",
+        f.unresolved_attention()
     );
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
+    assert!(
+        inbox["envelopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["control"]["attempt_id"] != old_attempt),
+        "a settled stale wake leaves the inbox"
+    );
+
     let second_reply = f.reply(&second, "worker", "historical-done", "completed", None);
     f.status("worker", "idle");
     let mut completed_second_reply = false;
@@ -2075,9 +2183,7 @@ fn coordination_historical_wake_recovery() {
         let inbox =
             execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
         for envelope in inbox["envelopes"].as_array().unwrap() {
-            if envelope["control"]["attempt_id"] == old_attempt
-                || envelope["control"]["coordination_nudge"] == true
-            {
+            if envelope["control"]["coordination_nudge"] == true {
                 continue;
             }
             completed_second_reply |=
@@ -2097,39 +2203,11 @@ fn coordination_historical_wake_recovery() {
     let inbox =
         execute_integration_operation("delivery.inbox", json!({}), &f.runtime("lead")).unwrap();
     let envelopes = inbox["envelopes"].as_array().unwrap();
-    let historical = envelopes
-        .iter()
-        .find(|e| e["control"]["attempt_id"] == old_attempt)
-        .expect("old obligation");
     let latest = envelopes
         .iter()
         .find(|e| e["control"]["attempt_id"] == current["control"]["attempt_id"])
         .expect("current obligation");
-    assert_eq!(historical["control"]["coordination_id"], id);
-    assert_eq!(historical["control"]["coordination_nudge_stale"], true);
     assert_eq!(latest["control"]["coordination_nudge_stale"], false);
-    let stale_operations = historical["control"]["tool"]["operations"]
-        .as_array()
-        .unwrap();
-    assert!(
-        stale_operations
-            .iter()
-            .any(|op| op["token"] == "handoff.results")
-    );
-    assert!(stale_operations.iter().all(|op| !matches!(
-        op["token"].as_str(),
-        Some("send" | "handoff.resolve" | "address.list" | "handoff.preview")
-    )));
-    assert!(
-        historical["control"]["permitted_operations"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|op| !matches!(
-                op.as_str(),
-                Some("send" | "handoff.resolve" | "address.list" | "handoff.preview")
-            ))
-    );
     assert!(
         latest["control"]["tool"]["operations"]
             .as_array()
@@ -2138,11 +2216,11 @@ fn coordination_historical_wake_recovery() {
             .any(|op| op["token"] == "handoff.resolve")
     );
     assert!(
-        historical["trusted_instruction"]
-            .as_str()
-            .unwrap()
-            .contains("coordination_nudge_stale true")
+        envelopes
+            .iter()
+            .all(|e| e["control"]["attempt_id"] != old_attempt)
     );
+
     let before = f.handoff("handoff.results", json!({"coordination_id":id}));
     f.sessions
         .lock()
@@ -3072,4 +3150,484 @@ fn a_message_addressed_only_to_its_author_is_refused() {
     )
     .unwrap_err();
     assert!(refused.contains("only to its author"), "{refused}");
+}
+
+/// Namestack verify run v10111443b186, capture `restart-adopt-stall`: the
+/// restarted sub-lead resolved its coordination inside the post-adoption
+/// nudge's turn and ended that turn without the nudge's bound complete. The
+/// wake attempt then sat acknowledged with no disposition for five idle
+/// minutes, the report_to_human delivery stayed queued behind it, and once a
+/// later prompt got things moving the wake settled with no disposition and
+/// Doctor kept ND-DELIVERY-003 for the rest of the run.
+#[test]
+fn a_nudge_the_lead_acted_on_but_never_completed_settles_as_no_reply_when_its_turn_ends() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    let nudge = f.nudge_prompts().pop().expect("the idle lead is nudged");
+    let wake_attempt = nudge["control"]["attempt_id"].as_str().unwrap().to_owned();
+    assert_eq!(f.attempt_state(&wake_attempt), "acknowledged");
+
+    f.status("lead", "working");
+    let resolved = f.handoff(
+        "handoff.resolve",
+        json!({
+            "request_id":"nudge-turn-resolve",
+            "coordination_id":id,
+            "outcome":"completed",
+            "report":"Synthetic final report.",
+            "reconciled_assignments":[
+                {"assignment_id":a["coordination"][0]["assignment_id"],"revision":1}
+            ]
+        }),
+    );
+    let report = resolved["report_message_id"].clone();
+    f.status("lead", "idle");
+
+    // Inside the acknowledgement grace the host's idle reading may still lag
+    // the submission, so the wake stays acknowledged and the report waits.
+    f.now.store(100 + 10_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&wake_attempt), "acknowledged");
+    assert_eq!(f.delivery(&report, "lead").1, "queued");
+    assert!(!f.prompted(&report, "lead"));
+
+    // Past the grace with the session idle the nudge is finished: no reply was
+    // ever permitted, the coordination already records what the lead did, and
+    // nothing is left for a human to decide about the nudge itself.
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&wake_attempt), "settled");
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "a settled nudge must not raise ND-DELIVERY-003: {:?}",
+        f.unresolved_attention()
+    );
+    assert!(
+        f.prompted(&report, "lead"),
+        "the report must reach the lead"
+    );
+    assert_eq!(f.delivery(&report, "lead").1, "acknowledged");
+
+    let attention = f.unresolved_attention();
+    f.drain();
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    assert_eq!(f.unresolved_attention(), attention);
+    f.complete(&wake_attempt);
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+
+    f.complete(&f.attempt(&report, "lead"));
+    assert_eq!(f.delivery(&report, "lead").1, "settled");
+    assert_eq!(f.unresolved_attention(), Vec::<(String, String)>::new());
+}
+
+#[test]
+fn an_ignored_nudge_settles_as_no_reply_and_the_coordination_is_flagged_for_a_decision() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    f.reply(&a, "worker", "first-result", "completed", None);
+    f.status("lead", "idle");
+    f.settle_lead_inputs();
+    let nudge = f.nudge_prompts().pop().expect("the idle lead is nudged");
+    let wake_attempt = nudge["control"]["attempt_id"].as_str().unwrap().to_owned();
+
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&wake_attempt), "settled");
+    assert_eq!(f.disposition(&wake_attempt).as_deref(), Some("no_reply"));
+    let attention = f.unresolved_attention();
+    assert!(
+        attention
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "an ignored nudge must not raise ND-DELIVERY-003: {attention:?}"
+    );
+    assert_eq!(
+        attention
+            .iter()
+            .filter(|(kind, _)| kind == "coordination")
+            .count(),
+        1,
+        "{attention:?}"
+    );
+    assert_eq!(
+        f.attention_summary(),
+        "The one continuation for this revision ended or is held without a new work decision. Review handoff.results and act explicitly; Namedrop will not repeat the prompt."
+    );
+}
+
+#[test]
+fn an_open_assignment_whose_worker_idles_past_the_grace_is_not_flagged_and_its_late_reply_is_accepted()
+ {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    assert_eq!(f.attempt_state(&attempt), "acknowledged");
+
+    f.status("worker", "idle");
+    f.now.store(100 + 10_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "acknowledged");
+
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+    assert_eq!(f.disposition(&attempt), None);
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "an open assignment awaiting its worker must not raise ND-DELIVERY-003: {:?}",
+        f.unresolved_attention()
+    );
+
+    f.status("lead", "idle");
+    f.drain();
+    let nudges = f.nudge_prompts();
+    assert_eq!(nudges.len(), 1, "{nudges:?}");
+    let body = nudges[0]["untrusted_body"].as_str().unwrap();
+    assert!(body.contains(": pending."), "{body}");
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "{:?}",
+        f.unresolved_attention()
+    );
+
+    f.now.store(100 + 3_600_000, Ordering::Relaxed);
+    f.reply(&a, "worker", "first-result", "completed", None);
+    assert_eq!(f.disposition(&attempt).as_deref(), Some("reply"));
+    f.drain();
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "{:?}",
+        f.unresolved_attention()
+    );
+}
+
+#[test]
+fn a_tracked_request_still_unanswered_when_its_coordination_resolves_is_flagged() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    f.status("worker", "idle");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+    assert_eq!(f.disposition(&attempt), None);
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "{:?}",
+        f.unresolved_attention()
+    );
+
+    f.handoff(
+        "handoff.resolve",
+        json!({
+            "request_id":"give-up",
+            "coordination_id":id,
+            "outcome":"cancelled",
+            "report":"Synthetic report: the worker never answered.",
+            "reason":"Synthetic cancellation."
+        }),
+    );
+    f.drain();
+    assert!(
+        f.unresolved_attention()
+            .contains(&("agent_disposition".to_owned(), attempt.clone())),
+        "a request whose coordination ended without its reply must raise ND-DELIVERY-003: {:?}",
+        f.unresolved_attention()
+    );
+    assert_eq!(f.disposition(&attempt), None);
+}
+
+#[test]
+fn a_tracked_request_still_unanswered_when_its_worker_session_is_replaced_is_flagged() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    f.status("worker", "idle");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "{:?}",
+        f.unresolved_attention()
+    );
+
+    f.replace_session("worker", "session-worker-replacement");
+    f.drain();
+    assert!(
+        f.unresolved_attention()
+            .contains(&("agent_disposition".to_owned(), attempt.clone())),
+        "a request whose exact recipient session is gone must raise ND-DELIVERY-003: {:?}",
+        f.unresolved_attention()
+    );
+}
+
+#[test]
+fn a_request_the_lead_supersedes_with_a_follow_up_is_never_flagged() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    let not_flagged = |when: &str| {
+        assert!(
+            f.unresolved_attention()
+                .iter()
+                .all(|(kind, _)| kind != "agent_disposition"),
+            "a superseded request must not raise ND-DELIVERY-003 {when}: {:?}",
+            f.unresolved_attention()
+        );
+    };
+    f.status("worker", "idle");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+    assert_eq!(f.disposition(&attempt), None);
+    not_flagged("before the follow-up");
+
+    let follow_up = execute_message_operation(
+        "send",
+        json!({"request_id":"second","source":"@worker synthetic follow-up","author_kind":"agent_session",
+            "coordination_id":id,"assignment_id":a["coordination"][0]["assignment_id"],"expected_revision":1}),
+        &f.runtime("lead"),
+    )
+    .unwrap();
+    not_flagged("at the follow-up's drain");
+
+    f.reply(&follow_up, "worker", "second-result", "completed", None);
+    f.drain();
+    assert_eq!(f.disposition(&attempt), None);
+    not_flagged("after the worker answered revision 2");
+
+    f.handoff(
+        "handoff.resolve",
+        json!({
+            "request_id":"finish",
+            "coordination_id":id,
+            "outcome":"completed",
+            "report":"Synthetic final report.",
+            "reconciled_assignments":[
+                {"assignment_id":a["coordination"][0]["assignment_id"],"revision":2}
+            ]
+        }),
+    );
+    f.drain();
+    assert_eq!(f.disposition(&attempt), None);
+    not_flagged("after the coordination resolved completed");
+}
+
+#[test]
+fn a_tracked_request_whose_worker_is_retired_after_it_settles_is_flagged_once_and_stays_acknowledged()
+ {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    let item = format!("attention-agent-disposition-{attempt}");
+    f.status("worker", "idle");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+
+    f.retire("worker");
+    f.drain();
+    assert!(
+        f.unresolved_attention()
+            .contains(&("agent_disposition".to_owned(), attempt.clone())),
+        "a request whose worker was retired before answering must raise ND-DELIVERY-003: {:?}",
+        f.unresolved_attention()
+    );
+    let summary = f.disposition_summary(&attempt).unwrap();
+    assert!(summary.contains("retired"), "{summary}");
+    assert_eq!(f.opened_facts(&item), 1);
+
+    let acknowledged = execute_control_operation(
+        "delivery.acknowledge",
+        json!({"attempt_id":attempt,"confirmed":true}),
+        &f.runtime("lead"),
+    )
+    .unwrap();
+    assert_eq!(acknowledged["changed"], true);
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "{:?}",
+        f.unresolved_attention()
+    );
+    assert_eq!(
+        f.fact_count("attention_item", &item, "acknowledged", "local-human"),
+        1
+    );
+
+    for _ in 0..2 {
+        f.drain();
+        assert!(
+            f.unresolved_attention()
+                .iter()
+                .all(|(kind, _)| kind != "agent_disposition"),
+            "reconciliation must not reopen an acknowledged warning: {:?}",
+            f.unresolved_attention()
+        );
+        assert_eq!(f.opened_facts(&item), 1);
+    }
+    assert_eq!(f.disposition(&attempt), None);
+}
+
+#[test]
+fn a_flagged_request_of_a_replaced_worker_session_can_be_acknowledged_by_a_human() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    let item = format!("attention-agent-disposition-{attempt}");
+    f.status("worker", "idle");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+
+    f.replace_session("worker", "session-worker-replacement");
+    f.drain();
+    assert!(
+        f.unresolved_attention()
+            .contains(&("agent_disposition".to_owned(), attempt.clone())),
+        "{:?}",
+        f.unresolved_attention()
+    );
+    let acknowledged = execute_control_operation(
+        "delivery.acknowledge",
+        json!({"attempt_id":attempt,"confirmed":true}),
+        &f.runtime("lead"),
+    )
+    .unwrap_or_else(|refusal| {
+        panic!("a replaced worker session leaves nobody else to clear the warning: {refusal}")
+    });
+    assert_eq!(acknowledged["changed"], true);
+    let summary = f.disposition_summary(&attempt).unwrap();
+    assert!(summary.contains("delivery acknowledge"), "{summary}");
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "{:?}",
+        f.unresolved_attention()
+    );
+    for _ in 0..2 {
+        f.drain();
+        assert!(
+            f.unresolved_attention()
+                .iter()
+                .all(|(kind, _)| kind != "agent_disposition"),
+            "reconciliation must not reopen an acknowledged warning: {:?}",
+            f.unresolved_attention()
+        );
+        assert_eq!(f.opened_facts(&item), 1);
+    }
+    assert_eq!(f.disposition(&attempt), None);
+}
+
+#[test]
+fn an_awaited_settled_request_stays_in_its_workers_inbox_and_a_late_complete_is_accepted() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    f.status("worker", "idle");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+    assert_eq!(f.disposition(&attempt), None);
+
+    let inbox =
+        execute_integration_operation("delivery.inbox", json!({}), &f.runtime("worker")).unwrap();
+    let listed = inbox["envelopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|envelope| {
+            envelope["control"]["attempt_id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(listed, [attempt.as_str()]);
+
+    f.complete_for(&attempt, "worker");
+    assert_eq!(f.disposition(&attempt).as_deref(), Some("no_reply"));
+    f.drain();
+    assert!(
+        f.unresolved_attention()
+            .iter()
+            .all(|(kind, _)| kind != "agent_disposition"),
+        "{:?}",
+        f.unresolved_attention()
+    );
+}
+
+#[test]
+fn a_flagged_unanswered_request_is_not_reopened_or_reworded_by_later_drains() {
+    let f = Fixture::new();
+    let id = f.begin();
+    let a = f.send(&id, "first", "worker");
+    let attempt = f.attempt(&a["message_id"], "worker");
+    let item = format!("attention-agent-disposition-{attempt}");
+    f.status("worker", "idle");
+    f.now.store(100 + 31_000, Ordering::Relaxed);
+    f.drain();
+    assert_eq!(f.attempt_state(&attempt), "settled");
+
+    f.handoff(
+        "handoff.resolve",
+        json!({
+            "request_id":"give-up",
+            "coordination_id":id,
+            "outcome":"cancelled",
+            "report":"Synthetic report: the worker never answered.",
+            "reason":"Synthetic cancellation."
+        }),
+    );
+    assert!(
+        f.unresolved_attention()
+            .contains(&("agent_disposition".to_owned(), attempt.clone())),
+        "{:?}",
+        f.unresolved_attention()
+    );
+    let summary = f.disposition_summary(&attempt).unwrap();
+    assert_eq!(f.opened_facts(&item), 1);
+
+    for _ in 0..2 {
+        f.drain();
+        assert_eq!(f.opened_facts(&item), 1);
+        assert_eq!(
+            f.disposition_summary(&attempt).as_deref(),
+            Some(summary.as_str())
+        );
+        assert!(
+            f.unresolved_attention()
+                .contains(&("agent_disposition".to_owned(), attempt.clone())),
+            "{:?}",
+            f.unresolved_attention()
+        );
+    }
 }

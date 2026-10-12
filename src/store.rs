@@ -43,6 +43,7 @@ UPDATE pane_addresses SET persona = (
 
 mod coordination;
 mod coordination_ownership;
+mod missing_disposition;
 pub(crate) use coordination_ownership::CoordinationRole;
 mod groups;
 mod handoff;
@@ -5058,11 +5059,8 @@ impl StateTransaction<'_> {
     }
 
     /// The Delivery Attempts one exact Agent Session still owes at one Pane
-    /// Address, in mailbox order: submitted or acknowledged without a
-    /// disposition, plus a settled attempt whose missing-disposition Attention
-    /// Item is still open, so a late disposition can still answer and resolve
-    /// it. Held, failed, cancelled, disposed, other-session, and other-address
-    /// attempts are outside what this session can still act on.
+    /// Address, in mailbox order. A settled attempt stays owed until a
+    /// disposition or a human acknowledgement closes it.
     pub(crate) fn outstanding_delivery_attempts(
         &self,
         namespace: &StateNamespace,
@@ -5086,18 +5084,14 @@ impl StateTransaction<'_> {
                      AND p.worktree_id = a.worktree_id
                      AND p.attempt_id = a.attempt_id
                )
-               AND (
-                   s.state IN ('submitted', 'acknowledged')
-                   OR (
-                       s.state = 'settled' AND EXISTS (
-                           SELECT 1 FROM attention_items i
-                           WHERE i.session_socket_id = a.session_socket_id
-                             AND i.worktree_id = a.worktree_id
-                             AND i.source_kind = ?5
-                             AND i.source_id = a.attempt_id
-                             AND i.resolved_at_ms IS NULL
-                       )
-                   )
+               AND s.state IN ('submitted', 'acknowledged', 'settled')
+               AND NOT EXISTS (
+                   SELECT 1 FROM attention_items i
+                   WHERE i.session_socket_id = a.session_socket_id
+                     AND i.worktree_id = a.worktree_id
+                     AND i.source_kind = ?5
+                     AND i.source_id = a.attempt_id
+                     AND i.resolved_at_ms IS NOT NULL
                )
              ORDER BY d.mailbox_order",
         )?;
@@ -5411,22 +5405,8 @@ impl StateTransaction<'_> {
                 attempt_id.as_str(),
                 attribution,
             )?;
-        } else if next == DeliveryState::Settled
-            && !self.delivery_disposition_exists(namespace, attempt_id)?
-        {
-            self.open_attention_item(
-                namespace,
-                &AttentionItemDraft {
-                    id: crate::AttentionItemId::new(format!(
-                        "attention-agent-disposition-{}",
-                        attempt_id.as_str()
-                    )),
-                    source_kind: crate::AttentionSourceKind::AgentDisposition,
-                    source_id: attempt_id.as_str().to_owned(),
-                    summary: "Delivery settled without a reply or no-reply disposition.".to_owned(),
-                },
-                attribution,
-            )?;
+        } else if next == DeliveryState::Settled {
+            self.flag_missing_disposition(namespace, attempt_id, attribution)?;
         }
         if matches!(next, DeliveryState::Failed | DeliveryState::Cancelled) {
             self.complete_result_set_if_ready(namespace, &source_message_id, attribution)?;
@@ -5644,6 +5624,48 @@ impl StateTransaction<'_> {
         )
     }
 
+    pub(crate) fn settle_observed_attempt(
+        &mut self,
+        namespace: &StateNamespace,
+        attempt_id: &crate::DeliveryAttemptId,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let (message_id, pinned_session) = self.transaction.query_row(
+            "SELECT d.message_id, a.agent_session_id FROM delivery_attempts a
+             JOIN mailbox_deliveries d USING (
+                session_socket_id, worktree_id, delivery_id, address_id
+             )
+             WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.attempt_id = ?3",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                attempt_id.as_str()
+            ],
+            |row| {
+                Ok((
+                    MessageId::new(row.get::<_, String>(0)?),
+                    crate::AgentSessionId::new(row.get::<_, String>(1)?),
+                ))
+            },
+        )?;
+        if self.wake_identity(namespace, &message_id)?.is_some() {
+            self.record_no_reply_disposition(
+                namespace,
+                attempt_id,
+                &format!("observed-no-reply-{}", attempt_id.as_str()),
+                &pinned_session,
+                attribution,
+            )
+        } else {
+            self.transition_delivery_attempt(
+                namespace,
+                attempt_id,
+                DeliveryState::Settled,
+                attribution,
+            )
+        }
+    }
+
     pub fn record_reply_disposition(
         &mut self,
         namespace: &StateNamespace,
@@ -5816,10 +5838,10 @@ impl StateTransaction<'_> {
                 "only a human may acknowledge a missing disposition",
             ));
         }
-        let retired: bool = self
+        let (address, pinned_session, retired) = self
             .transaction
             .query_row(
-                "SELECT p.retired FROM delivery_attempts a
+                "SELECT a.address_id, a.agent_session_id, p.retired FROM delivery_attempts a
                  JOIN pane_addresses p USING (session_socket_id, worktree_id, address_id)
                  WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.attempt_id = ?3",
                 params![
@@ -5827,15 +5849,25 @@ impl StateTransaction<'_> {
                     namespace.space_id.as_str(),
                     attempt_id.as_str()
                 ],
-                |row| row.get(0),
+                |row| {
+                    Ok((
+                        PaneAddressId::new(row.get::<_, String>(0)?),
+                        crate::AgentSessionId::new(row.get::<_, String>(1)?),
+                        row.get::<_, bool>(2)?,
+                    ))
+                },
             )
             .optional()?
             .ok_or_else(|| {
                 StoreError::invalid_input("delivery attempt does not exist in this workspace")
             })?;
-        if !retired {
+        if !retired
+            && !self
+                .recipient_session_now(namespace, &address)?
+                .replaced(&pinned_session)
+        {
             return Err(StoreError::invalid_input(
-                "the recipient address is not retired; only its exact Agent Session can record this attempt's disposition",
+                "the recipient address is not retired and its session is unchanged; only its exact Agent Session can record this attempt's disposition",
             ));
         }
         let acknowledged: bool = self.transaction.query_row(
