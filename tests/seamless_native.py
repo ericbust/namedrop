@@ -57,6 +57,8 @@ def main():
     binary = Path(os.environ.get('NAMEDROP_TEST_BINARY', REPO / 'target/debug/namedrop')).resolve()
     base = Path(tempfile.mkdtemp(prefix='namedrop-native-update-', dir=FIXTURE_ROOT))
     env = {k: v for k, v in os.environ.items() if not k.startswith(('HERDR_', 'CODEX_', 'CLAUDE_', 'NAMEDROP_', 'GIT_CONFIG_'))}
+    # Setup runs any codex on PATH, which would install the plugin before the check that it is still missing.
+    env['PATH'] = os.pathsep.join(d for d in env['PATH'].split(os.pathsep) if not os.access(os.path.join(d, 'codex'), os.X_OK))
     for name in ('home', 'config', 'state', 'data', 'run', 'workspace', 'remote', 'evidence'):
         (base / name).mkdir()
     env.update(HOME=str(base/'home'), XDG_CONFIG_HOME=str(base/'config'), XDG_STATE_HOME=str(base/'state'),
@@ -162,7 +164,8 @@ def main():
         command('sh', root/'scripts/setup.sh', 'activate', '--json', context=context)
         assert json.loads((state/'runtime/legacy-sessions.json').read_text())['codex_ready'] is True
         def namedrop(*args, pane=source):
-            return json.loads(command(launcher, *args, context=dict(context, HERDR_PANE_ID=pane)).stdout)
+            return json.loads(command(launcher, '--herdr-socket', env['HERDR_SOCKET_PATH'], '--herdr-workspace', workspace,
+                                      '--herdr-pane', pane, *args, context=context).stdout)
         recipient = host('tab', 'create', '--workspace', workspace, '--label', 'Keep this agent')['result']['root_pane']['pane_id']
         wait(lambda: (base/'home'/f'shell-ready-{recipient}').exists(), 'fixture shell prompt')
         # A native process gives Herdr a real foreground process named codex.
