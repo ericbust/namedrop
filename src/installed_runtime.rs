@@ -107,9 +107,7 @@ fn staged_executable(root: &std::path::Path) -> PathBuf {
 }
 
 fn sha256_hex(path: &std::path::Path) -> std::io::Result<String> {
-    let mut hasher = sha2::Sha256::new();
-    std::io::copy(&mut fs::File::open(path)?, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(crate::lower_hex(&sha2::Sha256::digest(fs::read(path)?)))
 }
 
 /// The launcher remains a regular, stable path so cached hooks and exact command

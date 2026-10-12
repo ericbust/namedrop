@@ -105,7 +105,7 @@ impl Fixture {
 impl Fixture {
     fn stage_runtime(&self, active: &[u8], built: Option<&[u8]>, launcher: bool) -> PathBuf {
         use sha2::Digest;
-        let digest = format!("{:x}", sha2::Sha256::digest(active));
+        let digest = namedrop::lower_hex(&sha2::Sha256::digest(active));
         let runtime = self.root.join("runtime");
         let release = runtime.join("releases").join(&digest);
         fs::create_dir_all(&release).unwrap();

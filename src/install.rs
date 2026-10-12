@@ -829,7 +829,7 @@ fn codex_cache_version(contents: &[&str]) -> String {
         digest.update((content.len() as u64).to_le_bytes());
         digest.update(content.as_bytes());
     }
-    let digest = format!("{:x}", digest.finalize());
+    let digest = crate::lower_hex(&digest.finalize());
     format!("{}+codex.{}", env!("CARGO_PKG_VERSION"), &digest[..16])
 }
 
