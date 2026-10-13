@@ -333,7 +333,7 @@ impl Fixture {
 
     fn queue_status_for(&self, name: &str, pane_id: &str) -> PathBuf {
         use sha2::{Digest, Sha256};
-        let scope = format!("{:x}", Sha256::digest("test-socket\0workspace-1"));
+        let scope = namedrop::lower_hex(&Sha256::digest("test-socket\0workspace-1"));
         let directory = self.state().join("agent-status-reconciliation").join(scope);
         fs::create_dir_all(&directory).unwrap();
         let marker = directory.join(format!("pending-{name}"));

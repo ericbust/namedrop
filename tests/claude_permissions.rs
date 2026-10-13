@@ -14,7 +14,7 @@ fn pending_update(
 ) -> Value {
     use sha2::{Digest, Sha256};
     let hash =
-        |text: Option<&str>| text.map(|text| format!("{:x}", Sha256::digest(text.as_bytes())));
+        |text: Option<&str>| text.map(|text| namedrop::lower_hex(&Sha256::digest(text.as_bytes())));
     json!({"path":path,"before_hash":hash(before),"after_hash":hash(after),"added":added,"removed":[],"mode":384})
 }
 

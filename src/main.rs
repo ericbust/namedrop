@@ -778,7 +778,7 @@ fn reconciliation_directory(
     socket_id: &str,
     space_id: &str,
 ) -> Result<PathBuf, String> {
-    let scope = format!("{:x}", Sha256::digest(format!("{socket_id}\0{space_id}")));
+    let scope = namedrop::lower_hex(&Sha256::digest(format!("{socket_id}\0{space_id}")));
     let directory = state_directory
         .join("agent-status-reconciliation")
         .join(scope);

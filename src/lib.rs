@@ -211,3 +211,21 @@ pub fn is_control_operation(operation: &str) -> bool {
 pub(crate) fn input_schema_error(error: serde_json::Error) -> String {
     format!("invalid operation input: {error}")
 }
+
+#[doc(hidden)]
+pub fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn lower_hex_matches_the_sha256_digests_earlier_releases_persisted() {
+        assert_eq!(
+            super::lower_hex(&Sha256::digest(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+}

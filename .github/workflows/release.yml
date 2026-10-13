@@ -19,7 +19,7 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       release: ${{ steps.plan.outputs.release }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: plan
         run: |
           version=$(sh scripts/release.sh version)
@@ -48,7 +48,7 @@ jobs:
             artifact: namedrop-release-linux-aarch64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: clippy, rustfmt
@@ -59,7 +59,7 @@ jobs:
       - run: cargo test --locked --all-targets
       - run: CARGO_TARGET_DIR=target/crate-checks cargo package --locked
       - run: sh scripts/package-release.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
           path: target/dist/*
@@ -73,8 +73,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true

@@ -1,6 +1,6 @@
 [package]
 name = "namedrop"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 rust-version = "1.97"
 description = "Name and @mention AI agents and terminal panes to collaborate inside Herdr"
@@ -21,10 +21,10 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-sha2 = "0.10"
-toml_edit = "0.23"
+sha2 = "0.11"
+toml_edit = "0.25"
 libc = "0.2"
 unicode-width = { version = "0.2.2", default-features = false }
