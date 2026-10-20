@@ -1655,6 +1655,29 @@ fn spaces_owning_checkout(
     Ok((owners, unknown))
 }
 
+/// Every Herdr workspace as (id, label), in Herdr's own order. A workspace
+/// Herdr reports without a label falls back to its id.
+#[expect(dead_code, reason = "the send path reads labels in a later step")]
+pub(crate) fn workspace_labels(
+    herdr: &impl HerdrCommandExecutor,
+) -> Result<Vec<(String, String)>, String> {
+    let output = herdr.execute(&["workspace", "list"])?;
+    let mut workspaces = serde_json::from_str::<WorkspaceListEnvelope>(&output.stdout)
+        .map_err(|error| error.to_string())?
+        .result
+        .workspaces;
+    workspaces.sort_by_key(|workspace| workspace.number);
+    Ok(workspaces
+        .into_iter()
+        .map(|workspace| {
+            let label = workspace
+                .label
+                .unwrap_or_else(|| workspace.workspace_id.clone());
+            (workspace.workspace_id, label)
+        })
+        .collect())
+}
+
 fn worktree_list_for_workspace(
     herdr: &impl HerdrCommandExecutor,
     workspace_id: &str,
@@ -2111,6 +2134,10 @@ struct WorkspaceListResult {
 #[derive(Deserialize)]
 struct WorkspaceEntry {
     workspace_id: String,
+    #[expect(dead_code, reason = "the send path reads labels in a later step")]
+    label: Option<String>,
+    #[expect(dead_code, reason = "the send path reads labels in a later step")]
+    number: Option<u64>,
     worktree: Option<WorkspaceWorktree>,
 }
 

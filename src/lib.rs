@@ -25,6 +25,8 @@ mod persona;
 mod ports;
 mod runtime;
 mod shortcuts;
+#[expect(dead_code, reason = "the send path plans routes in a later step")]
+mod spaces;
 mod store;
 #[doc(hidden)]
 pub use shortcuts::install_shortcuts;
