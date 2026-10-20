@@ -75,8 +75,9 @@ pub use lifecycle::{
     pane_workspace, reconcile_discovered_panes,
 };
 pub use message::{
-    ParsedMessage, RecipientOutlook, execute_message_operation, parse_mentions,
-    parse_prompt_mentions, recipient_outlooks, validate_message_input,
+    ParsedMessage, RecipientOutlook, RecipientRun, SpaceScope, WorkspaceLabel,
+    carries_leading_mentions, execute_message_operation, parse_mentions, parse_prompt_mentions,
+    recipient_outlooks, validate_message_input,
 };
 pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
 pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};

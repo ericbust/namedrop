@@ -10,24 +10,114 @@ use serde_json::{Value, json};
 
 const MISSING_RECIPIENTS: &str = "message must begin with one or more recipient Mentions";
 
+/// How long a workspace label may be once folded. Herdr labels are free text, and
+/// a label reaches prompts and errors, so it is bounded on the way in.
+const MAX_LABEL_CHARS: usize = 64;
+
+/// A Herdr workspace label in the form people type and match it. Folding
+/// lowercases ASCII and turns each run of characters a `#` token cannot hold
+/// into one `-`, so "My Space" and `#my-space` compare equal, and the folded
+/// form is always safe to show inside a prompt.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct WorkspaceLabel(String);
+
+impl WorkspaceLabel {
+    /// The token after `#`, when it is label-shaped. `all` is reserved: it is
+    /// [`SpaceScope::All`], never a label.
+    pub fn from_token(token: &str) -> Option<Self> {
+        if token.is_empty() || !token.bytes().all(is_label_token_byte) {
+            return None;
+        }
+        let label = Self::fold(token);
+        (label.0 != "all").then_some(label)
+    }
+
+    /// A label as Herdr reports it, which may hold spaces, capitals, or anything else.
+    pub fn from_herdr(label: &str) -> Self {
+        Self::fold(label)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn fold(label: &str) -> Self {
+        let mut folded = String::new();
+        let mut separator = false;
+        for character in label.trim().chars() {
+            if character.is_ascii() && is_label_token_byte(character as u8) {
+                if separator && !folded.is_empty() {
+                    folded.push('-');
+                }
+                separator = false;
+                folded.push(character.to_ascii_lowercase());
+            } else {
+                separator = true;
+            }
+        }
+        Self(folded.chars().take(MAX_LABEL_CHARS).collect())
+    }
+}
+
+impl std::fmt::Display for WorkspaceLabel {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "#{}", self.0)
+    }
+}
+
+/// Which workspaces a leading run of Mentions addresses. One scope applies to
+/// the whole run.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SpaceScope {
+    /// No `#` tokens: each name resolves here first.
+    Unqualified,
+    /// `#a #b ...`, deduplicated, in written order.
+    Named(Vec<WorkspaceLabel>),
+    /// `#all`, which cannot be combined with named labels.
+    All,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecipientRun {
+    pub scope: SpaceScope,
+    pub aliases: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParsedMessage {
-    pub recipient_aliases: Vec<String>,
+    pub recipients: RecipientRun,
     pub body: String,
     pub context_reference_aliases: Vec<String>,
 }
 
+/// Grammar: `[ws] ("#" label ws)* ("@" alias ws)+ body`. A `#` run counts only
+/// when at least one valid Mention follows it; otherwise the source addresses
+/// nobody and stays literal. A `#` token after the first Mention is body text.
 pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
-    let trimmed = source.trim_start();
-    let leading_bytes = source.len() - trimmed.len();
-    let mut cursor = leading_bytes;
-    let mut recipients = Vec::new();
+    let mut cursor = skip_whitespace(source, 0);
+    let mut labels: Vec<WorkspaceLabel> = Vec::new();
+    let mut all = false;
+    loop {
+        let token_end = token_end(source, cursor);
+        let Some(token) = source[cursor..token_end].strip_prefix('#') else {
+            break;
+        };
+        if token.eq_ignore_ascii_case("all") {
+            all = true;
+        } else if let Some(label) = WorkspaceLabel::from_token(token) {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        } else {
+            break;
+        }
+        cursor = skip_whitespace(source, token_end);
+    }
 
+    let mut recipients = Vec::new();
     loop {
         cursor = skip_whitespace(source, cursor);
-        let token_end = source[cursor..]
-            .find(char::is_whitespace)
-            .map_or(source.len(), |offset| cursor + offset);
+        let token_end = token_end(source, cursor);
         let token = &source[cursor..token_end];
         let Some(alias) = token.strip_prefix('@') else {
             break;
@@ -44,6 +134,18 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
     if recipients.is_empty() {
         return Err(MISSING_RECIPIENTS.to_owned());
     }
+    let scope = match (all, labels.is_empty()) {
+        (false, true) => SpaceScope::Unqualified,
+        (false, false) => SpaceScope::Named(labels),
+        (true, true) => SpaceScope::All,
+        (true, false) => {
+            return Err(
+                "#all already addresses every workspace, so it cannot be combined with \
+                 workspace labels"
+                    .to_owned(),
+            );
+        }
+    };
     cursor = skip_whitespace(source, cursor);
     let body = &source[cursor..];
     if body.trim().is_empty() {
@@ -51,7 +153,10 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
     }
 
     Ok(ParsedMessage {
-        recipient_aliases: recipients,
+        recipients: RecipientRun {
+            scope,
+            aliases: recipients,
+        },
         body: body.to_owned(),
         context_reference_aliases: context_mentions(body),
     })
@@ -64,10 +169,10 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
 /// nobody is literal and must be left alone, while a Mention whose message is
 /// malformed is a real handoff whose failure the person should hear about.
 pub fn carries_leading_mentions(source: &str) -> bool {
-    source.starts_with('@')
+    starts_at_column_zero(source)
         && parse_mentions(source).map_or_else(
             |error| error != MISSING_RECIPIENTS,
-            |parsed| !parsed.recipient_aliases.is_empty(),
+            |parsed| !parsed.recipients.aliases.is_empty(),
         )
 }
 
@@ -77,15 +182,19 @@ pub fn carries_leading_mentions(source: &str) -> bool {
 /// happens atomically in the routing transaction, so an unknown alias makes the
 /// hook fail open without a partial send.
 pub fn parse_prompt_mentions(source: &str) -> Result<ParsedMessage, String> {
-    if !source.starts_with('@') {
+    if !starts_at_column_zero(source) {
         return Err(MISSING_RECIPIENTS.to_owned());
     }
-    let recipient_aliases = parse_mentions(source)?.recipient_aliases;
+    let recipients = parse_mentions(source)?.recipients;
     Ok(ParsedMessage {
-        recipient_aliases,
+        recipients,
         body: source.to_owned(),
         context_reference_aliases: Vec::new(),
     })
+}
+
+fn starts_at_column_zero(source: &str) -> bool {
+    source.starts_with('@') || source.starts_with('#')
 }
 
 /// What sending will do for one recipient. "Send" is not "deliver": a delivery
@@ -378,6 +487,9 @@ where
                 .to_owned(),
         );
     }
+    if parsed.recipients.scope != SpaceScope::Unqualified {
+        return Err("workspace-qualified Mentions are not routable yet".to_owned());
+    }
     let pane_id = runtime
         .current_pane_id
         .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())?;
@@ -511,7 +623,7 @@ where
         };
         let recipients = transaction.resolve_message_recipients(
             &namespace,
-            &parsed.recipient_aliases,
+            &parsed.recipients.aliases,
             &author.address_id,
         )?;
         if (in_reply_to.is_some() || context.is_some()) && recipients.iter().any(|r|
@@ -1053,6 +1165,12 @@ fn required_nonempty(value: String, field: &str) -> Result<String, String> {
     }
 }
 
+fn token_end(source: &str, cursor: usize) -> usize {
+    source[cursor..]
+        .find(char::is_whitespace)
+        .map_or(source.len(), |offset| cursor + offset)
+}
+
 fn skip_whitespace(source: &str, mut cursor: usize) -> usize {
     while let Some(character) = source[cursor..].chars().next()
         && character.is_whitespace()
@@ -1118,15 +1236,41 @@ fn mention_token_end(text: &str, at: usize) -> usize {
 /// Collects the Context Reference Mentions of a body. An at-sign token is classified whole before
 /// any alias is looked up: a token that is not alias-shaped is not Mention-shaped, so it stays
 /// literal prose instead of rejecting the send, and no valid alias prefix is taken out of it.
+/// A run that opens with a `#label` names someone in another workspace, so it is prose here too.
 fn context_mentions(body: &str) -> Vec<String> {
     let mut aliases = Vec::new();
+    let mut qualified_run_end = None;
     for anchor in mention_anchors(body) {
-        let token = &body[anchor + 1..mention_token_end(body, anchor)];
+        let end = mention_token_end(body, anchor);
+        let continues_run = qualified_run_end
+            .is_some_and(|run_end| body[run_end..anchor].chars().all(char::is_whitespace));
+        if continues_run || follows_workspace_label(body, anchor) {
+            qualified_run_end = Some(end);
+            continue;
+        }
+        qualified_run_end = None;
+        let token = &body[anchor + 1..end];
         if validate_alias(token).is_ok() && !aliases.iter().any(|existing| existing == token) {
             aliases.push(token.to_owned());
         }
     }
     aliases
+}
+
+fn follows_workspace_label(text: &str, anchor: usize) -> bool {
+    let before = &text[..anchor];
+    if !before.ends_with(char::is_whitespace) {
+        return false;
+    }
+    before
+        .split_whitespace()
+        .next_back()
+        .and_then(|token| token.strip_prefix('#'))
+        .is_some_and(|label| !label.is_empty() && label.bytes().all(is_label_token_byte))
+}
+
+fn is_label_token_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
 }
 
 fn is_mention_token_byte(byte: u8) -> bool {
