@@ -141,7 +141,7 @@
           "source": {
             "type": "string",
             "minLength": 1,
-            "description": "Authored source. It must begin with one or more @alias recipient Mentions."
+            "description": "Authored source. It must begin with one or more @alias recipient Mentions, optionally preceded by #label workspace tokens or #all to address other workspaces."
           },
           "author_kind": {
             "type": "string",
@@ -1278,16 +1278,21 @@
     {
       "token": "address.list",
       "automatic_permission": true,
-      "description": "Refresh this workspace's named panes, live registration and availability before selecting collaborators. Read-only management operation outside the registered capability profile; current coordinator callbacks bind it explicitly.",
+      "description": "Refresh this workspace's named panes, live registration and availability before selecting collaborators; with workspaces \"all\", every activated workspace's label, names and groups. Read-only management operation outside the registered capability profile; current coordinator callbacks bind it explicitly.",
       "argv": ["address", "list"],
       "input_schema": {
         "type": "object",
         "additionalProperties": false,
-        "properties": {}
+        "properties": {
+          "workspaces": {"type": "string", "enum": ["all"], "description": "Read every activated workspace of this Herdr session instead of this one."}
+        }
       },
       "examples": [{
         "description": "Read the current roster before choosing workers.",
         "input": {}
+      }, {
+        "description": "Find which workspaces have an @lead before addressing one with #label.",
+        "input": {"workspaces": "all"}
       }]
     },
     {

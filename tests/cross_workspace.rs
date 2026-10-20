@@ -1472,6 +1472,13 @@ fn a_workspace_whose_label_cannot_be_typed_is_reached_by_its_id() {
             .any(|notification| notification.iter().any(|arg| arg == "Sent to #w2 @tester")),
         "{notifications:?}"
     );
+    let listed = execute_lifecycle_operation(
+        "address.list",
+        json!({"workspaces":"all"}),
+        &fixture.runtime("w1", "pane-1-lead"),
+    )
+    .unwrap();
+    assert_eq!(listed["workspaces"][1]["label"], "w2");
     let sent = fixture.agent_send("w1", "pane-1-lead", "cjk-1", "#w2 @lead Status?");
     assert_eq!(sent["forwarded"][0]["workspace"], "w2");
     fixture.drain("w2");
@@ -1527,6 +1534,24 @@ fn a_token_that_is_one_workspaces_label_and_anothers_id_is_refused_as_ambiguous(
         "{error}"
     );
     assert_eq!(fixture.message_rows(), before, "nothing was sent");
+
+    let listed = execute_lifecycle_operation(
+        "address.list",
+        json!({"workspaces":"all"}),
+        &fixture.runtime("w1", "pane-1-lead"),
+    )
+    .unwrap();
+    let tokens: Vec<&str> = listed["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| workspace["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        tokens,
+        ["ws1", "ws2", "w3"],
+        "ws3 shows the token that reaches it"
+    );
     fixture.agent_send("w1", "pane-1-lead", "w2-2", "#w3 @lead hi");
     fixture.drain("w3");
     assert_eq!(fixture.herdr.envelopes("pane-3-lead").len(), 1);
@@ -1619,5 +1644,114 @@ fn a_remote_envelope_names_the_sender_workspace_and_still_authenticates() {
         local["control"]["sender"].get("workspace").is_none(),
         "a local envelope keeps its exact shape: {}",
         local["control"]["sender"]
+    );
+}
+
+#[test]
+fn the_roster_mentions_other_workspaces_without_reading_herdr_labels() {
+    let roster = |fixture: &Fixture| {
+        fixture.herdr.commands.lock().unwrap().clear();
+        let output = fixture.hook("w1", "pane-1-lead", "What should we do next?");
+        let commands = fixture.herdr.commands.lock().unwrap().clone();
+        (additional_context(&output).to_owned(), commands)
+    };
+    let (single, single_commands) = roster(&Fixture::with_activated(1));
+    assert!(!single.contains("Other workspaces"), "{single}");
+    let (several, several_commands) = roster(&Fixture::new());
+    assert!(
+        several.contains(
+            "Other workspaces: 2 other Herdr workspaces have named agents (@lead, @scout, @tester)."
+        ),
+        "{several}"
+    );
+    assert!(
+        several.starts_with(&single),
+        "the paragraph only follows today's roster"
+    );
+    assert_eq!(single_commands, several_commands);
+    assert!(
+        !several_commands
+            .iter()
+            .any(|command| command == "workspace list")
+    );
+}
+
+#[test]
+fn the_roster_leaves_out_workspaces_with_no_live_agents() {
+    let prompt = "What should we do next?";
+    let single = Fixture::with_activated(1).hook("w1", "pane-1-lead", prompt);
+    let closed = Fixture::new();
+    closed.sql("UPDATE pane_bindings SET active = 0 WHERE worktree_id IN ('w2', 'w3')");
+    assert_eq!(closed.hook("w1", "pane-1-lead", prompt), single);
+    let partly = Fixture::new();
+    partly.sql("UPDATE pane_bindings SET active = 0 WHERE worktree_id = 'w3'");
+    let roster = partly.hook("w1", "pane-1-lead", prompt);
+    assert!(
+        additional_context(&roster).contains(
+            "Other workspaces: 1 other Herdr workspace has named agents (@lead, @scout, @tester)."
+        ),
+        "{roster:?}"
+    );
+}
+
+#[test]
+fn address_list_reads_every_workspace_when_asked() {
+    let fixture = Fixture::new();
+    execute_group_operation(
+        "group.set",
+        json!({"alias":"crew","members":["lead","tester"]}),
+        &fixture.runtime("w2", "pane-2-lead"),
+    )
+    .unwrap();
+    let runtime = fixture.runtime("w1", "pane-1-lead");
+    let all =
+        execute_lifecycle_operation("address.list", json!({"workspaces":"all"}), &runtime).unwrap();
+    assert_eq!(all["here"], "ws1");
+    let summary: Vec<(String, bool, Vec<String>)> = all["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|workspace| {
+            (
+                workspace["label"].as_str().unwrap().to_owned(),
+                workspace["current"].as_bool().unwrap(),
+                workspace["addresses"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|address| address["alias"].as_str().unwrap().to_owned())
+                    .collect(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (
+                "ws1".to_owned(),
+                true,
+                vec!["lead".to_owned(), "planner".to_owned()]
+            ),
+            (
+                "ws2".to_owned(),
+                false,
+                vec!["lead".to_owned(), "scout".to_owned(), "tester".to_owned()]
+            ),
+            (
+                "ws3".to_owned(),
+                false,
+                vec!["lead".to_owned(), "scout".to_owned()]
+            ),
+        ]
+    );
+    assert_eq!(all["workspaces"][1]["groups"][0]["alias"], "crew");
+    let here_only = execute_lifecycle_operation("address.list", json!({}), &runtime).unwrap();
+    assert_eq!(
+        here_only, all["workspaces"][0]["addresses"],
+        "without it, today's answer"
+    );
+    assert!(
+        execute_lifecycle_operation("address.list", json!({"workspaces":"some"}), &runtime)
+            .is_err()
     );
 }

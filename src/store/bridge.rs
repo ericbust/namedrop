@@ -635,6 +635,42 @@ impl StateTransaction<'_> {
             .map(|label| WorkspaceLabel::from_herdr(&label)))
     }
 
+    /// Named agents bound to a live pane in this session's other activated
+    /// workspaces, and how many workspaces hold them. Read from durable state
+    /// only, so a roster costs no Herdr command.
+    pub(crate) fn other_space_agents(
+        &self,
+        socket: &str,
+        here: &SpaceId,
+    ) -> Result<(usize, Vec<String>), StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT c.worktree_id, c.alias
+             FROM alias_claims c
+             JOIN pane_addresses a USING (session_socket_id, worktree_id, address_id)
+             JOIN worktrees w USING (session_socket_id, worktree_id)
+             WHERE c.session_socket_id = ?1 AND c.worktree_id <> ?2
+               AND c.claim_state = 'active' AND a.retired = 0 AND a.pane_type = 'agent'
+               AND w.activated = 1 AND w.deactivated = 0
+               AND EXISTS (
+                    SELECT 1 FROM pane_bindings b
+                    WHERE b.session_socket_id = c.session_socket_id
+                      AND b.worktree_id = c.worktree_id
+                      AND b.address_id = c.address_id AND b.active = 1
+               )
+             ORDER BY c.alias",
+        )?;
+        let rows = statement
+            .query_map(params![socket, here.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let spaces: std::collections::BTreeSet<&str> =
+            rows.iter().map(|(space, _)| space.as_str()).collect();
+        let mut aliases: Vec<String> = rows.iter().map(|(_, alias)| alias.clone()).collect();
+        aliases.dedup();
+        Ok((spaces.len(), aliases))
+    }
+
     /// The copies an authored message produced, for receipts and replays.
     pub(crate) fn forwarded_copies(
         &self,
