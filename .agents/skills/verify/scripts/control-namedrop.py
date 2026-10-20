@@ -70,7 +70,8 @@ def read_envelopes(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "dashboard", "handoffs",
-                                              "shared-checkout", "stuck-wake", "idle-worker", "stale-runtime"],
+                                              "shared-checkout", "stuck-wake", "idle-worker", "stale-runtime",
+                                              "cross-workspace"],
                         default="names")
     parser.add_argument("--binary", type=Path, default=REPO / "target/debug/namedrop")
     args = parser.parse_args()
@@ -92,7 +93,7 @@ def main():
                HERDR_SOCKET_PATH=str(base / "run/herdr.sock"), SHELL=shutil.which("bash") or "/bin/bash")
     (base / "home/.bashrc").write_text('PROMPT_COMMAND=\': > "$HOME/ready-$HERDR_PANE_ID"\'\n')
     (base / "home/.bash_profile").write_text('. "$HOME/.bashrc"\n')
-    links_plugin = args.feature in ("stuck-wake", "idle-worker", "stale-runtime")
+    links_plugin = args.feature in ("stuck-wake", "idle-worker", "stale-runtime", "cross-workspace")
     state = base / ("state/herdr/plugins/namedrop" if links_plugin else "state/namedrop")
     server = None
     dashboard_pid = None
@@ -113,11 +114,11 @@ def main():
         with (evidence / "commands.jsonl").open("a") as log:
             log.write(json.dumps(row) + "\n")
 
-    def command(*argv, check=True, context=None, timeout=30, kind="host", cwd=None):
+    def command(*argv, check=True, context=None, timeout=30, kind="host", cwd=None, stdin=None):
         result = subprocess.run([str(a) for a in argv], env=dict(env, **(context or {})), cwd=cwd or base / "workspace",
-                                capture_output=True, text=True, timeout=timeout)
-        record({"kind": kind, "argv": [str(a) for a in argv], "exit": result.returncode,
-                "stdout": result.stdout, "stderr": result.stderr})
+                                capture_output=True, text=True, timeout=timeout, input=stdin)
+        record({"kind": kind, "argv": [str(a) for a in argv], **({"stdin": stdin} if stdin is not None else {}),
+                "exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr})
         if check and result.returncode:
             raise RuntimeError(result.stderr or result.stdout)
         return result
@@ -189,7 +190,8 @@ def main():
         wait(lambda: server.poll() is not None or Path(env["HERDR_SOCKET_PATH"]).exists(), "owned server socket")
         if server.poll() is not None:
             raise RuntimeError("Disposable server failed; see server.log")
-        created = host("workspace", "create", "--cwd", str(base / "workspace"), "--label", "Namedrop verification")
+        created = host("workspace", "create", "--cwd", str(base / "workspace"), "--label",
+                       "alpha" if args.feature == "cross-workspace" else "Namedrop verification")
         spaces = {"lead": created["workspace"]["workspace_id"]}
         panes = {"lead": created["root_pane"]["pane_id"]}
         panes["worker"] = host("tab", "create", "--workspace", spaces["lead"], "--cwd", str(base / "workspace"),
@@ -559,18 +561,44 @@ def main():
             finally:
                 save("stale-runtime.json", trace)
         elif links_plugin:
-            panes["lead-agent"] = host("tab", "create", "--workspace", spaces["lead"], "--cwd", str(base / "workspace"),
-                                       "--label", "Verification lead agent")["root_pane"]["pane_id"]
-            wait(lambda: (base / "home" / f"ready-{panes['lead-agent']}").exists(), "lead agent native bash prompt")
-            shell_pids.append(host("pane", "process-info", "--pane", panes["lead-agent"])["process_info"]["shell_pid"])
+            directories = {"lead": base / "workspace"}
+
+            def open_tab(key, space, label):
+                panes[key] = host("tab", "create", "--workspace", spaces[space], "--cwd", str(directories[space]),
+                                  "--label", label)["root_pane"]["pane_id"]
+                wait(lambda: (base / "home" / f"ready-{panes[key]}").exists(), f"{key} native bash prompt")
+                shell_pids.append(host("pane", "process-info", "--pane", panes[key])["process_info"]["shell_pid"])
+
+            if args.feature == "cross-workspace":
+                for space, label in (("beta", "Beta Space"), ("gamma", "gamma")):
+                    directories[space] = base / space
+                    directories[space].mkdir()
+                    command("git", "init", "--quiet", cwd=directories[space])
+                    created = host("workspace", "create", "--cwd", str(directories[space]), "--label", label)
+                    spaces[space] = created["workspace"]["workspace_id"]
+                    panes[space] = created["root_pane"]["pane_id"]
+                    wait(lambda: (base / "home" / f"ready-{panes[space]}").exists(), f"{space} native bash prompt")
+                    shell_pids.append(host("pane", "process-info", "--pane", panes[space])["process_info"]["shell_pid"])
+                    command("sh", root / "scripts/setup.sh", "activate", "--json", timeout=120, cwd=directories[space],
+                            context=dict(context, HERDR_WORKSPACE_ID=spaces[space], HERDR_PANE_ID=panes[space]))
+                open_tab("alpha-lead", "lead", "Verification alpha lead")
+                open_tab("beta-reviewer", "beta", "Verification beta reviewer")
+                cast = (("alpha-lead", "lead", "alpha-lead", "lead"), ("alpha-helper", "lead", "worker", "helper"),
+                        ("beta-lead", "beta", "beta", "lead"), ("beta-reviewer", "beta", "beta-reviewer", "reviewer"),
+                        ("gamma-lead", "gamma", "gamma", "lead"))
+            else:
+                open_tab("lead-agent", "lead", "Verification lead agent")
+                cast = (("lead", "lead", "lead-agent", "lead"), ("worker", "lead", "worker", "worker"))
             simulator = base / "codex"
             compile_simulator(simulator)
             renderer = base / "render.py"
             renderer.write_text(RENDERER)
-            agents = {role: {"pane": panes[key], "session": f"{index:08d}-1111-4111-8111-{index:012d}",
+            agents = {role: {"pane": panes[key], "space": spaces[space], "cwd": directories[space], "alias": alias,
+                             "session": f"{index:08d}-1111-4111-8111-{index:012d}",
                              "surface": base / f"{role}-surface", "envelopes": base / f"{role}-envelopes.jsonl",
                              "pids": base / f"{role}-pids"}
-                      for index, (role, key) in enumerate((("lead", "lead-agent"), ("worker", "worker")), 1)}
+                      for index, (role, space, key, alias) in enumerate(cast, 1)}
+            space_of = {agent["pane"]: agent["space"] for agent in agents.values()}
 
             def pane_row(role):
                 return next((p for p in host("pane", "list")["panes"] if p["pane_id"] == agents[role]["pane"]), {})
@@ -615,11 +643,11 @@ def main():
 
             def tool_environment(pane):
                 return {"HERDR_PLUGIN_STATE_DIR": str(state), "HERDR_SOCKET_PATH": env["HERDR_SOCKET_PATH"],
-                        "HERDR_WORKSPACE_ID": spaces["lead"], "HERDR_PANE_ID": pane}
+                        "HERDR_WORKSPACE_ID": space_of[pane], "HERDR_PANE_ID": pane}
 
             def as_agent(*argv, pane, **payload):
                 invocation = [str(launcher), "--plugin-state", str(state), "--herdr-socket", env["HERDR_SOCKET_PATH"],
-                              "--herdr-workspace", spaces["lead"], "--herdr-pane", pane, *map(str, argv)]
+                              "--herdr-workspace", space_of[pane], "--herdr-pane", pane, *map(str, argv)]
                 if payload:
                     invocation += ["--input-json", json.dumps(payload)]
                 result = command(*invocation, context=tool_environment(pane), check=False, kind="agent-cli")
@@ -641,8 +669,7 @@ def main():
                                  and (outcome is None or op["input"].get("outcome") == outcome))
                 bound_env = tool["environment"]
                 assert bound_env["HERDR_SOCKET_PATH"] == env["HERDR_SOCKET_PATH"], bound_env
-                assert bound_env["HERDR_WORKSPACE_ID"] == spaces["lead"], bound_env
-                assert bound_env["HERDR_PANE_ID"] in {agent["pane"] for agent in agents.values()}, bound_env
+                assert space_of.get(bound_env["HERDR_PANE_ID"]) == bound_env["HERDR_WORKSPACE_ID"], bound_env
                 assert bound_env["HERDR_PLUGIN_STATE_DIR"] == str(state), bound_env
                 payload = dict(operation["input"], **authored)
                 for field in ("attempt_id", "in_reply_to", "coordination_id", "assignment_id", "expected_revision", "request_id"):
@@ -675,8 +702,8 @@ def main():
                 host("pane", "report-agent-session", agent["pane"], "--source", "herdr:codex", "--agent", "codex",
                      "--agent-session-id", agent["session"])
                 observe(role, "idle")
-            for role, agent in agents.items():
-                as_agent("name", role, "--type", "agent", pane=agent["pane"])
+            for agent in agents.values():
+                as_agent("name", agent["alias"], "--type", "agent", pane=agent["pane"])
             for role in agents:
                 observe(role, "working")
                 observe(role, "idle")
@@ -685,9 +712,9 @@ def main():
                 found = rows("SELECT address_id, agent_session_id FROM integration_registrations WHERE active = 1")
                 return found if {session for _, session in found} == expected_sessions else None
 
-            registrations = wait(active_registrations, "active registrations for both simulated sessions")
+            registrations = wait(active_registrations, "active registrations for every simulated session")
             roster = cli("doctor", "--json", allowed=(0, 1))
-            assert roster["data"]["available_agents"] == 2, roster
+            assert roster["data"]["available_agents"] == sum(a["space"] == spaces["lead"] for a in agents.values()), roster
 
             if args.feature == "stuck-wake":
                 begun = as_agent("handoff", "begin", pane=agents["lead"]["pane"], request_id="stuck-wake-begin",
@@ -782,7 +809,7 @@ def main():
                 save_wake_evidence(polls, events_in_window, stalled=False, settled_at_ms=settled_at_ms, arrived_at_ms=arrived_at_ms,
                                    settled_after_ms=settled_at_ms - t0, arrived_after_ms=arrived_at_ms - t0,
                                    doctor_after_settle=doctor_after_settle, doctor_after_report=doctor_after_report)
-            else:
+            elif args.feature == "idle-worker":
                 lead_pane = agents["lead"]["pane"]
                 trace = {"panes": panes, "sessions": {role: agent["session"] for role, agent in agents.items()},
                          "simulator_pids": {role: agent["pids"].read_text().split() for role, agent in agents.items()},
@@ -912,6 +939,186 @@ def main():
                     if summary.get("outcome") != "passed":
                         backup_database()
                     save("idle-worker.json", trace)
+                    for role, agent in agents.items():
+                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
+            else:
+                summary["limits"] += (" Each prompt hook runs as a host process that Herdr vouches for through the pane's"
+                                      " CODEX_SESSION_ID, not as a child of a real agent process. Herdr cannot list"
+                                      " notifications, so the hook's \"Sent to\" banner is unobserved; the relay is"
+                                      " observed through the reply's receipt and the source pane's metadata. No person"
+                                      " answers the workspace picker.")
+                hook_executable = [launcher, "hook", "user-prompt-submit", "--state-directory", state]
+                wrappers = {runtime: base / "home" / directory / "skills/namedrop/scripts/user-prompt-submit"
+                            for runtime, directory in (("codex", ".agents"), ("claude", ".claude"))}
+                blocked = {"decision": "block", "reason": "Collaboration message sent."}
+                expected = dict.fromkeys(agents, 0)
+                trace = {"panes": panes, "spaces": spaces, "sessions": {role: agent["session"] for role, agent in agents.items()},
+                         "registrations": registrations, "requirements": {}}
+
+                def require(condition, requirement, observed):
+                    trace["requirements"][requirement] = {"passed": bool(condition), "observed": observed}
+                    if not condition:
+                        summary["outcome"] = requirement
+                        raise RuntimeError(f"cross-workspace: {requirement}; observed {observed}")
+
+                def hook(role, prompt, executable=hook_executable):
+                    agent = agents[role]
+                    payload = {"hook_event_name": "UserPromptSubmit", "session_id": agent["session"],
+                               "cwd": str(agent["cwd"]), "prompt": prompt}
+                    result = command(*executable, stdin=json.dumps(payload), check=False, kind="hook", cwd=agent["cwd"],
+                                     context=dict(tool_environment(agent["pane"]), CODEX_SESSION_ID=agent["session"]))
+                    try:
+                        output = json.loads(result.stdout)
+                    except ValueError:
+                        output = None
+                    return {"role": role, "prompt": prompt, "exit": result.returncode, "stdout": result.stdout,
+                            "stderr": result.stderr, "output": output}
+
+                def wake(role):
+                    # The generated wrapper runs this after a block; a bare hook call never drains.
+                    agent = agents[role]
+                    command(launcher, "hook", "mailbox-wake", "--state-directory", state, stdin="", kind="wake",
+                            cwd=agent["cwd"], context=dict(tool_environment(agent["pane"]), CODEX_SESSION_ID=agent["session"]))
+
+                def counts():
+                    return {role: len(read_envelopes(agent["envelopes"])) for role, agent in agents.items()}
+
+                def deliveries(step, recipients):
+                    for role in recipients:
+                        expected[role] += 1
+                    try:
+                        wait(lambda: counts() == expected, f"{step} envelopes")
+                    except RuntimeError:
+                        pass
+                    time.sleep(3)
+                    observed = counts()
+                    require(observed == expected, f"{step}: exactly {recipients or 'nobody'} receive a new envelope", observed)
+                    return {role: read_envelopes(agents[role]["envelopes"])[-1] for role in recipients}
+
+                def message_state():
+                    return {table: rows(f"SELECT COUNT(*) FROM {table}")[0][0] for table in
+                            ("collaboration_messages", "mailbox_deliveries", "delivery_attempts", "bridged_messages",
+                             "space_envoys")}
+
+                def sender_workspace(envelope):
+                    return envelope["control"]["sender"].get("workspace")
+
+                def relay_token(role):
+                    return host("pane", "get", agents[role]["pane"])["pane"].get("tokens", {}).get("namedrop-relay")
+
+                try:
+                    listed = trace["workspace_list"] = host("workspace", "list")
+                    labels = {w["workspace_id"]: w.get("label") for w in listed["workspaces"]}
+                    require(labels == {spaces["lead"]: "alpha", spaces["beta"]: "Beta Space", spaces["gamma"]: "gamma"},
+                            "g: herdr workspace list reports the labels alpha, Beta Space and gamma", labels)
+                    for runtime, wrapper in wrappers.items():
+                        require(wrapper.is_file(), f"h: activation installed the {runtime} wrapper", str(wrapper))
+                        (evidence / f"{runtime}-user-prompt-submit.sh").write_text(wrapper.read_text())
+
+                    sent = trace["a"] = hook("alpha-lead", "#beta-space @lead hi")
+                    require(sent["exit"] == 0 and sent["output"] == blocked,
+                            "a: the hook blocks with the literal Collaboration message sent.", sent["stdout"])
+                    wake("alpha-lead")
+                    arrived = deliveries("a", ["beta-lead"])["beta-lead"]
+                    require(arrived["untrusted_body"].endswith("hi"), "a: Beta Space's lead receives the prompt",
+                            arrived["untrusted_body"])
+                    require(sender_workspace(arrived) == "alpha", "a: the envelope's sender names workspace alpha",
+                            arrived["control"]["sender"])
+                    inbox = as_agent("delivery", "inbox", pane=agents["beta-lead"]["pane"])["envelopes"]
+                    require(arrived in inbox, "a: Beta Space's lead's delivery inbox holds the received envelope",
+                            [e["control"]["attempt_id"] for e in inbox])
+                    inbox = as_agent("delivery", "inbox", pane=agents["alpha-lead"]["pane"])["envelopes"]
+                    require(inbox == [], "a: alpha's lead owes no delivery", [e["control"]["attempt_id"] for e in inbox])
+                    bridged = trace["bridged_after_a"] = rows("SELECT worktree_id, origin_space_id, origin_label_snapshot "
+                                                              "FROM bridged_messages")
+                    require([row[:2] for row in bridged] == [(spaces["beta"], spaces["lead"])],
+                            "g: #beta-space forwarded into the workspace labelled Beta Space", bridged)
+
+                    operation = next(op for op in arrived["control"]["tool"]["operations"] if op["token"] == "reply")
+                    prefill = operation["input"].get("source", "")
+                    require(prefill == "@lead <reply body>", "b: the bound reply addresses the sender without a workspace",
+                            prefill)
+                    replied = trace["b"] = bound(arrived, "reply", source=prefill.replace("<reply body>", "Beta lead here."))
+                    relay = replied.get("relay") or {}
+                    require(relay.get("notification_shown") is True and relay.get("metadata_error") is None,
+                            "b: the reply shows the human relay notification and reports pane metadata", relay)
+                    returned = deliveries("b", ["alpha-lead"])["alpha-lead"]
+                    require(returned["untrusted_body"] == "Beta lead here." and
+                            returned["control"]["reply_mode"] == "report_to_human",
+                            "b: alpha's lead receives the reply as a report to the human",
+                            {"body": returned["untrusted_body"], "reply_mode": returned["control"]["reply_mode"]})
+                    targets = trace["relay_tokens"] = {role: relay_token(role) for role in ("alpha-lead", "beta-lead")}
+                    require(targets == {"alpha-lead": "@lead: Beta lead here.", "beta-lead": None},
+                            "b: the relay metadata targets alpha's lead pane only", targets)
+                    bound(returned, "complete.no-reply")
+
+                    wrapped = trace["h_send"] = hook("alpha-lead", "#beta-space @lead hi from the wrapper",
+                                                     [wrappers["codex"]])
+                    require(wrapped["exit"] == 0 and wrapped["output"] == blocked,
+                            "h: the installed codex wrapper passes the block through", wrapped["stdout"])
+                    forwarded = deliveries("h-send", ["beta-lead"])["beta-lead"]
+                    require(forwarded["untrusted_body"].endswith("hi from the wrapper") and sender_workspace(forwarded) == "alpha",
+                            "h: the wrapper's own mailbox wake delivers to Beta Space's lead",
+                            {"body": forwarded["untrusted_body"], "sender": forwarded["control"]["sender"]})
+                    bound(forwarded, "complete.no-reply")
+
+                    local = trace["c"] = hook("alpha-helper", "@lead local check")
+                    require(local["output"] == blocked, "c: the hook blocks an unqualified local send", local["stdout"])
+                    wake("alpha-helper")
+                    stayed = deliveries("c", ["alpha-lead"])["alpha-lead"]
+                    require(stayed["untrusted_body"].endswith("local check") and sender_workspace(stayed) is None,
+                            "c: alpha's own lead receives it with a local sender",
+                            {"body": stayed["untrusted_body"], "sender": stayed["control"]["sender"]})
+                    bound(stayed, "complete.no-reply")
+
+                    remote = trace["d"] = hook("alpha-helper", "@reviewer please review")
+                    require(remote["output"] == blocked, "d: the hook blocks an unqualified send to a remote-only name",
+                            remote["stdout"])
+                    wake("alpha-helper")
+                    reviewed = deliveries("d", ["beta-reviewer"])["beta-reviewer"]
+                    require(reviewed["untrusted_body"].endswith("please review") and sender_workspace(reviewed) == "alpha",
+                            "d: Beta Space's reviewer receives it from alpha",
+                            {"body": reviewed["untrusted_body"], "sender": reviewed["control"]["sender"]})
+                    bound(reviewed, "complete.no-reply")
+
+                    everyone = trace["f"] = hook("alpha-helper", "#all @lead status")
+                    require(everyone["output"] == blocked, "f: the hook blocks #all", everyone["stdout"])
+                    wake("alpha-helper")
+                    leads = deliveries("f", ["alpha-lead", "beta-lead", "gamma-lead"])
+                    require(all(e["untrusted_body"].endswith("status") for e in leads.values()),
+                            "f: every workspace's lead receives the status prompt",
+                            {role: e["untrusted_body"] for role, e in leads.items()})
+                    for envelope in leads.values():
+                        bound(envelope, "complete.no-reply")
+
+                    named = cli("address", "list", "--json")["data"]
+                    lead_address = next(a for a in named if a["alias"] == "lead")
+                    removed = trace["e_remove"] = body("address", "remove", address_id=lead_address["id"])
+                    remaining = sorted(a["alias"] for a in cli("address", "list", "--json")["data"])
+                    require(removed["removed"] is True and "lead" not in remaining,
+                            "e: alpha's lead name is removed", {"removed": removed, "remaining": remaining})
+                    before = trace["e_state_before"] = message_state()
+                    picked = trace["e"] = hook("alpha-helper", "@lead who should take this?")
+                    context_text = ((picked["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                    require(context_text.startswith("Namedrop workspace roster."),
+                            "e: the hook answers with roster-marked additionalContext", picked["stdout"])
+                    require("@lead is not named in this workspace. It is named in these workspaces: #beta-space, #gamma."
+                            in context_text and "Nothing was sent" in context_text,
+                            "e: the picker lists Beta Space and gamma and says nothing was sent", context_text)
+                    wake("alpha-helper")
+                    deliveries("e", [])
+                    require(message_state() == before, "e: the picker persists nothing", message_state())
+                    for runtime, wrapper in wrappers.items():
+                        wrapped = trace[f"h_picker_{runtime}"] = hook("alpha-helper", "@lead who should take this?", [wrapper])
+                        require(wrapped["exit"] == 0 and wrapped["stdout"] == picked["stdout"],
+                                f"h: the installed {runtime} wrapper passes the picker through unchanged", wrapped["stdout"])
+                    deliveries("h-picker", [])
+                    require(message_state() == before, "h: the wrapped pickers persist nothing", message_state())
+                    summary["outcome"] = "passed"
+                finally:
+                    if summary.get("outcome") != "passed":
+                        backup_database()
+                    save("cross-workspace.json", trace)
                     for role, agent in agents.items():
                         save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
         backup_database()
