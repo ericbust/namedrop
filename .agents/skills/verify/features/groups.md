@@ -27,7 +27,7 @@ Preconditions:
 - The recipe saves `@reviewer` and `@tester` with agent type, then runs the exact `group set` command above.
 - It runs `group list --json` and asserts one `review-team` group whose member aliases are exactly `reviewer` and `tester`. Inspect `groups.json` and `commands.jsonl`.
 - It removes `review-team` and requires `removed: true`. A second group list must return an empty `data.groups`, and `address list` must still contain `reviewer` and `tester`.
-- It requires `group set` with no members to be rejected. It then names the worker pane `@build` as a terminal and records whether a group `ops` containing only `build` is accepted, in `group-probes.json`. Today it is accepted; see Gotchas.
+- It requires `group set` with no members to be rejected. It then names the worker pane `@build` as a terminal. That pane already holds `@tester`, so this renames it and changes its type. The recipe records whether a group `ops` containing only `build` is accepted, in `group-probes.json`. Today it is accepted; see Gotchas.
 - It saves a group `solo` whose only member is `reviewer`, the lead pane's own name, then sends `@solo Note to self.` from that pane. The send must be refused with `addressed only to its author` and leave the database unchanged. `group-probes.json` keeps the refusal.
 - To drive the group prompt entry point in an authorized disposable agent session, enter `@review-team Review this fixture change.` from a session that is not a member. Observe each recipient envelope and its final reply. A member that sends to its own group gets no envelope of its own. Edit the group, then repeat the send with the same `request_id`. The replay must return the original message ID and recipient IDs. This path is not exercised by the helper.
 

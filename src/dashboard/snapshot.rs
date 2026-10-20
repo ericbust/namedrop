@@ -26,7 +26,7 @@ impl SpaceKey {
             namespace.session_socket_id,
             namespace.space_id.as_str()
         ));
-        Self(format!("{digest:x}")[..20].to_owned())
+        Self(crate::lower_hex(&digest)[..20].to_owned())
     }
 
     pub fn parse(segment: &str) -> Option<Self> {

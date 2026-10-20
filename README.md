@@ -72,7 +72,7 @@ You need:
 - **macOS on Apple silicon** or **Linux on x86_64** with glibc.
 - **[Herdr](https://herdr.dev) 0.7.5 or newer**.
 - **Codex or Claude Code**, and **Python 3.9 or newer** on `PATH`.
-- **Git, Rust 1.97 or newer, and a C compiler and linker**, because Herdr builds Namedrop from source. On macOS, Apple's command-line developer tools provide the compiler.
+- **Git, Rust 1.97 or newer, and a C compiler and linker**, because Herdr builds Namedrop from source. On macOS, Apple's command-line developer tools provide the compiler. A [release archive](#install-from-a-release-archive) doesn't need these.
 
 On Linux, install from a local Herdr workspace. A remote workspace installs Namedrop on the remote host. With Codex on Linux, Agent status summaries and persona suggestions also need Landlock and the official static Codex executable. `namedrop doctor` tells you what's missing. Linux aarch64 builds pass CI but nobody has tested them by hand yet.
 
@@ -96,6 +96,25 @@ herdr plugin pane open --plugin namedrop --entrypoint setup
 Herdr shows an install preview, then builds the executable and manages the checkout. Review the preview before you confirm. The setup tab activates Namedrop, shows any errors and next steps, and waits for Enter. **Keep Herdr running during setup. It doesn't need a restart.**
 
 If you already use a local Namedrop checkout, follow the [migration steps](docs/operations.md#migrate-a-local-link-to-a-managed-installation) first. Herdr won't install over a local link.
+
+### Install from a release archive
+
+Each [release](https://github.com/ericbust/namedrop/releases) has an archive with a prebuilt executable for each platform, so you don't need Git, Rust or a compiler. Download the `.tar.gz` and its `.sha256` file for your platform, then check and extract the archive. On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`.
+
+```sh
+sha256sum -c namedrop-<version>-<target>.tar.gz.sha256
+tar -xzf namedrop-<version>-<target>.tar.gz
+```
+
+Keep the extracted directory. Herdr runs Namedrop from it, so moving or deleting it breaks the installation. Then open a terminal in the Herdr workspace where you want to use Namedrop, and run setup from the extracted directory:
+
+```sh
+sh namedrop-<version>-<target>/scripts/setup.sh install
+```
+
+Setup checks that the executable runs on your machine, links the directory with Herdr, and activates Namedrop. Then [check the shell command](#check-the-shell-command) and [connect your agents](#connect-your-agents).
+
+An archive installation doesn't use **Update Namedrop**. To update, extract the new release to a new directory and follow the [manual upgrade steps](docs/operations.md#manual-upgrade). To remove it, use `herdr plugin unlink namedrop`, as [Uninstall](#uninstall) describes. The archives aren't signed or notarized, and nobody has tested a downloaded copy on macOS yet.
 
 ### Check the shell command
 

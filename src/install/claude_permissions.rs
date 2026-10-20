@@ -42,7 +42,7 @@ struct JournalUpdate {
 }
 fn snapshot_hash(text: &Option<String>) -> Option<String> {
     text.as_ref()
-        .map(|text| format!("{:x}", Sha256::digest(text.as_bytes())))
+        .map(|text| crate::lower_hex(&Sha256::digest(text.as_bytes())))
 }
 #[derive(Clone)]
 struct SettingsUpdate {

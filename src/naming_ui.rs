@@ -777,7 +777,7 @@ fn manage_prompt(
         };
         notice = match result {
             Ok(data) => {
-                let warning = if needs_terminal_watcher(&data) {
+                let warning = if needs_mailbox_watcher(&data) {
                     wake_runtime_mailboxes(runtime).err()
                 } else {
                     None

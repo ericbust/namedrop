@@ -1,0 +1,19 @@
+name: Release check
+
+# Separate from CI so adding or removing a label doesn't rerun the test matrix.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  release-check:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-release') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - run: sh scripts/release.sh check "origin/${{ github.base_ref }}"

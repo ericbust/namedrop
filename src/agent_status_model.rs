@@ -316,7 +316,7 @@ fn digest(input: &WorkerInput, model: &str) -> String {
     // The payload carries identities and meaningful state but no collection
     // timestamp, so a re-collection that changed nothing still hits the cache.
     hasher.update(input.payload.as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::lower_hex(&hasher.finalize())
 }
 
 /// Resolves the worker binary, allowing tests to substitute a fake CLI the same

@@ -352,6 +352,10 @@ impl HerdrCommandExecutor for FakeHerdr {
         self.clock
             .advance(self.command_cost_ms.load(Ordering::Relaxed));
         let stdout = match args {
+            ["workspace", "list"] => {
+                json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
+                    .to_string()
+            }
             ["worktree", "list", "--workspace", "workspace-1", "--json"]
             | ["worktree", "list", "--cwd", _, "--json"] => {
                 json!({"result":{"worktrees":[{"path":self.worktree,"open_workspace_id":"workspace-1"}]}})

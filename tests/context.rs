@@ -108,6 +108,10 @@ impl FakeHerdr {
 impl HerdrCommandExecutor for FakeHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let mut stdout = match args {
+            ["workspace", "list"] => {
+                serde_json::json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
+                    .to_string()
+            }
             ["worktree", "list", "--cwd", cwd, "--json"]
                 if *cwd == *self.worktree.lock().unwrap() =>
             {

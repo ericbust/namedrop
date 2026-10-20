@@ -1411,7 +1411,7 @@
     },
     {
       "token": "delivery.acknowledge",
-      "description": "Only after explicit human review and confirmation: acknowledge the missing-disposition warning on a settled delivery attempt whose recipient address is retired. Records the acknowledgement and clears only that warning; does not record a disposition, change the delivery, or resend anything. Refused while the recipient is not retired. Outside the registered capability and automatic-permission profile.",
+      "description": "Only after explicit human review and confirmation: acknowledge the missing-disposition warning on a settled delivery attempt whose recipient address is retired or whose exact session was replaced on a live name. Records the acknowledgement and clears only that warning; does not record a disposition, change the delivery, or resend anything. Refused while the recipient is not retired and no newer session has been seen on its name. Outside the registered capability and automatic-permission profile.",
       "argv": ["delivery", "acknowledge"],
       "input_schema": {
         "type": "object",
@@ -1423,7 +1423,7 @@
         }
       },
       "examples": [{
-        "description": "After the human confirms the recipient is retired and asks to clear the missing-disposition warning.",
+        "description": "After the human confirms the recipient is retired or its session was replaced, and asks to clear the missing-disposition warning.",
         "input": {"attempt_id": "attempt-1", "confirmed": true}
       }]
     },

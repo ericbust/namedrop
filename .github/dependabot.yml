@@ -1,0 +1,21 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # Workflow files never reach users, so these updates need no release.
+    labels: [no-release]
+    groups:
+      github-actions:
+        patterns: ["*"]
+    ignore:
+      # The toolchain version is the crate's rust-version, so CI tests the minimum supported Rust.
+      - dependency-name: dtolnay/rust-toolchain
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ["*"]

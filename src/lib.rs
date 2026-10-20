@@ -36,7 +36,7 @@ pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integratio
 
 pub use context::{execute_context_operation, execute_human_context_operation};
 pub use controls::execute_control_operation;
-pub use delivery::{DrainReport, drain_mailboxes};
+pub use delivery::{DrainReport, GraceDeadline, drain_mailboxes};
 pub(crate) use delivery::{drain_receipt, publish_status_metadata, reconcile_delivery_state};
 pub use domain::*;
 pub use groups::execute_group_operation;
@@ -72,7 +72,7 @@ pub(crate) use integration::{collaboration_executable, tool_environment};
 pub use lifecycle::{
     DiscoveredPane, DiscoveredWorktree, LifecycleRuntime, discover_worktree,
     discover_worktree_for_workspace, execute_lifecycle_operation, locate_agent_session_pane,
-    reconcile_discovered_panes,
+    pane_workspace, reconcile_discovered_panes,
 };
 pub use message::{
     ParsedMessage, RecipientOutlook, execute_message_operation, parse_mentions,
@@ -211,4 +211,22 @@ pub fn is_control_operation(operation: &str) -> bool {
 /// Tag JSON schema failures at the input boundary, before operational work.
 pub(crate) fn input_schema_error(error: serde_json::Error) -> String {
     format!("invalid operation input: {error}")
+}
+
+#[doc(hidden)]
+pub fn lower_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn lower_hex_matches_the_sha256_digests_earlier_releases_persisted() {
+        assert_eq!(
+            super::lower_hex(&Sha256::digest(b"abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 }

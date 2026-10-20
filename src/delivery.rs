@@ -1,21 +1,22 @@
 use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate,
-    HerdrCommandExecutor, IdGenerator, IntegrationToolInvocation, LeaseDraft, LifecycleRuntime,
-    MutationAttribution, PromptFailureKind, StateNamespace, StateStore, StateTransaction,
-    StoreError, collaboration_executable, discover_worktree, discover_worktree_for_workspace,
-    tool_environment,
+    HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
+    LeaseDraft, LifecycleRuntime, MutationAttribution, PromptFailureKind, StateNamespace,
+    StateStore, StateTransaction, StoreError, collaboration_executable, discover_worktree,
+    discover_worktree_for_workspace, tool_environment,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const LEASE_DURATION_MS: u64 = 30_000;
 const ACKNOWLEDGEMENT_GRACE_MS: u64 = 30_000;
 const QUEUED_HOLD_AFTER_MS: u64 = 24 * 60 * 60 * 1_000;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DrainReport {
     pub terminal_waiting: Vec<crate::PaneAddressId>,
     pub terminal_running: Vec<DeliveryAttemptId>,
+    #[serde(skip_deserializing)]
     pub delivery_notice: &'static str,
     pub submitted: Vec<DeliveryAttemptId>,
     pub requeued: Vec<DeliveryAttemptId>,
@@ -23,6 +24,15 @@ pub struct DrainReport {
     pub settled: Vec<DeliveryAttemptId>,
     pub held: Vec<DeliveryAttemptId>,
     pub expired: Vec<crate::DeliveryId>,
+    pub pending_grace: Vec<GraceDeadline>,
+}
+
+/// An idle submitted or acknowledged attempt still inside the acknowledgement
+/// grace. The drain observes it again at `due_at_ms`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GraceDeadline {
+    pub attempt_id: DeliveryAttemptId,
+    pub due_at_ms: u64,
 }
 
 impl Default for DrainReport {
@@ -37,7 +47,25 @@ impl Default for DrainReport {
             settled: Vec::new(),
             held: Vec::new(),
             expired: Vec::new(),
+            pending_grace: Vec::new(),
         }
+    }
+}
+
+impl DrainReport {
+    pub fn awaits_retry(&self) -> bool {
+        !self.requeued.is_empty() || self.awaits_terminal()
+    }
+
+    pub fn awaits_terminal(&self) -> bool {
+        !self.terminal_waiting.is_empty() || !self.terminal_running.is_empty()
+    }
+
+    pub fn next_grace_due_ms(&self) -> Option<u64> {
+        self.pending_grace
+            .iter()
+            .map(|deadline| deadline.due_at_ms)
+            .min()
     }
 }
 
@@ -61,6 +89,7 @@ where
 pub(crate) struct DeliveryReconciliationReport {
     pub settled: Vec<DeliveryAttemptId>,
     pub held: Vec<DeliveryAttemptId>,
+    pub pending_grace: Vec<GraceDeadline>,
 }
 
 pub(crate) fn reconcile_delivery_state(
@@ -114,41 +143,8 @@ pub(crate) fn reconcile_delivery_state(
             // claimed runner can persist an exit status and settle this work.
             continue;
         }
-        let same_session = attempt.binding_active
-            && pane.and_then(|pane| pane.agent_session_id.as_ref())
-                == Some(&attempt.agent_session_id);
-        let session_is_settled = pane
-            .and_then(|pane| pane.agent_status.as_deref())
-            .is_some_and(|status| matches!(status, "idle" | "done"));
-        let acknowledgement_grace_elapsed = attribution
-            .occurred_at_ms
-            .saturating_sub(attempt.created_at_ms)
-            >= ACKNOWLEDGEMENT_GRACE_MS;
-        let must_hold = (restart
-            && matches!(
-                attempt.state,
-                DeliveryState::Dispatching | DeliveryState::Submitted
-            ))
-            || !same_session
-            || (attempt.state == DeliveryState::Dispatching
-                && attempt
-                    .lease_expires_at_ms
-                    .is_none_or(|expires_at_ms| expires_at_ms <= attribution.occurred_at_ms))
-            || (attempt.state == DeliveryState::Submitted
-                && session_is_settled
-                && acknowledgement_grace_elapsed);
-        let next = if must_hold {
-            Some(DeliveryState::Held)
-        } else if attempt.state == DeliveryState::Acknowledged
-            && session_is_settled
-            && acknowledgement_grace_elapsed
-        {
-            Some(DeliveryState::Settled)
-        } else {
-            None
-        };
-        match next {
-            Some(DeliveryState::Held) => {
+        match observe_agent_attempt(&attempt, pane, restart, attribution.occurred_at_ms) {
+            Observation::Hold => {
                 transaction.transition_delivery_attempt(
                     namespace,
                     &attempt.attempt_id,
@@ -157,19 +153,58 @@ pub(crate) fn reconcile_delivery_state(
                 )?;
                 report.held.push(attempt.attempt_id);
             }
-            Some(DeliveryState::Settled) => {
-                transaction.transition_delivery_attempt(
-                    namespace,
-                    &attempt.attempt_id,
-                    DeliveryState::Settled,
-                    attribution,
-                )?;
+            Observation::Settle => {
+                transaction.settle_observed_attempt(namespace, &attempt.attempt_id, attribution)?;
                 report.settled.push(attempt.attempt_id);
             }
-            Some(_) | None => {}
+            Observation::PendingGrace { due_at_ms } => report.pending_grace.push(GraceDeadline {
+                attempt_id: attempt.attempt_id,
+                due_at_ms,
+            }),
+            Observation::Unchanged => {}
         }
     }
     Ok(report)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Observation {
+    Hold,
+    Settle,
+    PendingGrace { due_at_ms: u64 },
+    Unchanged,
+}
+
+fn observe_agent_attempt(
+    attempt: &InflightDeliveryAttempt,
+    pane: Option<&DiscoveredPane>,
+    restart: bool,
+    now_ms: u64,
+) -> Observation {
+    let same_session = attempt.binding_active
+        && pane.and_then(|pane| pane.agent_session_id.as_ref()) == Some(&attempt.agent_session_id);
+    let session_is_settled = pane
+        .and_then(|pane| pane.agent_status.as_deref())
+        .is_some_and(|status| matches!(status, "idle" | "done"));
+    let grace_due_at_ms = attempt
+        .created_at_ms
+        .saturating_add(ACKNOWLEDGEMENT_GRACE_MS);
+    let idle_past_grace = session_is_settled && now_ms >= grace_due_at_ms;
+    let lease_expired = attempt
+        .lease_expires_at_ms
+        .is_none_or(|expires_at_ms| expires_at_ms <= now_ms);
+    match attempt.state {
+        _ if !same_session => Observation::Hold,
+        DeliveryState::Dispatching if restart || lease_expired => Observation::Hold,
+        DeliveryState::Submitted if restart || idle_past_grace => Observation::Hold,
+        DeliveryState::Acknowledged if idle_past_grace => Observation::Settle,
+        DeliveryState::Submitted | DeliveryState::Acknowledged if session_is_settled => {
+            Observation::PendingGrace {
+                due_at_ms: grace_due_at_ms,
+            }
+        }
+        _ => Observation::Unchanged,
+    }
 }
 
 pub(crate) fn publish_status_metadata<E, C, I>(
@@ -322,6 +357,7 @@ where
         settled: reconciled.settled,
         held: reconciled.held,
         expired,
+        pending_grace: reconciled.pending_grace,
         ..DrainReport::default()
     };
 
@@ -599,4 +635,98 @@ fn live_candidate_matches(
                         .is_some_and(|status| matches!(status, "idle" | "done"))
             }
     })
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::*;
+    use crate::{AgentSessionId, PaneAddressId, PaneBindingId};
+
+    const CREATED_AT_MS: u64 = 1_000;
+
+    fn attempt(state: DeliveryState) -> InflightDeliveryAttempt {
+        InflightDeliveryAttempt {
+            attempt_id: DeliveryAttemptId::new("attempt-1"),
+            address_id: PaneAddressId::new("address-1"),
+            binding_id: PaneBindingId::new("binding-1"),
+            state,
+            binding_active: true,
+            pane_id: "pane-1".to_owned(),
+            agent_session_id: AgentSessionId::new("session-1"),
+            created_at_ms: CREATED_AT_MS,
+            lease_expires_at_ms: None,
+        }
+    }
+
+    fn pane(session: &str, status: &str) -> DiscoveredPane {
+        DiscoveredPane {
+            pane_id: "pane-1".to_owned(),
+            terminal_id: "terminal-1".to_owned(),
+            tab_id: "tab-1".to_owned(),
+            workspace_id: "workspace-1".to_owned(),
+            cwd: None,
+            pane_label: None,
+            agent_session_id: Some(AgentSessionId::new(session)),
+            agent: None,
+            occupant_label: None,
+            agent_status: Some(status.to_owned()),
+            idle_state_label: None,
+        }
+    }
+
+    #[test]
+    fn an_inflight_attempt_is_observed_against_its_session_and_the_grace() {
+        let pending = Observation::PendingGrace {
+            due_at_ms: CREATED_AT_MS + ACKNOWLEDGEMENT_GRACE_MS,
+        };
+        let cases = [
+            (
+                DeliveryState::Acknowledged,
+                "session-1",
+                "idle",
+                29_000,
+                pending,
+            ),
+            (
+                DeliveryState::Acknowledged,
+                "session-1",
+                "idle",
+                30_000,
+                Observation::Settle,
+            ),
+            (
+                DeliveryState::Submitted,
+                "session-1",
+                "idle",
+                10_000,
+                pending,
+            ),
+            (
+                DeliveryState::Acknowledged,
+                "session-1",
+                "working",
+                29_000,
+                Observation::Unchanged,
+            ),
+            (
+                DeliveryState::Acknowledged,
+                "session-2",
+                "idle",
+                29_000,
+                Observation::Hold,
+            ),
+        ];
+        for (state, session, status, elapsed_ms, expected) in cases {
+            assert_eq!(
+                observe_agent_attempt(
+                    &attempt(state),
+                    Some(&pane(session, status)),
+                    false,
+                    CREATED_AT_MS + elapsed_ms,
+                ),
+                expected,
+                "{state:?} on {session} {status} after {elapsed_ms} ms"
+            );
+        }
+    }
 }

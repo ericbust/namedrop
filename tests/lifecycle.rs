@@ -6,8 +6,8 @@ use namedrop::{
     PaneAddressId, PaneAddressLifecycle, PaneBindingId, PaneRoleId, PaneRolePreset, StateNamespace,
     StateStore, StoreErrorKind, ThreadId, WorktreeId, discover_worktree,
     discover_worktree_for_workspace, execute_lifecycle_operation, execute_message_operation,
-    locate_agent_session_pane, normalize_alias, package_directory, reconcile_discovered_panes,
-    validate_alias,
+    locate_agent_session_pane, normalize_alias, package_directory, pane_workspace,
+    reconcile_discovered_panes, validate_alias,
 };
 use rusqlite::Connection;
 use std::{
@@ -96,6 +96,10 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
     impl HerdrCommandExecutor for NameHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                        .to_owned()
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -199,6 +203,10 @@ fn name_leaves_a_tab_shared_by_two_agents_unchanged() {
     impl HerdrCommandExecutor for MultiPaneHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                        .to_owned()
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -278,6 +286,9 @@ fn name_succeeds_with_a_warning_when_the_cosmetic_tab_label_cannot_be_applied() 
     impl HerdrCommandExecutor for RenameFailureHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -376,6 +387,9 @@ fn managed_singleton_tab_labels_restore_only_while_the_plugin_still_owns_them() 
     impl HerdrCommandExecutor for ManagedLabelHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#.to_owned()
@@ -550,6 +564,10 @@ fn assert_native_session_events(events: &[(Option<&'static str>, serde_json::Val
     impl HerdrCommandExecutor for PendingSessionHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                        .to_owned()
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"]
                 | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
@@ -682,6 +700,10 @@ fn name_upgrades_an_existing_address_to_zero_turn_registration() {
     impl HerdrCommandExecutor for UpgradeHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                        .to_owned()
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -847,6 +869,9 @@ fn restart_reconciliation_refreshes_panes_before_delivery_drain() {
     impl HerdrCommandExecutor for CountingHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -913,6 +938,9 @@ fn activation_keeps_dispatch_gated_when_initial_reconciliation_fails() {
     impl HerdrCommandExecutor for FakeHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -1144,6 +1172,9 @@ fn herdr_discovery_and_restart_reconciliation_fail_closed() {
     impl HerdrCommandExecutor for FakeHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"source":{"source_workspace_id":"workspace-1"},"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -1284,6 +1315,58 @@ fn workspace_discovery_rejects_successful_snapshots_that_omit_the_requested_spac
 }
 
 #[test]
+fn workspace_discovery_attaches_a_second_space_on_the_source_checkout() {
+    struct SharedCheckoutHerdr;
+    impl HerdrCommandExecutor for SharedCheckoutHerdr {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            match args {
+                ["worktree", "list", "--workspace", "space-b", "--json"] => {
+                    Ok(HerdrCommandOutput {
+                        stdout: r#"{"result":{"source":{"repo_key":"/repo/.git","repo_name":"repo","repo_root":"/repo","source_checkout_path":"/repo","source_workspace_id":"space-b"},"worktrees":[{"path":"/repo","open_workspace_id":"space-a","label":"repo","branch":"main","is_linked_worktree":false}]}}"#.to_owned(),
+                    })
+                }
+                ["pane", "list", "--workspace", "space-b"] => Ok(HerdrCommandOutput {
+                    stdout: r#"{"result":{"panes":[{"pane_id":"space-b:pane-1","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"space-b"}]}}"#.to_owned(),
+                }),
+                _ => panic!("unexpected Herdr command: {args:?}"),
+            }
+        }
+    }
+
+    let discovered = discover_worktree_for_workspace(&SharedCheckoutHerdr, "space-b").unwrap();
+    assert_eq!(discovered.workspace_id, "space-b");
+    assert_eq!(discovered.worktree_id, WorktreeId::new("/repo"));
+    assert!(discovered.worktree_attached);
+    assert_eq!(discovered.label.as_deref(), Some("repo"));
+    assert_eq!(discovered.branch.as_deref(), Some("main"));
+    assert_eq!(discovered.panes.len(), 1);
+    assert_eq!(discovered.panes[0].pane_id, "space-b:pane-1");
+    assert_eq!(discovered.panes[0].workspace_id, "space-b");
+}
+
+#[test]
+fn workspace_discovery_keeps_failing_closed_when_source_names_another_space() {
+    struct LinkedDuplicateHerdr;
+    impl HerdrCommandExecutor for LinkedDuplicateHerdr {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            match args {
+                ["worktree", "list", "--workspace", "space-b", "--json"] => {
+                    Ok(HerdrCommandOutput {
+                        stdout: r#"{"result":{"source":{"source_checkout_path":"/repo","source_workspace_id":"space-c"},"worktrees":[{"path":"/repo","open_workspace_id":"space-c","label":"repo","branch":"main"},{"path":"/repo-feature","open_workspace_id":"space-a","label":"repo-feature","branch":"feature","is_linked_worktree":true}]}}"#.to_owned(),
+                    })
+                }
+                _ => panic!(
+                    "pane discovery must not run for a linked-worktree duplicate: {args:?}"
+                ),
+            }
+        }
+    }
+
+    let error = discover_worktree_for_workspace(&LinkedDuplicateHerdr, "space-b").unwrap_err();
+    assert!(error.contains("does not contain space space-b"), "{error}");
+}
+
+#[test]
 fn agent_session_lookup_needs_one_exact_herdr_pane() {
     struct PanesHerdr;
     impl HerdrCommandExecutor for PanesHerdr {
@@ -1314,12 +1397,243 @@ fn agent_session_lookup_needs_one_exact_herdr_pane() {
     assert_eq!(locate_agent_session_pane(&PanesHerdr, "missing"), None);
 }
 
+/// Herdr with checkout `/repo` (of repository `/repo/.git`, linked when
+/// `linked`, unreported when `None`) first opened by `opener`. Each space in `stamped` carries
+/// Herdr's `worktree.checkout_path` in `workspace list`; each space in
+/// `listings` answers `worktree list --workspace` instead.
+struct SpacesHerdr {
+    opener: &'static str,
+    linked: Option<bool>,
+    stamped: Vec<(&'static str, &'static str)>,
+    listings: Vec<(&'static str, Result<&'static str, &'static str>)>,
+}
+
+impl HerdrCommandExecutor for SpacesHerdr {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        let output = |stdout: String| Ok(HerdrCommandOutput { stdout });
+        match args {
+            ["worktree", "list", "--cwd", "/repo", "--json"] => {
+                let mut checkout =
+                    serde_json::json!({"path": "/repo", "open_workspace_id": self.opener});
+                if let Some(linked) = self.linked {
+                    checkout["is_linked_worktree"] = linked.into();
+                }
+                output(
+                    serde_json::json!({"result": {"source": {"repo_key": "/repo/.git",
+                        "source_checkout_path": "/repo", "source_workspace_id": self.opener},
+                        "worktrees": [checkout]}})
+                    .to_string(),
+                )
+            }
+            ["workspace", "list"] => {
+                let spaces = std::iter::once(serde_json::json!({"workspace_id": self.opener}))
+                    .chain(self.stamped.iter().map(|(id, checkout)| {
+                        serde_json::json!({"workspace_id": id, "worktree": {
+                            "checkout_path": checkout, "repo_key": "/repo/.git"}})
+                    }))
+                    .chain(
+                        self.listings
+                            .iter()
+                            .map(|(id, _)| serde_json::json!({"workspace_id": id})),
+                    )
+                    .collect::<Vec<_>>();
+                output(serde_json::json!({"result": {"workspaces": spaces}}).to_string())
+            }
+            ["worktree", "list", "--workspace", id, "--json"] => {
+                match self.listings.iter().find(|(space, _)| space == id) {
+                    Some((_, Ok(stdout))) => output((*stdout).to_owned()),
+                    Some((_, Err(error))) => Err((*error).to_owned()),
+                    None => panic!("unexpected space {id}"),
+                }
+            }
+            ["pane", "list", "--workspace", id] if *id == self.opener => {
+                output(r#"{"result":{"panes":[]}}"#.to_owned())
+            }
+            _ => panic!("unexpected Herdr command: {args:?}"),
+        }
+    }
+}
+
+const SECOND_SPACE_ON_REPO: &str = r#"{"result":{"source":{"source_checkout_path":"/repo","source_workspace_id":"space-a"},"worktrees":[{"path":"/repo","open_workspace_id":"space-b"}]}}"#;
+const NOT_GIT_WORKTREE: &str = r#"{"error":{"code":"not_git_worktree"}}"#;
+
+#[test]
+fn cwd_discovery_refuses_a_checkout_two_spaces_share() {
+    let herdr = SpacesHerdr {
+        opener: "space-b",
+        linked: Some(false),
+        stamped: vec![],
+        listings: vec![("space-a", Ok(SECOND_SPACE_ON_REPO))],
+    };
+
+    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    assert!(error.contains("/repo"), "{error}");
+    assert!(error.contains("(space-a, space-b)"), "{error}");
+    assert!(error.contains("--herdr-workspace"), "{error}");
+}
+
+#[test]
+fn cwd_discovery_ignores_spaces_on_other_checkouts_or_none() {
+    let herdr = SpacesHerdr {
+        opener: "space-a",
+        linked: Some(false),
+        stamped: vec![],
+        listings: vec![
+            ("space-c", Err(NOT_GIT_WORKTREE)),
+            (
+                "space-d",
+                Ok(
+                    r#"{"result":{"source":{"source_checkout_path":"/other","source_workspace_id":"space-d"},"worktrees":[{"path":"/repo","open_workspace_id":"space-a"},{"path":"/other","open_workspace_id":"space-e"}]}}"#,
+                ),
+            ),
+        ],
+    };
+
+    let discovered = discover_worktree(&herdr, Path::new("/repo")).unwrap();
+    assert_eq!(discovered.workspace_id, "space-a");
+    assert_eq!(discovered.worktree_id, WorktreeId::new("/repo"));
+}
+
+#[test]
+fn cwd_discovery_fails_closed_when_a_space_cannot_be_read() {
+    let herdr = SpacesHerdr {
+        opener: "space-a",
+        linked: Some(true),
+        stamped: vec![],
+        listings: vec![("space-b", Err("herdr: connection reset"))],
+    };
+
+    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    assert_eq!(error, "herdr: connection reset");
+}
+
+// What Herdr 0.9.1 answers a second space created with `workspace create
+// --cwd` on a linked worktree: the path's first opener, and `source` naming
+// the repository root's opener.
+const SECOND_SPACE_ON_LINKED: &str = r#"{"result":{"source":{"repo_key":"/repo/.git","source_checkout_path":"/root"},"worktrees":[{"path":"/root"},{"path":"/repo","is_linked_worktree":true,"open_workspace_id":"space-a"}]}}"#;
+
+#[test]
+fn cwd_discovery_refuses_a_linked_checkout_a_second_space_may_share() {
+    let herdr = SpacesHerdr {
+        opener: "space-a",
+        linked: Some(true),
+        stamped: vec![],
+        listings: vec![("space-b", Ok(SECOND_SPACE_ON_LINKED))],
+    };
+
+    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    assert!(error.contains("/repo"), "{error}");
+    assert!(error.contains("space-a"), "{error}");
+    assert!(error.contains("space-b"), "{error}");
+    assert!(error.contains("--herdr-workspace"), "{error}");
+}
+
+#[test]
+fn cwd_discovery_treats_an_unreported_checkout_kind_as_linked() {
+    let herdr = SpacesHerdr {
+        opener: "space-a",
+        linked: None,
+        stamped: vec![],
+        listings: vec![("space-b", Ok(SECOND_SPACE_ON_LINKED))],
+    };
+
+    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    assert!(error.contains("space-b"), "{error}");
+}
+
+#[test]
+fn cwd_discovery_counts_a_space_herdr_stamped_on_the_checkout() {
+    let herdr = SpacesHerdr {
+        opener: "space-a",
+        linked: Some(false),
+        stamped: vec![("space-b", "/repo"), ("space-c", "/repo-linked")],
+        listings: vec![],
+    };
+
+    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    assert!(error.contains("(space-a, space-b)"), "{error}");
+}
+
+#[test]
+fn cwd_discovery_places_an_unreported_space_off_a_root_checkout() {
+    let herdr = SpacesHerdr {
+        opener: "space-a",
+        linked: Some(false),
+        stamped: vec![],
+        listings: vec![("space-b", Ok(SECOND_SPACE_ON_LINKED))],
+    };
+
+    assert_eq!(
+        discover_worktree(&herdr, Path::new("/repo"))
+            .unwrap()
+            .workspace_id,
+        "space-a"
+    );
+}
+
+#[test]
+fn cwd_discovery_skips_spaces_that_cannot_own_a_linked_checkout() {
+    let herdr = SpacesHerdr {
+        opener: "space-a",
+        linked: Some(true),
+        stamped: vec![("space-e", "/repo-other")],
+        listings: vec![
+            (
+                "space-c",
+                Err(
+                    r#"{"error":{"code":"workspace_not_found","message":"workspace space-c not found"}}"#,
+                ),
+            ),
+            (
+                "space-d",
+                Ok(
+                    r#"{"result":{"source":{"repo_key":"/other/.git","source_checkout_path":"/other"},"worktrees":[{"path":"/other"},{"path":"/other-linked","is_linked_worktree":true,"open_workspace_id":"space-x"}]}}"#,
+                ),
+            ),
+            (
+                "space-f",
+                Ok(
+                    r#"{"result":{"source":{"repo_key":"/repo/.git","source_checkout_path":"/root","source_workspace_id":"space-f"},"worktrees":[{"path":"/root","open_workspace_id":"space-x"},{"path":"/repo","is_linked_worktree":true,"open_workspace_id":"space-a"}]}}"#,
+                ),
+            ),
+        ],
+    };
+
+    assert_eq!(
+        discover_worktree(&herdr, Path::new("/repo"))
+            .unwrap()
+            .workspace_id,
+        "space-a"
+    );
+}
+
+#[test]
+fn a_known_pane_names_its_space() {
+    struct PanesHerdr;
+    impl HerdrCommandExecutor for PanesHerdr {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            assert_eq!(args, ["pane", "list"]);
+            Ok(HerdrCommandOutput {
+                stdout: r#"{"result":{"panes":[{"pane_id":"w1:p1","terminal_id":"t1","tab_id":"tab-1","workspace_id":"w1"},{"pane_id":"w2:p1","terminal_id":"t2","tab_id":"tab-2","workspace_id":"w2"}]}}"#.to_owned(),
+            })
+        }
+    }
+
+    assert_eq!(pane_workspace(&PanesHerdr, "w2:p1").unwrap(), "w2");
+    let error = pane_workspace(&PanesHerdr, "w9:p1").unwrap_err();
+    assert!(error.contains("w9:p1"), "{error}");
+    assert!(error.contains("--herdr-workspace"), "{error}");
+}
+
 #[test]
 fn only_proven_same_worktree_moves_preserve_a_binding() {
     struct MoveHerdr;
     impl HerdrCommandExecutor for MoveHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"]
                 | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
@@ -1465,6 +1779,9 @@ fn lifecycle_operations_activate_create_bind_and_list_through_one_contract() {
     impl HerdrCommandExecutor for FakeHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"source":{"source_workspace_id":"workspace-1"},"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -1562,6 +1879,9 @@ fn lifecycle_operations_mutate_addresses_without_losing_identity() {
     impl HerdrCommandExecutor for FakeHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"source":{"source_workspace_id":"workspace-1"},"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -1666,6 +1986,9 @@ fn strict_inputs_and_activation_confirmation_fail_before_mutation() {
     impl HerdrCommandExecutor for FakeHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
@@ -1768,6 +2091,10 @@ fn agent_status_events_replace_and_clear_the_current_occupant() {
     impl HerdrCommandExecutor for DynamicHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                        .to_owned()
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"]
                 | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
@@ -1889,6 +2216,10 @@ fn tab_close_cancels_outstanding_delivery_and_removes_every_attached_mention() {
     impl HerdrCommandExecutor for ClosingTabHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                        .to_owned()
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"]
                 | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
@@ -2127,6 +2458,10 @@ fn agent_status_event_reconciles_every_replaced_session_before_onboarding() {
     impl HerdrCommandExecutor for ReplacedSessionsHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                        .to_owned()
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"]
                 | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
@@ -2313,6 +2648,9 @@ impl SetupHerdr {
 impl HerdrCommandExecutor for SetupHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let stdout = match args {
+            ["workspace", "list"] => {
+                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
+            }
             ["worktree", "list", "--cwd", "/repo", "--json"]
             | ["worktree", "list", "--json"]
             | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
@@ -2500,6 +2838,9 @@ impl AgentTabHerdr {
 impl HerdrCommandExecutor for AgentTabHerdr {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let stdout = match args {
+            ["workspace", "list"] => {
+                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
+            }
             ["worktree", "list", "--cwd", "/repo", "--json"]
             | ["worktree", "list", "--json"]
             | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
@@ -2695,6 +3036,9 @@ impl HerdrCommandExecutor for TourHerdr {
             pane
         };
         let stdout = match args {
+            ["workspace", "list"] => {
+                r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#.to_owned()
+            }
             ["worktree", "list", "--cwd", "/repo", "--json"]
             | ["worktree", "list", "--json"]
             | ["worktree", "list", "--workspace", "workspace-1", "--json"] => {
@@ -2902,6 +3246,9 @@ fn name_refuses_a_retired_or_renamed_away_alias_with_a_clear_message() {
     impl HerdrCommandExecutor for ThreePaneHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
                 ["worktree", "list", "--cwd", "/repo", "--json"]
                 | ["worktree", "list", "--json"] => {
                     r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#

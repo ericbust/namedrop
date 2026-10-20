@@ -29,7 +29,7 @@ On Linux you also need zsh, because `tests/shell_command.rs` runs `/bin/zsh`, an
 
 The native Herdr tests, such as `tests/seamless_native.py`, `tests/coordination_native.py`, `tests/personas_native.py`, and `tests/checkout_context_native.py`, don't run in CI. They use the shell named in `NAMEDROP_TEST_SHELL` (`bash` or `zsh`, zsh by default when it's installed), so run them with each shell your change affects.
 
-`Cargo.toml`, `Cargo.lock` and `herdr-plugin.toml` must have the same version. `scripts/package-release.sh` exits with 65 if `Cargo.toml` and `herdr-plugin.toml` disagree, or if the binary's `--version` doesn't match, but it doesn't check `Cargo.lock`. Keep that one in step yourself.
+`Cargo.toml`, `Cargo.lock` and `herdr-plugin.toml` must have the same version, and each pull request raises it and adds a section to `CHANGELOG.md`. Run `sh scripts/release.sh check origin/main` to check all of that before you push; the Release check workflow runs the same command. `scripts/package-release.sh` also exits with 65 if the binary's `--version` doesn't match.
 
 ## Guidelines
 
