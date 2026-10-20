@@ -1,5 +1,3 @@
-//! Mentions that cross Herdr workspaces: who receives what, how a reply finds
-//! its way home, and what never leaks into a workspace's own listings.
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
@@ -24,7 +22,6 @@ const MISS_GUIDANCE: &str = "Namedrop could not resolve at least one leading rec
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
-/// (workspace id, Herdr label, [(alias, pane)]).
 type Space = (
     &'static str,
     &'static str,
@@ -53,10 +50,8 @@ const SPACES: [Space; 3] = [
 ];
 
 struct FakeHerdr {
-    /// ws1's checkout; the other workspaces have none.
     repo: String,
     labels: Mutex<Vec<(String, String)>>,
-    /// When set, `workspace list` fails as an unreachable Herdr would.
     workspace_list_fails: AtomicBool,
     prompts: Mutex<Vec<(String, String)>>,
     notifications: Mutex<Vec<Vec<String>>>,
@@ -203,7 +198,6 @@ impl Fixture {
         Self::with_activated(SPACES.len())
     }
 
-    /// Only the first `activated` workspaces have Namedrop activated.
     fn with_activated(activated: usize) -> Self {
         let root = std::env::temp_dir().join(format!(
             "namedrop-cross-workspace-{}-{}",
@@ -285,7 +279,6 @@ impl Fixture {
         }
     }
 
-    /// Registers every agent, so each can author agent sends and replies.
     fn register_all(&self) {
         self.register_all_activated(SPACES.len());
     }
@@ -377,7 +370,6 @@ impl Fixture {
             .unwrap();
     }
 
-    /// Every durable message and delivery, across all workspaces.
     fn message_rows(&self) -> (i64, i64) {
         let db = rusqlite::Connection::open(self.state.join("namedrop.sqlite3")).unwrap();
         let count = |table: &str| {
@@ -415,7 +407,6 @@ fn an_agent_send_reaches_only_the_named_workspace_and_the_reply_returns_to_its_t
     assert!(fixture.herdr.envelopes("pane-3-lead").is_empty());
     assert!(fixture.herdr.envelopes("pane-2-tester").is_empty());
 
-    // ws2 has its own @lead (the replier itself), and the reply still goes home.
     fixture.reply_to("w2", "pane-2-lead", &delivered, "@lead Rebased at abc123.");
     fixture.drain("w1");
     let returned = fixture.herdr.last_envelope("pane-1-lead");
@@ -528,7 +519,6 @@ fn a_reply_naming_two_participants_with_one_name_is_refused() {
 fn envoys_never_appear_where_a_workspace_lists_its_own_names() {
     let fixture = Fixture::new();
     fixture.register_all();
-    // ws2 now holds a stand-in for ws1's @planner, a name ws2 does not have.
     fixture.agent_send(
         "w1",
         "pane-1-planner",
@@ -564,7 +554,6 @@ fn envoys_never_appear_where_a_workspace_lists_its_own_names() {
     assert!(!health.contains("planner"), "{health}");
     assert!(!health.contains("envoy"), "{health}");
 
-    // Unqualified @planner is absent in ws2 and named only in ws1, so it goes there.
     fixture.agent_send("w2", "pane-2-tester", "plan-2", "@planner Plan received.");
     fixture.drain("w1");
     assert_eq!(
@@ -592,8 +581,6 @@ fn envoys_never_appear_where_a_workspace_lists_its_own_names() {
     }
 }
 
-/// Plays the author: each incoming reply is read and completed, as an agent
-/// would, until the mailbox holds nothing more for it.
 fn receive_until_result_set(fixture: &Fixture, workspace: &str, pane: &str) -> Vec<Value> {
     for _ in 0..6 {
         fixture.drain(workspace);
@@ -713,7 +700,6 @@ fn a_remote_member_answering_a_colleague_comes_home_as_no_reply() {
 fn a_mixed_local_and_remote_fan_out_returns_exactly_one_result_set() {
     let fixture = Fixture::new();
     fixture.register_all();
-    // @tester is named only in ws2, so the unqualified run spans both workspaces.
     fixture.agent_send(
         "w1",
         "pane-1-lead",
@@ -754,8 +740,6 @@ fn stopping_the_remote_thread_still_completes_a_mixed_fan_out() {
         &fixture.runtime("w2", "pane-2-lead"),
     )
     .unwrap();
-    // The stop reaches ws1's side too, which holds the result set's
-    // delivery there exactly as a stopped local thread holds its own.
     let db = rusqlite::Connection::open(fixture.state.join("namedrop.sqlite3")).unwrap();
     let bodies: Vec<String> = db
         .prepare(
@@ -817,8 +801,6 @@ fn stopping_either_side_of_a_conversation_stops_both() {
     assert!(error.contains("stopped"), "{error}");
 }
 
-/// Two agents answer each other until the conversation's Automatic Reply
-/// Limit pauses it, and how many replies got through.
 fn ping_pong(fixture: &Fixture, start: (&str, &str), other: (&str, &str), source: &str) -> usize {
     fixture.agent_send(start.0, start.1, "ping-0", source);
     let mut replies = 0;
@@ -1268,7 +1250,6 @@ fn a_wake_reaches_only_workspaces_holding_forwarded_copies() {
 fn a_wake_from_the_remote_workspace_dispatches_the_authors_result_set() {
     let fixture = Fixture::new();
     fixture.register_all();
-    // @tester is named only in ws2, so the run spans both workspaces.
     fixture.agent_send(
         "w1",
         "pane-1-lead",

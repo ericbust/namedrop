@@ -21,11 +21,9 @@ pub struct RecipientRun {
 pub struct ParsedMessage {
     pub recipients: RecipientRun,
     pub body: String,
-    /// Every alias-shaped Mention in the body, in written order.
     pub context_mentions: Vec<BodyMention>,
 }
 
-/// A Mention inside a body, with the `#label` that opens its run, if any.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BodyMention {
     pub alias: String,
@@ -33,9 +31,6 @@ pub struct BodyMention {
 }
 
 impl ParsedMessage {
-    /// The body's Context References, deduplicated. A Mention whose run opens
-    /// with a label that `names_workspace` accepts addresses someone in that
-    /// workspace, so it is prose here rather than a reference.
     pub fn context_reference_aliases(
         &self,
         names_workspace: impl Fn(&WorkspaceLabel) -> bool,
@@ -53,9 +48,6 @@ impl ParsedMessage {
     }
 }
 
-/// The Context References of a body, after asking Herdr about the labels it
-/// names. A body with no `#label` before a Mention reads nothing, and a label
-/// Herdr cannot confirm leaves its Mention a reference, as before workspaces.
 pub(crate) fn body_reference_aliases<E: crate::HerdrCommandExecutor>(
     parsed: &ParsedMessage,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
@@ -244,9 +236,6 @@ fn stored_recipient_outlooks(
     Ok(outlooks)
 }
 
-/// Outlooks in recipient order, each answered by the workspace the recipient
-/// lives in. A recipient in another workspace reads `#label @alias: ...`, and a
-/// paused workspace says the message waits for the person to resume it there.
 fn routed_recipient_outlooks(
     transaction: &crate::StateTransaction<'_>,
     namespace: &StateNamespace,
@@ -273,12 +262,12 @@ fn routed_recipient_outlooks(
                 format!(
                     "{} @{}: {} is paused, so this message stays queued until the person \
                      resumes collaboration there.",
-                    origin.label, outlook.alias, origin.label
+                    origin.origin_label, outlook.alias, origin.origin_label
                 )
             } else {
-                format!("{} {}", origin.label, outlook.statement)
+                format!("{} {}", origin.origin_label, outlook.statement)
             };
-            outlook.workspace = Some(origin.label.clone());
+            outlook.workspace = Some(origin.origin_label.clone());
             outlooks.push(outlook);
         }
     }
@@ -438,15 +427,10 @@ where
     Ok(response)
 }
 
-/// What the prompt hook's send did.
 pub(crate) enum PromptMentionOutcome {
-    /// Committed. `remote` names each recipient in another workspace as
-    /// `#label @alias`.
     Sent {
         remote: Vec<String>,
     },
-    /// Nothing was sent: an unqualified name lives in several other workspaces
-    /// and the person has to pick.
     NeedsPick {
         choices: Vec<AmbiguousName>,
     },
@@ -507,7 +491,6 @@ where
     }
     let parsed = parse_prompt_mentions(&input.source)?;
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
-    // A `#` run Herdr cannot confirm stays the person's own prompt.
     if let SpaceScope::Named(labels) = &parsed.recipients.scope
         && !labels
             .iter()
@@ -532,12 +515,9 @@ where
         .map(|(_, forwarded)| forwarded)
 }
 
-/// Why a send was not committed. A refusal comes from routing, before any
-/// write, and the prompt hook answers each kind differently.
 pub(crate) enum SendError {
     Refused(RouteRefusal),
     Failed(String),
-    /// A prompt whose `#` run names no Herdr workspace.
     NotAMention,
 }
 
@@ -557,7 +537,6 @@ impl std::fmt::Display for SendError {
     }
 }
 
-/// The committed receipt, and the copies it forwarded into other workspaces.
 type PersistedMessage = (Value, Vec<crate::store::ForwardedCopy>);
 
 fn persist_prepared_message_operation<E, C, I>(
@@ -816,7 +795,6 @@ where
             })
             .and_then(|route| route.participants.first())
             .and_then(|source| {
-                // A source in another workspace is shown in its own pane there.
                 let (home, address_id) = match transaction
                     .envoy_origin(&namespace, &source.address_id)
                     .ok()?
@@ -1081,7 +1059,6 @@ where
     }
 }
 
-/// What one committed send produced, fresh or replayed.
 struct Committed {
     routed: crate::RoutedMessageReceipt,
     outlook: Vec<RecipientOutlook>,
@@ -1091,7 +1068,6 @@ struct Committed {
     declined_context_request: Option<crate::ContextGrantRecord>,
 }
 
-/// The request a retry must match to return its saved receipt.
 struct Replay<'a> {
     request_id: &'a str,
     authored_source: &'a str,
@@ -1150,8 +1126,6 @@ impl Replay<'_> {
     }
 }
 
-/// The sender of this pane, checked against what the request claims, and the
-/// attribution its writes carry.
 fn sending_author<E, C, I>(
     transaction: &crate::StateTransaction<'_>,
     namespace: &StateNamespace,
@@ -1514,8 +1488,7 @@ fn mention_token_end(text: &str, at: usize) -> usize {
 
 /// Collects the Mentions of a body. An at-sign token is classified whole before any alias is
 /// looked up: a token that is not alias-shaped is not Mention-shaped, so it stays literal prose
-/// instead of rejecting the send, and no valid alias prefix is taken out of it. A run that opens
-/// with a `#label` carries that label, and routing decides whether it names a workspace.
+/// instead of rejecting the send, and no valid alias prefix is taken out of it.
 fn context_mentions(body: &str) -> Vec<BodyMention> {
     let mut mentions = Vec::new();
     let mut qualified_run: Option<(usize, WorkspaceLabel)> = None;

@@ -50,30 +50,22 @@ CREATE TABLE bridged_threads (
 
 const ENVOY_ROLE_ID: &str = "role-envoy";
 
-/// The real, named address an envoy stands for, and the labels both sides had
-/// when the envoy was last refreshed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct EnvoyOrigin {
     pub space: SpaceId,
     pub address_id: PaneAddressId,
     pub alias: String,
-    /// The origin space's label.
-    pub label: WorkspaceLabel,
-    /// The label of the space the envoy lives in.
+    pub origin_label: WorkspaceLabel,
     pub host_label: WorkspaceLabel,
 }
 
 pub(crate) struct SpaceNames {
     pub space: SpaceId,
     pub activated: bool,
-    /// Live agent aliases and group aliases.
     pub names: std::collections::BTreeSet<String>,
-    /// Tombstoned aliases and the aliases of retired addresses.
     pub retired: std::collections::BTreeSet<String>,
 }
 
-/// Which authored message a copy mirrors, written beside the copy, with the
-/// labels both workspaces had when it was forwarded.
 pub(super) struct BridgeOrigin<'a> {
     space: &'a SpaceId,
     message_id: &'a MessageId,
@@ -104,8 +96,6 @@ fn bridged_id(space: &SpaceId, id: &str) -> String {
 }
 
 impl StateTransaction<'_> {
-    /// Find or create the envoy standing for `origin` inside `host`, and refresh
-    /// the alias and labels it remembers.
     pub(crate) fn envoy_for(
         &mut self,
         host: &StateNamespace,
@@ -126,7 +116,7 @@ impl StateTransaction<'_> {
             return Err(StoreError::invalid_input(format!(
                 "@{} in {} is a named terminal; terminals take commands only from their own \
                  workspace",
-                origin.alias, origin.label
+                origin.alias, origin.origin_label
             )));
         }
         let address_id = PaneAddressId::new(format!(
@@ -186,7 +176,7 @@ impl StateTransaction<'_> {
                 origin.space.as_str(),
                 origin.address_id.as_str(),
                 origin.alias,
-                origin.label.as_str(),
+                origin.origin_label.as_str(),
                 origin.host_label.as_str()
             ],
         )?;
@@ -219,7 +209,7 @@ impl StateTransaction<'_> {
                         space: SpaceId::new(row.get::<_, String>(0)?),
                         address_id: PaneAddressId::new(row.get::<_, String>(1)?),
                         alias: row.get(2)?,
-                        label: WorkspaceLabel::from_herdr(&row.get::<_, String>(3)?),
+                        origin_label: WorkspaceLabel::from_herdr(&row.get::<_, String>(3)?),
                         host_label: WorkspaceLabel::from_herdr(&row.get::<_, String>(4)?),
                     })
                 },
@@ -250,8 +240,6 @@ impl StateTransaction<'_> {
             .optional()?)
     }
 
-    /// Who `address_id` of `source` is inside `target`: the real address when it
-    /// is an envoy for `target`, otherwise `target`'s envoy for it.
     fn stand_in(
         &mut self,
         target: &StateNamespace,
@@ -276,7 +264,7 @@ impl StateTransaction<'_> {
                         space: source.space_id.clone(),
                         address_id: address_id.clone(),
                         alias: alias.to_owned(),
-                        label: source_label.clone(),
+                        origin_label: source_label.clone(),
                         host_label: target_label.clone(),
                     },
                     occurred_at_ms,
@@ -285,16 +273,18 @@ impl StateTransaction<'_> {
         }
     }
 
-    /// Called by `append_message` and by nothing else: one copy of `draft` in each
-    /// space its envoy recipients stand for, and this space's envoy deliveries
-    /// settle because the copy now carries them.
+    /// One copy of `draft` in each space its envoy recipients stand for. This
+    /// space's envoy deliveries settle because the copy now carries them.
     pub(super) fn forward_to_envoys(
         &mut self,
         namespace: &StateNamespace,
         draft: &MessageDraft,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
-        let mut targets: Vec<(EnvoyOrigin, Vec<&crate::MessageRecipientDraft>)> = Vec::new();
+        let mut targets: Vec<(
+            EnvoyOrigin,
+            Vec<(&crate::MessageRecipientDraft, EnvoyOrigin)>,
+        )> = Vec::new();
         for recipient in &draft.recipients {
             let Some(origin) = self.envoy_origin(namespace, &recipient.address_id)? else {
                 continue;
@@ -303,8 +293,8 @@ impl StateTransaction<'_> {
                 .iter_mut()
                 .find(|(first, _)| first.space == origin.space)
             {
-                Some((_, recipients)) => recipients.push(recipient),
-                None => targets.push((origin, vec![recipient])),
+                Some((_, recipients)) => recipients.push((recipient, origin)),
+                None => targets.push((origin.clone(), vec![(recipient, origin)])),
             }
         }
         for (envoy, recipients) in targets {
@@ -315,10 +305,10 @@ impl StateTransaction<'_> {
             {
                 return Err(StoreError::invalid_input(format!(
                     "Namedrop is not activated in {}; activate it there before sending",
-                    envoy.label
+                    envoy.origin_label
                 )));
             }
-            let (source_label, target_label) = (&envoy.host_label, &envoy.label);
+            let (source_label, target_label) = (&envoy.host_label, &envoy.origin_label);
             let author = self.stand_in(
                 &target,
                 namespace,
@@ -334,15 +324,12 @@ impl StateTransaction<'_> {
                 None => None,
             };
             let mut copy_recipients = Vec::new();
-            for recipient in &recipients {
-                let origin = self
-                    .envoy_origin(namespace, &recipient.address_id)?
-                    .expect("grouped recipients are envoys");
+            for (recipient, origin) in &recipients {
                 if self.pane_type(&target, &origin.address_id)? == crate::PaneType::Terminal {
                     return Err(StoreError::invalid_input(format!(
                         "@{} in {} is a named terminal; terminals take commands only from their \
                          own workspace",
-                        origin.alias, envoy.label
+                        origin.alias, envoy.origin_label
                     )));
                 }
                 let current = self.routing_address_by_id(&target, &origin.address_id)?;
@@ -382,7 +369,7 @@ impl StateTransaction<'_> {
                     holder_label: target_label,
                 }),
             )?;
-            for recipient in recipients {
+            for (recipient, _) in recipients {
                 self.transaction.execute(
                     "UPDATE mailbox_deliveries SET state = 'settled'
                      WHERE session_socket_id = ?1 AND worktree_id = ?2 AND delivery_id = ?3",
@@ -428,7 +415,6 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
-    /// The thread in `target` that continues `thread_id`, paired on first use.
     fn bridged_thread(
         &mut self,
         namespace: &StateNamespace,
@@ -502,8 +488,6 @@ impl StateTransaction<'_> {
         Ok(peer)
     }
 
-    /// Every thread in another workspace that continues this one's
-    /// conversation, directly or through another pairing.
     pub(super) fn paired_threads(
         &self,
         namespace: &StateNamespace,
@@ -547,8 +531,6 @@ impl StateTransaction<'_> {
             .collect())
     }
 
-    /// The message in `target` that `message_id` of `namespace` corresponds to:
-    /// the original a copy mirrors, or the copy an original produced.
     fn counterpart_message(
         &self,
         namespace: &StateNamespace,
@@ -563,7 +545,6 @@ impl StateTransaction<'_> {
         self.copy_of(target, &namespace.space_id, message_id)
     }
 
-    /// Copy to origin: the authored message a copy in `namespace` mirrors.
     fn copy_origin(
         &self,
         namespace: &StateNamespace,
@@ -589,7 +570,6 @@ impl StateTransaction<'_> {
             .optional()?)
     }
 
-    /// Origin to copy: the copy in `holder` of `origin_space`'s message.
     fn copy_of(
         &self,
         holder: &StateNamespace,
@@ -613,7 +593,6 @@ impl StateTransaction<'_> {
             .optional()?)
     }
 
-    /// The workspace label a copy was sent from, for its envelope's sender.
     pub(crate) fn bridged_sender_label(
         &self,
         namespace: &StateNamespace,
@@ -671,7 +650,6 @@ impl StateTransaction<'_> {
         Ok((spaces.len(), aliases))
     }
 
-    /// The copies an authored message produced, for receipts and replays.
     pub(crate) fn forwarded_copies(
         &self,
         namespace: &StateNamespace,
@@ -952,8 +930,6 @@ impl StateTransaction<'_> {
             .map_err(StoreError::from)
     }
 
-    /// Every space of this Herdr session with the names it answers to, live
-    /// and retired.
     pub(crate) fn alias_index(&self, socket: &str) -> Result<Vec<SpaceNames>, StoreError> {
         let mut statement = self.transaction.prepare(
             "SELECT worktree_id, activated AND NOT deactivated FROM worktrees

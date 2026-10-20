@@ -2444,7 +2444,6 @@ impl StateTransaction<'_> {
         self.append_message_from(namespace, draft, attribution, None)
     }
 
-    /// `bridged_from` is set only on a copy another space forwarded here.
     fn append_message_from(
         &mut self,
         namespace: &StateNamespace,
@@ -2703,7 +2702,6 @@ impl StateTransaction<'_> {
             attribution,
         )?;
         if is_agent_reply {
-            // A conversation across workspaces shares one Automatic Reply Limit.
             for (peer, peer_thread) in self.paired_threads(namespace, &draft.thread_id)? {
                 self.charge_agent_reply(&peer, &peer_thread, attribution)?;
             }
@@ -2712,8 +2710,6 @@ impl StateTransaction<'_> {
         self.message_receipt(namespace, &draft.message_id, false)
     }
 
-    /// Spends one agent reply from the thread's Automatic Reply Limit, and
-    /// pauses the thread when that was the last one.
     fn charge_agent_reply(
         &mut self,
         namespace: &StateNamespace,

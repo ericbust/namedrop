@@ -1,7 +1,3 @@
-//! Which Herdr workspaces a leading run of Mentions reaches. Planning is pure
-//! over one read of every space's names and labels; validity inside a space is
-//! still answered by that space's own resolver.
-
 use crate::message::SendError;
 use crate::{RecipientRun, RoutingAddressSnapshot, SpaceId, StateNamespace};
 use serde::Serialize;
@@ -19,26 +15,15 @@ const MAX_LABEL_CHARS: usize = 64;
 pub struct WorkspaceLabel(String);
 
 impl WorkspaceLabel {
-    /// The token after `#`, when it is label-shaped. `all` is reserved: it is
-    /// [`SpaceScope::All`], never a label.
     pub fn from_token(token: &str) -> Option<Self> {
         if token.is_empty() || !token.bytes().all(is_label_token_byte) {
             return None;
         }
-        let label = Self::fold(token);
+        let label = Self::from_herdr(token);
         (label.0 != "all").then_some(label)
     }
 
-    /// A label as Herdr reports it, which may hold spaces, capitals, or anything else.
     pub fn from_herdr(label: &str) -> Self {
-        Self::fold(label)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    fn fold(label: &str) -> Self {
         let mut folded = String::new();
         let mut separator = false;
         for character in label.trim().chars() {
@@ -54,6 +39,10 @@ impl WorkspaceLabel {
         }
         Self(folded.chars().take(MAX_LABEL_CHARS).collect())
     }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl Serialize for WorkspaceLabel {
@@ -68,15 +57,10 @@ impl std::fmt::Display for WorkspaceLabel {
     }
 }
 
-/// Which workspaces a leading run of Mentions addresses. One scope applies to
-/// the whole run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SpaceScope {
-    /// No `#` tokens: each name resolves here first.
     Unqualified,
-    /// `#a #b ...`, deduplicated, in written order.
     Named(Vec<WorkspaceLabel>),
-    /// `#all`, which cannot be combined with named labels.
     All,
 }
 
@@ -84,8 +68,6 @@ fn is_label_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
 }
 
-/// Herdr's workspaces and their labels, read at most once per send and only
-/// when a `#` token asks for them.
 pub(crate) struct HerdrWorkspaces<'a, E> {
     herdr: &'a E,
     listed: std::cell::OnceCell<Vec<(String, String)>>,
@@ -99,7 +81,6 @@ impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
         }
     }
 
-    /// `(workspace id, label)` in Herdr's workspace order.
     fn list(&self) -> Result<&[(String, String)], String> {
         if let Some(listed) = self.listed.get() {
             return Ok(listed);
@@ -108,7 +89,6 @@ impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
         Ok(self.listed.get_or_init(|| listed))
     }
 
-    /// Whether `label` names a live Herdr workspace, by its label or its id.
     pub(crate) fn names(&self, label: &WorkspaceLabel) -> Result<bool, String> {
         Ok(self.list()?.iter().any(|(id, herdr_label)| {
             [id, herdr_label]
@@ -118,8 +98,6 @@ impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
     }
 }
 
-/// One read of the spaces in this Herdr session. The current space comes first,
-/// then the others in Herdr's workspace order.
 #[derive(Clone, Debug)]
 pub(crate) struct SpaceDirectory {
     entries: Vec<SpaceEntry>,
@@ -128,13 +106,9 @@ pub(crate) struct SpaceDirectory {
 #[derive(Clone, Debug)]
 pub(crate) struct SpaceEntry {
     pub space: SpaceId,
-    /// `None` only for the current space when no label had to be read.
     pub label: Option<WorkspaceLabel>,
-    /// The label as Herdr shows it, made terminal-safe and bounded, for the one
-    /// message that must tell two folded-equal labels apart.
     pub display: String,
     pub activated: bool,
-    /// Live agent aliases and group aliases.
     pub names: BTreeSet<String>,
     /// Retired aliases, kept for the current space only: a retired local name
     /// keeps its retired error instead of silently reaching another workspace.
@@ -146,16 +120,12 @@ impl SpaceEntry {
         self.names.contains(alias) || self.retired.contains(alias)
     }
 
-    /// `#<workspace id>`, which reaches the workspace whatever its label.
     fn id(&self) -> WorkspaceLabel {
         WorkspaceLabel::from_herdr(self.space.as_str())
     }
 }
 
 impl SpaceDirectory {
-    /// Reads the directory a run needs. A run that stays here (no `#` scope, and
-    /// every name either here or nowhere else) gets this space alone and no
-    /// Herdr command, so a single-workspace session costs what it always did.
     pub(crate) fn load<E: crate::HerdrCommandExecutor>(
         store: &mut crate::StateStore,
         workspaces: &HerdrWorkspaces<'_, E>,
@@ -240,8 +210,6 @@ impl SpaceDirectory {
         )
     }
 
-    /// The workspace `label` names, by its label or its id. A token that names
-    /// two workspaces either way is refused, never resolved by a tie-break.
     fn named(&self, label: &WorkspaceLabel) -> Result<&SpaceEntry, RouteRefusal> {
         let matches: Vec<&SpaceEntry> = self
             .entries
@@ -273,32 +241,23 @@ impl SpaceDirectory {
     }
 }
 
-/// Where a send goes: every leg resolves to recipients in the sender's own
-/// workspace, a remote one as envoys there.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RoutePlan {
-    /// How the other workspaces name the sender's.
-    pub here: WorkspaceLabel,
-    /// The current space's leg first when it has one.
+    pub sender_label: WorkspaceLabel,
     pub legs: Vec<RouteLeg>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RouteLeg {
-    /// Names that `space`'s own resolver answers, `label` being how that
-    /// space is named.
     Names {
         space: SpaceId,
         label: WorkspaceLabel,
         aliases: Vec<String>,
     },
-    /// Reply participants in other workspaces, already resolved by the
-    /// message being answered.
     Participants(Vec<RoutingAddressSnapshot>),
 }
 
 impl RoutePlan {
-    /// Whether any recipient lives in another workspace than `here`.
     pub(crate) fn crosses(&self, here: &SpaceId) -> bool {
         self.legs.iter().any(|leg| match leg {
             RouteLeg::Names { space, .. } => space != here,
@@ -306,8 +265,6 @@ impl RoutePlan {
         })
     }
 
-    /// The recipients of every leg, as addresses in `namespace`: names in
-    /// another workspace resolve there and are stood in for by envoys here.
     pub(crate) fn resolve(
         &self,
         transaction: &mut crate::StateTransaction<'_>,
@@ -338,8 +295,8 @@ impl RoutePlan {
                                 space: space.clone(),
                                 address_id: member.address_id,
                                 alias: member.alias,
-                                label: label.clone(),
-                                host_label: self.here.clone(),
+                                origin_label: label.clone(),
+                                host_label: self.sender_label.clone(),
                             },
                             now_ms,
                         )?);
@@ -351,9 +308,6 @@ impl RoutePlan {
     }
 }
 
-/// Reads what routing needs before any write: a reply's remote participants
-/// claim the names they had in the answered message, and the rest is planned
-/// over the space directory.
 pub(crate) fn route<E: crate::HerdrCommandExecutor>(
     store: &mut crate::StateStore,
     workspaces: &HerdrWorkspaces<'_, E>,
@@ -393,7 +347,7 @@ pub(crate) fn route<E: crate::HerdrCommandExecutor>(
     };
     let mut plan = if remaining.aliases.is_empty() {
         RoutePlan {
-            here: WorkspaceLabel::from_herdr(namespace.space_id.as_str()),
+            sender_label: WorkspaceLabel::from_herdr(namespace.space_id.as_str()),
             legs: Vec::new(),
         }
     } else {
@@ -454,12 +408,9 @@ fn reply_participants(
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RouteRefusal {
-    /// Present nowhere. The text stays "unknown Mention: @x", which the hook's
-    /// existing unresolved-recipient guidance answers.
     UnknownMention {
         alias: String,
     },
-    /// Unqualified, absent here, present in two or more other workspaces.
     Ambiguous {
         choices: Vec<AmbiguousName>,
     },
@@ -467,8 +418,6 @@ pub(crate) enum RouteRefusal {
         label: WorkspaceLabel,
         known: Vec<WorkspaceLabel>,
     },
-    /// `label` names two or more workspaces, by label or by id: each one's
-    /// label as Herdr shows it, and the token that still reaches it.
     DuplicateLabel {
         label: WorkspaceLabel,
         workspaces: Vec<(String, WorkspaceLabel)>,
@@ -476,12 +425,10 @@ pub(crate) enum RouteRefusal {
     NotActivated {
         label: WorkspaceLabel,
     },
-    /// Named scope: the alias is in none of the named workspaces.
     NotInNamedWorkspaces {
         alias: String,
         labels: Vec<WorkspaceLabel>,
     },
-    /// Named scope: a named workspace receives none of the names.
     NothingForWorkspace {
         label: WorkspaceLabel,
     },
@@ -550,9 +497,6 @@ impl fmt::Display for RouteRefusal {
     }
 }
 
-/// How prose names a workspace among `workspaces`, every workspace's id and
-/// label: its own label, or its id when that label folds to nothing, to `all`,
-/// or to the same form as another workspace's label or id.
 pub(crate) fn workspace_token<'a>(
     space: &SpaceId,
     label: Option<&WorkspaceLabel>,
@@ -589,7 +533,6 @@ fn joined(labels: &[WorkspaceLabel], separator: &str) -> String {
         .join(separator)
 }
 
-/// The resolution table, as code.
 pub(crate) fn plan_route(
     run: &RecipientRun,
     directory: &SpaceDirectory,
@@ -689,7 +632,7 @@ pub(crate) fn plan_route(
         })
         .collect();
     Ok(RoutePlan {
-        here: directory.token(directory.here()),
+        sender_label: directory.token(directory.here()),
         legs,
     })
 }
@@ -713,9 +656,6 @@ mod tests {
         }
     }
 
-    /// Here is `ws1`. `lead` lives here and in ws2 and ws3; `tester` only in
-    /// ws2; `ops` in ws2 and ws3; `reviewers` is a group in ws2; `old` is a
-    /// local tombstone that also names a live agent in ws2.
     fn directory() -> SpaceDirectory {
         SpaceDirectory::new(
             SpaceEntry {

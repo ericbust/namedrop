@@ -75,7 +75,7 @@ where
     };
     match outcome {
         // The reason stays this exact literal: the generated wrapper wakes the
-        // mailboxes only on it. Where a remote recipient went is told apart.
+        // mailboxes only on it.
         PromptMentionOutcome::Sent { remote } => {
             if !remote.is_empty() {
                 let _ = runtime.herdr.execute(&[

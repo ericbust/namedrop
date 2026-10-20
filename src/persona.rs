@@ -165,7 +165,6 @@ where
     })
 }
 
-/// How many names from other workspaces a roster lists before it summarizes.
 const MAX_LISTED_REMOTE_NAMES: usize = 12;
 
 /// The other workspaces of this Herdr session, by name only: their labels come

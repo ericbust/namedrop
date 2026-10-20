@@ -1512,8 +1512,7 @@ fn role_input(input: AddressCreateInput) -> Result<ResolvedRoleInput, String> {
     })
 }
 
-/// One workspace's named panes, with live registration and availability. This
-/// is the refresh a coordinator is told to run immediately before every
+/// The refresh a coordinator is told to run immediately before every
 /// selection, so it must answer availability itself.
 fn address_rows(
     discovered: &DiscoveredWorktree,
@@ -1521,10 +1520,10 @@ fn address_rows(
     store: &mut StateStore,
 ) -> Result<Value, String> {
     // A name alone cannot say whether that agent can take work now. The same
-    // load the health check and the prompt roster use supplies
-    // the two facts the record cannot carry — a live registration, and
-    // a paused space — and the roster's own function turns them into
-    // the same sentence, so there is one rule rather than two.
+    // load the health check and the prompt roster use supplies the two facts
+    // the record cannot carry, a live registration and a paused space, and the
+    // roster's own function turns them into the same sentence, so there is one
+    // rule rather than two.
     let setup = load_collaboration_setup_from_store(discovered, session_socket_id, store)?;
     let paused = setup
         .worktree_state
@@ -1558,9 +1557,6 @@ enum AllWorkspaces {
     All,
 }
 
-/// `address list` across every activated workspace of this Herdr session, each
-/// answered by the same per-workspace read, so a plain-English request such as
-/// "ask my @lead panes" can see every workspace before it sends.
 fn every_workspace_addresses<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
     here: &str,
@@ -1571,20 +1567,19 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let mut workspaces = Vec::new();
-    let mut here_label = None;
-    let listed = workspace_labels(runtime.herdr)?;
-    let spaces: Vec<(crate::SpaceId, crate::WorkspaceLabel)> = listed
-        .iter()
+    let spaces: Vec<(crate::SpaceId, crate::WorkspaceLabel)> = workspace_labels(runtime.herdr)?
+        .into_iter()
         .map(|(id, label)| {
             (
-                crate::SpaceId::new(id.clone()),
-                crate::WorkspaceLabel::from_herdr(label),
+                crate::SpaceId::new(id),
+                crate::WorkspaceLabel::from_herdr(&label),
             )
         })
         .collect();
-    for ((workspace_id, _), (space, label)) in listed.into_iter().zip(&spaces) {
-        let namespace = StateNamespace::for_space(runtime.session_socket_id, workspace_id.clone());
+    let mut workspaces = Vec::new();
+    let mut here_label = None;
+    for (space, label) in &spaces {
+        let namespace = StateNamespace::new(runtime.session_socket_id, space.clone());
         let Some(state) = store
             .transaction(|transaction| transaction.worktree_state(&namespace))
             .map_err(|error| error.to_string())?
@@ -1597,11 +1592,11 @@ where
             Some(label),
             spaces.iter().map(|(other, label)| (other, Some(label))),
         );
-        let discovered = discover_worktree_for_workspace(runtime.herdr, &workspace_id)?;
+        let discovered = discover_worktree_for_workspace(runtime.herdr, space.as_str())?;
         let groups = store
             .transaction(|transaction| transaction.list_mention_groups(&namespace))
             .map_err(|error| error.to_string())?;
-        let current = workspace_id == here;
+        let current = space.as_str() == here;
         if current {
             here_label = Some(label.clone());
         }
@@ -1735,8 +1730,6 @@ fn spaces_owning_checkout(
     Ok((owners, unknown))
 }
 
-/// Every Herdr workspace as (id, label), in Herdr's own order. A workspace
-/// Herdr reports without a label falls back to its id.
 pub(crate) fn workspace_labels(
     herdr: &impl HerdrCommandExecutor,
 ) -> Result<Vec<(String, String)>, String> {

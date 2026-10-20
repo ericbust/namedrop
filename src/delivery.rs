@@ -71,7 +71,7 @@ impl DrainReport {
 
 /// The spaces one mailbox wake should drain: this one first, then every other
 /// space of the Herdr session holding a queued forwarded copy. State that
-/// cannot be read still wakes this space, exactly as before.
+/// cannot be read still wakes this space.
 pub fn spaces_to_wake(
     state_directory: &std::path::Path,
     session_socket_id: &str,

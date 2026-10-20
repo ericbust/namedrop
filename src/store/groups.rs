@@ -183,7 +183,6 @@ impl StateTransaction<'_> {
     }
 }
 
-/// The recipients a message goes to, each once and never its author.
 pub(crate) fn addressed_recipients(
     recipients: Vec<RoutingAddressSnapshot>,
     author: &PaneAddressId,
