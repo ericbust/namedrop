@@ -1657,7 +1657,6 @@ fn spaces_owning_checkout(
 
 /// Every Herdr workspace as (id, label), in Herdr's own order. A workspace
 /// Herdr reports without a label falls back to its id.
-#[expect(dead_code, reason = "the send path reads labels in a later step")]
 pub(crate) fn workspace_labels(
     herdr: &impl HerdrCommandExecutor,
 ) -> Result<Vec<(String, String)>, String> {
@@ -2134,9 +2133,7 @@ struct WorkspaceListResult {
 #[derive(Deserialize)]
 struct WorkspaceEntry {
     workspace_id: String,
-    #[expect(dead_code, reason = "the send path reads labels in a later step")]
     label: Option<String>,
-    #[expect(dead_code, reason = "the send path reads labels in a later step")]
     number: Option<u64>,
     worktree: Option<WorkspaceWorktree>,
 }

@@ -16,7 +16,7 @@ def main():
     actual = Path(os.environ['NAMEDROP_TEST_BINARY'])
     declared = json.loads((REPO / 'runtime.json').read_text())
     assert json.loads(subprocess.check_output([actual, '--runtime-info'])) == declared
-    assert declared['state_schema'] == 5 and declared['collaboration_protocol'] == 'collab/v1'
+    assert declared['state_schema'] == 6 and declared['collaboration_protocol'] == 'collab/v1'
     subprocess.run([actual, '--validate-update-manifest', REPO / 'herdr-plugin.toml'], check=True)
     with tempfile.TemporaryDirectory(prefix='namedrop runtime ') as directory:
         base = Path(directory)

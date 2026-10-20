@@ -183,11 +183,15 @@ where
     let mut store = StateStore::open_read_only(runtime.state_directory)
         .map_err(|e| e.to_string())?
         .ok_or("Namedrop has no saved state")?;
+    let reference_aliases = crate::message::body_reference_aliases(
+        &parsed,
+        &crate::spaces::HerdrWorkspaces::new(runtime.herdr),
+    );
     store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx,&namespace,pane,&discovered)?;
         let recipients = tx.resolve_message_recipients(&namespace,&parsed.recipients.aliases,&author.address_id)?;
         let recipients = recipients.iter().map(|r|tx.recipient_preview(&namespace,&discovered,&r.address_id,None)).collect::<Result<Vec<_>,_>>()?;
-        let references = parsed.context_reference_aliases.iter().map(|alias| {
+        let references = reference_aliases.iter().map(|alias| {
             let address = tx.resolve_routing_alias(&namespace,alias)?;
             Ok(json!({"address_id":address.address_id,"alias":address.alias}))
         }).collect::<Result<Vec<_>,crate::StoreError>>()?;

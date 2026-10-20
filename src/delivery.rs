@@ -69,6 +69,33 @@ impl DrainReport {
     }
 }
 
+/// The spaces one mailbox wake should drain: this one first, then every other
+/// space of the Herdr session holding a queued forwarded copy. State that
+/// cannot be read still wakes this space, exactly as before.
+pub fn spaces_to_wake(
+    state_directory: &std::path::Path,
+    session_socket_id: &str,
+    here: &str,
+) -> Vec<String> {
+    let queued = StateStore::open_read_only(state_directory)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|transaction| transaction.spaces_awaiting_dispatch(session_socket_id))
+                .ok()
+        })
+        .unwrap_or_default();
+    let mut spaces = vec![here.to_owned()];
+    spaces.extend(
+        queued
+            .into_iter()
+            .map(|space| space.as_str().to_owned())
+            .filter(|space| space != here),
+    );
+    spaces
+}
+
 pub(crate) fn drain_receipt<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
 where
     E: HerdrCommandExecutor,

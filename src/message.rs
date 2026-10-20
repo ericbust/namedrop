@@ -1,3 +1,4 @@
+use crate::spaces::{AmbiguousName, RouteRefusal, SpaceScope, WorkspaceLabel};
 use crate::{
     ActorKind, ContextGrantDraft, ContextGrantId, ContextReferenceDraft, ContextSnapshotId,
     DeliveryId, LifecycleRuntime, MessageDraft, MessageRecipientDraft, MutationAttribution,
@@ -10,73 +11,6 @@ use serde_json::{Value, json};
 
 const MISSING_RECIPIENTS: &str = "message must begin with one or more recipient Mentions";
 
-/// How long a workspace label may be once folded. Herdr labels are free text, and
-/// a label reaches prompts and errors, so it is bounded on the way in.
-const MAX_LABEL_CHARS: usize = 64;
-
-/// A Herdr workspace label in the form people type and match it. Folding
-/// lowercases ASCII and turns each run of characters a `#` token cannot hold
-/// into one `-`, so "My Space" and `#my-space` compare equal, and the folded
-/// form is always safe to show inside a prompt.
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct WorkspaceLabel(String);
-
-impl WorkspaceLabel {
-    /// The token after `#`, when it is label-shaped. `all` is reserved: it is
-    /// [`SpaceScope::All`], never a label.
-    pub fn from_token(token: &str) -> Option<Self> {
-        if token.is_empty() || !token.bytes().all(is_label_token_byte) {
-            return None;
-        }
-        let label = Self::fold(token);
-        (label.0 != "all").then_some(label)
-    }
-
-    /// A label as Herdr reports it, which may hold spaces, capitals, or anything else.
-    pub fn from_herdr(label: &str) -> Self {
-        Self::fold(label)
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    fn fold(label: &str) -> Self {
-        let mut folded = String::new();
-        let mut separator = false;
-        for character in label.trim().chars() {
-            if character.is_ascii() && is_label_token_byte(character as u8) {
-                if separator && !folded.is_empty() {
-                    folded.push('-');
-                }
-                separator = false;
-                folded.push(character.to_ascii_lowercase());
-            } else {
-                separator = true;
-            }
-        }
-        Self(folded.chars().take(MAX_LABEL_CHARS).collect())
-    }
-}
-
-impl std::fmt::Display for WorkspaceLabel {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "#{}", self.0)
-    }
-}
-
-/// Which workspaces a leading run of Mentions addresses. One scope applies to
-/// the whole run.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SpaceScope {
-    /// No `#` tokens: each name resolves here first.
-    Unqualified,
-    /// `#a #b ...`, deduplicated, in written order.
-    Named(Vec<WorkspaceLabel>),
-    /// `#all`, which cannot be combined with named labels.
-    All,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RecipientRun {
     pub scope: SpaceScope,
@@ -87,7 +21,56 @@ pub struct RecipientRun {
 pub struct ParsedMessage {
     pub recipients: RecipientRun,
     pub body: String,
-    pub context_reference_aliases: Vec<String>,
+    /// Every alias-shaped Mention in the body, in written order.
+    pub context_mentions: Vec<BodyMention>,
+}
+
+/// A Mention inside a body, with the `#label` that opens its run, if any.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BodyMention {
+    pub alias: String,
+    pub workspace: Option<WorkspaceLabel>,
+}
+
+impl ParsedMessage {
+    /// The body's Context References, deduplicated. A Mention whose run opens
+    /// with a label that `names_workspace` accepts addresses someone in that
+    /// workspace, so it is prose here rather than a reference.
+    pub fn context_reference_aliases(
+        &self,
+        names_workspace: impl Fn(&WorkspaceLabel) -> bool,
+    ) -> Vec<String> {
+        let mut aliases: Vec<String> = Vec::new();
+        for mention in &self.context_mentions {
+            if mention.workspace.as_ref().is_some_and(&names_workspace)
+                || aliases.contains(&mention.alias)
+            {
+                continue;
+            }
+            aliases.push(mention.alias.clone());
+        }
+        aliases
+    }
+}
+
+/// The Context References of a body, after asking Herdr about the labels it
+/// names. A body with no `#label` before a Mention reads nothing, and a label
+/// Herdr cannot confirm leaves its Mention a reference, as before workspaces.
+pub(crate) fn body_reference_aliases<E: crate::HerdrCommandExecutor>(
+    parsed: &ParsedMessage,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+) -> Vec<String> {
+    let mut live = Vec::new();
+    for label in parsed
+        .context_mentions
+        .iter()
+        .filter_map(|mention| mention.workspace.as_ref())
+    {
+        if !live.contains(label) && workspaces.names(label).unwrap_or(false) {
+            live.push(label.clone());
+        }
+    }
+    parsed.context_reference_aliases(|label| live.contains(label))
 }
 
 /// Grammar: `[ws] ("#" label ws)* ("@" alias ws)+ body`. A `#` run counts only
@@ -158,7 +141,7 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
             aliases: recipients,
         },
         body: body.to_owned(),
-        context_reference_aliases: context_mentions(body),
+        context_mentions: context_mentions(body),
     })
 }
 
@@ -189,7 +172,7 @@ pub fn parse_prompt_mentions(source: &str) -> Result<ParsedMessage, String> {
     Ok(ParsedMessage {
         recipients,
         body: source.to_owned(),
-        context_reference_aliases: Vec::new(),
+        context_mentions: Vec::new(),
     })
 }
 
@@ -207,6 +190,9 @@ fn starts_at_column_zero(source: &str) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RecipientOutlook {
     pub alias: String,
+    /// The recipient's workspace, present only when it is not the sender's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceLabel>,
     /// The Agent Session status the projection reports, verbatim. Absent when no
     /// session has been observed for the address since its pane was bound.
     pub agent_status: Option<String>,
@@ -258,6 +244,47 @@ fn stored_recipient_outlooks(
     Ok(outlooks)
 }
 
+/// Outlooks in recipient order, each answered by the workspace the recipient
+/// lives in. A recipient in another workspace reads `#label @alias: ...`, and a
+/// paused workspace says the message waits for the person to resume it there.
+fn routed_recipient_outlooks(
+    transaction: &crate::StateTransaction<'_>,
+    namespace: &StateNamespace,
+    recipients: &[crate::RoutingAddressSnapshot],
+) -> Result<Vec<RecipientOutlook>, crate::StoreError> {
+    let mut outlooks = Vec::new();
+    for recipient in recipients {
+        let Some(origin) = transaction.envoy_origin(namespace, &recipient.address_id)? else {
+            outlooks.extend(stored_recipient_outlooks(
+                transaction,
+                namespace,
+                std::slice::from_ref(&recipient.alias),
+            )?);
+            continue;
+        };
+        let there = StateNamespace::new(namespace.session_socket_id.clone(), origin.space);
+        let paused = transaction
+            .worktree_state(&there)?
+            .is_some_and(|state| state.paused);
+        for mut outlook in
+            stored_recipient_outlooks(transaction, &there, std::slice::from_ref(&origin.alias))?
+        {
+            outlook.statement = if paused {
+                format!(
+                    "{} @{}: {} is paused, so this message stays queued until the person \
+                     resumes collaboration there.",
+                    origin.label, outlook.alias, origin.label
+                )
+            } else {
+                format!("{} {}", origin.label, outlook.statement)
+            };
+            outlook.workspace = Some(origin.label.clone());
+            outlooks.push(outlook);
+        }
+    }
+    Ok(outlooks)
+}
+
 fn recipient_outlook(address: &PaneAddressRecord) -> RecipientOutlook {
     let alias = &address.alias;
     let statement = if address.pane_type == crate::PaneType::Terminal && address.pane_id.is_some() {
@@ -292,6 +319,7 @@ fn recipient_outlook(address: &PaneAddressRecord) -> RecipientOutlook {
     };
     RecipientOutlook {
         alias: alias.clone(),
+        workspace: None,
         agent_status: address.agent_status.clone(),
         lifecycle: address.lifecycle,
         statement,
@@ -384,34 +412,86 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let mut response = persist_message_operation(operation, input, runtime)?;
+    let input = prepare_source_message(parse_operation_input(operation, input)?)?;
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let (mut response, forwarded) = persist_prepared_message_operation(input, runtime, &workspaces)
+        .map_err(|error| error.to_string())?;
     response["drain"] = crate::drain_receipt(runtime);
+    // A copy queued in another workspace drains there now rather than waiting
+    // for that workspace's next event.
+    if !forwarded.is_empty() {
+        response["drains"] = forwarded
+            .iter()
+            .map(|copy| {
+                let there = LifecycleRuntime {
+                    workspace_id: Some(copy.space.as_str()),
+                    ..*runtime
+                };
+                (
+                    copy.workspace.as_str().to_owned(),
+                    crate::drain_receipt(&there),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+    }
     Ok(response)
 }
 
-/// Commits one send or reply without waiting for best-effort delivery. Runtime
-/// hooks use this seam to avoid the known post-commit mailbox-drain timeout
-/// window before the hook emits its blocking decision. The normal operation
-/// path above immediately follows the same commit with a mailbox drain.
-pub(crate) fn persist_message_operation<E, C, I>(
-    operation: &str,
+/// What the prompt hook's send did.
+pub(crate) enum PromptMentionOutcome {
+    /// Committed. `remote` names each recipient in another workspace as
+    /// `#label @alias`.
+    Sent {
+        remote: Vec<String>,
+    },
+    /// Nothing was sent: an unqualified name lives in several other workspaces
+    /// and the person has to pick.
+    NeedsPick {
+        choices: Vec<AmbiguousName>,
+    },
+    Refused(RouteRefusal),
+    /// Not confirmed for any other reason. The hook answers with a fixed
+    /// literal the wrappers match, so the text is not carried.
+    Failed,
+}
+
+/// Commits the verbatim leading-Mention shorthand used by native prompt hooks.
+/// `None` when the prompt's `#` run names no Herdr workspace: it never
+/// addressed anyone, so it stays the person's own prompt.
+pub(crate) fn persist_prompt_mention_operation<E, C, I>(
     input: Value,
     runtime: &LifecycleRuntime<'_, E, C, I>,
-) -> Result<Value, String>
+) -> Option<PromptMentionOutcome>
 where
     E: crate::HerdrCommandExecutor,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let input = prepare_source_message(parse_operation_input(operation, input)?)?;
-    persist_prepared_message_operation(input, runtime)
+    Some(match persist_prompt_mention(input, runtime) {
+        Err(SendError::NotAMention) => return None,
+        Ok(forwarded) => PromptMentionOutcome::Sent {
+            remote: forwarded
+                .iter()
+                .flat_map(|copy| {
+                    copy.deliveries
+                        .iter()
+                        .map(move |delivery| format!("{} @{}", copy.workspace, delivery.alias))
+                })
+                .collect(),
+        },
+        Err(SendError::Refused(RouteRefusal::Ambiguous { choices })) => {
+            PromptMentionOutcome::NeedsPick { choices }
+        }
+        Err(SendError::Refused(refusal)) => PromptMentionOutcome::Refused(refusal),
+        Err(SendError::Failed(_)) => PromptMentionOutcome::Failed,
+    })
 }
 
-/// Commits the verbatim leading-Mention shorthand used by native prompt hooks.
-pub(crate) fn persist_prompt_mention_operation<E, C, I>(
+fn persist_prompt_mention<E, C, I>(
     input: Value,
     runtime: &LifecycleRuntime<'_, E, C, I>,
-) -> Result<Value, String>
+) -> Result<Vec<crate::store::ForwardedCopy>, SendError>
 where
     E: crate::HerdrCommandExecutor,
     C: crate::Clock,
@@ -421,9 +501,20 @@ where
     if input.context.is_some() {
         // The native @alias hook shorthand keeps its current semantics: context
         // handoff belongs to the explicit agent-authored send and reply only.
-        return Err("a prompt Mention cannot carry a context block".to_owned());
+        return Err("a prompt Mention cannot carry a context block"
+            .to_owned()
+            .into());
     }
     let parsed = parse_prompt_mentions(&input.source)?;
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    // A `#` run Herdr cannot confirm stays the person's own prompt.
+    if let SpaceScope::Named(labels) = &parsed.recipients.scope
+        && !labels
+            .iter()
+            .all(|label| workspaces.names(label).unwrap_or(false))
+    {
+        return Err(SendError::NotAMention);
+    }
     let prepared = PreparedMessageOperation {
         request_id: input.request_id,
         authored_source: input.source,
@@ -437,13 +528,43 @@ where
         tracking: input.tracking,
         grammar_version: "mention-hook/v1",
     };
-    persist_prepared_message_operation(prepared, runtime)
+    persist_prepared_message_operation(prepared, runtime, &workspaces)
+        .map(|(_, forwarded)| forwarded)
 }
+
+/// Why a send was not committed. A refusal comes from routing, before any
+/// write, and the prompt hook answers each kind differently.
+pub(crate) enum SendError {
+    Refused(RouteRefusal),
+    Failed(String),
+    /// A prompt whose `#` run names no Herdr workspace.
+    NotAMention,
+}
+
+impl From<String> for SendError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(refusal) => refusal.fmt(formatter),
+            Self::Failed(error) => formatter.write_str(error),
+            Self::NotAMention => formatter.write_str(MISSING_RECIPIENTS),
+        }
+    }
+}
+
+/// The committed receipt, and the copies it forwarded into other workspaces.
+type PersistedMessage = (Value, Vec<crate::store::ForwardedCopy>);
 
 fn persist_prepared_message_operation<E, C, I>(
     input: PreparedMessageOperation,
     runtime: &LifecycleRuntime<'_, E, C, I>,
-) -> Result<Value, String>
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+) -> Result<PersistedMessage, SendError>
 where
     E: crate::HerdrCommandExecutor,
     C: crate::Clock,
@@ -465,18 +586,22 @@ where
     if context.is_some() && author_kind != ActorKind::AgentSession {
         return Err(
             "a context block requires an agent-authored message (author_kind agent_session)"
-                .to_owned(),
+                .to_owned()
+                .into(),
         );
     }
     if request_context && context.is_some() {
         return Err(
             "a reply cannot both request context and attach it: request_context asks the \
              sender, the context block answers"
-                .to_owned(),
+                .to_owned()
+                .into(),
         );
     }
     if request_context && decline_context_request.is_some() {
-        return Err("a reply cannot both request context and decline a request".to_owned());
+        return Err("a reply cannot both request context and decline a request"
+            .to_owned()
+            .into());
     }
     if (request_context || decline_context_request.is_some())
         && author_kind != ActorKind::AgentSession
@@ -484,11 +609,9 @@ where
         return Err(
             "a context request marker requires an agent-authored reply (author_kind \
              agent_session)"
-                .to_owned(),
+                .to_owned()
+                .into(),
         );
-    }
-    if parsed.recipients.scope != SpaceScope::Unqualified {
-        return Err("workspace-qualified Mentions are not routable yet".to_owned());
     }
     let pane_id = runtime
         .current_pane_id
@@ -499,6 +622,56 @@ where
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
+    let replay = Replay {
+        request_id: &request_id,
+        authored_source: &authored_source,
+        in_reply_to: in_reply_to.as_ref(),
+        author_kind,
+        disposition_attempt: disposition_attempt_id.is_some(),
+        tracking: &tracking,
+    };
+    // A retry returns what the first send committed before anything about the
+    // route or its context is read again, so it can never pin or route anew.
+    let (author, replayed) = store
+        .transaction(|transaction| {
+            let (author, _) = sending_author(transaction, &namespace, pane_id, &replay, runtime)?;
+            let replayed =
+                replay.receipt(transaction, &namespace, &author, pane_id, &discovered)?;
+            Ok((author, replayed))
+        })
+        .map_err(|error| error.to_string())?;
+    if let Some(committed) = replayed {
+        return present_committed(
+            committed,
+            &mut store,
+            &namespace,
+            &disposition_attempt_id,
+            runtime,
+        );
+    }
+    let routing = crate::spaces::route(
+        &mut store,
+        workspaces,
+        &namespace,
+        (&author.address_id, in_reply_to.as_ref()),
+        &parsed.recipients,
+    )?;
+    // Context and tracking are refused before the context pin is written, so a
+    // refused cross-workspace send leaves nothing behind.
+    if routing.crosses(&namespace.space_id)
+        && (context.is_some()
+            || request_context
+            || decline_context_request.is_some()
+            || tracking.present())
+    {
+        return Err(
+            "context handoffs and tracked coordination stay inside one workspace; send the \
+             cross-workspace part as a plain message"
+                .to_owned()
+                .into(),
+        );
+    }
+    let reference_aliases = body_reference_aliases(&parsed, workspaces);
     // Validation, redaction, and the optional git pin all happen before the
     // routing transaction: a send that fails from here on delivers nothing and
     // leaves at most one orphaned pin ref for the lazy sweep.
@@ -510,7 +683,8 @@ where
         return Err(
             "context grant_ids fulfill a context request, so they ride a reply in the \
              requesting thread, never a send"
-                .to_owned(),
+                .to_owned()
+                .into(),
         );
     }
     let context = match context
@@ -520,70 +694,15 @@ where
         Ok(context) => context,
         Err(error) => {
             record_snapshot_activation_failure(&fulfillment_grant_ids, &error, runtime);
-            return Err(error);
+            return Err(error.into());
         }
     };
     let routed = store.transaction(|transaction| {
-        let state = transaction.worktree_state(&namespace)?;
-        if !state.is_some_and(|state| state.activated && !state.deactivated) {
-            return Err(crate::StoreError::invalid_input(
-                "Namedrop is not activated for this space",
-            ));
-        }
-        let author = transaction.routing_author_for_pane(&namespace, pane_id)?;
-        if author_kind == ActorKind::AgentSession && author.agent_session_id.is_none() {
-            return Err(crate::StoreError::invalid_input(
-                "an agent-authored message requires a current Agent Session",
-            ));
-        }
-        if in_reply_to.is_some()
-            && author_kind == ActorKind::AgentSession
-            && disposition_attempt_id.is_none()
-        {
-            return Err(crate::StoreError::invalid_input(
-                "an agent-authored reply requires the Delivery Attempt id",
-            ));
-        }
-        if author_kind != ActorKind::AgentSession && disposition_attempt_id.is_some() {
-            return Err(crate::StoreError::invalid_input(
-                "only an Agent Session may complete a Delivery Attempt with a reply",
-            ));
-        }
-        let attribution = MutationAttribution::new(
-            author_kind,
-            if author_kind == ActorKind::AgentSession {
-                author
-                    .agent_session_id
-                    .as_ref()
-                    .expect("Agent Session was checked")
-                    .as_str()
-            } else {
-                "local-human"
-            },
-            runtime.clock.now_unix_ms(),
-        );
-        if let Some(replay) = transaction.replay_message(
-            &namespace,
-            &author.address_id,
-            &request_id,
-            &authored_source,
-            in_reply_to.as_ref(),
-            author_kind,
-        )? {
-            if !transaction.coordination_links(&namespace,&replay.receipt.message_id)?.is_empty() {
-                crate::context::registered_current_address(transaction,&namespace,pane_id,&discovered)?;
-            }
-            transaction.check_coordination_replay(&namespace, &replay.receipt.message_id, &tracking.fingerprint(), &author)?;
-            let outlook = stored_recipient_outlooks(
-                transaction,
-                &namespace,
-                &replay
-                    .recipients
-                    .iter()
-                    .map(|r| r.alias.clone())
-                    .collect::<Vec<_>>(),
-            )?;
-            return Ok((replay, outlook, None, None, None, None));
+        let (author, attribution) =
+            sending_author(transaction, &namespace, pane_id, &replay, runtime)?;
+        // A concurrent retry may have committed since the check above.
+        if let Some(committed) = replay.receipt(transaction, &namespace, &author, pane_id, &discovered)? {
+            return Ok(committed);
         }
         let reply_route = in_reply_to
             .as_ref()
@@ -621,25 +740,19 @@ where
                 thread_id
             }
         };
-        let recipients = transaction.resolve_message_recipients(
+        let recipients = routing.resolve(
+            transaction,
             &namespace,
-            &parsed.recipients.aliases,
             &author.address_id,
+            runtime.clock.now_unix_ms(),
         )?;
         if (in_reply_to.is_some() || context.is_some()) && recipients.iter().any(|r|
             transaction.pane_type(&namespace,&r.address_id).is_ok_and(|kind|kind==crate::PaneType::Terminal)) {
             return Err(crate::StoreError::invalid_input("terminal recipients accept new shell command requests without agent context attachments"));
         }
-        let outlook = stored_recipient_outlooks(
-            transaction,
-            &namespace,
-            &recipients
-                .iter()
-                .map(|r| r.alias.clone())
-                .collect::<Vec<_>>(),
-        )?;
+        let outlook = routed_recipient_outlooks(transaction, &namespace, &recipients)?;
         let references =
-            resolve_aliases(transaction, &namespace, &parsed.context_reference_aliases)?;
+            resolve_aliases(transaction, &namespace, &reference_aliases)?;
         let grammar_version = if disposition_attempt_id.is_some() && answers_relay_context_request {
             // Resume the suspended one-shot human relay. The requester gets
             // one return_to_source delivery, whose answer becomes the final
@@ -665,13 +778,13 @@ where
         let draft = MessageDraft {
             thread_id,
             message_id: crate::MessageId::new(runtime.ids.next_id("message")),
-            in_reply_to,
+            in_reply_to: in_reply_to.clone(),
             author_address_id: author.address_id,
             author_kind,
             author_alias_snapshot: author.alias,
             author_agent_session_snapshot: author.agent_session_id,
-            request_id,
-            authored_source,
+            request_id: request_id.clone(),
+            authored_source: authored_source.clone(),
             body: parsed.body,
             grammar_version: grammar_version.to_owned(),
             recipients: recipients
@@ -703,11 +816,22 @@ where
             })
             .and_then(|route| route.participants.first())
             .and_then(|source| {
+                // A source in another workspace is shown in its own pane there.
+                let (home, address_id) = match transaction
+                    .envoy_origin(&namespace, &source.address_id)
+                    .ok()?
+                {
+                    Some(origin) => (
+                        StateNamespace::new(runtime.session_socket_id, origin.space),
+                        origin.address_id,
+                    ),
+                    None => (namespace.clone(), source.address_id.clone()),
+                };
                 transaction
-                    .active_pane_bindings(&namespace)
+                    .active_pane_bindings(&home)
                     .ok()?
                     .into_iter()
-                    .find(|binding| binding.address_id == source.address_id)
+                    .find(|binding| binding.address_id == address_id)
                     .map(|binding| RelayPresentation {
                         pane_id: binding.pane_id,
                         sender_alias: draft.author_alias_snapshot.clone(),
@@ -928,8 +1052,8 @@ where
                 }
             })
             .transpose()?;
-        Ok((
-            crate::RoutedMessageReceipt {
+        Ok(Committed {
+            routed: crate::RoutedMessageReceipt {
                 receipt,
                 recipients,
                 context_references: references,
@@ -939,22 +1063,177 @@ where
             context_grants,
             context_request_grant,
             declined_context_request,
-        ))
+        })
     });
-    let (routed, outlook, relay, context_grants, context_request_grant, declined_context_request) =
-        match routed {
-            Ok(routed) => routed,
-            Err(error) => {
-                let error = error.to_string();
-                record_snapshot_activation_failure(&fulfillment_grant_ids, &error, runtime);
-                return Err(error);
-            }
-        };
+    match routed {
+        Ok(committed) => present_committed(
+            committed,
+            &mut store,
+            &namespace,
+            &disposition_attempt_id,
+            runtime,
+        ),
+        Err(error) => {
+            let error = error.to_string();
+            record_snapshot_activation_failure(&fulfillment_grant_ids, &error, runtime);
+            Err(error.into())
+        }
+    }
+}
 
-    let links = store
-        .transaction(|tx| tx.coordination_links(&namespace, &routed.receipt.message_id))
+/// What one committed send produced, fresh or replayed.
+struct Committed {
+    routed: crate::RoutedMessageReceipt,
+    outlook: Vec<RecipientOutlook>,
+    relay: Option<RelayPresentation>,
+    context_grants: Option<Vec<crate::ContextGrantRecord>>,
+    context_request_grant: Option<crate::ContextGrantRecord>,
+    declined_context_request: Option<crate::ContextGrantRecord>,
+}
+
+/// The request a retry must match to return its saved receipt.
+struct Replay<'a> {
+    request_id: &'a str,
+    authored_source: &'a str,
+    in_reply_to: Option<&'a crate::MessageId>,
+    author_kind: ActorKind,
+    disposition_attempt: bool,
+    tracking: &'a crate::coordination::TrackingInput,
+}
+
+impl Replay<'_> {
+    fn receipt(
+        &self,
+        transaction: &mut crate::StateTransaction<'_>,
+        namespace: &StateNamespace,
+        author: &crate::RoutingAddressSnapshot,
+        pane_id: &str,
+        discovered: &crate::DiscoveredWorktree,
+    ) -> Result<Option<Committed>, crate::StoreError> {
+        let Some(replay) = transaction.replay_message(
+            namespace,
+            &author.address_id,
+            self.request_id,
+            self.authored_source,
+            self.in_reply_to,
+            self.author_kind,
+        )?
+        else {
+            return Ok(None);
+        };
+        if !transaction
+            .coordination_links(namespace, &replay.receipt.message_id)?
+            .is_empty()
+        {
+            crate::context::registered_current_address(
+                transaction,
+                namespace,
+                pane_id,
+                discovered,
+            )?;
+        }
+        transaction.check_coordination_replay(
+            namespace,
+            &replay.receipt.message_id,
+            &self.tracking.fingerprint(),
+            author,
+        )?;
+        let outlook = routed_recipient_outlooks(transaction, namespace, &replay.recipients)?;
+        Ok(Some(Committed {
+            routed: replay,
+            outlook,
+            relay: None,
+            context_grants: None,
+            context_request_grant: None,
+            declined_context_request: None,
+        }))
+    }
+}
+
+/// The sender of this pane, checked against what the request claims, and the
+/// attribution its writes carry.
+fn sending_author<E, C, I>(
+    transaction: &crate::StateTransaction<'_>,
+    namespace: &StateNamespace,
+    pane_id: &str,
+    request: &Replay<'_>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Result<(crate::RoutingAddressSnapshot, MutationAttribution), crate::StoreError>
+where
+    C: crate::Clock,
+{
+    let state = transaction.worktree_state(namespace)?;
+    if !state.is_some_and(|state| state.activated && !state.deactivated) {
+        return Err(crate::StoreError::invalid_input(
+            "Namedrop is not activated for this space",
+        ));
+    }
+    let author = transaction.routing_author_for_pane(namespace, pane_id)?;
+    let author_kind = request.author_kind;
+    if author_kind == ActorKind::AgentSession && author.agent_session_id.is_none() {
+        return Err(crate::StoreError::invalid_input(
+            "an agent-authored message requires a current Agent Session",
+        ));
+    }
+    if request.in_reply_to.is_some()
+        && author_kind == ActorKind::AgentSession
+        && !request.disposition_attempt
+    {
+        return Err(crate::StoreError::invalid_input(
+            "an agent-authored reply requires the Delivery Attempt id",
+        ));
+    }
+    if author_kind != ActorKind::AgentSession && request.disposition_attempt {
+        return Err(crate::StoreError::invalid_input(
+            "only an Agent Session may complete a Delivery Attempt with a reply",
+        ));
+    }
+    let attribution = MutationAttribution::new(
+        author_kind,
+        if author_kind == ActorKind::AgentSession {
+            author
+                .agent_session_id
+                .as_ref()
+                .expect("Agent Session was checked")
+                .as_str()
+        } else {
+            "local-human"
+        },
+        runtime.clock.now_unix_ms(),
+    );
+    Ok((author, attribution))
+}
+
+fn present_committed<E, C, I>(
+    committed: Committed,
+    store: &mut StateStore,
+    namespace: &StateNamespace,
+    disposition_attempt_id: &Option<crate::DeliveryAttemptId>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Result<PersistedMessage, SendError>
+where
+    E: crate::HerdrCommandExecutor,
+{
+    let Committed {
+        routed,
+        outlook,
+        relay,
+        context_grants,
+        context_request_grant,
+        declined_context_request,
+    } = committed;
+    let (links, forwarded) = store
+        .transaction(|tx| {
+            Ok((
+                tx.coordination_links(namespace, &routed.receipt.message_id)?,
+                tx.forwarded_copies(namespace, &routed.receipt.message_id)?,
+            ))
+        })
         .map_err(|e| e.to_string())?;
     let mut response = receipt_json(routed, outlook);
+    if !forwarded.is_empty() {
+        response["forwarded"] = json!(&forwarded);
+    }
     if !links.is_empty() {
         response["coordination"] = json!(links);
     }
@@ -977,7 +1256,7 @@ where
     if let Some(relay) = relay {
         response["relay"] = present_relay_result(&relay, runtime);
     }
-    Ok(response)
+    Ok((response, forwarded))
 }
 
 fn present_relay_result<E, C, I>(
@@ -1233,44 +1512,45 @@ fn mention_token_end(text: &str, at: usize) -> usize {
     end
 }
 
-/// Collects the Context Reference Mentions of a body. An at-sign token is classified whole before
-/// any alias is looked up: a token that is not alias-shaped is not Mention-shaped, so it stays
-/// literal prose instead of rejecting the send, and no valid alias prefix is taken out of it.
-/// A run that opens with a `#label` names someone in another workspace, so it is prose here too.
-fn context_mentions(body: &str) -> Vec<String> {
-    let mut aliases = Vec::new();
-    let mut qualified_run_end = None;
+/// Collects the Mentions of a body. An at-sign token is classified whole before any alias is
+/// looked up: a token that is not alias-shaped is not Mention-shaped, so it stays literal prose
+/// instead of rejecting the send, and no valid alias prefix is taken out of it. A run that opens
+/// with a `#label` carries that label, and routing decides whether it names a workspace.
+fn context_mentions(body: &str) -> Vec<BodyMention> {
+    let mut mentions = Vec::new();
+    let mut qualified_run: Option<(usize, WorkspaceLabel)> = None;
     for anchor in mention_anchors(body) {
         let end = mention_token_end(body, anchor);
-        let continues_run = qualified_run_end
-            .is_some_and(|run_end| body[run_end..anchor].chars().all(char::is_whitespace));
-        if continues_run || follows_workspace_label(body, anchor) {
-            qualified_run_end = Some(end);
-            continue;
+        let workspace = match qualified_run.take() {
+            Some((run_end, label)) if body[run_end..anchor].chars().all(char::is_whitespace) => {
+                Some(label)
+            }
+            _ => workspace_label_before(body, anchor),
+        };
+        if let Some(label) = &workspace {
+            qualified_run = Some((end, label.clone()));
         }
-        qualified_run_end = None;
         let token = &body[anchor + 1..end];
-        if validate_alias(token).is_ok() && !aliases.iter().any(|existing| existing == token) {
-            aliases.push(token.to_owned());
+        if validate_alias(token).is_ok() {
+            mentions.push(BodyMention {
+                alias: token.to_owned(),
+                workspace,
+            });
         }
     }
-    aliases
+    mentions
 }
 
-fn follows_workspace_label(text: &str, anchor: usize) -> bool {
+fn workspace_label_before(text: &str, anchor: usize) -> Option<WorkspaceLabel> {
     let before = &text[..anchor];
     if !before.ends_with(char::is_whitespace) {
-        return false;
+        return None;
     }
     before
         .split_whitespace()
         .next_back()
         .and_then(|token| token.strip_prefix('#'))
-        .is_some_and(|label| !label.is_empty() && label.bytes().all(is_label_token_byte))
-}
-
-fn is_label_token_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+        .and_then(WorkspaceLabel::from_token)
 }
 
 fn is_mention_token_byte(byte: u8) -> bool {

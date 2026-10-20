@@ -1,0 +1,972 @@
+//! Cross-workspace messages. A message is always written in its author's
+//! space; a recipient in another space is an envoy there, a claim-less local
+//! stand-in address. Appending a message that names envoys writes one copy per
+//! remote space, and a copy's outcome is reflected back onto the envoy's
+//! delivery so the author's own joins see it.
+
+use super::*;
+use crate::{SpaceId, WorkspaceLabel};
+
+pub(super) const SCHEMA: &str = r#"
+CREATE TABLE space_envoys (
+    session_socket_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    address_id TEXT NOT NULL,
+    origin_space_id TEXT NOT NULL,
+    origin_address_id TEXT NOT NULL,
+    origin_alias TEXT NOT NULL,
+    origin_label TEXT NOT NULL,
+    host_label TEXT NOT NULL,
+    PRIMARY KEY (session_socket_id, worktree_id, address_id),
+    UNIQUE (session_socket_id, worktree_id, origin_space_id, origin_address_id),
+    FOREIGN KEY (session_socket_id, worktree_id, address_id)
+        REFERENCES pane_addresses (session_socket_id, worktree_id, address_id)
+);
+CREATE TABLE bridged_messages (
+    session_socket_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    origin_space_id TEXT NOT NULL,
+    origin_message_id TEXT NOT NULL,
+    origin_label_snapshot TEXT NOT NULL,
+    label_snapshot TEXT NOT NULL,
+    PRIMARY KEY (session_socket_id, worktree_id, message_id),
+    UNIQUE (session_socket_id, worktree_id, origin_space_id, origin_message_id),
+    FOREIGN KEY (session_socket_id, worktree_id, message_id)
+        REFERENCES collaboration_messages (session_socket_id, worktree_id, message_id)
+);
+CREATE TABLE bridged_threads (
+    session_socket_id TEXT NOT NULL,
+    worktree_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    peer_space_id TEXT NOT NULL,
+    peer_thread_id TEXT NOT NULL,
+    PRIMARY KEY (session_socket_id, worktree_id, thread_id, peer_space_id),
+    UNIQUE (session_socket_id, worktree_id, peer_space_id, peer_thread_id),
+    FOREIGN KEY (session_socket_id, worktree_id, thread_id)
+        REFERENCES collaboration_threads (session_socket_id, worktree_id, thread_id)
+);
+"#;
+
+const ENVOY_ROLE_ID: &str = "role-envoy";
+
+/// The real, named address an envoy stands for, and the labels both sides had
+/// when the envoy was last refreshed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EnvoyOrigin {
+    pub space: SpaceId,
+    pub address_id: PaneAddressId,
+    pub alias: String,
+    /// The origin space's label.
+    pub label: WorkspaceLabel,
+    /// The label of the space the envoy lives in.
+    pub host_label: WorkspaceLabel,
+}
+
+pub(crate) struct SpaceNames {
+    pub space: SpaceId,
+    pub activated: bool,
+    /// Live agent aliases and group aliases.
+    pub names: std::collections::BTreeSet<String>,
+    /// Tombstoned aliases and the aliases of retired addresses.
+    pub retired: std::collections::BTreeSet<String>,
+}
+
+/// Which authored message a copy mirrors, written beside the copy, with the
+/// labels both workspaces had when it was forwarded.
+pub(super) struct BridgeOrigin<'a> {
+    space: &'a SpaceId,
+    message_id: &'a MessageId,
+    label: &'a WorkspaceLabel,
+    holder_label: &'a WorkspaceLabel,
+}
+
+/// What one forwarded copy did, read back from the ledger, so a fresh receipt
+/// and a replayed one agree.
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ForwardedCopy {
+    pub workspace: WorkspaceLabel,
+    #[serde(skip)]
+    pub space: SpaceId,
+    pub message_id: MessageId,
+    pub thread_id: ThreadId,
+    pub deliveries: Vec<ForwardedDelivery>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct ForwardedDelivery {
+    pub alias: String,
+    pub delivery_id: crate::DeliveryId,
+}
+
+fn bridged_id(space: &SpaceId, id: &str) -> String {
+    format!("bridge:{}:{id}", space.as_str())
+}
+
+impl StateTransaction<'_> {
+    /// Find or create the envoy standing for `origin` inside `host`, and refresh
+    /// the alias and labels it remembers.
+    pub(crate) fn envoy_for(
+        &mut self,
+        host: &StateNamespace,
+        origin: &EnvoyOrigin,
+        occurred_at_ms: u64,
+    ) -> Result<RoutingAddressSnapshot, StoreError> {
+        let origin_namespace =
+            StateNamespace::new(host.session_socket_id.clone(), origin.space.clone());
+        if self
+            .envoy_origin(&origin_namespace, &origin.address_id)?
+            .is_some()
+        {
+            return Err(StoreError::invalid_input(
+                "an envoy cannot stand for another envoy",
+            ));
+        }
+        if self.pane_type(&origin_namespace, &origin.address_id)? == crate::PaneType::Terminal {
+            return Err(StoreError::invalid_input(format!(
+                "@{} in {} is a named terminal; terminals take commands only from their own \
+                 workspace",
+                origin.alias, origin.label
+            )));
+        }
+        let address_id = PaneAddressId::new(format!(
+            "envoy:{}:{}",
+            origin.space.as_str(),
+            origin.address_id.as_str()
+        ));
+        let params = params![host.session_socket_id, host.space_id.as_str()];
+        self.transaction.execute(
+            "INSERT OR IGNORE INTO pane_roles (session_socket_id, worktree_id, role_id, name, description)
+             VALUES (?1, ?2, 'role-envoy', 'envoy',
+                     'Stands in for a named agent in another Herdr workspace.')",
+            params,
+        )?;
+        let created = self.transaction.execute(
+            "INSERT OR IGNORE INTO pane_addresses (
+                session_socket_id, worktree_id, address_id, role_id, retired,
+                collaboration_disabled, created_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, 0, 0, ?5)",
+            params![
+                host.session_socket_id,
+                host.space_id.as_str(),
+                address_id.as_str(),
+                ENVOY_ROLE_ID,
+                to_i64(occurred_at_ms)?
+            ],
+        )? == 1;
+        if created {
+            // Never active, so no pane lookup sees it. It exists because a
+            // reflected Delivery Attempt must name a binding.
+            self.transaction.execute(
+                "INSERT INTO pane_bindings (
+                    session_socket_id, worktree_id, binding_id, address_id, pane_id,
+                    active, bound_at_ms, unbound_at_ms
+                 ) VALUES (?1, ?2, ?3, ?3, '', 0, ?4, ?4)",
+                params![
+                    host.session_socket_id,
+                    host.space_id.as_str(),
+                    address_id.as_str(),
+                    to_i64(occurred_at_ms)?
+                ],
+            )?;
+        }
+        self.transaction.execute(
+            "INSERT INTO space_envoys (
+                session_socket_id, worktree_id, address_id, origin_space_id,
+                origin_address_id, origin_alias, origin_label, host_label
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT (session_socket_id, worktree_id, address_id) DO UPDATE SET
+                origin_alias = excluded.origin_alias,
+                origin_label = excluded.origin_label,
+                host_label = excluded.host_label",
+            params![
+                host.session_socket_id,
+                host.space_id.as_str(),
+                address_id.as_str(),
+                origin.space.as_str(),
+                origin.address_id.as_str(),
+                origin.alias,
+                origin.label.as_str(),
+                origin.host_label.as_str()
+            ],
+        )?;
+        Ok(RoutingAddressSnapshot {
+            address_id,
+            alias: origin.alias.clone(),
+            pane_binding_id: None,
+            agent_session_id: None,
+        })
+    }
+
+    pub(crate) fn envoy_origin(
+        &self,
+        host: &StateNamespace,
+        address_id: &PaneAddressId,
+    ) -> Result<Option<EnvoyOrigin>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT origin_space_id, origin_address_id, origin_alias, origin_label, host_label
+                 FROM space_envoys
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3",
+                params![
+                    host.session_socket_id,
+                    host.space_id.as_str(),
+                    address_id.as_str()
+                ],
+                |row| {
+                    Ok(EnvoyOrigin {
+                        space: SpaceId::new(row.get::<_, String>(0)?),
+                        address_id: PaneAddressId::new(row.get::<_, String>(1)?),
+                        alias: row.get(2)?,
+                        label: WorkspaceLabel::from_herdr(&row.get::<_, String>(3)?),
+                        host_label: WorkspaceLabel::from_herdr(&row.get::<_, String>(4)?),
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    fn envoy_standing_for(
+        &self,
+        host: &StateNamespace,
+        origin_space: &SpaceId,
+        origin_address: &PaneAddressId,
+    ) -> Result<Option<PaneAddressId>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT address_id FROM space_envoys
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND origin_space_id = ?3 AND origin_address_id = ?4",
+                params![
+                    host.session_socket_id,
+                    host.space_id.as_str(),
+                    origin_space.as_str(),
+                    origin_address.as_str()
+                ],
+                |row| row.get::<_, String>(0).map(PaneAddressId::new),
+            )
+            .optional()?)
+    }
+
+    /// Who `address_id` of `source` is inside `target`: the real address when it
+    /// is an envoy for `target`, otherwise `target`'s envoy for it.
+    fn stand_in(
+        &mut self,
+        target: &StateNamespace,
+        source: &StateNamespace,
+        address_id: &PaneAddressId,
+        alias: &str,
+        labels: (&WorkspaceLabel, &WorkspaceLabel),
+        occurred_at_ms: u64,
+    ) -> Result<RoutingAddressSnapshot, StoreError> {
+        match self.envoy_origin(source, address_id)? {
+            Some(origin) if origin.space == target.space_id => {
+                self.routing_address_by_id(target, &origin.address_id)
+            }
+            Some(_) => Err(StoreError::invalid_input(
+                "an envoy cannot stand for another envoy",
+            )),
+            None => {
+                let (source_label, target_label) = labels;
+                self.envoy_for(
+                    target,
+                    &EnvoyOrigin {
+                        space: source.space_id.clone(),
+                        address_id: address_id.clone(),
+                        alias: alias.to_owned(),
+                        label: source_label.clone(),
+                        host_label: target_label.clone(),
+                    },
+                    occurred_at_ms,
+                )
+            }
+        }
+    }
+
+    /// Called by `append_message` and by nothing else: one copy of `draft` in each
+    /// space its envoy recipients stand for, and this space's envoy deliveries
+    /// settle because the copy now carries them.
+    pub(super) fn forward_to_envoys(
+        &mut self,
+        namespace: &StateNamespace,
+        draft: &MessageDraft,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let mut targets: Vec<(EnvoyOrigin, Vec<&crate::MessageRecipientDraft>)> = Vec::new();
+        for recipient in &draft.recipients {
+            let Some(origin) = self.envoy_origin(namespace, &recipient.address_id)? else {
+                continue;
+            };
+            match targets
+                .iter_mut()
+                .find(|(first, _)| first.space == origin.space)
+            {
+                Some((_, recipients)) => recipients.push(recipient),
+                None => targets.push((origin, vec![recipient])),
+            }
+        }
+        for (envoy, recipients) in targets {
+            let target = StateNamespace::new(namespace.session_socket_id.clone(), envoy.space);
+            if !self
+                .worktree_state(&target)?
+                .is_some_and(|state| state.activated && !state.deactivated)
+            {
+                return Err(StoreError::invalid_input(format!(
+                    "Namedrop is not activated in {}; activate it there before sending",
+                    envoy.label
+                )));
+            }
+            let (source_label, target_label) = (&envoy.host_label, &envoy.label);
+            let author = self.stand_in(
+                &target,
+                namespace,
+                &draft.author_address_id,
+                &draft.author_alias_snapshot,
+                (source_label, target_label),
+                attribution.occurred_at_ms,
+            )?;
+            let thread_id =
+                self.bridged_thread(namespace, &draft.thread_id, &target, attribution)?;
+            let in_reply_to = match &draft.in_reply_to {
+                Some(message_id) => self.counterpart_message(namespace, message_id, &target)?,
+                None => None,
+            };
+            let mut copy_recipients = Vec::new();
+            for recipient in &recipients {
+                let origin = self
+                    .envoy_origin(namespace, &recipient.address_id)?
+                    .expect("grouped recipients are envoys");
+                if self.pane_type(&target, &origin.address_id)? == crate::PaneType::Terminal {
+                    return Err(StoreError::invalid_input(format!(
+                        "@{} in {} is a named terminal; terminals take commands only from their \
+                         own workspace",
+                        origin.alias, envoy.label
+                    )));
+                }
+                let current = self.routing_address_by_id(&target, &origin.address_id)?;
+                copy_recipients.push(crate::MessageRecipientDraft {
+                    address_id: current.address_id,
+                    alias_snapshot: current.alias,
+                    agent_session_snapshot: current.agent_session_id,
+                    delivery_id: crate::DeliveryId::new(bridged_id(
+                        &namespace.space_id,
+                        recipient.delivery_id.as_str(),
+                    )),
+                });
+            }
+            let copy_id = bridged_id(&namespace.space_id, draft.message_id.as_str());
+            self.append_message_from(
+                &target,
+                &MessageDraft {
+                    thread_id,
+                    message_id: MessageId::new(copy_id.clone()),
+                    in_reply_to,
+                    author_address_id: author.address_id,
+                    author_kind: draft.author_kind,
+                    author_alias_snapshot: draft.author_alias_snapshot.clone(),
+                    author_agent_session_snapshot: draft.author_agent_session_snapshot.clone(),
+                    request_id: copy_id,
+                    authored_source: draft.authored_source.clone(),
+                    body: draft.body.clone(),
+                    grammar_version: draft.grammar_version.clone(),
+                    recipients: copy_recipients,
+                    context_references: Vec::new(),
+                },
+                attribution,
+                Some(&BridgeOrigin {
+                    space: &namespace.space_id,
+                    message_id: &draft.message_id,
+                    label: source_label,
+                    holder_label: target_label,
+                }),
+            )?;
+            for recipient in recipients {
+                self.transaction.execute(
+                    "UPDATE mailbox_deliveries SET state = 'settled'
+                     WHERE session_socket_id = ?1 AND worktree_id = ?2 AND delivery_id = ?3",
+                    params![
+                        namespace.session_socket_id,
+                        namespace.space_id.as_str(),
+                        recipient.delivery_id.as_str()
+                    ],
+                )?;
+                self.append_transition(
+                    namespace,
+                    TransitionEntityKind::MailboxDelivery,
+                    recipient.delivery_id.as_str(),
+                    TransitionKind::Settled,
+                    attribution,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn record_bridged_message(
+        &mut self,
+        namespace: &StateNamespace,
+        message_id: &MessageId,
+        origin: &BridgeOrigin<'_>,
+    ) -> Result<(), StoreError> {
+        self.transaction.execute(
+            "INSERT INTO bridged_messages (
+                session_socket_id, worktree_id, message_id, origin_space_id,
+                origin_message_id, origin_label_snapshot, label_snapshot
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                message_id.as_str(),
+                origin.space.as_str(),
+                origin.message_id.as_str(),
+                origin.label.as_str(),
+                origin.holder_label.as_str()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The thread in `target` that continues `thread_id`, paired on first use.
+    fn bridged_thread(
+        &mut self,
+        namespace: &StateNamespace,
+        thread_id: &ThreadId,
+        target: &StateNamespace,
+        attribution: &MutationAttribution,
+    ) -> Result<ThreadId, StoreError> {
+        let paired = self
+            .transaction
+            .query_row(
+                "SELECT peer_thread_id FROM bridged_threads
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND thread_id = ?3 AND peer_space_id = ?4",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    thread_id.as_str(),
+                    target.space_id.as_str()
+                ],
+                |row| row.get::<_, String>(0).map(ThreadId::new),
+            )
+            .optional()?;
+        if let Some(peer) = paired {
+            return Ok(peer);
+        }
+        let title: String = self.transaction.query_row(
+            "SELECT title FROM collaboration_threads
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                thread_id.as_str()
+            ],
+            |row| row.get(0),
+        )?;
+        let peer = ThreadId::new(bridged_id(&namespace.space_id, thread_id.as_str()));
+        self.create_thread(target, &peer, &title, attribution)?;
+        // One conversation has one set of controls, so the new side starts
+        // where the existing side stands.
+        self.transaction.execute(
+            "UPDATE thread_controls SET (paused, stopped, reply_allowance) = (
+                SELECT paused, stopped, reply_allowance FROM thread_controls
+                WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
+             )
+             WHERE session_socket_id = ?1 AND worktree_id = ?4 AND thread_id = ?5",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                thread_id.as_str(),
+                target.space_id.as_str(),
+                peer.as_str()
+            ],
+        )?;
+        for (side, thread, other, other_thread) in [
+            (namespace, thread_id, target, &peer),
+            (target, &peer, namespace, thread_id),
+        ] {
+            self.transaction.execute(
+                "INSERT INTO bridged_threads (
+                    session_socket_id, worktree_id, thread_id, peer_space_id, peer_thread_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    side.session_socket_id,
+                    side.space_id.as_str(),
+                    thread.as_str(),
+                    other.space_id.as_str(),
+                    other_thread.as_str()
+                ],
+            )?;
+        }
+        Ok(peer)
+    }
+
+    /// Every thread in another workspace that continues this one's
+    /// conversation, directly or through another pairing.
+    pub(super) fn paired_threads(
+        &self,
+        namespace: &StateNamespace,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<(StateNamespace, ThreadId)>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT peer_space_id, peer_thread_id FROM bridged_threads
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3",
+        )?;
+        let start = (namespace.space_id.clone(), thread_id.clone());
+        let mut seen = vec![start.clone()];
+        let mut pending = vec![start];
+        while let Some((space, thread)) = pending.pop() {
+            let peers = statement
+                .query_map(
+                    params![namespace.session_socket_id, space.as_str(), thread.as_str()],
+                    |row| {
+                        Ok((
+                            SpaceId::new(row.get::<_, String>(0)?),
+                            ThreadId::new(row.get::<_, String>(1)?),
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            for peer in peers {
+                if !seen.contains(&peer) {
+                    seen.push(peer.clone());
+                    pending.push(peer);
+                }
+            }
+        }
+        Ok(seen
+            .into_iter()
+            .skip(1)
+            .map(|(space, thread)| {
+                (
+                    StateNamespace::new(namespace.session_socket_id.clone(), space),
+                    thread,
+                )
+            })
+            .collect())
+    }
+
+    /// The message in `target` that `message_id` of `namespace` corresponds to:
+    /// the original a copy mirrors, or the copy an original produced.
+    fn counterpart_message(
+        &self,
+        namespace: &StateNamespace,
+        message_id: &MessageId,
+        target: &StateNamespace,
+    ) -> Result<Option<MessageId>, StoreError> {
+        if let Some((space, origin)) = self.copy_origin(namespace, message_id)?
+            && space == target.space_id
+        {
+            return Ok(Some(origin));
+        }
+        self.copy_of(target, &namespace.space_id, message_id)
+    }
+
+    /// Copy to origin: the authored message a copy in `namespace` mirrors.
+    fn copy_origin(
+        &self,
+        namespace: &StateNamespace,
+        message_id: &MessageId,
+    ) -> Result<Option<(SpaceId, MessageId)>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT origin_space_id, origin_message_id FROM bridged_messages
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    message_id.as_str()
+                ],
+                |row| {
+                    Ok((
+                        SpaceId::new(row.get::<_, String>(0)?),
+                        MessageId::new(row.get::<_, String>(1)?),
+                    ))
+                },
+            )
+            .optional()?)
+    }
+
+    /// Origin to copy: the copy in `holder` of `origin_space`'s message.
+    fn copy_of(
+        &self,
+        holder: &StateNamespace,
+        origin_space: &SpaceId,
+        origin_message: &MessageId,
+    ) -> Result<Option<MessageId>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT message_id FROM bridged_messages
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND origin_space_id = ?3 AND origin_message_id = ?4",
+                params![
+                    holder.session_socket_id,
+                    holder.space_id.as_str(),
+                    origin_space.as_str(),
+                    origin_message.as_str()
+                ],
+                |row| row.get::<_, String>(0).map(MessageId::new),
+            )
+            .optional()?)
+    }
+
+    /// The workspace label a copy was sent from, for its envelope's sender.
+    pub(crate) fn bridged_sender_label(
+        &self,
+        namespace: &StateNamespace,
+        message_id: &MessageId,
+    ) -> Result<Option<WorkspaceLabel>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT origin_label_snapshot FROM bridged_messages
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    message_id.as_str()
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|label| WorkspaceLabel::from_herdr(&label)))
+    }
+
+    /// The copies an authored message produced, for receipts and replays.
+    pub(crate) fn forwarded_copies(
+        &self,
+        namespace: &StateNamespace,
+        message_id: &MessageId,
+    ) -> Result<Vec<ForwardedCopy>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT b.worktree_id, b.message_id, m.thread_id, b.label_snapshot
+             FROM bridged_messages b
+             JOIN collaboration_messages m USING (session_socket_id, worktree_id, message_id)
+             WHERE b.session_socket_id = ?1 AND b.origin_space_id = ?2
+               AND b.origin_message_id = ?3
+             ORDER BY b.worktree_id",
+        )?;
+        let copies = statement
+            .query_map(
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    message_id.as_str()
+                ],
+                |row| {
+                    Ok((
+                        SpaceId::new(row.get::<_, String>(0)?),
+                        MessageId::new(row.get::<_, String>(1)?),
+                        ThreadId::new(row.get::<_, String>(2)?),
+                        WorkspaceLabel::from_herdr(&row.get::<_, String>(3)?),
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        copies
+            .into_iter()
+            .map(|(space, message_id, thread_id, workspace)| {
+                let holder =
+                    StateNamespace::new(namespace.session_socket_id.clone(), space.clone());
+                let deliveries = self
+                    .message_routing_snapshots(
+                        &holder,
+                        &message_id,
+                        "message_recipients",
+                        "recipient_order",
+                        false,
+                    )?
+                    .into_iter()
+                    .map(|recipient| {
+                        let delivery_id = self.transaction.query_row(
+                            "SELECT delivery_id FROM mailbox_deliveries
+                             WHERE session_socket_id = ?1 AND worktree_id = ?2
+                               AND message_id = ?3 AND address_id = ?4",
+                            params![
+                                holder.session_socket_id,
+                                holder.space_id.as_str(),
+                                message_id.as_str(),
+                                recipient.address_id.as_str()
+                            ],
+                            |row| row.get::<_, String>(0).map(crate::DeliveryId::new),
+                        )?;
+                        Ok(ForwardedDelivery {
+                            alias: recipient.alias,
+                            delivery_id,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, StoreError>>()?;
+                Ok(ForwardedCopy {
+                    workspace,
+                    space,
+                    message_id,
+                    thread_id,
+                    deliveries,
+                })
+            })
+            .collect()
+    }
+
+    /// Reflects each settled outcome of a copy's deliveries onto the envoy
+    /// delivery it came from, so joins in the author's space see real results.
+    /// Idempotent: an outcome already reflected is left alone.
+    pub(super) fn reflect_copy_outcomes(
+        &mut self,
+        namespace: &StateNamespace,
+        copy_id: &MessageId,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let Some((origin_space, origin_message)) = self.copy_origin(namespace, copy_id)? else {
+            return Ok(());
+        };
+        let origin = StateNamespace::new(namespace.session_socket_id.clone(), origin_space);
+        let mut statement = self.transaction.prepare(
+            "SELECT d.address_id, d.state, a.attempt_id, a.agent_session_id, a.created_at_ms,
+                    p.disposition_id, p.disposition_kind, p.occurred_at_ms
+             FROM mailbox_deliveries d
+             LEFT JOIN delivery_attempts a ON a.rowid = (
+                 SELECT latest.rowid FROM delivery_attempts latest
+                 WHERE latest.session_socket_id = d.session_socket_id
+                   AND latest.worktree_id = d.worktree_id
+                   AND latest.delivery_id = d.delivery_id
+                 ORDER BY latest.created_at_ms DESC, latest.rowid DESC LIMIT 1
+             )
+             LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id)
+             WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2 AND d.message_id = ?3",
+        )?;
+        let outcomes = statement
+            .query_map(
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    copy_id.as_str()
+                ],
+                |row| {
+                    Ok((
+                        PaneAddressId::new(row.get::<_, String>(0)?),
+                        parse_delivery_state(row.get(1)?)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut changed = false;
+        for (address, state, attempt, session, attempt_at, disposition, kind, disposed_at) in
+            outcomes
+        {
+            let Some(envoy) = self.envoy_standing_for(&origin, &namespace.space_id, &address)?
+            else {
+                continue;
+            };
+            let delivery_id: String = self.transaction.query_row(
+                "SELECT delivery_id FROM mailbox_deliveries
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND message_id = ?3 AND address_id = ?4",
+                params![
+                    origin.session_socket_id,
+                    origin.space_id.as_str(),
+                    origin_message.as_str(),
+                    envoy.as_str()
+                ],
+                |row| row.get(0),
+            )?;
+            if let (Some(attempt), Some(session), Some(disposition), Some(kind)) =
+                (attempt, session, disposition, kind)
+            {
+                let reflected_attempt = bridged_id(&namespace.space_id, &attempt);
+                let inserted = self.transaction.execute(
+                    "INSERT OR IGNORE INTO delivery_attempts (
+                        session_socket_id, worktree_id, attempt_id, delivery_id, address_id,
+                        binding_id, agent_session_id, created_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
+                    params![
+                        origin.session_socket_id,
+                        origin.space_id.as_str(),
+                        reflected_attempt,
+                        delivery_id,
+                        envoy.as_str(),
+                        session,
+                        attempt_at.unwrap_or_default()
+                    ],
+                )? == 1;
+                if !inserted {
+                    continue;
+                }
+                self.transaction.execute(
+                    "INSERT INTO delivery_attempt_state (
+                        session_socket_id, worktree_id, attempt_id, address_id, state, active
+                     ) VALUES (?1, ?2, ?3, ?4, 'settled', 0)",
+                    params![
+                        origin.session_socket_id,
+                        origin.space_id.as_str(),
+                        reflected_attempt,
+                        envoy.as_str()
+                    ],
+                )?;
+                // A reply's disposition id is its reply message, so the
+                // reflected one names the reply's copy on this side. A reply
+                // that stayed in the copy's space has no copy here, so the
+                // author sees that nothing came back.
+                let reply_copy = match kind.as_str() {
+                    "reply" => self.copy_of(
+                        &origin,
+                        &namespace.space_id,
+                        &MessageId::new(disposition.clone()),
+                    )?,
+                    _ => None,
+                };
+                let (reflected_disposition, kind) = match reply_copy {
+                    Some(message) => (message.as_str().to_owned(), kind),
+                    None if kind == "reply" => (
+                        bridged_id(&namespace.space_id, &disposition),
+                        crate::DeliveryDisposition::NoReply.as_str().to_owned(),
+                    ),
+                    None => (bridged_id(&namespace.space_id, &disposition), kind),
+                };
+                self.transaction.execute(
+                    "INSERT INTO delivery_dispositions (
+                        session_socket_id, worktree_id, disposition_id, attempt_id,
+                        disposition_kind, occurred_at_ms
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        origin.session_socket_id,
+                        origin.space_id.as_str(),
+                        reflected_disposition,
+                        reflected_attempt,
+                        kind,
+                        disposed_at.unwrap_or_default()
+                    ],
+                )?;
+                self.append_transition(
+                    &origin,
+                    TransitionEntityKind::AgentDisposition,
+                    &reflected_disposition,
+                    if kind == "reply" {
+                        TransitionKind::CompletedReply
+                    } else {
+                        TransitionKind::CompletedNoReply
+                    },
+                    attribution,
+                )?;
+                changed = true;
+            } else if matches!(state, DeliveryState::Failed | DeliveryState::Cancelled) {
+                let updated = self.transaction.execute(
+                    "UPDATE mailbox_deliveries SET state = ?4
+                     WHERE session_socket_id = ?1 AND worktree_id = ?2 AND delivery_id = ?3
+                       AND state = 'settled'",
+                    params![
+                        origin.session_socket_id,
+                        origin.space_id.as_str(),
+                        delivery_id,
+                        delivery_state_name(state)
+                    ],
+                )?;
+                if updated == 1 {
+                    self.append_transition(
+                        &origin,
+                        TransitionEntityKind::MailboxDelivery,
+                        &delivery_id,
+                        delivery_transition_kind(state),
+                        attribution,
+                    )?;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.complete_result_set_if_ready(&origin, &origin_message, attribution)?;
+        }
+        Ok(())
+    }
+
+    /// Spaces holding a queued delivery in a conversation that spans
+    /// workspaces: a forwarded copy, or anything another workspace's activity
+    /// queued there, such as a result set. Only a wake from that other
+    /// workspace reaches it promptly.
+    pub(crate) fn spaces_awaiting_dispatch(
+        &self,
+        socket: &str,
+    ) -> Result<Vec<SpaceId>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT DISTINCT d.worktree_id FROM mailbox_deliveries d
+             JOIN collaboration_messages m USING (session_socket_id, worktree_id, message_id)
+             WHERE d.session_socket_id = ?1 AND d.state = 'queued'
+               AND EXISTS (
+                   SELECT 1 FROM bridged_threads t
+                   WHERE t.session_socket_id = m.session_socket_id
+                     AND t.worktree_id = m.worktree_id AND t.thread_id = m.thread_id
+               )
+             ORDER BY d.worktree_id",
+        )?;
+        statement
+            .query_map(params![socket], |row| {
+                row.get::<_, String>(0).map(SpaceId::new)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
+    /// Every space of this Herdr session with the names it answers to, live
+    /// and retired.
+    pub(crate) fn alias_index(&self, socket: &str) -> Result<Vec<SpaceNames>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT worktree_id, activated AND NOT deactivated FROM worktrees
+             WHERE session_socket_id = ?1 ORDER BY worktree_id",
+        )?;
+        let mut spaces = statement
+            .query_map(params![socket], |row| {
+                Ok(SpaceNames {
+                    space: SpaceId::new(row.get::<_, String>(0)?),
+                    activated: row.get(1)?,
+                    names: std::collections::BTreeSet::new(),
+                    retired: std::collections::BTreeSet::new(),
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut statement = self.transaction.prepare(
+            "SELECT c.worktree_id, c.alias, c.claim_state = 'active' AND a.retired = 0
+             FROM alias_claims c
+             JOIN pane_addresses a USING (session_socket_id, worktree_id, address_id)
+             WHERE c.session_socket_id = ?1
+             UNION SELECT worktree_id, alias, 1 FROM mention_groups WHERE session_socket_id = ?1",
+        )?;
+        for name in statement.query_map(params![socket], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, bool>(2)?,
+            ))
+        })? {
+            let (space, alias, live) = name?;
+            if let Some(entry) = spaces
+                .iter_mut()
+                .find(|entry| entry.space.as_str() == space)
+            {
+                if live {
+                    entry.names.insert(alias);
+                } else {
+                    entry.retired.insert(alias);
+                }
+            }
+        }
+        Ok(spaces)
+    }
+
+    pub(crate) fn is_envoy(
+        &self,
+        namespace: &StateNamespace,
+        address_id: &PaneAddressId,
+    ) -> Result<bool, StoreError> {
+        Ok(self.envoy_origin(namespace, address_id)?.is_some())
+    }
+}

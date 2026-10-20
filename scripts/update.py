@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def prepare_target(before, directory):
@@ -151,7 +151,7 @@ def durable_state(panes, other_servers=False):
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2) as db:
         db.execute('BEGIN')
         schema = db.execute("PRAGMA user_version").fetchone()[0]
-        require(schema in (3, 4, SCHEMA_VERSION),
+        require(schema in (3, 4, 5, SCHEMA_VERSION),
                 "Unknown collaboration database schema; use the matching Namedrop release to inspect unfinished work.")
         deliveries = db.execute("""SELECT session_socket_id, worktree_id, delivery_id, state FROM mailbox_deliveries d
             WHERE state NOT IN ('settled', 'failed', 'cancelled') OR
@@ -174,11 +174,18 @@ def durable_state(panes, other_servers=False):
                 historical += 1
                 historical_deliveries.add((socket, space, delivery))
         unfinished = len(deliveries) - historical
-        joins = db.execute("""SELECT m.session_socket_id, m.author_session_snapshot, m.worktree_id, m.message_id FROM collaboration_messages m
+        # A copy forwarded from another workspace is joined where it was sent,
+        # never here; this matches complete_ready_result_sets in src/store.rs.
+        envoy_author = """AND NOT EXISTS (SELECT 1 FROM space_envoys e
+                 WHERE e.session_socket_id=m.session_socket_id AND e.worktree_id=m.worktree_id
+                 AND e.address_id=m.author_address_id)""" if db.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='space_envoys'").fetchone() else ""
+        joins = db.execute(f"""SELECT m.session_socket_id, m.author_session_snapshot, m.worktree_id, m.message_id FROM collaboration_messages m
             JOIN pane_addresses a ON a.session_socket_id=m.session_socket_id
                  AND a.worktree_id=m.worktree_id AND a.address_id=m.author_address_id
             WHERE m.author_kind='agent_session' AND m.grammar_version='delegated/v1'
             AND a.retired=0 AND a.collaboration_disabled=0 AND m.author_session_snapshot IS NOT NULL
+            {envoy_author}
             AND (SELECT count(*) FROM message_recipients r
                  WHERE r.session_socket_id=m.session_socket_id AND r.worktree_id=m.worktree_id
                  AND r.message_id=m.message_id) > 1
@@ -212,7 +219,7 @@ def durable_state(panes, other_servers=False):
                         SELECT 1 FROM delivery_attempts a JOIN delivery_dispositions p
                         USING (session_socket_id,worktree_id,attempt_id)
                         WHERE a.session_socket_id=d.session_socket_id AND a.worktree_id=d.worktree_id
-                        AND a.delivery_id=d.delivery_id)))))""").fetchall() if schema == SCHEMA_VERSION else []
+                        AND a.delivery_id=d.delivery_id)))))""").fetchall() if schema >= 5 else []
         unfinished += len(coordinations)
         details = []
         for socket, space, delivery, status in deliveries:

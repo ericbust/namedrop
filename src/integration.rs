@@ -1272,6 +1272,10 @@ where
 pub struct DeliveryAddress {
     pub address_id: PaneAddressId,
     pub alias: String,
+    /// The sender's workspace, present only when it is not the recipient's, so
+    /// every local envelope keeps its exact shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<crate::WorkspaceLabel>,
 }
 
 impl DeliveryAddress {
@@ -1279,6 +1283,7 @@ impl DeliveryAddress {
         Self {
             address_id,
             alias: alias.into(),
+            workspace: None,
         }
     }
 }

@@ -21,7 +21,7 @@ fn mention_parser_separates_recipients_context_and_literals() {
         parsed.body,
         "Please inspect foo@bar, \\@planner, `@inline`, and ```\n@fenced\n``` then @planner."
     );
-    assert_eq!(parsed.context_reference_aliases, ["planner"]);
+    assert_eq!(parsed.context_reference_aliases(|_| false), ["planner"]);
 }
 
 #[test]
@@ -45,7 +45,7 @@ name@example.com, \\@literal, and `@inline`.";
 
     assert_eq!(parsed.recipients.aliases, ["reviewer", "planner"]);
     assert_eq!(parsed.body, source);
-    assert!(parsed.context_reference_aliases.is_empty());
+    assert!(parsed.context_mentions.is_empty());
     assert!(
         parse_prompt_mentions("Please ask @reviewer to inspect this.").is_err(),
         "an embedded Mention must remain available to the local agent"
@@ -145,7 +145,7 @@ fn mention_parser_keeps_at_sign_tokens_that_are_not_alias_shaped_literal() {
         "@TODO write this up: a bare @ is fine, @foo_bar and @bad--alias and @trailing- and \
 @Planner are prose, but @planner is a Mention, and this ends with @"
     );
-    assert_eq!(parsed.context_reference_aliases, ["planner"]);
+    assert_eq!(parsed.context_reference_aliases(|_| false), ["planner"]);
 }
 
 #[test]
@@ -781,9 +781,22 @@ fn workspace_labels_fold_case_and_spaces_to_the_typed_form() {
 }
 
 #[test]
-fn a_qualified_mention_inside_a_body_is_prose_not_a_context_reference() {
+fn a_body_mention_is_prose_only_when_its_label_names_a_workspace() {
     let parsed = parse_mentions("@reviewer see #b @y and #c @z @w, but ask @planner").unwrap();
-    assert_eq!(parsed.context_reference_aliases, ["planner"]);
+    assert_eq!(
+        parsed.context_reference_aliases(|_| true),
+        ["planner"],
+        "a run after a workspace label is prose"
+    );
+    assert_eq!(
+        parsed.context_reference_aliases(|label| label.as_str() == "c"),
+        ["y", "planner"]
+    );
+    assert_eq!(
+        parsed.context_reference_aliases(|_| false),
+        ["y", "z", "w", "planner"],
+        "a label that names no workspace leaves today's references"
+    );
 }
 
 #[test]
