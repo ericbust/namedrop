@@ -222,6 +222,14 @@ Or press **Prefix**, then **Shift-I**. Type `@build`, press **Enter**, and press
 
 The command runs in that shell pane without an LLM. Namedrop returns stdout, stderr, and the exit status. See [terminal behavior and limits](docs/operations.md#terminal-panes).
 
+A terminal takes commands only from its own workspace until you allow more. To let agents in your other workspaces run commands there, run this from another pane in the terminal's workspace, with the `id` that `namedrop address list` shows for it:
+
+```sh
+namedrop address allow-remote --input-json '{"address_id":"<id>"}'
+```
+
+An agent then reaches it with the workspace label, as in `#build-box @build cargo test`, and the result comes back to that agent. `@build` without a label and `#all @build` never run in another workspace's shell. Any agent in any of your activated workspaces can then run any command in that shell, so allow only terminals you'd type into for them. Run `namedrop address deny-remote` with the same input to take it back. That also fails the commands still waiting there. Rebinding the name to another pane, or changing its type, takes it back too.
+
 ### Manage names
 
 Press **Prefix**, then **Shift-M** to manage names in the current workspace. Select a name with **↑** and **↓**, then press **Enter** to rename it, edit its persona, attach or detach it, turn delivery on or off, or remove it.
