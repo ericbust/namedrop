@@ -491,14 +491,7 @@ impl StateTransaction<'_> {
                 // never silently cancelled or retried here.
                 let delivery=self.transaction.query_row("SELECT delivery_id FROM mailbox_deliveries WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 AND state='queued'",params![ns.session_socket_id,ns.space_id.as_str(),message],|r|r.get::<_,String>(0)).optional()?;
                 if let Some(delivery) = delivery {
-                    self.transaction.execute("UPDATE mailbox_deliveries SET state='cancelled' WHERE session_socket_id=?1 AND worktree_id=?2 AND delivery_id=?3 AND state='queued'",params![ns.session_socket_id,ns.space_id.as_str(),delivery])?;
-                    self.append_transition(
-                        ns,
-                        TransitionEntityKind::MailboxDelivery,
-                        &delivery,
-                        TransitionKind::Cancelled,
-                        by,
-                    )?;
+                    self.cancel_unsent_delivery(ns, &crate::DeliveryId::new(delivery), by)?;
                 }
             }
             if outcome != "open" {
@@ -1088,18 +1081,7 @@ impl StateTransaction<'_> {
                 .collect::<Result<Vec<_>, _>>()?
         };
         for delivery in cancelled {
-            self.transaction.execute(
-                "UPDATE mailbox_deliveries SET state='cancelled'
-                 WHERE session_socket_id=?1 AND worktree_id=?2 AND delivery_id=?3 AND state='queued'",
-                params![ns.session_socket_id, ns.space_id.as_str(), delivery],
-            )?;
-            self.append_transition(
-                ns,
-                TransitionEntityKind::MailboxDelivery,
-                &delivery,
-                TransitionKind::Cancelled,
-                by,
-            )?;
+            self.cancel_unsent_delivery(ns, &crate::DeliveryId::new(delivery), by)?;
         }
         Ok(())
     }

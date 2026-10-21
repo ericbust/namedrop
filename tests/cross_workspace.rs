@@ -2261,3 +2261,40 @@ fn address_list_reads_every_workspace_when_asked() {
             .is_err()
     );
 }
+
+#[test]
+fn every_unsent_delivery_cancel_goes_through_the_one_reflecting_helper() {
+    fn sources(directory: &std::path::Path, found: &mut Vec<(String, String)>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                sources(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push((
+                    path.display().to_string(),
+                    fs::read_to_string(&path).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let raw_cancels: Vec<String> = files
+        .iter()
+        .flat_map(|(path, text)| {
+            let compact: String = text.split_whitespace().collect();
+            let count = compact.matches("SETstate='cancelled'").count();
+            std::iter::repeat_n(path.clone(), count)
+        })
+        .collect();
+    assert_eq!(
+        raw_cancels.len(),
+        1,
+        "only cancel_unsent_delivery may write a cancelled delivery state, so a forwarded \
+         copy's cancel always reaches its other workspace: {raw_cancels:?}"
+    );
+    assert!(raw_cancels[0].ends_with("src/store.rs"), "{raw_cancels:?}");
+}
