@@ -71,7 +71,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "dashboard", "handoffs",
                                               "shared-checkout", "stuck-wake", "idle-worker", "stale-runtime",
-                                              "cross-workspace"],
+                                              "cross-workspace", "cross-workspace-tracked"],
                         default="names")
     parser.add_argument("--binary", type=Path, default=REPO / "target/debug/namedrop")
     args = parser.parse_args()
@@ -93,7 +93,8 @@ def main():
                HERDR_SOCKET_PATH=str(base / "run/herdr.sock"), SHELL=shutil.which("bash") or "/bin/bash")
     (base / "home/.bashrc").write_text('PROMPT_COMMAND=\': > "$HOME/ready-$HERDR_PANE_ID"\'\n')
     (base / "home/.bash_profile").write_text('. "$HOME/.bashrc"\n')
-    links_plugin = args.feature in ("stuck-wake", "idle-worker", "stale-runtime", "cross-workspace")
+    cross_workspace = args.feature in ("cross-workspace", "cross-workspace-tracked")
+    links_plugin = cross_workspace or args.feature in ("stuck-wake", "idle-worker", "stale-runtime")
     state = base / ("state/herdr/plugins/namedrop" if links_plugin else "state/namedrop")
     server = None
     dashboard_pid = None
@@ -191,7 +192,7 @@ def main():
         if server.poll() is not None:
             raise RuntimeError("Disposable server failed; see server.log")
         created = host("workspace", "create", "--cwd", str(base / "workspace"), "--label",
-                       "alpha" if args.feature == "cross-workspace" else "Namedrop verification")
+                       "alpha" if cross_workspace else "Namedrop verification")
         spaces = {"lead": created["workspace"]["workspace_id"]}
         panes = {"lead": created["root_pane"]["pane_id"]}
         panes["worker"] = host("tab", "create", "--workspace", spaces["lead"], "--cwd", str(base / "workspace"),
@@ -569,7 +570,7 @@ def main():
                 wait(lambda: (base / "home" / f"ready-{panes[key]}").exists(), f"{key} native bash prompt")
                 shell_pids.append(host("pane", "process-info", "--pane", panes[key])["process_info"]["shell_pid"])
 
-            if args.feature == "cross-workspace":
+            if cross_workspace:
                 for space, label in (("beta", "Beta Space"), ("gamma", "gamma")):
                     directories[space] = base / space
                     directories[space].mkdir()
@@ -1104,182 +1105,258 @@ def main():
                             {"body": stayed["untrusted_body"], "sender": stayed["control"]["sender"]})
                     bound(stayed, "complete.no-reply")
 
-                    before_bare_remote = message_state()
-                    remote = trace["d"] = hook("alpha-helper", "@reviewer please review")
-                    remote_text = ((remote["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
-                    require(remote_text.startswith("Namedrop workspace roster.")
-                            and "@reviewer is not named in this workspace. It is named in: #beta-space. Use #beta-space"
-                                " @reviewer to reach it. Nothing was sent." in remote_text,
-                            "d: an unqualified name only Beta Space has stays in alpha and names #beta-space", remote["stdout"])
-                    wake("alpha-helper")
-                    deliveries("d", [])
-                    require(message_state() == before_bare_remote, "d: the refused bare name persists nothing",
-                            message_state())
+                    if args.feature == "cross-workspace-tracked":
+                        lead, reviewer = agents["alpha-lead"], agents["beta-reviewer"]
 
-                    everyone = trace["f"] = hook("alpha-helper", "#all @lead status")
-                    require(everyone["output"] == blocked, "f: the hook blocks #all", everyone["stdout"])
-                    wake("alpha-helper")
-                    leads = deliveries("f", ["alpha-lead", "beta-lead", "gamma-lead"])
-                    require(all(e["untrusted_body"].endswith("status") for e in leads.values()),
-                            "f: every workspace's lead receives the status prompt",
-                            {role: e["untrusted_body"] for role, e in leads.items()})
-                    for envelope in leads.values():
-                        bound(envelope, "complete.no-reply")
+                        def coordination_rows():
+                            return {table: rows(f"SELECT worktree_id, COUNT(*) FROM {table} GROUP BY worktree_id")
+                                    for table in ("coordinations", "coordination_assignments", "coordination_links")}
 
-                    built = trace["i"] = hook("alpha-helper", "#stack @builder build it")
-                    require(built["output"] == blocked,
-                            "i: the hook blocks #stack, which names the repository, not a workspace with the name",
-                            built["stdout"])
-                    wake("alpha-helper")
-                    arrived = deliveries("i", ["wt-one-builder"])["wt-one-builder"]
-                    require(arrived["untrusted_body"].endswith("build it") and sender_workspace(arrived) == "alpha",
-                            "i: wt-one's builder receives it from alpha",
-                            {"body": arrived["untrusted_body"], "sender": arrived["control"]["sender"]})
-                    bound(arrived, "complete.no-reply")
+                        begun = trace["begin"] = as_agent("handoff", "begin", pane=lead["pane"], request_id="xws-tracked-begin",
+                                                          deliverable="Release notes reviewed in Beta Space.")
+                        coordination = begun["coordination_id"]
+                        sent = trace["send"] = as_agent("send", pane=lead["pane"], request_id="xws-tracked-send",
+                                                        author_kind="agent_session", coordination_id=coordination,
+                                                        source="#beta-space @reviewer Review the release notes and reply.")
+                        links = sent.get("coordination") or []
+                        require(len(links) == 1 and links[0]["coordination_id"] == coordination and links[0]["revision"] == 1,
+                                "t-send: the tracked send to #beta-space @reviewer records one assignment at revision 1", sent)
+                        require([copy["workspace"] for copy in sent.get("forwarded", [])] == ["beta-space"],
+                                "t-send: the request is forwarded into Beta Space", sent.get("forwarded"))
+                        request = deliveries("t-send", ["beta-reviewer"])["beta-reviewer"]
+                        control = request["control"]
+                        require(control.get("coordination_id") == coordination and
+                                [a["assignment_id"] for a in control.get("assignments", [])] == [links[0]["assignment_id"]],
+                                "t-send: the reviewer's envelope carries alpha's coordination and assignment",
+                                {"coordination_id": control.get("coordination_id"), "assignments": control.get("assignments")})
+                        reply_input = next(op["input"] for op in control["tool"]["operations"] if op["token"] == "reply")
+                        require(reply_input.get("work_outcome") == "needs_continuation",
+                                "t-send: the bound reply defaults work_outcome to needs_continuation", reply_input)
+                        homes = trace["rows_after_send"] = coordination_rows()
+                        require(all(row[0] == spaces["lead"] for found in homes.values() for row in found),
+                                "t-send: coordination rows exist only in alpha", homes)
 
-                    before_twin = message_state()
-                    twin = trace["j"] = hook("alpha-helper", "#stack @twin which one?")
-                    twin_text = ((twin["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
-                    require(twin_text.startswith("Namedrop workspace roster.")
-                            and "@twin is named in more than one stack worktree: #wt-one, #wt-two." in twin_text
-                            and "Nothing was sent" in twin_text,
-                            "j: the picker names the stack repository and offers #wt-one and #wt-two", twin_text)
-                    wake("alpha-helper")
-                    deliveries("j", [])
-                    require(message_state() == before_twin, "j: the picker persists nothing", message_state())
+                        replied = trace["reply"] = bound(request, "reply", source="@lead Release notes reviewed; ship it.",
+                                                         work_outcome="completed")
+                        require([link["assignment_id"] for link in replied.get("coordination") or []] ==
+                                [links[0]["assignment_id"]], "t-reply: the reviewer's reply records its assignment", replied)
+                        answer = deliveries("t-reply", ["alpha-lead"])["alpha-lead"]
+                        require(answer["untrusted_body"] == "Release notes reviewed; ship it." and
+                                answer["control"].get("coordination_id") == coordination,
+                                "t-reply: alpha's lead receives the tracked reply",
+                                {"body": answer["untrusted_body"], "coordination_id": answer["control"].get("coordination_id")})
+                        report = trace["results"] = as_agent("handoff", "results", pane=lead["pane"],
+                                                             coordination_id=coordination)
+                        assignment = (report.get("assignments") or [{}])[0]
+                        require(assignment.get("work_outcome") == "completed" and assignment.get("workspace") == "beta-space"
+                                and assignment.get("delivery", {}).get("state") == "settled",
+                                "t-results: handoff.results in alpha shows the beta assignment completed", assignment)
+                        bound(answer, "complete.no-reply")
 
-                    for step, prompt, offered in (
-                            ("k", "#stack run the tests", "#wt-one @builder, #wt-one @twin, #wt-two @twin"),
-                            ("k-one", "#wt-two run the tests", "#wt-two @twin")):
-                        asked = trace[step] = hook("alpha-helper", prompt)
-                        asked_text = ((asked["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
-                        scope = prompt.split()[0]
-                        require(asked_text.startswith("Namedrop workspace roster.")
-                                and f"It names {scope} but no agent there. Its agents: {offered}. Nothing was sent"
-                                in asked_text,
-                                f"{step}: {prompt!r} with no Mention asks who, offering {offered}", asked_text)
+                        nudge = deliveries("t-nudge", ["alpha-lead"])["alpha-lead"]
+                        require(nudge["control"].get("coordination_nudge") is True and
+                                nudge["control"].get("coordination_id") == coordination,
+                                "t-nudge: the idle lead is nudged to resolve the completed coordination", nudge["control"])
+                        resolved = trace["resolve"] = bound(nudge, "handoff.resolve", outcome="completed",
+                                                            report="Beta Space reviewed the release notes.")
+                        require(resolved.get("outcome") == "completed" and resolved.get("report_saved") is True,
+                                "t-resolve: handoff.resolve completes the coordination", resolved)
+                        bound(nudge, "complete.no-reply")
+                        saved = deliveries("t-resolve", ["alpha-lead"])["alpha-lead"]
+                        require(saved["untrusted_body"] == "Beta Space reviewed the release notes." and
+                                saved["control"]["reply_mode"] == "report_to_human",
+                                "t-resolve: the saved report reaches alpha's lead",
+                                {"body": saved["untrusted_body"], "reply_mode": saved["control"]["reply_mode"]})
+                        bound(saved, "complete.no-reply")
+                        homes = trace["rows_after_resolve"] = coordination_rows()
+                        require(all(row[0] == spaces["lead"] for found in homes.values() for row in found),
+                                "t-resolve: nothing was mirrored into Beta Space or gamma", homes)
+                        dispositions = trace["dispositions"] = rows(
+                            "SELECT a.worktree_id, p.disposition_kind FROM delivery_dispositions p "
+                            "JOIN delivery_attempts a USING (session_socket_id, worktree_id, attempt_id) "
+                            "JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id) "
+                            "WHERE d.message_id IN (?, ?)", (sent["message_id"], f"bridge:{spaces['lead']}:{sent['message_id']}"))
+                        require(sorted(dispositions) == sorted([(spaces["lead"], "reply"), (spaces["beta"], "reply")]),
+                                "t-resolve: the reply disposition is recorded in Beta Space and reflected into alpha",
+                                dispositions)
+                        summary["outcome"] = "passed"
+                    else:
+                        before_bare_remote = message_state()
+                        remote = trace["d"] = hook("alpha-helper", "@reviewer please review")
+                        remote_text = ((remote["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                        require(remote_text.startswith("Namedrop workspace roster.")
+                                and "@reviewer is not named in this workspace. It is named in: #beta-space. Use #beta-space"
+                                    " @reviewer to reach it. Nothing was sent." in remote_text,
+                                "d: an unqualified name only Beta Space has stays in alpha and names #beta-space", remote["stdout"])
                         wake("alpha-helper")
-                        deliveries(step, [])
-                        require(message_state() == before_twin, f"{step}: the recipient picker persists nothing",
+                        deliveries("d", [])
+                        require(message_state() == before_bare_remote, "d: the refused bare name persists nothing",
                                 message_state())
 
-                    mixed_prompt = "#stack @builder @twin both of you"
-                    mixed = trace["l"] = hook("alpha-helper", mixed_prompt)
-                    mixed_text = ((mixed["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
-                    require(mixed_text.startswith("Namedrop workspace roster.")
-                            and "@twin is named in more than one stack worktree: #wt-one, #wt-two. These names are "
-                                "already resolved: #wt-one @builder. Nothing was sent" in mixed_text
-                            and "once per workspace, never with #all" in mixed_text,
-                            "l: the picker asks only about @twin and keeps @builder resolved in #wt-one", mixed_text)
-                    wake("alpha-helper")
-                    deliveries("l", [])
-                    require(message_state() == before_twin, "l: the mixed picker persists nothing", message_state())
-                    # "All of them", resent the way the picker prescribes: one send per workspace, each with every
-                    # name bound there and the rest of the prompt after its last leading @name.
-                    text = mixed_prompt.split(" ", 3)[3]
-                    resends = trace["l_resend"] = [f"#wt-one @builder @twin {text}", f"#wt-two @twin {text}"]
-                    for index, source in enumerate(resends):
-                        as_agent("send", pane=agents["alpha-helper"]["pane"], request_id=f"xws-mixed-{index}",
-                                 author_kind="agent_session", source=source)
-                    wake("alpha-helper")
-                    resent = deliveries("l-resend", ["wt-one-builder", "wt-one-twin", "wt-two-twin"])
-                    require(all(e["untrusted_body"].endswith(text) and sender_workspace(e) == "alpha"
-                                for e in resent.values()),
-                            "l: the guided resend reaches wt-one's builder and both twins from alpha",
-                            {role: {"body": e["untrusted_body"], "sender": e["control"]["sender"]}
-                             for role, e in resent.items()})
-                    for envelope in resent.values():
-                        bound(envelope, "complete.no-reply")
-                    # The #wt-one send addressed two names, so their answers come home as one result set.
-                    wake("alpha-helper")
-                    results = deliveries("l-result-set", ["alpha-helper"])["alpha-helper"]
-                    outcomes = sorted((o["target"]["alias"], o["status"])
-                                      for o in (results["control"].get("result_set") or {}).get("outcomes", []))
-                    require(outcomes == [("builder", "no_reply"), ("twin", "no_reply")],
-                            "l: alpha's helper gets one result set for the #wt-one send", outcomes)
-                    bound(results, "complete.no-reply")
+                        everyone = trace["f"] = hook("alpha-helper", "#all @lead status")
+                        require(everyone["output"] == blocked, "f: the hook blocks #all", everyone["stdout"])
+                        wake("alpha-helper")
+                        leads = deliveries("f", ["alpha-lead", "beta-lead", "gamma-lead"])
+                        require(all(e["untrusted_body"].endswith("status") for e in leads.values()),
+                                "f: every workspace's lead receives the status prompt",
+                                {role: e["untrusted_body"] for role, e in leads.items()})
+                        for envelope in leads.values():
+                            bound(envelope, "complete.no-reply")
 
-                    before_bare = message_state()
-                    for step, source in (("m", "#wt-two"), ("m-indented", "  #wt-two run the tests")):
-                        _, result, response = agent_call("send", pane=agents["alpha-helper"]["pane"],
-                                                         request_id=f"xws-{step}", author_kind="agent_session",
-                                                         source=source)
+                        built = trace["i"] = hook("alpha-helper", "#stack @builder build it")
+                        require(built["output"] == blocked,
+                                "i: the hook blocks #stack, which names the repository, not a workspace with the name",
+                                built["stdout"])
+                        wake("alpha-helper")
+                        arrived = deliveries("i", ["wt-one-builder"])["wt-one-builder"]
+                        require(arrived["untrusted_body"].endswith("build it") and sender_workspace(arrived) == "alpha",
+                                "i: wt-one's builder receives it from alpha",
+                                {"body": arrived["untrusted_body"], "sender": arrived["control"]["sender"]})
+                        bound(arrived, "complete.no-reply")
+
+                        before_twin = message_state()
+                        twin = trace["j"] = hook("alpha-helper", "#stack @twin which one?")
+                        twin_text = ((twin["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                        require(twin_text.startswith("Namedrop workspace roster.")
+                                and "@twin is named in more than one stack worktree: #wt-one, #wt-two." in twin_text
+                                and "Nothing was sent" in twin_text,
+                                "j: the picker names the stack repository and offers #wt-one and #wt-two", twin_text)
+                        wake("alpha-helper")
+                        deliveries("j", [])
+                        require(message_state() == before_twin, "j: the picker persists nothing", message_state())
+
+                        for step, prompt, offered in (
+                                ("k", "#stack run the tests", "#wt-one @builder, #wt-one @twin, #wt-two @twin"),
+                                ("k-one", "#wt-two run the tests", "#wt-two @twin")):
+                            asked = trace[step] = hook("alpha-helper", prompt)
+                            asked_text = ((asked["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                            scope = prompt.split()[0]
+                            require(asked_text.startswith("Namedrop workspace roster.")
+                                    and f"It names {scope} but no agent there. Its agents: {offered}. Nothing was sent"
+                                    in asked_text,
+                                    f"{step}: {prompt!r} with no Mention asks who, offering {offered}", asked_text)
+                            wake("alpha-helper")
+                            deliveries(step, [])
+                            require(message_state() == before_twin, f"{step}: the recipient picker persists nothing",
+                                    message_state())
+
+                        mixed_prompt = "#stack @builder @twin both of you"
+                        mixed = trace["l"] = hook("alpha-helper", mixed_prompt)
+                        mixed_text = ((mixed["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                        require(mixed_text.startswith("Namedrop workspace roster.")
+                                and "@twin is named in more than one stack worktree: #wt-one, #wt-two. These names are "
+                                    "already resolved: #wt-one @builder. Nothing was sent" in mixed_text
+                                and "once per workspace, never with #all" in mixed_text,
+                                "l: the picker asks only about @twin and keeps @builder resolved in #wt-one", mixed_text)
+                        wake("alpha-helper")
+                        deliveries("l", [])
+                        require(message_state() == before_twin, "l: the mixed picker persists nothing", message_state())
+                        # "All of them", resent the way the picker prescribes: one send per workspace, each with every
+                        # name bound there and the rest of the prompt after its last leading @name.
+                        text = mixed_prompt.split(" ", 3)[3]
+                        resends = trace["l_resend"] = [f"#wt-one @builder @twin {text}", f"#wt-two @twin {text}"]
+                        for index, source in enumerate(resends):
+                            as_agent("send", pane=agents["alpha-helper"]["pane"], request_id=f"xws-mixed-{index}",
+                                     author_kind="agent_session", source=source)
+                        wake("alpha-helper")
+                        resent = deliveries("l-resend", ["wt-one-builder", "wt-one-twin", "wt-two-twin"])
+                        require(all(e["untrusted_body"].endswith(text) and sender_workspace(e) == "alpha"
+                                    for e in resent.values()),
+                                "l: the guided resend reaches wt-one's builder and both twins from alpha",
+                                {role: {"body": e["untrusted_body"], "sender": e["control"]["sender"]}
+                                 for role, e in resent.items()})
+                        for envelope in resent.values():
+                            bound(envelope, "complete.no-reply")
+                        # The #wt-one send addressed two names, so their answers come home as one result set.
+                        wake("alpha-helper")
+                        results = deliveries("l-result-set", ["alpha-helper"])["alpha-helper"]
+                        outcomes = sorted((o["target"]["alias"], o["status"])
+                                          for o in (results["control"].get("result_set") or {}).get("outcomes", []))
+                        require(outcomes == [("builder", "no_reply"), ("twin", "no_reply")],
+                                "l: alpha's helper gets one result set for the #wt-one send", outcomes)
+                        bound(results, "complete.no-reply")
+
+                        before_bare = message_state()
+                        for step, source in (("m", "#wt-two"), ("m-indented", "  #wt-two run the tests")):
+                            _, result, response = agent_call("send", pane=agents["alpha-helper"]["pane"],
+                                                             request_id=f"xws-{step}", author_kind="agent_session",
+                                                             source=source)
+                            message = (response.get("error") or {}).get("message", "")
+                            trace[step] = {"source": source, "exit": result.returncode, "stdout": result.stdout,
+                                           "stderr": result.stderr}
+                            require(result.returncode == 65 and response.get("status") == "rejected"
+                                    and "#wt-two has these named agents: #wt-two @twin" in message,
+                                    f"{step}: agent send {source!r} is refused with #wt-two's names", trace[step])
+                        deliveries("m", [])
+                        require(message_state() == before_bare, "m: the refused agent sends persist nothing",
+                                message_state())
+
+                        asked_review = as_agent("send", pane=agents["alpha-helper"]["pane"], request_id="xws-review",
+                                                author_kind="agent_session", source="#beta-space @reviewer review the patch")
+                        wake("alpha-helper")
+                        review = deliveries("n-send", ["beta-reviewer"])["beta-reviewer"]
+                        reply_op = next(op for op in review["control"]["tool"]["operations"] if op["token"] == "reply")
+                        before_reply = message_state()
+                        _, result, response = agent_call(*reply_op["argv"], pane=agents["beta-reviewer"]["pane"],
+                                                         **dict(reply_op["input"], source="@twin Reviewed."))
                         message = (response.get("error") or {}).get("message", "")
-                        trace[step] = {"source": source, "exit": result.returncode, "stdout": result.stdout,
-                                       "stderr": result.stderr}
+                        trace["n"] = {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
                         require(result.returncode == 65 and response.get("status") == "rejected"
-                                and "#wt-two has these named agents: #wt-two @twin" in message,
-                                f"{step}: agent send {source!r} is refused with #wt-two's names", trace[step])
-                    deliveries("m", [])
-                    require(message_state() == before_bare, "m: the refused agent sends persist nothing",
-                            message_state())
+                                and "@twin is not named in this workspace. It is named in: #wt-one, #wt-two. Use #wt-one"
+                                    " @twin or #wt-two @twin to reach it" in message
+                                and "nothing was sent and the reply's delivery attempt stays open" in message
+                                and "except the source, which is @helper, a space, and the message text" in message
+                                and "then tell the person the reply left out @twin" in message,
+                                "n: the reply naming a bare name from elsewhere is refused with a retry addressed to its sender",
+                                trace["n"])
+                        deliveries("n-refused", [])
+                        require(message_state() == before_reply, "n: the refused reply persists nothing", message_state())
+                        trace["n_reply"] = bound(review, "reply", source="@helper Reviewed.")
+                        as_agent("send", pane=agents["beta-reviewer"]["pane"], request_id="xws-review-twin",
+                                 author_kind="agent_session", source="#wt-one @twin Reviewed.")
+                        wake("beta-reviewer")
+                        recovered = deliveries("n-recovered", ["alpha-helper", "wt-one-twin"])
+                        answered = recovered["alpha-helper"]
+                        require(answered["untrusted_body"] == "Reviewed."
+                                and answered["control"]["thread_id"] == asked_review["thread_id"],
+                                "n: alpha's helper hears the reply on the thread it started",
+                                {"body": answered["untrusted_body"], "thread": answered["control"]["thread_id"],
+                                 "started": asked_review["thread_id"]})
+                        require(recovered["wt-one-twin"]["untrusted_body"] == "Reviewed.",
+                                "n: wt-one's twin receives the send", recovered["wt-one-twin"]["untrusted_body"])
+                        settled_as = disposition(review["control"]["attempt_id"])
+                        require(settled_as == "reply", "n: the original attempt settles as a reply", settled_as)
+                        for envelope in recovered.values():
+                            bound(envelope, "complete.no-reply")
 
-                    asked_review = as_agent("send", pane=agents["alpha-helper"]["pane"], request_id="xws-review",
-                                            author_kind="agent_session", source="#beta-space @reviewer review the patch")
-                    wake("alpha-helper")
-                    review = deliveries("n-send", ["beta-reviewer"])["beta-reviewer"]
-                    reply_op = next(op for op in review["control"]["tool"]["operations"] if op["token"] == "reply")
-                    before_reply = message_state()
-                    _, result, response = agent_call(*reply_op["argv"], pane=agents["beta-reviewer"]["pane"],
-                                                     **dict(reply_op["input"], source="@twin Reviewed."))
-                    message = (response.get("error") or {}).get("message", "")
-                    trace["n"] = {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
-                    require(result.returncode == 65 and response.get("status") == "rejected"
-                            and "@twin is not named in this workspace. It is named in: #wt-one, #wt-two. Use #wt-one"
-                                " @twin or #wt-two @twin to reach it" in message
-                            and "nothing was sent and the reply's delivery attempt stays open" in message
-                            and "except the source, which is @helper, a space, and the message text" in message
-                            and "then tell the person the reply left out @twin" in message,
-                            "n: the reply naming a bare name from elsewhere is refused with a retry addressed to its sender",
-                            trace["n"])
-                    deliveries("n-refused", [])
-                    require(message_state() == before_reply, "n: the refused reply persists nothing", message_state())
-                    trace["n_reply"] = bound(review, "reply", source="@helper Reviewed.")
-                    as_agent("send", pane=agents["beta-reviewer"]["pane"], request_id="xws-review-twin",
-                             author_kind="agent_session", source="#wt-one @twin Reviewed.")
-                    wake("beta-reviewer")
-                    recovered = deliveries("n-recovered", ["alpha-helper", "wt-one-twin"])
-                    answered = recovered["alpha-helper"]
-                    require(answered["untrusted_body"] == "Reviewed."
-                            and answered["control"]["thread_id"] == asked_review["thread_id"],
-                            "n: alpha's helper hears the reply on the thread it started",
-                            {"body": answered["untrusted_body"], "thread": answered["control"]["thread_id"],
-                             "started": asked_review["thread_id"]})
-                    require(recovered["wt-one-twin"]["untrusted_body"] == "Reviewed.",
-                            "n: wt-one's twin receives the send", recovered["wt-one-twin"]["untrusted_body"])
-                    settled_as = disposition(review["control"]["attempt_id"])
-                    require(settled_as == "reply", "n: the original attempt settles as a reply", settled_as)
-                    for envelope in recovered.values():
-                        bound(envelope, "complete.no-reply")
-
-                    named = cli("address", "list", "--json")["data"]
-                    lead_address = next(a for a in named if a["alias"] == "lead")
-                    removed = trace["e_remove"] = body("address", "remove", address_id=lead_address["id"])
-                    remaining = sorted(a["alias"] for a in cli("address", "list", "--json")["data"])
-                    require(removed["removed"] is True and "lead" not in remaining,
-                            "e: alpha's lead name is removed", {"removed": removed, "remaining": remaining})
-                    before = trace["e_state_before"] = message_state()
-                    refused = trace["e"] = hook("alpha-helper", "@lead who should take this?")
-                    context_text = ((refused["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
-                    require(context_text.startswith("Namedrop workspace roster."),
-                            "e: the hook answers with roster-marked additionalContext", refused["stdout"])
-                    require("@lead is not named in this workspace. It is named in: #beta-space, #gamma. Use #beta-space"
-                            " @lead or #gamma @lead to reach it. Nothing was sent." in context_text,
-                            "e: the refusal names both workspaces' tokens and says nothing was sent", context_text)
-                    wake("alpha-helper")
-                    deliveries("e", [])
-                    require(message_state() == before, "e: the refusal persists nothing", message_state())
-                    for runtime, wrapper in wrappers.items():
-                        wrapped = trace[f"h_refusal_{runtime}"] = hook("alpha-helper", "@lead who should take this?", [wrapper])
-                        require(wrapped["exit"] == 0 and wrapped["stdout"] == refused["stdout"],
-                                f"h: the installed {runtime} wrapper passes the refusal through unchanged", wrapped["stdout"])
-                    deliveries("h-refusal", [])
-                    require(message_state() == before, "h: the wrapped refusals persist nothing", message_state())
-                    summary["outcome"] = "passed"
+                        named = cli("address", "list", "--json")["data"]
+                        lead_address = next(a for a in named if a["alias"] == "lead")
+                        removed = trace["e_remove"] = body("address", "remove", address_id=lead_address["id"])
+                        remaining = sorted(a["alias"] for a in cli("address", "list", "--json")["data"])
+                        require(removed["removed"] is True and "lead" not in remaining,
+                                "e: alpha's lead name is removed", {"removed": removed, "remaining": remaining})
+                        before = trace["e_state_before"] = message_state()
+                        refused = trace["e"] = hook("alpha-helper", "@lead who should take this?")
+                        context_text = ((refused["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                        require(context_text.startswith("Namedrop workspace roster."),
+                                "e: the hook answers with roster-marked additionalContext", refused["stdout"])
+                        require("@lead is not named in this workspace. It is named in: #beta-space, #gamma. Use #beta-space"
+                                " @lead or #gamma @lead to reach it. Nothing was sent." in context_text,
+                                "e: the refusal names both workspaces' tokens and says nothing was sent", context_text)
+                        wake("alpha-helper")
+                        deliveries("e", [])
+                        require(message_state() == before, "e: the refusal persists nothing", message_state())
+                        for runtime, wrapper in wrappers.items():
+                            wrapped = trace[f"h_refusal_{runtime}"] = hook("alpha-helper", "@lead who should take this?", [wrapper])
+                            require(wrapped["exit"] == 0 and wrapped["stdout"] == refused["stdout"],
+                                    f"h: the installed {runtime} wrapper passes the refusal through unchanged", wrapped["stdout"])
+                        deliveries("h-refusal", [])
+                        require(message_state() == before, "h: the wrapped refusals persist nothing", message_state())
+                        summary["outcome"] = "passed"
                 finally:
                     if summary.get("outcome") != "passed":
                         backup_database()
-                    save("cross-workspace.json", trace)
+                    save(f"{args.feature}.json", trace)
                     for role, agent in agents.items():
                         save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
         backup_database()

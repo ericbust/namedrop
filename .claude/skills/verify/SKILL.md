@@ -129,8 +129,8 @@ Namedrop run through the profile's `env -i` line as the manual drive notes show:
   then `group list` and `group remove`, all with `--herdr-pane` set to the shell pane.
 - Pause (`src/controls.rs`): `space pause --input-json '{}'` adds `ND-SPACE-001` to Doctor;
   `space resume` clears it.
-- Cross-workspace mentions and the dashboard (this branch only): the model-free native
-  recipes in [native/README.md](native/README.md). For real agents, run
+- Cross-workspace mentions, tracked handoffs across workspaces and the dashboard (this
+  branch only): the model-free native recipes in [native/README.md](native/README.md). For real agents, run
   `.claude/skills/verify/scripts/second-workspace.py test-link-<checkout name>` on a profile
   kept with `--keep`, then `.claude/skills/verify/scripts/cross-workspace-probe.py` with the
   same profile. The first adds a workspace labelled `beta` on its own repository with a
@@ -143,8 +143,8 @@ Namedrop run through the profile's `env -i` line as the manual drive notes show:
   comes back; `#all @codex` from Claude brings both workspaces' `@codex` replies back to
   Claude. Every delivery must settle. It empties Claude's input box at the end, takes
   about 2.5 minutes and exits 0 when all six checks pass.
-- No route written yet: tracked handoffs and the 30-second settle (`src/handoff.rs`,
-  `src/coordination.rs`, `ND-DELIVERY-003`, `ND-COORDINATION-001`), popups other than
+- No route written yet: tracked handoffs inside one workspace and the 30-second settle
+  (`src/handoff.rs`, `src/coordination.rs`, `ND-DELIVERY-003`, `ND-COORDINATION-001`), popups other than
   Doctor's (`src/naming_ui.rs`, `src/agent_status_ui.rs`), the tour (`src/tour.rs`), shared
   checkouts (`ND-INSPECT-001`), rename and personas. The native recipes for them, last
   reconciled at 1.0.2, are in git: `git show 1b1d32a:.agents/skills/verify/features/README.md`.
