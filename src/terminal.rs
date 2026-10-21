@@ -75,9 +75,17 @@ pub fn execute_terminal<E: HerdrCommandExecutor, C: Clock, I: IdGenerator>(
         )
     };
     let mut store = StateStore::open(runtime.state_directory).map_err(|e| e.to_string())?;
-    let command = store
+    let command = match store
         .transaction(|tx| tx.claim_terminal_execution(&ns, &attempt, pane, &attribution()))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?
+    {
+        Ok(command) => command,
+        Err(refusal) => {
+            // The refusal is saved, so the caller still wakes the author.
+            println!("[Namedrop: not run: {refusal}]");
+            return Ok(65);
+        }
+    };
     println!("$ {command}");
     let (code, output) = match run_shell(&command) {
         Ok(result) => result,

@@ -4,8 +4,9 @@ use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
     PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore,
-    complete_capability_profile, drain_mailboxes, execute_integration_operation,
-    execute_message_operation, execute_user_prompt_submit_hook, issue_registration_challenge,
+    complete_capability_profile, drain_mailboxes, execute_control_operation,
+    execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
+    execute_user_prompt_submit_hook, issue_registration_challenge,
 };
 use serde_json::{Value, json};
 use std::{
@@ -60,6 +61,9 @@ pub struct FakeHerdr {
     pub sessions: Mutex<BTreeMap<String, String>>,
     pub unreadable: Mutex<BTreeSet<String>>,
     pub failing_prompts: Mutex<BTreeSet<String>>,
+    /// Shell panes as (workspace, pane, physical terminal).
+    pub terminals: Mutex<Vec<(String, String, String)>>,
+    pub runs: Mutex<Vec<(String, String)>>,
 }
 
 impl FakeHerdr {
@@ -81,7 +85,17 @@ impl FakeHerdr {
             sessions: Mutex::new(BTreeMap::new()),
             unreadable: Mutex::new(BTreeSet::new()),
             failing_prompts: Mutex::new(BTreeSet::new()),
+            terminals: Mutex::new(Vec::new()),
+            runs: Mutex::new(Vec::new()),
         }
+    }
+
+    pub fn is_terminal(&self, pane: &str) -> bool {
+        self.terminals
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, shell, _)| shell == pane)
     }
 
     pub fn envelopes(&self, pane: &str) -> Vec<Value> {
@@ -143,7 +157,7 @@ impl HerdrCommandExecutor for FakeHerdr {
                 let statuses = self.statuses.lock().unwrap().clone();
                 let sessions = self.sessions.lock().unwrap().clone();
                 let (statuses, sessions) = (&statuses, &sessions);
-                let panes: Vec<Value> = SPACES
+                let mut panes: Vec<Value> = SPACES
                     .iter()
                     .filter(|(id, _, _)| id == workspace)
                     .flat_map(|(id, _, agents)| {
@@ -155,7 +169,30 @@ impl HerdrCommandExecutor for FakeHerdr {
                         })
                     })
                     .collect();
+                panes.extend(
+                    self.terminals
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(id, _, _)| id == workspace)
+                        .map(|(id, pane, terminal)| {
+                            json!({"pane_id":pane,"terminal_id":terminal,"tab_id":"tab-shell",
+                                   "workspace_id":id,"agent":null,"agent_status":"unknown"})
+                        }),
+                );
                 json!({"result":{"panes":panes}}).to_string()
+            }
+            ["pane", "process-info", "--pane", pane] if self.is_terminal(pane) => {
+                json!({"result":{"process_info":{"shell_pid":42,"foreground_process_group_id":42,
+                       "foreground_processes":[{"pid":std::process::id()}]}}})
+                .to_string()
+            }
+            ["pane", "run", pane, command] => {
+                self.runs
+                    .lock()
+                    .unwrap()
+                    .push(((*pane).to_owned(), (*command).to_owned()));
+                "{}".to_owned()
             }
             ["agent", "prompt", pane, _]
                 if self.failing_prompts.lock().unwrap().contains(*pane) =>
@@ -397,6 +434,94 @@ impl Fixture {
                 )
             })
             .unwrap();
+    }
+
+    pub fn add_terminal(&self, workspace: &str, alias: &str, pane: &str) {
+        self.add_shell(workspace, pane);
+        let namespace = StateNamespace::for_space("socket-a", workspace);
+        let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
+        let id = PaneAddressId::new(address_id(workspace, alias));
+        StateStore::open(&self.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.create_pane_address(
+                    &namespace,
+                    &PaneAddressDraft {
+                        id: id.clone(),
+                        role_id: PaneRoleId::new(format!("role-{workspace}-{alias}")),
+                        role_name: alias.to_owned(),
+                        role_description: format!("{alias} terminal"),
+                        alias: alias.to_owned(),
+                    },
+                    &attribution,
+                )?;
+                transaction.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new(format!("binding-{pane}")),
+                    &id,
+                    pane,
+                    &attribution,
+                )
+            })
+            .unwrap();
+        self.sql(&format!(
+            "UPDATE pane_addresses SET pane_type = 'terminal' WHERE address_id = '{}'",
+            id.as_str()
+        ));
+    }
+
+    pub fn add_shell(&self, workspace: &str, pane: &str) {
+        self.herdr.terminals.lock().unwrap().push((
+            workspace.to_owned(),
+            pane.to_owned(),
+            format!("t-{pane}"),
+        ));
+    }
+
+    pub fn rebind(&self, workspace: &str, alias: &str, pane: &str) {
+        let namespace = StateNamespace::for_space("socket-a", workspace);
+        StateStore::open(&self.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.rebind_pane(
+                    &namespace,
+                    &PaneBindingId::new(format!("binding-{pane}-{}", self.ids.next_id("rebind"))),
+                    &PaneAddressId::new(address_id(workspace, alias)),
+                    pane,
+                    &MutationAttribution::new(ActorKind::Human, "test", 3),
+                )
+            })
+            .unwrap();
+    }
+
+    pub fn remote_control(
+        &self,
+        operation: &str,
+        workspace: &str,
+        from_pane: &str,
+        alias: &str,
+    ) -> Result<Value, String> {
+        execute_control_operation(
+            operation,
+            json!({"address_id":address_id(workspace, alias)}),
+            &self.runtime(workspace, from_pane),
+        )
+    }
+
+    pub fn address(&self, workspace: &str, alias: &str) -> Value {
+        let listed = execute_lifecycle_operation(
+            "address.list",
+            json!({}),
+            &self.runtime(workspace, "pane-none"),
+        )
+        .unwrap();
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|address| address["alias"] == alias)
+            .unwrap_or_else(|| panic!("@{alias} is not listed in {workspace}: {listed}"))
+            .clone()
     }
 
     pub fn drain(&self, workspace: &str) {

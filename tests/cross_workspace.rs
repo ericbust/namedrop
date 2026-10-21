@@ -2406,3 +2406,103 @@ fn purging_a_workspace_cancels_the_deliveries_its_copies_still_owed() {
     let outcomes = joined[0]["control"]["result_set"]["outcomes"].to_string();
     assert!(outcomes.contains("cancelled"), "{outcomes}");
 }
+
+#[test]
+fn allowing_remote_commands_saves_one_grant_that_address_list_shows_only_when_set() {
+    let fixture = Fixture::new();
+    fixture.add_terminal("w2", "build", "pane-2-build");
+    assert!(
+        fixture
+            .address("w2", "build")
+            .get("remote_commands")
+            .is_none(),
+        "a terminal without a grant lists exactly as before"
+    );
+    for _ in 0..2 {
+        let allowed = fixture
+            .remote_control("address.allow-remote", "w2", "pane-2-lead", "build")
+            .unwrap();
+        assert_eq!(allowed["remote_commands"], true);
+    }
+    assert_eq!(fixture.address("w2", "build")["remote_commands"], true);
+    let transitions = |kind: &str| {
+        fixture.count(&format!(
+            "SELECT COUNT(*) FROM transition_facts WHERE entity_id = 'address-w2-build' \
+             AND transition_kind = '{kind}'"
+        ))
+    };
+    assert_eq!(transitions("remote_commands_allowed"), 1);
+    for _ in 0..2 {
+        let denied = fixture
+            .remote_control("address.deny-remote", "w2", "pane-2-lead", "build")
+            .unwrap();
+        assert!(denied.get("remote_commands").is_none(), "{denied}");
+    }
+    assert_eq!(transitions("remote_commands_revoked"), 1);
+}
+
+#[test]
+fn a_terminal_cannot_allow_remote_commands_for_itself_or_from_an_unknown_pane() {
+    let fixture = Fixture::new();
+    fixture.add_terminal("w2", "build", "pane-2-build");
+    fixture.add_terminal("w2", "logs", "pane-2-logs");
+    for pane in ["pane-2-build", "pane-2-logs"] {
+        let error = fixture
+            .remote_control("address.allow-remote", "w2", pane, "build")
+            .unwrap_err();
+        assert!(error.contains("named terminal"), "{error}");
+    }
+    let error = fixture
+        .remote_control("address.allow-remote", "w2", "pane-none", "build")
+        .unwrap_err();
+    assert!(error.contains("Herdr pane"), "{error}");
+    let error = fixture
+        .remote_control("address.allow-remote", "w2", "pane-2-lead", "tester")
+        .unwrap_err();
+    assert!(error.contains("not a named terminal"), "{error}");
+    assert!(
+        fixture
+            .address("w2", "build")
+            .get("remote_commands")
+            .is_none()
+    );
+}
+
+#[test]
+fn rebinding_a_terminal_drops_its_grant_even_back_to_the_same_shell() {
+    let fixture = Fixture::new();
+    fixture.add_terminal("w2", "build", "pane-2-build");
+    fixture.add_shell("w2", "pane-2-spare");
+    fixture
+        .remote_control("address.allow-remote", "w2", "pane-2-lead", "build")
+        .unwrap();
+    fixture.rebind("w2", "build", "pane-2-spare");
+    assert!(
+        fixture
+            .address("w2", "build")
+            .get("remote_commands")
+            .is_none()
+    );
+    fixture
+        .remote_control("address.allow-remote", "w2", "pane-2-lead", "build")
+        .unwrap();
+    fixture.rebind("w2", "build", "pane-2-build");
+    assert!(
+        fixture
+            .address("w2", "build")
+            .get("remote_commands")
+            .is_none(),
+        "returning to the first shell does not revive its old grant"
+    );
+}
+
+#[test]
+fn turning_remote_commands_on_or_off_is_never_auto_permitted() {
+    for token in ["address.allow-remote", "address.deny-remote"] {
+        assert!(namedrop::is_control_operation(token));
+        assert!(
+            namedrop::operation_catalog().operation(token).is_none(),
+            "only catalog operations become host allow rules"
+        );
+    }
+}

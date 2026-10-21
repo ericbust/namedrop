@@ -76,6 +76,7 @@ fn projection(aliases: &[&str]) -> Vec<PaneAddressRecord> {
             agent_status: Some("idle".to_owned()),
             retired: false,
             collaboration_disabled: false,
+            remote_commands: false,
         })
         .collect()
 }

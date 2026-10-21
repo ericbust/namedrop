@@ -342,6 +342,9 @@ pub struct PaneAddressRecord {
     pub agent_status: Option<String>,
     pub retired: bool,
     pub collaboration_disabled: bool,
+    /// Other workspaces may command this terminal's current shell.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote_commands: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -782,6 +785,8 @@ pub enum TransitionKind {
     Continued,
     Enabled,
     Disabled,
+    RemoteCommandsAllowed,
+    RemoteCommandsRevoked,
     Opened,
     Resolved,
     Adopted,
@@ -820,6 +825,8 @@ impl TransitionKind {
             Self::Continued => "continued",
             Self::Enabled => "enabled",
             Self::Disabled => "disabled",
+            Self::RemoteCommandsAllowed => "remote_commands_allowed",
+            Self::RemoteCommandsRevoked => "remote_commands_revoked",
             Self::Opened => "opened",
             Self::Resolved => "resolved",
             Self::Adopted => "adopted",

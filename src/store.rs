@@ -651,6 +651,7 @@ impl StateTransaction<'_> {
             agent_status: None,
             retired: false,
             collaboration_disabled: false,
+            remote_commands: false,
         })
     }
 
@@ -688,7 +689,7 @@ impl StateTransaction<'_> {
                           AND o.observed_at_ms >= b.bound_at_ms
                         ORDER BY o.observed_at_ms DESC, o.rowid DESC
                         LIMIT 1
-                    ), a.pane_type, a.persona
+                    ), a.pane_type, a.persona, a.remote_commands_terminal_id IS NOT NULL
              FROM pane_addresses a
              JOIN pane_roles r USING (session_socket_id, worktree_id, role_id)
              JOIN alias_claims c USING (session_socket_id, worktree_id, address_id)
@@ -745,6 +746,7 @@ impl StateTransaction<'_> {
                         agent_status: row.get(9)?,
                         retired,
                         collaboration_disabled: row.get(6)?,
+                        remote_commands: row.get(12)?,
                     })
                 },
             )?
@@ -1197,6 +1199,7 @@ impl StateTransaction<'_> {
         if changed == 1 {
             self.expire_context_grants(namespace, address_id, None)?;
             self.expire_integration_registrations(namespace, address_id, None, attribution)?;
+            self.clear_remote_commands(namespace, address_id, attribution)?;
             self.append_transition(
                 namespace,
                 TransitionEntityKind::PaneAddress,
@@ -6984,6 +6987,8 @@ fn parse_transition_kind(value: String) -> rusqlite::Result<TransitionKind> {
         "continued" => Ok(TransitionKind::Continued),
         "enabled" => Ok(TransitionKind::Enabled),
         "disabled" => Ok(TransitionKind::Disabled),
+        "remote_commands_allowed" => Ok(TransitionKind::RemoteCommandsAllowed),
+        "remote_commands_revoked" => Ok(TransitionKind::RemoteCommandsRevoked),
         "opened" => Ok(TransitionKind::Opened),
         "resolved" => Ok(TransitionKind::Resolved),
         "adopted" => Ok(TransitionKind::Adopted),
@@ -7080,6 +7085,7 @@ fn initialize_schema(
         (4, coordination::SCHEMA),
         (5, PERSONA_SCHEMA),
         (6, bridge::SCHEMA),
+        (6, terminal::REMOTE_SCHEMA),
     ] {
         if version < introduced_in {
             transaction.execute_batch(schema)?;

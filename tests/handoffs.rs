@@ -410,7 +410,7 @@ fn schema_two_upgrade_preserves_names_as_agents() {
     let directory = TestDirectory::new();
     setup(&directory);
     let db = rusqlite::Connection::open(directory.state.join("namedrop.sqlite3")).unwrap();
-    db.execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; DROP TABLE terminal_executions; ALTER TABLE pane_addresses DROP COLUMN pane_type; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=2;").unwrap();
+    db.execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; DROP TABLE terminal_executions; ALTER TABLE pane_addresses DROP COLUMN pane_type; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=2;").unwrap();
     drop(db);
     let mut store = StateStore::open(&directory.state).unwrap();
     assert_eq!(store.schema_version().unwrap(), 6);
@@ -1081,7 +1081,7 @@ fn a_schema_one_upgrade_preserves_existing_requests_and_replays() {
     let before = execute_message_operation("send", input.clone(), &source).unwrap();
     // Remove the additive v2/v3/v4 schema to reproduce an installed v1 database.
     let db = rusqlite::Connection::open(directory.state.join("namedrop.sqlite3")).unwrap();
-    db.execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; DROP TRIGGER group_alias_conflict; DROP TRIGGER agent_alias_group_conflict; DROP TABLE mention_group_members; DROP TABLE mention_groups; DROP TABLE terminal_executions; ALTER TABLE pane_addresses DROP COLUMN pane_type; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=1;").unwrap();
+    db.execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; DROP TRIGGER group_alias_conflict; DROP TRIGGER agent_alias_group_conflict; DROP TABLE mention_group_members; DROP TABLE mention_groups; DROP TABLE terminal_executions; ALTER TABLE pane_addresses DROP COLUMN pane_type; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=1;").unwrap();
     drop(db);
     namedrop::execute_group_operation(
         "group.set",
