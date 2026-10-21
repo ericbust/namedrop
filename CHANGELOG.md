@@ -12,10 +12,13 @@ Each release is a section here, newest first. The GitHub release for a version u
 - A mention without a label never leaves the current workspace, so where it goes doesn't depend on which names other workspaces have. If the name isn't in this workspace, nothing is sent, and you're told the exact label to use, such as `@lead is not named in this workspace. It is named in: #beta. Use #beta @lead to reach it.` Agents' `namedrop send` follows the same rule.
 - Replies come back to the workspace that sent the message, and the recipient sees which workspace it came from. Stopping or pausing the conversation on either side applies to both.
 - The prompt roster lists the named agents in your other workspaces, and `address list` with `{"workspaces":"all"}` shows every workspace's names and groups.
+- Tracked handoffs reach agents in other workspaces. After `handoff begin`, send to `#label @name`, a group in that workspace, or `#all @name` with the `coordination_id`. The worker replies with its work outcome from its own workspace, and continuations, `handoff results`, `status`, `resolve` and `adopt`, nudges and the unanswered-request warning all work as they do in one workspace. The coordination stays in the lead's workspace; nothing is copied into the worker's.
+- `handoff results` and `handoff status` show where a recipient in another workspace really stands: queued, held, settled or answered, as its own workspace records it, with that workspace's name and its delivery outlook. Before, such a recipient showed as settled from the moment of the send.
+- Purging a workspace cancels the deliveries that other workspaces were still waiting on there, so their results and coordinations stop waiting.
 
 ### Changed
 
-- Namedrop's state moves to schema 6 the first time the new release opens it. Context handoffs and tracked coordination still stay inside one workspace.
+- Namedrop's state moves to schema 6 the first time the new release opens it. Context handoffs still stay inside one workspace.
 ## [1.3.3] - 2026-10-26
 
 ### Fixed
