@@ -9,6 +9,7 @@ use namedrop::{
 };
 use serde_json::{Value, json};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::PathBuf,
     sync::{
@@ -55,6 +56,9 @@ pub struct FakeHerdr {
     pub prompts: Mutex<Vec<(String, String)>>,
     pub notifications: Mutex<Vec<Vec<String>>>,
     pub commands: Mutex<Vec<String>>,
+    pub statuses: Mutex<BTreeMap<String, String>>,
+    pub sessions: Mutex<BTreeMap<String, String>>,
+    pub unreadable: Mutex<BTreeSet<String>>,
 }
 
 impl FakeHerdr {
@@ -72,6 +76,9 @@ impl FakeHerdr {
             prompts: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
             commands: Mutex::new(Vec::new()),
+            statuses: Mutex::new(BTreeMap::new()),
+            sessions: Mutex::new(BTreeMap::new()),
+            unreadable: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -125,7 +132,15 @@ impl HerdrCommandExecutor for FakeHerdr {
             ["worktree", "list", "--workspace", _, "--json"] => {
                 return Err(json!({"error":{"code":"not_git_worktree"}}).to_string());
             }
+            ["pane", "list", "--workspace", workspace]
+                if self.unreadable.lock().unwrap().contains(*workspace) =>
+            {
+                return Err(format!("herdr: workspace {workspace} is unavailable"));
+            }
             ["pane", "list", "--workspace", workspace] => {
+                let statuses = self.statuses.lock().unwrap().clone();
+                let sessions = self.sessions.lock().unwrap().clone();
+                let (statuses, sessions) = (&statuses, &sessions);
                 let panes: Vec<Value> = SPACES
                     .iter()
                     .filter(|(id, _, _)| id == workspace)
@@ -133,7 +148,8 @@ impl HerdrCommandExecutor for FakeHerdr {
                         agents.iter().enumerate().map(move |(index, (_, pane))| {
                             json!({"pane_id":pane,"terminal_id":format!("t-{pane}"),
                                    "tab_id":format!("tab-{index}"),"workspace_id":id,"agent":"codex",
-                                   "agent_session":{"value":session(pane)},"agent_status":"idle"})
+                                   "agent_session":{"value":sessions.get(*pane).cloned().unwrap_or_else(|| session(pane))},
+                                   "agent_status":statuses.get(*pane).map_or("idle", String::as_str)})
                         })
                     })
                     .collect();
@@ -180,10 +196,10 @@ pub fn address_id(workspace: &str, alias: &str) -> String {
     format!("address-{workspace}-{alias}")
 }
 
-pub struct FixedClock;
-impl Clock for FixedClock {
+pub struct TestClock(pub AtomicU64);
+impl Clock for TestClock {
     fn now_unix_ms(&self) -> u64 {
-        42
+        self.0.load(Ordering::Relaxed)
     }
     fn wait_ms(&self, _: u64) {}
 }
@@ -200,9 +216,10 @@ pub struct Fixture {
     pub state: PathBuf,
     pub herdr: FakeHerdr,
     pub ids: SequenceIds,
+    pub clock: TestClock,
 }
 
-pub type Runtime<'a> = LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds>;
+pub type Runtime<'a> = LifecycleRuntime<'a, FakeHerdr, TestClock, SequenceIds>;
 
 impl Fixture {
     pub fn new() -> Self {
@@ -232,6 +249,7 @@ impl Fixture {
             herdr: FakeHerdr::new(&repo),
             root,
             ids: SequenceIds(AtomicU64::new(1)),
+            clock: TestClock(AtomicU64::new(42)),
         };
         let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
         for (workspace, _, agents) in SPACES.into_iter().take(activated) {
@@ -285,7 +303,7 @@ impl Fixture {
             current_pane_id: Some(pane),
             session_socket_id: "socket-a",
             herdr: &self.herdr,
-            clock: &FixedClock,
+            clock: &self.clock,
             ids: &self.ids,
         }
     }
@@ -400,6 +418,30 @@ impl Fixture {
             &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt}).to_string(),
             &self.runtime(workspace, pane),
         )
+    }
+
+    pub fn advance(&self, ms: u64) {
+        self.clock.0.fetch_add(ms, Ordering::Relaxed);
+    }
+
+    pub fn status(&self, pane: &str, status: &str) {
+        self.herdr
+            .statuses
+            .lock()
+            .unwrap()
+            .insert(pane.to_owned(), status.to_owned());
+    }
+
+    pub fn db(&self) -> rusqlite::Connection {
+        rusqlite::Connection::open(self.state.join("namedrop.sqlite3")).unwrap()
+    }
+
+    pub fn count(&self, query: &str) -> i64 {
+        self.db().query_row(query, [], |row| row.get(0)).unwrap()
+    }
+
+    pub fn text(&self, query: &str) -> Option<String> {
+        self.db().query_row(query, [], |row| row.get(0)).ok()
     }
 
     pub fn sql(&self, statement: &str) {

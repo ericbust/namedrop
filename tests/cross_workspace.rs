@@ -2298,3 +2298,112 @@ fn every_unsent_delivery_cancel_goes_through_the_one_reflecting_helper() {
     );
     assert!(raw_cancels[0].ends_with("src/store.rs"), "{raw_cancels:?}");
 }
+
+fn copy_attempt(fixture: &Fixture, workspace: &str, alias: &str) -> String {
+    fixture
+        .text(&format!(
+            "SELECT a.attempt_id FROM delivery_attempts a
+             JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
+             WHERE a.worktree_id = '{workspace}' AND a.address_id = '{}' AND d.message_id LIKE 'bridge:%'
+             ORDER BY a.rowid DESC LIMIT 1",
+            address_id(workspace, alias)
+        ))
+        .expect("the copy was dispatched")
+}
+
+fn results(fixture: &Fixture, workspace: &str, pane: &str, message: &Value) -> Value {
+    execute_handoff_operation(
+        "handoff.results",
+        json!({"message_id":message}),
+        &fixture.runtime(workspace, pane),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_remote_request_that_settles_unanswered_shows_its_attempt_to_the_author() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let sent = fixture.agent_send("w1", "pane-1-lead", "settle-1", "#ws2 @tester Check this.");
+    fixture.drain("w2");
+    let attempt = copy_attempt(&fixture, "w2", "tester");
+    let before = results(&fixture, "w1", "pane-1-lead", &sent["message_id"]);
+    assert_eq!(before["recipients"][0]["attempt_id"], Value::Null);
+
+    fixture.advance(31_000);
+    fixture.drain("w2");
+    assert_eq!(
+        fixture.text(&format!(
+            "SELECT state FROM delivery_attempt_state WHERE attempt_id = '{attempt}'"
+        )),
+        Some("settled".to_owned())
+    );
+    let after = results(&fixture, "w1", "pane-1-lead", &sent["message_id"]);
+    let recipient = &after["recipients"][0];
+    assert_eq!(recipient["attempt_id"], format!("bridge:w2:{attempt}"));
+    assert_eq!(recipient["result_status"], Value::Null);
+    assert_eq!(recipient["needs_attention"], true);
+
+    let reply = fixture.herdr.last_envelope("pane-2-tester");
+    fixture.reply_to("w2", "pane-2-tester", &reply, "@lead Checked, all good.");
+    let replied = results(&fixture, "w1", "pane-1-lead", &sent["message_id"]);
+    assert_eq!(
+        replied["recipients"][0]["result_status"], "replied",
+        "a disposition that arrives after the settle is still reflected"
+    );
+    assert_eq!(
+        replied["recipients"][0]["untrusted_reply"],
+        "Checked, all good."
+    );
+}
+
+#[test]
+fn purging_a_workspace_cancels_the_deliveries_its_copies_still_owed() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    fixture.agent_send(
+        "w1",
+        "pane-1-lead",
+        "purge-1",
+        "#ws1 #ws2 @planner @tester Check the release.",
+    );
+    let local = fixture.herdr.last_envelope("pane-1-planner");
+    fixture.reply_to("w1", "pane-1-planner", &local, "@lead Release checked.");
+    fixture.drain("w2");
+    fixture.advance(31_000);
+    fixture.drain("w2");
+    assert!(
+        result_sets(&fixture, "pane-1-lead").is_empty(),
+        "an unanswered remote request keeps the join open"
+    );
+
+    let namespace = StateNamespace::for_space("socket-a", "w2");
+    let attribution = namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "test", 50);
+    StateStore::open(&fixture.state)
+        .unwrap()
+        .transaction(|transaction| transaction.deactivate_worktree(&namespace, &attribution))
+        .unwrap();
+    execute_lifecycle_operation(
+        "purge",
+        json!({"typed_space_id":"w2"}),
+        &fixture.runtime("w2", "pane-2-lead"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM mailbox_deliveries WHERE worktree_id = 'w2'"),
+        0
+    );
+    assert_eq!(
+        fixture.text(
+            "SELECT state FROM mailbox_deliveries WHERE worktree_id = 'w1'
+             AND address_id = 'envoy:w2:address-w2-tester'"
+        ),
+        Some("cancelled".to_owned())
+    );
+    fixture.drain("w1");
+    let joined = result_sets(&fixture, "pane-1-lead");
+    assert_eq!(joined.len(), 1, "the purge completes the author's join");
+    let outcomes = joined[0]["control"]["result_set"]["outcomes"].to_string();
+    assert!(outcomes.contains("cancelled"), "{outcomes}");
+}

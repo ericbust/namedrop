@@ -727,6 +727,8 @@ impl StateTransaction<'_> {
 
     /// Reflects each settled outcome of a copy's deliveries onto the envoy
     /// delivery it came from, so joins in the author's space see real results.
+    /// A settled attempt is reflected when it settles, and its disposition
+    /// when one arrives, so the author's space can judge an unanswered one.
     /// Idempotent: an outcome already reflected is left alone.
     pub(super) fn reflect_copy_outcomes(
         &mut self,
@@ -794,10 +796,10 @@ impl StateTransaction<'_> {
                 ],
                 |row| row.get(0),
             )?;
-            if let (Some(attempt), Some(session), Some(disposition), Some(kind)) =
-                (attempt, session, disposition, kind)
+            if let (Some(attempt), Some(session)) = (&attempt, &session)
+                && (disposition.is_some() || state == DeliveryState::Settled)
             {
-                let reflected_attempt = bridged_id(&namespace.space_id, &attempt);
+                let reflected_attempt = bridged_id(&namespace.space_id, attempt);
                 let inserted = self.transaction.execute(
                     "INSERT OR IGNORE INTO delivery_attempts (
                         session_socket_id, worktree_id, attempt_id, delivery_id, address_id,
@@ -813,20 +815,22 @@ impl StateTransaction<'_> {
                         attempt_at.unwrap_or_default()
                     ],
                 )? == 1;
-                if !inserted {
-                    continue;
+                if inserted {
+                    self.transaction.execute(
+                        "INSERT INTO delivery_attempt_state (
+                            session_socket_id, worktree_id, attempt_id, address_id, state, active
+                         ) VALUES (?1, ?2, ?3, ?4, 'settled', 0)",
+                        params![
+                            origin.session_socket_id,
+                            origin.space_id.as_str(),
+                            reflected_attempt,
+                            envoy.as_str()
+                        ],
+                    )?;
                 }
-                self.transaction.execute(
-                    "INSERT INTO delivery_attempt_state (
-                        session_socket_id, worktree_id, attempt_id, address_id, state, active
-                     ) VALUES (?1, ?2, ?3, ?4, 'settled', 0)",
-                    params![
-                        origin.session_socket_id,
-                        origin.space_id.as_str(),
-                        reflected_attempt,
-                        envoy.as_str()
-                    ],
-                )?;
+                let (Some(disposition), Some(kind)) = (disposition, kind) else {
+                    continue;
+                };
                 // A reply's disposition id is its reply message, so the
                 // reflected one names the reply's copy on this side. A reply
                 // that stayed in the copy's space has no copy here, so the
@@ -847,8 +851,8 @@ impl StateTransaction<'_> {
                     ),
                     None => (bridged_id(&namespace.space_id, &disposition), kind),
                 };
-                self.transaction.execute(
-                    "INSERT INTO delivery_dispositions (
+                let disposed = self.transaction.execute(
+                    "INSERT OR IGNORE INTO delivery_dispositions (
                         session_socket_id, worktree_id, disposition_id, attempt_id,
                         disposition_kind, occurred_at_ms
                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -860,7 +864,10 @@ impl StateTransaction<'_> {
                         kind,
                         disposed_at.unwrap_or_default()
                     ],
-                )?;
+                )? == 1;
+                if !disposed {
+                    continue;
+                }
                 self.append_transition(
                     &origin,
                     TransitionEntityKind::AgentDisposition,
@@ -872,33 +879,102 @@ impl StateTransaction<'_> {
                     },
                     attribution,
                 )?;
+                self.resolve_attention_source(
+                    &origin,
+                    crate::AttentionSourceKind::AgentDisposition,
+                    &reflected_attempt,
+                    attribution,
+                )?;
                 changed = true;
             } else if matches!(state, DeliveryState::Failed | DeliveryState::Cancelled) {
-                let updated = self.transaction.execute(
-                    "UPDATE mailbox_deliveries SET state = ?4
-                     WHERE session_socket_id = ?1 AND worktree_id = ?2 AND delivery_id = ?3
-                       AND state = 'settled'",
-                    params![
-                        origin.session_socket_id,
-                        origin.space_id.as_str(),
-                        delivery_id,
-                        delivery_state_name(state)
-                    ],
-                )?;
-                if updated == 1 {
-                    self.append_transition(
-                        &origin,
-                        TransitionEntityKind::MailboxDelivery,
-                        &delivery_id,
-                        delivery_transition_kind(state),
-                        attribution,
-                    )?;
-                    changed = true;
-                }
+                changed |= self.end_envoy_delivery(&origin, &delivery_id, state, attribution)?;
             }
         }
         if changed {
             self.complete_result_set_if_ready(&origin, &origin_message, attribution)?;
+        }
+        Ok(())
+    }
+
+    fn end_envoy_delivery(
+        &mut self,
+        origin: &StateNamespace,
+        delivery_id: &str,
+        state: DeliveryState,
+        attribution: &MutationAttribution,
+    ) -> Result<bool, StoreError> {
+        let updated = self.transaction.execute(
+            "UPDATE mailbox_deliveries SET state = ?4
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND delivery_id = ?3
+               AND state = 'settled'",
+            params![
+                origin.session_socket_id,
+                origin.space_id.as_str(),
+                delivery_id,
+                delivery_state_name(state)
+            ],
+        )? == 1;
+        if updated {
+            self.append_transition(
+                origin,
+                TransitionEntityKind::MailboxDelivery,
+                delivery_id,
+                delivery_transition_kind(state),
+                attribution,
+            )?;
+        }
+        Ok(updated)
+    }
+
+    /// Purging a workspace deletes the copies forwarded into it. Every
+    /// delivery still waiting on one of them in the author's space is
+    /// cancelled first, so no join or coordination waits on work that is gone.
+    pub(super) fn cancel_purged_copies(
+        &mut self,
+        namespace: &StateNamespace,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT b.origin_space_id, b.origin_message_id, e.address_id, o.delivery_id
+             FROM bridged_messages b
+             JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id)
+             JOIN space_envoys e
+               ON e.session_socket_id = b.session_socket_id
+              AND e.worktree_id = b.origin_space_id
+              AND e.origin_space_id = b.worktree_id
+              AND e.origin_address_id = d.address_id
+             JOIN mailbox_deliveries o
+               ON o.session_socket_id = b.session_socket_id
+              AND o.worktree_id = b.origin_space_id
+              AND o.message_id = b.origin_message_id
+              AND o.address_id = e.address_id
+             WHERE b.session_socket_id = ?1 AND b.worktree_id = ?2
+               AND NOT EXISTS (
+                   SELECT 1 FROM delivery_attempts a JOIN delivery_dispositions p
+                     USING (session_socket_id, worktree_id, attempt_id)
+                   WHERE a.session_socket_id = o.session_socket_id
+                     AND a.worktree_id = o.worktree_id AND a.delivery_id = o.delivery_id
+               )
+             ORDER BY b.rowid, d.rowid",
+        )?;
+        let waiting = statement
+            .query_map(
+                params![namespace.session_socket_id, namespace.space_id.as_str()],
+                |row| {
+                    Ok((
+                        SpaceId::new(row.get::<_, String>(0)?),
+                        MessageId::new(row.get::<_, String>(1)?),
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        for (space, message, delivery) in waiting {
+            let origin = StateNamespace::new(namespace.session_socket_id.clone(), space);
+            if self.end_envoy_delivery(&origin, &delivery, DeliveryState::Cancelled, attribution)? {
+                self.complete_result_set_if_ready(&origin, &message, attribution)?;
+            }
         }
         Ok(())
     }

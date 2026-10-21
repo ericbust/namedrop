@@ -246,14 +246,19 @@ impl StateStore {
         &mut self,
         namespace: &StateNamespace,
         typed_space_id: &str,
+        attribution: &MutationAttribution,
     ) -> Result<WorktreePurgeResult, StoreError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let summary = purge_summary(&transaction, namespace)?;
         validate_purge(&summary, namespace, typed_space_id)?;
-        delete_namespace_rows(&transaction, "main", namespace)?;
-        transaction.commit()?;
+        {
+            let mut state = StateTransaction { transaction };
+            state.cancel_purged_copies(namespace, attribution)?;
+            delete_namespace_rows(&state.transaction, "main", namespace)?;
+            state.transaction.commit()?;
+        }
 
         let mut maintenance_warnings = Vec::new();
         let database_path = self.state_directory.join(DATABASE_FILE_NAME);
@@ -5525,6 +5530,7 @@ impl StateTransaction<'_> {
             )?;
         } else if next == DeliveryState::Settled {
             self.flag_missing_disposition(namespace, attempt_id, attribution)?;
+            self.reflect_copy_outcomes(namespace, &source_message_id, attribution)?;
         }
         if matches!(next, DeliveryState::Failed | DeliveryState::Cancelled) {
             self.complete_result_set_if_ready(namespace, &source_message_id, attribution)?;
