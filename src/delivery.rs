@@ -71,29 +71,36 @@ impl DrainReport {
 }
 
 /// The spaces one mailbox wake should drain: this one first, then every other
-/// space of the Herdr session holding a queued forwarded copy. State that
-/// cannot be read still wakes this space.
+/// space of the Herdr session holding a queued forwarded copy, and every space
+/// whose open coordination has an assignee here, so a worker going idle
+/// reaches its lead's nudge. State that cannot be read still wakes this space.
 pub fn spaces_to_wake(
     state_directory: &std::path::Path,
     session_socket_id: &str,
     here: &str,
 ) -> Vec<String> {
-    let queued = StateStore::open_read_only(state_directory)
+    let others = StateStore::open_read_only(state_directory)
         .ok()
         .flatten()
         .and_then(|mut store| {
             store
-                .transaction(|transaction| transaction.spaces_awaiting_dispatch(session_socket_id))
+                .transaction(|transaction| {
+                    let mut spaces = transaction.spaces_awaiting_dispatch(session_socket_id)?;
+                    spaces.extend(transaction.coordination_homes_seated_in(
+                        session_socket_id,
+                        &crate::SpaceId::new(here),
+                    )?);
+                    Ok(spaces)
+                })
                 .ok()
         })
         .unwrap_or_default();
     let mut spaces = vec![here.to_owned()];
-    spaces.extend(
-        queued
-            .into_iter()
-            .map(|space| space.as_str().to_owned())
-            .filter(|space| space != here),
-    );
+    for space in others {
+        if !spaces.iter().any(|known| known == space.as_str()) {
+            spaces.push(space.as_str().to_owned());
+        }
+    }
     spaces
 }
 
@@ -361,6 +368,11 @@ where
             )
         })
         .map_err(|error| error.to_string())?;
+    let remote_seats = store
+        .transaction(|transaction| transaction.remote_seat_spaces(&namespace))
+        .map_err(|error| error.to_string())?;
+    let live =
+        crate::spaces::LiveSpaces::load(runtime.herdr, first_discovery.clone(), &remote_seats);
     store
         .transaction(|transaction| {
             transaction.complete_ready_result_sets(
@@ -369,7 +381,7 @@ where
             )?;
             transaction.reconcile_coordinations(
                 &namespace,
-                &first_discovery,
+                &live,
                 &MutationAttribution::new(ActorKind::Plugin, "namedrop-coordination", now),
             )?;
             Ok(())
@@ -452,7 +464,7 @@ where
                 if !transaction.coordination_wake_message_eligible(
                     &namespace,
                     &second.message_id,
-                    &second_discovery,
+                    &live.with_here(second_discovery.clone()),
                 )? {
                     return Ok(None);
                 }

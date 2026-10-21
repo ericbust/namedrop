@@ -1708,12 +1708,12 @@ impl DeliveryControl {
                     }
                 }
                 "send" => {
-                    for (assignment_id, revision, alias) in assignments {
-                        let Some(alias) = alias else { continue };
+                    for (assignment_id, revision, mention) in assignments {
+                        let Some(mention) = mention else { continue };
                         let mut send = operation.clone();
                         send.input = json!({
                             "request_id":format!("continue-{}-{}",self.attempt_id.as_str(),assignment_id.as_str()),
-                            "source":format!("@{alias} <specific continuation instruction>"),
+                            "source":format!("{mention} <specific continuation instruction>"),
                             "author_kind":"agent_session",
                             "coordination_id":id,
                             "assignment_id":assignment_id,

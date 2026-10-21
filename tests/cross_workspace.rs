@@ -1041,7 +1041,7 @@ fn a_paused_workspace_queues_and_says_so_until_it_resumes() {
 }
 
 #[test]
-fn context_and_tracking_never_cross_workspaces_and_leave_no_pin() {
+fn context_never_crosses_workspaces_and_leaves_no_pin() {
     let fixture = Fixture::new();
     fixture.register_all();
     let repo = fixture.root.join("repo");
@@ -1057,7 +1057,6 @@ fn context_and_tracking_never_cross_workspaces_and_leave_no_pin() {
     for input in [
         json!({"request_id":"ctx-1","source":"#ws2 @lead Review this.","author_kind":"agent_session","context":context}),
         json!({"request_id":"ctx-2","source":"#ws2 @tester Review this.","author_kind":"agent_session","context":context}),
-        json!({"request_id":"track-1","source":"#ws2 @lead Review this.","author_kind":"agent_session","coordination_id":"coordination-1"}),
     ] {
         let error = fixture.try_send("w1", "pane-1-lead", input).unwrap_err();
         assert!(error.contains("stay inside one workspace"), "{error}");

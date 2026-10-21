@@ -3,9 +3,9 @@
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    drain_mailboxes, execute_integration_operation, execute_message_operation,
-    execute_user_prompt_submit_hook, issue_registration_challenge,
+    PaneBindingId, PaneRoleId, PromptFailureKind, StateNamespace, StateStore,
+    complete_capability_profile, drain_mailboxes, execute_integration_operation,
+    execute_message_operation, execute_user_prompt_submit_hook, issue_registration_challenge,
 };
 use serde_json::{Value, json};
 use std::{
@@ -59,6 +59,7 @@ pub struct FakeHerdr {
     pub statuses: Mutex<BTreeMap<String, String>>,
     pub sessions: Mutex<BTreeMap<String, String>>,
     pub unreadable: Mutex<BTreeSet<String>>,
+    pub failing_prompts: Mutex<BTreeSet<String>>,
 }
 
 impl FakeHerdr {
@@ -79,6 +80,7 @@ impl FakeHerdr {
             statuses: Mutex::new(BTreeMap::new()),
             sessions: Mutex::new(BTreeMap::new()),
             unreadable: Mutex::new(BTreeSet::new()),
+            failing_prompts: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -155,6 +157,11 @@ impl HerdrCommandExecutor for FakeHerdr {
                     .collect();
                 json!({"result":{"panes":panes}}).to_string()
             }
+            ["agent", "prompt", pane, _]
+                if self.failing_prompts.lock().unwrap().contains(*pane) =>
+            {
+                return Err("definitive".to_owned());
+            }
             ["agent", "prompt", pane, prompt] => {
                 self.prompts
                     .lock()
@@ -173,6 +180,14 @@ impl HerdrCommandExecutor for FakeHerdr {
             _ => return Err(format!("unexpected Herdr command: {args:?}")),
         };
         Ok(HerdrCommandOutput { stdout })
+    }
+
+    fn classify_prompt_failure(&self, error: &str) -> PromptFailureKind {
+        if error == "definitive" {
+            PromptFailureKind::DefinitiveNonRetryable
+        } else {
+            PromptFailureKind::AmbiguousInvocation
+        }
     }
 }
 

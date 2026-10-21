@@ -330,7 +330,7 @@ fn coordination_migration_and_reopen() {
             )
         })
         .unwrap();
-    f.db().execute_batch("DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=3;").unwrap();
+    f.db().execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=3;").unwrap();
     let before = f.snapshot();
     for table in [
         "pane_addresses",

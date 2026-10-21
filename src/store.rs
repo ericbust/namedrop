@@ -45,9 +45,11 @@ mod bridge;
 pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
 pub(crate) use groups::addressed_recipients;
 mod coordination;
+mod coordination_bridge;
 mod coordination_ownership;
 pub mod dashboard;
 mod missing_disposition;
+pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
 mod groups;
 mod handoff;
@@ -4821,7 +4823,11 @@ impl StateTransaction<'_> {
             .as_ref()
             .map(|set| set.source_message_id.clone())
             .unwrap_or_else(|| MessageId::new(message_id.clone()));
-        let assignments = self.coordination_links(namespace, &coordination_message)?;
+        let tracked = self.tracked_message(namespace, &coordination_message)?;
+        let assignments = tracked
+            .as_ref()
+            .map(|tracked| tracked.links.clone())
+            .unwrap_or_default();
         let nudge = grammar_version == "coordination-nudge/v1";
         let wake_identity = if nudge {
             self.wake_identity(namespace, &MessageId::new(message_id.clone()))?
@@ -4867,10 +4873,23 @@ impl StateTransaction<'_> {
         if review_source_message_id.is_some() && !tracked_join && !nudge {
             permitted_operations.push("handoff.results".to_owned());
         }
-        let tracked_worker = assignments.iter().any(|link| {
-            self.coordination_assignment(namespace, &link.assignment_id)
-                .is_ok_and(|a| a["recipient_address_id"].as_str() == Some(&recipient_address_id))
-        });
+        let tracked_worker = match &tracked {
+            Some(tracked) => {
+                let worker = self.counterpart_address(
+                    namespace,
+                    &PaneAddressId::new(recipient_address_id.clone()),
+                    &tracked.home,
+                )?;
+                assignments.iter().any(|link| {
+                    self.coordination_assignment(&tracked.home, &link.assignment_id)
+                        .is_ok_and(|a| {
+                            a["recipient_address_id"].as_str()
+                                == worker.as_ref().map(PaneAddressId::as_str)
+                        })
+                })
+            }
+            None => false,
+        };
         let sender_workspace =
             self.bridged_sender_label(namespace, &MessageId::new(message_id.clone()))?;
         let draft = crate::DeliveryControlDraft {
@@ -4936,11 +4955,19 @@ impl StateTransaction<'_> {
             let actions = rows
                 .into_iter()
                 .map(|(assignment, revision, address, session, _)| {
-                    let disabled: bool = self.transaction.query_row("SELECT collaboration_disabled FROM pane_addresses WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3",params![namespace.session_socket_id,namespace.space_id.as_str(),address.as_str()],|r|r.get(0))?;
-                    let alias = self.optional_routing_address_by_id(namespace, &address)?
+                    // An assignee in another workspace is checked there and
+                    // named by that workspace's id, which a rename never moves.
+                    let principal = self.principal(namespace, &address)?;
+                    let (ns, address) = (&principal.ns, &principal.address_id);
+                    let disabled: bool = self.transaction.query_row("SELECT collaboration_disabled FROM pane_addresses WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),address.as_str()],|r|r.get(0))?;
+                    let mention = self.optional_routing_address_by_id(ns, address)?
                         .filter(|snapshot| !disabled && snapshot.agent_session_id.as_ref().map(|s| s.as_str()) == Some(session.as_str()))
-                        .map(|snapshot| snapshot.alias);
-                    Ok((assignment, revision, alias))
+                        .map(|snapshot| if ns == namespace {
+                            format!("@{}", snapshot.alias)
+                        } else {
+                            format!("{} @{}", crate::WorkspaceLabel::from_herdr(ns.space_id.as_str()), snapshot.alias)
+                        });
+                    Ok((assignment, revision, mention))
                 })
                 .collect::<Result<Vec<_>, StoreError>>()?;
             control.bind_coordination_actions(&id, &actions, all_completed);
@@ -5985,9 +6012,11 @@ impl StateTransaction<'_> {
             .ok_or_else(|| {
                 StoreError::invalid_input("delivery attempt does not exist in this workspace")
             })?;
+        let principal = self.principal(namespace, &address)?;
+        let retired = retired || self.address_retired(&principal.ns, &principal.address_id)?;
         if !retired
             && !self
-                .recipient_session_now(namespace, &address)?
+                .recipient_session_now(&principal.ns, &principal.address_id)?
                 .replaced(&pinned_session)
         {
             return Err(StoreError::invalid_input(

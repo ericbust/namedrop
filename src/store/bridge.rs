@@ -46,6 +46,21 @@ CREATE TABLE bridged_threads (
     FOREIGN KEY (session_socket_id, worktree_id, thread_id)
         REFERENCES collaboration_threads (session_socket_id, worktree_id, thread_id)
 );
+-- An envoy delivery settles when its copy is forwarded; the copy's own
+-- delivery carries the real progress. Every other delivery is its own seat.
+CREATE VIEW delivery_seats AS
+SELECT d.session_socket_id, d.worktree_id, d.delivery_id,
+       COALESCE(c.state, d.state) AS progress
+FROM mailbox_deliveries d
+LEFT JOIN space_envoys e
+  ON e.session_socket_id = d.session_socket_id AND e.worktree_id = d.worktree_id
+ AND e.address_id = d.address_id
+LEFT JOIN bridged_messages b
+  ON b.session_socket_id = d.session_socket_id AND b.worktree_id = e.origin_space_id
+ AND b.origin_space_id = d.worktree_id AND b.origin_message_id = d.message_id
+LEFT JOIN mailbox_deliveries c
+  ON c.session_socket_id = b.session_socket_id AND c.worktree_id = b.worktree_id
+ AND c.message_id = b.message_id AND c.address_id = e.origin_address_id;
 "#;
 
 const ENVOY_ROLE_ID: &str = "role-envoy";
@@ -91,7 +106,7 @@ pub(crate) struct ForwardedDelivery {
     pub delivery_id: crate::DeliveryId,
 }
 
-fn bridged_id(space: &SpaceId, id: &str) -> String {
+pub(super) fn bridged_id(space: &SpaceId, id: &str) -> String {
     format!("bridge:{}:{id}", space.as_str())
 }
 
@@ -217,7 +232,7 @@ impl StateTransaction<'_> {
             .optional()?)
     }
 
-    fn envoy_standing_for(
+    pub(super) fn envoy_standing_for(
         &self,
         host: &StateNamespace,
         origin_space: &SpaceId,
@@ -545,7 +560,7 @@ impl StateTransaction<'_> {
         self.copy_of(target, &namespace.space_id, message_id)
     }
 
-    fn copy_origin(
+    pub(super) fn copy_origin(
         &self,
         namespace: &StateNamespace,
         message_id: &MessageId,
@@ -570,7 +585,7 @@ impl StateTransaction<'_> {
             .optional()?)
     }
 
-    fn copy_of(
+    pub(super) fn copy_of(
         &self,
         holder: &StateNamespace,
         origin_space: &SpaceId,

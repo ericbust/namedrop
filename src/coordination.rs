@@ -197,16 +197,16 @@ pub(crate) fn track_message<
     draft: &MessageDraft,
     input: &TrackingInput,
     attempt: Option<&crate::DeliveryAttemptId>,
-    discovered: &crate::DiscoveredWorktree,
+    live: &crate::spaces::LiveSpaces,
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<(), StoreError> {
-    let parents = draft
+    let tracked = draft
         .in_reply_to
         .as_ref()
-        .map(|id| tx.coordination_links(ns, id))
+        .map(|id| tx.tracked_message(ns, id))
         .transpose()?
-        .unwrap_or_default();
-    if parents.is_empty() && !input.present() {
+        .flatten();
+    if tracked.is_none() && !input.present() {
         return Ok(());
     }
     if draft.author_kind != ActorKind::AgentSession {
@@ -218,9 +218,22 @@ pub(crate) fn track_message<
         tx,
         ns,
         runtime.current_pane_id.expect("message requires pane"),
-        discovered,
+        live.local(),
     )?;
     tx.require_coordination_capability(ns, &author)?;
+    let now = runtime.clock.now_unix_ms();
+    // A copy's links live in the lead's workspace, so its reply is a worker's:
+    // the lead never receives a copy of its own request.
+    if let Some(tracked) = tracked.as_ref().filter(|t| t.home != *ns) {
+        if input.coordination_id.is_some() || input.assignment_id.is_some() {
+            return Err(StoreError::invalid_input(
+                "worker replies inherit their assignment from the bound message",
+            ));
+        }
+        let reply = remote_worker_reply(tx, ns, draft, attempt, &author, tracked)?;
+        return record_worker_reply(tx, &reply, input, now);
+    }
+    let parents = tracked.map(|t| t.links).unwrap_or_default();
     let inherited = parents
         .iter()
         .find(|link| {
@@ -260,21 +273,19 @@ pub(crate) fn track_message<
             }
             for recipient in &draft.recipients {
                 let address = tx.routing_address_by_id(ns, &recipient.address_id)?;
-                require_live_recipient(tx, ns, &address, discovered)?;
+                require_live_recipient(tx, ns, &address, live)?;
                 if address.address_id == author.address_id {
                     return Err(StoreError::invalid_input(
                         "the lead cannot assign tracked work to itself",
                     ));
                 }
+                let session = tx.pinned_session(ns, &draft.message_id, recipient)?;
                 let link = if let Some(id) = existing {
                     let a = tx.coordination_assignment(ns, id)?;
                     if a["coordination_id"].as_str() != Some(coordination.as_str())
                         || a["recipient_address_id"].as_str() != Some(recipient.address_id.as_str())
                         || a["recipient_session_id"].as_str()
-                            != recipient
-                                .agent_session_snapshot
-                                .as_ref()
-                                .map(|s| s.as_str())
+                            != session.as_ref().map(|s| s.as_str())
                     {
                         return Err(StoreError::invalid_input(
                             "assignment continuation must retain its coordination and exact recipient session",
@@ -300,9 +311,16 @@ pub(crate) fn track_message<
                         revision: 1,
                     }
                 };
-                tx.dispatch_assignment(ns, &link, draft, recipient, &input.fingerprint())?;
+                tx.dispatch_assignment(
+                    ns,
+                    &link,
+                    draft,
+                    recipient,
+                    session.as_ref(),
+                    &input.fingerprint(),
+                )?;
             }
-            tx.advance_coordination(ns, coordination, runtime.clock.now_unix_ms())?;
+            tx.advance_coordination(ns, coordination, now)?;
         }
         CoordinationRole::Other => {
             if input.coordination_id.is_some() || input.assignment_id.is_some() {
@@ -315,57 +333,182 @@ pub(crate) fn track_message<
                     "only the exact coordination owner can dispatch assignments",
                 )
             })?;
-            let assignment = tx.coordination_assignment(ns, &link.assignment_id)?;
-            if assignment["recipient_address_id"].as_str() != Some(author.address_id.as_str())
-                || assignment["recipient_session_id"].as_str()
-                    != author.agent_session_id.as_ref().map(|s| s.as_str())
-            {
-                return Err(StoreError::invalid_input(
-                    "work outcome requires the assignment's exact recipient session",
-                ));
-            }
-            let recipient = match draft.recipients.as_slice() {
-                [recipient] if recipient.address_id == owner.address_id => recipient,
-                recipients => {
-                    let extra = recipients
-                        .iter()
-                        .filter(|r| r.address_id != owner.address_id)
-                        .map(|r| format!("@{}", r.alias_snapshot))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    return Err(StoreError::invalid_input(format!(
-                        "a tracked reply goes only to @{lead}, but this one also addresses {extra}. \
-                         Start the source with @{lead} alone and write any other name without the @",
-                        lead = owner.alias
-                    )));
-                }
+            let reply = WorkerReply {
+                home: ns.clone(),
+                link: link.clone(),
+                worker: Some(author.address_id.clone()),
+                session: author.agent_session_id.clone(),
+                reply: draft.message_id.clone(),
+                to: draft
+                    .recipients
+                    .iter()
+                    .map(|r| HomeRecipient {
+                        address_id: Some(r.address_id.clone()),
+                        alias: r.alias_snapshot.clone(),
+                        session: r.agent_session_snapshot.clone(),
+                    })
+                    .collect(),
+                attempt: AttemptAt {
+                    ns: ns.clone(),
+                    attempt: attempt.cloned(),
+                    request: draft.in_reply_to.clone().expect("inherited message"),
+                    author: author.clone(),
+                },
             };
-            if recipient.agent_session_snapshot != owner.agent_session_id {
-                return Err(StoreError::invalid_input(
-                    "the lead session restarted; it must run handoff adopt before tracked replies are accepted, so retry this reply after it does",
-                ));
-            }
-            tx.require_assignment_attempt(
-                ns,
-                attempt.ok_or_else(|| {
-                    StoreError::invalid_input("tracked replies require their bound attempt")
-                })?,
-                draft.in_reply_to.as_ref().expect("inherited message"),
-                &author,
-            )?;
-            tx.record_assignment_outcome(ns, link, draft, input, runtime.clock.now_unix_ms())?;
+            record_worker_reply(tx, &reply, input, now)?;
         }
     }
     Ok(())
+}
+
+/// A worker's tracked reply as the lead's workspace judges it. A reply in the
+/// lead's workspace and one from another workspace are built differently and
+/// judged by the one record_worker_reply, so the rules and their errors exist
+/// once.
+struct WorkerReply {
+    home: StateNamespace,
+    link: CoordinationLink,
+    /// The worker as `home` knows it: its address, or its envoy there.
+    worker: Option<crate::PaneAddressId>,
+    session: Option<crate::AgentSessionId>,
+    /// The reply in `home`: the reply itself, or its forwarded copy.
+    reply: crate::MessageId,
+    to: Vec<HomeRecipient>,
+    attempt: AttemptAt,
+}
+
+/// One reply recipient as `home` knows it. No address means `home` has no
+/// counterpart for it, such as a colleague in the worker's own workspace.
+struct HomeRecipient {
+    address_id: Option<crate::PaneAddressId>,
+    alias: String,
+    session: Option<crate::AgentSessionId>,
+}
+
+struct AttemptAt {
+    ns: StateNamespace,
+    attempt: Option<crate::DeliveryAttemptId>,
+    request: crate::MessageId,
+    author: RoutingAddressSnapshot,
+}
+
+fn remote_worker_reply(
+    tx: &StateTransaction<'_>,
+    ns: &StateNamespace,
+    draft: &MessageDraft,
+    attempt: Option<&crate::DeliveryAttemptId>,
+    author: &RoutingAddressSnapshot,
+    tracked: &crate::store::TrackedMessage,
+) -> Result<WorkerReply, StoreError> {
+    let home = &tracked.home;
+    let worker = tx.counterpart_address(ns, &author.address_id, home)?;
+    let link = tracked
+        .links
+        .iter()
+        .find(|link| {
+            tx.coordination_assignment(home, &link.assignment_id)
+                .is_ok_and(|a| {
+                    a["recipient_address_id"].as_str()
+                        == worker.as_ref().map(crate::PaneAddressId::as_str)
+                })
+        })
+        .or_else(|| tracked.links.first())
+        .expect("a tracked message has links")
+        .clone();
+    let reply = tx.copy_in(home, &ns.space_id, &draft.message_id)?;
+    let to = draft
+        .recipients
+        .iter()
+        .map(|r| {
+            let address_id = tx.counterpart_address(ns, &r.address_id, home)?;
+            let session = match &address_id {
+                Some(address) => tx
+                    .recipient_session_snapshot(home, &reply, address)?
+                    .flatten(),
+                None => None,
+            };
+            Ok(HomeRecipient {
+                address_id,
+                alias: r.alias_snapshot.clone(),
+                session,
+            })
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    Ok(WorkerReply {
+        home: home.clone(),
+        link,
+        worker,
+        session: author.agent_session_id.clone(),
+        reply,
+        to,
+        attempt: AttemptAt {
+            ns: ns.clone(),
+            attempt: attempt.cloned(),
+            request: draft.in_reply_to.clone().expect("a tracked reply answers"),
+            author: author.clone(),
+        },
+    })
+}
+
+fn record_worker_reply(
+    tx: &mut StateTransaction<'_>,
+    reply: &WorkerReply,
+    input: &TrackingInput,
+    now: u64,
+) -> Result<(), StoreError> {
+    let home = &reply.home;
+    let owner = tx.coordination_owner(home, &reply.link.coordination_id)?;
+    let assignment = tx.coordination_assignment(home, &reply.link.assignment_id)?;
+    if assignment["recipient_address_id"].as_str()
+        != reply.worker.as_ref().map(crate::PaneAddressId::as_str)
+        || assignment["recipient_session_id"].as_str() != reply.session.as_ref().map(|s| s.as_str())
+    {
+        return Err(StoreError::invalid_input(
+            "work outcome requires the assignment's exact recipient session",
+        ));
+    }
+    let recipient = match reply.to.as_slice() {
+        [recipient] if recipient.address_id.as_ref() == Some(&owner.address_id) => recipient,
+        recipients => {
+            let extra = recipients
+                .iter()
+                .filter(|r| r.address_id.as_ref() != Some(&owner.address_id))
+                .map(|r| format!("@{}", r.alias))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(StoreError::invalid_input(format!(
+                "a tracked reply goes only to @{lead}, but this one also addresses {extra}. \
+                 Start the source with @{lead} alone and write any other name without the @",
+                lead = owner.alias
+            )));
+        }
+    };
+    if recipient.session != owner.agent_session_id {
+        return Err(StoreError::invalid_input(
+            "the lead session restarted; it must run handoff adopt before tracked replies are accepted, so retry this reply after it does",
+        ));
+    }
+    let at = &reply.attempt;
+    let proof = tx.require_assignment_attempt(
+        &at.ns,
+        at.attempt.as_ref().ok_or_else(|| {
+            StoreError::invalid_input("tracked replies require their bound attempt")
+        })?,
+        &at.request,
+        &at.author,
+    )?;
+    tx.record_assignment_outcome(home, &proof, &reply.link, &reply.reply, input, now)
 }
 
 fn require_live_recipient(
     tx: &StateTransaction<'_>,
     ns: &StateNamespace,
     address: &RoutingAddressSnapshot,
-    discovered: &crate::DiscoveredWorktree,
+    live: &crate::spaces::LiveSpaces,
 ) -> Result<(), StoreError> {
-    if tx.pane_type(ns, &address.address_id)? != crate::PaneType::Agent {
+    let principal = tx.principal(ns, &address.address_id)?;
+    let (ns, address_id) = (&principal.ns, &principal.address_id);
+    if tx.pane_type(ns, address_id)? != crate::PaneType::Agent {
         return Err(StoreError::invalid_input(
             "tracked assignments require agent recipients",
         ));
@@ -373,8 +516,14 @@ fn require_live_recipient(
     let binding = tx
         .active_pane_bindings(ns)?
         .into_iter()
-        .find(|b| b.address_id == address.address_id)
+        .find(|b| &b.address_id == address_id)
         .ok_or_else(|| StoreError::invalid_input("tracked recipient has no current binding"))?;
-    let live = crate::context::registered_current_address(tx, ns, &binding.pane_id, discovered)?;
-    tx.require_coordination_capability(ns, &live)
+    let discovered = live.of(&ns.space_id).ok_or_else(|| {
+        StoreError::invalid_input(format!(
+            "Namedrop could not read the panes of @{}'s workspace from Herdr; retry the send",
+            address.alias
+        ))
+    })?;
+    let current = crate::context::registered_current_address(tx, ns, &binding.pane_id, discovered)?;
+    tx.require_coordination_capability(ns, &current)
 }
