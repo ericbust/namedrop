@@ -2506,3 +2506,522 @@ fn turning_remote_commands_on_or_off_is_never_auto_permitted() {
         );
     }
 }
+
+fn shared_build(fixture: &Fixture) {
+    fixture.register_all();
+    fixture.add_terminal("w2", "build", "pane-2-build");
+    fixture
+        .remote_control("address.allow-remote", "w2", "pane-2-lead", "build")
+        .unwrap();
+}
+
+fn no_shell_ran(fixture: &Fixture) -> bool {
+    fixture.herdr.runs.lock().unwrap().is_empty()
+}
+
+#[test]
+fn a_remote_command_reaches_only_a_terminal_that_allowed_it() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    fixture.add_terminal("w2", "build", "pane-2-build");
+    let before = fixture.message_rows();
+    let error = fixture
+        .try_send(
+            "w1",
+            "pane-1-lead",
+            json!({"request_id":"build-1","source":"#ws2 @build echo ok","author_kind":"agent_session"}),
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("@build in #ws2") && error.contains("allow-remote"),
+        "{error}"
+    );
+    assert_eq!(fixture.message_rows(), before);
+    assert!(no_shell_ran(&fixture));
+}
+
+#[test]
+fn an_allowed_terminal_runs_the_exact_command_and_its_result_comes_home() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    let sent = fixture.agent_send("w1", "pane-1-lead", "build-1", "#ws2 @build echo ok");
+    assert_eq!(fixture.herdr.runs("pane-2-build").len(), 1);
+    assert_eq!(fixture.run_terminal("w2", "pane-2-build").unwrap(), 0);
+    assert!(
+        spaces_to_wake(&fixture.state, "socket-a", "w2").contains(&"w1".to_owned()),
+        "the runner's wake reaches the author's workspace"
+    );
+    fixture.drain("w1");
+    let result = fixture.herdr.last_envelope("pane-1-lead");
+    assert!(
+        Fixture::untrusted_body(&result).contains("exit code 0"),
+        "{result}"
+    );
+    let results = execute_handoff_operation(
+        "handoff.results",
+        json!({"message_id":sent["message_id"]}),
+        &fixture.runtime("w1", "pane-1-lead"),
+    )
+    .unwrap();
+    assert_eq!(results["complete"], true, "{results}");
+    let terminal = &results["recipients"][0]["terminal_result"];
+    assert_eq!(terminal["exit_code"], 0, "{results}");
+    assert!(
+        terminal["output"].as_str().unwrap().contains("ok\n"),
+        "{results}"
+    );
+    assert_eq!(
+        fixture.texts("SELECT command FROM terminal_executions"),
+        ["echo ok"]
+    );
+}
+
+#[test]
+fn a_hook_command_strips_its_workspace_labels_exactly_as_the_sender_did() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    fixture.add_terminal("w3", "build", "pane-3-build");
+    fixture
+        .remote_control("address.allow-remote", "w3", "pane-3-lead", "build")
+        .unwrap();
+    fixture.hook("w1", "pane-1-lead", "#ws2 @build printf one");
+    fixture.hook("w1", "pane-1-lead", "#ws2 #ws3 @build printf two");
+    fixture.drain("w2");
+    fixture.drain("w3");
+    for (workspace, pane) in [("w2", "pane-2-build"), ("w3", "pane-3-build")] {
+        while fixture.run_terminal(workspace, pane).is_ok() {
+            fixture.drain(workspace);
+        }
+    }
+    let mut commands = fixture.texts("SELECT command FROM terminal_executions");
+    commands.sort();
+    assert_eq!(commands, ["printf one", "printf two", "printf two"]);
+}
+
+#[test]
+fn all_and_unlabelled_mentions_never_reach_a_remote_terminal() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    let before = fixture.message_rows();
+    // A bare name never leaves its workspace, so it meets the general refusal
+    // before any terminal rule; #all reaches the terminal rule.
+    for (source, expected) in [
+        (
+            "@build make",
+            "@build is not named in this workspace. It is named in: #ws2. Use #ws2 @build to reach it.",
+        ),
+        ("#all @build make", "put #ws2 before the mention"),
+    ] {
+        let error = fixture
+            .try_send(
+                "w1",
+                "pane-1-lead",
+                json!({"request_id":source,"source":source,"author_kind":"agent_session"}),
+            )
+            .unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        let refused = fixture.hook("w1", "pane-1-lead", source);
+        assert!(
+            additional_context(&refused).contains(expected),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(fixture.message_rows(), before);
+    assert!(no_shell_ran(&fixture));
+}
+
+#[test]
+fn a_group_is_refused_whole_naming_every_terminal_that_did_not_allow_it() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    fixture.add_terminal("w2", "logs", "pane-2-logs");
+    fixture.add_terminal("w2", "deploy", "pane-2-deploy");
+    execute_group_operation(
+        "group.set",
+        json!({"alias":"ops","members":["tester","build","logs","deploy"]}),
+        &fixture.runtime("w2", "pane-2-lead"),
+    )
+    .unwrap();
+    let before = fixture.message_rows();
+    let error = fixture
+        .try_send(
+            "w1",
+            "pane-1-lead",
+            json!({"request_id":"ops-1","source":"#ws2 @ops make","author_kind":"agent_session"}),
+        )
+        .unwrap_err();
+    assert!(
+        error.contains("@logs in #ws2 and @deploy in #ws2 are each"),
+        "{error}"
+    );
+    assert!(!error.contains("@build"), "{error}");
+    assert_eq!(fixture.message_rows(), before);
+    for alias in ["logs", "deploy"] {
+        fixture
+            .remote_control("address.allow-remote", "w2", "pane-2-lead", alias)
+            .unwrap();
+    }
+    fixture.agent_send("w1", "pane-1-lead", "ops-2", "#ws2 @ops make");
+    for pane in ["pane-2-build", "pane-2-logs", "pane-2-deploy"] {
+        assert_eq!(fixture.herdr.runs(pane).len(), 1, "{pane}");
+    }
+    assert_eq!(fixture.herdr.envelopes("pane-2-tester").len(), 1);
+}
+
+#[test]
+fn denying_remote_commands_fails_the_queued_ones_at_once() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    fixture.herdr.shells_busy.store(true, Ordering::Relaxed);
+    let sent = fixture.agent_send("w1", "pane-1-lead", "build-1", "#ws2 @build make");
+    let copy = &sent["forwarded"][0]["message_id"];
+    assert_eq!(fixture.delivery_states("w2", copy), ["queued"]);
+    fixture
+        .remote_control("address.deny-remote", "w2", "pane-2-lead", "build")
+        .unwrap();
+    assert_eq!(fixture.delivery_states("w2", copy), ["failed"]);
+    assert_eq!(
+        fixture.delivery_states("w1", &sent["message_id"]),
+        ["failed"],
+        "the author sees the failure without waiting for the shell"
+    );
+    fixture.herdr.shells_busy.store(false, Ordering::Relaxed);
+    fixture
+        .remote_control("address.allow-remote", "w2", "pane-2-lead", "build")
+        .unwrap();
+    fixture.drain("w2");
+    assert!(
+        no_shell_ran(&fixture),
+        "allowing again never runs the old command"
+    );
+}
+
+#[test]
+fn a_grant_revoked_after_dispatch_stops_the_shell_and_completes_the_join() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    execute_group_operation(
+        "group.set",
+        json!({"alias":"ops","members":["tester","build"]}),
+        &fixture.runtime("w2", "pane-2-lead"),
+    )
+    .unwrap();
+    let sent = fixture.agent_send("w1", "pane-1-planner", "ops-1", "#ws2 @ops Check it.");
+    fixture
+        .remote_control("address.deny-remote", "w2", "pane-2-lead", "build")
+        .unwrap();
+    assert_eq!(fixture.run_terminal("w2", "pane-2-build").unwrap(), 65);
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM terminal_executions WHERE started_at_ms IS NOT NULL"),
+        0,
+        "the shell never started"
+    );
+    let tester = fixture.herdr.last_envelope("pane-2-tester");
+    fixture.reply_to("w2", "pane-2-tester", &tester, "@planner Checked.");
+    let joined = receive_until_result_set(&fixture, "w1", "pane-1-planner");
+    assert_eq!(joined.len(), 1, "exactly one result set reaches the author");
+    let statuses: Vec<String> = joined[0]["control"]["result_set"]["outcomes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|outcome| format!("{}={}", outcome["target"]["alias"], outcome["status"]))
+        .collect();
+    assert_eq!(
+        statuses,
+        [r#""tester"="replied""#, r#""build"="cancelled""#]
+    );
+    assert_eq!(
+        fixture.delivery_states("w1", &sent["message_id"]),
+        ["settled", "cancelled"]
+    );
+}
+
+#[test]
+fn a_terminal_rebound_or_respawned_refuses_a_queued_remote_command() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    fixture.add_shell("w2", "pane-2-spare");
+    fixture.herdr.shells_busy.store(true, Ordering::Relaxed);
+    let rebound = fixture.agent_send("w1", "pane-1-lead", "build-1", "#ws2 @build make");
+    fixture.rebind("w2", "build", "pane-2-spare");
+    fixture.herdr.shells_busy.store(false, Ordering::Relaxed);
+    fixture.drain("w2");
+    assert!(no_shell_ran(&fixture));
+    assert_eq!(
+        fixture.delivery_states("w1", &rebound["message_id"]),
+        ["failed"]
+    );
+
+    fixture
+        .remote_control("address.allow-remote", "w2", "pane-2-lead", "build")
+        .unwrap();
+    fixture
+        .herdr
+        .terminals
+        .lock()
+        .unwrap()
+        .iter_mut()
+        .for_each(|shell| {
+            if shell.1 == "pane-2-spare" {
+                shell.2 = "t-respawned".to_owned();
+            }
+        });
+    let respawned = fixture.agent_send("w1", "pane-1-lead", "build-2", "#ws2 @build make");
+    assert!(
+        no_shell_ran(&fixture),
+        "the grant named the shell before the respawn"
+    );
+    assert_eq!(
+        fixture.delivery_states("w1", &respawned["message_id"]),
+        ["failed"]
+    );
+}
+
+#[test]
+fn a_paused_conversation_blocks_the_claim_and_resuming_never_reruns_it() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    let sent = fixture.agent_send("w1", "pane-1-lead", "build-1", "#ws2 @build make");
+    let control = |operation: &str| {
+        execute_control_operation(
+            operation,
+            json!({"thread_id":sent["thread_id"]}),
+            &fixture.runtime("w1", "pane-1-lead"),
+        )
+        .unwrap();
+    };
+    control("thread.pause");
+    let error = fixture.run_terminal("w2", "pane-2-build").unwrap_err();
+    assert!(error.contains("no longer claimable"), "{error}");
+    control("thread.resume");
+    fixture.drain("w2");
+    assert_eq!(
+        fixture.herdr.runs("pane-2-build").len(),
+        1,
+        "nothing re-ran it"
+    );
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM terminal_executions WHERE started_at_ms IS NOT NULL"),
+        0
+    );
+}
+
+#[test]
+fn a_mixed_send_returns_one_result_set_and_finds_the_remote_output() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    let sent = fixture.agent_send(
+        "w1",
+        "pane-1-lead",
+        "mixed-1",
+        "#ws1 #ws2 @planner @build echo hi",
+    );
+    fixture.run_terminal("w2", "pane-2-build").unwrap();
+    let local = fixture.herdr.last_envelope("pane-1-planner");
+    let before = fixture.message_rows();
+    let error = execute_message_operation(
+        "reply",
+        json!({"request_id":"again","source":"@build echo again","author_kind":"agent_session",
+               "in_reply_to":local["control"]["message_id"],
+               "attempt_id":local["control"]["attempt_id"]}),
+        &fixture.runtime("w1", "pane-1-planner"),
+    )
+    .unwrap_err();
+    assert!(error.contains("new shell command requests"), "{error}");
+    assert_eq!(
+        fixture.message_rows(),
+        before,
+        "a reply never reaches the shell"
+    );
+    fixture.reply_to("w1", "pane-1-planner", &local, "@lead Planned.");
+    assert_eq!(
+        receive_until_result_set(&fixture, "w1", "pane-1-lead").len(),
+        1
+    );
+    assert!(
+        fixture
+            .herdr
+            .envelopes("pane-1-lead")
+            .iter()
+            .all(|envelope| envelope["control"]["sender"]["alias"] != "build"),
+        "the join alone presents the terminal's result"
+    );
+    let results = execute_handoff_operation(
+        "handoff.results",
+        json!({"message_id":sent["message_id"]}),
+        &fixture.runtime("w1", "pane-1-lead"),
+    )
+    .unwrap();
+    let recipients = results["recipients"].as_array().unwrap();
+    let planner = recipients
+        .iter()
+        .find(|r| r["target"]["alias"] == "planner");
+    let build = recipients.iter().find(|r| r["target"]["alias"] == "build");
+    assert!(
+        planner.unwrap().get("terminal_result").is_none(),
+        "{results}"
+    );
+    assert_eq!(
+        build.unwrap()["terminal_result"]["exit_code"],
+        0,
+        "{results}"
+    );
+}
+
+#[test]
+fn a_result_waits_for_a_deactivated_author_without_wedging_the_terminals_workspace() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    let script = fixture.root.join("deactivate.py");
+    fs::write(
+        &script,
+        "import sqlite3, sys\n\
+         db = sqlite3.connect(sys.argv[1])\n\
+         db.execute(\"UPDATE worktrees SET deactivated = 1 WHERE worktree_id = 'w1'\")\n\
+         db.commit()\n",
+    )
+    .unwrap();
+    let command = format!(
+        "#ws2 @build python3 -I {} {}",
+        script.display(),
+        fixture.state.join("namedrop.sqlite3").display()
+    );
+    fixture.agent_send("w1", "pane-1-lead", "build-1", &command);
+    assert_eq!(
+        fixture.run_terminal("w2", "pane-2-build").unwrap(),
+        0,
+        "the author's workspace went away while the command ran"
+    );
+    fixture.agent_send("w3", "pane-3-lead", "other-1", "#ws2 @tester Lint it.");
+    fixture.drain("w2");
+    assert_eq!(
+        fixture.herdr.envelopes("pane-2-tester").len(),
+        1,
+        "the terminal's workspace keeps delivering"
+    );
+    fixture.sql("UPDATE worktrees SET deactivated = 0 WHERE worktree_id = 'w1'");
+    fixture.drain("w2");
+    fixture.drain("w2");
+    let results = || {
+        fixture.count(
+            "SELECT COUNT(*) FROM collaboration_messages WHERE worktree_id = 'w1' \
+             AND grammar_version = 'terminal-result/v1'",
+        )
+    };
+    assert_eq!(results(), 1, "the result arrives once");
+}
+
+#[test]
+fn a_terminal_cannot_start_a_conversation_in_another_workspace() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    let before = fixture.message_rows();
+    let error = fixture
+        .try_send(
+            "w2",
+            "pane-2-build",
+            json!({"request_id":"from-shell","source":"#ws1 @lead hi","author_kind":"human"}),
+        )
+        .unwrap_err();
+    assert!(error.contains("named terminal cannot send"), "{error}");
+    assert_eq!(fixture.message_rows(), before);
+}
+
+#[test]
+fn a_single_workspace_terminal_issues_the_same_herdr_commands_as_before() {
+    let fixture = Fixture::with_activated(1);
+    fixture.register_all_activated(1);
+    fixture.add_terminal("w1", "build", "pane-1-build");
+    fixture.herdr.commands.lock().unwrap().clear();
+    fixture.agent_send("w1", "pane-1-lead", "build-1", "@build echo ok");
+    fixture.run_terminal("w1", "pane-1-build").unwrap();
+    fixture.drain("w1");
+    let commands: Vec<String> = fixture
+        .herdr
+        .commands
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|command| {
+            if command.starts_with("pane run ") || command.starts_with("agent prompt ") {
+                command.split(' ').take(3).collect::<Vec<_>>().join(" ")
+            } else {
+                command.clone()
+            }
+        })
+        .collect();
+    let discover = [
+        "worktree list --workspace w1 --json",
+        "pane list --workspace w1",
+    ];
+    let metadata = [
+        "pane report-metadata pane-1-build --source namedrop --token namedrop-awaiting=1 --token namedrop-attention=0",
+        "pane report-metadata pane-1-lead --source namedrop --token namedrop-awaiting=1 --token namedrop-attention=0",
+        "pane report-metadata pane-1-planner --source namedrop --token namedrop-awaiting=1 --token namedrop-attention=0",
+    ];
+    let shell = "pane process-info --pane pane-1-build";
+    let expected: Vec<&str> = [
+        &discover[..],
+        &discover,
+        &[shell],
+        &discover,
+        &[shell, "pane run pane-1-build"],
+        &metadata,
+        &discover,
+        &[shell],
+        &discover,
+        &discover,
+        &["agent prompt pane-1-lead"],
+        &metadata,
+    ]
+    .concat();
+    assert_eq!(commands, expected);
+}
+
+#[test]
+fn changing_a_terminals_type_drops_its_grant() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    let rename = |pane_type: &str| {
+        execute_lifecycle_operation(
+            "name",
+            json!({"alias":"build","pane_type":pane_type}),
+            &fixture.runtime("w2", "pane-2-build"),
+        )
+        .unwrap()
+    };
+    rename("terminal");
+    assert_eq!(
+        fixture.address("w2", "build")["remote_commands"],
+        true,
+        "same type keeps it"
+    );
+    rename("agent");
+    rename("terminal");
+    assert!(
+        fixture
+            .address("w2", "build")
+            .get("remote_commands")
+            .is_none()
+    );
+}
+
+#[test]
+fn a_result_for_an_author_that_became_a_terminal_is_saved_without_wedging_the_shell() {
+    let fixture = Fixture::new();
+    shared_build(&fixture);
+    fixture.agent_send("w1", "pane-1-lead", "build-1", "#ws2 @build echo ok");
+    fixture.sql(
+        "UPDATE pane_addresses SET pane_type = 'terminal' WHERE address_id = 'address-w1-lead'",
+    );
+    assert_eq!(fixture.run_terminal("w2", "pane-2-build").unwrap(), 0);
+    assert_eq!(
+        fixture.texts(
+            "SELECT d.state FROM mailbox_deliveries d JOIN collaboration_messages m \
+             USING (session_socket_id, worktree_id, message_id) \
+             WHERE d.worktree_id = 'w1' AND m.grammar_version = 'terminal-result/v1'"
+        ),
+        ["settled"],
+        "the result is kept in the author's workspace and never typed into its shell"
+    );
+}

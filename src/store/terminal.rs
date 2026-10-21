@@ -480,6 +480,15 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
+    pub(crate) fn remote_command_grant(
+        &self,
+        ns: &StateNamespace,
+        id: &PaneAddressId,
+    ) -> Result<Option<String>, StoreError> {
+        self.transaction.query_row("SELECT remote_commands_terminal_id FROM pane_addresses WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3",
+            params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|r.get(0)).map_err(StoreError::from)
+    }
+
     fn active_address(
         &self,
         ns: &StateNamespace,

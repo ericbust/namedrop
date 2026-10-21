@@ -64,6 +64,7 @@ pub struct FakeHerdr {
     /// Shell panes as (workspace, pane, physical terminal).
     pub terminals: Mutex<Vec<(String, String, String)>>,
     pub runs: Mutex<Vec<(String, String)>>,
+    pub shells_busy: AtomicBool,
 }
 
 impl FakeHerdr {
@@ -87,7 +88,18 @@ impl FakeHerdr {
             failing_prompts: Mutex::new(BTreeSet::new()),
             terminals: Mutex::new(Vec::new()),
             runs: Mutex::new(Vec::new()),
+            shells_busy: AtomicBool::new(false),
         }
+    }
+
+    pub fn runs(&self, pane: &str) -> Vec<String> {
+        self.runs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(target, _)| target == pane)
+            .map(|(_, command)| command.clone())
+            .collect()
     }
 
     pub fn is_terminal(&self, pane: &str) -> bool {
@@ -183,7 +195,12 @@ impl HerdrCommandExecutor for FakeHerdr {
                 json!({"result":{"panes":panes}}).to_string()
             }
             ["pane", "process-info", "--pane", pane] if self.is_terminal(pane) => {
-                json!({"result":{"process_info":{"shell_pid":42,"foreground_process_group_id":42,
+                let group = if self.shells_busy.load(Ordering::Relaxed) {
+                    43
+                } else {
+                    42
+                };
+                json!({"result":{"process_info":{"shell_pid":42,"foreground_process_group_id":group,
                        "foreground_processes":[{"pid":std::process::id()}]}}})
                 .to_string()
             }
@@ -522,6 +539,34 @@ impl Fixture {
             .find(|address| address["alias"] == alias)
             .unwrap_or_else(|| panic!("@{alias} is not listed in {workspace}: {listed}"))
             .clone()
+    }
+
+    pub fn texts(&self, query: &str) -> Vec<String> {
+        self.db()
+            .prepare(query)
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    pub fn delivery_states(&self, workspace: &str, message: &Value) -> Vec<String> {
+        self.texts(&format!(
+            "SELECT state FROM mailbox_deliveries WHERE worktree_id = '{workspace}' \
+             AND message_id = '{}' ORDER BY delivery_id",
+            message.as_str().unwrap()
+        ))
+    }
+
+    pub fn run_terminal(&self, workspace: &str, pane: &str) -> Result<i32, String> {
+        let run = self
+            .herdr
+            .runs(pane)
+            .pop()
+            .expect("a command was dispatched");
+        let attempt = run.split('\'').rev().nth(1).unwrap().to_owned();
+        namedrop::execute_terminal(&attempt, &self.runtime(workspace, pane))
     }
 
     pub fn drain(&self, workspace: &str) {
