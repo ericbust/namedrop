@@ -341,6 +341,20 @@ impl Fixture {
             .unwrap();
     }
 
+    fn release(&self, workspace: &str, alias: &str) {
+        let namespace = StateNamespace::for_space("socket-a", workspace);
+        StateStore::open(&self.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.release_alias(
+                    &namespace,
+                    alias,
+                    &MutationAttribution::new(ActorKind::Human, "test", 3),
+                )
+            })
+            .unwrap();
+    }
+
     fn remove(&self, workspace: &str, alias: &str) {
         let namespace = StateNamespace::for_space("socket-a", workspace);
         StateStore::open(&self.state)
@@ -540,6 +554,450 @@ fn a_reply_naming_two_participants_with_one_name_is_refused() {
         error.contains("@lead names more than one participant"),
         "{error}"
     );
+    assert_eq!(fixture.message_rows(), before);
+}
+
+/// The reply `envelope` binds, with `source` as its text.
+fn bound_reply(envelope: &Value, source: &str) -> Value {
+    let mut input = envelope["control"]["tool"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|operation| operation["token"] == "reply")
+        .unwrap()["input"]
+        .clone();
+    input["source"] = json!(source);
+    input
+}
+
+/// Runs `reply`, which must be refused as ambiguous, then does only what the
+/// refusal says: the same reply again with the source it prescribes, then one
+/// `send` per workspace `picks` chose for the names the reply left out.
+fn follow_reply_refusal(
+    fixture: &Fixture,
+    (workspace, pane): (&str, &str),
+    reply: &Value,
+    picks: &[(&str, &str)],
+) -> String {
+    let runtime = fixture.runtime(workspace, pane);
+    let error = execute_message_operation("reply", reply.clone(), &runtime).unwrap_err();
+    assert!(
+        error.contains("nothing was sent and the reply's delivery attempt stays open"),
+        "{error}"
+    );
+    let source = reply["source"].as_str().unwrap();
+    let body = namedrop::parse_mentions(source).unwrap().body;
+    let mut retry = None;
+    let mut sends: Vec<(String, Vec<String>)> = Vec::new();
+    for clause in error.split("; ") {
+        if let Some((_, prescribed)) = clause.split_once("except the source, which is ") {
+            retry = Some(match prescribed.strip_prefix("this source with ") {
+                Some(rest) => {
+                    let (removed, _) = rest.split_once(" removed").unwrap();
+                    removed.split(' ').fold(source.to_owned(), |kept, name| {
+                        kept.replacen(&format!("{name} "), "", 1)
+                    })
+                }
+                None => {
+                    let (sender, _) = prescribed
+                        .split_once(", a space, and the message text")
+                        .unwrap();
+                    format!("{sender} {body}")
+                }
+            });
+        } else if let Some(rest) = clause.strip_prefix("then tell the person the reply left out ") {
+            let (names, _) = rest.split_once(", ask").unwrap();
+            for alias in names.split(' ').map(|name| name.strip_prefix('@').unwrap()) {
+                let (_, token) = picks.iter().find(|(name, _)| *name == alias).unwrap();
+                assert!(error.contains(token), "{error}");
+                match sends.iter_mut().find(|(chosen, _)| chosen == token) {
+                    Some((_, aliases)) => aliases.push(alias.to_owned()),
+                    None => sends.push(((*token).to_owned(), vec![alias.to_owned()])),
+                }
+            }
+        }
+    }
+    let mut retried = reply.clone();
+    retried["source"] = json!(retry.unwrap_or_else(|| panic!("no retry prescribed: {error}")));
+    execute_message_operation("reply", retried, &runtime).unwrap();
+    assert!(!sends.is_empty(), "{error}");
+    for (index, (token, aliases)) in sends.iter().enumerate() {
+        let names = aliases
+            .iter()
+            .map(|alias| format!("@{alias}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        fixture.agent_send(
+            workspace,
+            pane,
+            &format!("guided-send-{index}"),
+            &format!("{token} {names} {body}"),
+        );
+    }
+    for workspace in ["w1", "w2", "w3"] {
+        fixture.drain(workspace);
+    }
+    error
+}
+
+fn disposition(fixture: &Fixture, envelope: &Value) -> Vec<String> {
+    let db = rusqlite::Connection::open(fixture.state.join("namedrop.sqlite3")).unwrap();
+    let mut statement = db
+        .prepare("SELECT disposition_kind FROM delivery_dispositions WHERE attempt_id = ?1")
+        .unwrap();
+    statement
+        .query_map(
+            [envelope["control"]["attempt_id"].as_str().unwrap()],
+            |row| row.get(0),
+        )
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+#[test]
+fn an_ambiguous_reply_keeps_its_participant_on_the_thread_and_settles_the_attempt() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let sent = fixture.agent_send(
+        "w1",
+        "pane-1-planner",
+        "suite",
+        "#ws2 @tester Run the suite.",
+    );
+    fixture.drain("w2");
+    let original = fixture.herdr.last_envelope("pane-2-tester");
+    fixture.rename("w1", "lead", "reviewer");
+    fixture.rename("w3", "lead", "reviewer");
+
+    let error = follow_reply_refusal(
+        &fixture,
+        ("w2", "pane-2-tester"),
+        &bound_reply(&original, "@planner @reviewer Done."),
+        &[("reviewer", "#ws3")],
+    );
+
+    let answered = fixture.herdr.last_envelope("pane-1-planner");
+    assert_eq!(Fixture::untrusted_body(&answered), "Done.", "{error}");
+    assert_eq!(
+        answered["control"]["thread_id"], sent["thread_id"],
+        "the participant hears the answer on the thread it started"
+    );
+    assert_eq!(
+        Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-3-lead")),
+        "Done."
+    );
+    assert!(fixture.herdr.envelopes("pane-1-lead").is_empty());
+    assert_eq!(disposition(&fixture, &original), ["reply"]);
+}
+
+#[test]
+fn an_ambiguous_reply_keeps_a_local_participant_on_the_thread() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let sent = fixture.agent_send("w1", "pane-1-lead", "plan", "@planner Plan it.");
+    fixture.drain("w1");
+    let original = fixture.herdr.last_envelope("pane-1-planner");
+
+    let error = follow_reply_refusal(
+        &fixture,
+        ("w1", "pane-1-planner"),
+        &bound_reply(&original, "@lead @scout Planned."),
+        &[("scout", "#ws2")],
+    );
+
+    let answered = fixture.herdr.last_envelope("pane-1-lead");
+    assert_eq!(
+        answered["control"]["thread_id"], sent["thread_id"],
+        "{error}"
+    );
+    assert_eq!(fixture.herdr.envelopes("pane-1-lead").len(), 1);
+    assert_eq!(
+        Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-2-scout")),
+        "Planned."
+    );
+    assert_eq!(disposition(&fixture, &original), ["reply"]);
+}
+
+#[test]
+fn an_ambiguous_reply_naming_no_one_else_goes_back_to_its_sender() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let sent = fixture.agent_send(
+        "w1",
+        "pane-1-planner",
+        "suite",
+        "#ws2 @tester Run the suite.",
+    );
+    fixture.drain("w2");
+    let original = fixture.herdr.last_envelope("pane-2-tester");
+    fixture.rename("w1", "lead", "reviewer");
+    fixture.rename("w3", "lead", "reviewer");
+
+    let error = follow_reply_refusal(
+        &fixture,
+        ("w2", "pane-2-tester"),
+        &bound_reply(&original, "@reviewer Done."),
+        &[("reviewer", "#ws1")],
+    );
+
+    assert!(error.contains("which is @planner, a space"), "{error}");
+    let answered = fixture.herdr.last_envelope("pane-1-planner");
+    assert_eq!(Fixture::untrusted_body(&answered), "Done.");
+    assert_eq!(answered["control"]["thread_id"], sent["thread_id"]);
+    assert_eq!(
+        Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-1-lead")),
+        "Done."
+    );
+    assert!(fixture.herdr.envelopes("pane-3-lead").is_empty());
+    assert_eq!(disposition(&fixture, &original), ["reply"]);
+}
+
+#[test]
+fn a_tracked_report_with_an_ambiguous_name_still_reaches_the_lead() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let lead = fixture.runtime("w1", "pane-1-lead");
+    let coordination = execute_handoff_operation(
+        "handoff.begin",
+        json!({"request_id":"report","deliverable":"The final report"}),
+        &lead,
+    )
+    .unwrap();
+    let assigned = fixture
+        .try_send(
+            "w1",
+            "pane-1-lead",
+            json!({"request_id":"assign","source":"@planner Write the report.",
+                   "author_kind":"agent_session",
+                   "coordination_id":coordination["coordination_id"]}),
+        )
+        .unwrap();
+    fixture.drain("w1");
+    let assignment = fixture.herdr.last_envelope("pane-1-planner");
+    let mut report = bound_reply(&assignment, "@scout Finished report.");
+    report["work_outcome"] = json!("completed");
+
+    let error = follow_reply_refusal(
+        &fixture,
+        ("w1", "pane-1-planner"),
+        &report,
+        &[("scout", "#ws2")],
+    );
+
+    assert!(!error.contains("complete --no-reply"), "{error}");
+    let delivered = fixture.herdr.last_envelope("pane-1-lead");
+    assert_eq!(
+        Fixture::untrusted_body(&delivered),
+        "Finished report.",
+        "{error}"
+    );
+    assert_eq!(delivered["control"]["thread_id"], assigned["thread_id"]);
+    let results = execute_handoff_operation(
+        "handoff.results",
+        json!({"coordination_id":coordination["coordination_id"]}),
+        &lead,
+    )
+    .unwrap();
+    let tracked = &results["assignments"][0];
+    assert_eq!(tracked["work_outcome"], "completed", "{results}");
+    assert_eq!(
+        tracked["last_reply_message_id"], delivered["control"]["message_id"],
+        "{results}"
+    );
+    assert_eq!(disposition(&fixture, &assignment), ["reply"]);
+    assert_eq!(
+        Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-2-scout")),
+        "Finished report."
+    );
+}
+
+#[test]
+fn a_scoped_ambiguous_reply_keeps_its_thread() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    *fixture.herdr.repos.lock().unwrap() = ["w1", "w2", "w3"]
+        .map(|workspace| (workspace.to_owned(), "namestack".to_owned()))
+        .to_vec();
+    let sent = fixture.agent_send(
+        "w1",
+        "pane-1-planner",
+        "suite",
+        "#ws2 @tester Run the suite.",
+    );
+    fixture.drain("w2");
+    let original = fixture.herdr.last_envelope("pane-2-tester");
+
+    let error = follow_reply_refusal(
+        &fixture,
+        ("w2", "pane-2-tester"),
+        &bound_reply(&original, "#namestack @planner @scout Done."),
+        &[("scout", "#ws3")],
+    );
+
+    let answered = fixture.herdr.last_envelope("pane-1-planner");
+    assert_eq!(Fixture::untrusted_body(&answered), "Done.", "{error}");
+    assert_eq!(
+        answered["control"]["thread_id"], sent["thread_id"],
+        "{error}"
+    );
+    assert_eq!(disposition(&fixture, &original), ["reply"]);
+    assert_eq!(
+        Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-3-scout")),
+        "Done."
+    );
+}
+
+/// w1's @lead asks w1's @planner, then becomes @boss and gives up @lead,
+/// leaving w2's @lead as the only @lead in the session.
+fn answer_from_a_released_sender(fixture: &Fixture) -> Value {
+    fixture.register_all();
+    fixture.agent_send("w1", "pane-1-lead", "ask", "@planner Write the report.");
+    fixture.drain("w1");
+    let original = fixture.herdr.last_envelope("pane-1-planner");
+    fixture.rename("w1", "lead", "boss");
+    fixture.release("w1", "lead");
+    fixture.rename("w3", "lead", "other-lead");
+    original
+}
+
+fn assert_nothing_delivered(fixture: &Fixture, original: &Value, before: (i64, i64)) {
+    for workspace in ["w1", "w2", "w3"] {
+        fixture.drain(workspace);
+    }
+    assert_eq!(fixture.message_rows(), before);
+    assert!(fixture.herdr.envelopes("pane-2-lead").is_empty());
+    assert!(fixture.herdr.envelopes("pane-3-lead").is_empty());
+    assert!(fixture.herdr.envelopes("pane-1-lead").is_empty());
+    assert!(disposition(fixture, original).is_empty());
+}
+
+#[test]
+fn following_an_ambiguous_reply_refusal_never_reaches_a_released_name_elsewhere() {
+    let fixture = Fixture::new();
+    let original = answer_from_a_released_sender(&fixture);
+    let runtime = fixture.runtime("w1", "pane-1-planner");
+    let mut reply = bound_reply(&original, "@scout Private report.");
+    let before = fixture.message_rows();
+
+    let refusal = execute_message_operation("reply", reply.clone(), &runtime).unwrap_err();
+    let (_, prescribed) = refusal.split_once("except the source, which is ").unwrap();
+    let (sender, _) = prescribed
+        .split_once(", a space, and the message text")
+        .unwrap_or_else(|| panic!("{refusal}"));
+    reply["source"] = json!(format!("{sender} Private report."));
+    let retry = execute_message_operation("reply", reply, &runtime).unwrap_err();
+
+    assert!(
+        retry.contains("@lead in this conversation no longer reaches the participant"),
+        "{retry}"
+    );
+    assert!(retry.contains("now @boss"), "{retry}");
+    assert_nothing_delivered(&fixture, &original, before);
+}
+
+#[test]
+fn a_reply_naming_a_released_sender_is_refused_rather_than_sent_elsewhere() {
+    let fixture = Fixture::new();
+    let original = answer_from_a_released_sender(&fixture);
+    let before = fixture.message_rows();
+
+    let error = execute_message_operation(
+        "reply",
+        bound_reply(&original, "@lead Report."),
+        &fixture.runtime("w1", "pane-1-planner"),
+    )
+    .unwrap_err();
+
+    assert!(error.contains("now @boss"), "{error}");
+    assert_nothing_delivered(&fixture, &original, before);
+}
+
+#[test]
+fn a_reply_naming_a_local_sender_reaches_it_on_the_thread() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let sent = fixture.agent_send("w1", "pane-1-lead", "ask", "@planner Write the report.");
+    fixture.drain("w1");
+    let original = fixture.herdr.last_envelope("pane-1-planner");
+
+    execute_message_operation(
+        "reply",
+        bound_reply(&original, "@lead Report."),
+        &fixture.runtime("w1", "pane-1-planner"),
+    )
+    .unwrap();
+    for workspace in ["w1", "w2", "w3"] {
+        fixture.drain(workspace);
+    }
+
+    let answered = fixture.herdr.last_envelope("pane-1-lead");
+    assert_eq!(Fixture::untrusted_body(&answered), "Report.");
+    assert_eq!(answered["control"]["thread_id"], sent["thread_id"]);
+    assert!(fixture.herdr.envelopes("pane-2-lead").is_empty());
+    assert_eq!(disposition(&fixture, &original), ["reply"]);
+}
+
+#[test]
+fn a_reply_naming_a_renamed_local_sender_points_to_its_new_name() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    fixture.agent_send("w1", "pane-1-lead", "ask", "@planner Write the report.");
+    fixture.drain("w1");
+    let original = fixture.herdr.last_envelope("pane-1-planner");
+    fixture.rename("w1", "lead", "boss");
+    fixture.rename("w3", "lead", "other-lead");
+    let before = fixture.message_rows();
+
+    let error = execute_message_operation(
+        "reply",
+        bound_reply(&original, "@lead Report."),
+        &fixture.runtime("w1", "pane-1-planner"),
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "retired Mention: @lead; use @boss");
+    assert_nothing_delivered(&fixture, &original, before);
+}
+
+#[test]
+fn an_ambiguous_reply_to_namedrop_itself_offers_no_reply_to_the_sender() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let lead = fixture.runtime("w1", "pane-1-lead");
+    let coordination = execute_handoff_operation(
+        "handoff.begin",
+        json!({"request_id":"report","deliverable":"The final report"}),
+        &lead,
+    )
+    .unwrap();
+    execute_handoff_operation(
+        "handoff.resolve",
+        json!({"request_id":"resolve","coordination_id":coordination["coordination_id"],
+               "outcome":"completed","report":"Saved report.","reconciled_assignments":[]}),
+        &lead,
+    )
+    .unwrap();
+    fixture.drain("w1");
+    let saved = fixture.herdr.last_envelope("pane-1-lead");
+    assert_eq!(saved["control"]["sender"]["alias"], "namedrop");
+    let before = fixture.message_rows();
+
+    let error = execute_message_operation(
+        "reply",
+        json!({"request_id":"note","source":"@scout Note.","author_kind":"agent_session",
+               "in_reply_to":saved["control"]["message_id"],
+               "attempt_id":saved["control"]["attempt_id"]}),
+        &lead,
+    )
+    .unwrap_err();
+
+    assert!(!error.contains("@namedrop"), "{error}");
+    assert!(
+        error.contains("this delivery takes no reply to its sender"),
+        "{error}"
+    );
+    assert!(error.contains("send to @scout separately"), "{error}");
     assert_eq!(fixture.message_rows(), before);
 }
 

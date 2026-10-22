@@ -320,7 +320,12 @@ pub(crate) enum RouteLeg {
         label: WorkspaceLabel,
         aliases: Vec<String>,
     },
+    /// Remote participants a reply names, pinned to the envoys that stand for
+    /// them.
     Participants(Vec<RoutingAddressSnapshot>),
+    /// Local participants a reply names by the alias each had in the answered
+    /// message, checked again when the reply is written.
+    Local(Vec<RoutingAddressSnapshot>),
 }
 
 impl RoutePlan {
@@ -328,6 +333,7 @@ impl RoutePlan {
         self.legs.iter().any(|leg| match leg {
             RouteLeg::Names { space, .. } => space != here,
             RouteLeg::Participants(participants) => !participants.is_empty(),
+            RouteLeg::Local(_) => false,
         })
     }
 
@@ -343,6 +349,11 @@ impl RoutePlan {
             match leg {
                 RouteLeg::Participants(participants) => {
                     recipients.extend(participants.iter().cloned());
+                }
+                RouteLeg::Local(participants) => {
+                    for participant in participants {
+                        recipients.push(local_participant(transaction, namespace, participant)?);
+                    }
                 }
                 RouteLeg::Names { space, aliases, .. } if space == &namespace.space_id => {
                     recipients.extend(transaction.resolve_recipient_aliases(namespace, aliases)?);
@@ -381,21 +392,30 @@ pub(crate) fn route<E: crate::HerdrCommandExecutor>(
     (author, in_reply_to): (&crate::PaneAddressId, Option<&crate::MessageId>),
     run: &RecipientRun,
 ) -> Result<RoutePlan, SendError> {
-    let participants = store
+    let (pins, fallback) = store
         .transaction(|transaction| {
-            let (Some(message_id), SpaceScope::Unqualified) = (in_reply_to, &run.scope) else {
-                return Ok(Vec::new());
+            let Some(message_id) = in_reply_to else {
+                return Ok((Vec::new(), None));
             };
             let Ok(route) = transaction.message_route(namespace, message_id) else {
-                return Ok(Vec::new());
+                return Ok((Vec::new(), None));
             };
-            reply_participants(
-                transaction,
-                namespace,
-                author,
-                route.participants,
-                &run.aliases,
-            )
+            let fallback = if route.from_namedrop {
+                ReplyRetry::Nothing
+            } else {
+                ReplyRetry::ToSender(route.participants[0].alias.clone())
+            };
+            let pins = match run.scope {
+                SpaceScope::Unqualified => reply_participants(
+                    transaction,
+                    namespace,
+                    author,
+                    route.participants,
+                    &run.aliases,
+                )?,
+                _ => Vec::new(),
+            };
+            Ok((pins, Some(fallback)))
         })
         .map_err(|error| error.to_string())?;
     let remaining = RecipientRun {
@@ -403,11 +423,7 @@ pub(crate) fn route<E: crate::HerdrCommandExecutor>(
         aliases: run
             .aliases
             .iter()
-            .filter(|alias| {
-                !participants
-                    .iter()
-                    .any(|participant| &participant.alias == *alias)
-            })
+            .filter(|alias| !pins.iter().any(|(pinned, _)| pinned == *alias))
             .cloned()
             .collect(),
     };
@@ -424,52 +440,119 @@ pub(crate) fn route<E: crate::HerdrCommandExecutor>(
             &namespace.space_id,
             &remaining,
         )?;
-        plan_route(&remaining, &directory).map_err(SendError::Refused)?
+        plan_route(&remaining, &directory).map_err(|refusal| {
+            SendError::Refused(match (refusal, fallback) {
+                (RouteRefusal::Ambiguous { choices, .. }, Some(fallback)) => {
+                    RouteRefusal::AmbiguousReply {
+                        retry: if run
+                            .aliases
+                            .iter()
+                            .all(|alias| choices.iter().any(|choice| &choice.alias == alias))
+                        {
+                            fallback
+                        } else {
+                            ReplyRetry::WithoutThem
+                        },
+                        choices,
+                    }
+                }
+                (refusal, _) => refusal,
+            })
+        })?
     };
-    if !participants.is_empty() {
-        plan.legs.insert(0, RouteLeg::Participants(participants));
+    let (mut remote, mut local) = (Vec::new(), Vec::new());
+    for (_, pin) in pins {
+        match pin {
+            Pin::Envoy(participant) => remote.push(participant),
+            Pin::Local(participant) => local.push(participant),
+            Pin::Author => {}
+        }
+    }
+    if !local.is_empty() {
+        plan.legs.insert(0, RouteLeg::Local(local));
+    }
+    if !remote.is_empty() {
+        plan.legs.insert(0, RouteLeg::Participants(remote));
     }
     Ok(plan)
 }
 
-/// The remote participants a reply names. A written Mention matches the name
-/// each participant had in the message being answered, so a later rename on
-/// either side cannot turn a reply toward someone else.
+/// Where a written Mention that names a conversation participant goes.
+enum Pin {
+    Envoy(RoutingAddressSnapshot),
+    Local(RoutingAddressSnapshot),
+    /// The replying agent itself, which a message never addresses.
+    Author,
+}
+
+/// The participants a reply names. A written Mention matches the name each
+/// participant had in the message being answered and reaches only that
+/// participant, so a later rename on either side cannot turn a reply toward
+/// someone else, and such a name never enters the cross-workspace search.
 fn reply_participants(
     transaction: &crate::StateTransaction<'_>,
     namespace: &StateNamespace,
     author: &crate::PaneAddressId,
     participants: Vec<RoutingAddressSnapshot>,
     aliases: &[String],
-) -> Result<Vec<RoutingAddressSnapshot>, crate::StoreError> {
-    let mut remote = Vec::new();
+) -> Result<Vec<(String, Pin)>, crate::StoreError> {
+    let mut pins = Vec::new();
     for alias in aliases {
-        let named: Vec<&RoutingAddressSnapshot> = participants
+        let mut named: Vec<&RoutingAddressSnapshot> = participants
             .iter()
-            .filter(|participant| &participant.alias == alias && &participant.address_id != author)
+            .filter(|participant| &participant.alias == alias)
             .collect();
-        let mut envoys = Vec::new();
-        for participant in &named {
-            if transaction.is_envoy(namespace, &participant.address_id)? {
-                envoys.push(*participant);
-            }
+        if named.len() > 1 {
+            named.retain(|participant| &participant.address_id != author);
         }
-        match (envoys.as_slice(), named.len()) {
-            ([], _) => {}
-            ([participant], 1) => remote.push(RoutingAddressSnapshot {
-                pane_binding_id: None,
-                agent_session_id: None,
-                ..(*participant).clone()
-            }),
+        let pin = match named.as_slice() {
+            [] => continue,
+            [participant] if &participant.address_id == author => Pin::Author,
+            [participant] if transaction.is_envoy(namespace, &participant.address_id)? => {
+                Pin::Envoy(RoutingAddressSnapshot {
+                    pane_binding_id: None,
+                    agent_session_id: None,
+                    ..(*participant).clone()
+                })
+            }
+            [participant] => {
+                local_participant(transaction, namespace, participant)?;
+                Pin::Local((*participant).clone())
+            }
             _ => {
                 return Err(crate::StoreError::invalid_input(format!(
                     "@{alias} names more than one participant of this conversation; prefix the \
                      reply with the workspace you mean"
                 )));
             }
-        }
+        };
+        pins.push((alias.clone(), pin));
     }
-    Ok(remote)
+    Ok(pins)
+}
+
+/// A local participant named by the alias it had in the message being
+/// answered. The alias reaches it only while it still holds that alias here;
+/// an alias it gave up reaches no one else. The check runs when the reply is
+/// routed and again when it is written.
+fn local_participant(
+    transaction: &crate::StateTransaction<'_>,
+    namespace: &StateNamespace,
+    participant: &RoutingAddressSnapshot,
+) -> Result<RoutingAddressSnapshot, crate::StoreError> {
+    let alias = &participant.alias;
+    if transaction.alias_holder(namespace, alias)?.as_ref() == Some(&participant.address_id) {
+        return transaction.resolve_routing_alias(namespace, alias);
+    }
+    let now =
+        match transaction.optional_routing_address_by_id(namespace, &participant.address_id)? {
+            Some(current) => format!("that participant is now @{}", current.alias),
+            None => "that participant has no name now".to_owned(),
+        };
+    Err(crate::StoreError::invalid_input(format!(
+        "@{alias} in this conversation no longer reaches the participant it named; {now}; \
+         nothing was sent and the reply's delivery attempt stays open"
+    )))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -483,6 +566,12 @@ pub(crate) enum RouteRefusal {
     Ambiguous {
         settled: Vec<ScopedName>,
         choices: Vec<AmbiguousName>,
+    },
+    /// A reply with ambiguous names, which keeps the thread and settles the
+    /// attempt when it is retried as `retry` says.
+    AmbiguousReply {
+        choices: Vec<AmbiguousName>,
+        retry: ReplyRetry,
     },
     UnknownWorkspace {
         label: WorkspaceLabel,
@@ -510,6 +599,17 @@ pub(crate) enum RouteRefusal {
     },
 }
 
+/// How a reply refused for ambiguous names is retried.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum ReplyRetry {
+    /// Other names remain once the ambiguous ones are removed.
+    WithoutThem,
+    /// No name remains, so the reply goes back to the answered message's sender.
+    ToSender(String),
+    /// No name remains, and Namedrop itself sent the answered message.
+    Nothing,
+}
+
 /// One name in one workspace, written as the exact tokens that resend to it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ScopedName {
@@ -521,6 +621,24 @@ impl fmt::Display for ScopedName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} @{}", self.workspace, self.alias)
     }
+}
+
+fn write_choices(formatter: &mut fmt::Formatter<'_>, choices: &[AmbiguousName]) -> fmt::Result {
+    for (index, choice) in choices.iter().enumerate() {
+        if index > 0 {
+            formatter.write_str("; ")?;
+        }
+        match &choice.within {
+            None => write!(
+                formatter,
+                "@{} is not named in this workspace but is named in {}",
+                choice.alias,
+                joined(&choice.labels, " and ")
+            )?,
+            Some(_) => formatter.write_str(&choice.describe(", "))?,
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn listed(names: &[ScopedName]) -> String {
@@ -573,20 +691,7 @@ impl fmt::Display for RouteRefusal {
         match self {
             Self::UnknownMention { alias } => write!(formatter, "unknown Mention: @{alias}"),
             Self::Ambiguous { settled, choices } => {
-                for (index, choice) in choices.iter().enumerate() {
-                    if index > 0 {
-                        formatter.write_str("; ")?;
-                    }
-                    match &choice.within {
-                        None => write!(
-                            formatter,
-                            "@{} is not named in this workspace but is named in {}",
-                            choice.alias,
-                            joined(&choice.labels, " and ")
-                        )?,
-                        Some(_) => formatter.write_str(&choice.describe(", "))?,
-                    }
-                }
+                write_choices(formatter, choices)?;
                 if !settled.is_empty() {
                     write!(formatter, "; already resolved: {}", listed(settled))?;
                 }
@@ -595,6 +700,43 @@ impl fmt::Display for RouteRefusal {
                      #all, each source being that workspace's #label, every @name bound there \
                      (the resolved names that are there and the names chosen there), a space, \
                      and the message text",
+                )
+            }
+            Self::AmbiguousReply { choices, retry } => {
+                write_choices(formatter, choices)?;
+                let dropped = choices
+                    .iter()
+                    .map(|choice| format!("@{}", choice.alias))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                formatter.write_str(
+                    "; nothing was sent and the reply's delivery attempt stays open; ",
+                )?;
+                let rerun = "run reply again with the same in_reply_to, attempt_id and \
+                             work_outcome and every other input unchanged except the source, ";
+                match retry {
+                    ReplyRetry::WithoutThem => write!(
+                        formatter,
+                        "{rerun}which is this source with {dropped} removed and everything \
+                         else, #scope tokens and the other names, kept as written; then "
+                    )?,
+                    ReplyRetry::ToSender(sender) => write!(
+                        formatter,
+                        "{rerun}which is @{sender}, a space, and the message text, because \
+                         removing {dropped} leaves no one to address; then "
+                    )?,
+                    ReplyRetry::Nothing => write!(
+                        formatter,
+                        "this delivery takes no reply to its sender, so send to {dropped} \
+                         separately instead; "
+                    )?,
+                }
+                write!(
+                    formatter,
+                    "tell the person the reply left out {dropped}, ask which workspace is \
+                     meant, and only after they pick send once per chosen workspace, never with \
+                     #all, each source being that workspace's #label, the names chosen there, a \
+                     space, and the message text"
                 )
             }
             Self::UnknownWorkspace { label, known } if known.is_empty() => {
@@ -902,7 +1044,9 @@ mod tests {
             .into_iter()
             .map(|leg| match leg {
                 RouteLeg::Names { space, aliases, .. } => (space.as_str().to_owned(), aliases),
-                RouteLeg::Participants(_) => unreachable!("planning resolves names only"),
+                RouteLeg::Participants(_) | RouteLeg::Local(_) => {
+                    unreachable!("planning resolves names only")
+                }
             })
             .collect()
     }

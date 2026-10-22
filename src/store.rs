@@ -861,6 +861,29 @@ impl StateTransaction<'_> {
             })
     }
 
+    /// The address that holds `alias` here, whether the claim is active or a
+    /// tombstone left by a rename.
+    pub(crate) fn alias_holder(
+        &self,
+        namespace: &StateNamespace,
+        alias: &str,
+    ) -> Result<Option<PaneAddressId>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT address_id FROM alias_claims
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND alias = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    alias
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(PaneAddressId::new))
+    }
+
     pub(crate) fn resolve_routing_alias(
         &self,
         namespace: &StateNamespace,
@@ -949,7 +972,7 @@ impl StateTransaction<'_> {
             .ok_or_else(|| StoreError::invalid_input("reply participant is no longer routable"))
     }
 
-    fn optional_routing_address_by_id(
+    pub(crate) fn optional_routing_address_by_id(
         &self,
         namespace: &StateNamespace,
         address_id: &PaneAddressId,
@@ -2432,6 +2455,10 @@ impl StateTransaction<'_> {
             thread_id,
             participants,
             reply_mode: crate::DeliveryReplyMode::for_message_grammar(&grammar_version),
+            from_namedrop: matches!(
+                grammar_version.as_str(),
+                "coordination-nudge/v1" | "coordination-report/v1" | "result-set/v1"
+            ),
         })
     }
 

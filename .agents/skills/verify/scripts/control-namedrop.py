@@ -1212,6 +1212,42 @@ def main():
                     require(message_state() == before_bare, "m: the refused agent sends persist nothing",
                             message_state())
 
+                    asked_review = as_agent("send", pane=agents["alpha-helper"]["pane"], request_id="xws-review",
+                                            author_kind="agent_session", source="#beta-space @reviewer review the patch")
+                    wake("alpha-helper")
+                    review = deliveries("n-send", ["beta-reviewer"])["beta-reviewer"]
+                    reply_op = next(op for op in review["control"]["tool"]["operations"] if op["token"] == "reply")
+                    before_reply = message_state()
+                    _, result, response = agent_call(*reply_op["argv"], pane=agents["beta-reviewer"]["pane"],
+                                                     **dict(reply_op["input"], source="@twin Reviewed."))
+                    message = (response.get("error") or {}).get("message", "")
+                    trace["n"] = {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
+                    require(result.returncode == 65 and response.get("status") == "rejected"
+                            and "@twin is not named in this workspace but is named in #wt-one and #wt-two" in message
+                            and "nothing was sent and the reply's delivery attempt stays open" in message
+                            and "except the source, which is @helper, a space, and the message text" in message
+                            and "then tell the person the reply left out @twin" in message,
+                            "n: the ambiguous reply is refused with a retry addressed to its sender", trace["n"])
+                    deliveries("n-refused", [])
+                    require(message_state() == before_reply, "n: the refused reply persists nothing", message_state())
+                    trace["n_reply"] = bound(review, "reply", source="@helper Reviewed.")
+                    as_agent("send", pane=agents["beta-reviewer"]["pane"], request_id="xws-review-twin",
+                             author_kind="agent_session", source="#wt-one @twin Reviewed.")
+                    wake("beta-reviewer")
+                    recovered = deliveries("n-recovered", ["alpha-helper", "wt-one-twin"])
+                    answered = recovered["alpha-helper"]
+                    require(answered["untrusted_body"] == "Reviewed."
+                            and answered["control"]["thread_id"] == asked_review["thread_id"],
+                            "n: alpha's helper hears the reply on the thread it started",
+                            {"body": answered["untrusted_body"], "thread": answered["control"]["thread_id"],
+                             "started": asked_review["thread_id"]})
+                    require(recovered["wt-one-twin"]["untrusted_body"] == "Reviewed.",
+                            "n: wt-one's twin receives the send", recovered["wt-one-twin"]["untrusted_body"])
+                    settled_as = disposition(review["control"]["attempt_id"])
+                    require(settled_as == "reply", "n: the original attempt settles as a reply", settled_as)
+                    for envelope in recovered.values():
+                        bound(envelope, "complete.no-reply")
+
                     named = cli("address", "list", "--json")["data"]
                     lead_address = next(a for a in named if a["alias"] == "lead")
                     removed = trace["e_remove"] = body("address", "remove", address_id=lead_address["id"])
