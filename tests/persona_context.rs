@@ -465,6 +465,59 @@ fn mentions_still_route_and_a_delivery_still_authenticates_exactly_as_before() {
     );
 }
 
+/// Claude Code marks a long paste for the model, and every dispatched envelope
+/// is long enough to be one, so the hook is handed the marked form rather than
+/// the JSON. Authentication sees through exactly one whole block, and nothing
+/// looser: a closing line for another paste, two pastes, or text around it.
+#[test]
+fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
+    execute_message_operation(
+        "send",
+        json!({"request_id":"to-claude","source":"@reviewer Check the login path.",
+               "author_kind":"agent_session"}),
+        &lead,
+    )
+    .unwrap();
+    let envelope = herdr.envelope_for("pane-reviewer");
+    let attempt = envelope["control"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let envelope = envelope.to_string();
+    let marked = |id: &str, body: &str| {
+        format!("\n\n<pasted_content id=\"{id}\">\n{body}\n</pasted_content id=\"{id}\">\n")
+    };
+
+    let attested = context(&hook(&marked("29f6", &envelope), &reviewer).unwrap());
+    assert!(attested.starts_with(DELIVERY_MARKER), "{attested}");
+    assert!(
+        attested.contains(COMMAND_MARKER) && attested.contains(&attempt),
+        "{attested}"
+    );
+
+    for prompt in [
+        format!("<pasted_content id=\"29f6\">\n{envelope}\n</pasted_content id=\"552d\">"),
+        format!("{}{}", marked("29f6", &envelope), marked("552d", &envelope)),
+        format!("Handle this:{}", marked("29f6", &envelope)),
+    ] {
+        let output = hook(&prompt, &reviewer).map(|output| context(&output));
+        assert!(
+            output.as_ref().is_none_or(|context| {
+                !context.contains(DELIVERY_MARKER) && !context.contains(COMMAND_MARKER)
+            }),
+            "{prompt:?} was attested: {output:?}"
+        );
+    }
+}
+
 /// Codex suppresses the attestation whole, so composing the two together would
 /// cost it the roster on every incoming task. It gets the same fresh roster on
 /// its own, the attestation is never produced for it, and both generated

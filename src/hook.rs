@@ -134,7 +134,7 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let envelope = serde_json::from_str::<Value>(prompt).ok()?;
+    let envelope = serde_json::from_str::<Value>(submitted_text(prompt)).ok()?;
     if !is_delivery_envelope(prompt) {
         return None;
     }
@@ -186,8 +186,27 @@ where
     }
 }
 
+/// Claude Code marks a long paste for the model and hands the hook that marked
+/// form: the submitted text between a `<pasted_content id="…">` line and a
+/// `</pasted_content id="…">` line, whitespace around both. A Delivery Envelope
+/// is always long enough to arrive that way, so the text inside one whole block
+/// is what was submitted. Anything shaped differently is returned as it came,
+/// and the exact-match authentication still decides what the text is.
+fn submitted_text(prompt: &str) -> &str {
+    pasted_content(prompt).unwrap_or(prompt)
+}
+
+fn pasted_content(prompt: &str) -> Option<&str> {
+    const OPENING: &str = "<pasted_content id=\"";
+    const CLOSING: &str = "</pasted_content id=\"";
+    let rest = prompt.trim().strip_prefix(OPENING)?;
+    let id_end = rest.find("\">")?;
+    let (id, body) = (&rest[..id_end], &rest[id_end + 2..]);
+    body.strip_suffix(format!("{CLOSING}{id}\">").as_str())
+}
+
 fn is_delivery_envelope(prompt: &str) -> bool {
-    let Ok(envelope) = serde_json::from_str::<Value>(prompt) else {
+    let Ok(envelope) = serde_json::from_str::<Value>(submitted_text(prompt)) else {
         return false;
     };
     let recognized = match envelope.get("envelope_kind") {
