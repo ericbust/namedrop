@@ -498,6 +498,35 @@ pub(crate) enum RouteRefusal {
     NothingForWorkspace {
         label: WorkspaceLabel,
     },
+    /// A `#` scope with no Mention after it. `names` lists everyone a send to
+    /// that scope would reach, so the person can say who they meant.
+    NoRecipient {
+        scope: SpaceScope,
+        names: Vec<ScopedName>,
+    },
+}
+
+/// One name in one workspace, written as the exact tokens that resend to it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ScopedName {
+    pub workspace: WorkspaceLabel,
+    pub alias: String,
+}
+
+impl fmt::Display for ScopedName {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{} @{}", self.workspace, self.alias)
+    }
+}
+
+impl fmt::Display for SpaceScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unqualified => formatter.write_str("this workspace"),
+            Self::Named(labels) => formatter.write_str(&joined(labels, " ")),
+            Self::All => formatter.write_str("#all"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -590,6 +619,19 @@ impl fmt::Display for RouteRefusal {
             Self::NothingForWorkspace { label } => {
                 write!(formatter, "none of the Mentions is named in {label}")
             }
+            Self::NoRecipient { scope, names } if names.is_empty() => {
+                write!(formatter, "{scope} has no named agents; nothing was sent")
+            }
+            Self::NoRecipient { scope, names } => write!(
+                formatter,
+                "message must begin with one or more recipient Mentions; {scope} has these named \
+                 agents: {}; start the source with the #label @name you mean",
+                names
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
         }
     }
 }
@@ -628,6 +670,45 @@ fn joined(labels: &[WorkspaceLabel], separator: &str) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(separator)
+}
+
+/// Every name a send to `scope` would accept, by workspace, each as the token
+/// that reaches it alone. The same scope rule as [`plan_route`] decides which
+/// workspaces count: a label's exact match and its repository's worktrees.
+pub(crate) fn names_in_scope(
+    scope: &SpaceScope,
+    directory: &SpaceDirectory,
+) -> Result<Vec<ScopedName>, RouteRefusal> {
+    let mut reached: Vec<&SpaceEntry> = Vec::new();
+    match scope {
+        SpaceScope::Unqualified => reached.push(directory.here()),
+        SpaceScope::Named(labels) => {
+            for label in labels {
+                let scope = directory.scope(label)?;
+                if scope.exact.is_none() && scope.family.is_empty() {
+                    return Err(RouteRefusal::NotActivated {
+                        label: label.clone(),
+                    });
+                }
+                for entry in scope.exact.into_iter().chain(scope.family) {
+                    if !reached.iter().any(|seen| seen.space == entry.space) {
+                        reached.push(entry);
+                    }
+                }
+            }
+        }
+        SpaceScope::All => reached.extend(directory.entries.iter().filter(|entry| entry.activated)),
+    }
+    Ok(reached
+        .into_iter()
+        .flat_map(|entry| {
+            let workspace = directory.token(entry);
+            entry.names.iter().map(move |alias| ScopedName {
+                workspace: workspace.clone(),
+                alias: alias.clone(),
+            })
+        })
+        .collect())
 }
 
 pub(crate) fn plan_route(
@@ -1080,6 +1161,77 @@ mod tests {
             refusal.to_string(),
             "@codex is named in more than one namestack worktree: #catchup-again, #other; name \
              the workspace you mean in place of the repository, or name each one"
+        );
+    }
+
+    fn scoped(pairs: &[(&str, &str)]) -> Vec<ScopedName> {
+        pairs
+            .iter()
+            .map(|(workspace, alias)| ScopedName {
+                workspace: label(workspace),
+                alias: (*alias).to_owned(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_scope_without_a_mention_offers_every_name_it_reaches() {
+        let named = |directory: &SpaceDirectory, labels: &[&str]| {
+            names_in_scope(
+                &SpaceScope::Named(labels.iter().map(|token| label(token)).collect()),
+                directory,
+            )
+        };
+        let workspaces = directory();
+        assert_eq!(
+            named(&workspaces, &["ws3"]),
+            Ok(scoped(&[("ws3", "lead"), ("ws3", "ops")])),
+            "an exact workspace offers each of its names"
+        );
+        let repositories = repositories();
+        assert_eq!(
+            named(&repositories, &["namestack"]),
+            Ok(scoped(&[
+                ("catchup-again", "claude"),
+                ("catchup-again", "codex"),
+                ("other", "codex"),
+                ("other", "pi"),
+            ])),
+            "a repository offers each activated worktree's names under that worktree's token"
+        );
+        assert_eq!(
+            named(&repositories, &["namestack", "catchup-again"]),
+            named(&repositories, &["namestack"]),
+            "a workspace reached twice is offered once"
+        );
+        assert_eq!(
+            names_in_scope(&SpaceScope::All, &workspaces),
+            Ok(scoped(&[
+                ("ws1", "lead"),
+                ("my-space", "lead"),
+                ("my-space", "old"),
+                ("my-space", "ops"),
+                ("my-space", "reviewers"),
+                ("my-space", "tester"),
+                ("ws3", "lead"),
+                ("ws3", "ops"),
+            ])),
+            "#all offers every activated workspace's names"
+        );
+        assert_eq!(named(&repositories, &["solo-feature"]), Ok(Vec::new()));
+        assert_eq!(
+            RouteRefusal::NoRecipient {
+                scope: SpaceScope::Named(vec![label("solo-feature")]),
+                names: Vec::new(),
+            }
+            .to_string(),
+            "#solo-feature has no named agents; nothing was sent"
+        );
+        assert_eq!(
+            named(&workspaces, &["dormant"]),
+            Err(RouteRefusal::NotActivated {
+                label: label("dormant")
+            })
         );
     }
 

@@ -12,6 +12,7 @@ A person in one Herdr workspace mentions an agent that lives in another. A `#lab
 - `xws-all` delivers `#all @lead status` to every workspace's lead.
 - `xws-repo-scope` sends `#stack @builder` to the one linked worktree of the `stack` repository that has the name, though the workspace labelled `stack` is that repository's inactive main checkout.
 - `xws-repo-picker` answers `#stack @twin`, a name in two `stack` worktrees, with a picker that names the repository and offers `#wt-one` and `#wt-two`, and persists nothing.
+- `xws-recipient-picker` answers `#stack run the tests` and `#wt-two run the tests`, which name a scope and no one in it, with a picker of that scope's `#label @name` tokens, even when there is only one, and persists nothing.
 - `xws-picker` answers an unqualified name found in two other workspaces with roster-marked `additionalContext` that lists them, and persists nothing.
 - `xws-wrapper` passes the block and the picker through the installed generated `user-prompt-submit` wrappers.
 
@@ -38,6 +39,7 @@ Preconditions: the same as [stuck wake](stuck-wake.md). The helper links the can
 - f. From alpha's helper, `#all @lead status` reaches the leads of alpha, Beta Space and gamma, and no one else.
 - i. From alpha's helper, `#stack @builder build it` must print the block, and only wt-one's builder receives it, with sender workspace `alpha`.
 - j. From alpha's helper, `#stack @twin which one?` must return roster-marked `additionalContext` that contains `@twin is named in more than one stack worktree: #wt-one, #wt-two.` and `Nothing was sent`. After a mailbox wake, no pane receives an envelope, and the message row counts do not change.
+- k. From alpha's helper, `#stack run the tests` must return roster-marked `additionalContext` that contains `It names #stack but no agent there. Its agents: #wt-one @builder, #wt-one @twin, #wt-two @twin. Nothing was sent`. `#wt-two run the tests` must ask the same way with `#wt-two @twin` alone. After each, a mailbox wake delivers nothing and the message row counts do not change.
 - e. The helper removes alpha's `lead` name with `address remove`. From alpha's helper, `@lead who should take this?` must return `additionalContext` that starts with `Namedrop workspace roster.` and contains `@lead is not named in this workspace. It is named in these workspaces: #beta-space, #gamma.` and `Nothing was sent`. After a mailbox wake, no pane receives an envelope. The row counts of `collaboration_messages`, `mailbox_deliveries`, `delivery_attempts`, `bridged_messages` and `space_envoys` must not change.
 - h, picker. The installed Codex and Claude wrappers each run the same prompt. Each must print byte-for-byte the hook's output from step e, and the row counts must still not change.
 - Every delivery check waits for the expected envelope counts, waits 3 s more, and then requires every simulated pane's count to match. A stray envelope to any pane fails the step. The helper completes each received envelope through its bound `complete.no-reply`.

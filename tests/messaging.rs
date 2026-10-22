@@ -4,7 +4,7 @@ use namedrop::{
     ActorKind, LifecycleRuntime, MutationAttribution, PaneAddressId, PaneAddressLifecycle,
     PaneAddressRecord, PaneBindingId, PaneRoleId, RecipientRun, SpaceScope, StateNamespace,
     StateStore, WorkspaceLabel, carries_leading_mentions, execute_message_operation,
-    parse_mentions, parse_prompt_mentions, recipient_outlooks,
+    parse_mentions, parse_prompt_mentions, recipient_outlooks, validate_message_input,
 };
 use std::{path::Path, sync::atomic::AtomicU64};
 use support::{FakeHerdr, FixedClock, SequenceIds, TestDirectory, setup_addresses};
@@ -754,6 +754,31 @@ fn a_hash_without_a_following_mention_stays_literal() {
         carries_leading_mentions("#a @x"),
         "a bodyless handoff still addresses someone"
     );
+}
+
+#[test]
+fn a_send_naming_only_a_scope_reaches_the_send_that_lists_its_names() {
+    for source in ["#a", "  #a run the tests", "#all"] {
+        assert_eq!(
+            validate_message_input(
+                "send",
+                serde_json::json!({"request_id":"r","source":source}),
+            ),
+            Ok(()),
+            "{source:?}"
+        );
+    }
+    for (operation, source) in [("send", "plain text"), ("send", "@"), ("reply", "#a")] {
+        let input = if operation == "reply" {
+            serde_json::json!({"request_id":"r","source":source,"in_reply_to":"m"})
+        } else {
+            serde_json::json!({"request_id":"r","source":source})
+        };
+        assert!(
+            validate_message_input(operation, input).is_err(),
+            "{operation} {source:?}"
+        );
+    }
 }
 
 #[test]

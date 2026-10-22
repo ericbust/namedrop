@@ -1,5 +1,5 @@
 use crate::message::PromptMentionOutcome;
-use crate::spaces::{AmbiguousName, RouteRefusal};
+use crate::spaces::{AmbiguousName, RouteRefusal, ScopedName, SpaceScope};
 use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -100,6 +100,9 @@ where
         PromptMentionOutcome::NeedsPick { choices } => {
             Some(under_roster(&workspace_picker(&choices), runtime))
         }
+        PromptMentionOutcome::NeedsRecipient { scope, names } => {
+            Some(under_roster(&recipient_picker(&scope, &names), runtime))
+        }
         PromptMentionOutcome::Refused(refusal) => Some(under_roster(
             &format!(
                 "Namedrop did not send this prompt: {refusal}. The prompt was preserved for you \
@@ -182,6 +185,24 @@ fn workspace_picker(choices: &[AmbiguousName]) -> String {
     )
 }
 
+fn recipient_picker(scope: &SpaceScope, names: &[ScopedName]) -> String {
+    let names = names
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Namedrop did not send this prompt. It names {scope} but no agent there. Its agents: \
+         {names}. Nothing was sent and nothing is queued. Ask the person who to send it to. \
+         Offer each agent, and \"all of them\" when there are two or more. Use your host's \
+         question tool if it has one (AskUserQuestion on Claude Code). Otherwise ask in one line \
+         and end your turn. Do not choose for them and do not start the task. When they answer, \
+         run `send` with author_kind agent_session once per chosen workspace, with a source made \
+         of that workspace's #label, the chosen @names there, a space, and their prompt \
+         unchanged."
+    )
+}
+
 /// The serialized text a generated wrapper must recognize around one dynamic
 /// context: everything before the marker, and everything after it. Deriving both
 /// from the real output keeps the wrapper in step with this serialization.
@@ -253,7 +274,10 @@ where
     // "carries a Mention" and not "parses as a message": `@reviewer` with no
     // body does address someone, so its failure is a real handoff failure and
     // still reported.
-    if !crate::message::carries_leading_mentions(prompt) || is_delivery_envelope(prompt) {
+    if !(crate::message::carries_leading_mentions(prompt)
+        || crate::message::workspace_prompt_scope(prompt).is_some())
+        || is_delivery_envelope(prompt)
+    {
         return None;
     }
     crate::message::persist_prompt_mention_operation(

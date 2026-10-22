@@ -341,6 +341,20 @@ impl Fixture {
             .unwrap();
     }
 
+    fn remove(&self, workspace: &str, alias: &str) {
+        let namespace = StateNamespace::for_space("socket-a", workspace);
+        StateStore::open(&self.state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.remove_pane_address(
+                    &namespace,
+                    &PaneAddressId::new(address_id(workspace, alias)),
+                    &MutationAttribution::new(ActorKind::Human, "test", 2),
+                )
+            })
+            .unwrap();
+    }
+
     fn drain(&self, workspace: &str) {
         drain_mailboxes(&self.runtime(workspace, "pane-none")).unwrap();
     }
@@ -1417,6 +1431,127 @@ fn a_repository_name_in_two_worktrees_asks_the_person_and_sends_nothing() {
         refused.contains("@scout is named in more than one namestack worktree: #ws2, #ws3"),
         "{refused}"
     );
+    assert_eq!(fixture.message_rows(), before);
+}
+
+#[test]
+fn a_workspace_without_a_mention_asks_who_to_send_it_to() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let before = fixture.message_rows();
+    let output = fixture.hook("w1", "pane-1-lead", "#ws3 run the tests");
+    let context = additional_context(&output);
+    assert!(context.starts_with(ROSTER_MARKER), "{context}");
+    assert!(
+        context.contains(
+            "Namedrop did not send this prompt. It names #ws3 but no agent there. Its agents: \
+             #ws3 @lead, #ws3 @scout. Nothing was sent"
+        ),
+        "{context}"
+    );
+    assert!(context.contains("once per chosen workspace"), "{context}");
+    assert_eq!(fixture.message_rows(), before);
+
+    let refused = fixture
+        .try_send(
+            "w1",
+            "pane-1-lead",
+            json!({"request_id":"workspace-prompt","author_kind":"agent_session",
+                   "source":"#ws3 run the tests"}),
+        )
+        .unwrap_err();
+    assert!(
+        refused.contains("#ws3 has these named agents: #ws3 @lead, #ws3 @scout"),
+        "{refused}"
+    );
+    assert_eq!(fixture.message_rows(), before);
+}
+
+#[test]
+fn an_agent_send_naming_only_a_workspace_lists_its_names_with_or_without_text() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let before = fixture.message_rows();
+    for (index, source) in ["#ws3", "  #ws3 run the tests", "#ws3   "]
+        .into_iter()
+        .enumerate()
+    {
+        let refused = fixture
+            .try_send(
+                "w1",
+                "pane-1-lead",
+                json!({"request_id":format!("bare-scope-{index}"),"author_kind":"agent_session",
+                       "source":source}),
+            )
+            .unwrap_err();
+        assert!(
+            refused.contains("#ws3 has these named agents: #ws3 @lead, #ws3 @scout"),
+            "{source:?}: {refused}"
+        );
+    }
+    assert_eq!(fixture.message_rows(), before);
+}
+
+#[test]
+fn all_with_no_mention_where_namedrop_is_off_is_a_failed_handoff() {
+    let fixture = Fixture::with_activated(2);
+    fixture.register_all_activated(2);
+    let before = fixture.message_rows();
+    let output = fixture.hook("w3", "pane-3-lead", "#all run the tests");
+    assert_eq!(
+        additional_context(&output),
+        "Namedrop could not confirm the leading Mention handoff. The prompt was preserved for \
+         you unchanged; do not retry automatically. Continue locally or ask the person to retry \
+         after collaboration is available."
+    );
+    assert_eq!(fixture.message_rows(), before);
+}
+
+#[test]
+fn a_workspace_with_one_name_still_asks_and_one_with_none_is_refused() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    fixture.remove("w3", "scout");
+    let before = fixture.message_rows();
+    let asked = fixture.hook("w1", "pane-1-lead", "#ws3 run the tests");
+    let context = additional_context(&asked);
+    assert!(
+        context.contains("Its agents: #ws3 @lead. Nothing was sent"),
+        "{context}"
+    );
+
+    fixture.remove("w3", "lead");
+    let refused = fixture.hook("w1", "pane-1-lead", "#ws3 run the tests");
+    let context = additional_context(&refused);
+    assert!(
+        context.contains(
+            "Namedrop did not send this prompt: #ws3 has no named agents; nothing was sent."
+        ),
+        "{context}"
+    );
+    assert_eq!(fixture.message_rows(), before);
+    fixture.drain("w3");
+    assert!(fixture.herdr.envelopes("pane-3-lead").is_empty());
+}
+
+#[test]
+fn a_hash_word_naming_no_workspace_stays_the_persons_prompt() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let ordinary = fixture.hook("w1", "pane-1-lead", "What should we do next?");
+    let before = fixture.message_rows();
+    for prompt in [
+        "#42 fix the build",
+        "# Heading",
+        "#ws3",
+        "  #ws3 run the tests",
+    ] {
+        assert_eq!(
+            fixture.hook("w1", "pane-1-lead", prompt),
+            ordinary,
+            "{prompt}"
+        );
+    }
     assert_eq!(fixture.message_rows(), before);
 }
 

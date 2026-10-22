@@ -8,6 +8,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 - Mention agents in other Herdr workspaces. Put a workspace label before the mentions, as in `#exp-dashboard @lead Status?`, name several labels, or use `#all @lead` to reach that name in every workspace. Labels ignore case, a space matches a hyphen, and every workspace also answers to its Herdr id, such as `#w12`.
 - A repository's name reaches its worktrees. `#namestack @claude` goes to the one `namestack` worktree that has `@claude`, even though Herdr labels each worktree's workspace after the worktree. A workspace labelled exactly `namestack` that has the name still wins, and if two worktrees have it your agent asks which one you meant.
+- A workspace label with no mention, as in `#catchup-again run the tests`, sends nothing. Your agent lists that workspace's named agents and asks who you meant, even when there is only one.
 - A mention without a label stays in the current workspace when the name exists there. If only one other workspace has the name, the prompt goes there and Herdr shows where it went. If several do, nothing is sent and your agent asks which one you meant.
 - Replies come back to the workspace that sent the message, and the recipient sees which workspace it came from. Stopping or pausing the conversation on either side applies to both.
 - The prompt roster lists the named agents in your other workspaces, and `address list` with `{"workspaces":"all"}` shows every workspace's names and groups.

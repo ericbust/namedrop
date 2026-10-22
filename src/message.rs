@@ -1,4 +1,4 @@
-use crate::spaces::{AmbiguousName, RouteRefusal, SpaceScope, WorkspaceLabel};
+use crate::spaces::{AmbiguousName, RouteRefusal, ScopedName, SpaceScope, WorkspaceLabel};
 use crate::{
     ActorKind, ContextGrantDraft, ContextGrantId, ContextReferenceDraft, ContextSnapshotId,
     DeliveryId, LifecycleRuntime, MessageDraft, MessageRecipientDraft, MutationAttribution,
@@ -69,25 +69,11 @@ pub(crate) fn body_reference_aliases<E: crate::HerdrCommandExecutor>(
 /// when at least one valid Mention follows it; otherwise the source addresses
 /// nobody and stays literal. A `#` token after the first Mention is body text.
 pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
-    let mut cursor = skip_whitespace(source, 0);
-    let mut labels: Vec<WorkspaceLabel> = Vec::new();
-    let mut all = false;
-    loop {
-        let token_end = token_end(source, cursor);
-        let Some(token) = source[cursor..token_end].strip_prefix('#') else {
-            break;
-        };
-        if token.eq_ignore_ascii_case("all") {
-            all = true;
-        } else if let Some(label) = WorkspaceLabel::from_token(token) {
-            if !labels.contains(&label) {
-                labels.push(label);
-            }
-        } else {
-            break;
-        }
-        cursor = skip_whitespace(source, token_end);
-    }
+    let LeadingLabels {
+        labels,
+        all,
+        mut cursor,
+    } = leading_labels(source);
 
     let mut recipients = Vec::new();
     loop {
@@ -135,6 +121,66 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
         body: body.to_owned(),
         context_mentions: context_mentions(body),
     })
+}
+
+struct LeadingLabels {
+    labels: Vec<WorkspaceLabel>,
+    all: bool,
+    /// Where the `#` run ends and the Mentions, if any, begin.
+    cursor: usize,
+}
+
+fn leading_labels(source: &str) -> LeadingLabels {
+    let mut cursor = skip_whitespace(source, 0);
+    let mut labels: Vec<WorkspaceLabel> = Vec::new();
+    let mut all = false;
+    loop {
+        let token_end = token_end(source, cursor);
+        let Some(token) = source[cursor..token_end].strip_prefix('#') else {
+            break;
+        };
+        if token.eq_ignore_ascii_case("all") {
+            all = true;
+        } else if let Some(label) = WorkspaceLabel::from_token(token) {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        } else {
+            break;
+        }
+        cursor = skip_whitespace(source, token_end);
+    }
+    LeadingLabels {
+        labels,
+        all,
+        cursor,
+    }
+}
+
+/// The scope of a leading `#` run that no Mention follows, as in `#ws3` or
+/// `#catchup-again run the tests`: it names a workspace but nobody in it.
+/// Whether the labels name real workspaces is the caller's to check; until
+/// then the text may be prose such as `#42 fix the build`.
+fn scope_without_mention(source: &str) -> Option<SpaceScope> {
+    if parse_mentions(source).err().as_deref() != Some(MISSING_RECIPIENTS) {
+        return None;
+    }
+    let LeadingLabels { labels, all, .. } = leading_labels(source);
+    match (all, labels.is_empty()) {
+        (false, false) => Some(SpaceScope::Named(labels)),
+        (true, true) => Some(SpaceScope::All),
+        _ => None,
+    }
+}
+
+/// [`scope_without_mention`] under the prompt hook's stricter rules: the run
+/// starts at column zero and text follows it, so a bare `#ws3` typed at the
+/// prompt stays the person's own words.
+pub(crate) fn workspace_prompt_scope(source: &str) -> Option<SpaceScope> {
+    if !source.starts_with('#') || source[leading_labels(source).cursor..].trim().is_empty() {
+        return None;
+    }
+    scope_without_mention(source)
 }
 
 /// True when `source` opens with at least one column-zero recipient Mention,
@@ -387,6 +433,11 @@ struct RelayPresentation {
 
 pub fn validate_message_input(operation: &str, input: Value) -> Result<(), String> {
     let input = parse_operation_input(operation, input)?;
+    // A `send` that names a scope and nobody in it is answered by the send
+    // itself, which knows the names in that scope.
+    if operation == "send" && scope_without_mention(&input.source).is_some() {
+        return Ok(());
+    }
     parse_mentions(&input.source)?;
     Ok(())
 }
@@ -401,8 +452,14 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let input = prepare_source_message(parse_operation_input(operation, input)?)?;
+    let input = parse_operation_input(operation, input)?;
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    if operation == "send"
+        && let Some(scope) = scope_without_mention(&input.source)
+    {
+        return Err(workspace_prompt_refusal(scope, runtime, &workspaces).to_string());
+    }
+    let input = prepare_source_message(input)?;
     let (mut response, forwarded) = persist_prepared_message_operation(input, runtime, &workspaces)
         .map_err(|error| error.to_string())?;
     response["drain"] = crate::drain_receipt(runtime);
@@ -433,6 +490,13 @@ pub(crate) enum PromptMentionOutcome {
     },
     NeedsPick {
         choices: Vec<AmbiguousName>,
+    },
+    /// A `#` scope with no Mention. The person always picks, even from one
+    /// name: a column-zero `#word text` can be prose that matches a
+    /// workspace, so a missing Mention never sends by itself.
+    NeedsRecipient {
+        scope: SpaceScope,
+        names: Vec<ScopedName>,
     },
     Refused(RouteRefusal),
     /// Not confirmed for any other reason. The hook answers with a fixed
@@ -467,6 +531,11 @@ where
         Err(SendError::Refused(RouteRefusal::Ambiguous { choices })) => {
             PromptMentionOutcome::NeedsPick { choices }
         }
+        Err(SendError::Refused(RouteRefusal::NoRecipient { scope, names }))
+            if !names.is_empty() =>
+        {
+            PromptMentionOutcome::NeedsRecipient { scope, names }
+        }
         Err(SendError::Refused(refusal)) => PromptMentionOutcome::Refused(refusal),
         Err(SendError::Failed(_)) => PromptMentionOutcome::Failed,
     })
@@ -489,13 +558,12 @@ where
             .to_owned()
             .into());
     }
-    let parsed = parse_prompt_mentions(&input.source)?;
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
-    if let SpaceScope::Named(labels) = &parsed.recipients.scope
-        && !labels
-            .iter()
-            .all(|label| workspaces.names(label).unwrap_or(false))
-    {
+    if let Some(scope) = workspace_prompt_scope(&input.source) {
+        return Err(workspace_prompt_refusal(scope, runtime, &workspaces));
+    }
+    let parsed = parse_prompt_mentions(&input.source)?;
+    if !names_workspaces(&parsed.recipients.scope, &workspaces) {
         return Err(SendError::NotAMention);
     }
     let prepared = PreparedMessageOperation {
@@ -513,6 +581,68 @@ where
     };
     persist_prepared_message_operation(prepared, runtime, &workspaces)
         .map(|(_, forwarded)| forwarded)
+}
+
+/// A `#` run naming no one is either prose, which stays the person's own
+/// text, or a workspace prompt, refused with the names in its scope.
+fn workspace_prompt_refusal<E, C, I>(
+    scope: SpaceScope,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+) -> SendError
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    match names_in_prompt_scope(&scope, runtime, workspaces) {
+        Ok(names) => SendError::Refused(RouteRefusal::NoRecipient { scope, names }),
+        Err(error) => error,
+    }
+}
+
+fn names_in_prompt_scope<E, C, I>(
+    scope: &SpaceScope,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+) -> Result<Vec<ScopedName>, SendError>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    if !names_workspaces(scope, workspaces) {
+        return Err(SendError::NotAMention);
+    }
+    let discovered = match runtime.workspace_id {
+        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
+        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+    };
+    let namespace = discovered.namespace(runtime.session_socket_id);
+    let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
+    let directory = crate::spaces::SpaceDirectory::load(
+        &mut store,
+        workspaces,
+        &namespace.session_socket_id,
+        &namespace.space_id,
+        &RecipientRun {
+            scope: scope.clone(),
+            aliases: Vec::new(),
+        },
+    )?;
+    crate::spaces::names_in_scope(scope, &directory).map_err(SendError::Refused)
+}
+
+fn names_workspaces<E: crate::HerdrCommandExecutor>(
+    scope: &SpaceScope,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+) -> bool {
+    match scope {
+        SpaceScope::Named(labels) => labels
+            .iter()
+            .all(|label| workspaces.names(label).unwrap_or(false)),
+        SpaceScope::Unqualified | SpaceScope::All => true,
+    }
 }
 
 pub(crate) enum SendError {

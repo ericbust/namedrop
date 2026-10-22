@@ -1142,6 +1142,21 @@ def main():
                     deliveries("j", [])
                     require(message_state() == before_twin, "j: the picker persists nothing", message_state())
 
+                    for step, prompt, offered in (
+                            ("k", "#stack run the tests", "#wt-one @builder, #wt-one @twin, #wt-two @twin"),
+                            ("k-one", "#wt-two run the tests", "#wt-two @twin")):
+                        asked = trace[step] = hook("alpha-helper", prompt)
+                        asked_text = ((asked["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                        scope = prompt.split()[0]
+                        require(asked_text.startswith("Namedrop workspace roster.")
+                                and f"It names {scope} but no agent there. Its agents: {offered}. Nothing was sent"
+                                in asked_text,
+                                f"{step}: {prompt!r} with no Mention asks who, offering {offered}", asked_text)
+                        wake("alpha-helper")
+                        deliveries(step, [])
+                        require(message_state() == before_twin, f"{step}: the recipient picker persists nothing",
+                                message_state())
+
                     named = cli("address", "list", "--json")["data"]
                     lead_address = next(a for a in named if a["alias"] == "lead")
                     removed = trace["e_remove"] = body("address", "remove", address_id=lead_address["id"])
