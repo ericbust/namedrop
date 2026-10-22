@@ -9,8 +9,8 @@ use namedrop::{
     describe_operations, diagnose_collaboration, execute_context_operation,
     execute_control_operation, execute_group_operation, execute_handoff_operation,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
-    execute_user_prompt_submit_hook, is_context_operation, is_control_operation,
-    is_integration_operation, is_lifecycle_operation, is_message_operation,
+    execute_session_start_hook, execute_user_prompt_submit_hook, is_context_operation,
+    is_control_operation, is_integration_operation, is_lifecycle_operation, is_message_operation,
     render_command_result_to_text, validate_message_input,
 };
 use serde::Deserialize;
@@ -117,6 +117,10 @@ fn main() -> ExitCode {
             cli.mailbox_wake_hook_state_directory()
                 .map(Path::to_path_buf)
         })
+        .or_else(|| {
+            cli.session_start_hook_state_directory()
+                .map(Path::to_path_buf)
+        })
         .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
     let _command_guard = match selected_state
         .as_deref()
@@ -160,7 +164,10 @@ fn main() -> ExitCode {
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
-        return run_user_prompt_submit_hook(state_directory);
+        return run_context_hook(state_directory, execute_user_prompt_submit_hook);
+    }
+    if let Some(state_directory) = cli.session_start_hook_state_directory() {
+        return run_context_hook(state_directory, execute_session_start_hook);
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
         return run_mailbox_wake_hook(state_directory);
@@ -673,16 +680,23 @@ fn with_runtime_options<T>(
     })
 }
 
-fn run_user_prompt_submit_hook(state_directory: &Path) -> ExitCode {
+/// Runs one hook that reads the host's event payload from stdin and may answer
+/// with context for the model. Silence is the only failure mode: a hook that
+/// cannot run must not interrupt the person's turn.
+fn run_context_hook(
+    state_directory: &Path,
+    execute: fn(
+        &str,
+        &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
+    ) -> Option<serde_json::Value>,
+) -> ExitCode {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    let output = with_runtime_at(state_directory, |runtime| {
-        Ok(execute_user_prompt_submit_hook(&input, runtime))
-    })
-    .ok()
-    .flatten();
+    let output = with_runtime_at(state_directory, |runtime| Ok(execute(&input, runtime)))
+        .ok()
+        .flatten();
     if let Some(output) = output {
         let _ = serde_json::to_writer(io::stdout().lock(), &output);
     }

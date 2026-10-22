@@ -17,10 +17,35 @@ struct UserPromptSubmitInput {
     prompt: String,
 }
 
+#[derive(Deserialize)]
+struct SessionStartInput {
+    hook_event_name: String,
+}
+
 enum LeadingMentionRoute {
     NotApplicable,
     Sent,
     Failed(&'static str),
+}
+
+/// Supplies the Namedrop selection policy once, when a native session starts
+/// or its host rebuilds the context (resume, clear, compaction, fork). The
+/// policy is fixed text, so reading it per turn would only repeat it; the
+/// roster it governs still arrives with every prompt.
+pub fn execute_session_start_hook<E, C, I>(
+    input: &str,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Option<Value>
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    let input: SessionStartInput = serde_json::from_str(input).ok()?;
+    if input.hook_event_name != "SessionStart" {
+        return None;
+    }
+    crate::persona::session_policy(runtime).map(|policy| hook_output("SessionStart", &policy))
 }
 
 /// Routes one runtime UserPromptSubmit payload when a column-zero leading
@@ -97,10 +122,11 @@ where
 }
 
 /// The serialized text a generated wrapper must recognize around one dynamic
-/// context: everything before the marker, and everything after it. Deriving both
-/// from the real output keeps the wrapper in step with this serialization.
-pub(crate) fn context_bounds(marker: &str) -> (String, String) {
-    let output = context_hook_output(marker).to_string();
+/// context of one hook event: everything before the marker, and everything
+/// after it. Deriving both from the real output keeps the wrapper in step with
+/// this serialization.
+pub(crate) fn context_bounds(event: &str, marker: &str) -> (String, String) {
+    let output = hook_output(event, marker).to_string();
     let end = output
         .find(marker)
         .expect("a plain-text context marker serializes verbatim")
@@ -113,9 +139,13 @@ pub(crate) fn failed_handoff_hook_outputs() -> [Value; 2] {
 }
 
 fn context_hook_output(context: &str) -> Value {
+    hook_output("UserPromptSubmit", context)
+}
+
+fn hook_output(event: &str, context: &str) -> Value {
     json!({
         "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
+            "hookEventName": event,
             "additionalContext": context,
         }
     })

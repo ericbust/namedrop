@@ -2779,6 +2779,16 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
         .unwrap(),
         serde_json::json!({
             "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!(
+                            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/scripts/session-start\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/scripts/session-start\"; else '{}'; fi",
+                            directory.join("scripts/session-start").display()
+                        ),
+                        "timeout": 10
+                    }]
+                }],
                 "UserPromptSubmit": [{
                     "hooks": [{
                         "type": "command",
@@ -2802,6 +2812,15 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
     assert!(script.contains("hook user-prompt-submit --state-directory"));
     assert!(script.contains("hook mailbox-wake --state-directory"));
     assert!(script.contains("#!/bin/sh"));
+    let session_start = directory.join("scripts/session-start");
+    assert!(
+        fs::metadata(&session_start).unwrap().permissions().mode() & 0o111 != 0,
+        "{} session-start wrapper is not executable",
+        runtime.as_str()
+    );
+    let session_start = fs::read_to_string(session_start).unwrap();
+    assert!(session_start.contains("hook session-start --state-directory"));
+    assert!(session_start.contains("#!/bin/sh"));
     assert!(script.contains("2>/dev/null) || exit 0"));
     let marketplace: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(directory.join(".agents/plugins/marketplace.json")).unwrap(),
