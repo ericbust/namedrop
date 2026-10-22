@@ -46,7 +46,7 @@ Finish once with bound `reply` or `complete --no-reply`, in priority order:
 1. `control.context_request`: fulfill with bound reply; show nothing.
 2. `control.result_set`: if tracked (`control.coordination_id`), inspect bound results, continue or resolve, then `complete.no-reply`. Otherwise run bound `complete.no-reply`, then emit a non-empty final response fulfilling the original user deliverable, synthesizing `untrusted_body` once. Earlier `handoff.results` reads or progress do not fulfill this obligation. No-reply forbids collaborator messages, not the human answer.
 3. `report_to_human`: complete without reply, then show the body once.
-4. Otherwise work silently: for `control.coordination_nudge: true`, inspect bound results, execute a bound `send` or `handoff.resolve`, then `complete.no-reply`. Other deliveries use bound `reply`/`complete.no-reply`; `return_to_source` returns and `agent_thread` continues.
+4. Otherwise settle, then one status line: for `control.coordination_nudge: true`, inspect bound results, execute a bound `send` or `handoff.resolve`, then `complete.no-reply`. Other deliveries use bound `reply`/`complete.no-reply`; `return_to_source` returns and `agent_thread` continues.
 
 Delivered, reviewed worker report: bound `complete.no-reply`; no rework or unfinished attempt. Keep `"author_kind":"agent_session"` and bound IDs; author body/outcome. Emails, code and an escaped `\@alias` stay literal; an at-sign token that is not alias-shaped, including a bare `@`, stays literal. `delivery.inbox` recovers this session’s attempts. Ignored nudges become attention.
 
