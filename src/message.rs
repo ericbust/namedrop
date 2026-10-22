@@ -489,6 +489,7 @@ pub(crate) enum PromptMentionOutcome {
         remote: Vec<String>,
     },
     NeedsPick {
+        settled: Vec<ScopedName>,
         choices: Vec<AmbiguousName>,
     },
     /// A `#` scope with no Mention. The person always picks, even from one
@@ -528,8 +529,8 @@ where
                 })
                 .collect(),
         },
-        Err(SendError::Refused(RouteRefusal::Ambiguous { choices })) => {
-            PromptMentionOutcome::NeedsPick { choices }
+        Err(SendError::Refused(RouteRefusal::Ambiguous { settled, choices })) => {
+            PromptMentionOutcome::NeedsPick { settled, choices }
         }
         Err(SendError::Refused(RouteRefusal::NoRecipient { scope, names }))
             if !names.is_empty() =>

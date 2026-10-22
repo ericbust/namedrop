@@ -97,8 +97,8 @@ where
             Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[0], runtime))
         }
         PromptMentionOutcome::Failed => Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[1], runtime)),
-        PromptMentionOutcome::NeedsPick { choices } => {
-            Some(under_roster(&workspace_picker(&choices), runtime))
+        PromptMentionOutcome::NeedsPick { settled, choices } => {
+            Some(under_roster(&workspace_picker(&settled, &choices), runtime))
         }
         PromptMentionOutcome::NeedsRecipient { scope, names } => {
             Some(under_roster(&recipient_picker(&scope, &names), runtime))
@@ -153,44 +153,39 @@ where
 
 /// The hook cannot draw a question, so it hands the question to the agent,
 /// whose host can. The prompt stays in the transcript, so nobody retypes it.
-fn workspace_picker(choices: &[AmbiguousName]) -> String {
+/// The resend is one `send` per workspace, so a name that already resolved
+/// keeps its workspace whatever the person picks for the others.
+fn workspace_picker(settled: &[ScopedName], choices: &[AmbiguousName]) -> String {
     let named = choices
         .iter()
         .map(|choice| format!("{}.", choice.describe(", ")))
         .collect::<Vec<_>>()
         .join(" ");
-    let mut repos: Vec<String> = Vec::new();
-    for repo in choices.iter().filter_map(|choice| choice.within.as_ref()) {
-        if !repos.contains(&repo.to_string()) {
-            repos.push(repo.to_string());
-        }
-    }
-    let source = if repos.is_empty() {
-        "a source made of the chosen #label tokens (or #all), a space, and their prompt unchanged"
-            .to_owned()
+    let (resolved, bound) = if settled.is_empty() {
+        (String::new(), "the person chose that workspace for it")
     } else {
-        format!(
-            "their prompt unchanged except that {} is replaced by the chosen #label tokens (every \
-             offered token for all of them, never #all)",
-            repos.join(" and ")
+        (
+            format!(
+                " These names are already resolved: {}.",
+                crate::spaces::listed(settled)
+            ),
+            "it is already resolved there or the person chose that workspace for it",
         )
     };
     format!(
-        "Namedrop did not send this prompt. {named} Nothing was sent and nothing is queued. Ask \
-         the person which workspace they meant. Offer each workspace, and \"all of them\" when \
-         there are two or more. Use your host's question tool if it has one (AskUserQuestion on \
-         Claude Code). Otherwise ask in one line and end your turn. Do not choose for them and \
-         do not start the task. When they answer, run `send` with author_kind agent_session and \
-         {source}."
+        "Namedrop did not send this prompt. {named}{resolved} Nothing was sent and nothing is \
+         queued. Ask the person which workspace they meant. Offer each workspace, and \"all of \
+         them\" when there are two or more. Use your host's question tool if it has one \
+         (AskUserQuestion on Claude Code). Otherwise ask in one line and end your turn. Do not \
+         choose for them and do not start the task. When they answer, run `send` with \
+         author_kind agent_session once per workspace, never with #all. Each source is that \
+         workspace's #label, every @name bound there, a space, and the rest of the prompt \
+         exactly as written after its last leading @name. A name is bound to a workspace when {bound}."
     )
 }
 
 fn recipient_picker(scope: &SpaceScope, names: &[ScopedName]) -> String {
-    let names = names
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let names = crate::spaces::listed(names);
     format!(
         "Namedrop did not send this prompt. It names {scope} but no agent there. Its agents: \
          {names}. Nothing was sent and nothing is queued. Ask the person who to send it to. \

@@ -477,7 +477,11 @@ pub(crate) enum RouteRefusal {
     UnknownMention {
         alias: String,
     },
+    /// Some names have two or more homes. `settled` holds every name that
+    /// resolved, as the token that resends it to the same workspace, so the
+    /// resend after the person picks keeps them where they were.
     Ambiguous {
+        settled: Vec<ScopedName>,
         choices: Vec<AmbiguousName>,
     },
     UnknownWorkspace {
@@ -517,6 +521,14 @@ impl fmt::Display for ScopedName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{} @{}", self.workspace, self.alias)
     }
+}
+
+pub(crate) fn listed(names: &[ScopedName]) -> String {
+    names
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 impl fmt::Display for SpaceScope {
@@ -560,7 +572,7 @@ impl fmt::Display for RouteRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownMention { alias } => write!(formatter, "unknown Mention: @{alias}"),
-            Self::Ambiguous { choices } => {
+            Self::Ambiguous { settled, choices } => {
                 for (index, choice) in choices.iter().enumerate() {
                     if index > 0 {
                         formatter.write_str("; ")?;
@@ -575,16 +587,15 @@ impl fmt::Display for RouteRefusal {
                         Some(_) => formatter.write_str(&choice.describe(", "))?,
                     }
                 }
-                if choices.iter().any(|choice| choice.within.is_some()) {
-                    formatter.write_str(
-                        "; name the workspace you mean in place of the repository, or name each \
-                         one",
-                    )
-                } else {
-                    formatter.write_str(
-                        "; prefix the source with the workspace you mean, or #all for every one",
-                    )
+                if !settled.is_empty() {
+                    write!(formatter, "; already resolved: {}", listed(settled))?;
                 }
+                formatter.write_str(
+                    "; ask which workspace is meant, then send once per workspace, never with \
+                     #all, each source being that workspace's #label, every @name bound there \
+                     (the resolved names that are there and the names chosen there), a space, \
+                     and the message text",
+                )
             }
             Self::UnknownWorkspace { label, known } if known.is_empty() => {
                 write!(formatter, "no workspace is labelled {label}")
@@ -626,11 +637,7 @@ impl fmt::Display for RouteRefusal {
                 formatter,
                 "message must begin with one or more recipient Mentions; {scope} has these named \
                  agents: {}; start the source with the #label @name you mean",
-                names
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                listed(names)
             ),
         }
     }
@@ -716,9 +723,9 @@ pub(crate) fn plan_route(
     directory: &SpaceDirectory,
 ) -> Result<RoutePlan, RouteRefusal> {
     let mut targets: Vec<(&SpaceEntry, &String)> = Vec::new();
+    let mut ambiguous = Vec::new();
     match &run.scope {
         SpaceScope::Unqualified => {
-            let mut ambiguous = Vec::new();
             for alias in &run.aliases {
                 let here = directory.here();
                 if here.answers_to(alias) {
@@ -743,9 +750,6 @@ pub(crate) fn plan_route(
                     }),
                 }
             }
-            if !ambiguous.is_empty() {
-                return Err(RouteRefusal::Ambiguous { choices: ambiguous });
-            }
         }
         SpaceScope::Named(labels) => {
             let scopes = labels
@@ -753,7 +757,6 @@ pub(crate) fn plan_route(
                 .map(|label| directory.scope(label))
                 .collect::<Result<Vec<_>, _>>()?;
             let mut reached = vec![false; scopes.len()];
-            let mut ambiguous = Vec::new();
             for alias in &run.aliases {
                 let mut found = false;
                 for (scope, reached) in scopes.iter().zip(&mut reached) {
@@ -792,9 +795,6 @@ pub(crate) fn plan_route(
                     label: scope.label.clone(),
                 });
             }
-            if !ambiguous.is_empty() {
-                return Err(RouteRefusal::Ambiguous { choices: ambiguous });
-            }
         }
         SpaceScope::All => {
             for alias in &run.aliases {
@@ -813,6 +813,18 @@ pub(crate) fn plan_route(
                 }
             }
         }
+    }
+    if !ambiguous.is_empty() {
+        return Err(RouteRefusal::Ambiguous {
+            settled: targets
+                .iter()
+                .map(|(entry, alias)| ScopedName {
+                    workspace: directory.token(entry),
+                    alias: (*alias).clone(),
+                })
+                .collect(),
+            choices: ambiguous,
+        });
     }
     let legs = directory
         .entries
@@ -926,12 +938,34 @@ mod tests {
         assert_eq!(
             plan(&["ops"]),
             Err(RouteRefusal::Ambiguous {
+                settled: Vec::new(),
                 choices: vec![AmbiguousName {
                     alias: "ops".to_owned(),
                     labels: vec![label("my-space"), label("ws3")],
                     within: None,
                 }],
             })
+        );
+        assert_eq!(
+            plan(&["ops", "lead", "tester"]),
+            Err(RouteRefusal::Ambiguous {
+                settled: vec![
+                    ScopedName {
+                        workspace: label("ws1"),
+                        alias: "lead".to_owned(),
+                    },
+                    ScopedName {
+                        workspace: label("my-space"),
+                        alias: "tester".to_owned(),
+                    },
+                ],
+                choices: vec![AmbiguousName {
+                    alias: "ops".to_owned(),
+                    labels: vec![label("my-space"), label("ws3")],
+                    within: None,
+                }],
+            }),
+            "the question carries every name that resolved, local or remote, so the resend keeps them"
         );
         assert_eq!(
             plan(&["ops", "nobody"]),
@@ -1063,13 +1097,24 @@ mod tests {
         assert_eq!(
             plan(&["namestack"], &["codex", "claude", "pi"]),
             Err(RouteRefusal::Ambiguous {
+                settled: vec![
+                    ScopedName {
+                        workspace: label("catchup-again"),
+                        alias: "claude".to_owned(),
+                    },
+                    ScopedName {
+                        workspace: label("other"),
+                        alias: "pi".to_owned(),
+                    },
+                ],
                 choices: vec![AmbiguousName {
                     alias: "codex".to_owned(),
                     labels: vec![label("catchup-again"), label("other")],
                     within: Some(label("namestack")),
                 }],
             }),
-            "two homes ask, and an inactive worktree is not a home"
+            "two homes ask, an inactive worktree is not a home, and the names that resolved come \
+             with the question"
         );
         assert_eq!(
             plan(&["namestack"], &["ghost"]),
@@ -1153,14 +1198,20 @@ mod tests {
     #[test]
     fn a_name_in_two_worktrees_says_which_repository_and_offers_each() {
         let refusal = plan_route(
-            &run(SpaceScope::Named(vec![label("namestack")]), &["codex"]),
+            &run(
+                SpaceScope::Named(vec![label("namestack")]),
+                &["codex", "claude"],
+            ),
             &repositories(),
         )
         .unwrap_err();
         assert_eq!(
             refusal.to_string(),
-            "@codex is named in more than one namestack worktree: #catchup-again, #other; name \
-             the workspace you mean in place of the repository, or name each one"
+            "@codex is named in more than one namestack worktree: #catchup-again, #other; already \
+             resolved: #catchup-again @claude; ask which workspace is meant, then send once per \
+             workspace, never with #all, each source being that workspace's #label, every @name \
+             bound there (the resolved names that are there and the names chosen there), a \
+             space, and the message text"
         );
     }
 

@@ -669,13 +669,17 @@ def main():
                 return {"HERDR_PLUGIN_STATE_DIR": str(state), "HERDR_SOCKET_PATH": env["HERDR_SOCKET_PATH"],
                         "HERDR_WORKSPACE_ID": space_of[pane], "HERDR_PANE_ID": pane}
 
-            def as_agent(*argv, pane, **payload):
+            def agent_call(*argv, pane, **payload):
                 invocation = [str(launcher), "--plugin-state", str(state), "--herdr-socket", env["HERDR_SOCKET_PATH"],
                               "--herdr-workspace", space_of[pane], "--herdr-pane", pane, *map(str, argv)]
                 if payload:
                     invocation += ["--input-json", json.dumps(payload)]
                 result = command(*invocation, context=tool_environment(pane), check=False, kind="agent-cli")
                 response = json.loads(result.stdout) if result.stdout.strip().startswith("{") else {}
+                return invocation, result, response
+
+            def as_agent(*argv, pane, **payload):
+                invocation, result, response = agent_call(*argv, pane=pane, **payload)
                 assert result.returncode == 0 and response.get("status") == "ok", (invocation, result.stdout, result.stderr)
                 return response["data"]
 
@@ -1156,6 +1160,57 @@ def main():
                         deliveries(step, [])
                         require(message_state() == before_twin, f"{step}: the recipient picker persists nothing",
                                 message_state())
+
+                    mixed_prompt = "#stack @builder @twin both of you"
+                    mixed = trace["l"] = hook("alpha-helper", mixed_prompt)
+                    mixed_text = ((mixed["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                    require(mixed_text.startswith("Namedrop workspace roster.")
+                            and "@twin is named in more than one stack worktree: #wt-one, #wt-two. These names are "
+                                "already resolved: #wt-one @builder. Nothing was sent" in mixed_text
+                            and "once per workspace, never with #all" in mixed_text,
+                            "l: the picker asks only about @twin and keeps @builder resolved in #wt-one", mixed_text)
+                    wake("alpha-helper")
+                    deliveries("l", [])
+                    require(message_state() == before_twin, "l: the mixed picker persists nothing", message_state())
+                    # "All of them", resent the way the picker prescribes: one send per workspace, each with every
+                    # name bound there and the rest of the prompt after its last leading @name.
+                    text = mixed_prompt.split(" ", 3)[3]
+                    resends = trace["l_resend"] = [f"#wt-one @builder @twin {text}", f"#wt-two @twin {text}"]
+                    for index, source in enumerate(resends):
+                        as_agent("send", pane=agents["alpha-helper"]["pane"], request_id=f"xws-mixed-{index}",
+                                 author_kind="agent_session", source=source)
+                    wake("alpha-helper")
+                    resent = deliveries("l-resend", ["wt-one-builder", "wt-one-twin", "wt-two-twin"])
+                    require(all(e["untrusted_body"].endswith(text) and sender_workspace(e) == "alpha"
+                                for e in resent.values()),
+                            "l: the guided resend reaches wt-one's builder and both twins from alpha",
+                            {role: {"body": e["untrusted_body"], "sender": e["control"]["sender"]}
+                             for role, e in resent.items()})
+                    for envelope in resent.values():
+                        bound(envelope, "complete.no-reply")
+                    # The #wt-one send addressed two names, so their answers come home as one result set.
+                    wake("alpha-helper")
+                    results = deliveries("l-result-set", ["alpha-helper"])["alpha-helper"]
+                    outcomes = sorted((o["target"]["alias"], o["status"])
+                                      for o in (results["control"].get("result_set") or {}).get("outcomes", []))
+                    require(outcomes == [("builder", "no_reply"), ("twin", "no_reply")],
+                            "l: alpha's helper gets one result set for the #wt-one send", outcomes)
+                    bound(results, "complete.no-reply")
+
+                    before_bare = message_state()
+                    for step, source in (("m", "#wt-two"), ("m-indented", "  #wt-two run the tests")):
+                        _, result, response = agent_call("send", pane=agents["alpha-helper"]["pane"],
+                                                         request_id=f"xws-{step}", author_kind="agent_session",
+                                                         source=source)
+                        message = (response.get("error") or {}).get("message", "")
+                        trace[step] = {"source": source, "exit": result.returncode, "stdout": result.stdout,
+                                       "stderr": result.stderr}
+                        require(result.returncode == 65 and response.get("status") == "rejected"
+                                and "#wt-two has these named agents: #wt-two @twin" in message,
+                                f"{step}: agent send {source!r} is refused with #wt-two's names", trace[step])
+                    deliveries("m", [])
+                    require(message_state() == before_bare, "m: the refused agent sends persist nothing",
+                            message_state())
 
                     named = cli("address", "list", "--json")["data"]
                     lead_address = next(a for a in named if a["alias"] == "lead")

@@ -1413,10 +1413,9 @@ fn a_repository_name_in_two_worktrees_asks_the_person_and_sends_nothing() {
         "{context}"
     );
     assert!(
-        context.contains("#namestack is replaced by the chosen #label tokens"),
+        context.contains("once per workspace, never with #all"),
         "{context}"
     );
-    assert!(!context.contains("(or #all)"), "{context}");
     assert_eq!(fixture.message_rows(), before);
 
     let refused = fixture
@@ -1432,6 +1431,243 @@ fn a_repository_name_in_two_worktrees_asks_the_person_and_sends_nothing() {
         "{refused}"
     );
     assert_eq!(fixture.message_rows(), before);
+}
+
+/// The person's answer to a workspace picker: one offered workspace for each
+/// ambiguous name, as `(alias, #token)`, or every offered workspace.
+enum Answer {
+    Pick(&'static [(&'static str, &'static str)]),
+    All,
+}
+
+/// Runs the prompt through the hook, then does what the picker tells the
+/// agent to do with `answer`: one `send` per workspace, each naming the
+/// names already resolved there and the names the person chose there, then
+/// the prompt's text after its routing run, exactly as the parser cuts it.
+fn follow_picker(
+    fixture: &Fixture,
+    workspace: &str,
+    pane: &str,
+    prompt: &str,
+    answer: Answer,
+) -> String {
+    let output = fixture.hook(workspace, pane, prompt);
+    let context = additional_context(&output).to_owned();
+    let mut bound: Vec<(String, Vec<String>)> = Vec::new();
+    let mut bind = |token: &str, alias: &str| match bound.iter_mut().find(|(t, _)| t == token) {
+        Some((_, aliases)) => aliases.push(alias.to_owned()),
+        None => bound.push((token.to_owned(), vec![alias.to_owned()])),
+    };
+    let mut ambiguous_alias = None;
+    let mut chose = false;
+    for sentence in context.split(". ") {
+        if let Some(resolved) = sentence.strip_prefix("These names are already resolved: ") {
+            for name in resolved.split(", ") {
+                let (token, alias) = name.split_once(" @").unwrap();
+                bind(token, alias);
+            }
+            continue;
+        }
+        if let Some((alias, _)) = sentence
+            .strip_prefix('@')
+            .and_then(|rest| rest.split_once(" is not named in this workspace"))
+        {
+            ambiguous_alias = Some(alias.to_owned());
+            continue;
+        }
+        let (alias, offered) =
+            if let Some(offered) = sentence.strip_prefix("It is named in these workspaces: ") {
+                (ambiguous_alias.take().unwrap(), offered)
+            } else if let Some((alias, offered)) = sentence
+                .strip_prefix('@')
+                .and_then(|rest| rest.split_once(" is named in more than one "))
+                .and_then(|(alias, rest)| Some((alias.to_owned(), rest.split_once(": ")?.1)))
+            {
+                (alias, offered)
+            } else {
+                continue;
+            };
+        for token in offered.trim_end_matches('.').split(", ") {
+            if matches!(answer, Answer::All)
+                || matches!(answer, Answer::Pick(picks) if picks.contains(&(alias.as_str(), token)))
+            {
+                bind(token, &alias);
+                chose = true;
+            }
+        }
+    }
+    assert!(chose, "the picker offers the answer: {context}");
+    let text = namedrop::parse_mentions(prompt).unwrap().body;
+    for (index, (token, aliases)) in bound.iter().enumerate() {
+        let names = aliases
+            .iter()
+            .map(|alias| format!("@{alias}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        fixture.agent_send(
+            workspace,
+            pane,
+            &format!("resend-{index}"),
+            &format!("{token} {names} {text}"),
+        );
+    }
+    for workspace in ["w1", "w2", "w3"] {
+        fixture.drain(workspace);
+    }
+    for pane in PANES {
+        for envelope in fixture.herdr.envelopes(pane) {
+            assert_eq!(Fixture::untrusted_body(&envelope), text, "{pane}");
+        }
+    }
+    context
+}
+
+fn received(fixture: &Fixture, panes: &[&str]) -> Vec<usize> {
+    panes
+        .iter()
+        .map(|pane| fixture.herdr.envelopes(pane).len())
+        .collect()
+}
+
+const PANES: [&str; 7] = [
+    "pane-1-lead",
+    "pane-2-lead",
+    "pane-3-lead",
+    "pane-2-tester",
+    "pane-2-scout",
+    "pane-3-scout",
+    "pane-1-planner",
+];
+
+#[test]
+fn a_repository_picker_resend_keeps_the_name_its_exact_workspace_resolved() {
+    for (answer, expected) in [
+        (Answer::Pick(&[("scout", "#ws2")]), [1, 0, 0, 0, 1, 0, 0]),
+        (Answer::All, [1, 0, 0, 0, 1, 1, 0]),
+    ] {
+        let fixture = Fixture::new();
+        fixture.register_all();
+        *fixture.herdr.repos.lock().unwrap() = ["w1", "w2", "w3"]
+            .map(|space| (space.to_owned(), "namestack".to_owned()))
+            .to_vec();
+        fixture.herdr.labels.lock().unwrap()[0].1 = "namestack".to_owned();
+        let context = follow_picker(
+            &fixture,
+            "w1",
+            "pane-1-planner",
+            "#namestack @lead @scout Run the suite.",
+            answer,
+        );
+        assert_eq!(
+            received(&fixture, &PANES),
+            expected,
+            "@lead resolved to the main checkout, so only @scout was ever the person's choice"
+        );
+        assert!(
+            context.contains("once per workspace, never with #all"),
+            "{context}"
+        );
+    }
+}
+
+#[test]
+fn a_repository_picker_resend_keeps_the_name_only_one_worktree_has() {
+    for (answer, expected) in [
+        (Answer::Pick(&[("scout", "#ws3")]), [0, 0, 0, 1, 0, 1, 0]),
+        (Answer::All, [0, 0, 0, 1, 1, 1, 0]),
+    ] {
+        let fixture = Fixture::new();
+        fixture.register_all();
+        with_namestack_worktrees(&fixture);
+        let context = follow_picker(
+            &fixture,
+            "w1",
+            "pane-1-lead",
+            "#namestack @tester @scout Run the suite.",
+            answer,
+        );
+        assert_eq!(
+            received(&fixture, &PANES),
+            expected,
+            "@tester lives only in #ws2, whichever worktree the person picks for @scout"
+        );
+        assert!(
+            context.contains("once per workspace, never with #all"),
+            "{context}"
+        );
+    }
+}
+
+#[test]
+fn the_unqualified_picker_resend_keeps_the_local_name() {
+    for (answer, expected) in [
+        (Answer::Pick(&[("scout", "#ws2")]), [1, 0, 0, 0, 1, 0, 0]),
+        (Answer::All, [1, 0, 0, 0, 1, 1, 0]),
+    ] {
+        let fixture = Fixture::new();
+        fixture.register_all();
+        let context = follow_picker(
+            &fixture,
+            "w1",
+            "pane-1-planner",
+            "@lead @scout Map the repository.",
+            answer,
+        );
+        assert_eq!(
+            received(&fixture, &PANES),
+            expected,
+            "@lead is local, so only @scout was ever the person's choice"
+        );
+        assert!(
+            context.contains("once per workspace, never with #all"),
+            "{context}"
+        );
+    }
+}
+
+#[test]
+fn the_picker_resend_delivers_the_task_text_exactly_as_typed() {
+    for body in [
+        "# Heading\n\nRun the suite.",
+        "Run these:\n  cargo test\n    cargo clippy -- -D warnings",
+    ] {
+        let fixture = Fixture::new();
+        fixture.register_all();
+        with_namestack_worktrees(&fixture);
+        let context = follow_picker(
+            &fixture,
+            "w1",
+            "pane-1-lead",
+            &format!("#namestack @scout {body}"),
+            Answer::Pick(&[("scout", "#ws3")]),
+        );
+        assert!(context.contains("exactly as written"), "{context}");
+        assert_eq!(received(&fixture, &PANES), [0, 0, 0, 0, 0, 1, 0]);
+        assert_eq!(
+            Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-3-scout")),
+            body
+        );
+    }
+}
+
+#[test]
+fn the_picker_resend_sends_each_ambiguous_name_where_the_person_chose() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    fixture.rename("w2", "tester", "builder");
+    fixture.rename("w3", "lead", "builder");
+    follow_picker(
+        &fixture,
+        "w1",
+        "pane-1-planner",
+        "@builder @scout Map the repository.",
+        Answer::Pick(&[("builder", "#ws2"), ("scout", "#ws3")]),
+    );
+    assert_eq!(received(&fixture, &PANES), [0, 0, 0, 1, 0, 1, 0]);
+    assert_eq!(
+        Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-2-tester")),
+        "Map the repository."
+    );
 }
 
 #[test]
