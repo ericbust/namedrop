@@ -198,6 +198,8 @@ Names are unique per Herdr workspace, so two workspaces can each have an `@lead`
 
 Labels match without case, and a space in a label matches a hyphen, so `#my-space` reaches the workspace labelled "My Space". Every workspace also answers to its Herdr id, such as `#w12`. Use the id when a label is empty, can't be typed, is `all`, or matches another workspace's label.
 
+Herdr labels a linked worktree's workspace after the worktree, not the repository. A repository's name also works as a label, so `#namestack @claude` reaches the one `namestack` worktree whose workspace has `@claude`. A workspace labelled `namestack` that has the name still wins. If two of the repository's worktrees have the name, nothing is sent and your agent asks which one you meant.
+
 A mention without a label stays in the current workspace when the name exists there. If it doesn't, and exactly one other workspace has the name, the prompt goes there and Herdr shows where it went. If several workspaces have the name, nothing is sent and your agent asks which one you meant. You can also ask in plain words, such as "ask my @lead panes to report back".
 
 Replies come back to the workspace you sent from. Context handoffs and tracked coordination stay inside one workspace.

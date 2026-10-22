@@ -153,28 +153,32 @@ where
 fn workspace_picker(choices: &[AmbiguousName]) -> String {
     let named = choices
         .iter()
-        .map(|choice| {
-            format!(
-                "@{} is not named in this workspace. It is named in these workspaces: {}.",
-                choice.alias,
-                choice
-                    .labels
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })
+        .map(|choice| format!("{}.", choice.describe(", ")))
         .collect::<Vec<_>>()
         .join(" ");
+    let mut repos: Vec<String> = Vec::new();
+    for repo in choices.iter().filter_map(|choice| choice.within.as_ref()) {
+        if !repos.contains(&repo.to_string()) {
+            repos.push(repo.to_string());
+        }
+    }
+    let source = if repos.is_empty() {
+        "a source made of the chosen #label tokens (or #all), a space, and their prompt unchanged"
+            .to_owned()
+    } else {
+        format!(
+            "their prompt unchanged except that {} is replaced by the chosen #label tokens (every \
+             offered token for all of them, never #all)",
+            repos.join(" and ")
+        )
+    };
     format!(
         "Namedrop did not send this prompt. {named} Nothing was sent and nothing is queued. Ask \
          the person which workspace they meant. Offer each workspace, and \"all of them\" when \
          there are two or more. Use your host's question tool if it has one (AskUserQuestion on \
          Claude Code). Otherwise ask in one line and end your turn. Do not choose for them and \
          do not start the task. When they answer, run `send` with author_kind agent_session and \
-         a source made of the chosen #label tokens (or #all), a space, and their prompt \
-         unchanged."
+         {source}."
     )
 }
 

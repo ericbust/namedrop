@@ -52,6 +52,8 @@ const SPACES: [Space; 3] = [
 struct FakeHerdr {
     repo: String,
     labels: Mutex<Vec<(String, String)>>,
+    /// The repository Herdr stamps on a workspace's checkout, by workspace id.
+    repos: Mutex<Vec<(String, String)>>,
     workspace_list_fails: AtomicBool,
     prompts: Mutex<Vec<(String, String)>>,
     notifications: Mutex<Vec<Vec<String>>>,
@@ -68,6 +70,7 @@ impl FakeHerdr {
                     .map(|(id, label, _)| ((*id).to_owned(), (*label).to_owned()))
                     .collect(),
             ),
+            repos: Mutex::new(Vec::new()),
             workspace_list_fails: AtomicBool::new(false),
             prompts: Mutex::new(Vec::new()),
             notifications: Mutex::new(Vec::new()),
@@ -102,8 +105,19 @@ impl HerdrCommandExecutor for FakeHerdr {
             }
             ["workspace", "list"] => {
                 let labels = self.labels.lock().unwrap();
+                let repos = self.repos.lock().unwrap();
                 json!({"result":{"type":"workspace_list","workspaces": labels.iter().enumerate()
-                    .map(|(number, (id, label))| json!({"workspace_id":id,"label":label,"number":number + 1}))
+                    .map(|(number, (id, label))| {
+                        let mut workspace = json!({"workspace_id":id,"label":label,"number":number + 1});
+                        if let Some((_, repo)) = repos.iter().find(|(space, _)| space == id) {
+                            workspace["worktree"] = json!({
+                                "checkout_path": format!("/worktrees/{repo}/{label}"),
+                                "is_linked_worktree": true,
+                                "repo_name": repo,
+                            });
+                        }
+                        workspace
+                    })
                     .collect::<Vec<_>>()}})
                 .to_string()
             }
@@ -1348,6 +1362,62 @@ fn local_and_unknown_mentions_answer_exactly_as_before() {
     let context = additional_context(&missed);
     assert!(context.starts_with(ROSTER_MARKER), "{context}");
     assert!(context.ends_with(MISS_GUIDANCE), "{context}");
+}
+
+fn with_namestack_worktrees(fixture: &Fixture) {
+    *fixture.herdr.repos.lock().unwrap() = vec![
+        ("w2".to_owned(), "namestack".to_owned()),
+        ("w3".to_owned(), "namestack".to_owned()),
+    ];
+}
+
+#[test]
+fn a_repository_name_reaches_the_one_worktree_with_the_name() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    with_namestack_worktrees(&fixture);
+    assert_eq!(
+        fixture.hook("w1", "pane-1-lead", "#namestack @tester Run the suite."),
+        Some(json!({"decision":"block","reason":"Collaboration message sent."})),
+        "no workspace is labelled namestack, so the repository alone makes it a scope"
+    );
+    fixture.drain("w2");
+    assert_eq!(fixture.herdr.envelopes("pane-2-tester").len(), 1);
+}
+
+#[test]
+fn a_repository_name_in_two_worktrees_asks_the_person_and_sends_nothing() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    with_namestack_worktrees(&fixture);
+    let before = fixture.message_rows();
+    let output = fixture.hook("w1", "pane-1-lead", "#namestack @scout Map the repository.");
+    let context = additional_context(&output);
+    assert!(context.starts_with(ROSTER_MARKER), "{context}");
+    assert!(
+        context.contains("@scout is named in more than one namestack worktree: #ws2, #ws3."),
+        "{context}"
+    );
+    assert!(
+        context.contains("#namestack is replaced by the chosen #label tokens"),
+        "{context}"
+    );
+    assert!(!context.contains("(or #all)"), "{context}");
+    assert_eq!(fixture.message_rows(), before);
+
+    let refused = fixture
+        .try_send(
+            "w1",
+            "pane-1-lead",
+            json!({"request_id":"repo-ambiguous","author_kind":"agent_session",
+                   "source":"#namestack @scout Map the repository."}),
+        )
+        .unwrap_err();
+    assert!(
+        refused.contains("@scout is named in more than one namestack worktree: #ws2, #ws3"),
+        "{refused}"
+    );
+    assert_eq!(fixture.message_rows(), before);
 }
 
 #[test]

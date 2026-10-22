@@ -70,7 +70,7 @@ fn is_label_token_byte(byte: u8) -> bool {
 
 pub(crate) struct HerdrWorkspaces<'a, E> {
     herdr: &'a E,
-    listed: std::cell::OnceCell<Vec<(String, String)>>,
+    listed: std::cell::OnceCell<Vec<crate::lifecycle::ListedWorkspace>>,
 }
 
 impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
@@ -81,7 +81,7 @@ impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
         }
     }
 
-    fn list(&self) -> Result<&[(String, String)], String> {
+    fn list(&self) -> Result<&[crate::lifecycle::ListedWorkspace], String> {
         if let Some(listed) = self.listed.get() {
             return Ok(listed);
         }
@@ -89,11 +89,18 @@ impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
         Ok(self.listed.get_or_init(|| listed))
     }
 
+    /// Whether `#label` names a workspace by its label or id, or names the
+    /// repository some workspace's checkout belongs to.
     pub(crate) fn names(&self, label: &WorkspaceLabel) -> Result<bool, String> {
-        Ok(self.list()?.iter().any(|(id, herdr_label)| {
-            [id, herdr_label]
-                .into_iter()
-                .any(|name| &WorkspaceLabel::from_herdr(name) == label)
+        Ok(self.list()?.iter().any(|workspace| {
+            [
+                Some(&workspace.id),
+                Some(&workspace.label),
+                workspace.repo.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|name| &WorkspaceLabel::from_herdr(name) == label)
         }))
     }
 }
@@ -107,6 +114,10 @@ pub(crate) struct SpaceDirectory {
 pub(crate) struct SpaceEntry {
     pub space: SpaceId,
     pub label: Option<WorkspaceLabel>,
+    /// The repository this workspace's checkout belongs to. A `#repo` token
+    /// reaches every workspace that shares it: the main checkout and each
+    /// linked worktree alike.
+    pub repo: Option<WorkspaceLabel>,
     pub display: String,
     pub activated: bool,
     pub names: BTreeSet<String>,
@@ -142,9 +153,10 @@ impl SpaceDirectory {
         else {
             return Err("Namedrop is not activated for this space".to_owned());
         };
-        let here_entry = |label: Option<&str>| SpaceEntry {
+        let here_entry = |label: Option<&str>, repo: Option<&str>| SpaceEntry {
             space: here.clone(),
             label: label.map(WorkspaceLabel::from_herdr),
+            repo: repo.map(WorkspaceLabel::from_herdr),
             display: label.map(displayed_label).unwrap_or_default(),
             activated: true,
             names: here_names.names.clone(),
@@ -152,20 +164,22 @@ impl SpaceDirectory {
         };
         let crosses = run.scope != SpaceScope::Unqualified
             || run.aliases.iter().any(|alias| {
-                !here_entry(None).answers_to(alias)
+                !here_entry(None, None).answers_to(alias)
                     && index.iter().any(|space| {
                         &space.space != here && space.activated && space.names.contains(alias)
                     })
             });
         if !crosses {
-            return Ok(Self::new(here_entry(None), Vec::new()));
+            return Ok(Self::new(here_entry(None, None), Vec::new()));
         }
-        let labels = workspaces.list()?;
-        let entry = |space: SpaceId, label: Option<&str>| {
+        let listed = workspaces.list()?;
+        let entry = |workspace: &crate::lifecycle::ListedWorkspace| {
+            let space = SpaceId::new(&workspace.id);
             let stored = index.iter().find(|stored| stored.space == space);
             SpaceEntry {
-                label: label.map(WorkspaceLabel::from_herdr),
-                display: label.map(displayed_label).unwrap_or_default(),
+                label: Some(WorkspaceLabel::from_herdr(&workspace.label)),
+                repo: workspace.repo.as_deref().map(WorkspaceLabel::from_herdr),
+                display: displayed_label(&workspace.label),
                 activated: stored.is_some_and(|stored| stored.activated),
                 names: stored
                     .map(|stored| stored.names.clone())
@@ -174,16 +188,21 @@ impl SpaceDirectory {
                 space,
             }
         };
-        let here_label = labels
+        let here_listed = listed
             .iter()
-            .find(|(id, _)| id == here.as_str())
-            .map(|(_, label)| label.as_str());
-        let others = labels
+            .find(|workspace| workspace.id == here.as_str());
+        let others = listed
             .iter()
-            .filter(|(id, _)| id != here.as_str())
-            .map(|(id, label)| entry(SpaceId::new(id), Some(label)))
+            .filter(|workspace| workspace.id != here.as_str())
+            .map(entry)
             .collect();
-        Ok(Self::new(here_entry(here_label), others))
+        Ok(Self::new(
+            here_entry(
+                here_listed.map(|workspace| workspace.label.as_str()),
+                here_listed.and_then(|workspace| workspace.repo.as_deref()),
+            ),
+            others,
+        ))
     }
 
     pub(crate) fn new(here: SpaceEntry, others: Vec<SpaceEntry>) -> Self {
@@ -210,33 +229,80 @@ impl SpaceDirectory {
         )
     }
 
-    fn named(&self, label: &WorkspaceLabel) -> Result<&SpaceEntry, RouteRefusal> {
-        let matches: Vec<&SpaceEntry> = self
+    /// What a typed `#label` reaches. A label that names two workspaces is
+    /// refused before the repository is consulted: the person typed a token
+    /// that already means two things, so a third reading would only guess.
+    fn scope<'a>(&'a self, label: &'a WorkspaceLabel) -> Result<LabelScope<'a>, RouteRefusal> {
+        let exact: Vec<&SpaceEntry> = self
             .entries
             .iter()
             .filter(|entry| &entry.id() == label || entry.label.as_ref() == Some(label))
             .collect();
-        match matches.as_slice() {
-            [] => Err(RouteRefusal::UnknownWorkspace {
-                label: label.clone(),
-                known: self
-                    .entries
-                    .iter()
-                    .filter(|entry| entry.activated)
-                    .map(|entry| self.token(entry))
-                    .collect(),
-            }),
-            [entry] if !entry.activated => Err(RouteRefusal::NotActivated {
-                label: label.clone(),
-            }),
-            [entry] => Ok(entry),
-            many => Err(RouteRefusal::DuplicateLabel {
-                label: label.clone(),
-                workspaces: many
-                    .iter()
-                    .map(|entry| (entry.display.clone(), self.token(entry)))
-                    .collect(),
-            }),
+        let family: Vec<&SpaceEntry> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.repo.as_ref() == Some(label))
+            .filter(|entry| !exact.iter().any(|other| other.space == entry.space))
+            .collect();
+        let exact = match exact.as_slice() {
+            [] if family.is_empty() => {
+                return Err(RouteRefusal::UnknownWorkspace {
+                    label: label.clone(),
+                    known: self
+                        .entries
+                        .iter()
+                        .filter(|entry| entry.activated)
+                        .map(|entry| self.token(entry))
+                        .collect(),
+                });
+            }
+            [] => None,
+            [entry] => Some(*entry),
+            many => {
+                return Err(RouteRefusal::DuplicateLabel {
+                    label: label.clone(),
+                    workspaces: many
+                        .iter()
+                        .map(|entry| (entry.display.clone(), self.token(entry)))
+                        .collect(),
+                });
+            }
+        };
+        let family: Vec<&SpaceEntry> = family.into_iter().filter(|entry| entry.activated).collect();
+        Ok(LabelScope {
+            label,
+            not_activated: match exact {
+                Some(entry) => !entry.activated,
+                None => family.is_empty(),
+            },
+            exact: exact.filter(|entry| entry.activated),
+            family,
+        })
+    }
+}
+
+/// One typed `#label`: the activated workspace it names exactly, and the
+/// activated workspaces of the repository it names. The exact match wins; the
+/// repository is the fallback for a name the exact match lacks.
+struct LabelScope<'a> {
+    label: &'a WorkspaceLabel,
+    exact: Option<&'a SpaceEntry>,
+    family: Vec<&'a SpaceEntry>,
+    /// A name found nowhere in this scope reports that Namedrop is not
+    /// activated, rather than that the name is missing.
+    not_activated: bool,
+}
+
+impl<'a> LabelScope<'a> {
+    fn homes(&self, alias: &str) -> Vec<&'a SpaceEntry> {
+        match self.exact {
+            Some(exact) if exact.answers_to(alias) => vec![exact],
+            _ => self
+                .family
+                .iter()
+                .copied()
+                .filter(|entry| entry.answers_to(alias))
+                .collect(),
         }
     }
 }
@@ -438,6 +504,27 @@ pub(crate) enum RouteRefusal {
 pub(crate) struct AmbiguousName {
     pub alias: String,
     pub labels: Vec<WorkspaceLabel>,
+    /// The `#repo` token the person typed, when the name is ambiguous among
+    /// that repository's workspaces rather than among all of them.
+    pub within: Option<WorkspaceLabel>,
+}
+
+impl AmbiguousName {
+    pub(crate) fn describe(&self, separator: &str) -> String {
+        match &self.within {
+            None => format!(
+                "@{} is not named in this workspace. It is named in these workspaces: {}",
+                self.alias,
+                joined(&self.labels, separator)
+            ),
+            Some(repo) => format!(
+                "@{} is named in more than one {} worktree: {}",
+                self.alias,
+                repo.as_str(),
+                joined(&self.labels, separator)
+            ),
+        }
+    }
 }
 
 impl fmt::Display for RouteRefusal {
@@ -449,16 +536,26 @@ impl fmt::Display for RouteRefusal {
                     if index > 0 {
                         formatter.write_str("; ")?;
                     }
-                    write!(
-                        formatter,
-                        "@{} is not named in this workspace but is named in {}",
-                        choice.alias,
-                        joined(&choice.labels, " and ")
-                    )?;
+                    match &choice.within {
+                        None => write!(
+                            formatter,
+                            "@{} is not named in this workspace but is named in {}",
+                            choice.alias,
+                            joined(&choice.labels, " and ")
+                        )?,
+                        Some(_) => formatter.write_str(&choice.describe(", "))?,
+                    }
                 }
-                formatter.write_str(
-                    "; prefix the source with the workspace you mean, or #all for every one",
-                )
+                if choices.iter().any(|choice| choice.within.is_some()) {
+                    formatter.write_str(
+                        "; name the workspace you mean in place of the repository, or name each \
+                         one",
+                    )
+                } else {
+                    formatter.write_str(
+                        "; prefix the source with the workspace you mean, or #all for every one",
+                    )
+                }
             }
             Self::UnknownWorkspace { label, known } if known.is_empty() => {
                 write!(formatter, "no workspace is labelled {label}")
@@ -561,6 +658,7 @@ pub(crate) fn plan_route(
                     homes => ambiguous.push(AmbiguousName {
                         alias: alias.clone(),
                         labels: homes.iter().map(|home| directory.token(home)).collect(),
+                        within: None,
                     }),
                 }
             }
@@ -569,32 +667,52 @@ pub(crate) fn plan_route(
             }
         }
         SpaceScope::Named(labels) => {
-            let named = labels
+            let scopes = labels
                 .iter()
-                .map(|label| directory.named(label))
+                .map(|label| directory.scope(label))
                 .collect::<Result<Vec<_>, _>>()?;
+            let mut reached = vec![false; scopes.len()];
+            let mut ambiguous = Vec::new();
             for alias in &run.aliases {
-                let homes: Vec<&SpaceEntry> = named
-                    .iter()
-                    .copied()
-                    .filter(|entry| entry.answers_to(alias))
-                    .collect();
-                if homes.is_empty() {
+                let mut found = false;
+                for (scope, reached) in scopes.iter().zip(&mut reached) {
+                    match scope.homes(alias).as_slice() {
+                        [] if scope.not_activated => {
+                            return Err(RouteRefusal::NotActivated {
+                                label: scope.label.clone(),
+                            });
+                        }
+                        [] => continue,
+                        [home] => {
+                            if !targets.iter().any(|(target, named)| {
+                                target.space == home.space && *named == alias
+                            }) {
+                                targets.push((home, alias));
+                            }
+                        }
+                        homes => ambiguous.push(AmbiguousName {
+                            alias: alias.clone(),
+                            labels: homes.iter().map(|home| directory.token(home)).collect(),
+                            within: Some(scope.label.clone()),
+                        }),
+                    }
+                    *reached = true;
+                    found = true;
+                }
+                if !found {
                     return Err(RouteRefusal::NotInNamedWorkspaces {
                         alias: alias.clone(),
                         labels: labels.clone(),
                     });
                 }
-                targets.extend(homes.into_iter().map(|home| (home, alias)));
             }
-            if let Some((_, label)) = named.iter().zip(labels).find(|(entry, _)| {
-                !targets
-                    .iter()
-                    .any(|(target, _)| target.space == entry.space)
-            }) {
+            if let Some((scope, _)) = scopes.iter().zip(&reached).find(|(_, reached)| !**reached) {
                 return Err(RouteRefusal::NothingForWorkspace {
-                    label: label.clone(),
+                    label: scope.label.clone(),
                 });
+            }
+            if !ambiguous.is_empty() {
+                return Err(RouteRefusal::Ambiguous { choices: ambiguous });
             }
         }
         SpaceScope::All => {
@@ -649,6 +767,7 @@ mod tests {
         SpaceEntry {
             space: SpaceId::new(id),
             label: Some(WorkspaceLabel::from_herdr(herdr_label)),
+            repo: None,
             display: herdr_label.to_owned(),
             activated: true,
             names: names.iter().map(|name| (*name).to_owned()).collect(),
@@ -729,6 +848,7 @@ mod tests {
                 choices: vec![AmbiguousName {
                     alias: "ops".to_owned(),
                     labels: vec![label("my-space"), label("ws3")],
+                    within: None,
                 }],
             })
         );
@@ -798,6 +918,168 @@ mod tests {
             Err(RouteRefusal::NothingForWorkspace {
                 label: label("ws3")
             })
+        );
+    }
+
+    fn worktree(id: &str, herdr_label: &str, repo: &str, names: &[&str]) -> SpaceEntry {
+        SpaceEntry {
+            repo: Some(WorkspaceLabel::from_herdr(repo)),
+            ..entry(id, herdr_label, names)
+        }
+    }
+
+    /// `namestack` is a repository with its main checkout in w2 (labelled
+    /// after the repo, not activated) and linked worktrees in w3, w4 and w5.
+    /// `tools` is a repository whose main checkout is activated.
+    fn repositories() -> SpaceDirectory {
+        SpaceDirectory::new(
+            entry("w1", "ws1", &["lead"]),
+            vec![
+                SpaceEntry {
+                    activated: false,
+                    ..worktree("w2", "namestack", "namestack", &["claude"])
+                },
+                worktree("w3", "catchup-again", "namestack", &["claude", "codex"]),
+                worktree("w4", "other", "namestack", &["codex", "pi"]),
+                SpaceEntry {
+                    activated: false,
+                    ..worktree("w5", "parked", "namestack", &["pi", "ghost"])
+                },
+                worktree("w6", "tools", "tools", &["lead"]),
+                worktree("w7", "tools-fix", "tools", &["lead", "fixer"]),
+                worktree("w8", "solo-feature", "solo", &[]),
+            ],
+        )
+    }
+
+    #[test]
+    fn repository_resolution_table() {
+        let directory = repositories();
+        let plan = |labels: &[&str], aliases: &[&str]| {
+            plan_route(
+                &run(
+                    SpaceScope::Named(labels.iter().map(|token| label(token)).collect()),
+                    aliases,
+                ),
+                &directory,
+            )
+        };
+        assert_eq!(
+            legs(plan(&["namestack"], &["claude"])),
+            [leg("w3", &["claude"])],
+            "an inactive main checkout hands the name to its one worktree that has it"
+        );
+        assert_eq!(
+            legs(plan(&["tools"], &["lead"])),
+            [leg("w6", &["lead"])],
+            "the exact label wins over another worktree with the same name"
+        );
+        assert_eq!(
+            legs(plan(&["tools"], &["fixer"])),
+            [leg("w7", &["fixer"])],
+            "an activated exact match without the name still looks in its repository"
+        );
+        assert_eq!(
+            plan(&["namestack"], &["codex", "claude", "pi"]),
+            Err(RouteRefusal::Ambiguous {
+                choices: vec![AmbiguousName {
+                    alias: "codex".to_owned(),
+                    labels: vec![label("catchup-again"), label("other")],
+                    within: Some(label("namestack")),
+                }],
+            }),
+            "two homes ask, and an inactive worktree is not a home"
+        );
+        assert_eq!(
+            plan(&["namestack"], &["ghost"]),
+            Err(RouteRefusal::NotActivated {
+                label: label("namestack")
+            }),
+            "an inactive exact match with no home in its repository is still not activated"
+        );
+        assert_eq!(
+            plan(&["namestack"], &["claude", "nobody"]),
+            Err(RouteRefusal::NotActivated {
+                label: label("namestack")
+            }),
+            "one missing name keeps the whole send refused"
+        );
+        assert!(
+            matches!(
+                plan(&["nowhere"], &["claude"]),
+                Err(RouteRefusal::UnknownWorkspace { .. })
+            ),
+            "a token naming neither a workspace nor a repository is unknown"
+        );
+        assert_eq!(
+            plan(&["solo"], &["lead"]),
+            Err(RouteRefusal::NotInNamedWorkspaces {
+                alias: "lead".to_owned(),
+                labels: vec![label("solo")],
+            }),
+            "a repository-only token is valid even when no worktree has the name"
+        );
+        assert_eq!(
+            legs(plan(&["namestack", "catchup-again"], &["claude"])),
+            [leg("w3", &["claude"])],
+            "a workspace reached twice gets the name once"
+        );
+        assert_eq!(
+            plan(&["ws1", "namestack"], &["lead"]),
+            Err(RouteRefusal::NotActivated {
+                label: label("namestack")
+            })
+        );
+    }
+
+    #[test]
+    fn a_repository_name_alone_reaches_its_one_worktree() {
+        let directory = SpaceDirectory::new(
+            entry("w1", "ws1", &["lead"]),
+            vec![
+                worktree("w2", "catchup-again", "namestack", &["claude"]),
+                worktree("w3", "other", "namestack", &["codex"]),
+            ],
+        );
+        assert_eq!(
+            legs(plan_route(
+                &run(SpaceScope::Named(vec![label("namestack")]), &["claude"]),
+                &directory
+            )),
+            [leg("w2", &["claude"])]
+        );
+    }
+
+    #[test]
+    fn a_duplicate_label_refuses_before_its_repository_is_consulted() {
+        let directory = SpaceDirectory::new(
+            entry("w1", "ws1", &[]),
+            vec![
+                worktree("w2", "namestack", "namestack", &[]),
+                worktree("w3", "Namestack", "namestack", &[]),
+                worktree("w4", "catchup-again", "namestack", &["claude"]),
+            ],
+        );
+        assert!(matches!(
+            plan_route(
+                &run(SpaceScope::Named(vec![label("namestack")]), &["claude"]),
+                &directory
+            ),
+            Err(RouteRefusal::DuplicateLabel { .. })
+        ));
+    }
+
+    #[test]
+    fn a_name_in_two_worktrees_says_which_repository_and_offers_each() {
+        let refusal = plan_route(
+            &run(SpaceScope::Named(vec![label("namestack")]), &["codex"]),
+            &repositories(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            refusal.to_string(),
+            "@codex is named in more than one namestack worktree: #catchup-again, #other; name \
+             the workspace you mean in place of the repository, or name each one"
         );
     }
 

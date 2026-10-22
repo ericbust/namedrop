@@ -581,11 +581,35 @@ def main():
                     shell_pids.append(host("pane", "process-info", "--pane", panes[space])["process_info"]["shell_pid"])
                     command("sh", root / "scripts/setup.sh", "activate", "--json", timeout=120, cwd=directories[space],
                             context=dict(context, HERDR_WORKSPACE_ID=spaces[space], HERDR_PANE_ID=panes[space]))
+                # The repository's main checkout is labelled after the repo and never activated; Herdr labels each
+                # linked worktree's workspace after the worktree, so only the repo name ties them together.
+                stack = directories["stack"] = base / "stack"
+                stack.mkdir()
+                command("git", "init", "--quiet", "-b", "main", cwd=stack)
+                command("git", "-c", "user.name=verify", "-c", "user.email=verify@example.invalid", "commit", "--quiet",
+                        "--allow-empty", "-m", "fixture", cwd=stack)
+                created = host("workspace", "create", "--cwd", str(stack), "--label", "stack")
+                for space, label in (("stack", None), ("wt-one", "wt-one"), ("wt-two", "wt-two")):
+                    if label is not None:
+                        directories[space] = base / label
+                        command("git", "worktree", "add", "--quiet", "-b", label, str(directories[space]), cwd=stack)
+                        created = host("worktree", "open", "--workspace", spaces["stack"], "--path",
+                                       str(directories[space]), "--label", label)
+                    spaces[space] = created["workspace"]["workspace_id"]
+                    panes[space] = created["root_pane"]["pane_id"]
+                    wait(lambda: (base / "home" / f"ready-{panes[space]}").exists(), f"{space} native bash prompt")
+                    shell_pids.append(host("pane", "process-info", "--pane", panes[space])["process_info"]["shell_pid"])
+                    if label is not None:
+                        command("sh", root / "scripts/setup.sh", "activate", "--json", timeout=120,
+                                cwd=directories[space],
+                                context=dict(context, HERDR_WORKSPACE_ID=spaces[space], HERDR_PANE_ID=panes[space]))
                 open_tab("alpha-lead", "lead", "Verification alpha lead")
                 open_tab("beta-reviewer", "beta", "Verification beta reviewer")
+                open_tab("wt-one-twin", "wt-one", "Verification wt-one twin")
                 cast = (("alpha-lead", "lead", "alpha-lead", "lead"), ("alpha-helper", "lead", "worker", "helper"),
                         ("beta-lead", "beta", "beta", "lead"), ("beta-reviewer", "beta", "beta-reviewer", "reviewer"),
-                        ("gamma-lead", "gamma", "gamma", "lead"))
+                        ("gamma-lead", "gamma", "gamma", "lead"), ("wt-one-builder", "wt-one", "wt-one", "builder"),
+                        ("wt-one-twin", "wt-one", "wt-one-twin", "twin"), ("wt-two-twin", "wt-two", "wt-two", "twin"))
             else:
                 open_tab("lead-agent", "lead", "Verification lead agent")
                 cast = (("lead", "lead", "lead-agent", "lead"), ("worker", "lead", "worker", "worker"))
@@ -1009,8 +1033,13 @@ def main():
                 try:
                     listed = trace["workspace_list"] = host("workspace", "list")
                     labels = {w["workspace_id"]: w.get("label") for w in listed["workspaces"]}
-                    require(labels == {spaces["lead"]: "alpha", spaces["beta"]: "Beta Space", spaces["gamma"]: "gamma"},
-                            "g: herdr workspace list reports the labels alpha, Beta Space and gamma", labels)
+                    require(labels == {spaces["lead"]: "alpha", spaces["beta"]: "Beta Space", spaces["gamma"]: "gamma",
+                                       spaces["stack"]: "stack", spaces["wt-one"]: "wt-one", spaces["wt-two"]: "wt-two"},
+                            "g: herdr workspace list reports the labels alpha, Beta Space, gamma, stack, wt-one and wt-two",
+                            labels)
+                    repos = {w["workspace_id"]: (w.get("worktree") or {}).get("repo_name") for w in listed["workspaces"]}
+                    require(repos[spaces["wt-one"]] == "stack" and repos[spaces["wt-two"]] == "stack",
+                            "g: Herdr stamps both linked worktrees with the repository name stack", repos)
                     for runtime, wrapper in wrappers.items():
                         require(wrapper.is_file(), f"h: activation installed the {runtime} wrapper", str(wrapper))
                         (evidence / f"{runtime}-user-prompt-submit.sh").write_text(wrapper.read_text())
@@ -1090,6 +1119,28 @@ def main():
                             {role: e["untrusted_body"] for role, e in leads.items()})
                     for envelope in leads.values():
                         bound(envelope, "complete.no-reply")
+
+                    built = trace["i"] = hook("alpha-helper", "#stack @builder build it")
+                    require(built["output"] == blocked,
+                            "i: the hook blocks #stack, which names the repository, not a workspace with the name",
+                            built["stdout"])
+                    wake("alpha-helper")
+                    arrived = deliveries("i", ["wt-one-builder"])["wt-one-builder"]
+                    require(arrived["untrusted_body"].endswith("build it") and sender_workspace(arrived) == "alpha",
+                            "i: wt-one's builder receives it from alpha",
+                            {"body": arrived["untrusted_body"], "sender": arrived["control"]["sender"]})
+                    bound(arrived, "complete.no-reply")
+
+                    before_twin = message_state()
+                    twin = trace["j"] = hook("alpha-helper", "#stack @twin which one?")
+                    twin_text = ((twin["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                    require(twin_text.startswith("Namedrop workspace roster.")
+                            and "@twin is named in more than one stack worktree: #wt-one, #wt-two." in twin_text
+                            and "Nothing was sent" in twin_text,
+                            "j: the picker names the stack repository and offers #wt-one and #wt-two", twin_text)
+                    wake("alpha-helper")
+                    deliveries("j", [])
+                    require(message_state() == before_twin, "j: the picker persists nothing", message_state())
 
                     named = cli("address", "list", "--json")["data"]
                     lead_address = next(a for a in named if a["alias"] == "lead")

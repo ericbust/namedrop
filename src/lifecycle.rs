@@ -1569,10 +1569,10 @@ where
 {
     let spaces: Vec<(crate::SpaceId, crate::WorkspaceLabel)> = workspace_labels(runtime.herdr)?
         .into_iter()
-        .map(|(id, label)| {
+        .map(|workspace| {
             (
-                crate::SpaceId::new(id),
-                crate::WorkspaceLabel::from_herdr(&label),
+                crate::SpaceId::new(workspace.id),
+                crate::WorkspaceLabel::from_herdr(&workspace.label),
             )
         })
         .collect();
@@ -1730,9 +1730,16 @@ fn spaces_owning_checkout(
     Ok((owners, unknown))
 }
 
+pub(crate) struct ListedWorkspace {
+    pub id: String,
+    pub label: String,
+    /// The repository a workspace's checkout belongs to, when Herdr stamped one.
+    pub repo: Option<String>,
+}
+
 pub(crate) fn workspace_labels(
     herdr: &impl HerdrCommandExecutor,
-) -> Result<Vec<(String, String)>, String> {
+) -> Result<Vec<ListedWorkspace>, String> {
     let output = herdr.execute(&["workspace", "list"])?;
     let mut workspaces = serde_json::from_str::<WorkspaceListEnvelope>(&output.stdout)
         .map_err(|error| error.to_string())?
@@ -1745,7 +1752,11 @@ pub(crate) fn workspace_labels(
             let label = workspace
                 .label
                 .unwrap_or_else(|| workspace.workspace_id.clone());
-            (workspace.workspace_id, label)
+            ListedWorkspace {
+                id: workspace.workspace_id,
+                label,
+                repo: workspace.worktree.and_then(|worktree| worktree.repo_name),
+            }
         })
         .collect())
 }
@@ -2214,6 +2225,7 @@ struct WorkspaceEntry {
 #[derive(Deserialize)]
 struct WorkspaceWorktree {
     checkout_path: String,
+    repo_name: Option<String>,
 }
 
 #[derive(Deserialize)]
