@@ -675,11 +675,13 @@ fn coordination_protocol_and_legacy_routes() {
             .any(|o| o["token"] == "handoff.resolve")
     );
     legacy.complete("lead", &joined);
+    // An untracked join carries the untracked obligation and no other kind's
+    // rule: the plugin applied the priority order when it built the envelope.
     let instruction = joined["trusted_instruction"].as_str().unwrap();
-    assert!(instruction.contains("unless tracked, run bound complete.no-reply then emit a non-empty final response fulfilling the original user deliverable"));
+    assert!(instruction.contains("result_set: run bound complete.no-reply then emit a non-empty final response fulfilling the original user deliverable"));
     assert!(
-        instruction.find("context_request:").unwrap()
-            < instruction.find("Tracked result_set").unwrap()
+        !instruction.contains("context_request") && !instruction.contains("Tracked result_set"),
+        "{instruction}"
     );
 
     // Context fulfillment keeps first priority even within tracked work.
@@ -695,6 +697,13 @@ fn coordination_protocol_and_legacy_routes() {
     context.drain();
     let e = context.envelope("lead", &asked["message_id"]);
     assert!(!e["control"]["context_request"].is_null());
+    let instruction = e["trusted_instruction"].as_str().unwrap();
+    assert!(
+        instruction.contains("context_request: bound reply; hide body")
+            && !instruction.contains("result_set")
+            && !instruction.contains("then one status line"),
+        "{instruction}"
+    );
     let mut fulfill = context.bound(&e, "reply");
     fulfill["input"]["source"] = json!("@worker Synthetic context supplied.");
     fulfill["input"]["context"] = json!({"capture_git_state":false,"snapshot":{"objective":"Synthetic boundary review","applicable_user_instructions":[],"decisions":[],"completed_work":[],"current_work":["Review zero"],"blockers":[],"evidence":[]}});
