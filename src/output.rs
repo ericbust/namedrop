@@ -40,6 +40,7 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                 }
                 .into(),
             );
+            app_server_advice(&data["codex_app_server"], &mut lines);
             package_errors(&data["integration_packages"], &mut lines);
             if data["pane_type"] == "agent" && data["ready"] != true {
                 fields(&data["native_session_setup"], 0, &mut lines);
@@ -251,6 +252,20 @@ fn hook_steps(hooks: &Value, lines: &mut Vec<String>) {
     }
 }
 
+/// Codex's shared app-server advice, with each step on its own indented line
+/// so the commands stay copyable.
+fn app_server_advice(advice: &Value, lines: &mut Vec<String>) {
+    if !advice.is_object() {
+        return;
+    }
+    lines.push(format!("Warning: {}", text(&advice["summary"])));
+    lines.push(text(&advice["explanation"]));
+    lines.push(text(&advice["fix"]));
+    for step in advice["steps"].as_array().into_iter().flatten() {
+        lines.push(format!("  {}", text(step)));
+    }
+}
+
 fn package_errors(packages: &Value, lines: &mut Vec<String>) {
     if let Some(packages) = packages.as_object() {
         for (runtime, package) in packages {
@@ -391,6 +406,40 @@ mod tests {
         );
         let rendered = render_command_result_to_text(&busy);
         assert!(rendered.contains("idle shell") && !rendered.contains("agent setup"));
+    }
+
+    #[test]
+    fn naming_a_served_codex_pane_shows_the_shared_app_server_advice_whatever_its_readiness() {
+        let advice = crate::codex_app_server::advice(false);
+        for ready in [true, false] {
+            let result = CommandResult::success(
+                "name",
+                json!({"alias":"@builder", "pane_type":"agent", "ready":ready,
+                       "codex_app_server":advice, "native_session_setup":null,
+                       "tab_label":{"status":"applied"}}),
+            );
+            let rendered = render_command_result_to_text(&result);
+            assert!(
+                rendered.contains(&format!("Warning: {}\n", crate::codex_app_server::SUMMARY)),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(crate::codex_app_server::FIX),
+                "{rendered}"
+            );
+            for command in crate::codex_app_server::COMMANDS {
+                assert!(
+                    rendered.lines().any(|line| line == format!("  {command}")),
+                    "{command} is copyable on its own line: {rendered}"
+                );
+            }
+        }
+        let quiet = CommandResult::success(
+            "name",
+            json!({"alias":"@builder", "pane_type":"agent", "ready":true,
+                   "codex_app_server":null, "tab_label":{"status":"applied"}}),
+        );
+        assert!(!render_command_result_to_text(&quiet).contains("Warning"));
     }
 
     /// The readable table shows what a person needs to choose a collaborator:

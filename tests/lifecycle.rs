@@ -1,3 +1,5 @@
+#[path = "support/codex_app_server.rs"]
+mod codex_app_server;
 use clap::Parser;
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState,
@@ -637,6 +639,7 @@ fn assert_native_session_events(events: &[(Option<&'static str>, serde_json::Val
     assert_eq!(named["registered"], false);
     assert_eq!(named["ready"], false);
     assert_eq!(named["agent_session_id"], serde_json::Value::Null);
+    assert_eq!(named["codex_app_server"], serde_json::Value::Null);
     assert!(
         named["native_session_setup"]["explanation"]
             .as_str()
@@ -3347,5 +3350,58 @@ fn name_refuses_a_retired_or_renamed_away_alias_with_a_clear_message() {
         execute_lifecycle_operation("address.list", serde_json::json!({}), &first).unwrap(),
         before,
         "a refused name must leave every address as it was"
+    );
+}
+
+#[test]
+fn naming_a_codex_pane_the_shared_app_server_serves_gives_its_advice_instead_of_session_setup() {
+    let directory = TestDirectory::new();
+    let herdr = AgentTabHerdr::new(false, None);
+    let ids = FixedIds(AtomicU64::new(1));
+    let runtime = agent_tab_runtime(&directory, &herdr, &ids);
+    let server = codex_app_server::start_server(&directory.home().join(".codex"));
+
+    let named =
+        execute_lifecycle_operation("name", serde_json::json!({"alias": "builder"}), &runtime)
+            .unwrap();
+    let advice = &named["codex_app_server"];
+    assert_eq!(advice["status"], "codex_shared_app_server");
+    assert_eq!(advice["summary"], codex_app_server::SUMMARY);
+    assert!(
+        advice["fix"]
+            .as_str()
+            .unwrap()
+            .contains("Namedrop never changes Codex settings")
+    );
+    let steps = advice["steps"].as_array().unwrap();
+    for command in codex_app_server::COMMANDS {
+        assert!(steps.contains(&serde_json::json!(command)), "{command}");
+    }
+    assert_eq!(
+        named["native_session_setup"],
+        serde_json::Value::Null,
+        "a first prompt or a Herdr reinstall cannot help a served pane"
+    );
+    assert_eq!(
+        herdr.idle_label.lock().unwrap().as_deref(),
+        Some("@builder: see namedrop doctor")
+    );
+
+    drop(server);
+    execute_lifecycle_operation("reconcile", serde_json::json!({}), &runtime).unwrap();
+    assert_eq!(
+        herdr.idle_label.lock().unwrap().as_deref(),
+        Some("@builder: send a prompt to connect"),
+        "the label follows the server once it stops"
+    );
+    let named =
+        execute_lifecycle_operation("name", serde_json::json!({"alias": "builder"}), &runtime)
+            .unwrap();
+    assert_eq!(named["codex_app_server"], serde_json::Value::Null);
+    assert!(
+        named["native_session_setup"]["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("first prompt")
     );
 }
