@@ -1,13 +1,15 @@
 //! What the installed hook actually hands a native session at a prompt or task
 //! boundary: the current workspace persona roster, without changing how explicit
 //! Mentions route or how a Delivery Envelope authenticates.
+#[path = "support/codex_app_server.rs"]
+mod codex_app_server;
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
     PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
-    execute_session_start_hook, execute_user_prompt_submit_hook, install_integration_package,
-    issue_registration_challenge,
+    execute_codex_app_server_hook, execute_integration_operation, execute_lifecycle_operation,
+    execute_message_operation, execute_session_start_hook, execute_user_prompt_submit_hook,
+    install_integration_package, issue_registration_challenge,
 };
 use serde_json::{Value, json};
 use std::{
@@ -1418,5 +1420,105 @@ fn both_installed_wrappers_forward_a_roster_and_only_claude_forwards_the_attesta
                 "{runtime:?} session-start forwarded the wrong outputs for {output}"
             );
         }
+    }
+}
+
+/// What the real binary prints for a new Codex session whose hooks run inside
+/// Codex's shared app-server.
+fn app_server_notice(directory: &TestDirectory) -> String {
+    let output = codex_app_server::run_with_stdin(
+        codex_app_server::inside_server(
+            &directory.home.join(".codex"),
+            Path::new(env!("CARGO_BIN_EXE_namedrop")),
+        )
+        .args(["hook", "session-start", "--state-directory"])
+        .arg(&directory.state)
+        .env("HOME", &directory.home)
+        .env("CODEX_HOME", directory.home.join(".codex"))
+        .env("CLAUDE_CONFIG_DIR", directory.home.join(".claude"))
+        .env("HERDR_BIN_PATH", directory.root.join("no-herdr"))
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_PLUGIN_STATE_DIR")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID"),
+        r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}"#,
+    );
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[test]
+fn only_the_codex_session_start_wrapper_forwards_the_shared_app_server_notice_exactly() {
+    let directory = TestDirectory::new();
+    let notice = app_server_notice(&directory);
+    let value: Value = serde_json::from_str(&notice).expect(&notice);
+    assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    let executable = directory.root.join("hook-result");
+    for (runtime, output, forward) in [
+        (AgentRuntime::Codex, notice.clone(), true),
+        (AgentRuntime::Codex, format!("{notice} "), false),
+        (
+            AgentRuntime::Codex,
+            notice.replacen("Namedrop", "Nomedrop", 1),
+            false,
+        ),
+        (AgentRuntime::ClaudeCode, notice.clone(), false),
+    ] {
+        let package =
+            install_integration_package(&directory.home, runtime, &executable, &directory.state)
+                .unwrap();
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s' '{}'\n",
+                output.replace('\'', "'\"'\"'")
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let result = Command::new(package.join("scripts/session-start"))
+            .output()
+            .unwrap();
+        assert!(result.status.success(), "{runtime:?}: {result:?}");
+        assert_eq!(
+            String::from_utf8(result.stdout).unwrap(),
+            if forward { output } else { String::new() },
+            "{runtime:?}"
+        );
+    }
+}
+
+#[test]
+fn the_claude_session_start_wrapper_forwards_only_the_policy_as_before() {
+    let directory = TestDirectory::new();
+    let executable = directory.root.join("hook-result");
+    let package = install_integration_package(
+        &directory.home,
+        AgentRuntime::ClaudeCode,
+        &executable,
+        &directory.state,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(package.join("scripts/session-start")).unwrap(),
+        format!(
+            "#!/bin/sh\noutput=$('{}' hook session-start --state-directory '{}' 2>/dev/null) || exit 0\ncase \"$output\" in\n  '{{\"hookSpecificOutput\":{{\"additionalContext\":\"{POLICY_MARKER}'*'\",\"hookEventName\":\"SessionStart\"}}}}') printf '%s' \"$output\" ;;\nesac\nexit 0\n",
+            executable.display(),
+            directory.state.display()
+        )
+    );
+}
+
+#[test]
+fn the_app_server_notice_stays_silent_outside_a_server_and_for_other_input() {
+    for input in [
+        r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}"#,
+        r#"{"hook_event_name":"UserPromptSubmit","prompt":"hello","session_id":"s1"}"#,
+        "garbage",
+    ] {
+        assert_eq!(execute_codex_app_server_hook(input), None, "{input}");
     }
 }

@@ -119,3 +119,32 @@ pub fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     entries.sort();
     entries
 }
+
+/// Runs `program` with `args` as the child of a process that looks like a
+/// Codex shared app-server, the way the server runs a session's hooks. The
+/// trailing `:` keeps the shell from replacing itself with the program.
+pub fn inside_server(codex_home: &Path, program: &Path) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg0(server_program(codex_home))
+        .args(["-c", "\"$@\"; :", "sh"])
+        .arg(program);
+    command
+}
+
+pub fn run_with_stdin(command: &mut Command, input: &str) -> std::process::Output {
+    use std::io::Write;
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    child.wait_with_output().unwrap()
+}

@@ -421,7 +421,7 @@ fn prepare_integration_package(
         installed_instructions(package.instructions, runtime, executable, state_directory)?;
     let hooks = hooks_manifest(&directory)?;
     let hook = hook_script(runtime, executable, state_directory)?;
-    let session_start = session_start_script(executable, state_directory)?;
+    let session_start = session_start_script(runtime, executable, state_directory)?;
     let codex_version = codex_cache_version(&[
         runtime.as_str(),
         &instructions,
@@ -981,10 +981,14 @@ fn forward_marked_context(event: &str, marker: &str) -> String {
     )
 }
 
-/// The session-start wrapper. It forwards exactly one thing, the selection
-/// policy, and only when the plugin produced it, so a host never receives
-/// anything else under this event from Namedrop.
-fn session_start_script(executable: &Path, state_directory: &Path) -> Result<String, String> {
+/// The session-start wrapper. It forwards only what the plugin produced: the
+/// selection policy, and for Codex the fixed shared app-server notice, so a
+/// host never receives anything else under this event from Namedrop.
+fn session_start_script(
+    runtime: AgentRuntime,
+    executable: &Path,
+    state_directory: &Path,
+) -> Result<String, String> {
     let executable = executable.to_str().ok_or_else(|| {
         format!(
             "collaboration executable path is not valid UTF-8: {}",
@@ -997,8 +1001,15 @@ fn session_start_script(executable: &Path, state_directory: &Path) -> Result<Str
             state_directory.display()
         )
     })?;
+    let app_server_notice = match runtime {
+        AgentRuntime::Codex => format!(
+            "if [ \"$output\" = {} ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n",
+            shell_single_quote(&crate::hook::codex_app_server_hook_output().to_string())
+        ),
+        AgentRuntime::ClaudeCode => String::new(),
+    };
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{}exit 0\n",
+        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}exit 0\n",
         shell_single_quote(executable),
         shell_single_quote(state_directory),
         forward_marked_context("SessionStart", crate::persona::POLICY_MARKER),

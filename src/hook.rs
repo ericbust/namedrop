@@ -20,6 +20,8 @@ struct UserPromptSubmitInput {
 #[derive(Deserialize)]
 struct SessionStartInput {
     hook_event_name: String,
+    #[serde(default)]
+    source: Option<String>,
 }
 
 enum LeadingMentionRoute {
@@ -46,6 +48,38 @@ where
         return None;
     }
     crate::persona::session_policy(runtime).map(|policy| hook_output("SessionStart", &policy))
+}
+
+/// The shared app-server notice for a SessionStart that runs inside Codex's
+/// shared app-server, or `None`. It needs no runtime, which under the server
+/// usually cannot be built. A cleared or compacted session already showed the
+/// notice in its window, so only a new, resumed or forked one gets it.
+pub fn execute_codex_app_server_hook(input: &str) -> Option<Value> {
+    let input: SessionStartInput = serde_json::from_str(input).ok()?;
+    let rebuilt = matches!(input.source.as_deref(), Some("clear" | "compact"));
+    (input.hook_event_name == "SessionStart"
+        && !rebuilt
+        && crate::codex_app_server::runs_inside_server())
+    .then(codex_app_server_hook_output)
+}
+
+/// One fixed output, so the Codex session-start wrapper can forward it as an
+/// exact literal. The person sees `systemMessage` as one warning line; the
+/// agent gets the full advice and how to offer the fix.
+pub(crate) fn codex_app_server_hook_output() -> Value {
+    let advice = crate::codex_app_server::advice_lines(false)
+        .collect::<Vec<_>>()
+        .join("\n");
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": format!(
+                "{}\n\n{advice}",
+                crate::codex_app_server::agent_guidance()
+            ),
+        },
+        "systemMessage": crate::codex_app_server::banner(),
+    })
 }
 
 /// Routes one runtime UserPromptSubmit payload when a column-zero leading

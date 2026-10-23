@@ -26,6 +26,7 @@ pub(crate) const DISABLE: &str = "codex features disable daemon_auto_start";
 pub(crate) const STOP: &str = "codex app-server daemon stop";
 pub(crate) const PER_SESSION: &str = "codex --no-daemon";
 pub(crate) const ENABLE: &str = "codex features enable daemon_auto_start";
+#[cfg(test)]
 pub(crate) const COMMANDS: [&str; 4] = [DISABLE, STOP, PER_SESSION, ENABLE];
 
 /// Each line is exactly one of the commands or prose that does not start with
@@ -109,13 +110,9 @@ pub(crate) struct RunningServer {
 }
 
 impl CodexAppServer {
-    /// Whether a plain `codex` started now would run through a shared server.
-    pub(crate) fn affects_new_sessions(&self) -> bool {
-        !matches!(self, Self::InProcess)
-    }
-
-    /// The advice for new sessions, with the lingering-server sentence when
-    /// the setting is already off.
+    /// The advice when a plain `codex` started now would run through a
+    /// shared server, with the lingering-server sentence when the setting is
+    /// already off.
     pub(crate) fn advice(&self) -> Option<Value> {
         match self {
             Self::InProcess => None,
@@ -401,7 +398,6 @@ mod tests {
         let server = Process::server(&root.codex_home());
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
         assert_eq!(root.observe(), running(&root, server.pid(), true));
-        assert!(root.observe().affects_new_sessions());
     }
 
     #[test]
