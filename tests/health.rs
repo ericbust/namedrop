@@ -1,3 +1,5 @@
+#[path = "support/codex_app_server.rs"]
+mod codex_app_server;
 use namedrop::*;
 use serde_json::json;
 use std::{
@@ -1012,4 +1014,254 @@ fn doctor_skips_the_runtime_check_when_herdr_has_no_plugin_root() {
     assert!(stale_runtime(&report).is_none());
     assert_ne!(report.status, HealthStatus::Unavailable);
     assert_eq!(f.host.plugin_lists.get(), 1);
+}
+
+/// Two Codex panes: pane-1 holds the Fixture's session, pane-2 has none.
+/// `foreground` is the process Herdr reports in front of each pane, or none
+/// when Herdr does not answer process-info.
+struct TwoCodexPanes<'a> {
+    host: &'a Host,
+    foreground: Option<u32>,
+}
+impl HerdrCommandExecutor for TwoCodexPanes<'_> {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        if let ["pane", "process-info", "--pane", _] = args {
+            let pid = self.foreground.ok_or("herdr did not answer")?;
+            return Ok(HerdrCommandOutput {
+                stdout: json!({"result":{"process_info":{"shell_pid":1,"foreground_process_group_id":pid,"foreground_processes":[{"pid":pid}]}}}).to_string(),
+            });
+        }
+        let mut output = self.host.execute(args)?;
+        if args.starts_with(&["pane", "list"]) {
+            let mut value: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
+            let mut second = value["result"]["panes"][0].clone();
+            second["pane_id"] = json!("pane-2");
+            second["terminal_id"] = json!("terminal-2");
+            second["agent_session"] = serde_json::Value::Null;
+            value["result"]["panes"]
+                .as_array_mut()
+                .unwrap()
+                .push(second);
+            for pane in value["result"]["panes"].as_array_mut().unwrap() {
+                pane["agent"] = json!("codex");
+            }
+            output.stdout = value.to_string();
+        }
+        Ok(output)
+    }
+}
+
+impl Fixture {
+    /// A registered space whose pane-1 now runs a session that is not the
+    /// registered one, so without the server it reports ND-SESSION-001, and
+    /// whose pane-2 has no session, so it reports ND-SESSION-002.
+    fn two_codex_panes(&self, foreground: Option<u32>) -> TwoCodexPanes<'_> {
+        self.register();
+        *self.host.session.borrow_mut() = "session-new".into();
+        TwoCodexPanes {
+            host: &self.host,
+            foreground,
+        }
+    }
+    fn codex_runtime<'a>(
+        &'a self,
+        host: &'a TwoCodexPanes<'a>,
+    ) -> LifecycleRuntime<'a, TwoCodexPanes<'a>, Time, Ids> {
+        LifecycleRuntime {
+            state_directory: &self.root,
+            home_directory: Some(&self.home),
+            agent_config: namedrop::AgentConfigDirectories::default(),
+            cwd: Path::new("/repo"),
+            workspace_id: Some("workspace-1"),
+            current_pane_id: Some("pane-2"),
+            session_socket_id: "socket-a",
+            herdr: host,
+            clock: &Time,
+            ids: &self.ids,
+        }
+    }
+}
+
+fn issues_with<'a>(report: &'a HealthReport, code: &str) -> Vec<&'a HealthIssue> {
+    report
+        .issues
+        .iter()
+        .filter(|issue| issue.code == code)
+        .collect()
+}
+
+#[test]
+fn doctor_reports_a_shared_codex_app_server_once_with_only_its_remedy() {
+    let f = Fixture::new();
+    let codex_home = f.home.join(".codex");
+    let server = codex_app_server::start_server(&codex_home);
+    let host = f.two_codex_panes(None);
+    let runtime = f.codex_runtime(&host);
+    let codex_before = codex_app_server::snapshot(&codex_home);
+    let database = fs::read(f.root.join("namedrop.sqlite3")).unwrap();
+
+    let report = diagnose_collaboration(&runtime);
+
+    let shared = issues_with(&report, "ND-SESSION-003");
+    assert_eq!(shared.len(), 1, "one issue for the space, not one per pane");
+    let value = serde_json::to_value(shared[0]).unwrap();
+    assert_eq!(value["summary"], codex_app_server::SUMMARY);
+    assert!(
+        shared[0].explanation.contains(
+            "Submitting another prompt or reinstalling the Herdr integration does not help."
+        ),
+        "{}",
+        shared[0].explanation
+    );
+    assert!(
+        !shared[0]
+            .explanation
+            .contains("daemon_auto_start is already off")
+    );
+    assert_eq!(shared[0].repair.kind, HealthRepairKind::HumanDecision);
+    assert!(
+        value["repair"]
+            .get("command")
+            .is_none_or(serde_json::Value::is_null),
+        "the Doctor popup must have no command to run: {value}"
+    );
+    assert!(
+        shared[0]
+            .repair
+            .prompt
+            .contains("Namedrop never changes Codex settings")
+    );
+    let steps = value["diagnostic"]["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 7);
+    assert_eq!(
+        [&steps[0], &steps[1], &steps[4], &steps[6]],
+        codex_app_server::COMMANDS
+            .map(|command| json!(command))
+            .each_ref(),
+        "each command is a step of its own"
+    );
+    assert!(
+        steps[2]
+            .as_str()
+            .unwrap()
+            .starts_with("Then restart Codex in each of its Herdr panes.")
+    );
+    let pid_file = codex_app_server::pid_file(&codex_home);
+    assert_eq!(value["diagnostic"]["path"], json!(pid_file));
+    assert_eq!(value["diagnostic"]["process_id"], server.pid());
+    assert_eq!(value["diagnostic"]["pane_ids"], json!(["pane-1", "pane-2"]));
+    assert_eq!(value["diagnostic"]["auto_start"], true);
+    assert_eq!(value["diagnostic"]["runtime"], "codex");
+    assert_eq!(value["diagnostic"]["workspace_id"], "workspace-1");
+
+    let rendered = render_health_report_to_text(&report);
+    assert!(
+        rendered.contains(&format!(
+            "Target: path={}, process_id={}, runtime=codex, workspace_id=workspace-1",
+            pid_file.display(),
+            server.pid()
+        )),
+        "{rendered}"
+    );
+    for command in codex_app_server::COMMANDS {
+        assert!(
+            rendered.contains(&format!("Step: {command}\n")),
+            "{rendered}"
+        );
+    }
+
+    assert!(
+        issues_with(&report, "ND-SESSION-002").is_empty(),
+        "a fresh-session remedy is wrong under the server: {:?}",
+        report.issues
+    );
+    assert!(
+        issues_with(&report, "ND-SESSION-001").is_empty(),
+        "re-naming could bind the alias to another pane's session: {:?}",
+        report.issues
+    );
+    assert_eq!(report.status, HealthStatus::NeedsAttention);
+    assert_eq!(codex_app_server::snapshot(&codex_home), codex_before);
+    assert_eq!(fs::read(f.root.join("namedrop.sqlite3")).unwrap(), database);
+}
+
+#[test]
+fn doctor_names_a_server_that_outlived_turning_its_setting_off() {
+    let f = Fixture::new();
+    let codex_home = f.home.join(".codex");
+    let _server = codex_app_server::start_server(&codex_home);
+    fs::write(
+        codex_home.join("config.toml"),
+        "[features]\ndaemon_auto_start = false\n",
+    )
+    .unwrap();
+    let host = f.two_codex_panes(None);
+    let report = diagnose_collaboration(&f.codex_runtime(&host));
+    let shared = issues_with(&report, "ND-SESSION-003");
+    assert_eq!(shared.len(), 1);
+    assert!(
+        shared[0].explanation.ends_with(
+            "daemon_auto_start is already off; the server started earlier keeps serving new Codex sessions until it is stopped."
+        ),
+        "{}",
+        shared[0].explanation
+    );
+    assert_eq!(
+        serde_json::to_value(shared[0]).unwrap()["diagnostic"]["auto_start"],
+        false
+    );
+}
+
+#[test]
+fn doctor_keeps_the_session_issues_when_codex_runs_in_process() {
+    let f = Fixture::new();
+    let codex_home = f.home.join(".codex");
+    fs::create_dir_all(&codex_home).unwrap();
+    fs::write(
+        codex_home.join("config.toml"),
+        "[features]\ndaemon_auto_start = false\n",
+    )
+    .unwrap();
+    let host = f.two_codex_panes(None);
+    let report = diagnose_collaboration(&f.codex_runtime(&host));
+    assert!(
+        issues_with(&report, "ND-SESSION-003").is_empty(),
+        "{:?}",
+        report.issues
+    );
+    let missing = issues_with(&report, "ND-SESSION-002");
+    assert_eq!(missing.len(), 1);
+    assert_eq!(
+        serde_json::to_value(missing[0]).unwrap()["diagnostic"]["pane_id"],
+        "pane-2"
+    );
+    assert_eq!(issues_with(&report, "ND-SESSION-001").len(), 1);
+}
+
+#[test]
+fn doctor_leaves_no_daemon_codex_panes_alone_beside_a_running_server() {
+    let f = Fixture::new();
+    let _server = codex_app_server::start_server(&f.home.join(".codex"));
+    let in_process = codex_app_server::in_process_codex();
+    let host = f.two_codex_panes(Some(in_process.pid()));
+    let report = diagnose_collaboration(&f.codex_runtime(&host));
+    assert!(
+        issues_with(&report, "ND-SESSION-003").is_empty(),
+        "{:?}",
+        report.issues
+    );
+    assert_eq!(issues_with(&report, "ND-SESSION-002").len(), 1);
+}
+
+#[test]
+fn doctor_assistance_names_the_shared_app_server_for_a_pane_without_a_session() {
+    let f = Fixture::new();
+    let _server = codex_app_server::start_server(&f.home.join(".codex"));
+    let host = f.two_codex_panes(None);
+    let refused = request_doctor_assistance(&f.codex_runtime(&host), "").unwrap_err();
+    assert!(
+        refused.starts_with(&format!("Nothing was sent: {}", codex_app_server::SUMMARY)),
+        "{refused}"
+    );
+    assert!(f.host.prompts.borrow().is_empty());
 }

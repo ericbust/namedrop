@@ -237,10 +237,6 @@ pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
 
 /// The pids Herdr reports in a pane's foreground process group, or none when
 /// Herdr does not answer.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "its surfaces arrive in the following commits")
-)]
 pub(crate) fn foreground_process_ids(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Vec<u32> {
     process_info(herdr, pane_id)
         .map(|info| info.foreground_processes.iter().map(|p| p.pid).collect())
@@ -248,10 +244,6 @@ pub(crate) fn foreground_process_ids(herdr: &impl HerdrCommandExecutor, pane_id:
 }
 
 /// A process's argv, or `None` when the process is gone or unreadable.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "its surfaces arrive in the following commits")
-)]
 #[cfg(target_os = "linux")]
 pub(crate) fn process_arguments(pid: u32) -> Option<Vec<String>> {
     let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
@@ -260,10 +252,6 @@ pub(crate) fn process_arguments(pid: u32) -> Option<Vec<String>> {
 }
 
 /// A process's argv, or `None` when the process is gone or unreadable.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "its surfaces arrive in the following commits")
-)]
 #[cfg(target_os = "macos")]
 pub(crate) fn process_arguments(pid: u32) -> Option<Vec<String>> {
     let pid = libc::c_int::try_from(pid).ok()?;
@@ -312,10 +300,6 @@ pub(crate) fn process_arguments(pid: u32) -> Option<Vec<String>> {
     (arguments.len() == argc).then_some(arguments)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "its surfaces arrive in the following commits")
-)]
 fn split_arguments(bytes: &[u8]) -> impl Iterator<Item = String> {
     bytes
         .split(|b| *b == 0)
@@ -323,20 +307,12 @@ fn split_arguments(bytes: &[u8]) -> impl Iterator<Item = String> {
 }
 
 /// The path of the executable a process runs, or `None` when unreadable.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "its surfaces arrive in the following commits")
-)]
 #[cfg(target_os = "linux")]
 pub(crate) fn process_executable(pid: u32) -> Option<std::path::PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/exe")).ok()
 }
 
 /// The path of the executable a process runs, or `None` when unreadable.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "its surfaces arrive in the following commits")
-)]
 #[cfg(target_os = "macos")]
 pub(crate) fn process_executable(pid: u32) -> Option<std::path::PathBuf> {
     use std::os::unix::ffi::OsStrExt;

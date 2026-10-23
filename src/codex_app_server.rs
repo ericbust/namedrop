@@ -184,6 +184,10 @@ impl ServedPanes {
     pub(crate) fn pane_ids(&self) -> &[String] {
         &self.pane_ids
     }
+
+    pub(crate) fn advice(&self) -> Value {
+        advice(!self.server.auto_start)
+    }
 }
 
 /// A Codex pane counts as served unless its foreground processes prove it runs

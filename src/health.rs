@@ -1,3 +1,4 @@
+use crate::codex_app_server::ServedPanes;
 use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
 use crate::{
@@ -226,6 +227,17 @@ where
         issues.push(stale_runtime_issue(&stale));
     }
 
+    let served = crate::codex_app_server::served_codex_panes(runtime, &setup.panes);
+    if let Some(served) = &served {
+        issues.push(shared_app_server_issue(served, &space_id));
+    }
+    let served_pane = |pane_id: Option<&str>| {
+        served
+            .as_ref()
+            .zip(pane_id)
+            .is_some_and(|(served, pane_id)| served.serves(pane_id))
+    };
+
     let supported_agents = setup
         .panes
         .iter()
@@ -236,7 +248,7 @@ where
         .iter()
         .filter(|pane| pane_agent_runtime(pane).is_some())
     {
-        if pane.agent_session_id.is_none() {
+        if pane.agent_session_id.is_none() && !served_pane(Some(&pane.pane_id)) {
             let agent_runtime = pane_agent_runtime(pane).expect("supported panes were filtered");
             let setup = crate::install::native_session_setup(agent_runtime);
             let mut native = issue(
@@ -320,6 +332,7 @@ where
                 }
             }
         } else if !setup.registered_address_ids.contains(&address.id)
+            && !served_pane(address.pane_id.as_deref())
             && !setup.panes.iter().any(|pane| {
                 address.pane_id.as_deref() == Some(pane.pane_id.as_str())
                     && pane.agent_session_id.is_none()
@@ -514,6 +527,12 @@ where
     // ordinary: the first prompt establishes one. Reinstalling or restarting is
     // the remedy only once a turn has passed without one appearing.
     if expected_session_id.is_empty() {
+        if invoking_pane_is_served(runtime, space_id, pane_id) {
+            return Err(format!(
+                "Nothing was sent: {} Follow the steps Doctor lists.",
+                crate::codex_app_server::SUMMARY
+            ));
+        }
         return Err(
             "Submit the first prompt in this pane, then open Doctor again: Namedrop has no session identity for it yet. If it is still missing after a turn, check or reinstall the Herdr native integration and restart the agent."
                 .to_owned(),
@@ -544,6 +563,23 @@ where
         }
         Err(error) => Err(format!("Unconfirmed, do not assume it arrived: {error}")),
     }
+}
+
+fn invoking_pane_is_served<E: HerdrCommandExecutor, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    space_id: &str,
+    pane_id: &str,
+) -> bool {
+    discover_worktree_for_workspace(runtime.herdr, space_id)
+        .ok()
+        .and_then(|discovered| {
+            let pane = discovered
+                .panes
+                .into_iter()
+                .find(|p| p.pane_id == pane_id)?;
+            crate::codex_app_server::served_codex_panes(runtime, std::slice::from_ref(&pane))
+        })
+        .is_some()
 }
 
 /// The Agent Session live in `pane_id` right now, or why Doctor must not
@@ -765,6 +801,33 @@ fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> Health
         "--human".into(),
     ]);
     outdated
+}
+
+/// One issue per space, not per pane: the server is shared by every Codex
+/// session under its Codex home. Its fix changes a Codex setting, so it is the
+/// person's decision and carries no command for the Doctor popup to run.
+fn shared_app_server_issue(served: &ServedPanes, space_id: &str) -> HealthIssue {
+    let advice = served.advice();
+    let mut shared = issue(
+        "ND-SESSION-003",
+        HealthSeverity::Blocked,
+        crate::codex_app_server::SUMMARY,
+        advice["explanation"]
+            .as_str()
+            .expect("the advice explanation is text"),
+        HealthRepairKind::HumanDecision,
+        crate::codex_app_server::FIX,
+    );
+    shared.diagnostic = serde_json::json!({
+        "auto_start": served.server.auto_start,
+        "pane_ids": served.pane_ids(),
+        "path": served.server.pid_file,
+        "process_id": served.server.pid,
+        "runtime": crate::AgentRuntime::Codex,
+        "steps": advice["steps"],
+        "workspace_id": space_id,
+    });
+    shared
 }
 
 fn issue(
