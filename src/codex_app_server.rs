@@ -729,6 +729,20 @@ mod tests {
     }
 
     #[test]
+    fn the_docs_give_the_same_advice() {
+        let compatibility = include_str!("../docs/compatibility.md");
+        let operations = include_str!("../docs/operations.md");
+        for docs in [compatibility, operations] {
+            for text in COMMANDS.into_iter().chain(["ND-SESSION-003"]) {
+                assert!(docs.contains(text), "{text}");
+            }
+        }
+        for text in [SUMMARY, EXPLANATION, FIX, STEPS[2]] {
+            assert!(compatibility.contains(text), "{text}");
+        }
+    }
+
+    #[test]
     fn advice_is_the_only_copy() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut pending = vec![root.join("src"), root.join("scripts")];
