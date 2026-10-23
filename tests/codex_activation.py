@@ -100,6 +100,30 @@ class CodexActivation(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(value['data']['agent_integration_hook_activation']['codex']['status'], 'setup_failed')
 
+    def test_shared_app_server_advice_is_carried_and_never_run(self):
+        advice = {'status': 'codex_shared_app_server', 'summary': 'Codex runs its sessions through its shared app-server.',
+                  'explanation': 'Herdr cannot tell the panes apart.', 'fix': 'Turn it off.',
+                  'steps': ['codex features disable daemon_auto_start', 'codex app-server daemon stop',
+                            'Then restart Codex.', 'codex --no-daemon', 'codex features enable daemon_auto_start']}
+        for payload in (self.payload, self.verified):
+            payload['data']['agent_integration_hook_activation']['codex']['app_server'] = copy.deepcopy(advice)
+        conflicting = copy.deepcopy(self.payload)
+        conflicting['data']['agent_integration_hook_activation']['codex']['steps'].insert(
+            0, 'codex plugin marketplace remove namedrop --json')
+        runs = []
+        for payload in (self.verified, self.payload, conflicting):
+            value, _, run = self.install(copy.deepcopy(payload))
+            runs.extend(run.call_args_list)
+            self.assertEqual(value['data']['agent_integration_hook_activation']['codex']['app_server'], advice)
+        with patch.object(runtime.shutil, 'which', return_value=None), \
+             patch.object(runtime.subprocess, 'run') as run:
+            value, _ = runtime.activate_codex_plugin(copy.deepcopy(self.payload), lambda: self.fail())
+        run.assert_not_called()
+        self.assertEqual(value['data']['agent_integration_hook_activation']['codex']['app_server'], advice)
+        self.assertTrue(runs, 'the install path ran commands, so the check below can see them')
+        for call in runs:
+            self.assertFalse({'features', 'app-server'} & set(call.args[0]), call.args[0])
+
 
 if __name__ == '__main__':
     unittest.main()

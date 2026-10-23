@@ -84,6 +84,10 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
             }
             lines.push("\nNext steps — for the runtimes you use".into());
             hook_steps(&data["agent_integration_hook_activation"], &mut lines);
+            app_server_advice(
+                &data["agent_integration_hook_activation"]["codex"]["app_server"],
+                &mut lines,
+            );
             lines.push("  Check native hooks: herdr integration status\n  If setup is needed, choose your runtime:\n    herdr integration install codex\n    herdr integration install claude".into());
             lines.push("  Start fresh agent sessions and confirm a request and reply to verify their hooks.".into());
             field("Shell", &data["shell_command"]["next_step"], 1, &mut lines);
@@ -440,6 +444,33 @@ mod tests {
                    "codex_app_server":null, "tab_label":{"status":"applied"}}),
         );
         assert!(!render_command_result_to_text(&quiet).contains("Warning"));
+    }
+
+    #[test]
+    fn activation_shows_the_shared_app_server_advice_only_when_codex_carries_it() {
+        let activated = |codex: Value| {
+            render_command_result_to_text(&CommandResult::success(
+                "activate",
+                json!({"space_id":"w1", "integration_packages":{},
+                       "agent_integration_hook_activation":{"codex":codex}}),
+            ))
+        };
+        let rendered = activated(
+            json!({"steps":["codex plugin add namedrop@namedrop --json"],
+                                        "app_server":crate::codex_app_server::advice(false)}),
+        );
+        assert!(
+            rendered.contains(crate::codex_app_server::SUMMARY),
+            "{rendered}"
+        );
+        for command in crate::codex_app_server::COMMANDS {
+            assert!(
+                rendered.lines().any(|line| line == format!("  {command}")),
+                "{command}: {rendered}"
+            );
+        }
+        let quiet = activated(json!({"steps":["codex plugin add namedrop@namedrop --json"]}));
+        assert!(!quiet.contains("Warning"), "{quiet}");
     }
 
     /// The readable table shows what a person needs to choose a collaborator:

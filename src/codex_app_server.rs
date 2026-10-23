@@ -699,6 +699,40 @@ mod tests {
     }
 
     #[test]
+    fn activation_carries_the_advice_beside_its_steps_never_in_them() {
+        let guidance = |root: &Root| {
+            crate::user_hook_activation_guidance(Some(&root.0), AgentConfigDirectories::default())
+        };
+        let in_process = Root::new();
+        let starts = Root::new();
+        fs::create_dir_all(starts.codex_home().join("app-server-daemon")).unwrap();
+        let running = Root::new();
+        let _server = Process::server(&running.codex_home());
+        running.write("config.toml", "[features]\ndaemon_auto_start = false\n");
+        running.write("app-server-daemon/daemon.pid", &pid_record(_server.pid()));
+
+        let quiet = guidance(&in_process);
+        assert!(quiet["codex"].get("app_server").is_none(), "{quiet}");
+        assert_eq!(guidance(&starts)["codex"]["app_server"], advice(false));
+        assert_eq!(guidance(&running)["codex"]["app_server"], advice(true));
+        for root in [&in_process, &starts, &running] {
+            let with_server_state = guidance(root);
+            for directory in ["app-server-daemon", "packages"] {
+                let _ = fs::remove_dir_all(root.codex_home().join(directory));
+            }
+            let without = guidance(root);
+            assert!(without["codex"].get("app_server").is_none(), "{without}");
+            assert_eq!(
+                with_server_state["codex"]["steps"], without["codex"]["steps"],
+                "the steps the activation runner executes do not depend on the server"
+            );
+            for step in with_server_state["codex"]["steps"].as_array().unwrap() {
+                assert!(!COMMANDS.contains(&step.as_str().unwrap()), "{step}");
+            }
+        }
+    }
+
+    #[test]
     fn advice_is_the_only_copy() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut pending = vec![root.join("src"), root.join("scripts")];

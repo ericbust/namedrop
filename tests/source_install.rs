@@ -2,6 +2,8 @@
 //! command Herdr runs before it registers the plugin, and the setup helper that
 //! links a local checkout or activates an already registered installation.
 //! Every fixture path contains a space so quoting is exercised throughout.
+#[path = "support/codex_app_server.rs"]
+mod codex_app_server;
 use std::{
     fs,
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -934,4 +936,66 @@ fn migrating_to_a_managed_installation_activates_it_without_relinking_any_local_
         !fixture.cargo_log().exists(),
         "install mode rebuilt the migrated installation"
     );
+}
+
+#[test]
+fn activation_shows_the_shared_app_server_advice_on_the_update_and_first_install_paths() {
+    let advice = serde_json::json!({
+        "status": "codex_shared_app_server",
+        "summary": codex_app_server::SUMMARY,
+        "explanation": "Herdr then files a Codex session under the wrong pane or under none.",
+        "fix": "The fix turns the shared app-server off, so each Codex runs inside its own pane.",
+        "steps": [
+            codex_app_server::DISABLE,
+            codex_app_server::STOP,
+            "Then restart Codex in each of its Herdr panes.",
+            "To fix one session only, leave the setting on and start that Codex with:",
+            codex_app_server::PER_SESSION,
+            "To undo the fix and turn the shared app-server back on:",
+            codex_app_server::ENABLE,
+        ],
+    });
+    for (live_update, path_marker) in [
+        (true, "Your current agents can keep working."),
+        (false, "Next steps"),
+    ] {
+        for app_server in [Some(&advice), None] {
+            let mut payload: serde_json::Value =
+                serde_json::from_str(&activation("space with spaces", true)).unwrap();
+            payload["data"]["runtime"] = serde_json::json!({"live_update": live_update});
+            if let Some(advice) = app_server {
+                payload["data"]["agent_integration_hook_activation"]["codex"]["app_server"] =
+                    advice.clone();
+            }
+            let fixture = Fixture::new();
+            let checkout = fixture.checkout();
+            fixture.host();
+            let output = succeeded(
+                &fixture
+                    .setup(&checkout, Some("activate"))
+                    .env(
+                        "NAMEDROP_TEST_LOG_RESPONSE",
+                        action_log("activate", 0, &payload.to_string()),
+                    )
+                    .output()
+                    .unwrap(),
+            );
+            assert!(output.contains(path_marker), "{live_update}: {output}");
+            if app_server.is_none() {
+                assert!(!output.contains("Codex shared app-server"), "{output}");
+                continue;
+            }
+            assert!(output.contains("\nCodex shared app-server\n"), "{output}");
+            assert!(
+                output.contains("  • Codex runs its sessions through its shared app-server"),
+                "{output}"
+            );
+            for command in codex_app_server::COMMANDS {
+                assert!(
+                    output.lines().any(|line| line == format!("    {command}")),
+                    "{live_update}: {command} is copyable on its own line: {output}"
+                );
+            }
+        }
+    }
 }

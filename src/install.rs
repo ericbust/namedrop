@@ -163,7 +163,7 @@ pub(crate) fn user_hook_activation_guidance(
         }
         None => json!(["resolve an absolute HOME before activating the Codex plugin"]),
     };
-    json!({
+    let mut guidance = json!({
         "codex": {
             "status": "human_action_required",
             "cache_current": codex_cache_current,
@@ -174,7 +174,12 @@ pub(crate) fn user_hook_activation_guidance(
             "status": "loads_next_session",
             "steps": ["Start a new Claude Code session or run /reload-plugins. Verify a request and reply; doctor alone cannot verify hooks."]
         }
-    })
+    });
+    // Never a step: the activation runner executes every `codex ` step.
+    if let Some(advice) = crate::codex_app_server::observe(home_directory, config).advice() {
+        guidance["codex"]["app_server"] = advice;
+    }
+    guidance
 }
 
 pub(crate) fn native_session_setup(runtime: AgentRuntime) -> Value {
