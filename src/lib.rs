@@ -3,6 +3,11 @@ mod agent_status_model;
 pub mod cli;
 pub use agent_status::collect_agent_status;
 pub use agent_status_model::{suggest_agent_persona, summarize_agent_status};
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "its surfaces arrive in the following commits")
+)]
+mod codex_app_server;
 mod context;
 mod controls;
 mod coordination;

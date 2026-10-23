@@ -204,10 +204,7 @@ pub fn verify_inherited_pane(
             )
         })?;
     let caller = std::process::id();
-    if std::iter::successors(parent_pid(caller), |pid| parent_pid(*pid))
-        .take(1024)
-        .any(|pid| u64::from(pid) == shell_pid)
-    {
+    if ancestor_pids(caller).any(|pid| u64::from(pid) == shell_pid) {
         return Ok(());
     }
     if agent_session_ids.iter().any(|session| {
@@ -231,6 +228,131 @@ pub fn verify_inherited_pane(
          not one of its ancestors. {sessions} A background daemon keeps the pane variables it \
          was started with. {remedy}"
     ))
+}
+
+/// The ancestors of `pid`, nearest first, at most 1024 of them.
+pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
+    std::iter::successors(parent_pid(pid), |pid| parent_pid(*pid)).take(1024)
+}
+
+/// The pids Herdr reports in a pane's foreground process group, or none when
+/// Herdr does not answer.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "its surfaces arrive in the following commits")
+)]
+pub(crate) fn foreground_process_ids(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Vec<u32> {
+    process_info(herdr, pane_id)
+        .map(|info| info.foreground_processes.iter().map(|p| p.pid).collect())
+        .unwrap_or_default()
+}
+
+/// A process's argv, or `None` when the process is gone or unreadable.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "its surfaces arrive in the following commits")
+)]
+#[cfg(target_os = "linux")]
+pub(crate) fn process_arguments(pid: u32) -> Option<Vec<String>> {
+    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let bytes = bytes.strip_suffix(&[0]).unwrap_or(&bytes);
+    (!bytes.is_empty()).then(|| split_arguments(bytes).collect())
+}
+
+/// A process's argv, or `None` when the process is gone or unreadable.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "its surfaces arrive in the following commits")
+)]
+#[cfg(target_os = "macos")]
+pub(crate) fn process_arguments(pid: u32) -> Option<Vec<String>> {
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut argument_max: libc::c_int = 0;
+    let mut size = std::mem::size_of::<libc::c_int>();
+    let mut mib = [libc::CTL_KERN, libc::KERN_ARGMAX];
+    // SAFETY: sysctl writes at most `size` bytes, the size of `argument_max`.
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            2,
+            (&raw mut argument_max).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    let mut buffer = vec![0_u8; usize::try_from(argument_max).ok()?];
+    let mut size = buffer.len();
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    // SAFETY: sysctl writes at most `size` bytes, the length of `buffer`, and
+    // sets `size` to the number it wrote.
+    let read = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buffer.as_mut_ptr().cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    buffer.truncate(size);
+    // KERN_PROCARGS2 is argc, the executable path, NUL padding, then argv.
+    let (argc, rest) = buffer.split_first_chunk::<4>()?;
+    let argc = usize::try_from(libc::c_int::from_ne_bytes(*argc)).ok()?;
+    let rest = &rest[rest.iter().position(|b| *b == 0)?..];
+    let rest = &rest[rest.iter().position(|b| *b != 0)?..];
+    let arguments = split_arguments(rest).take(argc).collect::<Vec<_>>();
+    (arguments.len() == argc).then_some(arguments)
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "its surfaces arrive in the following commits")
+)]
+fn split_arguments(bytes: &[u8]) -> impl Iterator<Item = String> {
+    bytes
+        .split(|b| *b == 0)
+        .map(|argument| String::from_utf8_lossy(argument).into_owned())
+}
+
+/// The path of the executable a process runs, or `None` when unreadable.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "its surfaces arrive in the following commits")
+)]
+#[cfg(target_os = "linux")]
+pub(crate) fn process_executable(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+/// The path of the executable a process runs, or `None` when unreadable.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "its surfaces arrive in the following commits")
+)]
+#[cfg(target_os = "macos")]
+pub(crate) fn process_executable(pid: u32) -> Option<std::path::PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let pid = libc::c_int::try_from(pid).ok()?;
+    let mut buffer = vec![0_u8; usize::try_from(libc::PROC_PIDPATHINFO_MAXSIZE).ok()?];
+    // SAFETY: proc_pidpath writes at most the given size into `buffer` and
+    // returns the length of the path it wrote.
+    let written = unsafe {
+        libc::proc_pidpath(
+            pid,
+            buffer.as_mut_ptr().cast(),
+            u32::try_from(buffer.len()).ok()?,
+        )
+    };
+    let written = usize::try_from(written).ok().filter(|n| *n > 0)?;
+    Some(std::ffi::OsStr::from_bytes(&buffer[..written]).into())
 }
 
 #[cfg(target_os = "linux")]

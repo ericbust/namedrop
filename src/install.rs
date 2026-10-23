@@ -62,7 +62,7 @@ impl AgentConfigDirectories<'_> {
             .map(Path::to_owned)
             .unwrap_or_else(|| home.join(".claude"))
     }
-    fn codex(self, home: &Path) -> PathBuf {
+    pub(crate) fn codex(self, home: &Path) -> PathBuf {
         self.codex
             .map(Path::to_owned)
             .unwrap_or_else(|| home.join(".codex"))
