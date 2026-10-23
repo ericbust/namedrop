@@ -1017,8 +1017,6 @@ fn doctor_skips_the_runtime_check_when_herdr_has_no_plugin_root() {
 }
 
 /// Two Codex panes: pane-1 holds the Fixture's session, pane-2 has none.
-/// `foreground` is the process Herdr reports in front of each pane, or none
-/// when Herdr does not answer process-info.
 struct TwoCodexPanes<'a> {
     host: &'a Host,
     foreground: Option<u32>,

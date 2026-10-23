@@ -17,7 +17,6 @@ pub(crate) const SUMMARY: &str = "Codex runs its sessions through its shared app
 
 pub(crate) const EXPLANATION: &str = "Since version 0.162, Codex starts one background app-server for each Codex home (CODEX_HOME) and runs every session's hooks inside it. That server keeps the environment of wherever it was first started, not of the pane you type in. Herdr then files a Codex session under the wrong pane or under none: mentions to that agent stay queued, a second Codex pane's session can be filed under the first, and Namedrop's own Codex hooks go silent. Submitting another prompt or reinstalling the Herdr integration does not help. The server also updates and restarts itself, which can close an open Codex window the next time it saves a setting.";
 
-/// Follows EXPLANATION when the setting is already off but a server still runs.
 pub(crate) const LINGERING: &str = "daemon_auto_start is already off; the server started earlier keeps serving new Codex sessions until it is stopped.";
 
 pub(crate) const FIX: &str = "The fix turns the shared app-server off, so each Codex runs inside its own pane, where Herdr can see it. While it is off, the `codex agents` session browser and Codex remote control are unavailable. Namedrop never changes Codex settings: run the steps yourself, or let the agent in the pane run them once you approve.";
@@ -52,7 +51,7 @@ pub(crate) fn advice(lingering: bool) -> Value {
     })
 }
 
-fn explanation(lingering: bool) -> String {
+pub(crate) fn explanation(lingering: bool) -> String {
     if lingering {
         format!("{EXPLANATION} {LINGERING}")
     } else {
@@ -60,8 +59,6 @@ fn explanation(lingering: bool) -> String {
     }
 }
 
-/// The advice as display lines: SUMMARY, EXPLANATION, LINGERING when it
-/// applies, FIX, then STEPS.
 pub(crate) fn advice_lines(lingering: bool) -> impl Iterator<Item = &'static str> {
     [SUMMARY, EXPLANATION]
         .into_iter()
@@ -70,7 +67,7 @@ pub(crate) fn advice_lines(lingering: bool) -> impl Iterator<Item = &'static str
         .chain(STEPS)
 }
 
-/// One line for Codex's warning row, built from the command consts.
+/// One line for Codex's warning row.
 pub(crate) fn banner() -> String {
     format!(
         "Namedrop: Codex runs through its shared app-server, so Herdr cannot tell which pane this session is in; mentions to it stay queued or reach the wrong pane. Fix: {DISABLE}, then {STOP}, then restart Codex in its panes. One session only: {PER_SESSION}. Undo: {ENABLE}. Namedrop changes nothing itself; see namedrop doctor."
@@ -110,9 +107,6 @@ pub(crate) struct RunningServer {
 }
 
 impl CodexAppServer {
-    /// The advice when a plain `codex` started now would run through a
-    /// shared server, with the lingering-server sentence when the setting is
-    /// already off.
     pub(crate) fn advice(&self) -> Option<Value> {
         match self {
             Self::InProcess => None,
@@ -189,7 +183,7 @@ impl ServedPanes {
 
 /// A Codex pane counts as served unless its foreground processes prove it runs
 /// in-process. When Herdr does not answer, it counts as served, because a
-/// server is running. With no Codex pane, nothing is read and Herdr is not asked.
+/// server is running.
 pub(crate) fn served_codex_panes<E: HerdrCommandExecutor, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
     panes: &[DiscoveredPane],
@@ -213,8 +207,6 @@ pub(crate) fn served_codex_panes<E: HerdrCommandExecutor, C, I>(
     (!pane_ids.is_empty()).then_some(ServedPanes { server, pane_ids })
 }
 
-/// True when an ancestor of this process is a Codex shared app-server, which
-/// proves this process runs inside it.
 pub(crate) fn runs_inside_server() -> bool {
     crate::terminal::ancestor_pids(std::process::id()).any(is_server_process)
 }
@@ -222,8 +214,11 @@ pub(crate) fn runs_inside_server() -> bool {
 const IN_PROCESS_FLAGS: [&str; 2] = ["--no-daemon", "--dangerously-bypass-hook-trust"];
 
 fn pane_runs_in_process(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> bool {
-    crate::terminal::foreground_process_ids(herdr, pane_id)
-        .into_iter()
+    // No answer from Herdr proves nothing, so the pane stays served.
+    let Some(pids) = crate::terminal::foreground_process_ids(herdr, pane_id) else {
+        return false;
+    };
+    pids.into_iter()
         .filter_map(crate::terminal::process_arguments)
         .any(|argv| argv.iter().any(|a| IN_PROCESS_FLAGS.contains(&a.as_str())))
 }

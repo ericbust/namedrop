@@ -397,8 +397,7 @@ fn name_prompt(
     Ok(Some(named))
 }
 
-/// Codex's shared app-server advice from a `name` result. It stays on screen
-/// until a key, since naming alone does not make the pane reachable.
+/// Codex's shared app-server advice from a `name` result.
 fn show_app_server_advice(advice: &serde_json::Value) {
     let text = |key: &str| advice[key].as_str().unwrap_or_default().to_owned();
     let steps = advice["steps"].as_array().into_iter().flatten();

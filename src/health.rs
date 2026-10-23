@@ -807,14 +807,11 @@ fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> Health
 /// session under its Codex home. Its fix changes a Codex setting, so it is the
 /// person's decision and carries no command for the Doctor popup to run.
 fn shared_app_server_issue(served: &ServedPanes, space_id: &str) -> HealthIssue {
-    let advice = served.advice();
     let mut shared = issue(
         "ND-SESSION-003",
         HealthSeverity::Blocked,
         crate::codex_app_server::SUMMARY,
-        advice["explanation"]
-            .as_str()
-            .expect("the advice explanation is text"),
+        &crate::codex_app_server::explanation(!served.server.auto_start),
         HealthRepairKind::HumanDecision,
         crate::codex_app_server::FIX,
     );
@@ -824,7 +821,7 @@ fn shared_app_server_issue(served: &ServedPanes, space_id: &str) -> HealthIssue 
         "path": served.server.pid_file,
         "process_id": served.server.pid,
         "runtime": crate::AgentRuntime::Codex,
-        "steps": advice["steps"],
+        "steps": crate::codex_app_server::STEPS,
         "workspace_id": space_id,
     });
     shared

@@ -175,7 +175,6 @@ pub(crate) fn user_hook_activation_guidance(
             "steps": ["Start a new Claude Code session or run /reload-plugins. Verify a request and reply; doctor alone cannot verify hooks."]
         }
     });
-    // Never a step: the activation runner executes every `codex ` step.
     if let Some(advice) = crate::codex_app_server::observe(home_directory, config).advice() {
         guidance["codex"]["app_server"] = advice;
     }

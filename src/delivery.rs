@@ -237,19 +237,12 @@ where
             .iter()
             .find(|pane| pane.pane_id == binding.pane_id)
         {
-            // Show the pane's hint while it applies, and clear it once it no
-            // longer does; otherwise leave the labels as named.
             if let Some(address) = addresses
                 .iter()
                 .find(|address| !address.retired && address.id == binding.address_id)
             {
                 let label = PaneLabel::for_pane(pane, served.as_ref());
-                let wanted = label.hint(&address.alias);
-                let showing = pane.idle_state_label.as_deref();
-                let showing_a_hint = PaneLabel::HINTS
-                    .iter()
-                    .any(|hint| hint.hint(&address.alias).as_deref() == showing);
-                if wanted.as_deref() != showing && (wanted.is_some() || showing_a_hint) {
+                if label.replaces(&address.alias, pane.idle_state_label.as_deref()) {
                     crate::lifecycle::publish_pane_address_metadata(
                         runtime,
                         &binding.pane_id,

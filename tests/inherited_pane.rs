@@ -402,8 +402,6 @@ fn an_empty_session_variable_is_not_counted_as_a_session() {
 fn a_session_start_inside_codex_s_shared_app_server_gets_its_notice_without_a_runtime() {
     let f = Fixture::new("app-server");
     f.activate();
-    // The server keeps the HERDR_PANE_ID of the pane that started it, which
-    // this process never runs inside, so no runtime can be built for it.
     let other = codex_app_server::Process::spawn(Command::new("sleep").arg("60"), "sleep");
     f.shell_is(other.pid());
     let codex_home = f.0.join("home/.codex");

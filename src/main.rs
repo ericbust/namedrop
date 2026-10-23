@@ -694,8 +694,6 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    // Before any runtime: under Codex's shared app-server the inherited pane
-    // cannot be verified, so the runtime usually fails to build.
     let output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
         with_runtime_at(state_directory, |runtime| Ok(execute(&input, runtime)))
             .ok()

@@ -1,4 +1,3 @@
-// Each test crate uses a different part of this support module.
 #![allow(dead_code)]
 
 use std::{
@@ -120,7 +119,7 @@ pub fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
     entries
 }
 
-/// Runs `program` with `args` as the child of a process that looks like a
+/// Runs `program` as the child of a process that looks like a
 /// Codex shared app-server, the way the server runs a session's hooks. The
 /// trailing `:` keeps the shell from replacing itself with the program.
 pub fn inside_server(codex_home: &Path, program: &Path) -> Command {

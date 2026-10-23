@@ -20,7 +20,6 @@ struct UserPromptSubmitInput {
 #[derive(Deserialize)]
 struct SessionStartInput {
     hook_event_name: String,
-    #[serde(default)]
     source: Option<String>,
 }
 

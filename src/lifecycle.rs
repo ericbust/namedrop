@@ -1121,13 +1121,26 @@ impl PaneLabel {
         }
     }
 
-    /// The label that replaces the idle and unknown states, if any.
     pub(crate) fn hint(self, alias: &str) -> Option<String> {
         match self {
             Self::Ready => None,
             Self::AwaitingSession => Some(format!("@{alias}: send a prompt to connect")),
             Self::SharedAppServer => Some(format!("@{alias}: see namedrop doctor")),
         }
+    }
+
+    /// Whether the pane's labels must be published again: its hint changed, or
+    /// a hint that no longer applies is still showing. A label the person set
+    /// themselves is left alone.
+    pub(crate) fn replaces(self, alias: &str, showing: Option<&str>) -> bool {
+        let wanted = self.hint(alias);
+        if wanted.as_deref() == showing {
+            return false;
+        }
+        wanted.is_some()
+            || Self::HINTS
+                .iter()
+                .any(|hint| hint.hint(alias).as_deref() == showing)
     }
 }
 
