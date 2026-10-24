@@ -387,7 +387,36 @@ fn name_prompt(
     );
     println!();
     say(Tone::Good, &named);
+    let advice = &result["codex_app_server"];
+    if advice.is_object() {
+        println!();
+        show_app_server_advice(advice);
+        println!();
+        prompt_line("Enter or Esc closes: ")?;
+    }
     Ok(Some(named))
+}
+
+/// Codex's shared app-server advice from a `name` result.
+fn show_app_server_advice(advice: &serde_json::Value) {
+    let text = |key: &str| advice[key].as_str().unwrap_or_default().to_owned();
+    let steps = advice["steps"].as_array().into_iter().flatten();
+    let lines = [(Tone::Warn, text("summary"))]
+        .into_iter()
+        .chain(["explanation", "fix"].map(|key| (Tone::Plain, text(key))))
+        .chain(steps.filter_map(|step| step.as_str()).map(|step| {
+            let tone = if step.starts_with("codex ") {
+                Tone::Code
+            } else {
+                Tone::Plain
+            };
+            (tone, step.to_owned())
+        }));
+    for (tone, line) in lines {
+        for wrapped in wrap_exact(&line, POPUP_COLUMNS) {
+            say(tone, &wrapped);
+        }
+    }
 }
 
 /// The line Manage and Doctor add when the space has no names yet.

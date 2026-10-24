@@ -1,5 +1,12 @@
+#[path = "support/codex_app_server.rs"]
+mod codex_app_server;
 use namedrop::{HerdrCommandExecutor, HerdrCommandOutput, verify_inherited_pane};
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 /// Herdr as seen through the executor port: the pane's shell is whatever pid
 /// the test says it is.
@@ -389,4 +396,76 @@ fn an_empty_session_variable_is_not_counted_as_a_session() {
     let text = text(&output);
     assert!(text.contains("There is no CODEX_SESSION_ID"), "{text}");
     assert!(!text.contains("None of the 1"), "{text}");
+}
+
+#[test]
+fn a_session_start_inside_codex_s_shared_app_server_gets_its_notice_without_a_runtime() {
+    let f = Fixture::new("app-server");
+    f.activate();
+    let other = codex_app_server::Process::spawn(Command::new("sleep").arg("60"), "sleep");
+    f.shell_is(other.pid());
+    let codex_home = f.0.join("home/.codex");
+    let hook = |event: &str, input: &str, inside: bool| {
+        let program = Path::new(env!("CARGO_BIN_EXE_namedrop"));
+        let mut command = if inside {
+            codex_app_server::inside_server(&codex_home, program)
+        } else {
+            Command::new(program)
+        };
+        f.host(&mut command)
+            .env_remove("HERDR_PLUGIN_STATE_DIR")
+            .args(["hook", event, "--state-directory"])
+            .arg(f.0.join("state"));
+        let output = codex_app_server::run_with_stdin(&mut command, input);
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let start =
+        r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"s1","cwd":"/repo"}"#;
+
+    let notice = hook("session-start", start, true);
+    assert!(notice.ends_with('}'), "no trailing newline: {notice:?}");
+    let value: serde_json::Value = serde_json::from_str(&notice).expect(&notice);
+    assert_eq!(
+        value.as_object().unwrap().keys().collect::<Vec<_>>(),
+        ["hookSpecificOutput", "systemMessage"]
+    );
+    assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    let banner = value["systemMessage"].as_str().unwrap();
+    let context = value["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(!banner.contains('\n'), "one warning line: {banner}");
+    assert!(context.contains(codex_app_server::SUMMARY), "{context}");
+    assert!(
+        context.contains("without the person's approval"),
+        "{context}"
+    );
+    for command in codex_app_server::COMMANDS {
+        assert!(banner.contains(command), "{command}: {banner}");
+        assert!(
+            context.lines().any(|line| line == command),
+            "{command} on its own line: {context}"
+        );
+    }
+    for source in ["resume", "fork"] {
+        let input = start.replace("startup", source);
+        assert_eq!(hook("session-start", &input, true), notice, "{source}");
+    }
+
+    assert_eq!(
+        hook("session-start", start, false),
+        "",
+        "outside the server"
+    );
+    for input in [
+        start.replace("startup", "clear"),
+        start.replace("startup", "compact"),
+        "not json".to_owned(),
+        start.replace("SessionStart", "UserPromptSubmit"),
+    ] {
+        assert_eq!(hook("session-start", &input, true), "", "{input}");
+    }
+    let prompt = r#"{"hook_event_name":"UserPromptSubmit","prompt":"hello","session_id":"s1"}"#;
+    assert_eq!(hook("user-prompt-submit", prompt, true), "");
 }

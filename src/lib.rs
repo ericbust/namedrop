@@ -3,6 +3,7 @@ mod agent_status_model;
 pub mod cli;
 pub use agent_status::collect_agent_status;
 pub use agent_status_model::{suggest_agent_persona, summarize_agent_status};
+mod codex_app_server;
 mod context;
 mod controls;
 mod coordination;
@@ -44,7 +45,9 @@ pub use health::{
     HealthIssue, HealthRepair, HealthRepairKind, HealthReport, HealthSeverity, HealthStatus,
     diagnose_collaboration, render_health_report_to_text, request_doctor_assistance,
 };
-pub use hook::{execute_session_start_hook, execute_user_prompt_submit_hook};
+pub use hook::{
+    execute_codex_app_server_hook, execute_session_start_hook, execute_user_prompt_submit_hook,
+};
 pub use install::{AgentConfigDirectories, install_integration_package, package_directory};
 pub(crate) use install::{
     IntegrationPackageInstallation, disclosed_user_package_targets,

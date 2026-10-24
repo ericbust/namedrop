@@ -1,3 +1,5 @@
+#[path = "support/codex_app_server.rs"]
+mod codex_app_server;
 use serde_json::Value;
 use std::{
     fs,
@@ -1738,4 +1740,71 @@ fn launch_tour_opens_the_tour_popup() {
     // Launching opens the popup only; the popup itself records the tour.
     assert!(!f.marker().exists());
     assert!(!f.0.join("state/namedrop.sqlite3").exists());
+}
+
+#[test]
+fn naming_a_codex_pane_the_shared_app_server_serves_shows_its_advice_until_a_key() {
+    let f = Fixture::new();
+    let quiet = f.run("review\n\n\n", true);
+    assert!(quiet.status.success(), "{quiet:?}");
+    assert!(
+        !String::from_utf8_lossy(&quiet.stdout).contains(codex_app_server::SUMMARY),
+        "no server, no notice"
+    );
+
+    let _server = codex_app_server::start_server(&f.0.join("home/.codex"));
+    let mut child = f
+        .command()
+        .args(["ui", "run", "name"])
+        .env("TEST_AGENT", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(b"review\n\n\n").unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    let shown = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reader = {
+        let shown = shown.clone();
+        std::thread::spawn(move || {
+            let mut buffer = [0; 4096];
+            while let Ok(n @ 1..) = stdout.read(&mut buffer) {
+                shown.lock().unwrap().extend_from_slice(&buffer[..n]);
+            }
+        })
+    };
+    let text = || String::from_utf8_lossy(&shown.lock().unwrap()).into_owned();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !text().contains("Enter or Esc closes") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the popup never offered to close: {}",
+            text()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "the popup stays open on the advice until a key"
+    );
+    stdin.write_all(b"\n").unwrap();
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    reader.join().unwrap();
+
+    let shown = text();
+    let named = shown.find("Named @review as agent.").expect(&shown);
+    let summary = shown
+        .find("Codex runs its sessions through its shared app-server, so Herdr")
+        .expect(&shown);
+    assert!(named < summary, "{shown}");
+    for command in codex_app_server::COMMANDS {
+        assert!(
+            shown.lines().any(|line| line.trim() == command),
+            "{command} is copyable on its own line: {shown}"
+        );
+    }
 }
