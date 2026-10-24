@@ -40,6 +40,7 @@ fn cached_update_is_informational_and_doctor_remains_healthy_and_read_only() {
     assert_eq!(update.diagnostic["last_success_at"], 90);
     assert_eq!(update.diagnostic["last_error"], "offline");
     let text = render_health_report_to_text(&report);
+    assert!(text.starts_with(&render_health_report_to_text(&baseline)));
     assert!(text.contains("herdr plugin action invoke update --plugin namedrop"));
     assert_eq!(before, fs::read(f.root.join("namedrop.sqlite3")).unwrap());
     assert!(!f.root.join("update-notice.json").exists());

@@ -946,28 +946,28 @@ fn add_operation<E, C, I>(
 
 #[must_use]
 pub fn render_health_report_to_text(report: &HealthReport) -> String {
+    let agents = if report.available_agents == 1 {
+        "agent is"
+    } else {
+        "agents are"
+    };
+    let terminals = if report.available_terminals > 0 {
+        format!(" {} terminals available.", report.available_terminals)
+    } else {
+        String::new()
+    };
+    let passed = format!(
+        "Namedrop checks passed; runtime hooks remain unverified.\n{} {agents} available.{terminals} {} messages await progress.",
+        report.available_agents, report.waiting_messages,
+    );
     if report.issues.is_empty() {
-        let agents = if report.available_agents == 1 {
-            "agent is"
-        } else {
-            "agents are"
-        };
-        let terminals = if report.available_terminals > 0 {
-            format!(" {} terminals available.", report.available_terminals)
-        } else {
-            String::new()
-        };
-        return format!(
-            "Namedrop checks passed; runtime hooks remain unverified.\n{} {agents} available.{terminals} {} messages await progress.",
-            report.available_agents, report.waiting_messages,
-        );
+        return passed;
     }
     let mut rendered = match report.status {
-        HealthStatus::Unavailable => "Namedrop could not complete its health check.\n",
-        HealthStatus::NeedsAttention => "Namedrop needs attention.\n",
-        HealthStatus::Healthy => "Namedrop is healthy.\n",
-    }
-    .to_owned();
+        HealthStatus::Unavailable => "Namedrop could not complete its health check.\n".to_owned(),
+        HealthStatus::NeedsAttention => "Namedrop needs attention.\n".to_owned(),
+        HealthStatus::Healthy => passed + "\n",
+    };
     for issue in &report.issues {
         rendered.push('\n');
         rendered.push_str(&terminal_safe_text(&issue.summary));
