@@ -251,19 +251,19 @@ where
                         update.version,
                         env!("CARGO_PKG_VERSION")
                     ),
-                    crate::update_check::UPDATE_COMMAND,
+                    &format!(
+                        "Updating keeps your names, groups, handoffs and running agents. Run `{}` from a plain shell tab.",
+                        crate::update_check::UPDATE_COMMAND
+                    ),
                     HealthRepairKind::HumanDecision,
                     "Run Update Namedrop when you are ready.",
                 );
-                update_issue.repair.command = Some(vec![
-                    "herdr".into(),
-                    "plugin".into(),
-                    "action".into(),
-                    "invoke".into(),
-                    "update".into(),
-                    "--plugin".into(),
-                    "namedrop".into(),
-                ]);
+                update_issue.repair.command = Some(
+                    crate::update_check::UPDATE_COMMAND
+                        .split(' ')
+                        .map(str::to_owned)
+                        .collect(),
+                );
                 update_issue.diagnostic = serde_json::json!({
                     "installed_version": env!("CARGO_PKG_VERSION"), "available_version": update.version,
                     "checked_at":update.checked_at, "last_success_at":update.last_success_at,
