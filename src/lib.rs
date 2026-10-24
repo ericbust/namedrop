@@ -63,9 +63,9 @@ pub use integration::{
     DeliveryControlDraft, DeliveryEnvelope, INTEGRATION_PROTOCOL_VERSION, InputTransport,
     IntegrationChallenge, IntegrationPackage, IntegrationRegistration, IntegrationToolInvocation,
     OperationCatalog, REPLY_BODY_PLACEHOLDER, ResultSetCompletion, ResultSetOutcome,
-    ResultSetStatus, TRUSTED_DELIVERY_INSTRUCTION, complete_capability_profile,
-    describe_operations, execute_integration_operation, integration_package,
-    issue_registration_challenge, operation_catalog,
+    ResultSetStatus, complete_capability_profile, describe_operations,
+    execute_integration_operation, integration_package, issue_registration_challenge,
+    operation_catalog, trusted_delivery_instruction,
 };
 pub(crate) use integration::{collaboration_executable, tool_environment};
 pub use lifecycle::{
