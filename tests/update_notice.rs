@@ -1,4 +1,6 @@
 use namedrop::{AgentRuntime, install_integration_package};
+#[path = "support/update_profile.rs"]
+mod update_profile;
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -20,11 +22,11 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
+        let root = update_profile::root(std::env::temp_dir().join(format!(
             "namedrop-notice-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        )));
         let state = root.join("state");
         let home = root.join("home");
         fs::create_dir_all(&state).unwrap();
@@ -48,7 +50,6 @@ impl Fixture {
         namedrop::update_check::session_notice(
             r#"{"hook_event_name":"SessionStart","source":"startup"}"#,
             &self.state,
-            Some(&self.home),
             now,
             None,
         )
@@ -85,7 +86,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.root).unwrap();
+        update_profile::cleanup(&self.root);
     }
 }
 
@@ -109,6 +110,9 @@ fn detached_worker_behavior() {
 #[test]
 fn cache_only_notice_is_global_daily_and_new_versions_rearm_it() {
     let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
     f.seed("9.10.0");
     let first = f.notice(1000).unwrap();
     assert_eq!(
@@ -137,6 +141,9 @@ fn cache_only_notice_is_global_daily_and_new_versions_rearm_it() {
 #[test]
 fn versions_compare_numerically_and_invalid_cache_never_produces_a_notice() {
     let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
     for version in [
         "0.99.99",
         env!("CARGO_PKG_VERSION"),
@@ -162,17 +169,15 @@ fn versions_compare_numerically_and_invalid_cache_never_produces_a_notice() {
 }
 
 #[test]
-fn pinned_ineligible_and_opted_out_caches_are_silent() {
+fn missing_versions_and_opted_out_caches_are_silent() {
     let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
     let original = f.seed("9.0.0");
-    for source in [
-        Value::Null,
-        json!({}),
-        json!({"kind":"local"}),
-        json!({"owner":"owner","repo":"repo","requested_ref":"a".repeat(40),"resolved_commit":"b".repeat(40),"subdir":""}),
-    ] {
+    for remote_version in [Value::Null, json!(12), json!("")] {
         let mut cache = original.clone();
-        cache["source"] = source;
+        cache["remote_version"] = remote_version;
         f.write(&cache);
         assert_eq!(f.notice(1000), None);
     }
@@ -193,6 +198,9 @@ fn pinned_ineligible_and_opted_out_caches_are_silent() {
 #[test]
 fn rebuilt_sessions_do_not_claim_the_notice_and_existing_banner_is_combined() {
     let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
     f.seed("9.0.0");
     let banner = json!({"systemMessage":"existing banner", "hookSpecificOutput":{"additionalContext":"unchanged"}});
     for source in ["clear", "compact"] {
@@ -201,7 +209,6 @@ fn rebuilt_sessions_do_not_claim_the_notice_and_existing_banner_is_combined() {
             namedrop::update_check::session_notice(
                 &input.to_string(),
                 &f.state,
-                Some(&f.home),
                 1000,
                 Some(banner.clone())
             ),
@@ -212,7 +219,6 @@ fn rebuilt_sessions_do_not_claim_the_notice_and_existing_banner_is_combined() {
     let output = namedrop::update_check::session_notice(
         r#"{"hook_event_name":"SessionStart","source":"resume"}"#,
         &f.state,
-        Some(&f.home),
         1000,
         Some(banner.clone()),
     )
@@ -261,6 +267,46 @@ fn real_session_start_cli_reads_cache_without_herdr_or_network() {
             .stdout
             .is_empty()
     );
+}
+
+#[test]
+fn update_settings_follow_the_subprocess_xdg_and_home_environment() {
+    let f = Fixture::new();
+    f.seed("9.0.0");
+    let config = f.root.join("custom-config");
+    let settings = config.join("herdr/plugins/config/namedrop/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let run = |xdg: &std::path::Path| {
+        let mut child = f
+            .command(&[
+                "hook",
+                "session-start",
+                "--state-directory",
+                f.state.to_str().unwrap(),
+            ])
+            .env("XDG_CONFIG_HOME", xdg)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"hook_event_name":"SessionStart","source":"startup"}"#)
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        output.stdout
+    };
+    f.settings("{\"check_for_updates\":true}");
+    fs::write(&settings, "{\"check_for_updates\":false}").unwrap();
+    assert!(run(&config).is_empty());
+    f.settings("{\"check_for_updates\":false}");
+    fs::write(&settings, "{\"check_for_updates\":true}").unwrap();
+    assert!(!run(&config).is_empty());
+    fs::remove_file(f.state.join("update-notice.json")).unwrap();
+    assert!(run(std::path::Path::new("relative-config")).is_empty());
 }
 
 #[test]
@@ -358,16 +404,41 @@ fn only_background_triggers_launch_the_worker_and_events_do_not_wait_for_it() {
 fn both_wrappers_forward_only_composed_notices_and_reject_hostile_versions() {
     let f = Fixture::new();
     let executable = f.root.join("hook-result");
-    let update = |version: &str| {
+    let update_for = |available: &str, installed: &str| {
         format!(
-            "Namedrop {version} is available (you have {}). Update: herdr plugin action invoke update --plugin namedrop",
-            env!("CARGO_PKG_VERSION")
+            "Namedrop {available} is available (you have {installed}). Update: herdr plugin action invoke update --plugin namedrop"
         )
     };
+    let update = |version: &str| update_for(version, env!("CARGO_PKG_VERSION"));
     for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
         let package = install_integration_package(&f.home, runtime, &executable, &f.state).unwrap();
         for (value, forward) in [
             (json!({"systemMessage":update("9.10.0")}), true),
+            (json!({"systemMessage":update_for("9.10.0", "1.3.1")}), true),
+            (
+                json!({"systemMessage":update_for("9.10.0", "1.3.0\nmalice")}),
+                false,
+            ),
+            (
+                json!({"systemMessage":update_for("9.10.0", "1.3.0\"")}),
+                false,
+            ),
+            (
+                json!({"systemMessage":update_for("9.10.0", "\u{1b}[31m1.3.0")}),
+                false,
+            ),
+            (
+                json!({"systemMessage":update_for("9.10.0", &"9".repeat(10_000))}),
+                false,
+            ),
+            (
+                json!({"systemMessage":update_for("9.10.0", "01.3.0")}),
+                false,
+            ),
+            (
+                json!({"systemMessage":update_for("9.10.0", "1.3.0.")}),
+                false,
+            ),
             (
                 json!({"hookSpecificOutput":{"additionalContext":"Namedrop selection policy. Existing policy.","hookEventName":"SessionStart"},"systemMessage":update("9.10.0")}),
                 true,
@@ -408,5 +479,20 @@ fn both_wrappers_forward_only_composed_notices_and_reject_hostile_versions() {
                 "{runtime:?}: {text}"
             );
         }
+    }
+}
+
+#[test]
+fn installed_session_start_wrappers_are_release_independent() {
+    let f = Fixture::new();
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let package =
+            install_integration_package(&f.home, runtime, &f.root.join("namedrop"), &f.state)
+                .unwrap();
+        let wrapper = fs::read_to_string(package.join("scripts/session-start")).unwrap();
+        assert!(
+            !wrapper.contains(env!("CARGO_PKG_VERSION")),
+            "{runtime:?} embeds the package version"
+        );
     }
 }

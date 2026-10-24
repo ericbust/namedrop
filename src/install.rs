@@ -1022,21 +1022,20 @@ fn forward_update_notice(runtime: AgentRuntime) -> String {
         .strip_suffix('}')
         .expect("hook output is an object");
     let message_start = "\"systemMessage\":\"Namedrop ";
-    let message_end = format!(
-        " is available (you have {}). Update: {}\"}}",
-        env!("CARGO_PKG_VERSION"),
-        crate::update_check::UPDATE_COMMAND,
-    );
+    let message_middle = " is available (you have ";
+    let message_end = format!("). Update: {}\"}}", crate::update_check::UPDATE_COMMAND,);
     let mut patterns = vec![
         format!(
-            "{}*{}",
+            "{}*{}*{}",
             shell_single_quote(&format!("{{{message_start}")),
+            shell_single_quote(message_middle),
             shell_single_quote(&message_end)
         ),
         format!(
-            "{}*{}*{}",
+            "{}*{}*{}*{}",
             shell_single_quote(&policy_start),
             shell_single_quote(&format!("{policy_end},{message_start}")),
+            shell_single_quote(message_middle),
             shell_single_quote(&message_end)
         ),
     ];
@@ -1046,14 +1045,16 @@ fn forward_update_notice(runtime: AgentRuntime) -> String {
             .strip_suffix("\"}")
             .expect("notice ends with systemMessage");
         patterns.push(format!(
-            "{}*{}",
+            "{}*{}*{}",
             shell_single_quote(&format!("{start}\\nNamedrop ")),
+            shell_single_quote(message_middle),
             shell_single_quote(&message_end)
         ));
     }
-    // Validate the dynamic part with shell builtins, so hooks gain no process.
+    // Validate both versions with shell builtins; wrapper bytes must remain
+    // stable when only the release version changes.
     format!(
-        "case \"$output\" in\n  {})\n    available=${{output##*'Namedrop '}}\n    available=${{available%{}}}\n    case \"$available\" in ''|*[!0-9.]*) exit 0 ;; esac\n    [ \"${{#available}}\" -le 32 ] || exit 0\n    IFS=.\n    set -- $available\n    [ \"$#\" -eq 3 ] || exit 0\n    [ \"$available\" = \"$1.$2.$3\" ] || exit 0\n    for part do\n      case \"$part\" in ''|0[0-9]*) exit 0 ;; esac\n    done\n    printf '%s' \"$output\"\n    ;;\nesac\n",
+        "case \"$output\" in\n  {})\n    versions=${{output##*'Namedrop '}}\n    versions=${{versions%{}}}\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      case \"$1\" in ''|*[!0-9.]*) return 1 ;; esac\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      for part do\n        case \"$part\" in ''|0[0-9]*) return 1 ;; esac\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    printf '%s' \"$output\"\n    ;;\nesac\n",
         patterns.join("|"),
         shell_single_quote(&message_end),
     )

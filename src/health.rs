@@ -227,11 +227,9 @@ where
     }) {
         issues.push(stale_runtime_issue(&stale));
     }
-    match crate::update_check::settings(runtime.home_directory) {
+    match crate::update_check::settings() {
         Err(error) => {
-            let path = runtime
-                .home_directory
-                .map(crate::update_check::settings_path);
+            let path = crate::update_check::settings_path().ok();
             let mut setting = issue(
                 "ND-UPDATE-002",
                 HealthSeverity::Info,
@@ -244,9 +242,7 @@ where
             issues.push(setting);
         }
         Ok(_) => {
-            if let Some(update) =
-                crate::update_check::available(runtime.state_directory, runtime.home_directory)
-            {
+            if let Some(update) = crate::update_check::available(runtime.state_directory) {
                 let mut update_issue = issue(
                     "ND-UPDATE-001",
                     HealthSeverity::Info,

@@ -1,5 +1,7 @@
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
+#[path = "support/update_profile.rs"]
+mod update_profile;
 use namedrop::*;
 use serde_json::json;
 use std::{
@@ -14,6 +16,9 @@ static NEXT: AtomicU64 = AtomicU64::new(1);
 #[test]
 fn cached_update_is_informational_and_doctor_remains_healthy_and_read_only() {
     let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
     f.register();
     let baseline = diagnose_collaboration(&f.runtime());
     assert_eq!(baseline.status, HealthStatus::Healthy, "{baseline:?}");
@@ -71,6 +76,9 @@ fn cached_update_is_informational_and_doctor_remains_healthy_and_read_only() {
 #[test]
 fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
     let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
     f.register();
     let path = f
         .home
@@ -109,11 +117,11 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!(
+        let root = update_profile::root(std::env::temp_dir().join(format!(
             "namedrop-health-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        )));
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
         Self {
@@ -224,7 +232,7 @@ fn stale_runtime(report: &HealthReport) -> Option<&HealthIssue> {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.root).unwrap();
+        update_profile::cleanup(&self.root);
     }
 }
 struct Host {

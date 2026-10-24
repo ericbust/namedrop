@@ -707,11 +707,9 @@ fn run_context_hook(
     if serde_json::from_str::<serde_json::Value>(&input)
         .is_ok_and(|input| input["hook_event_name"] == "SessionStart")
     {
-        let home = env::var_os("HOME").map(PathBuf::from);
         output = namedrop::update_check::session_notice(
             &input,
             state_directory,
-            home.as_deref(),
             SystemClock.now_unix_ms(),
             output,
         );

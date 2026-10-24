@@ -24,14 +24,13 @@ fn enabled() -> bool {
     true
 }
 
-pub(crate) fn settings_path(home: &Path) -> PathBuf {
-    let own_home = env::var_os("HOME").is_some_and(|value| Path::new(&value) == home);
-    env::var_os("XDG_CONFIG_HOME")
-        .filter(|_| own_home)
+pub(crate) fn settings_path() -> Result<PathBuf, String> {
+    let directory = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .unwrap_or_else(|| home.join(".config"))
-        .join("herdr/plugins/config/namedrop/settings.json")
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .ok_or("Namedrop cannot locate its update settings without HOME or XDG_CONFIG_HOME")?;
+    Ok(directory.join("herdr/plugins/config/namedrop/settings.json"))
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
@@ -46,9 +45,8 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_slice(&data).map_err(|error| error.to_string())
 }
 
-pub(crate) fn settings(home: Option<&Path>) -> Result<bool, String> {
-    let home = home.ok_or("Namedrop cannot locate its update settings without HOME")?;
-    let path = settings_path(home);
+pub(crate) fn settings() -> Result<bool, String> {
+    let path = settings_path()?;
     if !path.try_exists().map_err(|error| error.to_string())? {
         return Ok(true);
     }
@@ -73,70 +71,9 @@ fn version(value: &str) -> Option<[u64; 3]> {
 }
 
 #[derive(Deserialize)]
-struct Source {
-    owner: String,
-    repo: String,
-    requested_ref: String,
-    resolved_commit: String,
-    subdir: String,
-}
-
-impl Source {
-    fn valid(&self) -> bool {
-        let name = |value: &str| {
-            !value.is_empty()
-                && value.len() <= 100
-                && value
-                    .bytes()
-                    .next()
-                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
-        };
-        name(&self.owner)
-            && name(&self.repo)
-            && !self.requested_ref.is_empty()
-            && self.requested_ref.len() <= 255
-            && self
-                .requested_ref
-                .bytes()
-                .next()
-                .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            && self
-                .requested_ref
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_./-".contains(&byte))
-            && !self.requested_ref.contains("..")
-            && !self.requested_ref.contains("//")
-            && !["/", ".", ".lock"]
-                .iter()
-                .any(|end| self.requested_ref.ends_with(end))
-            && !commit(&self.requested_ref)
-            && commit(&self.resolved_commit)
-            && self.subdir.len() <= 4096
-            && !self.subdir.starts_with('/')
-            && self
-                .subdir
-                .split('/')
-                .all(|part| part != ".." && part != ".")
-            && self
-                .subdir
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"_./-".contains(&byte))
-    }
-}
-
-fn commit(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-#[derive(Deserialize)]
 struct Cache {
     schema_version: u32,
     checked_at: u64,
-    source: Option<Source>,
-    remote_commit: Option<String>,
     remote_version: Option<String>,
     last_success_at: Option<u64>,
     last_error: Option<String>,
@@ -150,23 +87,18 @@ fn cache(state: &Path) -> Option<Cache> {
 pub(crate) struct AvailableUpdate {
     pub version: String,
     pub checked_at: u64,
-    pub last_success_at: u64,
+    pub last_success_at: Option<u64>,
     pub last_error: Option<String>,
 }
 
-pub(crate) fn available(state: &Path, home: Option<&Path>) -> Option<AvailableUpdate> {
-    settings(home).ok().filter(|enabled| *enabled)?;
+pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
+    settings().ok().filter(|enabled| *enabled)?;
     let cache = cache(state)?;
-    cache.source.as_ref().filter(|source| source.valid())?;
-    cache
-        .remote_commit
-        .as_deref()
-        .filter(|value| commit(value))?;
     let remote = cache.remote_version?;
     (version(&remote)? > version(env!("CARGO_PKG_VERSION"))?).then_some(AvailableUpdate {
         version: remote,
         checked_at: cache.checked_at,
-        last_success_at: cache.last_success_at?,
+        last_success_at: cache.last_success_at,
         last_error: cache.last_error,
     })
 }
@@ -175,10 +107,10 @@ pub(crate) fn available(state: &Path, home: Option<&Path>) -> Option<AvailableUp
 /// owns the lock and all subprocess/network work, so pane handling never waits.
 #[doc(hidden)]
 pub fn start(state: &Path, now: u64) {
-    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+    let Ok(path) = settings_path() else {
         return;
     };
-    if settings(Some(&home)) != Ok(true)
+    if settings() != Ok(true)
         || cache(state)
             .is_some_and(|cache| now >= cache.checked_at && now - cache.checked_at < DAY_MS)
     {
@@ -187,7 +119,7 @@ pub fn start(state: &Path, now: u64) {
     let _ = Command::new("python3")
         .args(["-c", include_str!("../scripts/check-update.py")])
         .arg(state)
-        .arg(settings_path(&home))
+        .arg(path)
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -229,7 +161,6 @@ fn save_notice(state: &Path, notice: &Notice) -> Option<()> {
 pub fn session_notice(
     input: &str,
     state: &Path,
-    home: Option<&Path>,
     now: u64,
     mut output: Option<Value>,
 ) -> Option<Value> {
@@ -239,7 +170,7 @@ pub fn session_notice(
     {
         return output;
     }
-    let Some(update) = available(state, home) else {
+    let Some(update) = available(state) else {
         return output;
     };
     if read_json::<Notice>(&state.join("update-notice.json")).is_ok_and(|notice| {
