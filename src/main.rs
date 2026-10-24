@@ -713,18 +713,29 @@ fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
             Some(space_id) => space_id.to_owned(),
             None => namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
         };
-        let directory =
-            reconciliation_directory(state_directory, runtime.session_socket_id, &space_id)?;
-        queue_agent_status_reconciliation(
-            &directory,
-            &serde_json::json!({"operation":"mailbox-wake"}),
-        )?;
-        status_worker_command()?
-            .env("HERDR_PLUGIN_STATE_DIR", state_directory)
-            .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
-            .env("HERDR_WORKSPACE_ID", space_id)
-            .status()
-            .map_err(|error| error.to_string())?;
+        for space_id in
+            namedrop::spaces_to_wake(state_directory, runtime.session_socket_id, &space_id)
+        {
+            // One workspace that cannot be woken must not strand the others.
+            let _ = (|| -> Result<(), String> {
+                let directory = reconciliation_directory(
+                    state_directory,
+                    runtime.session_socket_id,
+                    &space_id,
+                )?;
+                queue_agent_status_reconciliation(
+                    &directory,
+                    &serde_json::json!({"operation":"mailbox-wake"}),
+                )?;
+                status_worker_command()?
+                    .env("HERDR_PLUGIN_STATE_DIR", state_directory)
+                    .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
+                    .env("HERDR_WORKSPACE_ID", &space_id)
+                    .status()
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })();
+        }
         Ok(())
     });
     ExitCode::SUCCESS

@@ -157,7 +157,7 @@ To open a popup without a key, run `herdr plugin action invoke <action> --plugin
 
 ## Examples
 
-Names belong to a Herdr workspace. A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
+Names belong to a Herdr workspace; see [other workspaces](#mention-agents-in-other-workspaces). A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
 
 ### Get two perspectives on a change
 
@@ -185,6 +185,26 @@ Then use it like a name:
 ```
 
 A group holds up to 64 agents. If mentions overlap, each agent still gets one delivery. Membership changes apply to future requests. Work already sent keeps its original recipients.
+
+### Mention agents in other workspaces
+
+Names are unique per Herdr workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:
+
+```text
+#exp-dashboard @lead Rebase on main and tell me the new HEAD.
+#exp-dashboard #feature-x @lead Status?
+#all @lead Report back your status in two lines.
+```
+
+Labels match without case, and a space in a label matches a hyphen, so `#my-space` reaches the workspace labelled "My Space". Every workspace also answers to its Herdr id, such as `#w12`. Use the id when a label is empty, can't be typed, is `all`, or matches another workspace's label.
+
+Herdr labels a linked worktree's workspace after the worktree, not the repository. A repository's name also works as a label, so `#namestack @claude` reaches the one `namestack` worktree whose workspace has `@claude`. A workspace labelled `namestack` that has the name still wins. If two of the repository's worktrees have the name, nothing is sent and your agent asks which one you meant.
+
+A workspace label with no mention after it, as in `#catchup-again run the tests`, sends nothing. Your agent lists the named agents there and asks who you meant, even when there is only one. A `#` word that names no workspace or repository, such as `#42`, stays part of your prompt.
+
+A mention without a label stays in the current workspace when the name exists there. If it doesn't, and exactly one other workspace has the name, the prompt goes there and Herdr shows where it went. If several workspaces have the name, nothing is sent and your agent asks which one you meant. You can also ask in plain words, such as "ask my @lead panes to report back".
+
+Replies come back to the workspace you sent from. Context handoffs and tracked coordination stay inside one workspace.
 
 ### Run tests in a shell pane
 

@@ -67,7 +67,7 @@ def contracts(gated):
 def rows(state):
     with sqlite3.connect(state / 'namedrop.sqlite3') as db:
         tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-                  if not r[0].startswith('coordination')]
+                  if not r[0].startswith(('coordination', 'space_envoys', 'bridged_'))]
         return {table: db.execute('SELECT * FROM "' + table + '" ORDER BY rowid').fetchall()
                 for table in tables}
 
@@ -201,7 +201,7 @@ def verify_completed(fixture, migration, pending):
     assert migration.returncode == 0, (out, err)
     out, err = pending.communicate(timeout=8)
     assert pending.returncode == 0 and json.loads(out)['status'] == 'ok', (out, err)
-    fixture.verify_rows(5)
+    fixture.verify_rows(6)
     assert runtime.current(fixture.rt) == fixture.new
     assert not (fixture.rt / 'migration.json').exists()
     assert (fixture.rt / fixture.old / 'namedrop').is_file()
@@ -281,7 +281,7 @@ def interrupted_publication(fixture):
     migration = fixture.migration()
     out, err = migration.communicate(timeout=8)
     assert migration.returncode == 0, (out, err)
-    fixture.verify_rows(5)
+    fixture.verify_rows(6)
     # Foreign publication entries are never removed by recovery.
     (fixture.rt / 'next').symlink_to('/foreign/runtime')
     try:
@@ -323,7 +323,7 @@ def orphaned_migration(fixture):
         connection.rollback()
         out, err = pending.communicate(timeout=6)
         assert pending.returncode != 0 and b'activation was interrupted' in err, (out, err)
-        fixture.verify_rows(5)
+        fixture.verify_rows(6)
         runtime.recover_migration(fixture.rt)
         assert not (fixture.rt / 'migration.json').exists()
         assert runtime.current(fixture.rt) == fixture.new
@@ -345,11 +345,11 @@ def interrupted(fixture, committed):
     pending = fixture.command()
     out, err = pending.communicate(timeout=5)
     assert pending.returncode != 0 and b'activation was interrupted' in err, (out, err)
-    fixture.verify_rows(5 if committed else 3)
+    fixture.verify_rows(6 if committed else 3)
     runtime.recover_migration(fixture.rt)
     assert not (fixture.rt / 'migration.json').exists()
     assert runtime.current(fixture.rt) == (fixture.new if committed else fixture.old)
-    fixture.verify_rows(5 if committed else 3)
+    fixture.verify_rows(6 if committed else 3)
     if committed:
         pending = fixture.command()
         out, err = pending.communicate(timeout=5)
@@ -386,7 +386,7 @@ def main():
         for old, new in (contracts(True), contracts(False)):
             assert runtime.live_compatible(old, new)
             assert runtime.live_compatible(dict(new), new)
-            for prior in (dict(old, state_schema=2), dict(old, state_schema=6),
+            for prior in (dict(old, state_schema=2), dict(old, state_schema=7),
                           dict(old, live_upgrade_epoch=2), dict(old, collaboration_protocol='unknown')):
                 assert not runtime.live_compatible(prior, new)
             assert not runtime.live_compatible(old, dict(new, command_gate=0))

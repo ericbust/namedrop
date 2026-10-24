@@ -357,6 +357,11 @@ impl StateTransaction<'_> {
              LEFT JOIN latest o
                ON o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
              WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
+               -- An envoy stands in for an agent in another workspace, not a lane here.
+               AND NOT EXISTS (
+                   SELECT 1 FROM space_envoys e
+                   WHERE e.session_socket_id = a.session_socket_id
+                     AND e.worktree_id = a.worktree_id AND e.address_id = a.address_id)
              ORDER BY a.address_id",
             ns,
             |row| {

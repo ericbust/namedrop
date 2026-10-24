@@ -542,6 +542,9 @@ pub(crate) struct MessageRoute {
     pub thread_id: ThreadId,
     pub participants: Vec<RoutingAddressSnapshot>,
     pub reply_mode: DeliveryReplyMode,
+    /// Namedrop wrote the message itself, under the recipient's own address
+    /// and the sender name `namedrop`, so its sender is no one to reply to.
+    pub from_namedrop: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

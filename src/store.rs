@@ -23,7 +23,7 @@ use std::{
 };
 
 const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
-pub(crate) const SCHEMA_VERSION: u32 = 5;
+pub(crate) const SCHEMA_VERSION: u32 = 6;
 
 /// Personas live on the Pane Address, which survives renaming and rebinding,
 /// rather than on the role record the native naming path overwrites. Upgrading
@@ -41,6 +41,9 @@ UPDATE pane_addresses SET persona = (
 );
 "#;
 
+mod bridge;
+pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
+pub(crate) use groups::addressed_recipients;
 mod coordination;
 mod coordination_ownership;
 pub mod dashboard;
@@ -858,6 +861,29 @@ impl StateTransaction<'_> {
             })
     }
 
+    /// The address that holds `alias` here, whether the claim is active or a
+    /// tombstone left by a rename.
+    pub(crate) fn alias_holder(
+        &self,
+        namespace: &StateNamespace,
+        alias: &str,
+    ) -> Result<Option<PaneAddressId>, StoreError> {
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT address_id FROM alias_claims
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND alias = ?3",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    alias
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(PaneAddressId::new))
+    }
+
     pub(crate) fn resolve_routing_alias(
         &self,
         namespace: &StateNamespace,
@@ -946,21 +972,25 @@ impl StateTransaction<'_> {
             .ok_or_else(|| StoreError::invalid_input("reply participant is no longer routable"))
     }
 
-    fn optional_routing_address_by_id(
+    pub(crate) fn optional_routing_address_by_id(
         &self,
         namespace: &StateNamespace,
         address_id: &PaneAddressId,
     ) -> Result<Option<RoutingAddressSnapshot>, StoreError> {
-        let alias = self
+        let found = self
             .transaction
             .query_row(
-                "SELECT c.alias
+                "SELECT c.alias, e.origin_alias
                  FROM pane_addresses a
-                 JOIN alias_claims c
+                 LEFT JOIN alias_claims c
                    ON c.session_socket_id = a.session_socket_id
                   AND c.worktree_id = a.worktree_id
                   AND c.address_id = a.address_id
                   AND c.claim_state = 'active'
+                 LEFT JOIN space_envoys e
+                   ON e.session_socket_id = a.session_socket_id
+                  AND e.worktree_id = a.worktree_id
+                  AND e.address_id = a.address_id
                  WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
                    AND a.address_id = ?3 AND a.retired = 0",
                 params![
@@ -968,12 +998,26 @@ impl StateTransaction<'_> {
                     namespace.space_id.as_str(),
                     address_id.as_str()
                 ],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, Option<String>>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                    ))
+                },
             )
             .optional()?;
-        alias
-            .map(|alias| self.resolve_routing_alias(namespace, &alias))
-            .transpose()
+        match found {
+            Some((Some(alias), _)) => self.resolve_routing_alias(namespace, &alias).map(Some),
+            // An envoy holds no name of its own, so it never resolves by alias;
+            // it answers to the name of the address it stands for.
+            Some((None, Some(origin_alias))) => Ok(Some(RoutingAddressSnapshot {
+                address_id: address_id.clone(),
+                alias: origin_alias,
+                pane_binding_id: None,
+                agent_session_id: None,
+            })),
+            Some((None, None)) | None => Ok(None),
+        }
     }
 
     pub fn move_pane_binding(
@@ -2411,6 +2455,10 @@ impl StateTransaction<'_> {
             thread_id,
             participants,
             reply_mode: crate::DeliveryReplyMode::for_message_grammar(&grammar_version),
+            from_namedrop: matches!(
+                grammar_version.as_str(),
+                "coordination-nudge/v1" | "coordination-report/v1" | "result-set/v1"
+            ),
         })
     }
 
@@ -2419,6 +2467,16 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         draft: &MessageDraft,
         attribution: &MutationAttribution,
+    ) -> Result<MessageReceipt, StoreError> {
+        self.append_message_from(namespace, draft, attribution, None)
+    }
+
+    fn append_message_from(
+        &mut self,
+        namespace: &StateNamespace,
+        draft: &MessageDraft,
+        attribution: &MutationAttribution,
+        bridged_from: Option<&bridge::BridgeOrigin<'_>>,
     ) -> Result<MessageReceipt, StoreError> {
         let fingerprint = serde_json::to_string(&serde_json::json!({
             "in_reply_to": draft.in_reply_to.as_ref().map(MessageId::as_str),
@@ -2483,7 +2541,9 @@ impl StateTransaction<'_> {
                 "Collaboration Disabled blocks sends from this Pane Address",
             ));
         }
-        let is_agent_reply = draft.author_kind == ActorKind::AgentSession
+        // A copy's reply was already counted against the author's own thread.
+        let is_agent_reply = bridged_from.is_none()
+            && draft.author_kind == ActorKind::AgentSession
             && draft.in_reply_to.is_some()
             && !matches!(
                 draft.grammar_version.as_str(),
@@ -2553,6 +2613,9 @@ impl StateTransaction<'_> {
                 draft.message_id.as_str()
             ],
         )?;
+        if let Some(origin) = bridged_from {
+            self.record_bridged_message(namespace, &draft.message_id, origin)?;
+        }
         for (recipient_order, recipient) in draft.recipients.iter().enumerate() {
             self.transaction.execute(
                 "INSERT INTO message_recipients (
@@ -2641,6 +2704,7 @@ impl StateTransaction<'_> {
                 ],
             )?;
         }
+        self.forward_to_envoys(namespace, draft, attribution)?;
         let mut participants = vec![draft.author_address_id.clone()];
         participants.extend(
             draft
@@ -2665,51 +2729,64 @@ impl StateTransaction<'_> {
             attribution,
         )?;
         if is_agent_reply {
-            let changed = self.transaction.execute(
-                "UPDATE thread_controls
-                 SET reply_allowance = reply_allowance - 1,
-                     paused = CASE WHEN reply_allowance = 1 THEN 1 ELSE paused END
-                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
-                   AND reply_allowance > 0",
-                params![
-                    namespace.session_socket_id,
-                    namespace.space_id.as_str(),
-                    draft.thread_id.as_str()
-                ],
-            )?;
-            if changed != 1 {
-                return Err(StoreError::invalid_input(
-                    "the Automatic Reply Limit requires human continuation",
-                ));
+            for (peer, peer_thread) in self.paired_threads(namespace, &draft.thread_id)? {
+                self.charge_agent_reply(&peer, &peer_thread, attribution)?;
             }
-            if self
-                .thread_control_state(namespace, &draft.thread_id)?
-                .reply_limit_paused
-            {
-                self.append_transition(
-                    namespace,
-                    TransitionEntityKind::CollaborationThread,
-                    draft.thread_id.as_str(),
-                    TransitionKind::Paused,
-                    attribution,
-                )?;
-                self.open_attention_item(
-                    namespace,
-                    &AttentionItemDraft {
-                        id: crate::AttentionItemId::new(format!(
-                            "attention-automatic-reply-limit-{}",
-                            draft.thread_id.as_str()
-                        )),
-                        source_kind: crate::AttentionSourceKind::AutomaticReplyLimit,
-                        source_id: draft.thread_id.as_str().to_owned(),
-                        summary: "Automatic Reply Limit reached; continue or stop this thread."
-                            .to_owned(),
-                    },
-                    attribution,
-                )?;
-            }
+            self.charge_agent_reply(namespace, &draft.thread_id, attribution)?;
         }
         self.message_receipt(namespace, &draft.message_id, false)
+    }
+
+    fn charge_agent_reply(
+        &mut self,
+        namespace: &StateNamespace,
+        thread_id: &ThreadId,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let changed = self.transaction.execute(
+            "UPDATE thread_controls
+             SET reply_allowance = reply_allowance - 1,
+                 paused = CASE WHEN reply_allowance = 1 THEN 1 ELSE paused END
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
+               AND reply_allowance > 0",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                thread_id.as_str()
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::invalid_input(
+                "the Automatic Reply Limit requires human continuation",
+            ));
+        }
+        if self
+            .thread_control_state(namespace, thread_id)?
+            .reply_limit_paused
+        {
+            self.append_transition(
+                namespace,
+                TransitionEntityKind::CollaborationThread,
+                thread_id.as_str(),
+                TransitionKind::Paused,
+                attribution,
+            )?;
+            self.open_attention_item(
+                namespace,
+                &AttentionItemDraft {
+                    id: crate::AttentionItemId::new(format!(
+                        "attention-automatic-reply-limit-{}",
+                        thread_id.as_str()
+                    )),
+                    source_kind: crate::AttentionSourceKind::AutomaticReplyLimit,
+                    source_id: thread_id.as_str().to_owned(),
+                    summary: "Automatic Reply Limit reached; continue or stop this thread."
+                        .to_owned(),
+                },
+                attribution,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn thread_control_state(
@@ -2742,6 +2819,18 @@ impl StateTransaction<'_> {
     }
 
     pub fn continue_thread(
+        &mut self,
+        namespace: &StateNamespace,
+        thread_id: &ThreadId,
+        attribution: &MutationAttribution,
+    ) -> Result<crate::ThreadControlState, StoreError> {
+        for (peer, peer_thread) in self.paired_threads(namespace, thread_id)? {
+            self.continue_thread_here(&peer, &peer_thread, attribution)?;
+        }
+        self.continue_thread_here(namespace, thread_id, attribution)
+    }
+
+    fn continue_thread_here(
         &mut self,
         namespace: &StateNamespace,
         thread_id: &ThreadId,
@@ -2785,6 +2874,18 @@ impl StateTransaction<'_> {
         thread_id: &ThreadId,
         attribution: &MutationAttribution,
     ) -> Result<crate::ThreadControlState, StoreError> {
+        for (peer, peer_thread) in self.paired_threads(namespace, thread_id)? {
+            self.pause_thread_here(&peer, &peer_thread, attribution)?;
+        }
+        self.pause_thread_here(namespace, thread_id, attribution)
+    }
+
+    fn pause_thread_here(
+        &mut self,
+        namespace: &StateNamespace,
+        thread_id: &ThreadId,
+        attribution: &MutationAttribution,
+    ) -> Result<crate::ThreadControlState, StoreError> {
         let current = self.thread_control_state(namespace, thread_id)?;
         if current.stopped {
             return Err(StoreError::invalid_input(
@@ -2814,6 +2915,18 @@ impl StateTransaction<'_> {
     }
 
     pub fn resume_thread(
+        &mut self,
+        namespace: &StateNamespace,
+        thread_id: &ThreadId,
+        attribution: &MutationAttribution,
+    ) -> Result<crate::ThreadControlState, StoreError> {
+        for (peer, peer_thread) in self.paired_threads(namespace, thread_id)? {
+            self.resume_thread_here(&peer, &peer_thread, attribution)?;
+        }
+        self.resume_thread_here(namespace, thread_id, attribution)
+    }
+
+    fn resume_thread_here(
         &mut self,
         namespace: &StateNamespace,
         thread_id: &ThreadId,
@@ -2852,7 +2965,21 @@ impl StateTransaction<'_> {
         self.thread_control_state(namespace, thread_id)
     }
 
+    /// Stops the thread and every thread paired with it in another workspace.
+    /// The result reports this workspace's side.
     pub fn stop_thread(
+        &mut self,
+        namespace: &StateNamespace,
+        thread_id: &ThreadId,
+        attribution: &MutationAttribution,
+    ) -> Result<crate::ThreadStopResult, StoreError> {
+        for (peer, peer_thread) in self.paired_threads(namespace, thread_id)? {
+            self.stop_thread_here(&peer, &peer_thread, attribution)?;
+        }
+        self.stop_thread_here(namespace, thread_id, attribution)
+    }
+
+    fn stop_thread_here(
         &mut self,
         namespace: &StateNamespace,
         thread_id: &ThreadId,
@@ -2897,9 +3024,9 @@ impl StateTransaction<'_> {
                 )?
                 .collect::<Result<Vec<_>, _>>()?
         };
-        let cancelled_delivery_ids = {
+        let cancelled = {
             let mut statement = self.transaction.prepare(
-                "SELECT d.delivery_id
+                "SELECT d.delivery_id, d.message_id
                  FROM mailbox_deliveries d
                  JOIN collaboration_messages m USING (
                     session_socket_id, worktree_id, message_id
@@ -2915,7 +3042,12 @@ impl StateTransaction<'_> {
                         namespace.space_id.as_str(),
                         thread_id.as_str()
                     ],
-                    |row| row.get::<_, String>(0).map(crate::DeliveryId::new),
+                    |row| {
+                        Ok((
+                            crate::DeliveryId::new(row.get::<_, String>(0)?),
+                            MessageId::new(row.get::<_, String>(1)?),
+                        ))
+                    },
                 )?
                 .collect::<Result<Vec<_>, _>>()?
         };
@@ -2941,7 +3073,7 @@ impl StateTransaction<'_> {
                 thread_id.as_str()
             ],
         )?;
-        for delivery_id in &cancelled_delivery_ids {
+        for (delivery_id, _) in &cancelled {
             self.append_transition(
                 namespace,
                 TransitionEntityKind::MailboxDelivery,
@@ -2949,6 +3081,13 @@ impl StateTransaction<'_> {
                 TransitionKind::Cancelled,
                 attribution,
             )?;
+        }
+        let mut cancelled_messages: Vec<&MessageId> =
+            cancelled.iter().map(|(_, message_id)| message_id).collect();
+        cancelled_messages.sort();
+        cancelled_messages.dedup();
+        for message_id in cancelled_messages {
+            self.reflect_copy_outcomes(namespace, message_id, attribution)?;
         }
         self.complete_ready_result_sets(namespace, attribution)?;
         self.resolve_attention_source(
@@ -2966,7 +3105,10 @@ impl StateTransaction<'_> {
         )?;
         Ok(crate::ThreadStopResult {
             state: self.thread_control_state(namespace, thread_id)?,
-            cancelled_delivery_ids,
+            cancelled_delivery_ids: cancelled
+                .into_iter()
+                .map(|(delivery_id, _)| delivery_id)
+                .collect(),
             active_responses,
         })
     }
@@ -4764,11 +4906,16 @@ impl StateTransaction<'_> {
             self.coordination_assignment(namespace, &link.assignment_id)
                 .is_ok_and(|a| a["recipient_address_id"].as_str() == Some(&recipient_address_id))
         });
+        let sender_workspace =
+            self.bridged_sender_label(namespace, &MessageId::new(message_id.clone()))?;
         let draft = crate::DeliveryControlDraft {
             attempt_id: attempt_id.clone(),
             thread_id: ThreadId::new(thread_id),
             message_id: MessageId::new(message_id),
-            sender: DeliveryAddress::new(PaneAddressId::new(author_address_id), author_alias),
+            sender: DeliveryAddress {
+                workspace: sender_workspace,
+                ..DeliveryAddress::new(PaneAddressId::new(author_address_id), author_alias)
+            },
             recipients,
             context_references: references,
             attached_context,
@@ -4900,7 +5047,9 @@ impl StateTransaction<'_> {
     }
 
     /// Materializes one durable, idempotent completion delivery for every
-    /// explicitly delegated fan-out whose existing per-recipient rows are terminal.
+    /// explicitly delegated fan-out authored in this workspace whose existing
+    /// per-recipient rows are terminal. A forwarded copy is joined where it was
+    /// sent, and scripts/update.py counts pending joins by the same rule.
     pub(crate) fn complete_ready_result_sets(
         &mut self,
         namespace: &StateNamespace,
@@ -4923,6 +5072,12 @@ impl StateTransaction<'_> {
                           AND result.worktree_id = m.worktree_id
                           AND result.in_reply_to = m.message_id
                           AND result.grammar_version = 'result-set/v1'
+                   )
+                   AND NOT EXISTS (
+                        SELECT 1 FROM space_envoys e
+                        WHERE e.session_socket_id = m.session_socket_id
+                          AND e.worktree_id = m.worktree_id
+                          AND e.address_id = m.author_address_id
                    )
                  ORDER BY m.thread_order",
             )?;
@@ -4950,6 +5105,7 @@ impl StateTransaction<'_> {
         source_message_id: &MessageId,
         attribution: &MutationAttribution,
     ) -> Result<Option<MessageId>, StoreError> {
+        self.reflect_copy_outcomes(namespace, source_message_id, attribution)?;
         let completion = match self.result_set_outcomes(namespace, source_message_id) {
             Ok(completion) if completion.expected > 1 => completion,
             Ok(_) => return Ok(None),
@@ -4990,6 +5146,11 @@ impl StateTransaction<'_> {
         let Some((thread_id, address_id, alias, session_id, retired, disabled)) = source else {
             return Ok(None);
         };
+        // The author's own space joins over its envoys, so a copy never builds
+        // a second result set for the same request.
+        if self.is_envoy(namespace, &address_id)? {
+            return Ok(None);
+        }
         if retired || disabled || session_id.is_none() {
             return Ok(None);
         }
@@ -6927,6 +7088,7 @@ fn initialize_schema(
         (3, terminal::SCHEMA),
         (4, coordination::SCHEMA),
         (5, PERSONA_SCHEMA),
+        (6, bridge::SCHEMA),
     ] {
         if version < introduced_in {
             transaction.execute_batch(schema)?;
