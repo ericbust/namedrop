@@ -19,6 +19,7 @@ pub enum HealthStatus {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthSeverity {
+    Info,
     Notice,
     Blocked,
     Broken,
@@ -225,6 +226,56 @@ where
         registered_plugin_root(runtime.herdr)
     }) {
         issues.push(stale_runtime_issue(&stale));
+    }
+    match crate::update_check::settings(runtime.home_directory) {
+        Err(error) => {
+            let path = runtime
+                .home_directory
+                .map(crate::update_check::settings_path);
+            let mut setting = issue(
+                "ND-UPDATE-002",
+                HealthSeverity::Info,
+                "Namedrop update checks are disabled by invalid settings.",
+                &format!("Fix settings.json to enable checks again: {error}"),
+                HealthRepairKind::HumanDecision,
+                "Set check_for_updates to true or false in the Namedrop settings file.",
+            );
+            setting.diagnostic = serde_json::json!({"path":path});
+            issues.push(setting);
+        }
+        Ok(_) => {
+            if let Some(update) =
+                crate::update_check::available(runtime.state_directory, runtime.home_directory)
+            {
+                let mut update_issue = issue(
+                    "ND-UPDATE-001",
+                    HealthSeverity::Info,
+                    &format!(
+                        "Namedrop {} is available (you have {}).",
+                        update.version,
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                    crate::update_check::UPDATE_COMMAND,
+                    HealthRepairKind::HumanDecision,
+                    "Run Update Namedrop when you are ready.",
+                );
+                update_issue.repair.command = Some(vec![
+                    "herdr".into(),
+                    "plugin".into(),
+                    "action".into(),
+                    "invoke".into(),
+                    "update".into(),
+                    "--plugin".into(),
+                    "namedrop".into(),
+                ]);
+                update_issue.diagnostic = serde_json::json!({
+                    "installed_version": env!("CARGO_PKG_VERSION"), "available_version": update.version,
+                    "checked_at":update.checked_at, "last_success_at":update.last_success_at,
+                    "last_error":update.last_error,
+                });
+                issues.push(update_issue);
+            }
+        }
     }
 
     let served = crate::codex_app_server::served_codex_panes(runtime, &setup.panes);
@@ -480,7 +531,10 @@ where
     }
 
     HealthReport {
-        status: if issues.is_empty() {
+        status: if issues
+            .iter()
+            .all(|issue| issue.severity == HealthSeverity::Info)
+        {
             HealthStatus::Healthy
         } else {
             HealthStatus::NeedsAttention
@@ -539,7 +593,11 @@ where
         );
     }
     let report = diagnose_collaboration(runtime);
-    if report.issues.is_empty() {
+    if report
+        .issues
+        .iter()
+        .all(|issue| issue.severity == HealthSeverity::Info)
+    {
         return Err("No issues remain; nothing was sent.".to_owned());
     }
     // Immediately before dispatch: the pane must still hold the exact Agent

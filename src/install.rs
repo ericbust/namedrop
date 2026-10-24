@@ -981,8 +981,7 @@ fn forward_marked_context(event: &str, marker: &str) -> String {
 }
 
 /// The session-start wrapper. It forwards only what the plugin produced: the
-/// selection policy, and for Codex the fixed shared app-server notice, so a
-/// host never receives anything else under this event from Namedrop.
+/// selection policy, a numeric update notice, and Codex's shared-server advice.
 fn session_start_script(
     runtime: AgentRuntime,
     executable: &Path,
@@ -1007,12 +1006,57 @@ fn session_start_script(
         ),
         AgentRuntime::ClaudeCode => String::new(),
     };
+    let update_notice = forward_update_notice(runtime);
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}exit 0\n",
+        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
         shell_single_quote(executable),
         shell_single_quote(state_directory),
         forward_marked_context("SessionStart", crate::persona::POLICY_MARKER),
     ))
+}
+
+fn forward_update_notice(runtime: AgentRuntime) -> String {
+    let (policy_start, policy_end) =
+        crate::hook::context_bounds("SessionStart", crate::persona::POLICY_MARKER);
+    let policy_end = policy_end
+        .strip_suffix('}')
+        .expect("hook output is an object");
+    let message_start = "\"systemMessage\":\"Namedrop ";
+    let message_end = format!(
+        " is available (you have {}). Update: {}\"}}",
+        env!("CARGO_PKG_VERSION"),
+        crate::update_check::UPDATE_COMMAND,
+    );
+    let mut patterns = vec![
+        format!(
+            "{}*{}",
+            shell_single_quote(&format!("{{{message_start}")),
+            shell_single_quote(&message_end)
+        ),
+        format!(
+            "{}*{}*{}",
+            shell_single_quote(&policy_start),
+            shell_single_quote(&format!("{policy_end},{message_start}")),
+            shell_single_quote(&message_end)
+        ),
+    ];
+    if runtime == AgentRuntime::Codex {
+        let notice = crate::hook::codex_app_server_hook_output().to_string();
+        let start = notice
+            .strip_suffix("\"}")
+            .expect("notice ends with systemMessage");
+        patterns.push(format!(
+            "{}*{}",
+            shell_single_quote(&format!("{start}\\nNamedrop ")),
+            shell_single_quote(&message_end)
+        ));
+    }
+    // Validate the dynamic part with shell builtins, so hooks gain no process.
+    format!(
+        "case \"$output\" in\n  {})\n    available=${{output##*'Namedrop '}}\n    available=${{available%{}}}\n    case \"$available\" in ''|*[!0-9.]*) exit 0 ;; esac\n    [ \"${{#available}}\" -le 32 ] || exit 0\n    IFS=.\n    set -- $available\n    [ \"$#\" -eq 3 ] || exit 0\n    [ \"$available\" = \"$1.$2.$3\" ] || exit 0\n    for part do\n      case \"$part\" in ''|0[0-9]*) exit 0 ;; esac\n    done\n    printf '%s' \"$output\"\n    ;;\nesac\n",
+        patterns.join("|"),
+        shell_single_quote(&message_end),
+    )
 }
 
 pub(crate) fn shell_single_quote(value: &str) -> String {

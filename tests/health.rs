@@ -10,6 +10,97 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn cached_update_is_informational_and_doctor_remains_healthy_and_read_only() {
+    let f = Fixture::new();
+    f.register();
+    let baseline = diagnose_collaboration(&f.runtime());
+    assert_eq!(baseline.status, HealthStatus::Healthy, "{baseline:?}");
+    let cache = json!({"schema_version":1,"checked_at":100,"last_success_at":90,"last_error":"offline",
+        "source":{"owner":"owner","repo":"repo","requested_ref":"main","resolved_commit":"a".repeat(40),"subdir":""},
+        "remote_commit":"b".repeat(40),"remote_version":"9.10.0"});
+    fs::write(f.root.join("update-check.json"), cache.to_string()).unwrap();
+    let before = fs::read(f.root.join("namedrop.sqlite3")).unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    assert_eq!(report.status, HealthStatus::Healthy);
+    let update = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-UPDATE-001")
+        .unwrap();
+    assert_eq!(update.severity, HealthSeverity::Info);
+    assert!(update.summary.contains("9.10.0"));
+    assert!(update.summary.contains(env!("CARGO_PKG_VERSION")));
+    assert_eq!(update.diagnostic["last_success_at"], 90);
+    assert_eq!(update.diagnostic["last_error"], "offline");
+    let text = render_health_report_to_text(&report);
+    assert!(text.contains("herdr plugin action invoke update --plugin namedrop"));
+    assert_eq!(before, fs::read(f.root.join("namedrop.sqlite3")).unwrap());
+    assert!(!f.root.join("update-notice.json").exists());
+    let runtime = LifecycleRuntime {
+        workspace_id: Some("workspace-1"),
+        ..f.runtime()
+    };
+    assert!(
+        request_doctor_assistance(&runtime, "session-old")
+            .unwrap_err()
+            .contains("No issues remain")
+    );
+
+    for version in [
+        env!("CARGO_PKG_VERSION"),
+        "0.99.0",
+        "9.0.0\nmalice",
+        "9.0.0\"",
+        "\u{1b}[31m9.0.0",
+        &"9".repeat(10_000),
+    ] {
+        let mut cache = cache.clone();
+        cache["remote_version"] = version.into();
+        fs::write(f.root.join("update-check.json"), cache.to_string()).unwrap();
+        assert!(
+            !diagnose_collaboration(&f.runtime())
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-UPDATE-001")
+        );
+    }
+}
+
+#[test]
+fn invalid_update_settings_are_visible_in_doctor_without_a_health_failure() {
+    let f = Fixture::new();
+    f.register();
+    let path = f
+        .home
+        .join(".config/herdr/plugins/config/namedrop/settings.json");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for settings in [
+        "{",
+        "{\"check_for_update\":false}",
+        "{\"check_for_updates\":\"false\"}",
+    ] {
+        fs::write(&path, settings).unwrap();
+        let report = diagnose_collaboration(&f.runtime());
+        assert_eq!(report.status, HealthStatus::Healthy);
+        let setting = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "ND-UPDATE-002")
+            .unwrap();
+        assert_eq!(setting.severity, HealthSeverity::Info);
+        assert_eq!(setting.diagnostic["path"], path.to_string_lossy().as_ref());
+    }
+    fs::write(path, "{\"check_for_updates\":false}").unwrap();
+    assert!(
+        !diagnose_collaboration(&f.runtime())
+            .issues
+            .iter()
+            .any(|issue| issue.code.starts_with("ND-UPDATE-"))
+    );
+}
+
 struct Fixture {
     root: PathBuf,
     home: PathBuf,

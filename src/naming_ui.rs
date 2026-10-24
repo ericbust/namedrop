@@ -194,7 +194,10 @@ fn doctor_prompt(
     let mut notice = String::new();
     'refresh: loop {
         let diagnosis = diagnose_collaboration(runtime);
-        let has_issues = !diagnosis.issues.is_empty();
+        let has_issues = diagnosis
+            .issues
+            .iter()
+            .any(|issue| issue.severity != namedrop::HealthSeverity::Info);
         // A space with no names is where the tour helps most, and it always
         // has an issue to report too: no agent, or an agent without a name.
         let offer_tour = space_has_no_names(runtime);
