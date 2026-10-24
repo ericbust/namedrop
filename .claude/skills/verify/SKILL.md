@@ -58,8 +58,10 @@ in the thread, the envelope seen exactly once by the recipient with its proof ma
 ## Read the result
 
 - Exit 0 is a pass. The last two lines are `PASS n/n in …. Report: <path>.txt` and the
-  compatibility line that starts with `- **`. `report.json` sits beside the `.txt` under
-  `~/.namedrop-testbed/reports/`; its `steps[].checks[]` carry `what`, `ok` and `detail`.
+  compatibility line that starts with `- **`. A JSON copy with the same name and a `.json`
+  suffix sits beside that `.txt` under `~/.namedrop-testbed/reports/`; its
+  `steps[].checks[]` carry `what`, `ok` and `detail`. Plain mode has ten steps, no-daemon
+  mode nine.
 - Exit 1 is a failure. The report names the failing check and its evidence directory
   (`<profile>/logs/test-<stamp>/NN-step/` with pane captures, doctor JSON, database rows
   and transcript summaries), keeps the profile and its server, and prints the
