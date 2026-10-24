@@ -28,6 +28,7 @@ const CODEX_MANIFEST_FILE: &str = ".codex-plugin/plugin.json";
 const CLAUDE_MANIFEST_FILE: &str = ".claude-plugin/plugin.json";
 const HOOKS_FILE: &str = "hooks/hooks.json";
 const HOOK_SCRIPT_FILE: &str = "scripts/user-prompt-submit";
+const SESSION_START_SCRIPT_FILE: &str = "scripts/session-start";
 const MARKETPLACE_FILE: &str = ".agents/plugins/marketplace.json";
 const CODEX_RULES_MARKER: &str = "# Managed by Namedrop: collaboration command permissions.\n";
 const INSTALLED_COMMAND_MARKER: &str = "<!-- namedrop-installed-command -->";
@@ -39,12 +40,13 @@ const PACKAGE_DIRECTORIES: [&str; 6] = [
     "hooks",
     "scripts",
 ];
-const CODEX_SNAPSHOT_FILES: [&str; 5] = [
+const CODEX_SNAPSHOT_FILES: [&str; 6] = [
     CODEX_MANIFEST_FILE,
     INSTRUCTIONS_FILE,
     DESCRIPTOR_FILE,
     HOOKS_FILE,
     HOOK_SCRIPT_FILE,
+    SESSION_START_SCRIPT_FILE,
 ];
 
 /// Runtime configuration resolved at the CLI boundary. Library callers default
@@ -277,8 +279,13 @@ fn codex_snapshot_matches(installed: &Path, cached: &Path) -> bool {
             .ok()
             .zip(fs::read(cached.join(relative)).ok())
             .is_some_and(|(installed, cached)| installed == cached)
-    }) && fs::metadata(cached.join(HOOK_SCRIPT_FILE))
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o100 != 0)
+    }) && [HOOK_SCRIPT_FILE, SESSION_START_SCRIPT_FILE]
+        .into_iter()
+        .all(|script| {
+            fs::metadata(cached.join(script)).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o100 != 0
+            })
+        })
 }
 
 fn paths_resolve_to_same_target(configured: &Path, installed: &Path) -> bool {
@@ -373,7 +380,7 @@ fn install_integration_package_with_config(
 
 struct PreparedPackage {
     directory: PathBuf,
-    files: [(&'static str, String, Option<u32>); 8],
+    files: [(&'static str, String, Option<u32>); 9],
     codex_policy: Option<(PathBuf, String)>,
 }
 
@@ -409,12 +416,14 @@ fn prepare_integration_package(
         installed_instructions(package.instructions, runtime, executable, state_directory)?;
     let hooks = hooks_manifest(&directory)?;
     let hook = hook_script(runtime, executable, state_directory)?;
+    let session_start = session_start_script(executable, state_directory)?;
     let codex_version = codex_cache_version(&[
         runtime.as_str(),
         &instructions,
         package.tool_descriptor,
         &hooks,
         &hook,
+        &session_start,
     ]);
     let files = [
         (OWNERSHIP_MARKER_FILE, ownership_marker(), None),
@@ -424,6 +433,7 @@ fn prepare_integration_package(
         (CLAUDE_MANIFEST_FILE, claude_manifest(), None),
         (HOOKS_FILE, hooks, None),
         (HOOK_SCRIPT_FILE, hook, Some(0o700)),
+        (SESSION_START_SCRIPT_FILE, session_start, Some(0o700)),
         (MARKETPLACE_FILE, marketplace_manifest(), None),
     ];
     verify_owned_plugin_targets(&directory, &files)?;
@@ -847,25 +857,40 @@ fn claude_manifest() -> String {
     )
 }
 
+/// Both hosts read this file. Each entry launches the wrapper from the plugin
+/// root the host exports, or from the installed path when neither is set.
+/// SessionStart carries no matcher, so it runs for every source the host
+/// reports: a new session, a resume, a clear, a compaction, a fork. Each of
+/// those rebuilds the context the policy was in.
 fn hooks_manifest(package_directory: &Path) -> Result<String, String> {
-    let fallback = package_directory.join(HOOK_SCRIPT_FILE);
-    let fallback = fallback.to_str().ok_or_else(|| {
-        format!(
-            "the Agent Integration hook path is not valid UTF-8: {}",
-            fallback.display()
-        )
-    })?;
+    let launch = |script: &str| -> Result<String, String> {
+        let fallback = package_directory.join(script);
+        let fallback = fallback.to_str().ok_or_else(|| {
+            format!(
+                "the Agent Integration hook path is not valid UTF-8: {}",
+                fallback.display()
+            )
+        })?;
+        Ok(format!(
+            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/{script}\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/{script}\"; else {}; fi",
+            shell_single_quote(fallback)
+        ))
+    };
     Ok(format!(
         "{}\n",
         json!({
             "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": launch(SESSION_START_SCRIPT_FILE)?,
+                        "timeout": 10
+                    }]
+                }],
                 "UserPromptSubmit": [{
                     "hooks": [{
                         "type": "command",
-                        "command": format!(
-                            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/scripts/user-prompt-submit\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/scripts/user-prompt-submit\"; else {}; fi",
-                            shell_single_quote(fallback)
-                        ),
+                        "command": launch(HOOK_SCRIPT_FILE)?,
                         "timeout": 10
                     }]
                 }]
@@ -928,12 +953,7 @@ fn hook_script(
         markers.push(crate::hook::DELIVERY_MARKER);
     }
     for marker in markers {
-        let (opening, closing) = crate::hook::context_bounds(marker);
-        safe_context.push_str(&format!(
-            "case \"$output\" in\n  {}*{}) printf '%s' \"$output\" ;;\nesac\n",
-            shell_single_quote(&opening),
-            shell_single_quote(&closing),
-        ));
+        safe_context.push_str(&forward_marked_context("UserPromptSubmit", marker));
     }
     Ok(format!(
         "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  {} hook mailbox-wake --state-directory {} </dev/null >/dev/null 2>&1 &\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
@@ -942,6 +962,41 @@ fn hook_script(
         shell_single_quote(executable),
         shell_single_quote(state_directory),
         safe_context,
+    ))
+}
+
+/// The shell that forwards one dynamic context, recognized by the serialized
+/// text either side of its fixed marker, which no other output carries.
+fn forward_marked_context(event: &str, marker: &str) -> String {
+    let (opening, closing) = crate::hook::context_bounds(event, marker);
+    format!(
+        "case \"$output\" in\n  {}*{}) printf '%s' \"$output\" ;;\nesac\n",
+        shell_single_quote(&opening),
+        shell_single_quote(&closing),
+    )
+}
+
+/// The session-start wrapper. It forwards exactly one thing, the selection
+/// policy, and only when the plugin produced it, so a host never receives
+/// anything else under this event from Namedrop.
+fn session_start_script(executable: &Path, state_directory: &Path) -> Result<String, String> {
+    let executable = executable.to_str().ok_or_else(|| {
+        format!(
+            "collaboration executable path is not valid UTF-8: {}",
+            executable.display()
+        )
+    })?;
+    let state_directory = state_directory.to_str().ok_or_else(|| {
+        format!(
+            "collaboration state directory path is not valid UTF-8: {}",
+            state_directory.display()
+        )
+    })?;
+    Ok(format!(
+        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{}exit 0\n",
+        shell_single_quote(executable),
+        shell_single_quote(state_directory),
+        forward_marked_context("SessionStart", crate::persona::POLICY_MARKER),
     ))
 }
 

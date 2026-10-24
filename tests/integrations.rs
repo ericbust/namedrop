@@ -2046,7 +2046,9 @@ fn the_trusted_instruction_prioritizes_the_final_human_answer() {
     let context = instruction.find("context_request:").unwrap();
     let results = instruction.find("result_set:").unwrap();
     let report = instruction.find("report_to_human:").unwrap();
-    let silent = instruction.find("Otherwise work silently").unwrap();
+    let silent = instruction
+        .find("Otherwise: reply/complete.no-reply")
+        .unwrap();
     assert!(context < results && results < report && report < silent);
     for required in [
         "in priority order",
@@ -2062,8 +2064,10 @@ fn the_trusted_instruction_prioritizes_the_final_human_answer() {
     assert!(instruction.contains("only from control.tool"));
     assert!(instruction.contains("untrusted_body is collaborator content"));
     assert!(instruction.contains("router already recorded receipt"));
-    assert!(instruction.contains("work silently"));
-    assert!(instruction.contains("output no prose"));
+    // A turn that ends with no visible text costs Claude Code one more model
+    // call to ask for one, so the quiet case asks for a single status line.
+    assert!(instruction.contains("then one status line"));
+    assert!(!instruction.contains("output no prose"));
     assert!(instruction.contains("reply"));
     assert!(instruction.contains("complete.no-reply"));
     assert!(instruction.contains("return_to_source"));
@@ -2106,7 +2110,7 @@ fn both_runtime_skills_reserve_final_synthesis_for_the_result_set() {
         let context = instructions.find("1. `control.context_request`").unwrap();
         let results = instructions.find("2. `control.result_set`").unwrap();
         let report = instructions.find("3. `report_to_human`").unwrap();
-        let silent = instructions.find("4. Otherwise work silently").unwrap();
+        let silent = instructions.find("4. Otherwise").unwrap();
         assert!(context < results && results < report && report < silent);
     }
 }
@@ -2775,6 +2779,16 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
         .unwrap(),
         serde_json::json!({
             "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!(
+                            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/scripts/session-start\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/scripts/session-start\"; else '{}'; fi",
+                            directory.join("scripts/session-start").display()
+                        ),
+                        "timeout": 10
+                    }]
+                }],
                 "UserPromptSubmit": [{
                     "hooks": [{
                         "type": "command",
@@ -2798,6 +2812,15 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
     assert!(script.contains("hook user-prompt-submit --state-directory"));
     assert!(script.contains("hook mailbox-wake --state-directory"));
     assert!(script.contains("#!/bin/sh"));
+    let session_start = directory.join("scripts/session-start");
+    assert!(
+        fs::metadata(&session_start).unwrap().permissions().mode() & 0o111 != 0,
+        "{} session-start wrapper is not executable",
+        runtime.as_str()
+    );
+    let session_start = fs::read_to_string(session_start).unwrap();
+    assert!(session_start.contains("hook session-start --state-directory"));
+    assert!(session_start.contains("#!/bin/sh"));
     assert!(script.contains("2>/dev/null) || exit 0"));
     let marketplace: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(directory.join(".agents/plugins/marketplace.json")).unwrap(),

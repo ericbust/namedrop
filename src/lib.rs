@@ -44,7 +44,7 @@ pub use health::{
     HealthIssue, HealthRepair, HealthRepairKind, HealthReport, HealthSeverity, HealthStatus,
     diagnose_collaboration, render_health_report_to_text, request_doctor_assistance,
 };
-pub use hook::execute_user_prompt_submit_hook;
+pub use hook::{execute_session_start_hook, execute_user_prompt_submit_hook};
 pub use install::{AgentConfigDirectories, install_integration_package, package_directory};
 pub(crate) use install::{
     IntegrationPackageInstallation, disclosed_user_package_targets,

@@ -17,10 +17,35 @@ struct UserPromptSubmitInput {
     prompt: String,
 }
 
+#[derive(Deserialize)]
+struct SessionStartInput {
+    hook_event_name: String,
+}
+
 enum LeadingMentionRoute {
     NotApplicable,
     Sent,
     Failed(&'static str),
+}
+
+/// Supplies the Namedrop selection policy once, when a native session starts
+/// or its host rebuilds the context (resume, clear, compaction, fork). The
+/// policy is fixed text, so reading it per turn would only repeat it; the
+/// roster it governs still arrives with every prompt.
+pub fn execute_session_start_hook<E, C, I>(
+    input: &str,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Option<Value>
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    let input: SessionStartInput = serde_json::from_str(input).ok()?;
+    if input.hook_event_name != "SessionStart" {
+        return None;
+    }
+    crate::persona::session_policy(runtime).map(|policy| hook_output("SessionStart", &policy))
 }
 
 /// Routes one runtime UserPromptSubmit payload when a column-zero leading
@@ -97,10 +122,11 @@ where
 }
 
 /// The serialized text a generated wrapper must recognize around one dynamic
-/// context: everything before the marker, and everything after it. Deriving both
-/// from the real output keeps the wrapper in step with this serialization.
-pub(crate) fn context_bounds(marker: &str) -> (String, String) {
-    let output = context_hook_output(marker).to_string();
+/// context of one hook event: everything before the marker, and everything
+/// after it. Deriving both from the real output keeps the wrapper in step with
+/// this serialization.
+pub(crate) fn context_bounds(event: &str, marker: &str) -> (String, String) {
+    let output = hook_output(event, marker).to_string();
     let end = output
         .find(marker)
         .expect("a plain-text context marker serializes verbatim")
@@ -113,9 +139,13 @@ pub(crate) fn failed_handoff_hook_outputs() -> [Value; 2] {
 }
 
 fn context_hook_output(context: &str) -> Value {
+    hook_output("UserPromptSubmit", context)
+}
+
+fn hook_output(event: &str, context: &str) -> Value {
     json!({
         "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
+            "hookEventName": event,
             "additionalContext": context,
         }
     })
@@ -134,7 +164,7 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let envelope = serde_json::from_str::<Value>(prompt).ok()?;
+    let envelope = serde_json::from_str::<Value>(submitted_text(prompt)).ok()?;
     if !is_delivery_envelope(prompt) {
         return None;
     }
@@ -186,8 +216,27 @@ where
     }
 }
 
+/// Claude Code marks a long paste for the model and hands the hook that marked
+/// form: the submitted text between a `<pasted_content id="…">` line and a
+/// `</pasted_content id="…">` line, whitespace around both. A Delivery Envelope
+/// is always long enough to arrive that way, so the text inside one whole block
+/// is what was submitted. Anything shaped differently is returned as it came,
+/// and the exact-match authentication still decides what the text is.
+fn submitted_text(prompt: &str) -> &str {
+    pasted_content(prompt).unwrap_or(prompt)
+}
+
+fn pasted_content(prompt: &str) -> Option<&str> {
+    const OPENING: &str = "<pasted_content id=\"";
+    const CLOSING: &str = "</pasted_content id=\"";
+    let rest = prompt.trim().strip_prefix(OPENING)?;
+    let id_end = rest.find("\">")?;
+    let (id, body) = (&rest[..id_end], &rest[id_end + 2..]);
+    body.strip_suffix(format!("{CLOSING}{id}\">").as_str())
+}
+
 fn is_delivery_envelope(prompt: &str) -> bool {
-    let Ok(envelope) = serde_json::from_str::<Value>(prompt) else {
+    let Ok(envelope) = serde_json::from_str::<Value>(submitted_text(prompt)) else {
         return false;
     };
     let recognized = match envelope.get("envelope_kind") {
