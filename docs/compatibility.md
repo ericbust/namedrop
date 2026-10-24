@@ -22,6 +22,7 @@ Nobody has tried musl (Alpine), NixOS or other Linux setups.
 - **macOS, 2026-09-10**, built from source: Herdr 0.8.2, Codex 0.142.2 with gpt-5.5, and Claude Code 2.1.268 with Opus 5. Mentions went both ways between Claude and Codex, and each reply arrived once. Also covered: replacing an agent session, a recipient waiting at an approval prompt, a terminal recipient returning output and an exit code, and installing from GitHub.
 - **Personas**, on macOS 26.5 with Herdr 0.9.1, Codex 0.155.1 and Claude Code 2.1.278: both hosts received the persona list in their model requests.
 - **Linux x86_64, 2026-09-26**, on the maintainer's laptop.
+- **Linux x86_64 (Omarchy), 2026-10-24**, Namedrop 1.2.0 from ericbust/namedrop at main, commit bc70992: Herdr 0.9.1, Codex 0.162.1 with gpt-6.1-sol, and Claude Code 2.1.296 with claude-opus-5-5. Codex's shared app-server warning appeared and cleared after its fix. Mentions went both ways between Claude and Codex, and each reply arrived once. @shell ran a command for Claude.
 
 Herdr 0.7.5 was only checked for loading the plugin and parsing commands. The full runs above used 0.8.2 and 0.9.1.
 
