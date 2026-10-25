@@ -2061,7 +2061,17 @@ fn the_trusted_instruction_carries_the_rules_for_the_delivery_it_is() {
     assert!(ordinary.contains("then one status line"), "{ordinary}");
     assert!(!ordinary.contains("output no prose"));
     assert!(ordinary.contains("return_to_source returns; agent_thread continues"));
-    assert!(ordinary.contains("Reviewed worker report: complete.no-reply; no rework"));
+    // reply and complete.no-reply stay equal choices. Codex gpt-6-sol read a
+    // separate no-reply sentence as an order and closed requests unanswered.
+    assert!(
+        ordinary.contains("bound reply/complete.no-reply"),
+        "{ordinary}"
+    );
+    assert_eq!(
+        ordinary.matches("complete.no-reply").count(),
+        1,
+        "{ordinary}"
+    );
     assert!(ordinary.ends_with("Registered profile available for recovery."));
     for absent in [
         "context_request",

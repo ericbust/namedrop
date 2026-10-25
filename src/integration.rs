@@ -40,7 +40,7 @@ const STALE_NUDGE_RULE: &str =
     "control.coordination_nudge_stale true: results, complete.no-reply only. ";
 const NUDGE_RULE: &str =
     "control.coordination_nudge true: results, send/resolve, complete.no-reply. ";
-const SETTLE_RULE: &str = "Finish once: bound reply/complete.no-reply, then one status line. Reviewed worker report: complete.no-reply; no rework. return_to_source returns; agent_thread continues. ";
+const SETTLE_RULE: &str = "Finish once: bound reply/complete.no-reply, then one status line. return_to_source returns; agent_thread continues. ";
 const RECOVERY_RULE: &str = "Registered profile available for recovery.";
 
 /// The plugin-authored instruction every Delivery Envelope carries, so an Agent
