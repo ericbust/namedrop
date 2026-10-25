@@ -21,7 +21,8 @@ git diff @{u}.. --stat
 ```
 
 The testbed builds the checkout's HEAD. Commit before you run it; uncommitted edits are
-not tested, and the kit says so in a warning.
+not tested. The kit warns about them only on a new or `--fresh` profile; a rerun of a
+kept profile stays silent.
 
 ## Doctor
 
@@ -43,7 +44,8 @@ cd ~/Projects/namedrop-testbed && ./testbed test --link "$WORKTREE" --fresh --ye
 
 `$WORKTREE` is the Namedrop checkout under verification. A fresh run takes about 3
 minutes and a rerun of a kept profile about 1.5; the two mention round trips take the
-longest, the build about a minute, and the run gives up after 20 minutes. The default is
+longest and the build about a minute. After the build the run has 20 minutes, each
+mention round trip 5, and a pane blocked for 30 seconds fails its step. The default is
 plain `codex` on Namedrop 1.2.0 and later, which also proves the shared app-server
 warning (`ND-SESSION-003`), runs the two commands Doctor gives as the fix, and checks that
 the warning clears. `--codex no-daemon` skips that arc. `--keep` leaves the profile
@@ -68,9 +70,13 @@ updates. Use the update notice probe under **Push on it** for that.
   `steps[].checks[]` carry `what`, `ok` and `detail`. Plain mode has ten steps, no-daemon
   mode nine.
 - Exit 1 is a failure. The report names the failing check and its evidence directory
-  (`<profile>/logs/test-<stamp>/NN-step/` with pane captures, doctor JSON, database rows
-  and transcript summaries), keeps the profile and its server, and prints the
-  `./testbed attach` and `./testbed destroy` commands. Read the evidence, then destroy.
+  (`~/.namedrop-testbed/profiles/<profile>/logs/test-<stamp>/NN-step/` with pane captures,
+  doctor JSON, database rows and transcript summaries) and keeps the profile and its
+  server. `report.txt` and `report.json` sit in `test-<stamp>/` itself; a failure is not
+  copied to `reports/`. A step 1 (build) failure names `01-build/`, which does not exist;
+  its whole story is in the report. The report prints `./testbed attach`, which refuses
+  to run inside a Herdr pane; from an agent use `./testbed status --profile <profile>`
+  and the manual drive notes. Read the evidence, then destroy.
 - The profile is `test-link-<checkout name>`. `test` never drives or deletes any other
   profile.
 
@@ -98,9 +104,29 @@ The harness covers the happy path. Probe around the change at the same surface:
   hand with [references/manual-drive.md](references/manual-drive.md): pane reads, key
   presses, prompts, popups, Codex's log and pid file.
 
+## What the harness does not reach
+
+A change to any of these needs a manual drive on a kept profile, with Namedrop run
+through the profile's `env -i` line as the manual drive notes show:
+
+- Stale runtime (`ND-SETUP-004`, `src/installed_runtime.rs`): replace
+  `<plugin_root>/bin/namedrop` with a copy plus one trailing newline. Doctor shows
+  `ND-SETUP-004` (notice) with `sh <plugin_root>/scripts/setup.sh activate --human` as the
+  repair; run it with `herdr pane run` in the shell pane, since activation refuses to run
+  outside a workspace pane, and the issue clears.
+- Groups (`src/groups.rs`): `group set --input-json '{"alias":"pair","members":["claude","codex"]}'`,
+  then `group list` and `group remove`, all with `--herdr-pane` set to the shell pane.
+- Pause (`src/controls.rs`): `space pause --input-json '{}'` adds `ND-SPACE-001` to Doctor;
+  `space resume` clears it.
+- No route written yet: tracked handoffs and the 30-second settle (`src/handoff.rs`,
+  `src/coordination.rs`, `ND-DELIVERY-003`, `ND-COORDINATION-001`), popups other than
+  Doctor's (`src/naming_ui.rs`, `src/agent_status_ui.rs`), the tour (`src/tour.rs`), shared
+  checkouts (`ND-INSPECT-001`), rename and personas. The native recipes for them, last
+  reconciled at 1.0.2, are in git: `git show 1b1d32a:.agents/skills/verify/features/README.md`.
+
 ## Report
 
-Use the bundled `/verify` report shape: `## Verification: <what changed>`, **Verdict**,
+Use this report shape: `## Verification: <what changed>`, **Verdict**,
 **Claim**, **Method** (this skill, the `./testbed test` command line and profile),
 `### Steps` with one ✅ line per passed harness step quoting its `detail`, 🔍 lines for
 the probes, then **Screenshot / sample** (the compatibility line and one pane capture)

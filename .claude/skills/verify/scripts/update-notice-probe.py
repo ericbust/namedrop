@@ -5,7 +5,7 @@ Usage: update-notice-probe.py PROFILE_NAME   (e.g. test-link-<checkout name>)
 
 Seeds an "update available" cache, then checks Doctor, a new Claude Code session, a
 same-day and a next-day Codex session, invalid settings and the opt-out. Restores the
-cache and removes the settings file at the end. Exit 0 when every check passes.
+cache and the settings file at the end. Exit 0 when every check passes.
 """
 
 import glob
@@ -55,9 +55,10 @@ def doctor(*mode):
                '--herdr-workspace', workspace, 'doctor', *mode).stdout
 
 
-def update_issues():
+def update_issues(code='ND-UPDATE-001'):
     data = json.loads(doctor('--json'))['data']
-    return data['status'], [i for i in data['issues'] if i.get('code') == 'ND-UPDATE-001']
+    blocking = [i['code'] for i in data['issues'] if i.get('severity') != 'info']
+    return data['status'], [i for i in data['issues'] if i.get('code') == code], blocking
 
 
 def new_claude_session():
@@ -74,9 +75,9 @@ def new_codex_turn():
     time.sleep(3)
     herdr('agent', 'send-keys', codex, 'enter')
     time.sleep(3)
-    herdr('agent', 'prompt', codex, 'Reply with only the word ok.', '--wait', '--until', 'idle',
-          '--until', 'done', '--timeout', '120000')
-    return pane_text(codex)
+    answered = herdr('agent', 'prompt', codex, 'Reply with only the word ok.', '--wait', '--until',
+                     'idle', '--until', 'done', '--timeout', '120000').returncode == 0
+    return pane_text(codex), answered
 
 
 def latest_claude_transcript():
@@ -96,6 +97,7 @@ def latest_claude_transcript():
 cache, notice = state / 'update-check.json', state / 'update-notice.json'
 settings = Path(herdr('plugin', 'config-dir', 'namedrop').stdout.strip()) / 'settings.json'
 original_cache = cache.read_bytes() if cache.exists() else None
+original_settings = settings.read_bytes() if settings.exists() else None
 now = int(time.time() * 1000)
 try:
     cache.write_text(json.dumps({
@@ -105,10 +107,11 @@ try:
         'remote_commit': 'b' * 40, 'remote_version': REMOTE}))
     notice.unlink(missing_ok=True)
 
-    status, issues = update_issues()
+    settings.unlink(missing_ok=True)
+    status, issues, blocking = update_issues()
     human = doctor('--human')
     check('doctor finding', status == 'healthy' and len(issues) == 1 and issues[0]['severity'] == 'info',
-          f'status {status}, ND-UPDATE-001 {[i["severity"] for i in issues]}')
+          f'status {status}, ND-UPDATE-001 {[i["severity"] for i in issues]}, not info {blocking}')
     check('doctor summary kept', human.startswith('Namedrop checks passed') and REMOTE in human,
           human.splitlines()[0])
 
@@ -123,28 +126,34 @@ try:
           f'hook_system_message {len(shown)}, additionalContext with {REMOTE}: '
           f'{sum(REMOTE in c for c in context)}')
 
-    screen = new_codex_turn()
-    check('codex same day stays quiet', '• ok' in screen and not LINE.search(screen),
-          f'turn answered {"• ok" in screen}, notice shown < 24h ago')
-    notice.unlink()
-    check('codex next day shows the line', bool(LINE.search(new_codex_turn())), '↳ Hook row')
+    screen, answered = new_codex_turn()
+    check('codex same day stays quiet', answered and not LINE.search(screen),
+          f'turn answered {answered}, notice shown < 24h ago')
+    # A marker a day and a millisecond old: the once-a-day window has passed.
+    notice.write_text(json.dumps({'version': REMOTE, 'shown_at': now - 86_400_001}))
+    screen, answered = new_codex_turn()
+    check('codex next day shows the line', answered and bool(LINE.search(screen)),
+          f'turn answered {answered}, ↳ Hook row')
 
     settings.parent.mkdir(parents=True, exist_ok=True)
     settings.write_text('{"check_for_updates":"no"}\n')
-    data = json.loads(doctor('--json'))['data']
-    invalid = any(i.get('code') == 'ND-UPDATE-002' for i in data['issues'])
-    check('invalid settings', invalid and data['status'] == 'healthy',
-          f"ND-UPDATE-002 {invalid}, status {data['status']}")
+    status, invalid, blocking = update_issues('ND-UPDATE-002')
+    check('invalid settings', status == 'healthy' and [i['severity'] for i in invalid] == ['info'],
+          f'ND-UPDATE-002 {[i["severity"] for i in invalid]}, status {status}, not info {blocking}')
 
     settings.write_text('{"check_for_updates":false}\n')
     notice.unlink(missing_ok=True)
-    status, issues = update_issues()
+    _, issues, _ = update_issues()
+    _, invalid, _ = update_issues('ND-UPDATE-002')
     screen = new_claude_session()
-    check('opt-out', not issues and not LINE.search(screen) and not notice.exists(),
-          f'doctor findings {len(issues)}, line on screen {bool(LINE.search(screen))}, '
+    check('opt-out', not issues and not invalid and not LINE.search(screen) and not notice.exists(),
+          f'doctor findings {len(issues) + len(invalid)}, line on screen {bool(LINE.search(screen))}, '
           f'notice file {notice.exists()}')
 finally:
-    settings.unlink(missing_ok=True)
+    if original_settings is None:
+        settings.unlink(missing_ok=True)
+    else:
+        settings.write_bytes(original_settings)
     notice.unlink(missing_ok=True)
     if original_cache is None:
         cache.unlink(missing_ok=True)
