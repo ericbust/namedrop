@@ -13,23 +13,27 @@ vars=$(sed -n 's/^ *env -i \(.*\) \/bin\/bash --noprofile.*/\1/p' ~/.namedrop-te
 eval "env -i $vars herdr pane list"
 ```
 
-Namedrop itself:
+Namedrop itself, through the same `env -i`; run bare, it finds the real Herdr socket and
+home instead of the profile's:
 
 ```sh
 ST=~/.namedrop-testbed/profiles/NAME/state/herdr/plugins/namedrop
-$ST/runtime/namedrop --plugin-state $ST --herdr-workspace w1 [--herdr-pane w1:p3] doctor --human
+W=$(python3 -c "import json;print(json.load(open('$HOME/.namedrop-testbed/profiles/NAME/state.json'))['workspace'])")
+eval "env -i $vars $ST/runtime/namedrop --plugin-state $ST --herdr-workspace $W [--herdr-pane $W:p3] doctor --human"
 ```
 
 `--json` gives the structured result under `data`. Naming a pane again
 (`name @codex --human --type agent`) is idempotent and shows its advice. Panes are
 `w1:p1` `@shell`, `w1:p2` `@claude`, `w1:p3` `@codex` on a fresh profile. `./testbed test`
-without `--fresh` and `./testbed reset` open a new workspace; `./testbed up` keeps the
-saved one. The current ids are in `PROFILE/state.json` under `workspace` and `panes`.
+without `--fresh` and `./testbed reset` open a new workspace (`w2`, …); `./testbed up` keeps
+the saved one. The current ids are in `PROFILE/state.json` under `workspace` and `panes`;
+the `w1` below stands for that workspace.
 
 ## Panes
 
 - `herdr pane read PANE --source visible` or `--source recent --lines 80` prints plain
-  text. `herdr pane wait-output PANE --regex RE --timeout MS` blocks until a line matches.
+  text. `herdr pane wait-output PANE --regex RE --timeout MS` searches what is already on
+  screen first, so a match left over from earlier returns at once; then it polls.
 - `herdr agent send-keys PANE enter|down|esc|c-c` (`c-c` is Ctrl-C; `ctrl-c` is rejected).
 - `herdr agent prompt PANE "text" --wait --until idle --until done --timeout MS` submits a
   prompt and returns when the sender's own turn ends, not when a round trip ends. Slash
@@ -38,10 +42,12 @@ saved one. The current ids are in `PROFILE/state.json` under `workspace` and `pa
   an agent that reports `done`.
 - `herdr agent wait PANE --until idle --until done --timeout MS`;
   `herdr pane process-info --pane PANE` shows the foreground argv (look for `--no-daemon`).
-- `herdr pane run w1:p1 "cmd > log 2>&1; printf '%s' \$? > log.exit"` runs a command in the
-  shell pane; the activation helper is `sh <plugin_root>/scripts/setup.sh activate`, with
-  `plugin_root` from `PROFILE/state.json` (`PROFILE/namedrop-source` for a `--link`
-  profile; a `--ref` or `--pr` install keeps it under Herdr's plugin directory).
+- `herdr pane run w1:p1 "cmd > PROFILE/logs/x.log 2>&1; printf '%s' \$? > PROFILE/logs/x.exit"`
+  runs a command in the shell pane, whose working directory is the seed repository; give
+  output files an absolute path so the repository stays clean. The activation helper is
+  `sh <plugin_root>/scripts/setup.sh activate`, with `plugin_root` from `PROFILE/state.json`
+  (`PROFILE/namedrop-source` for a `--link` profile; a `--ref` or `--pr` install keeps it
+  under Herdr's plugin directory).
 - Popups need their launcher's environment:
   `env NAMEDROP_TARGET_WORKSPACE=w1 NAMEDROP_TARGET_PANE=w1:p3 NAMEDROP_TARGET_TERMINAL=<terminal_id> NAMEDROP_TARGET_SESSION=<session id or empty> $ST/runtime/namedrop --plugin-state $ST ui run doctor`
   in the shell pane, then `herdr pane send-keys w1:p1 a` or `esc`; the shell pane is not an
@@ -96,10 +102,12 @@ saved one. The current ids are in `PROFILE/state.json` under `workspace` and `pa
   pane. Delete it to make the next new session show the line again. `/clear` and
   `/compact` never show it.
 - The opt-out is `settings.json` in the folder `herdr plugin config-dir namedrop` prints
-  (`PROFILE/config/herdr/plugins/config/namedrop/`): `{"check_for_updates":false}`. Any
-  other key or value shows `ND-UPDATE-002` and turns the check off.
+  (`PROFILE/config/herdr/plugins/config/namedrop/`): `{"check_for_updates":false}`. `{}` and
+  `true` keep it on. An unknown key, a non-boolean value or unreadable JSON shows
+  `ND-UPDATE-002` (info) and turns the check off.
 
 ## Finish
 
-`./testbed destroy --profile NAME --yes` stops the server, kills leftover Codex daemons
-and deletes the profile.
+`./testbed destroy --profile NAME --yes` stops the server, stops every process still
+running from the profile (agents and Codex daemons), and deletes the profile. Reports
+under `~/.namedrop-testbed/reports/` stay.
