@@ -30,8 +30,8 @@ cd ~/Projects/namedrop-testbed && ./testbed check && ./testbed list
 ```
 
 `check passed` means the tools, Python and socket path are fine and the kit's offline
-self-test passes. `list` shows profiles that still run; a leftover `test-*` profile from a
-failed run is yours to inspect or destroy.
+self-test passes. `list` shows every profile and whether it is running; a leftover
+`test-*` profile from a failed run or `--keep` is yours to inspect or destroy.
 
 ## Launch and drive
 
@@ -41,11 +41,13 @@ One command does CHECKLIST.md with no human:
 cd ~/Projects/namedrop-testbed && ./testbed test --link "$WORKTREE" --fresh --yes
 ```
 
-`$WORKTREE` is the Namedrop checkout under verification. Allow 4 to 20 minutes; the
-first build takes most of it. The default is plain `codex` on Namedrop 1.2.0 and later,
-which also proves the shared app-server warning (`ND-SESSION-003`), runs the two commands
-Doctor gives as the fix, and checks that the warning clears. `--codex no-daemon` skips
-that arc. `--keep` leaves the profile running after a pass so you can probe further.
+`$WORKTREE` is the Namedrop checkout under verification. A fresh run takes about 3
+minutes and a rerun of a kept profile about 1.5; the two mention round trips take the
+longest, the build about a minute, and the run gives up after 20 minutes. The default is
+plain `codex` on Namedrop 1.2.0 and later, which also proves the shared app-server
+warning (`ND-SESSION-003`), runs the two commands Doctor gives as the fix, and checks that
+the warning clears. `--codex no-daemon` skips that arc. `--keep` leaves the profile
+running after a pass so you can probe further.
 
 What the run asserts, step by step: build and names; first-run screens cleared; the Codex
 server state (and the fix in plain mode); `namedrop address list` and `doctor` clean; the
@@ -53,13 +55,16 @@ hooks loaded (the policy text once per session and the roster on the first turn,
 transcripts); Claude to Codex `pong` and Codex to Claude `ping`, each delivered once and
 replied once (one delivery, one attempt, no retries, one receipt, settled, two messages
 in the thread, the envelope seen exactly once by the recipient with its proof marker);
-`echo hello` on `@shell` with exit 0; nothing awaiting progress at the end.
+`echo hello` on `@shell` with exit 0; nothing awaiting progress at the end. It does not
+show the update notice (Namedrop 1.3.0 and later): a `--link` install never checks for
+updates. Use the update notice probe under **Push on it** for that.
 
 ## Read the result
 
-- Exit 0 is a pass. The last two lines are `PASS n/n in …. Report: <path>.txt` and the
-  compatibility line that starts with `- **`. A JSON copy with the same name and a `.json`
-  suffix sits beside that `.txt` under `~/.namedrop-testbed/reports/`; its
+- Exit 0 is a pass. The report ends with `PASS n/n in …. Report: <path>.txt` and the
+  compatibility line that starts with `- **`; on the terminal one more line follows,
+  `Deleted profile …` or, with `--keep`, `Kept profile …`. A JSON copy with the same name
+  and a `.json` suffix sits beside that `.txt` under `~/.namedrop-testbed/reports/`; its
   `steps[].checks[]` carry `what`, `ok` and `detail`. Plain mode has ten steps, no-daemon
   mode nine.
 - Exit 1 is a failure. The report names the failing check and its evidence directory
@@ -73,10 +78,22 @@ in the thread, the envelope seen exactly once by the recipient with its proof ma
 
 The harness covers the happy path. Probe around the change at the same surface:
 
-- Run it twice: `--fresh` once, then again without `--fresh`. The second run must reset
-  the panes and pass again.
+- Run it twice: `--fresh --keep` once, then again without `--fresh`. The second run must
+  reset the panes into a new workspace and pass again. A pass without `--keep` deletes the
+  profile, so the second run would only build from scratch. Do not commit between the two
+  runs: when HEAD has moved since the build, a run without `--fresh` fails at step 1 with
+  `was built from <old>; pass --fresh to test <new>`.
 - Run `--codex no-daemon` as well as the default when the change touches Codex startup,
   hooks or doctor.
+- When the change touches Doctor, the session-start hook or the update check (Namedrop
+  1.3.0 and later), run the update notice probe on a profile kept with `--keep`:
+  `.claude/skills/verify/scripts/update-notice-probe.py test-link-<checkout name>`. It
+  writes an "update available" cache, then checks that Doctor shows `ND-UPDATE-001` as
+  info and keeps its "checks passed" summary, that a new Claude session shows the line
+  and keeps it out of the agent's context, that Codex stays quiet the same day and shows
+  it the next, that invalid settings show `ND-UPDATE-002`, and that the opt-out turns it
+  all off. It restores the cache and settings at the end and exits 0 when all eight
+  checks pass. It takes about 30 seconds.
 - For anything the harness does not assert, pass `--keep` and drive the kept profile by
   hand with [references/manual-drive.md](references/manual-drive.md): pane reads, key
   presses, prompts, popups, Codex's log and pid file.
