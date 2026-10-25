@@ -30,6 +30,8 @@ mod store;
 pub use shortcuts::install_shortcuts;
 mod terminal;
 pub mod tour;
+#[doc(hidden)]
+pub mod update_check;
 pub use terminal::{default_pane_type, detect_pane_type, execute_terminal, verify_inherited_pane};
 
 pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integration-package-";

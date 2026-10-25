@@ -1466,6 +1466,11 @@ fn only_the_codex_session_start_wrapper_forwards_the_shared_app_server_notice_ex
             false,
         ),
         (AgentRuntime::ClaudeCode, notice.clone(), false),
+        {
+            let mut composed: Value = serde_json::from_str(&notice).unwrap();
+            composed["systemMessage"] = format!("{}\nNamedrop 9.0.0 is available (you have {}). Update: herdr plugin action invoke update --plugin namedrop", composed["systemMessage"].as_str().unwrap(), env!("CARGO_PKG_VERSION")).into();
+            (AgentRuntime::Codex, composed.to_string(), true)
+        },
     ] {
         let package =
             install_integration_package(&directory.home, runtime, &executable, &directory.state)
@@ -1492,7 +1497,7 @@ fn only_the_codex_session_start_wrapper_forwards_the_shared_app_server_notice_ex
 }
 
 #[test]
-fn the_claude_session_start_wrapper_forwards_only_the_policy_as_before() {
+fn the_claude_session_start_wrapper_keeps_the_installed_hook_command() {
     let directory = TestDirectory::new();
     let executable = directory.root.join("hook-result");
     let package = install_integration_package(
@@ -1502,14 +1507,11 @@ fn the_claude_session_start_wrapper_forwards_only_the_policy_as_before() {
         &directory.state,
     )
     .unwrap();
-    assert_eq!(
-        fs::read_to_string(package.join("scripts/session-start")).unwrap(),
-        format!(
-            "#!/bin/sh\noutput=$('{}' hook session-start --state-directory '{}' 2>/dev/null) || exit 0\ncase \"$output\" in\n  '{{\"hookSpecificOutput\":{{\"additionalContext\":\"{POLICY_MARKER}'*'\",\"hookEventName\":\"SessionStart\"}}}}') printf '%s' \"$output\" ;;\nesac\nexit 0\n",
-            executable.display(),
-            directory.state.display()
-        )
-    );
+    let wrapper = fs::read_to_string(package.join("scripts/session-start")).unwrap();
+    assert!(wrapper.starts_with(&format!(
+        "#!/bin/sh\noutput=$('{}' hook session-start --state-directory '{}' 2>/dev/null) || exit 0\n",
+        executable.display(), directory.state.display()
+    )));
 }
 
 #[test]

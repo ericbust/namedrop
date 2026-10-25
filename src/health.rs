@@ -19,6 +19,7 @@ pub enum HealthStatus {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthSeverity {
+    Info,
     Notice,
     Blocked,
     Broken,
@@ -225,6 +226,52 @@ where
         registered_plugin_root(runtime.herdr)
     }) {
         issues.push(stale_runtime_issue(&stale));
+    }
+    match crate::update_check::settings() {
+        Err(error) => {
+            let path = crate::update_check::settings_path().ok();
+            let mut setting = issue(
+                "ND-UPDATE-002",
+                HealthSeverity::Info,
+                "Namedrop update checks are disabled by invalid settings.",
+                &format!("Fix settings.json to enable checks again: {error}"),
+                HealthRepairKind::HumanDecision,
+                "Set check_for_updates to true or false in the Namedrop settings file.",
+            );
+            setting.diagnostic = serde_json::json!({"path":path});
+            issues.push(setting);
+        }
+        Ok(_) => {
+            if let Some(update) = crate::update_check::available(runtime.state_directory) {
+                let mut update_issue = issue(
+                    "ND-UPDATE-001",
+                    HealthSeverity::Info,
+                    &format!(
+                        "Namedrop {} is available (you have {}).",
+                        update.version,
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                    &format!(
+                        "Updating keeps your names, groups, handoffs and running agents. Run `{}` from a plain shell tab.",
+                        crate::update_check::UPDATE_COMMAND
+                    ),
+                    HealthRepairKind::HumanDecision,
+                    "Run Update Namedrop when you are ready.",
+                );
+                update_issue.repair.command = Some(
+                    crate::update_check::UPDATE_COMMAND
+                        .split(' ')
+                        .map(str::to_owned)
+                        .collect(),
+                );
+                update_issue.diagnostic = serde_json::json!({
+                    "installed_version": env!("CARGO_PKG_VERSION"), "available_version": update.version,
+                    "checked_at":update.checked_at, "last_success_at":update.last_success_at,
+                    "last_error":update.last_error,
+                });
+                issues.push(update_issue);
+            }
+        }
     }
 
     let served = crate::codex_app_server::served_codex_panes(runtime, &setup.panes);
@@ -480,7 +527,10 @@ where
     }
 
     HealthReport {
-        status: if issues.is_empty() {
+        status: if issues
+            .iter()
+            .all(|issue| issue.severity == HealthSeverity::Info)
+        {
             HealthStatus::Healthy
         } else {
             HealthStatus::NeedsAttention
@@ -539,7 +589,11 @@ where
         );
     }
     let report = diagnose_collaboration(runtime);
-    if report.issues.is_empty() {
+    if report
+        .issues
+        .iter()
+        .all(|issue| issue.severity == HealthSeverity::Info)
+    {
         return Err("No issues remain; nothing was sent.".to_owned());
     }
     // Immediately before dispatch: the pane must still hold the exact Agent
@@ -892,28 +946,28 @@ fn add_operation<E, C, I>(
 
 #[must_use]
 pub fn render_health_report_to_text(report: &HealthReport) -> String {
+    let agents = if report.available_agents == 1 {
+        "agent is"
+    } else {
+        "agents are"
+    };
+    let terminals = if report.available_terminals > 0 {
+        format!(" {} terminals available.", report.available_terminals)
+    } else {
+        String::new()
+    };
+    let passed = format!(
+        "Namedrop checks passed; runtime hooks remain unverified.\n{} {agents} available.{terminals} {} messages await progress.",
+        report.available_agents, report.waiting_messages,
+    );
     if report.issues.is_empty() {
-        let agents = if report.available_agents == 1 {
-            "agent is"
-        } else {
-            "agents are"
-        };
-        let terminals = if report.available_terminals > 0 {
-            format!(" {} terminals available.", report.available_terminals)
-        } else {
-            String::new()
-        };
-        return format!(
-            "Namedrop checks passed; runtime hooks remain unverified.\n{} {agents} available.{terminals} {} messages await progress.",
-            report.available_agents, report.waiting_messages,
-        );
+        return passed;
     }
     let mut rendered = match report.status {
-        HealthStatus::Unavailable => "Namedrop could not complete its health check.\n",
-        HealthStatus::NeedsAttention => "Namedrop needs attention.\n",
-        HealthStatus::Healthy => "Namedrop is healthy.\n",
-    }
-    .to_owned();
+        HealthStatus::Unavailable => "Namedrop could not complete its health check.\n".to_owned(),
+        HealthStatus::NeedsAttention => "Namedrop needs attention.\n".to_owned(),
+        HealthStatus::Healthy => passed + "\n",
+    };
     for issue in &report.issues {
         rendered.push('\n');
         rendered.push_str(&terminal_safe_text(&issue.summary));

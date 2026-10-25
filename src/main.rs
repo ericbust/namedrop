@@ -135,7 +135,7 @@ fn main() -> ExitCode {
     };
     // Recheck selection after acquiring the gate: a queued command may have
     // started before activation completed or before a failed switch rolled back.
-    if let Some(state) = selected_state {
+    if let Some(state) = selected_state.as_deref() {
         let launcher = state.join("runtime/namedrop");
         if launcher.exists() {
             let selected = fs::canonicalize(state.join("runtime/current/namedrop"));
@@ -177,6 +177,11 @@ fn main() -> ExitCode {
     }
     if cli.is_agent_status_worker_hook() {
         return run_agent_status_worker();
+    }
+    if matches!(cli.operation(), "reconcile" | "event.pane-lifecycle")
+        && let Some(state) = selected_state.as_deref()
+    {
+        namedrop::update_check::start(state, SystemClock.now_unix_ms());
     }
     if let Some(attempt) = cli.terminal_attempt() {
         let result = with_runtime_options(&cli.runtime, |runtime| {
@@ -694,11 +699,21 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    let output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
+    let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
         with_runtime_at(state_directory, |runtime| Ok(execute(&input, runtime)))
             .ok()
             .flatten()
     });
+    if serde_json::from_str::<serde_json::Value>(&input)
+        .is_ok_and(|input| input["hook_event_name"] == "SessionStart")
+    {
+        output = namedrop::update_check::session_notice(
+            &input,
+            state_directory,
+            SystemClock.now_unix_ms(),
+            output,
+        );
+    }
     if let Some(output) = output {
         let _ = serde_json::to_writer(io::stdout().lock(), &output);
     }
