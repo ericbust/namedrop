@@ -58,11 +58,12 @@ def shell_prompt_pattern(ps1):
 SHELL_PROMPT = shell_prompt_pattern(testbed.SHELL_PS1)
 
 SCREENS = (
-    # Claude Code 2.1.296. The seeds skip theme and trust; their rows catch a Claude that
+    # Claude Code 2.1.310. The seeds skip theme and trust; their rows catch a Claude that
     # ignores a seed.
     Screen("claude", "exited", SHELL_PROMPT, (), EXITED, None,
            "Claude exited to its shell; see the capture"),
-    Screen("claude", "login", r"Select login method|Paste code here", (), FATAL, None,
+    Screen("claude", "login", r"Select login method|Paste code here|Not logged in · Run /login", (),
+           FATAL, None,
            "Claude is not logged in; run ./testbed shell --profile {profile}, then claude auth login"),
     Screen("claude", "theme", r"Choose the text style that looks best", ("enter",), ANSWER, None, ""),
     Screen("claude", "security-notes", r"Security notes:", ("enter",), ANSWER, None, ""),
@@ -72,7 +73,7 @@ SCREENS = (
     Screen("claude", "folder-trust", r"Quick safety check", ("down", "enter"), ANSWER, None, ""),
     # Claude draws a no-break space after the composer's arrow.
     Screen("claude", "ready", "^❯[ \u00a0]", (), READY, None, ""),
-    # Codex 0.162.1.
+    # Codex 0.163.0.
     Screen("codex", "channel-closed", r"remote app-server worker channel is closed", (), FATAL,
            None, "Codex's shared app-server restarted under the window (it updates itself); "
                  "run the test again"),
@@ -141,7 +142,9 @@ Namedrop; issue_003, issue_panes, fix_steps, label and banner are Namedrop's cla
 FIX_COMMANDS = ("codex features disable daemon_auto_start", "codex app-server daemon stop")
 UNDO_COMMAND = "codex features enable daemon_auto_start"
 STOP_COMMAND = FIX_COMMANDS[1]
-BANNER = "Namedrop: Codex runs through its shared app-server"
+# Codex word-wraps hook output itself, so in a narrow pane only the banner's opening stays on
+# one line. The agent's reply scrolls it past wait-output's window, so it is read from scrollback.
+BANNER = "Namedrop: Codex"
 NO_DAEMON = "--no-daemon"
 
 
@@ -949,7 +952,8 @@ class Run:
             issue_panes=tuple(issue.diagnostic.get("pane_ids") or ()) if issue else (),
             fix_steps=tuple(issue.diagnostic.get("steps") or ()) if issue else (),
             label=self.panes()["codex"].label,
-            banner=self.wait_text("codex", BANNER, TIMEOUTS.banner, source="recent-unwrapped")
+            banner=self.settle(lambda: BANNER in self.text("codex", "recent-unwrapped", lines=600),
+                               bool, TIMEOUTS.banner, watch=())
             if look_for_banner else None,
             registered=(self.addresses().get("codex") or Address("codex", None, None, None, None)).registered,
             transport=self.transport(processes[0]["pid"]) if processes else None)

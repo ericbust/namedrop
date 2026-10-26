@@ -20,9 +20,8 @@ into each profile and never copies them.
 - **Linux.** x86_64 or aarch64 with glibc. A C compiler (`cc`) must be on PATH.
 - **macOS.** Apple silicon. Install the command-line developer tools with
   `xcode-select --install`. Homebrew tools in `/opt/homebrew/bin` are found
-  automatically. Claude reads your login keychain through a link.
-  The macOS path has not been run yet. The first `./testbed check` and
-  `./testbed up` on a Mac verify it.
+  automatically. Claude's login is linked from `~/.claude/.credentials.json`,
+  or from the login keychain when Claude keeps it there.
 
 Run the check first. It lists each tool with its version and runs a self-test
 that needs no network:

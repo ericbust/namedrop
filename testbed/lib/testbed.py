@@ -249,7 +249,7 @@ class Profile:
             yield
 
     def prepare(self, agents):
-        for name in ("home", "config", "state", "data", "cache", "run", "codex",
+        for name in ("home", "home/.claude", "config", "state", "data", "cache", "run", "codex",
                      "bin", "logs", "config-dirs", "data-dirs"):
             directory = self.dir / name
             if directory.is_symlink():
@@ -301,23 +301,26 @@ class Profile:
 
     def auth_links(self):
         real_home = Path.home()
-        links = [("Codex", Path(os.environ.get("CODEX_HOME", str(real_home / ".codex"))) / "auth.json",
-                  self.dir / "codex/auth.json", "codex login")]
+        claude = [(real_home / ".claude/.credentials.json", self.dir / "home/.claude/.credentials.json")]
         if sys.platform == "darwin":
-            links.append(("Claude", real_home / "Library/Keychains",
-                          self.dir / "home/Library/Keychains", "claude auth login"))
-        else:
-            links.append(("Claude", real_home / ".claude/.credentials.json",
-                          self.dir / "home/.claude/.credentials.json", "claude auth login"))
-        for label, target, destination, login in links:
-            if destination.is_symlink() or destination.exists():
-                if destination.is_symlink() and os.readlink(destination) != str(target):
-                    fail("unexpected authentication link: " + str(destination))
-                continue
-            if target.exists():
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.symlink_to(target, target_is_directory=target.is_dir())
-            else:
+            # Claude Code on macOS keeps its login in the credentials file or the login keychain.
+            claude.append((real_home / "Library/Keychains", self.dir / "home/Library/Keychains"))
+        logins = [("Codex", "codex login",
+                   [(Path(os.environ.get("CODEX_HOME", str(real_home / ".codex"))) / "auth.json",
+                     self.dir / "codex/auth.json")]),
+                  ("Claude", "claude auth login", claude)]
+        for label, login, links in logins:
+            linked = False
+            for target, destination in links:
+                if destination.is_symlink() or destination.exists():
+                    if destination.is_symlink() and os.readlink(destination) != str(target):
+                        fail("unexpected authentication link: " + str(destination))
+                    linked = True
+                elif target.exists():
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.symlink_to(target, target_is_directory=target.is_dir())
+                    linked = True
+            if not linked:
                 say("WARNING: {} login missing. Run ./testbed shell --profile {}, then {}".format(
                     label, self.name, login))
 
