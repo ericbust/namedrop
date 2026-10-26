@@ -142,7 +142,9 @@ Namedrop; issue_003, issue_panes, fix_steps, label and banner are Namedrop's cla
 FIX_COMMANDS = ("codex features disable daemon_auto_start", "codex app-server daemon stop")
 UNDO_COMMAND = "codex features enable daemon_auto_start"
 STOP_COMMAND = FIX_COMMANDS[1]
-BANNER = "Namedrop: Codex runs through its shared app-server"
+# Codex word-wraps hook output itself, so in a narrow pane only the banner's opening stays on
+# one line. The agent's reply scrolls it past wait-output's window, so it is read from scrollback.
+BANNER = "Namedrop: Codex"
 NO_DAEMON = "--no-daemon"
 
 
@@ -950,7 +952,8 @@ class Run:
             issue_panes=tuple(issue.diagnostic.get("pane_ids") or ()) if issue else (),
             fix_steps=tuple(issue.diagnostic.get("steps") or ()) if issue else (),
             label=self.panes()["codex"].label,
-            banner=self.wait_text("codex", BANNER, TIMEOUTS.banner, source="recent-unwrapped")
+            banner=self.settle(lambda: BANNER in self.text("codex", "recent-unwrapped", lines=600),
+                               bool, TIMEOUTS.banner, watch=())
             if look_for_banner else None,
             registered=(self.addresses().get("codex") or Address("codex", None, None, None, None)).registered,
             transport=self.transport(processes[0]["pid"]) if processes else None)
