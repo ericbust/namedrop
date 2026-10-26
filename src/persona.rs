@@ -246,10 +246,11 @@ fn other_workspaces(workspaces: usize, aliases: &[String]) -> String {
         format!("{workspaces} other Herdr workspaces have")
     };
     format!(
-        "Other workspaces: {count} named agents ({names}). Agents in other workspaces are \
-         not collaborators to recruit on your own. Address one only when the person names a \
-         workspace, says \"all my @name\", or answers the workspace question. Then run \
-         `address list` with {{\"workspaces\":\"all\"}} for each workspace's label and \
+        "Other workspaces: {count} named agents ({names}). A bare @name in a new message \
+         never reaches them, though a reply still reaches whoever wrote to you. They are not \
+         collaborators to recruit on your own. Address one only when the \
+         person names a workspace, says \"all my @name\", or answers the workspace question. \
+         Then run `address list` with {{\"workspaces\":\"all\"}} for each workspace's label and \
          readiness, and start the send source with `#label @name`, or `#all @name` for every \
          workspace with that name."
     )

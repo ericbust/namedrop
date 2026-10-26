@@ -162,14 +162,14 @@ impl SpaceDirectory {
             names: here_names.names.clone(),
             retired: here_names.retired.clone(),
         };
-        let crosses = run.scope != SpaceScope::Unqualified
+        let looks_elsewhere = run.scope != SpaceScope::Unqualified
             || run.aliases.iter().any(|alias| {
                 !here_entry(None, None).answers_to(alias)
                     && index.iter().any(|space| {
                         &space.space != here && space.activated && space.names.contains(alias)
                     })
             });
-        if !crosses {
+        if !looks_elsewhere {
             return Ok(Self::new(here_entry(None, None), Vec::new()));
         }
         let listed = workspaces.list()?;
@@ -442,20 +442,22 @@ pub(crate) fn route<E: crate::HerdrCommandExecutor>(
         )?;
         plan_route(&remaining, &directory).map_err(|refusal| {
             SendError::Refused(match (refusal, fallback) {
-                (RouteRefusal::Ambiguous { choices, .. }, Some(fallback)) => {
-                    RouteRefusal::AmbiguousReply {
-                        retry: if run
-                            .aliases
-                            .iter()
-                            .all(|alias| choices.iter().any(|choice| &choice.alias == alias))
-                        {
-                            fallback
-                        } else {
-                            ReplyRetry::WithoutThem
-                        },
-                        choices,
-                    }
-                }
+                (
+                    RouteRefusal::Ambiguous { choices, .. }
+                    | RouteRefusal::NotHere { names: choices },
+                    Some(fallback),
+                ) => RouteRefusal::UnplacedReply {
+                    retry: if run
+                        .aliases
+                        .iter()
+                        .all(|alias| choices.iter().any(|choice| &choice.alias == alias))
+                    {
+                        fallback
+                    } else {
+                        ReplyRetry::WithoutThem
+                    },
+                    choices,
+                },
                 (refusal, _) => refusal,
             })
         })?
@@ -560,17 +562,24 @@ pub(crate) enum RouteRefusal {
     UnknownMention {
         alias: String,
     },
-    /// Some names have two or more homes. `settled` holds every name that
-    /// resolved, as the token that resends it to the same workspace, so the
-    /// resend after the person picks keeps them where they were.
+    /// Bare names this workspace lacks but others have. A bare name never
+    /// leaves its workspace, so each comes back with the `#label` tokens that
+    /// reach it and nothing is sent.
+    NotHere {
+        names: Vec<UnplacedName>,
+    },
+    /// Some `#repo` names have two or more worktree homes. `settled` holds
+    /// every name that resolved, as the token that resends it to the same
+    /// workspace, so the resend after the person picks keeps them where they
+    /// were.
     Ambiguous {
         settled: Vec<ScopedName>,
-        choices: Vec<AmbiguousName>,
+        choices: Vec<UnplacedName>,
     },
-    /// A reply with ambiguous names, which keeps the thread and settles the
-    /// attempt when it is retried as `retry` says.
-    AmbiguousReply {
-        choices: Vec<AmbiguousName>,
+    /// A reply with names it cannot place, which keeps the thread and settles
+    /// the attempt when it is retried as `retry` says.
+    UnplacedReply {
+        choices: Vec<UnplacedName>,
         retry: ReplyRetry,
     },
     UnknownWorkspace {
@@ -599,10 +608,10 @@ pub(crate) enum RouteRefusal {
     },
 }
 
-/// How a reply refused for ambiguous names is retried.
+/// How a reply refused for names it cannot place is retried.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ReplyRetry {
-    /// Other names remain once the ambiguous ones are removed.
+    /// Other names remain once the unplaced ones are removed.
     WithoutThem,
     /// No name remains, so the reply goes back to the answered message's sender.
     ToSender(String),
@@ -623,22 +632,9 @@ impl fmt::Display for ScopedName {
     }
 }
 
-fn write_choices(formatter: &mut fmt::Formatter<'_>, choices: &[AmbiguousName]) -> fmt::Result {
-    for (index, choice) in choices.iter().enumerate() {
-        if index > 0 {
-            formatter.write_str("; ")?;
-        }
-        match &choice.within {
-            None => write!(
-                formatter,
-                "@{} is not named in this workspace but is named in {}",
-                choice.alias,
-                joined(&choice.labels, " and ")
-            )?,
-            Some(_) => formatter.write_str(&choice.describe(", "))?,
-        }
-    }
-    Ok(())
+fn write_choices(formatter: &mut fmt::Formatter<'_>, choices: &[UnplacedName]) -> fmt::Result {
+    let described: Vec<String> = choices.iter().map(UnplacedName::describe).collect();
+    formatter.write_str(&described.join("; "))
 }
 
 pub(crate) fn listed(names: &[ScopedName]) -> String {
@@ -659,28 +655,40 @@ impl fmt::Display for SpaceScope {
     }
 }
 
+/// A name the route could not place in one workspace, with the workspaces
+/// that have it.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AmbiguousName {
+pub(crate) struct UnplacedName {
     pub alias: String,
     pub labels: Vec<WorkspaceLabel>,
-    /// The `#repo` token the person typed, when the name is ambiguous among
-    /// that repository's workspaces rather than among all of them.
+    /// The `#repo` token typed before the name, when two or more of that
+    /// repository's worktrees have it. `None` for a bare name this workspace
+    /// lacks.
     pub within: Option<WorkspaceLabel>,
 }
 
-impl AmbiguousName {
-    pub(crate) fn describe(&self, separator: &str) -> String {
+impl UnplacedName {
+    pub(crate) fn describe(&self) -> String {
         match &self.within {
-            None => format!(
-                "@{} is not named in this workspace. It is named in these workspaces: {}",
-                self.alias,
-                joined(&self.labels, separator)
-            ),
+            None => {
+                let alias = &self.alias;
+                let tokens: Vec<String> = self
+                    .labels
+                    .iter()
+                    .map(|label| format!("{label} @{alias}"))
+                    .collect();
+                format!(
+                    "@{alias} is not named in this workspace. It is named in: {}. Use {} to \
+                     reach it",
+                    joined(&self.labels, ", "),
+                    tokens.join(" or ")
+                )
+            }
             Some(repo) => format!(
                 "@{} is named in more than one {} worktree: {}",
                 self.alias,
                 repo.as_str(),
-                joined(&self.labels, separator)
+                joined(&self.labels, ", ")
             ),
         }
     }
@@ -690,6 +698,12 @@ impl fmt::Display for RouteRefusal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownMention { alias } => write!(formatter, "unknown Mention: @{alias}"),
+            Self::NotHere { names } => {
+                for name in names {
+                    write!(formatter, "{}. ", name.describe())?;
+                }
+                formatter.write_str("Nothing was sent.")
+            }
             Self::Ambiguous { settled, choices } => {
                 write_choices(formatter, choices)?;
                 if !settled.is_empty() {
@@ -702,7 +716,7 @@ impl fmt::Display for RouteRefusal {
                      and the message text",
                 )
             }
-            Self::AmbiguousReply { choices, retry } => {
+            Self::UnplacedReply { choices, retry } => {
                 write_choices(formatter, choices)?;
                 let dropped = choices
                     .iter()
@@ -868,29 +882,31 @@ pub(crate) fn plan_route(
     let mut ambiguous = Vec::new();
     match &run.scope {
         SpaceScope::Unqualified => {
+            let here = directory.here();
+            let mut elsewhere = Vec::new();
             for alias in &run.aliases {
-                let here = directory.here();
                 if here.answers_to(alias) {
                     targets.push((here, alias));
                     continue;
                 }
-                let homes: Vec<&SpaceEntry> = directory
+                let labels: Vec<WorkspaceLabel> = directory
                     .others()
                     .filter(|entry| entry.activated && entry.names.contains(alias))
+                    .map(|home| directory.token(home))
                     .collect();
-                match homes.as_slice() {
-                    [] => {
-                        return Err(RouteRefusal::UnknownMention {
-                            alias: alias.clone(),
-                        });
-                    }
-                    [home] => targets.push((home, alias)),
-                    homes => ambiguous.push(AmbiguousName {
+                if labels.is_empty() {
+                    return Err(RouteRefusal::UnknownMention {
                         alias: alias.clone(),
-                        labels: homes.iter().map(|home| directory.token(home)).collect(),
-                        within: None,
-                    }),
+                    });
                 }
+                elsewhere.push(UnplacedName {
+                    alias: alias.clone(),
+                    labels,
+                    within: None,
+                });
+            }
+            if !elsewhere.is_empty() {
+                return Err(RouteRefusal::NotHere { names: elsewhere });
             }
         }
         SpaceScope::Named(labels) => {
@@ -916,7 +932,7 @@ pub(crate) fn plan_route(
                                 targets.push((home, alias));
                             }
                         }
-                        homes => ambiguous.push(AmbiguousName {
+                        homes => ambiguous.push(UnplacedName {
                             alias: alias.clone(),
                             labels: homes.iter().map(|home| directory.token(home)).collect(),
                             within: Some(scope.label.clone()),
@@ -1069,54 +1085,40 @@ mod tests {
             [leg("w1", &["old"])],
             "a local tombstone stays local and keeps its retired error"
         );
+        let not_here = |names: &[(&str, &[&str])]| {
+            Err(RouteRefusal::NotHere {
+                names: names
+                    .iter()
+                    .map(|(alias, labels)| UnplacedName {
+                        alias: (*alias).to_owned(),
+                        labels: labels.iter().map(|token| label(token)).collect(),
+                        within: None,
+                    })
+                    .collect(),
+            })
+        };
         assert_eq!(
-            legs(plan(&["tester"])),
-            [leg("w2", &["tester"])],
-            "one remote home"
+            plan(&["tester"]),
+            not_here(&[("tester", &["my-space"])]),
+            "one remote home is named, never reached"
         );
         assert_eq!(
-            legs(plan(&["reviewers"])),
-            [leg("w2", &["reviewers"])],
+            plan(&["reviewers"]),
+            not_here(&[("reviewers", &["my-space"])]),
             "a group alias follows the same table"
         );
-        assert_eq!(
-            plan(&["ops"]),
-            Err(RouteRefusal::Ambiguous {
-                settled: Vec::new(),
-                choices: vec![AmbiguousName {
-                    alias: "ops".to_owned(),
-                    labels: vec![label("my-space"), label("ws3")],
-                    within: None,
-                }],
-            })
-        );
+        assert_eq!(plan(&["ops"]), not_here(&[("ops", &["my-space", "ws3"])]));
         assert_eq!(
             plan(&["ops", "lead", "tester"]),
-            Err(RouteRefusal::Ambiguous {
-                settled: vec![
-                    ScopedName {
-                        workspace: label("ws1"),
-                        alias: "lead".to_owned(),
-                    },
-                    ScopedName {
-                        workspace: label("my-space"),
-                        alias: "tester".to_owned(),
-                    },
-                ],
-                choices: vec![AmbiguousName {
-                    alias: "ops".to_owned(),
-                    labels: vec![label("my-space"), label("ws3")],
-                    within: None,
-                }],
-            }),
-            "the question carries every name that resolved, local or remote, so the resend keeps them"
+            not_here(&[("ops", &["my-space", "ws3"]), ("tester", &["my-space"])]),
+            "a local name does not let the others through"
         );
         assert_eq!(
             plan(&["ops", "nobody"]),
             Err(RouteRefusal::UnknownMention {
                 alias: "nobody".to_owned()
             }),
-            "an unknown name wins over a question the person cannot answer"
+            "an unknown name wins over names found elsewhere"
         );
         assert_eq!(
             plan(&["ghost"]),
@@ -1126,9 +1128,9 @@ mod tests {
             "an inactive workspace is not a home"
         );
         assert_eq!(
-            legs(plan(&["tester", "lead"])),
-            [leg("w1", &["lead"]), leg("w2", &["tester"])],
-            "here's leg comes first"
+            plan(&["ops", "nobody"]).unwrap_err(),
+            plan(&["nobody", "ops"]).unwrap_err(),
+            "an unknown name wins in any order"
         );
     }
 
@@ -1251,7 +1253,7 @@ mod tests {
                         alias: "pi".to_owned(),
                     },
                 ],
-                choices: vec![AmbiguousName {
+                choices: vec![UnplacedName {
                     alias: "codex".to_owned(),
                     labels: vec![label("catchup-again"), label("other")],
                     within: Some(label("namestack")),

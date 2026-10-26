@@ -1,5 +1,5 @@
 use crate::message::PromptMentionOutcome;
-use crate::spaces::{AmbiguousName, RouteRefusal, ScopedName, SpaceScope};
+use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName};
 use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -161,6 +161,16 @@ where
         PromptMentionOutcome::NeedsRecipient { scope, names } => {
             Some(under_roster(&recipient_picker(&scope, &names), runtime))
         }
+        PromptMentionOutcome::Refused(refusal @ RouteRefusal::NotHere { .. }) => {
+            Some(under_roster(
+                &format!(
+                    "Namedrop did not send this prompt. {refusal} The prompt was preserved for \
+                     you unchanged; do not retry automatically. Tell the person the #label @name \
+                     to type."
+                ),
+                runtime,
+            ))
+        }
         PromptMentionOutcome::Refused(refusal) => Some(under_roster(
             &format!(
                 "Namedrop did not send this prompt: {refusal}. The prompt was preserved for you \
@@ -213,10 +223,10 @@ where
 /// whose host can. The prompt stays in the transcript, so nobody retypes it.
 /// The resend is one `send` per workspace, so a name that already resolved
 /// keeps its workspace whatever the person picks for the others.
-fn workspace_picker(settled: &[ScopedName], choices: &[AmbiguousName]) -> String {
+fn workspace_picker(settled: &[ScopedName], choices: &[UnplacedName]) -> String {
     let named = choices
         .iter()
-        .map(|choice| format!("{}.", choice.describe(", ")))
+        .map(|choice| format!("{}.", choice.describe()))
         .collect::<Vec<_>>()
         .join(" ");
     let (resolved, bound) = if settled.is_empty() {
