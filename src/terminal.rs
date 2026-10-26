@@ -254,10 +254,24 @@ pub(crate) fn foreground_process_ids(
 }
 
 /// A process's argv, or `None` when the process is gone or unreadable.
+///
+/// One read call per attempt: the kernel serves each read of `cmdline` from
+/// the memory map the process has at that moment, so a read in pieces that
+/// spans the process's `exec` splices the old argv with the new one.
 #[cfg(target_os = "linux")]
 pub(crate) fn process_arguments(pid: u32) -> Option<Vec<String>> {
-    let bytes = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let bytes = bytes.strip_suffix(&[0]).unwrap_or(&bytes);
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::File::open(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut buffer = vec![0; 4096];
+    loop {
+        let read = file.read_at(&mut buffer, 0).ok()?;
+        if read < buffer.len() {
+            buffer.truncate(read);
+            break;
+        }
+        buffer = vec![0; buffer.len() * 2];
+    }
+    let bytes = buffer.strip_suffix(&[0]).unwrap_or(&buffer);
     (!bytes.is_empty()).then(|| split_arguments(bytes).collect())
 }
 
