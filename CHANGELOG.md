@@ -2,7 +2,7 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
-## [Unreleased]
+## [1.4.0] - 2026-10-26
 
 ### Added
 
@@ -20,6 +20,9 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Changed
 
 - Namedrop's state moves to schema 6 the first time the new release opens it. Context handoffs still stay inside one workspace.
+- Namedrop's Codex hooks changed, so Codex asks once to trust them again in `/hooks`. A Codex session started before the update keeps receiving and answering messages, but a mention typed into it is not sent until you start a new Codex session and approve the hooks.
+- Namedrop 1.3.3 and earlier refuse to open state at schema 6, so going back to one of them after this update needs a [state backup](docs/operations.md#back-up-and-restore-state) taken before it.
+
 ## [1.3.3] - 2026-10-26
 
 ### Fixed
