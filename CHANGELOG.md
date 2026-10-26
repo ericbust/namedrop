@@ -15,6 +15,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 - Tracked handoffs reach agents in other workspaces. After `handoff begin`, send to `#label @name`, a group in that workspace, or `#all @name` with the `coordination_id`. The worker replies with its work outcome from its own workspace, and continuations, `handoff results`, `status`, `resolve` and `adopt`, nudges and the unanswered-request warning all work as they do in one workspace. The coordination stays in the lead's workspace; nothing is copied into the worker's.
 - `handoff results` and `handoff status` show where a recipient in another workspace really stands: queued, held, settled or answered, as its own workspace records it, with that workspace's name and its delivery outlook. Before, such a recipient showed as settled from the moment of the send.
 - Purging a workspace cancels the deliveries that other workspaces were still waiting on there, so their results and coordinations stop waiting.
+- Agents in other workspaces can run commands in a named terminal once you allow it with `namedrop address allow-remote`, and the result comes back to the agent that sent the command. The terminal must be named with its workspace label, as in `#build-box @build make test`; an unlabelled name or `#all` never reaches another workspace's shell. `address deny-remote` takes it back and fails the commands still waiting, and a rebind or a new shell ends the grant.
 
 ### Changed
 

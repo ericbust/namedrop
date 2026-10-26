@@ -520,7 +520,7 @@ pub(crate) fn route<E: crate::HerdrCommandExecutor>(
             &namespace.space_id,
             &remaining,
         )?;
-        plan_route(&remaining, &directory).map_err(|refusal| {
+        let plan = plan_route(&remaining, &directory).map_err(|refusal| {
             SendError::Refused(match (refusal, fallback) {
                 (
                     RouteRefusal::Ambiguous { choices, .. }
@@ -540,7 +540,9 @@ pub(crate) fn route<E: crate::HerdrCommandExecutor>(
                 },
                 (refusal, _) => refusal,
             })
-        })?
+        })?;
+        refuse_remote_terminals(store, namespace, &remaining.scope, &plan)?;
+        plan
     };
     let (mut remote, mut local) = (Vec::new(), Vec::new());
     for (_, pin) in pins {
@@ -557,6 +559,70 @@ pub(crate) fn route<E: crate::HerdrCommandExecutor>(
         plan.legs.insert(0, RouteLeg::Participants(remote));
     }
     Ok(plan)
+}
+
+/// Says before any write why a remote terminal will not run the command, so
+/// the author can fix every member at once. Forwarding enforces the same rule.
+fn refuse_remote_terminals(
+    store: &mut crate::StateStore,
+    namespace: &StateNamespace,
+    scope: &SpaceScope,
+    plan: &RoutePlan,
+) -> Result<(), SendError> {
+    let mut unshared = Vec::new();
+    for leg in &plan.legs {
+        let RouteLeg::Names {
+            space,
+            label,
+            aliases,
+        } = leg
+        else {
+            continue;
+        };
+        if space == &namespace.space_id {
+            continue;
+        }
+        let there = StateNamespace::new(namespace.session_socket_id.clone(), space.clone());
+        let terminals = store
+            .transaction(|transaction| {
+                // A name that does not resolve fails later with its own error.
+                let Ok(members) = transaction.resolve_recipient_aliases(&there, aliases) else {
+                    return Ok(Vec::new());
+                };
+                let mut terminals = Vec::new();
+                for member in members {
+                    if transaction.pane_type(&there, &member.address_id)?
+                        == crate::PaneType::Terminal
+                    {
+                        let grant = transaction.remote_command_grant(&there, &member.address_id)?;
+                        terminals.push((member.alias, grant.is_some()));
+                    }
+                }
+                Ok(terminals)
+            })
+            .map_err(|error| error.to_string())?;
+        if !matches!(scope, SpaceScope::Named(_))
+            && let Some((alias, _)) = terminals.first()
+        {
+            return Err(SendError::Refused(RouteRefusal::TerminalNeedsWorkspace {
+                alias: alias.clone(),
+                label: label.clone(),
+            }));
+        }
+        unshared.extend(
+            terminals
+                .into_iter()
+                .filter(|(_, shared)| !shared)
+                .map(|(alias, _)| (alias, label.clone())),
+        );
+    }
+    if unshared.is_empty() {
+        Ok(())
+    } else {
+        Err(SendError::Refused(RouteRefusal::TerminalNotShared {
+            terminals: unshared,
+        }))
+    }
 }
 
 /// Where a written Mention that names a conversation participant goes.
@@ -685,6 +751,13 @@ pub(crate) enum RouteRefusal {
     NoRecipient {
         scope: SpaceScope,
         names: Vec<ScopedName>,
+    },
+    TerminalNeedsWorkspace {
+        alias: String,
+        label: WorkspaceLabel,
+    },
+    TerminalNotShared {
+        terminals: Vec<(String, WorkspaceLabel)>,
     },
 }
 
@@ -874,6 +947,26 @@ impl fmt::Display for RouteRefusal {
                 "message must begin with one or more recipient Mentions; {scope} has these named \
                  agents: {}; start the source with the #label @name you mean",
                 listed(names)
+            ),
+            Self::TerminalNeedsWorkspace { alias, label } => write!(
+                formatter,
+                "@{alias} in {label} is a named terminal; put {label} before the mention to run \
+                 a command there, as in {label} @{alias} <command>"
+            ),
+            Self::TerminalNotShared { terminals } => write!(
+                formatter,
+                "{} {} a named terminal that takes commands only from its own workspace; a \
+                 person there can allow others with `namedrop address allow-remote`",
+                terminals
+                    .iter()
+                    .map(|(alias, label)| format!("@{alias} in {label}"))
+                    .collect::<Vec<_>>()
+                    .join(" and "),
+                if terminals.len() == 1 {
+                    "is"
+                } else {
+                    "are each"
+                }
             ),
         }
     }

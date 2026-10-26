@@ -402,22 +402,26 @@ mod drain_report_tests {
 fn wake_runtime_mailboxes(
     runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
 ) -> Result<(), String> {
-    let space = match runtime.workspace_id {
+    let here = match runtime.workspace_id {
         Some(id) => id.to_owned(),
         None => namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
     };
-    let directory =
-        reconciliation_directory(runtime.state_directory, runtime.session_socket_id, &space)?;
-    queue_agent_status_reconciliation(
-        &directory,
-        &serde_json::json!({"operation":"mailbox-wake"}),
-    )?;
-    status_worker_command()?
-        .env("HERDR_PLUGIN_STATE_DIR", runtime.state_directory)
-        .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
-        .env("HERDR_WORKSPACE_ID", space)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    // A terminal finishing here can queue its result in the author's workspace.
+    for space in namedrop::spaces_to_wake(runtime.state_directory, runtime.session_socket_id, &here)
+    {
+        let directory =
+            reconciliation_directory(runtime.state_directory, runtime.session_socket_id, &space)?;
+        queue_agent_status_reconciliation(
+            &directory,
+            &serde_json::json!({"operation":"mailbox-wake"}),
+        )?;
+        status_worker_command()?
+            .env("HERDR_PLUGIN_STATE_DIR", runtime.state_directory)
+            .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
+            .env("HERDR_WORKSPACE_ID", space)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 

@@ -490,11 +490,17 @@ where
                                 .iter()
                                 .find(|p| p.pane_id == second.pane_id)
                                 .expect("live candidate checked");
-                            transaction.prepare_terminal_execution(
-                                &namespace,
-                                &leased.attempt_id,
-                                &pane.terminal_id,
-                            )?;
+                            if transaction
+                                .prepare_terminal_execution(
+                                    &namespace,
+                                    &leased.attempt_id,
+                                    &pane.terminal_id,
+                                    &attribution,
+                                )?
+                                .is_err()
+                            {
+                                return Ok((leased, None));
+                            }
                             let command = crate::terminal::runner_command(
                                 runtime,
                                 &second_discovery.workspace_id,
@@ -502,13 +508,13 @@ where
                                 &leased.attempt_id,
                             )
                             .map_err(StoreError::invalid_input)?;
-                            return Ok((leased, command));
+                            return Ok((leased, Some(command)));
                         }
                         transaction
                             .delivery_envelope(&namespace, &leased.attempt_id, tool)
                             .and_then(|envelope| {
                                 serde_json::to_string(&envelope)
-                                    .map(|prompt| (leased, prompt))
+                                    .map(|prompt| (leased, Some(prompt)))
                                     .map_err(|error| {
                                         crate::StoreError::invalid_input(error.to_string())
                                     })
@@ -518,6 +524,10 @@ where
             })
             .map_err(|error| error.to_string())?;
         let Some((leased, prompt)) = leased else {
+            continue;
+        };
+        let Some(prompt) = prompt else {
+            report.failed.push(leased.attempt_id);
             continue;
         };
         let prompt_result = if second.pane_type == crate::PaneType::Terminal {

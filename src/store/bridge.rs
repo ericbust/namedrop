@@ -127,13 +127,6 @@ impl StateTransaction<'_> {
                 "an envoy cannot stand for another envoy",
             ));
         }
-        if self.pane_type(&origin_namespace, &origin.address_id)? == crate::PaneType::Terminal {
-            return Err(StoreError::invalid_input(format!(
-                "@{} in {} is a named terminal; terminals take commands only from their own \
-                 workspace",
-                origin.alias, origin.origin_label
-            )));
-        }
         let address_id = PaneAddressId::new(format!(
             "envoy:{}:{}",
             origin.space.as_str(),
@@ -312,6 +305,51 @@ impl StateTransaction<'_> {
                 None => targets.push((origin.clone(), vec![(recipient, origin)])),
             }
         }
+        if targets.is_empty() {
+            return Ok(());
+        }
+        if self.pane_type(namespace, &draft.author_address_id)? == crate::PaneType::Terminal
+            && draft.grammar_version != "terminal-result/v1"
+        {
+            return Err(StoreError::invalid_input(
+                "a named terminal cannot send to other workspaces; only its command results \
+                 travel home",
+            ));
+        }
+        let mut unshared = Vec::new();
+        for (envoy, recipients) in &targets {
+            let target =
+                StateNamespace::new(namespace.session_socket_id.clone(), envoy.space.clone());
+            for (_, origin) in recipients {
+                // A result is saved, never run, when its author has since become a terminal.
+                if draft.grammar_version == "terminal-result/v1"
+                    || self.pane_type(&target, &origin.address_id)? != crate::PaneType::Terminal
+                {
+                    continue;
+                }
+                if !super::terminal::terminal_runs(
+                    &draft.grammar_version,
+                    draft.in_reply_to.is_some(),
+                ) {
+                    return Err(StoreError::invalid_input(
+                        "terminal recipients accept new shell command requests without agent \
+                         context attachments",
+                    ));
+                }
+                let grant = self.remote_command_grant(&target, &origin.address_id)?;
+                if super::terminal::admit_remote_command(grant.as_deref(), None, true).is_err() {
+                    unshared.push((origin.alias.clone(), envoy.origin_label.clone()));
+                }
+            }
+        }
+        if !unshared.is_empty() {
+            return Err(StoreError::invalid_input(
+                crate::spaces::RouteRefusal::TerminalNotShared {
+                    terminals: unshared,
+                }
+                .to_string(),
+            ));
+        }
         for (envoy, recipients) in targets {
             let target = StateNamespace::new(namespace.session_socket_id.clone(), envoy.space);
             if !self
@@ -340,13 +378,6 @@ impl StateTransaction<'_> {
             };
             let mut copy_recipients = Vec::new();
             for (recipient, origin) in &recipients {
-                if self.pane_type(&target, &origin.address_id)? == crate::PaneType::Terminal {
-                    return Err(StoreError::invalid_input(format!(
-                        "@{} in {} is a named terminal; terminals take commands only from their \
-                         own workspace",
-                        origin.alias, envoy.origin_label
-                    )));
-                }
                 let current = self.routing_address_by_id(&target, &origin.address_id)?;
                 copy_recipients.push(crate::MessageRecipientDraft {
                     address_id: current.address_id,
@@ -606,6 +637,41 @@ impl StateTransaction<'_> {
                 |row| row.get::<_, String>(0).map(MessageId::new),
             )
             .optional()?)
+    }
+
+    /// The attempt in the recipient's own workspace that an envoy delivery's
+    /// copy received: the latest one, as reflection picks it.
+    pub(crate) fn copy_attempt(
+        &self,
+        namespace: &StateNamespace,
+        envoy: &PaneAddressId,
+        message_id: &MessageId,
+    ) -> Result<Option<(StateNamespace, crate::DeliveryAttemptId)>, StoreError> {
+        let Some(origin) = self.envoy_origin(namespace, envoy)? else {
+            return Ok(None);
+        };
+        let holder = StateNamespace::new(namespace.session_socket_id.clone(), origin.space);
+        let Some(copy) = self.copy_of(&holder, &namespace.space_id, message_id)? else {
+            return Ok(None);
+        };
+        let attempt = self
+            .transaction
+            .query_row(
+                "SELECT a.attempt_id FROM mailbox_deliveries d
+                 JOIN delivery_attempts a USING (session_socket_id, worktree_id, delivery_id)
+                 WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
+                   AND d.message_id = ?3 AND d.address_id = ?4
+                 ORDER BY a.created_at_ms DESC, a.rowid DESC LIMIT 1",
+                params![
+                    holder.session_socket_id,
+                    holder.space_id.as_str(),
+                    copy.as_str(),
+                    origin.address_id.as_str()
+                ],
+                |row| row.get::<_, String>(0).map(crate::DeliveryAttemptId::new),
+            )
+            .optional()?;
+        Ok(attempt.map(|attempt| (holder, attempt)))
     }
 
     pub(crate) fn bridged_sender_label(

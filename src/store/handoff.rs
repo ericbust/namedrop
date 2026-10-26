@@ -255,9 +255,18 @@ impl StateTransaction<'_> {
             let mut value = serde_json::to_value(&p).map_err(|e| StoreError::invalid_input(e.to_string()))?;
             value["elapsed_ms"] = json!(now.saturating_sub(p.created_at_ms));
             value["result_status"] = json!(p.result_status());
-            if let Some(attempt)=p.attempt_id.as_ref()
-                && let Some((code,output))=self.terminal_result(namespace,attempt)? {
-                value["terminal_result"]=json!({"exit_code":code,"output":output});
+            if let Some(attempt)=p.attempt_id.as_ref() {
+                let result = match self.terminal_result(namespace,attempt)? {
+                    Some(result) => Some(result),
+                    // A terminal in another workspace saved its output there.
+                    None => match self.copy_attempt(namespace,&p.target.address_id,message_id)? {
+                        Some((holder,copied)) => self.terminal_result(&holder,&copied)?,
+                        None => None,
+                    },
+                };
+                if let Some((code,output))=result {
+                    value["terminal_result"]=json!({"exit_code":code,"output":output});
+                }
             }
             value["needs_attention"] = json!(matches!(p.state, DeliveryState::Held | DeliveryState::Failed) || (p.state == DeliveryState::Settled && p.result_status().is_none()));
             if include_replies && let Some(reply_id) = p.reply_message_id {

@@ -139,6 +139,8 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                     for address in addresses {
                         let state = if address["collaboration_disabled"] == true {
                             "disabled".into()
+                        } else if address["remote_commands"] == true {
+                            "remote-ok".into()
                         } else if address["pane_type"] == "terminal"
                             && address["pane_id"].is_string()
                             && address["lifecycle"] == "empty"
@@ -180,14 +182,23 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                 }
             }
         }
-        "address.create" | "address.bind" | "address.unbind" | "address.rename"
-        | "address.enable" | "address.disable" | "address.persona" => {
+        "address.create"
+        | "address.bind"
+        | "address.unbind"
+        | "address.rename"
+        | "address.enable"
+        | "address.disable"
+        | "address.persona"
+        | "address.allow-remote"
+        | "address.deny-remote" => {
             let action = match result.operation.unwrap_or_default() {
                 "address.create" => "Created",
                 "address.bind" => "Bound",
                 "address.unbind" => "Unbound",
                 "address.rename" => "Renamed to",
                 "address.enable" => "Enabled",
+                "address.allow-remote" => "Allowed commands from other workspaces for",
+                "address.deny-remote" => "Turned off commands from other workspaces for",
                 "address.persona" => {
                     if data["persona"].is_string() {
                         "Set the persona for"

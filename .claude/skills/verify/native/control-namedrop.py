@@ -71,7 +71,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--feature", choices=["names", "groups", "controls", "tour", "dashboard", "handoffs",
                                               "shared-checkout", "stuck-wake", "idle-worker", "stale-runtime",
-                                              "cross-workspace", "cross-workspace-tracked"],
+                                              "cross-workspace", "cross-workspace-tracked", "remote-terminal"],
                         default="names")
     parser.add_argument("--binary", type=Path, default=REPO / "target/debug/namedrop")
     args = parser.parse_args()
@@ -94,7 +94,8 @@ def main():
     (base / "home/.bashrc").write_text('PROMPT_COMMAND=\': > "$HOME/ready-$HERDR_PANE_ID"\'\n')
     (base / "home/.bash_profile").write_text('. "$HOME/.bashrc"\n')
     cross_workspace = args.feature in ("cross-workspace", "cross-workspace-tracked")
-    links_plugin = cross_workspace or args.feature in ("stuck-wake", "idle-worker", "stale-runtime")
+    workspaces = cross_workspace or args.feature == "remote-terminal"
+    links_plugin = workspaces or args.feature in ("stuck-wake", "idle-worker", "stale-runtime")
     state = base / ("state/herdr/plugins/namedrop" if links_plugin else "state/namedrop")
     server = None
     dashboard_pid = None
@@ -192,7 +193,7 @@ def main():
         if server.poll() is not None:
             raise RuntimeError("Disposable server failed; see server.log")
         created = host("workspace", "create", "--cwd", str(base / "workspace"), "--label",
-                       "alpha" if cross_workspace else "Namedrop verification")
+                       "alpha" if workspaces else "Namedrop verification")
         spaces = {"lead": created["workspace"]["workspace_id"]}
         panes = {"lead": created["root_pane"]["pane_id"]}
         panes["worker"] = host("tab", "create", "--workspace", spaces["lead"], "--cwd", str(base / "workspace"),
@@ -570,7 +571,7 @@ def main():
                 wait(lambda: (base / "home" / f"ready-{panes[key]}").exists(), f"{key} native bash prompt")
                 shell_pids.append(host("pane", "process-info", "--pane", panes[key])["process_info"]["shell_pid"])
 
-            if cross_workspace:
+            if workspaces:
                 for space, label in (("beta", "Beta Space"), ("gamma", "gamma")):
                     directories[space] = base / space
                     directories[space].mkdir()
@@ -968,6 +969,116 @@ def main():
                     if summary.get("outcome") != "passed":
                         backup_database()
                     save("idle-worker.json", trace)
+                    for role, agent in agents.items():
+                        save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
+            elif args.feature == "remote-terminal":
+                summary["limits"] += (" The author is a simulated Codex session; the helper runs its CLI calls and bound"
+                                      " operations for it. The terminal is a plain Bash pane, and the person is the"
+                                      " helper typing the CLI into another Bash pane.")
+                alpha_lead = agents["alpha-lead"]["pane"]
+                trace = {"panes": panes, "spaces": spaces, "requirements": {}, "sends": {}}
+
+                def require(condition, requirement, observed):
+                    trace["requirements"][requirement] = {"passed": bool(condition), "observed": observed}
+                    if not condition:
+                        summary["outcome"] = requirement
+                        raise RuntimeError(f"remote terminal: {requirement}; observed {observed}")
+
+                def send(step, source):
+                    invocation = [str(launcher), "--plugin-state", str(state), "--herdr-socket", env["HERDR_SOCKET_PATH"],
+                                  "--herdr-workspace", spaces["lead"], "--herdr-pane", alpha_lead, "send", "--input-json",
+                                  json.dumps({"request_id": f"remote-terminal-{step}", "source": source,
+                                              "author_kind": "agent_session"})]
+                    result = command(*invocation, context=tool_environment(alpha_lead), check=False, kind="agent-cli")
+                    response = json.loads(result.stdout) if result.stdout.strip().startswith("{") else {}
+                    trace["sends"][step] = {"source": source, "exit": result.returncode, "response": response,
+                                            "stderr": result.stderr}
+                    return response
+
+                def refused(step, source, text):
+                    before = rows("SELECT COUNT(*) FROM collaboration_messages")
+                    response = send(step, source)
+                    message = (response.get("error") or {}).get("message", "")
+                    require(response.get("status") != "ok" and text in message,
+                            f"{step}: the send is refused with {text!r}", response)
+                    require(rows("SELECT COUNT(*) FROM collaboration_messages") == before,
+                            f"{step}: the refused send persists nothing", rows("SELECT COUNT(*) FROM collaboration_messages"))
+
+                def as_person(*argv, pane, allowed=(0,)):
+                    return cli(*argv, pane=panes[pane], workspace=spaces["beta"], allowed=allowed)
+
+                def marker(name):
+                    return base / f"marker-{name}"
+
+                try:
+                    open_tab("beta-build", "beta", "Verification beta build")
+                    open_tab("beta-shell", "beta", "Verification beta person")
+                    as_person("name", "@build", "--type", "terminal", pane="beta-build")
+                    build = next(a for a in as_person("address", "list", "--json", pane="beta-shell")["data"]
+                                 if a["alias"] == "build")
+                    require(build["pane_type"] == "terminal" and "remote_commands" not in build,
+                            "setup: Beta Space's @build is a terminal without a grant", build)
+                    grant = ["--input-json", json.dumps({"address_id": build["id"]})]
+
+                    refused("before", f"#beta-space @build touch {marker('before')}", "allow-remote")
+                    refused("unlabelled", f"@build touch {marker('unlabelled')}",
+                            "@build is not named in this workspace. It is named in: #beta-space. Use #beta-space @build"
+                            " to reach it")
+                    refused("all", f"#all @build touch {marker('all')}", "put #beta-space before the mention")
+                    self_grant = as_person("address", "allow-remote", *grant, pane="beta-build", allowed=range(1, 256))
+                    require("named terminal" in json.dumps(self_grant),
+                            "self-grant: allow-remote refuses to run inside the terminal it would open", self_grant)
+
+                    allowed = as_person("address", "allow-remote", *grant, pane="beta-shell")["data"]
+                    require(allowed.get("remote_commands") is True,
+                            "allow: the person's allow-remote saves the grant", allowed)
+                    sent = send("allowed", f"#beta-space @build touch {marker('allowed')} && echo remote-ok")
+                    require(sent.get("status") == "ok", "allowed: the send is accepted", sent)
+                    message_id = sent["data"]["message_id"]
+                    wait(marker("allowed").exists, "the command to run in Beta Space's terminal")
+                    result = wait(lambda: next((e for e in read_envelopes(agents["alpha-lead"]["envelopes"])
+                                                if e["control"]["sender"]["alias"] == "build"), None),
+                                  "the terminal result envelope in alpha", timeout=60)
+                    require("exit code 0" in result["untrusted_body"] and "remote-ok" in result["untrusted_body"],
+                            "allowed: alpha's lead receives the result without a manual drain", result["untrusted_body"])
+                    bound(result, "complete.no-reply")
+                    results = trace["handoff_results"] = as_agent("handoff", "results", pane=alpha_lead,
+                                                                  message_id=message_id)
+                    terminal = results["recipients"][0].get("terminal_result") or {}
+                    require(results["complete"] is True and terminal.get("exit_code") == 0
+                            and "remote-ok" in terminal.get("output", ""),
+                            "allowed: handoff results in alpha shows the terminal's exit code and output", results)
+
+                    denied = as_person("address", "deny-remote", *grant, pane="beta-shell")["data"]
+                    require("remote_commands" not in denied, "deny: deny-remote removes the grant", denied)
+                    refused("denied", f"#beta-space @build touch {marker('denied')}", "allow-remote")
+
+                    as_person("address", "allow-remote", *grant, pane="beta-shell")
+                    ready = base / "home" / f"ready-{panes['beta-build']}"
+                    ready.unlink(missing_ok=True)
+                    host("pane", "run", panes["beta-build"], "sleep 8")
+                    queued = send("queued", f"#beta-space @build touch {marker('queued')}")
+                    require(queued.get("status") == "ok", "queued: the send is accepted while the shell is busy", queued)
+                    copy = queued["data"]["forwarded"][0]["message_id"]
+                    require(rows("SELECT state FROM mailbox_deliveries WHERE message_id = ?", (copy,)) == [("queued",)],
+                            "queued: the command waits for the busy shell",
+                            rows("SELECT state FROM mailbox_deliveries WHERE message_id = ?", (copy,)))
+                    as_person("address", "deny-remote", *grant, pane="beta-shell")
+                    states = {"beta": rows("SELECT state FROM mailbox_deliveries WHERE message_id = ?", (copy,)),
+                              "alpha": rows("SELECT state FROM mailbox_deliveries WHERE message_id = ?",
+                                            (queued["data"]["message_id"],))}
+                    require(states == {"beta": [("failed",)], "alpha": [("failed",)]},
+                            "queued: deny-remote fails the queued command in both workspaces at once", states)
+                    wait(ready.exists, "the busy shell to finish its sleep")
+                    as_person("address", "allow-remote", *grant, pane="beta-shell")
+                    time.sleep(3)
+                    ran = sorted(path.name for path in base.glob("marker-*"))
+                    require(ran == ["marker-allowed"], "only the allowed command ever ran", ran)
+                    summary["outcome"] = "passed"
+                finally:
+                    if summary.get("outcome") != "passed":
+                        backup_database()
+                    save("remote-terminal.json", trace)
                     for role, agent in agents.items():
                         save(f"{role}-envelopes.json", read_envelopes(agent["envelopes"]))
             else:

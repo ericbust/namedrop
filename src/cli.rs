@@ -491,6 +491,10 @@ enum AddressCommand {
     Enable,
     /// Disable delivery to a named agent.
     Disable,
+    /// Let agents in other workspaces run commands in a named terminal.
+    AllowRemote,
+    /// Take back commands from other workspaces for a named terminal.
+    DenyRemote,
 }
 
 impl AddressCommand {
@@ -507,6 +511,8 @@ impl AddressCommand {
             Self::ReleaseAlias => "address.release-alias",
             Self::Enable => "address.enable",
             Self::Disable => "address.disable",
+            Self::AllowRemote => "address.allow-remote",
+            Self::DenyRemote => "address.deny-remote",
         }
     }
 }

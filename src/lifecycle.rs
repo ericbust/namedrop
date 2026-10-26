@@ -329,7 +329,12 @@ where
                             &binding.address_id,
                             &alias,
                         )?;
-                        transaction.set_pane_type(&namespace, &binding.address_id, pane_type)?;
+                        transaction.set_pane_type(
+                            &namespace,
+                            &binding.address_id,
+                            pane_type,
+                            &attribution,
+                        )?;
                         if let Some(persona) = &persona {
                             transaction.set_address_persona(
                                 &namespace,
@@ -357,7 +362,7 @@ where
                         alias: alias.clone(),
                     };
                     transaction.create_pane_address(&namespace, &draft, &attribution)?;
-                    transaction.set_pane_type(&namespace, &address_id, pane_type)?;
+                    transaction.set_pane_type(&namespace, &address_id, pane_type, &attribution)?;
                     if let Some(persona) = &persona {
                         transaction.set_address_persona(
                             &namespace,

@@ -347,7 +347,7 @@ fn upgrading_keeps_custom_descriptions_and_starts_native_names_generic() {
             .unwrap();
     }
     database
-        .execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=4;")
+        .execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=4;")
         .unwrap();
     drop(database);
 

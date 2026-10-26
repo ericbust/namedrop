@@ -204,6 +204,8 @@ pub fn is_control_operation(operation: &str) -> bool {
         operation,
         "address.enable"
             | "address.disable"
+            | "address.allow-remote"
+            | "address.deny-remote"
             | "delivery.cancel-held"
             | "delivery.acknowledge"
             | "handoff.acknowledge"
