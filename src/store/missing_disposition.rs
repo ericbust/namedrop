@@ -8,6 +8,10 @@ fn item_id(attempt: &crate::DeliveryAttemptId) -> crate::AttentionItemId {
 
 struct MissingDispositionFacts {
     disposed: bool,
+    /// Another workspace judges this attempt: a copy of a request whose
+    /// coordination lives elsewhere, or the reflection of an untracked attempt
+    /// that its copy's own workspace judges.
+    judged_elsewhere: bool,
     recipient_session: crate::AgentSessionId,
     recipient_retired: bool,
     recipient_session_now: RecipientSession,
@@ -58,7 +62,7 @@ fn unanswered(facts: &MissingDispositionFacts) -> Option<Unanswered> {
         return None;
     }
     let Some(tracked) = &facts.tracked else {
-        return Some(Unanswered::Untracked);
+        return (!facts.judged_elsewhere).then_some(Unanswered::Untracked);
     };
     if !tracked.is_current_request {
         return None;
@@ -165,9 +169,9 @@ impl StateTransaction<'_> {
         ns: &StateNamespace,
         attempt: &crate::DeliveryAttemptId,
     ) -> Result<MissingDispositionFacts, StoreError> {
-        let (address, session, retired, tracked) = self.transaction.query_row(
+        let (address, session, retired, tracked, message) = self.transaction.query_row(
             "SELECT a.address_id, a.agent_session_id, p.retired, c.outcome,
-                    t.current_message_id = d.message_id, t.coordination_id
+                    t.current_message_id = d.message_id, t.coordination_id, d.message_id
              FROM delivery_attempts a
              JOIN mailbox_deliveries d USING (
                  session_socket_id, worktree_id, delivery_id, address_id
@@ -208,14 +212,26 @@ impl StateTransaction<'_> {
                     crate::AgentSessionId::new(row.get::<_, String>(1)?),
                     row.get::<_, bool>(2)?,
                     tracked,
+                    MessageId::new(row.get::<_, String>(6)?),
                 ))
             },
         )?;
+        // An envoy's attempt is the reflection of its worker's, whose
+        // retirement and current session are read where that worker lives.
+        let principal = self.principal(ns, &address)?;
+        let judged_elsewhere = tracked.is_none()
+            && (principal.ns != *ns
+                || self
+                    .tracked_message(ns, &message)?
+                    .is_some_and(|found| found.home != *ns));
         Ok(MissingDispositionFacts {
             disposed: self.delivery_disposition_exists(ns, attempt)?,
+            judged_elsewhere,
             recipient_session: session,
-            recipient_retired: retired,
-            recipient_session_now: self.recipient_session_now(ns, &address)?,
+            recipient_retired: retired
+                || self.address_retired(&principal.ns, &principal.address_id)?,
+            recipient_session_now: self
+                .recipient_session_now(&principal.ns, &principal.address_id)?,
             tracked,
         })
     }
@@ -290,6 +306,7 @@ mod tests {
     fn facts(tracked: Option<TrackedRequest>) -> MissingDispositionFacts {
         MissingDispositionFacts {
             disposed: false,
+            judged_elsewhere: false,
             recipient_session: session("session-worker"),
             recipient_retired: false,
             recipient_session_now: RecipientSession::Observed(session("session-worker")),
@@ -312,6 +329,25 @@ mod tests {
     #[test]
     fn an_untracked_attempt_is_owed_at_settle() {
         assert_eq!(unanswered(&facts(None)), Some(Unanswered::Untracked));
+    }
+
+    #[test]
+    fn an_attempt_another_workspace_judges_is_never_owed_here() {
+        let mut elsewhere = facts(None);
+        elsewhere.judged_elsewhere = true;
+        assert_eq!(unanswered(&elsewhere), None);
+        let mut reflected = facts(Some(TrackedRequest {
+            coordination: CoordinationState::Resolved("blocked".to_owned()),
+            is_current_request: true,
+        }));
+        reflected.judged_elsewhere = true;
+        assert_eq!(
+            unanswered(&reflected),
+            Some(Unanswered::CoordinationResolved {
+                outcome: "blocked".to_owned()
+            }),
+            "the coordination's own workspace judges a tracked attempt"
+        );
     }
 
     #[test]

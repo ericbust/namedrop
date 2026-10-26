@@ -122,9 +122,12 @@ fn main() -> ExitCode {
                 .map(Path::to_path_buf)
         })
         .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
-    let _command_guard = match selected_state
+    // A dashboard successor started mid-update waits a bounded time rather
+    // than parking forever behind a stuck migration.
+    let gate_wait = cli.is_dashboard_server().then_some(Duration::from_secs(60));
+    let mut command_guard = match selected_state
         .as_deref()
-        .map(namedrop::runtime_command_guard)
+        .map(|state| namedrop::runtime_command_guard(state, gate_wait))
         .transpose()
     {
         Ok(guard) => guard,
@@ -147,6 +150,13 @@ fn main() -> ExitCode {
                 return ExitCode::from(69);
             }
         }
+    }
+    if cli.is_dashboard_server() {
+        let Some(state) = selected_state else {
+            eprintln!("dashboard-server requires --plugin-state");
+            return ExitCode::from(64);
+        };
+        return namedrop::dashboard::serve(&state, command_guard.take().flatten());
     }
     let human = cli.human_output(io::stdout().is_terminal());
     let input_file = cli.input_is_file();
@@ -199,6 +209,14 @@ fn main() -> ExitCode {
                 ExitCode::from(65)
             }
         };
+    }
+    if let Some(open_browser) = cli.dashboard_open_browser() {
+        return finish(
+            "dashboard",
+            with_runtime_options(&cli.runtime, |runtime| {
+                namedrop::dashboard::open(runtime, open_browser)
+            }),
+        );
     }
     if let Some(config) = cli.shortcuts_config() {
         return finish("ui.install-shortcuts", naming_ui::install_shortcuts(config));
@@ -384,22 +402,26 @@ mod drain_report_tests {
 fn wake_runtime_mailboxes(
     runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
 ) -> Result<(), String> {
-    let space = match runtime.workspace_id {
+    let here = match runtime.workspace_id {
         Some(id) => id.to_owned(),
         None => namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
     };
-    let directory =
-        reconciliation_directory(runtime.state_directory, runtime.session_socket_id, &space)?;
-    queue_agent_status_reconciliation(
-        &directory,
-        &serde_json::json!({"operation":"mailbox-wake"}),
-    )?;
-    status_worker_command()?
-        .env("HERDR_PLUGIN_STATE_DIR", runtime.state_directory)
-        .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
-        .env("HERDR_WORKSPACE_ID", space)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    // A terminal finishing here can queue its result in the author's workspace.
+    for space in namedrop::spaces_to_wake(runtime.state_directory, runtime.session_socket_id, &here)
+    {
+        let directory =
+            reconciliation_directory(runtime.state_directory, runtime.session_socket_id, &space)?;
+        queue_agent_status_reconciliation(
+            &directory,
+            &serde_json::json!({"operation":"mailbox-wake"}),
+        )?;
+        status_worker_command()?
+            .env("HERDR_PLUGIN_STATE_DIR", runtime.state_directory)
+            .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
+            .env("HERDR_WORKSPACE_ID", space)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
     Ok(())
 }
 
@@ -739,18 +761,32 @@ fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
                 namedrop::discover_worktree(&herdr, &cwd)?.workspace_id
             }
         };
-        let directory = reconciliation_directory(state_directory, &socket_id, &space_id)?;
-        queue_agent_status_reconciliation(
-            &directory,
-            &serde_json::json!({"operation":"mailbox-wake"}),
-        )?;
-        status_worker_command()?
-            .env("HERDR_PLUGIN_STATE_DIR", state_directory)
-            .env("HERDR_SOCKET_PATH", &socket_id)
-            .env("HERDR_WORKSPACE_ID", space_id)
-            .status()
-            .map_err(|error| error.to_string())?;
-        Ok(())
+        let mut failures = Vec::new();
+        for space_id in namedrop::spaces_to_wake(state_directory, &socket_id, &space_id) {
+            // One workspace that cannot be woken must not strand the others.
+            let woken = (|| -> Result<(), String> {
+                let directory = reconciliation_directory(state_directory, &socket_id, &space_id)?;
+                queue_agent_status_reconciliation(
+                    &directory,
+                    &serde_json::json!({"operation":"mailbox-wake"}),
+                )?;
+                status_worker_command()?
+                    .env("HERDR_PLUGIN_STATE_DIR", state_directory)
+                    .env("HERDR_SOCKET_PATH", &socket_id)
+                    .env("HERDR_WORKSPACE_ID", &space_id)
+                    .status()
+                    .map_err(|error| error.to_string())?;
+                Ok(())
+            })();
+            if let Err(error) = woken {
+                failures.push(format!("{space_id}: {error}"));
+            }
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(failures.join("; "))
+        }
     };
     match wake() {
         Ok(()) => ExitCode::SUCCESS,

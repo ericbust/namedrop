@@ -64,17 +64,10 @@ impl StateTransaction<'_> {
         aliases: &[String],
         author: &PaneAddressId,
     ) -> Result<Vec<RoutingAddressSnapshot>, StoreError> {
-        let mut recipients = self.resolve_recipient_aliases(namespace, aliases)?;
-        recipients.retain(|recipient| &recipient.address_id != author);
-        if recipients.is_empty() {
-            return Err(StoreError::invalid_input(
-                "this message is addressed only to its author; mention at least one other agent",
-            ));
-        }
-        Ok(recipients)
+        addressed_recipients(self.resolve_recipient_aliases(namespace, aliases)?, author)
     }
 
-    fn resolve_recipient_aliases(
+    pub(crate) fn resolve_recipient_aliases(
         &self,
         namespace: &StateNamespace,
         aliases: &[String],
@@ -188,4 +181,26 @@ impl StateTransaction<'_> {
         )?;
         Ok(json!({"alias":alias,"removed":removed!=0}))
     }
+}
+
+pub(crate) fn addressed_recipients(
+    recipients: Vec<RoutingAddressSnapshot>,
+    author: &PaneAddressId,
+) -> Result<Vec<RoutingAddressSnapshot>, StoreError> {
+    let mut unique: Vec<RoutingAddressSnapshot> = Vec::new();
+    for recipient in recipients {
+        if &recipient.address_id != author
+            && !unique
+                .iter()
+                .any(|existing| existing.address_id == recipient.address_id)
+        {
+            unique.push(recipient);
+        }
+    }
+    if unique.is_empty() {
+        return Err(StoreError::invalid_input(
+            "this message is addressed only to its author; mention at least one other agent",
+        ));
+    }
+    Ok(unique)
 }

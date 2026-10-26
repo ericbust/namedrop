@@ -56,6 +56,7 @@ pub(crate) struct WorkspaceContext {
 
 /// The activated space this process runs in, read without touching state.
 struct ActivatedSpace {
+    store: StateStore,
     discovered: crate::DiscoveredWorktree,
     setup: crate::lifecycle::CollaborationSetup,
     paused: bool,
@@ -94,6 +95,7 @@ where
     }
     let paused = state.paused;
     Some(ActivatedSpace {
+        store,
         discovered,
         setup,
         paused,
@@ -126,6 +128,7 @@ where
     I: IdGenerator,
 {
     let ActivatedSpace {
+        mut store,
         discovered,
         setup,
         paused,
@@ -200,6 +203,16 @@ where
                 .join(", ")
         ));
     }
+    if let Ok((workspaces, aliases)) = store.transaction(|transaction| {
+        transaction.other_space_agents(
+            runtime.session_socket_id,
+            &discovered.namespace(runtime.session_socket_id).space_id,
+        )
+    }) && !aliases.is_empty()
+    {
+        context.push('\n');
+        context.push_str(&other_workspaces(workspaces, &aliases));
+    }
     Some(WorkspaceContext {
         host: runtime
             .current_pane_id
@@ -207,6 +220,40 @@ where
             .and_then(crate::integration::pane_agent_runtime),
         roster: context,
     })
+}
+
+const MAX_LISTED_REMOTE_NAMES: usize = 12;
+
+/// The other workspaces of this Herdr session, by name only: their labels come
+/// from Herdr, and a prompt boundary never pays for that read.
+fn other_workspaces(workspaces: usize, aliases: &[String]) -> String {
+    let mut names = aliases
+        .iter()
+        .take(MAX_LISTED_REMOTE_NAMES)
+        .map(|alias| format!("@{alias}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let Some(more) = aliases
+        .len()
+        .checked_sub(MAX_LISTED_REMOTE_NAMES)
+        .filter(|n| *n > 0)
+    {
+        names.push_str(&format!(", and {more} more"));
+    }
+    let count = if workspaces == 1 {
+        "1 other Herdr workspace has".to_owned()
+    } else {
+        format!("{workspaces} other Herdr workspaces have")
+    };
+    format!(
+        "Other workspaces: {count} named agents ({names}). A bare @name in a new message \
+         never reaches them, though a reply still reaches whoever wrote to you. They are not \
+         collaborators to recruit on your own. Address one only when the \
+         person names a workspace, says \"all my @name\", or answers the workspace question. \
+         Then run `address list` with {{\"workspaces\":\"all\"}} for each workspace's label and \
+         readiness, and start the send source with `#label @name`, or `#all @name` for every \
+         workspace with that name."
+    )
 }
 
 /// A persona reaches the host inside an elevated system or developer message,

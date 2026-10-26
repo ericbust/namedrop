@@ -151,6 +151,36 @@ where
                 .map_err(|error| error.to_string())?;
             serde_json::to_value(record).map_err(|error| error.to_string())?
         }
+        "address.allow-remote" => {
+            let input: AddressInput = parse_input(input)?;
+            let address_id = PaneAddressId::new(required(input.address_id, "address_id")?);
+            let invoker = runtime
+                .current_pane_id
+                .and_then(|id| discovered.panes.iter().find(|pane| pane.pane_id == id))
+                .ok_or("allow-remote must run from a Herdr pane in this workspace")?;
+            let record = store
+                .transaction(|transaction| {
+                    transaction.allow_remote_commands(
+                        &namespace,
+                        &address_id,
+                        invoker,
+                        &discovered.panes,
+                        &attribution,
+                    )
+                })
+                .map_err(|error| error.to_string())?;
+            serde_json::to_value(record).map_err(|error| error.to_string())?
+        }
+        "address.deny-remote" => {
+            let input: AddressInput = parse_input(input)?;
+            let address_id = PaneAddressId::new(required(input.address_id, "address_id")?);
+            let record = store
+                .transaction(|transaction| {
+                    transaction.deny_remote_commands(&namespace, &address_id, &attribution)
+                })
+                .map_err(|error| error.to_string())?;
+            serde_json::to_value(record).map_err(|error| error.to_string())?
+        }
         "thread.pause" | "thread.resume" | "thread.continue" => {
             let input: ThreadInput = parse_input(input)?;
             let thread_id = ThreadId::new(required(input.thread_id, "thread_id")?);

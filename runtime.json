@@ -1,1 +1,1 @@
-{"runtime_protocol":1,"live_upgrade_epoch":1,"state_schema":5,"collaboration_protocol":"collab/v1","command_gate":1,"live_migrate_from":[3,4]}
+{"runtime_protocol":1,"live_upgrade_epoch":1,"state_schema":6,"collaboration_protocol":"collab/v1","command_gate":1,"live_migrate_from":[3,4,5]}

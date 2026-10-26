@@ -1,3 +1,5 @@
+use crate::message::PromptMentionOutcome;
+use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName};
 use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -21,12 +23,6 @@ struct UserPromptSubmitInput {
 struct SessionStartInput {
     hook_event_name: String,
     source: Option<String>,
-}
-
-enum LeadingMentionRoute {
-    NotApplicable,
-    Sent,
-    Failed(&'static str),
 }
 
 /// Supplies the Namedrop selection policy once, when a native session starts
@@ -107,33 +103,149 @@ where
     }
     // An envelope durable state does not hold is never rerouted as a Mention,
     // whatever text leads it; the turn stays local with the ordinary roster.
-    let route = match carried {
-        Some(_) => LeadingMentionRoute::NotApplicable,
+    let outcome = match carried {
+        Some(_) => None,
         None => route_leading_mentions(&input.prompt, runtime),
     };
-    match route {
+    let Some(outcome) = outcome else {
         // An ordinary turn is the persona roster's boundary. With no roster to
         // supply, non-Mention input stays invisible exactly as before.
-        LeadingMentionRoute::NotApplicable => crate::persona::workspace_context(runtime)
-            .map(|workspace| context_hook_output(&workspace.roster)),
-        LeadingMentionRoute::Sent => Some(json!({
-            "decision": "block",
-            "reason": "Collaboration message sent.",
-        })),
-        // A failed handoff leaves the work here, so this turn needs the same
-        // roster an ordinary turn gets: it is what says who else could take it.
-        // The roster leads because a generated wrapper recognizes a dynamic
-        // context by the marker its serialization starts with, so composing
-        // under that marker needs no wrapper change; the guidance follows
-        // verbatim, and with no roster to lead it the exact known-safe literal
-        // the wrappers match is emitted unchanged.
-        LeadingMentionRoute::Failed(guidance) => Some(context_hook_output(
-            &match crate::persona::workspace_context(runtime) {
-                Some(workspace) => format!("{}\n\n{guidance}", workspace.roster),
-                None => guidance.to_owned(),
-            },
+        return crate::persona::workspace_context(runtime)
+            .map(|workspace| context_hook_output(&workspace.roster));
+    };
+    match outcome {
+        // The reason stays this exact literal: the generated wrapper wakes the
+        // mailboxes only on it.
+        PromptMentionOutcome::Sent { remote } => {
+            if !remote.is_empty() {
+                let _ = runtime.herdr.execute(&[
+                    "notification",
+                    "show",
+                    "Namedrop",
+                    "--body",
+                    &format!("Sent to {}", remote.join(", ")),
+                    "--position",
+                    "bottom-right",
+                ]);
+            }
+            Some(json!({
+                "decision": "block",
+                "reason": "Collaboration message sent.",
+            }))
+        }
+        PromptMentionOutcome::Refused(RouteRefusal::UnknownMention { .. }) => {
+            Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[0], runtime))
+        }
+        PromptMentionOutcome::Failed => Some(failed_handoff(FAILED_HANDOFF_CONTEXTS[1], runtime)),
+        PromptMentionOutcome::NeedsPick { settled, choices } => {
+            Some(under_roster(&workspace_picker(&settled, &choices), runtime))
+        }
+        PromptMentionOutcome::NeedsRecipient { scope, names } => {
+            Some(under_roster(&recipient_picker(&scope, &names), runtime))
+        }
+        PromptMentionOutcome::Refused(refusal @ RouteRefusal::NotHere { .. }) => {
+            Some(under_roster(
+                &format!(
+                    "Namedrop did not send this prompt. {refusal} The prompt was preserved for \
+                     you unchanged; do not retry automatically. Tell the person the #label @name \
+                     to type."
+                ),
+                runtime,
+            ))
+        }
+        PromptMentionOutcome::Refused(refusal) => Some(under_roster(
+            &format!(
+                "Namedrop did not send this prompt: {refusal}. The prompt was preserved for you \
+                 unchanged; do not retry automatically. Tell the person what to change."
+            ),
+            runtime,
         )),
     }
+}
+
+/// A failed handoff leaves the work here, so this turn needs the same roster
+/// an ordinary turn gets: it is what says who else could take it. The roster
+/// leads because a generated wrapper recognizes a dynamic context by the
+/// marker its serialization starts with, so composing under that marker needs
+/// no wrapper change; the guidance follows verbatim, and with no roster to lead
+/// it the exact known-safe literal the wrappers match is emitted unchanged.
+fn failed_handoff<E, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    context_hook_output(&match crate::persona::workspace_context(runtime) {
+        Some(workspace) => format!("{}\n\n{guidance}", workspace.roster),
+        None => guidance.to_owned(),
+    })
+}
+
+/// Guidance with no fixed literal of its own still reaches the agent: it opens
+/// with the roster marker every generated wrapper forwards.
+fn under_roster<E, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    let roster = crate::persona::workspace_context(runtime).map_or_else(
+        || {
+            format!(
+                "{} No named agents in this Herdr space.",
+                crate::persona::ROSTER_MARKER
+            )
+        },
+        |workspace| workspace.roster,
+    );
+    context_hook_output(&format!("{roster}\n\n{guidance}"))
+}
+
+/// The hook cannot draw a question, so it hands the question to the agent,
+/// whose host can. The prompt stays in the transcript, so nobody retypes it.
+/// The resend is one `send` per workspace, so a name that already resolved
+/// keeps its workspace whatever the person picks for the others.
+fn workspace_picker(settled: &[ScopedName], choices: &[UnplacedName]) -> String {
+    let named = choices
+        .iter()
+        .map(|choice| format!("{}.", choice.describe()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let (resolved, bound) = if settled.is_empty() {
+        (String::new(), "the person chose that workspace for it")
+    } else {
+        (
+            format!(
+                " These names are already resolved: {}.",
+                crate::spaces::listed(settled)
+            ),
+            "it is already resolved there or the person chose that workspace for it",
+        )
+    };
+    format!(
+        "Namedrop did not send this prompt. {named}{resolved} Nothing was sent and nothing is \
+         queued. Ask the person which workspace they meant. Offer each workspace, and \"all of \
+         them\" when there are two or more. Use your host's question tool if it has one \
+         (AskUserQuestion on Claude Code). Otherwise ask in one line and end your turn. Do not \
+         choose for them and do not start the task. When they answer, run `send` with \
+         author_kind agent_session once per workspace, never with #all. Each source is that \
+         workspace's #label, every @name bound there, a space, and the rest of the prompt \
+         exactly as written after its last leading @name. A name is bound to a workspace when {bound}."
+    )
+}
+
+fn recipient_picker(scope: &SpaceScope, names: &[ScopedName]) -> String {
+    let names = crate::spaces::listed(names);
+    format!(
+        "Namedrop did not send this prompt. It names {scope} but no agent there. Its agents: \
+         {names}. Nothing was sent and nothing is queued. Ask the person who to send it to. \
+         Offer each agent, and \"all of them\" when there are two or more. Use your host's \
+         question tool if it has one (AskUserQuestion on Claude Code). Otherwise ask in one line \
+         and end your turn. Do not choose for them and do not start the task. When they answer, \
+         run `send` with author_kind agent_session once per chosen workspace, with a source made \
+         of that workspace's #label, the chosen @names there, a space, and their prompt \
+         unchanged."
+    )
 }
 
 /// The serialized text a generated wrapper must recognize around one dynamic
@@ -249,7 +361,7 @@ const LEFTOVER_INPUT_CONTEXT: &str = "The text ahead of the envelope was already
 fn route_leading_mentions<E, C, I>(
     prompt: &str,
     runtime: &LifecycleRuntime<'_, E, C, I>,
-) -> LeadingMentionRoute
+) -> Option<PromptMentionOutcome>
 where
     E: HerdrCommandExecutor,
     C: Clock,
@@ -264,23 +376,19 @@ where
     // "carries a Mention" and not "parses as a message": `@reviewer` with no
     // body does address someone, so its failure is a real handoff failure and
     // still reported.
-    if !crate::message::carries_leading_mentions(prompt) {
-        return LeadingMentionRoute::NotApplicable;
+    if !(crate::message::carries_leading_mentions(prompt)
+        || crate::message::workspace_prompt_scope(prompt).is_some())
+    {
+        return None;
     }
-    match crate::message::persist_prompt_mention_operation(
+    crate::message::persist_prompt_mention_operation(
         json!({
             "request_id": runtime.ids.next_id("hook-send"),
             "source": prompt,
             "author_kind": "human",
         }),
         runtime,
-    ) {
-        Ok(_) => LeadingMentionRoute::Sent,
-        Err(error) if error.contains("unknown Mention") => {
-            LeadingMentionRoute::Failed(FAILED_HANDOFF_CONTEXTS[0])
-        }
-        Err(_) => LeadingMentionRoute::Failed(FAILED_HANDOFF_CONTEXTS[1]),
-    }
+    )
 }
 
 /// The Delivery Envelope that ends the submitted text, with whatever preceded

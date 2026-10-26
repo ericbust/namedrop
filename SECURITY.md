@@ -20,6 +20,7 @@ Namedrop passes text between agents that run with your permissions, so these are
 - Shared context that a session other than its recipient can read.
 - Credential files or recognized secrets that reach shared context.
 - A delivery that reaches a pane outside its workspace, or that runs twice.
+- A command from another workspace that runs in a named terminal without that terminal's current `address allow-remote` grant, or a way for an agent or a terminal to grant it without a person.
 - A way for the Agent status summary request to escape its sandbox.
 - Activation that changes files outside the ones listed in [what installation, activation and packages each cover](docs/operations.md#what-installation-activation-and-packages-each-cover).
 

@@ -117,8 +117,8 @@ The harness covers the happy path. Probe around the change at the same surface:
 
 ## What the harness does not reach
 
-A change to any of these needs a manual drive on a kept profile, with Namedrop run
-through the profile's `env -i` line as the manual drive notes show:
+A change to any of these needs a drive on a kept profile beyond the checklist, with
+Namedrop run through the profile's `env -i` line as the manual drive notes show:
 
 - Stale runtime (`ND-SETUP-004`, `src/installed_runtime.rs`): replace
   `<plugin_root>/bin/namedrop` with a copy plus one trailing newline. Doctor shows
@@ -129,8 +129,23 @@ through the profile's `env -i` line as the manual drive notes show:
   then `group list` and `group remove`, all with `--herdr-pane` set to the shell pane.
 - Pause (`src/controls.rs`): `space pause --input-json '{}'` adds `ND-SPACE-001` to Doctor;
   `space resume` clears it.
-- No route written yet: tracked handoffs and the 30-second settle (`src/handoff.rs`,
-  `src/coordination.rs`, `ND-DELIVERY-003`, `ND-COORDINATION-001`), popups other than
+- Cross-workspace mentions, tracked handoffs across workspaces, remote terminal commands
+  and the dashboard (this branch only): the model-free native recipes in
+  [native/README.md](native/README.md). For real agents, run
+  `.claude/skills/verify/scripts/second-workspace.py test-link-<checkout name>` on a profile
+  kept with `--keep`, then `.claude/skills/verify/scripts/cross-workspace-probe.py` with the
+  same profile. The first adds a workspace labelled `beta` on its own repository with a
+  real Claude Code `@lead` and a real Codex `@codex` in about 5 seconds; a rerun reuses
+  them. The probe types four mentions as a person and checks Namedrop's rows in both
+  workspaces: a bare `@lead` from the kept workspace's Claude persists nothing and the hook
+  tells the agent `#beta @lead`; `#beta @lead` from Claude, with the blocked prompt left in
+  its input box, is bridged once, answered once, comes back to Claude and is not repeated
+  within 45 seconds; `#beta @lead` from Codex reaches beta within 15 seconds and its reply
+  comes back; `#all @codex` from Claude brings both workspaces' `@codex` replies back to
+  Claude. Every delivery must settle. It empties Claude's input box at the end, takes
+  about 2.5 minutes and exits 0 when all six checks pass.
+- No route written yet: tracked handoffs inside one workspace and the 30-second settle
+  (`src/handoff.rs`, `src/coordination.rs`, `ND-DELIVERY-003`, `ND-COORDINATION-001`), popups other than
   Doctor's (`src/naming_ui.rs`, `src/agent_status_ui.rs`), the tour (`src/tour.rs`), shared
   checkouts (`ND-INSPECT-001`), rename and personas. The native recipes for them, last
   reconciled at 1.0.2, are in git: `git show 1b1d32a:.agents/skills/verify/features/README.md`.

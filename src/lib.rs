@@ -7,6 +7,7 @@ mod codex_app_server;
 mod context;
 mod controls;
 mod coordination;
+pub mod dashboard;
 mod delivery;
 mod domain;
 mod groups;
@@ -25,6 +26,7 @@ mod persona;
 mod ports;
 mod runtime;
 mod shortcuts;
+mod spaces;
 mod store;
 #[doc(hidden)]
 pub use shortcuts::install_shortcuts;
@@ -38,7 +40,7 @@ pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integratio
 
 pub use context::{execute_context_operation, execute_human_context_operation};
 pub use controls::execute_control_operation;
-pub use delivery::{DrainReport, GraceDeadline, drain_mailboxes};
+pub use delivery::{DrainReport, GraceDeadline, drain_mailboxes, spaces_to_wake};
 pub(crate) use delivery::{drain_receipt, publish_status_metadata, reconcile_delivery_state};
 pub use domain::*;
 pub use groups::execute_group_operation;
@@ -79,12 +81,14 @@ pub use lifecycle::{
     pane_workspace, reconcile_discovered_panes,
 };
 pub use message::{
-    ParsedMessage, RecipientOutlook, execute_message_operation, parse_mentions,
-    parse_prompt_mentions, recipient_outlooks, validate_message_input,
+    BodyMention, ParsedMessage, RecipientOutlook, RecipientRun, carries_leading_mentions,
+    execute_message_operation, parse_mentions, parse_prompt_mentions, recipient_outlooks,
+    validate_message_input,
 };
 pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
 pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};
 use serde::Serialize;
+pub use spaces::{SpaceScope, WorkspaceLabel};
 mod output;
 pub use output::render_command_result_to_text;
 pub use store::{
@@ -200,6 +204,8 @@ pub fn is_control_operation(operation: &str) -> bool {
         operation,
         "address.enable"
             | "address.disable"
+            | "address.allow-remote"
+            | "address.deny-remote"
             | "delivery.cancel-held"
             | "delivery.acknowledge"
             | "handoff.acknowledge"

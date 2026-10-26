@@ -50,6 +50,21 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                 field("Tab label", &data["tab_label"], 0, &mut lines);
             }
         }
+        "dashboard" => {
+            lines.push(format!(
+                "Namedrop dashboard for workspace {} is live:",
+                text(&data["workspace_id"])
+            ));
+            lines.push(format!("  {}", text(&data["url"])));
+            lines.push(
+                if data["opened"] == true {
+                    "Opened in your browser. It stops on its own 10 minutes after the last tab closes."
+                } else {
+                    "Open that URL in a browser on this machine within 10 minutes; it works once. The server stops on its own 10 minutes after the last tab closes."
+                }
+                .into(),
+            );
+        }
         "activate" => {
             lines.push("Status".into());
             lines.push(format!(
@@ -124,6 +139,8 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                     for address in addresses {
                         let state = if address["collaboration_disabled"] == true {
                             "disabled".into()
+                        } else if address["remote_commands"] == true {
+                            "remote-ok".into()
                         } else if address["pane_type"] == "terminal"
                             && address["pane_id"].is_string()
                             && address["lifecycle"] == "empty"
@@ -165,14 +182,23 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                 }
             }
         }
-        "address.create" | "address.bind" | "address.unbind" | "address.rename"
-        | "address.enable" | "address.disable" | "address.persona" => {
+        "address.create"
+        | "address.bind"
+        | "address.unbind"
+        | "address.rename"
+        | "address.enable"
+        | "address.disable"
+        | "address.persona"
+        | "address.allow-remote"
+        | "address.deny-remote" => {
             let action = match result.operation.unwrap_or_default() {
                 "address.create" => "Created",
                 "address.bind" => "Bound",
                 "address.unbind" => "Unbound",
                 "address.rename" => "Renamed to",
                 "address.enable" => "Enabled",
+                "address.allow-remote" => "Allowed commands from other workspaces for",
+                "address.deny-remote" => "Turned off commands from other workspaces for",
                 "address.persona" => {
                     if data["persona"].is_string() {
                         "Set the persona for"

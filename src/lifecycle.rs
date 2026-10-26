@@ -329,7 +329,12 @@ where
                             &binding.address_id,
                             &alias,
                         )?;
-                        transaction.set_pane_type(&namespace, &binding.address_id, pane_type)?;
+                        transaction.set_pane_type(
+                            &namespace,
+                            &binding.address_id,
+                            pane_type,
+                            &attribution,
+                        )?;
                         if let Some(persona) = &persona {
                             transaction.set_address_persona(
                                 &namespace,
@@ -357,7 +362,7 @@ where
                         alias: alias.clone(),
                     };
                     transaction.create_pane_address(&namespace, &draft, &attribution)?;
-                    transaction.set_pane_type(&namespace, &address_id, pane_type)?;
+                    transaction.set_pane_type(&namespace, &address_id, pane_type, &attribution)?;
                     if let Some(persona) = &persona {
                         transaction.set_address_persona(
                             &namespace,
@@ -551,7 +556,7 @@ where
                 }));
             };
             let result = store
-                .purge_worktree(&namespace, &typed_space_id)
+                .purge_worktree(&namespace, &typed_space_id, &attribution)
                 .map_err(|error| error.to_string())?;
             Ok(json!({
                 "space_id": result.summary.space_id,
@@ -623,38 +628,14 @@ where
             serde_json::to_value(record).map_err(|error| error.to_string())
         }
         "address.list" => {
-            parse_input::<EmptyInput>(input)?;
+            let input: AddressListInput = parse_input(input)?;
             require_activated(&mut store, &namespace)?;
-            // This is the refresh a coordinator is told to run immediately
-            // before every selection, so it must answer availability itself:
-            // a name alone cannot say whether that agent can take work now.
-            // The same load the health check and the prompt roster use supplies
-            // the two facts the record cannot carry — a live registration, and
-            // a paused space — and the roster's own function turns them into
-            // the same sentence, so there is one rule rather than two.
-            let setup = load_collaboration_setup_from_store(
-                &discovered,
-                runtime.session_socket_id,
-                &mut store,
-            )?;
-            let paused = setup
-                .worktree_state
-                .as_ref()
-                .is_some_and(|state| state.paused);
-            let records = setup
-                .addresses
-                .iter()
-                .map(|address| {
-                    let registered = setup.registered_address_ids.contains(&address.id);
-                    let mut record = serde_json::to_value(address)?;
-                    record["registered"] = Value::Bool(registered);
-                    record["selection"] =
-                        crate::persona::selection_note(address, registered, paused).into();
-                    Ok(record)
-                })
-                .collect::<Result<Vec<Value>, serde_json::Error>>()
-                .map_err(|error| error.to_string())?;
-            serde_json::to_value(records).map_err(|error| error.to_string())
+            match input.workspaces {
+                None => address_rows(&discovered, runtime.session_socket_id, &mut store),
+                Some(AllWorkspaces::All) => {
+                    every_workspace_addresses(runtime, &discovered.workspace_id, &mut store)
+                }
+            }
         }
         "address.bind" => {
             let input: BindInput = parse_input(input)?;
@@ -1577,6 +1558,105 @@ fn role_input(input: AddressCreateInput) -> Result<ResolvedRoleInput, String> {
     })
 }
 
+/// The refresh a coordinator is told to run immediately before every
+/// selection, so it must answer availability itself.
+fn address_rows(
+    discovered: &DiscoveredWorktree,
+    session_socket_id: &str,
+    store: &mut StateStore,
+) -> Result<Value, String> {
+    // A name alone cannot say whether that agent can take work now. The same
+    // load the health check and the prompt roster use supplies the two facts
+    // the record cannot carry, a live registration and a paused space, and the
+    // roster's own function turns them into the same sentence, so there is one
+    // rule rather than two.
+    let setup = load_collaboration_setup_from_store(discovered, session_socket_id, store)?;
+    let paused = setup
+        .worktree_state
+        .as_ref()
+        .is_some_and(|state| state.paused);
+    let records = setup
+        .addresses
+        .iter()
+        .map(|address| {
+            let registered = setup.registered_address_ids.contains(&address.id);
+            let mut record = serde_json::to_value(address)?;
+            record["registered"] = Value::Bool(registered);
+            record["selection"] =
+                crate::persona::selection_note(address, registered, paused).into();
+            Ok(record)
+        })
+        .collect::<Result<Vec<Value>, serde_json::Error>>()
+        .map_err(|error| error.to_string())?;
+    serde_json::to_value(records).map_err(|error| error.to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AddressListInput {
+    workspaces: Option<AllWorkspaces>,
+}
+
+#[derive(Deserialize)]
+enum AllWorkspaces {
+    #[serde(rename = "all")]
+    All,
+}
+
+fn every_workspace_addresses<E, C, I>(
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    here: &str,
+    store: &mut StateStore,
+) -> Result<Value, String>
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    let spaces: Vec<(crate::SpaceId, crate::WorkspaceLabel)> = workspace_labels(runtime.herdr)?
+        .into_iter()
+        .map(|workspace| {
+            (
+                crate::SpaceId::new(workspace.id),
+                crate::WorkspaceLabel::from_herdr(&workspace.label),
+            )
+        })
+        .collect();
+    let mut workspaces = Vec::new();
+    let mut here_label = None;
+    for (space, label) in &spaces {
+        let namespace = StateNamespace::new(runtime.session_socket_id, space.clone());
+        let Some(state) = store
+            .transaction(|transaction| transaction.worktree_state(&namespace))
+            .map_err(|error| error.to_string())?
+            .filter(|state| state.activated && !state.deactivated)
+        else {
+            continue;
+        };
+        let label = crate::spaces::workspace_token(
+            space,
+            Some(label),
+            spaces.iter().map(|(other, label)| (other, Some(label))),
+        );
+        let discovered = discover_worktree_for_workspace(runtime.herdr, space.as_str())?;
+        let groups = store
+            .transaction(|transaction| transaction.list_mention_groups(&namespace))
+            .map_err(|error| error.to_string())?;
+        let current = space.as_str() == here;
+        if current {
+            here_label = Some(label.clone());
+        }
+        workspaces.push(serde_json::json!({
+            "label": label,
+            "current": current,
+            "paused": state.paused,
+            "addresses": address_rows(&discovered, runtime.session_socket_id, store)?,
+            "groups": groups,
+        }));
+    }
+    Ok(serde_json::json!({"here": here_label, "workspaces": workspaces}))
+}
+
 pub fn discover_worktree(
     herdr: &impl HerdrCommandExecutor,
     cwd: &Path,
@@ -1694,6 +1774,37 @@ fn spaces_owning_checkout(
     owners.sort();
     unknown.sort();
     Ok((owners, unknown))
+}
+
+pub(crate) struct ListedWorkspace {
+    pub id: String,
+    pub label: String,
+    /// The repository a workspace's checkout belongs to, when Herdr stamped one.
+    pub repo: Option<String>,
+}
+
+pub(crate) fn workspace_labels(
+    herdr: &impl HerdrCommandExecutor,
+) -> Result<Vec<ListedWorkspace>, String> {
+    let output = herdr.execute(&["workspace", "list"])?;
+    let mut workspaces = serde_json::from_str::<WorkspaceListEnvelope>(&output.stdout)
+        .map_err(|error| error.to_string())?
+        .result
+        .workspaces;
+    workspaces.sort_by_key(|workspace| workspace.number);
+    Ok(workspaces
+        .into_iter()
+        .map(|workspace| {
+            let label = workspace
+                .label
+                .unwrap_or_else(|| workspace.workspace_id.clone());
+            ListedWorkspace {
+                id: workspace.workspace_id,
+                label,
+                repo: workspace.worktree.and_then(|worktree| worktree.repo_name),
+            }
+        })
+        .collect())
 }
 
 fn worktree_list_for_workspace(
@@ -2152,12 +2263,15 @@ struct WorkspaceListResult {
 #[derive(Deserialize)]
 struct WorkspaceEntry {
     workspace_id: String,
+    label: Option<String>,
+    number: Option<u64>,
     worktree: Option<WorkspaceWorktree>,
 }
 
 #[derive(Deserialize)]
 struct WorkspaceWorktree {
     checkout_path: String,
+    repo_name: Option<String>,
 }
 
 #[derive(Deserialize)]

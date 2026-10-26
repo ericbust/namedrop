@@ -1282,7 +1282,7 @@ fn generated_skill_command_forms_are_covered_by_managed_settings() {
         )));
     assert!(!instructions.contains("allowed-tools:"), "{instructions}");
     assert!(installed_body.contains("--input-json-file <absolute-path>"));
-    assert!(installed_body.contains("same local Herdr workspace"));
+    assert!(installed_body.contains("under the user's sharing policy"));
     assert!(installed_body.contains(
         "For that supplied registration command, do not run `describe`, `--help`, or any other preliminary shell command"
     ));

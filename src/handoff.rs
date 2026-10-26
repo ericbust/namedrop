@@ -100,12 +100,16 @@ where
     let mut store = StateStore::open_read_only(runtime.state_directory)
         .map_err(|e| e.to_string())?
         .ok_or("Namedrop has no saved state")?;
+    let remote = store
+        .transaction(|tx| tx.queued_remote_seat_spaces(&namespace))
+        .map_err(|e| e.to_string())?;
+    let live = crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &remote);
     store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx, &namespace, pane, &discovered)?;
         if let Some(id) = coordination_id { return tx.coordination_report(&namespace,&id,&author); }
         if let Some(message_id) = message_id {
             let mut report = tx.handoff_report(&namespace, &author, &message_id, runtime.clock.now_unix_ms(), true)?;
-            tx.add_handoff_outlooks(&namespace, &discovered, &mut report)?;
+            tx.add_handoff_outlooks(&namespace, &live, &mut report)?;
             for recipient in report["recipients"].as_array_mut().unwrap() {
                 if recipient["result_status"]=="replied" {
                     let address = crate::PaneAddressId::new(recipient["target"]["address_id"].as_str().unwrap());
@@ -135,7 +139,7 @@ where
             ids.truncate(status.limit as usize);
             let reports = ids.iter().map(|id| {
                 let mut report = tx.handoff_report(&namespace, &author, id, runtime.clock.now_unix_ms(), false)?;
-                tx.add_handoff_outlooks(&namespace, &discovered, &mut report)?;
+                tx.add_handoff_outlooks(&namespace, &live, &mut report)?;
                 Ok(report)
             })
                 .collect::<Result<Vec<_>, crate::StoreError>>()?;
@@ -161,6 +165,11 @@ where
             crate::parse_prompt_mentions(&input.source)?
         }
     };
+    if parsed.recipients.scope != crate::SpaceScope::Unqualified {
+        return Err(
+            "preview covers this workspace only; send a #workspace message directly".to_owned(),
+        );
+    }
     // The Space is resolved before the context block is previewed, so the
     // preview answers for the same context root the send would capture against.
     let discovered = match runtime.workspace_id {
@@ -178,11 +187,15 @@ where
     let mut store = StateStore::open_read_only(runtime.state_directory)
         .map_err(|e| e.to_string())?
         .ok_or("Namedrop has no saved state")?;
+    let reference_aliases = crate::message::body_reference_aliases(
+        &parsed,
+        &crate::spaces::HerdrWorkspaces::new(runtime.herdr),
+    );
     store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx,&namespace,pane,&discovered)?;
-        let recipients = tx.resolve_message_recipients(&namespace,&parsed.recipient_aliases,&author.address_id)?;
+        let recipients = tx.resolve_message_recipients(&namespace,&parsed.recipients.aliases,&author.address_id)?;
         let recipients = recipients.iter().map(|r|tx.recipient_preview(&namespace,&discovered,&r.address_id,None)).collect::<Result<Vec<_>,_>>()?;
-        let references = parsed.context_reference_aliases.iter().map(|alias| {
+        let references = reference_aliases.iter().map(|alias| {
             let address = tx.resolve_routing_alias(&namespace,alias)?;
             Ok(json!({"address_id":address.address_id,"alias":address.alias}))
         }).collect::<Result<Vec<_>,crate::StoreError>>()?;

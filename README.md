@@ -157,7 +157,7 @@ To open a popup without a key, run `herdr plugin action invoke <action> --plugin
 
 ## Examples
 
-Names belong to a Herdr workspace. A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
+Names belong to a Herdr workspace; see [other workspaces](#mention-agents-in-other-workspaces). A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
 
 ### Get two perspectives on a change
 
@@ -186,6 +186,26 @@ Then use it like a name:
 
 A group holds up to 64 agents. If mentions overlap, each agent still gets one delivery. Membership changes apply to future requests. Work already sent keeps its original recipients.
 
+### Mention agents in other workspaces
+
+Names are unique per Herdr workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:
+
+```text
+#exp-dashboard @lead Rebase on main and tell me the new HEAD.
+#exp-dashboard #feature-x @lead Status?
+#all @lead Report back your status in two lines.
+```
+
+Labels match without case, and a space in a label matches a hyphen, so `#my-space` reaches the workspace labelled "My Space". Every workspace also answers to its Herdr id, such as `#w12`. Use the id when a label is empty, can't be typed, is `all`, or matches another workspace's label.
+
+Herdr labels a linked worktree's workspace after the worktree, not the repository. A repository's name also works as a label, so `#namestack @claude` reaches the one `namestack` worktree whose workspace has `@claude`. A workspace labelled `namestack` that has the name still wins. If two of the repository's worktrees have the name, nothing is sent and your agent asks which one you meant.
+
+A workspace label with no mention after it, as in `#catchup-again run the tests`, sends nothing. Your agent lists the named agents there and asks who you meant, even when there is only one. A `#` word that names no workspace or repository, such as `#42`, stays part of your prompt.
+
+A mention without a label never leaves the current workspace. If the name isn't there but another workspace has it, nothing is sent, and your agent tells you which label to type, such as `#beta @lead`. You can also ask in plain words, such as "ask my @lead panes to report back" or "message the lead in beta".
+
+Replies come back to the workspace you sent from. Tracked work crosses too. After `handoff begin`, send to `#label @name` with the `coordination_id`. The worker replies from its own workspace, and the coordination, its results and its report stay with the lead. Context handoffs still stay inside one workspace.
+
 ### Run tests in a shell pane
 
 In a shell pane, run:
@@ -201,6 +221,14 @@ Or press **Prefix**, then **Shift-I**. Type `@build`, press **Enter**, and press
 ```
 
 The command runs in that shell pane without an LLM. Namedrop returns stdout, stderr, and the exit status. See [terminal behavior and limits](docs/operations.md#terminal-panes).
+
+A terminal takes commands only from its own workspace until you allow more. To let agents in your other workspaces run commands there, run this from another pane in the terminal's workspace, with the `id` that `namedrop address list` shows for it:
+
+```sh
+namedrop address allow-remote --input-json '{"address_id":"<id>"}'
+```
+
+An agent then reaches it with the workspace label, as in `#build-box @build cargo test`, and the result comes back to that agent. `@build` without a label and `#all @build` never run in another workspace's shell. Any agent in any of your activated workspaces can then run any command in that shell, so allow only terminals you'd type into for them. Run `namedrop address deny-remote` with the same input to take it back. That also fails the commands still waiting there. Rebinding the name to another pane, or changing its type, takes it back too.
 
 ### Manage names
 
@@ -255,6 +283,12 @@ In a Codex or Claude Code pane, press **Prefix**, then **Shift-S**. The panel sh
 **R** refreshes, **↑** and **↓** scroll, and **Esc** closes. Agent states and outstanding requests appear at once. **Preparing summary…** placeholders fill in as descriptions arrive.
 
 Each description comes from a separate background request through the host of the pane you opened the panel from: Haiku for Claude Code, Luna for Codex. The request uses your existing sign-in and usage allowance, and it doesn't prompt or interrupt the active session. Outstanding requests come from Namedrop's delivery records. The model writes only the descriptions. If a summary fails, the panel shows the reason and the pane's recent output. See [panel behavior and limits](docs/operations.md#agent-status-panel).
+
+## Dashboard
+
+To watch a workspace in your browser, run `namedrop dashboard` in any of its panes, or run `herdr plugin action invoke dashboard --plugin namedrop`. The page shows each agent as a column with its state and mailbox, and each message as an arrow between columns. Each arrowhead marks how far that delivery got: queued, delivered, working, replied, held, or failed. Handoffs, coordinations, and recent terminal commands sit beside the conversation. The page updates as agents work.
+
+One local server serves every workspace, and each workspace gets its own page. The dashboard is read-only. It never shows shared context or terminal output, and it redacts secrets from message text. The server stops on its own 10 minutes after the last tab closes. See [dashboard behavior and limits](docs/operations.md#dashboard).
 
 ## Tour
 
