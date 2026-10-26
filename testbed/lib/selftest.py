@@ -234,6 +234,7 @@ def check_screens():
               "security-notes"),
              ("claude", "Let's get started.\n Choose the text style that looks best with your terminal",
               "theme"),
+             ("claude", CLAUDE_COMPOSER + "\n  Not logged in · Run /login", "login"),
              ("claude", WRAPPED_PROMPT, "exited"), ("claude", TYPED_PROMPT, None),
              ("codex", CODEX_LOADING, None), ("codex", CODEX_READY, "ready"),
              ("codex", CODEX_READY.replace("› Ask", CODEX_HOOKS + "› Ask"), "hooks-review"),
