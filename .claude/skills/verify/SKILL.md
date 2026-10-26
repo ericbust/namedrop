@@ -100,6 +100,16 @@ The harness covers the happy path. Probe around the change at the same surface:
   it the next, that invalid settings show `ND-UPDATE-002`, and that the opt-out turns it
   all off. It restores the cache and settings at the end and exits 0 when all eight
   checks pass. It takes about 30 seconds.
+- When the change touches the prompt hook, the agent wrappers, delivery or the mailbox
+  wake (Namedrop 1.3.3 and later), run the typed mention probe on a profile kept with
+  `--keep`: `.claude/skills/verify/scripts/typed-mention-probe.py test-link-<checkout name>`.
+  The checklist asks each agent to send its mention; this types a leading mention into
+  the pane the way a person does. It checks that a mention typed into Codex gets a
+  delivery attempt within 15 seconds and its reply settles, then that a mention typed
+  into Claude Code is sent once and replied to once, with no repeat in the 45 seconds
+  after. Other agent activity sends a stalled delivery and hides the stall, so it waits
+  for both agents to be idle and prompts nothing else meanwhile. It leaves Claude's input
+  box empty and exits 0 when both checks pass. It takes about 75 seconds when it passes.
 - For anything the harness does not assert, pass `--keep` and drive the kept profile by
   hand with [references/manual-drive.md](references/manual-drive.md): pane reads, key
   presses, prompts, popups, Codex's log and pid file.
