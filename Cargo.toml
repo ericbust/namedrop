@@ -9,7 +9,7 @@ repository = "https://github.com/ericbust/namedrop"
 readme = "README.md"
 keywords = ["agents", "collaboration", "herdr", "mentions"]
 categories = ["command-line-utilities", "development-tools"]
-exclude = ["/.scratch/**", "/.unlazy/**", "/docs/assets/**", "/docs/demo/**", "**/.DS_Store"]
+exclude = ["/.scratch/**", "/.unlazy/**", "/docs/assets/**", "/docs/demo/**", "/testbed/**", "**/.DS_Store"]
 
 [lib]
 name = "namedrop"
