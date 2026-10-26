@@ -539,8 +539,8 @@ fn mentions_still_route_and_a_delivery_still_authenticates_exactly_as_before() {
 
 /// Claude Code marks a long paste for the model, and every dispatched envelope
 /// is long enough to be one, so the hook is handed the marked form rather than
-/// the JSON. Authentication sees through exactly one whole block, and nothing
-/// looser: a closing line for another paste, two pastes, or text around it.
+/// the JSON. Authentication sees through the trailing whole block; a closing
+/// line for another paste is no block at all.
 #[test]
 fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
     let directory = TestDirectory::new();
@@ -575,19 +575,104 @@ fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
         "{attested}"
     );
 
-    for prompt in [
-        format!("<pasted_content id=\"29f6\">\n{envelope}\n</pasted_content id=\"552d\">"),
-        format!("{}{}", marked("29f6", &envelope), marked("552d", &envelope)),
-        format!("Handle this:{}", marked("29f6", &envelope)),
-    ] {
-        let output = hook(&prompt, &reviewer).map(|output| context(&output));
-        assert!(
-            output.as_ref().is_none_or(|context| {
-                !context.contains(DELIVERY_MARKER) && !context.contains(COMMAND_MARKER)
-            }),
-            "{prompt:?} was attested: {output:?}"
-        );
-    }
+    let prompt = format!("<pasted_content id=\"29f6\">\n{envelope}\n</pasted_content id=\"552d\">");
+    let output = hook(&prompt, &reviewer).map(|output| context(&output));
+    assert!(
+        output.as_ref().is_none_or(|context| {
+            !context.contains(DELIVERY_MARKER) && !context.contains(COMMAND_MARKER)
+        }),
+        "{prompt:?} was attested: {output:?}"
+    );
+}
+
+/// Herdr pastes a delivery into whatever the pane's input already holds and
+/// submits the lot, so the hook can receive text ahead of the envelope: a draft
+/// the person had not sent, or, on Claude Code, the Mention the hook just
+/// blocked and the host put back. Seen live on Claude Code 2.1.310: the reply to
+/// `@codex reply with only the word local` arrived behind that same text, the
+/// hook routed the whole prompt as a new human Mention, and the thread looped.
+/// The delivery is still the delivery; the text ahead of it is never a Mention.
+#[test]
+fn a_delivery_pasted_behind_leftover_input_is_the_delivery_and_never_a_mention() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let lead = runtime(&directory, &herdr, &ids, "pane-lead");
+    let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+    register("address-lead", AgentRuntime::Codex, &lead);
+    register("address-reviewer", AgentRuntime::ClaudeCode, &reviewer);
+    execute_message_operation(
+        "send",
+        json!({"request_id":"to-claude","source":"@reviewer local",
+               "author_kind":"agent_session"}),
+        &lead,
+    )
+    .unwrap();
+    let envelope = herdr.envelope_for("pane-reviewer");
+    let attempt = envelope["control"]["attempt_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let prompts_to_lead = || {
+        herdr
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(pane, _)| pane == "pane-lead")
+            .count()
+    };
+    let before = prompts_to_lead();
+
+    // The live shape: the blocked-and-restored Mention, then the marked paste.
+    let prompt = format!(
+        "@lead reply with only the word local\n\n<pasted_content id=\"0556\">\n{envelope}\n</pasted_content id=\"0556\">"
+    );
+    let output = hook(&prompt, &reviewer).unwrap();
+    assert!(
+        output.get("decision").is_none(),
+        "the delivery was routed as a Mention: {output}"
+    );
+    assert_eq!(
+        prompts_to_lead(),
+        before,
+        "the leftover text was sent to @lead again"
+    );
+    let attested = context(&output);
+    assert!(attested.starts_with(DELIVERY_MARKER), "{attested}");
+    assert!(
+        attested.contains(COMMAND_MARKER) && attested.contains(&attempt),
+        "{attested}"
+    );
+    assert!(
+        attested.contains("already in this pane's input"),
+        "the agent was not told about the leftover text: {attested}"
+    );
+
+    // Codex marks nothing, so the same leftover runs straight into the JSON.
+    execute_message_operation(
+        "send",
+        json!({"request_id":"to-codex","source":"@lead ping",
+               "author_kind":"agent_session"}),
+        &reviewer,
+    )
+    .unwrap();
+    let to_codex = herdr.envelope_for("pane-lead");
+    let before = herdr.prompts.lock().unwrap().len();
+    let output = hook(&format!("@reviewer reply with pong{to_codex}"), &lead).unwrap();
+    assert!(
+        output.get("decision").is_none(),
+        "the delivery was routed as a Mention: {output}"
+    );
+    assert_eq!(herdr.prompts.lock().unwrap().len(), before);
+    let delivered = context(&output);
+    assert!(
+        delivered.starts_with(ROSTER_MARKER)
+            && delivered.contains(COMMAND_MARKER)
+            && delivered.contains("already in this pane's input"),
+        "{delivered}"
+    );
 }
 
 /// Codex suppresses the attestation whole, so composing the two together would
