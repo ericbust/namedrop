@@ -6,8 +6,8 @@ description: Prove a Namedrop change on real Claude Code and Codex panes by runn
 # Verify Namedrop with real agents
 
 Namedrop's runtime surface is Herdr panes with real agents in them. Unit tests and
-`cargo test` are not evidence here. The handle is the maintainer's testbed at
-`~/Projects/namedrop-testbed`, a local kit that builds the branch into an isolated Herdr
+`cargo test` are not evidence here. The handle is the testbed in this repository,
+[testbed/](../../../testbed/README.md), a kit that builds the branch into an isolated Herdr
 profile, starts Claude Code and Codex, answers their first-run screens, sends the
 CHECKLIST mentions both ways, and checks every result in Namedrop's own database and the
 agents' transcripts. Nothing it does touches the real `~/.herdr`, `~/.claude` or
@@ -27,7 +27,7 @@ kept profile stays silent.
 ## Doctor
 
 ```sh
-cd ~/Projects/namedrop-testbed && ./testbed check && ./testbed list
+testbed/testbed check && testbed/testbed list
 ```
 
 `check passed` means the tools, Python and socket path are fine and the kit's offline
@@ -36,13 +36,14 @@ self-test passes. `list` shows every profile and whether it is running; a leftov
 
 ## Launch and drive
 
-One command does CHECKLIST.md with no human:
+One command does `testbed/CHECKLIST.md` with no human. Run it, and every `testbed/testbed`
+command below, from the root of the Namedrop checkout under verification:
 
 ```sh
-cd ~/Projects/namedrop-testbed && ./testbed test --link "$WORKTREE" --fresh --yes
+testbed/testbed test --link . --fresh --yes
 ```
 
-`$WORKTREE` is the Namedrop checkout under verification. A fresh run takes about 3
+`--link` names the checkout to build; `.` is the one you are in. A fresh run takes about 3
 minutes and a rerun of a kept profile about 1.5; the two mention round trips take the
 longest and the build about a minute. After the build the run has 20 minutes, each
 mention round trip 5, and a pane blocked for 30 seconds fails its step. The default is
@@ -74,8 +75,8 @@ updates. Use the update notice probe under **Push on it** for that.
   doctor JSON, database rows and transcript summaries) and keeps the profile and its
   server. `report.txt` and `report.json` sit in `test-<stamp>/` itself; a failure is not
   copied to `reports/`. A step 1 (build) failure names `01-build/`, which does not exist;
-  its whole story is in the report. The report prints `./testbed attach`, which refuses
-  to run inside a Herdr pane; from an agent use `./testbed status --profile <profile>`
+  its whole story is in the report. The report prints `testbed/testbed attach`, which refuses
+  to run inside a Herdr pane; from an agent use `testbed/testbed status --profile <profile>`
   and the manual drive notes. Read the evidence, then destroy.
 - The profile is `test-link-<checkout name>`. `test` never drives or deletes any other
   profile.
@@ -137,7 +138,7 @@ through the profile's `env -i` line as the manual drive notes show:
 ## Report
 
 Use this report shape: `## Verification: <what changed>`, **Verdict**,
-**Claim**, **Method** (this skill, the `./testbed test` command line and profile),
+**Claim**, **Method** (this skill, the `testbed/testbed test` command line and profile),
 `### Steps` with one ✅ line per passed harness step quoting its `detail`, 🔍 lines for
 the probes, then **Screenshot / sample** (the compatibility line and one pane capture)
 and `### Findings`. Paste the step lines and the compatibility line inline; a path alone
@@ -149,8 +150,8 @@ verdict is FAIL until it passes or is explained.
 A pass destroys its profile unless `--keep`. After a failure or `--keep`:
 
 ```sh
-cd ~/Projects/namedrop-testbed && ./testbed destroy --profile test-link-<name> --yes
+testbed/testbed destroy --profile test-link-<name> --yes
 ```
 
-Without the testbed on this machine, follow `CHECKLIST.md` in that repository by hand
-and use the manual drive notes for the pane mechanics.
+Where the testbed cannot run, follow `testbed/CHECKLIST.md` by hand and use the manual
+drive notes for the pane mechanics.

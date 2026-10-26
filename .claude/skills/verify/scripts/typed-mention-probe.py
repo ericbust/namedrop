@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Type a leading mention into the Claude Code and Codex panes of a profile kept by
-`./testbed test --keep`, the way a person does (Namedrop 1.3.3 and later).
+`testbed/testbed test --keep`, the way a person does (Namedrop 1.3.3 and later).
 
 Usage: typed-mention-probe.py PROFILE_NAME   (e.g. test-link-<checkout name>)
 
