@@ -72,6 +72,7 @@ impl Fixture {
             &host,
             format!(
                 r#"#!/bin/sh
+printf '%s\n' "$*" >> '{root}/herdr-calls'
 case "$1 $2" in
   'worktree list') printf '%s\n' '{{"result":{{"worktrees":[{{"path":"/repo","open_workspace_id":"w1"}}]}}}}';;
   'session list') printf '%s\n' '{{"sessions":[]}}';;
@@ -362,6 +363,50 @@ fn a_session_vouches_for_the_pane_when_the_process_is_a_child_of_init() {
     other.wait().unwrap();
     let printed = fs::read_to_string(&out).unwrap_or_default();
     assert!(printed.contains("\"status\":\"ok\""), "{printed}");
+}
+
+#[test]
+fn the_mailbox_wake_hook_drains_the_space_after_its_hook_shell_has_exited() {
+    // The user-prompt-submit wrapper backgrounds the wake and exits, so the
+    // wake runs reparented away from the pane's shell. Codex gives its hooks
+    // no session ID that could vouch for the inherited pane, and the wake
+    // needs none: it reconciles the whole space, as nobody's pane.
+    let f = Fixture::new("wake");
+    f.activate();
+    let mut other = unrelated_process();
+    f.shell_is(other.id());
+    let calls = f.0.join("herdr-calls");
+    fs::write(&calls, "").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+    f.host(&mut command)
+        .env_remove("HERDR_PLUGIN_STATE_DIR")
+        .env("PATH", "/usr/bin:/bin")
+        .arg("hook")
+        .arg("mailbox-wake")
+        .arg("--state-directory")
+        .arg(f.0.join("state"))
+        .stdin(std::process::Stdio::null());
+    let mut hook = command.spawn().unwrap();
+    let drained = |calls: &Path| {
+        fs::read_to_string(calls)
+            .unwrap_or_default()
+            .lines()
+            .any(|call| call.starts_with("pane list"))
+    };
+    let mut waited = 0;
+    while !drained(&calls) && hook.try_wait().unwrap().is_none() && waited < 200 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        waited += 1;
+    }
+    let _ = hook.kill();
+    let _ = hook.wait();
+    other.kill().unwrap();
+    other.wait().unwrap();
+    assert!(
+        drained(&calls),
+        "the wake never asked Herdr for the space's panes, so nothing was drained; Herdr calls: {:?}",
+        fs::read_to_string(&calls).unwrap_or_default()
+    );
 }
 
 #[test]

@@ -16,6 +16,18 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Changed
 
 - Namedrop's state moves to schema 6 the first time the new release opens it. Context handoffs and tracked coordination still stay inside one workspace.
+## [1.3.3] - 2026-10-26
+
+### Fixed
+
+- A mention you typed into a Claude Code pane no longer repeats itself. Claude Code puts a prompt the hook blocked back into the input box, and the reply was pasted in behind it, so Namedrop read the whole submission as a new mention and sent it again on every reply. A delivery that arrives behind text already in the input, whether that restored mention or a half-typed draft, is now handled as the delivery. The leftover text is never sent, and the agent tells you it came in with the delivery.
+
+## [1.3.2] - 2026-10-26
+
+### Fixed
+
+- A mention you typed into a Codex pane was accepted, but its delivery could wait minutes, until some other activity in the workspace sent it. The wake that sends a typed mention runs after its hook has exited, and it refused the pane identity it inherited because Codex gives hooks no session ID to vouch for it. It now wakes the workspace directly, as the status worker already does, and reports a failure instead of staying silent. Mentions typed into Codex now arrive within seconds, as they do from Claude Code.
+
 ## [1.3.1] - 2026-10-25
 
 ### Fixed
