@@ -1,4 +1,4 @@
-use crate::spaces::{AmbiguousName, RouteRefusal, ScopedName, SpaceScope, WorkspaceLabel};
+use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName, WorkspaceLabel};
 use crate::{
     ActorKind, ContextGrantDraft, ContextGrantId, ContextReferenceDraft, ContextSnapshotId,
     DeliveryId, LifecycleRuntime, MessageDraft, MessageRecipientDraft, MutationAttribution,
@@ -490,7 +490,7 @@ pub(crate) enum PromptMentionOutcome {
     },
     NeedsPick {
         settled: Vec<ScopedName>,
-        choices: Vec<AmbiguousName>,
+        choices: Vec<UnplacedName>,
     },
     /// A `#` scope with no Mention. The person always picks, even from one
     /// name: a column-zero `#word text` can be prose that matches a
