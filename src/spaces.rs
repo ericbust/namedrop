@@ -608,10 +608,10 @@ pub(crate) enum RouteRefusal {
     },
 }
 
-/// How a reply refused for ambiguous names is retried.
+/// How a reply refused for names it cannot place is retried.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ReplyRetry {
-    /// Other names remain once the ambiguous ones are removed.
+    /// Other names remain once the unplaced ones are removed.
     WithoutThem,
     /// No name remains, so the reply goes back to the answered message's sender.
     ToSender(String),
@@ -1118,7 +1118,7 @@ mod tests {
             Err(RouteRefusal::UnknownMention {
                 alias: "nobody".to_owned()
             }),
-            "an unknown name wins over a question the person cannot answer"
+            "an unknown name wins over names found elsewhere"
         );
         assert_eq!(
             plan(&["ghost"]),

@@ -570,7 +570,7 @@ fn bound_reply(envelope: &Value, source: &str) -> Value {
     input
 }
 
-/// Runs `reply`, which must be refused as ambiguous, then does only what the
+/// Runs `reply`, which must be refused for a name it cannot place, then does only what the
 /// refusal says: the same reply again with the source it prescribes, then one
 /// `send` per workspace `picks` chose for the names the reply left out.
 fn follow_reply_refusal(
@@ -656,7 +656,7 @@ fn disposition(fixture: &Fixture, envelope: &Value) -> Vec<String> {
 }
 
 #[test]
-fn an_ambiguous_reply_keeps_its_participant_on_the_thread_and_settles_the_attempt() {
+fn an_unplaced_reply_keeps_its_participant_on_the_thread_and_settles_the_attempt() {
     let fixture = Fixture::new();
     fixture.register_all();
     let sent = fixture.agent_send(
@@ -723,7 +723,7 @@ fn a_reply_with_a_bare_name_from_elsewhere_keeps_a_local_participant_on_the_thre
 }
 
 #[test]
-fn an_ambiguous_reply_naming_no_one_else_goes_back_to_its_sender() {
+fn an_unplaced_reply_naming_no_one_else_goes_back_to_its_sender() {
     let fixture = Fixture::new();
     fixture.register_all();
     let sent = fixture.agent_send(
@@ -757,7 +757,7 @@ fn an_ambiguous_reply_naming_no_one_else_goes_back_to_its_sender() {
 }
 
 #[test]
-fn a_tracked_report_with_an_ambiguous_name_still_reaches_the_lead() {
+fn a_tracked_report_with_a_bare_name_from_elsewhere_still_reaches_the_lead() {
     let fixture = Fixture::new();
     fixture.register_all();
     let lead = fixture.runtime("w1", "pane-1-lead");
@@ -876,7 +876,7 @@ fn assert_nothing_delivered(fixture: &Fixture, original: &Value, before: (i64, i
 }
 
 #[test]
-fn following_an_ambiguous_reply_refusal_never_reaches_a_released_name_elsewhere() {
+fn following_an_unplaced_reply_refusal_never_reaches_a_released_name_elsewhere() {
     let fixture = Fixture::new();
     let original = answer_from_a_released_sender(&fixture);
     let runtime = fixture.runtime("w1", "pane-1-planner");
@@ -964,7 +964,7 @@ fn a_reply_naming_a_renamed_local_sender_points_to_its_new_name() {
 }
 
 #[test]
-fn an_ambiguous_reply_to_namedrop_itself_offers_no_reply_to_the_sender() {
+fn an_unplaced_reply_to_namedrop_itself_offers_no_reply_to_the_sender() {
     let fixture = Fixture::new();
     fixture.register_all();
     let lead = fixture.runtime("w1", "pane-1-lead");
