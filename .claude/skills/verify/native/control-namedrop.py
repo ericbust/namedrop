@@ -1104,15 +1104,17 @@ def main():
                             {"body": stayed["untrusted_body"], "sender": stayed["control"]["sender"]})
                     bound(stayed, "complete.no-reply")
 
+                    before_bare_remote = message_state()
                     remote = trace["d"] = hook("alpha-helper", "@reviewer please review")
-                    require(remote["output"] == blocked, "d: the hook blocks an unqualified send to a remote-only name",
-                            remote["stdout"])
+                    remote_text = ((remote["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                    require(remote_text.startswith("Namedrop workspace roster.")
+                            and "@reviewer is not named in this workspace. It is named in: #beta-space. Use #beta-space"
+                                " @reviewer to reach it. Nothing was sent." in remote_text,
+                            "d: an unqualified name only Beta Space has stays in alpha and names #beta-space", remote["stdout"])
                     wake("alpha-helper")
-                    reviewed = deliveries("d", ["beta-reviewer"])["beta-reviewer"]
-                    require(reviewed["untrusted_body"].endswith("please review") and sender_workspace(reviewed) == "alpha",
-                            "d: Beta Space's reviewer receives it from alpha",
-                            {"body": reviewed["untrusted_body"], "sender": reviewed["control"]["sender"]})
-                    bound(reviewed, "complete.no-reply")
+                    deliveries("d", [])
+                    require(message_state() == before_bare_remote, "d: the refused bare name persists nothing",
+                            message_state())
 
                     everyone = trace["f"] = hook("alpha-helper", "#all @lead status")
                     require(everyone["output"] == blocked, "f: the hook blocks #all", everyone["stdout"])
@@ -1223,11 +1225,13 @@ def main():
                     message = (response.get("error") or {}).get("message", "")
                     trace["n"] = {"exit": result.returncode, "stdout": result.stdout, "stderr": result.stderr}
                     require(result.returncode == 65 and response.get("status") == "rejected"
-                            and "@twin is not named in this workspace but is named in #wt-one and #wt-two" in message
+                            and "@twin is not named in this workspace. It is named in: #wt-one, #wt-two. Use #wt-one"
+                                " @twin or #wt-two @twin to reach it" in message
                             and "nothing was sent and the reply's delivery attempt stays open" in message
                             and "except the source, which is @helper, a space, and the message text" in message
                             and "then tell the person the reply left out @twin" in message,
-                            "n: the ambiguous reply is refused with a retry addressed to its sender", trace["n"])
+                            "n: the reply naming a bare name from elsewhere is refused with a retry addressed to its sender",
+                            trace["n"])
                     deliveries("n-refused", [])
                     require(message_state() == before_reply, "n: the refused reply persists nothing", message_state())
                     trace["n_reply"] = bound(review, "reply", source="@helper Reviewed.")
@@ -1255,22 +1259,22 @@ def main():
                     require(removed["removed"] is True and "lead" not in remaining,
                             "e: alpha's lead name is removed", {"removed": removed, "remaining": remaining})
                     before = trace["e_state_before"] = message_state()
-                    picked = trace["e"] = hook("alpha-helper", "@lead who should take this?")
-                    context_text = ((picked["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
+                    refused = trace["e"] = hook("alpha-helper", "@lead who should take this?")
+                    context_text = ((refused["output"] or {}).get("hookSpecificOutput") or {}).get("additionalContext", "")
                     require(context_text.startswith("Namedrop workspace roster."),
-                            "e: the hook answers with roster-marked additionalContext", picked["stdout"])
-                    require("@lead is not named in this workspace. It is named in these workspaces: #beta-space, #gamma."
-                            in context_text and "Nothing was sent" in context_text,
-                            "e: the picker lists Beta Space and gamma and says nothing was sent", context_text)
+                            "e: the hook answers with roster-marked additionalContext", refused["stdout"])
+                    require("@lead is not named in this workspace. It is named in: #beta-space, #gamma. Use #beta-space"
+                            " @lead or #gamma @lead to reach it. Nothing was sent." in context_text,
+                            "e: the refusal names both workspaces' tokens and says nothing was sent", context_text)
                     wake("alpha-helper")
                     deliveries("e", [])
-                    require(message_state() == before, "e: the picker persists nothing", message_state())
+                    require(message_state() == before, "e: the refusal persists nothing", message_state())
                     for runtime, wrapper in wrappers.items():
-                        wrapped = trace[f"h_picker_{runtime}"] = hook("alpha-helper", "@lead who should take this?", [wrapper])
-                        require(wrapped["exit"] == 0 and wrapped["stdout"] == picked["stdout"],
-                                f"h: the installed {runtime} wrapper passes the picker through unchanged", wrapped["stdout"])
-                    deliveries("h-picker", [])
-                    require(message_state() == before, "h: the wrapped pickers persist nothing", message_state())
+                        wrapped = trace[f"h_refusal_{runtime}"] = hook("alpha-helper", "@lead who should take this?", [wrapper])
+                        require(wrapped["exit"] == 0 and wrapped["stdout"] == refused["stdout"],
+                                f"h: the installed {runtime} wrapper passes the refusal through unchanged", wrapped["stdout"])
+                    deliveries("h-refusal", [])
+                    require(message_state() == before, "h: the wrapped refusals persist nothing", message_state())
                     summary["outcome"] = "passed"
                 finally:
                     if summary.get("outcome") != "passed":
