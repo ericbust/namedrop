@@ -650,22 +650,7 @@ fn with_runtime_options<T>(
         workspace_id = Some(space);
         pane_id = pane_id.or(Some(pane));
     }
-    let socket_id = options
-        .herdr_socket
-        .clone()
-        .or_else(|| env::var("HERDR_SOCKET_PATH").ok())
-        .unwrap_or_else(|| {
-            herdr
-                .execute(&["status", "server"])
-                .ok()
-                .and_then(|output| {
-                    output
-                        .stdout
-                        .lines()
-                        .find_map(|line| line.strip_prefix("socket: ").map(str::to_owned))
-                })
-                .unwrap_or_else(|| "default".to_owned())
-        });
+    let socket_id = session_socket_id(options.herdr_socket.clone(), &herdr);
     let clock = SystemClock;
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
@@ -720,27 +705,60 @@ fn run_context_hook(
     ExitCode::SUCCESS
 }
 
+/// The socket that scopes this session's state: the caller's, the pane's, or
+/// the one the running Herdr server reports.
+fn session_socket_id(explicit: Option<String>, herdr: &ProcessHerdr) -> String {
+    explicit
+        .or_else(|| env::var("HERDR_SOCKET_PATH").ok())
+        .unwrap_or_else(|| {
+            herdr
+                .execute(&["status", "server"])
+                .ok()
+                .and_then(|output| {
+                    output
+                        .stdout
+                        .lines()
+                        .find_map(|line| line.strip_prefix("socket: ").map(str::to_owned))
+                })
+                .unwrap_or_else(|| "default".to_owned())
+        })
+}
+
+/// The wake the user-prompt-submit wrapper backgrounds once a mention was
+/// sent. Its hook shell has exited by the time it runs, so it is nobody's
+/// pane: it reconciles the whole space and takes no identity from the
+/// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
 fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
-    let _ = with_runtime_at(state_directory, |runtime| {
-        let space_id = match runtime.workspace_id {
-            Some(space_id) => space_id.to_owned(),
-            None => namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
+    let wake = || -> Result<(), String> {
+        let herdr = ProcessHerdr::default();
+        let socket_id = session_socket_id(None, &herdr);
+        let space_id = match env::var("HERDR_WORKSPACE_ID") {
+            Ok(space_id) => space_id,
+            Err(_) => {
+                let cwd = env::current_dir().map_err(|error| error.to_string())?;
+                namedrop::discover_worktree(&herdr, &cwd)?.workspace_id
+            }
         };
-        let directory =
-            reconciliation_directory(state_directory, runtime.session_socket_id, &space_id)?;
+        let directory = reconciliation_directory(state_directory, &socket_id, &space_id)?;
         queue_agent_status_reconciliation(
             &directory,
             &serde_json::json!({"operation":"mailbox-wake"}),
         )?;
         status_worker_command()?
             .env("HERDR_PLUGIN_STATE_DIR", state_directory)
-            .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
+            .env("HERDR_SOCKET_PATH", &socket_id)
             .env("HERDR_WORKSPACE_ID", space_id)
             .status()
             .map_err(|error| error.to_string())?;
         Ok(())
-    });
-    ExitCode::SUCCESS
+    };
+    match wake() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("could not wake Namedrop delivery: {error}");
+            ExitCode::from(65)
+        }
+    }
 }
 
 fn run_agent_status_changed_hook() -> ExitCode {
