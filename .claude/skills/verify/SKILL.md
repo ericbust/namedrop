@@ -106,8 +106,8 @@ The harness covers the happy path. Probe around the change at the same surface:
 
 ## What the harness does not reach
 
-A change to any of these needs a manual drive on a kept profile, with Namedrop run
-through the profile's `env -i` line as the manual drive notes show:
+A change to any of these needs a drive on a kept profile beyond the checklist, with
+Namedrop run through the profile's `env -i` line as the manual drive notes show:
 
 - Stale runtime (`ND-SETUP-004`, `src/installed_runtime.rs`): replace
   `<plugin_root>/bin/namedrop` with a copy plus one trailing newline. Doctor shows
