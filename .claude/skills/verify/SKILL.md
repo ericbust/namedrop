@@ -119,8 +119,19 @@ through the profile's `env -i` line as the manual drive notes show:
 - Pause (`src/controls.rs`): `space pause --input-json '{}'` adds `ND-SPACE-001` to Doctor;
   `space resume` clears it.
 - Cross-workspace mentions and the dashboard (this branch only): the model-free native
-  recipes in [native/README.md](native/README.md). For real agents, open a second
-  workspace in a kept profile and drive the mentions by hand.
+  recipes in [native/README.md](native/README.md). For real agents, run
+  `.claude/skills/verify/scripts/second-workspace.py test-link-<checkout name>` on a profile
+  kept with `--keep`, then `.claude/skills/verify/scripts/cross-workspace-probe.py` with the
+  same profile. The first adds a workspace labelled `beta` on its own repository with a
+  real Claude Code `@lead` and a real Codex `@codex` in about 5 seconds; a rerun reuses
+  them. The probe types four mentions as a person and checks Namedrop's rows in both
+  workspaces: a bare `@lead` from the kept workspace's Claude persists nothing and the hook
+  tells the agent `#beta @lead`; `#beta @lead` from Claude, with the blocked prompt left in
+  its input box, is bridged once, answered once, comes back to Claude and is not repeated
+  within 45 seconds; `#beta @lead` from Codex reaches beta within 15 seconds and its reply
+  comes back; `#all @codex` from Claude brings both workspaces' `@codex` replies back to
+  Claude. Every delivery must settle. It empties Claude's input box at the end, takes
+  about 2.5 minutes and exits 0 when all six checks pass.
 - No route written yet: tracked handoffs and the 30-second settle (`src/handoff.rs`,
   `src/coordination.rs`, `ND-DELIVERY-003`, `ND-COORDINATION-001`), popups other than
   Doctor's (`src/naming_ui.rs`, `src/agent_status_ui.rs`), the tour (`src/tour.rs`), shared

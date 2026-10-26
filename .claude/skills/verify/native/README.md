@@ -3,7 +3,10 @@
 `control-namedrop.py` drives the cross-workspace and dashboard features in a disposable
 native Herdr with no model: it fakes agent sessions, so it proves routing, envelopes and
 database state, not how a real agent reads them. Pair it with a real-agent drive on a
-kept testbed profile.
+kept testbed profile. For cross-workspace mentions that drive is two scripts,
+`.claude/skills/verify/scripts/second-workspace.py` and then
+`.claude/skills/verify/scripts/cross-workspace-probe.py`; **What the harness does not
+reach** in [../SKILL.md](../SKILL.md) says what they check.
 
 From the repository root:
 
