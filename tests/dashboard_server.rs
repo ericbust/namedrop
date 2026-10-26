@@ -377,8 +377,16 @@ fn connections_past_the_cap_are_turned_away() {
 
     drop(held);
     let admitted = eventually(Duration::from_secs(5), || {
-        let response = server.get("/assets/app.js", &[]);
-        response.status.contains("200").then_some(())
+        // A probe that lands before a slot frees is turned away like the
+        // excess one, and its unread request makes that close a reset.
+        let mut stream = server.connect("/assets/app.js", &[]);
+        let mut raw = String::new();
+        let outcome = stream.read_to_string(&mut raw);
+        if raw.starts_with("HTTP/1.1 503") {
+            return None;
+        }
+        outcome.unwrap();
+        Response::parse(&raw).status.contains("200").then_some(())
     });
     assert!(admitted.is_some(), "slots free up once connections close");
 }
