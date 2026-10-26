@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.3.2] - 2026-10-26
+
+### Fixed
+
+- A mention you typed into a Codex pane was accepted, but its delivery could wait minutes, until some other activity in the workspace sent it. The wake that sends a typed mention runs after its hook has exited, and it refused the pane identity it inherited because Codex gives hooks no session ID to vouch for it. It now wakes the workspace directly, as the status worker already does, and reports a failure instead of staying silent. Mentions typed into Codex now arrive within seconds, as they do from Claude Code.
+
 ## [1.3.1] - 2026-10-25
 
 ### Fixed
