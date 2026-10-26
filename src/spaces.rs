@@ -307,6 +307,59 @@ impl<'a> LabelScope<'a> {
     }
 }
 
+/// Live panes of the workspaces one decision reads, discovered before its
+/// transaction. A workspace Herdr could not read is unknown, never empty.
+#[derive(Clone, Debug)]
+pub(crate) struct LiveSpaces {
+    here: crate::DiscoveredWorktree,
+    others: std::collections::BTreeMap<SpaceId, Option<crate::DiscoveredWorktree>>,
+}
+
+impl LiveSpaces {
+    pub(crate) fn here(here: crate::DiscoveredWorktree) -> Self {
+        Self {
+            here,
+            others: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Reads each listed workspace once. An empty list issues no Herdr
+    /// command, so work that stays in one workspace reads exactly what it did.
+    pub(crate) fn load<E: crate::HerdrCommandExecutor>(
+        herdr: &E,
+        here: crate::DiscoveredWorktree,
+        spaces: &[SpaceId],
+    ) -> Self {
+        let others = spaces
+            .iter()
+            .filter(|space| space.as_str() != here.workspace_id)
+            .map(|space| {
+                let discovered = crate::discover_worktree_for_workspace(herdr, space.as_str()).ok();
+                (space.clone(), discovered)
+            })
+            .collect();
+        Self { here, others }
+    }
+
+    pub(crate) fn with_here(&self, here: crate::DiscoveredWorktree) -> Self {
+        Self {
+            here,
+            others: self.others.clone(),
+        }
+    }
+
+    pub(crate) fn local(&self) -> &crate::DiscoveredWorktree {
+        &self.here
+    }
+
+    pub(crate) fn of(&self, space: &SpaceId) -> Option<&crate::DiscoveredWorktree> {
+        if space.as_str() == self.here.workspace_id {
+            return Some(&self.here);
+        }
+        self.others.get(space).and_then(Option::as_ref)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RoutePlan {
     pub sender_label: WorkspaceLabel,
@@ -335,6 +388,33 @@ impl RoutePlan {
             RouteLeg::Participants(participants) => !participants.is_empty(),
             RouteLeg::Local(_) => false,
         })
+    }
+
+    pub(crate) fn remote_spaces(
+        &self,
+        transaction: &crate::StateTransaction<'_>,
+        namespace: &StateNamespace,
+    ) -> Result<Vec<SpaceId>, crate::StoreError> {
+        let mut spaces = Vec::new();
+        for leg in &self.legs {
+            match leg {
+                RouteLeg::Names { space, .. } => spaces.push(space.clone()),
+                RouteLeg::Participants(participants) => {
+                    for participant in participants {
+                        if let Some(origin) =
+                            transaction.envoy_origin(namespace, &participant.address_id)?
+                        {
+                            spaces.push(origin.space);
+                        }
+                    }
+                }
+                RouteLeg::Local(_) => {}
+            }
+        }
+        spaces.retain(|space| space != &namespace.space_id);
+        spaces.sort();
+        spaces.dedup();
+        Ok(spaces)
     }
 
     pub(crate) fn resolve(
@@ -1009,6 +1089,33 @@ pub(crate) fn plan_route(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NoHerdr;
+    impl crate::HerdrCommandExecutor for NoHerdr {
+        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
+            panic!("no Herdr command was expected: {args:?}")
+        }
+    }
+
+    #[test]
+    fn live_spaces_for_one_workspace_read_nothing_from_herdr() {
+        let here = crate::DiscoveredWorktree {
+            worktree_id: crate::WorktreeId::new("herdr-space:w1"),
+            workspace_id: "w1".to_owned(),
+            worktree_attached: false,
+            label: None,
+            branch: None,
+            panes: Vec::new(),
+        };
+        let live = LiveSpaces::load(&NoHerdr, here.clone(), &[SpaceId::new("w1")]);
+        assert_eq!(live.of(&SpaceId::new("w1")), Some(&here));
+        assert_eq!(
+            live.of(&SpaceId::new("w2")),
+            None,
+            "an unread workspace is unknown"
+        );
+        LiveSpaces::load(&NoHerdr, here, &[]);
+    }
 
     fn label(token: &str) -> WorkspaceLabel {
         WorkspaceLabel::from_token(token).unwrap()

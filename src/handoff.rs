@@ -100,12 +100,16 @@ where
     let mut store = StateStore::open_read_only(runtime.state_directory)
         .map_err(|e| e.to_string())?
         .ok_or("Namedrop has no saved state")?;
+    let remote = store
+        .transaction(|tx| tx.queued_remote_seat_spaces(&namespace))
+        .map_err(|e| e.to_string())?;
+    let live = crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &remote);
     store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx, &namespace, pane, &discovered)?;
         if let Some(id) = coordination_id { return tx.coordination_report(&namespace,&id,&author); }
         if let Some(message_id) = message_id {
             let mut report = tx.handoff_report(&namespace, &author, &message_id, runtime.clock.now_unix_ms(), true)?;
-            tx.add_handoff_outlooks(&namespace, &discovered, &mut report)?;
+            tx.add_handoff_outlooks(&namespace, &live, &mut report)?;
             for recipient in report["recipients"].as_array_mut().unwrap() {
                 if recipient["result_status"]=="replied" {
                     let address = crate::PaneAddressId::new(recipient["target"]["address_id"].as_str().unwrap());
@@ -135,7 +139,7 @@ where
             ids.truncate(status.limit as usize);
             let reports = ids.iter().map(|id| {
                 let mut report = tx.handoff_report(&namespace, &author, id, runtime.clock.now_unix_ms(), false)?;
-                tx.add_handoff_outlooks(&namespace, &discovered, &mut report)?;
+                tx.add_handoff_outlooks(&namespace, &live, &mut report)?;
                 Ok(report)
             })
                 .collect::<Result<Vec<_>, crate::StoreError>>()?;

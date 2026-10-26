@@ -742,12 +742,18 @@ where
     };
     // A retry returns what the first send committed before anything about the
     // route or its context is read again, so it can never pin or route anew.
-    let (author, replayed) = store
+    let (author, replayed, tracked_home) = store
         .transaction(|transaction| {
             let (author, _) = sending_author(transaction, &namespace, pane_id, &replay, runtime)?;
             let replayed =
                 replay.receipt(transaction, &namespace, &author, pane_id, &discovered)?;
-            Ok((author, replayed))
+            let tracked_home = in_reply_to
+                .as_ref()
+                .map(|message| transaction.tracked_message(&namespace, message))
+                .transpose()?
+                .flatten()
+                .map(|tracked| tracked.home);
+            Ok((author, replayed, tracked_home))
         })
         .map_err(|error| error.to_string())?;
     if let Some(committed) = replayed {
@@ -766,21 +772,32 @@ where
         (&author.address_id, in_reply_to.as_ref()),
         &parsed.recipients,
     )?;
-    // Context and tracking are refused before the context pin is written, so a
-    // refused cross-workspace send leaves nothing behind.
+    // Context is refused before the context pin is written, so a refused
+    // cross-workspace send leaves nothing behind.
     if routing.crosses(&namespace.space_id)
-        && (context.is_some()
-            || request_context
-            || decline_context_request.is_some()
-            || tracking.present())
+        && (context.is_some() || request_context || decline_context_request.is_some())
     {
         return Err(
-            "context handoffs and tracked coordination stay inside one workspace; send the \
-             cross-workspace part as a plain message"
+            "context handoffs stay inside one workspace; send the cross-workspace part as a \
+             plain message"
                 .to_owned()
                 .into(),
         );
     }
+    // The lead's tracked work checks each remote assignee against its own
+    // workspace's live panes, read here before the routing transaction. A
+    // worker's reply is judged from stored rows alone, so it reads nothing.
+    let live = if routing.crosses(&namespace.space_id)
+        && (tracking.present() || tracked_home.is_some())
+        && tracked_home.as_ref().is_none_or(|home| home == &namespace)
+    {
+        let spaces = store
+            .transaction(|transaction| routing.remote_spaces(transaction, &namespace))
+            .map_err(|error| error.to_string())?;
+        crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &spaces)
+    } else {
+        crate::spaces::LiveSpaces::here(discovered.clone())
+    };
     let reference_aliases = body_reference_aliases(&parsed, workspaces);
     // Validation, redaction, and the optional git pin all happen before the
     // routing transaction: a send that fails from here on delivers nothing and
@@ -959,7 +976,7 @@ where
             )?;
         }
         let receipt = transaction.append_message(&namespace, &draft, &attribution)?;
-        crate::coordination::track_message(transaction, &namespace, &draft, &tracking, disposition_attempt_id.as_ref(), &discovered, runtime)?;
+        crate::coordination::track_message(transaction, &namespace, &draft, &tracking, disposition_attempt_id.as_ref(), &live, runtime)?;
         if let Some(attempt_id) = &disposition_attempt_id {
             transaction.record_reply_disposition(
                 &namespace,
@@ -1228,9 +1245,9 @@ impl Replay<'_> {
         else {
             return Ok(None);
         };
-        if !transaction
-            .coordination_links(namespace, &replay.receipt.message_id)?
-            .is_empty()
+        if transaction
+            .tracked_message(namespace, &replay.receipt.message_id)?
+            .is_some()
         {
             crate::context::registered_current_address(
                 transaction,
@@ -1330,7 +1347,9 @@ where
     let (links, forwarded) = store
         .transaction(|tx| {
             Ok((
-                tx.coordination_links(namespace, &routed.receipt.message_id)?,
+                tx.tracked_message(namespace, &routed.receipt.message_id)?
+                    .map(|tracked| tracked.links)
+                    .unwrap_or_default(),
                 tx.forwarded_copies(namespace, &routed.receipt.message_id)?,
             ))
         })

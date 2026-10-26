@@ -551,7 +551,7 @@ where
                 }));
             };
             let result = store
-                .purge_worktree(&namespace, &typed_space_id)
+                .purge_worktree(&namespace, &typed_space_id, &attribution)
                 .map_err(|error| error.to_string())?;
             Ok(json!({
                 "space_id": result.summary.space_id,

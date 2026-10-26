@@ -121,7 +121,7 @@ impl StateTransaction<'_> {
     pub(crate) fn add_handoff_outlooks(
         &self,
         namespace: &StateNamespace,
-        discovered: &crate::DiscoveredWorktree,
+        live: &crate::spaces::LiveSpaces,
         report: &mut Value,
     ) -> Result<(), StoreError> {
         let thread = self.thread_control_state(
@@ -130,12 +130,25 @@ impl StateTransaction<'_> {
         )?;
         for recipient in report["recipients"].as_array_mut().unwrap() {
             if recipient["state"] == "queued" {
-                let mut outlook = self.recipient_preview(
-                    namespace,
-                    discovered,
-                    &PaneAddressId::new(recipient["target"]["address_id"].as_str().unwrap()),
-                    recipient["delivery_id"].as_str(),
-                )?;
+                let address =
+                    PaneAddressId::new(recipient["target"]["address_id"].as_str().unwrap());
+                let delivery = recipient["delivery_id"].as_str().unwrap();
+                let principal = self.principal(namespace, &address)?;
+                let seat_delivery = if principal.ns == *namespace {
+                    delivery.to_owned()
+                } else {
+                    super::bridge::bridged_id(&namespace.space_id, delivery)
+                };
+                let mut outlook = match live.of(&principal.ns.space_id) {
+                    Some(discovered) => self.recipient_preview(
+                        &principal.ns,
+                        discovered,
+                        &principal.address_id,
+                        Some(&seat_delivery),
+                    )?,
+                    None => json!({"address_id":address,"constraints":["remote_status_unknown"],
+                        "delivery_expectation":"queued until constraints clear"}),
+                };
                 if thread.paused {
                     outlook["constraints"]
                         .as_array_mut()
@@ -172,8 +185,9 @@ impl StateTransaction<'_> {
                AND m.in_reply_to IS NULL
                AND (?5 OR EXISTS (
                    SELECT 1 FROM mailbox_deliveries d
+                   JOIN delivery_seats s USING (session_socket_id, worktree_id, delivery_id)
                    WHERE d.session_socket_id = m.session_socket_id AND d.worktree_id = m.worktree_id
-                     AND d.message_id = m.message_id AND d.state NOT IN ('failed', 'cancelled')
+                     AND d.message_id = m.message_id AND s.progress NOT IN ('failed', 'cancelled')
                      AND NOT EXISTS (
                          SELECT 1 FROM delivery_attempts a JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id)
                          WHERE a.session_socket_id = d.session_socket_id AND a.worktree_id = d.worktree_id AND a.delivery_id = d.delivery_id
@@ -266,11 +280,14 @@ impl StateTransaction<'_> {
         message_id: &MessageId,
     ) -> Result<Vec<HandoffRecipient>, StoreError> {
         let mut statement = self.transaction.prepare(
-            "SELECT r.address_id, r.alias_snapshot, d.delivery_id, d.state, d.created_at_ms,
+            "SELECT r.address_id, r.alias_snapshot, d.delivery_id, s.progress, d.created_at_ms,
                     a.attempt_id, ack.acknowledged_at_ms, p.disposition_kind,
                     CASE WHEN p.disposition_kind = 'reply' THEN p.disposition_id END,
-                    COALESCE(p.occurred_at_ms, ack.acknowledged_at_ms, a.created_at_ms, d.created_at_ms)
+                    COALESCE(p.occurred_at_ms, ack.acknowledged_at_ms, a.created_at_ms, d.created_at_ms),
+                    e.origin_label
              FROM message_recipients r JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
+             JOIN delivery_seats s USING (session_socket_id, worktree_id, delivery_id)
+             LEFT JOIN space_envoys e USING (session_socket_id, worktree_id, address_id)
              LEFT JOIN delivery_attempts a ON a.rowid = (
                  SELECT latest.rowid FROM delivery_attempts latest
                  WHERE latest.session_socket_id = d.session_socket_id AND latest.worktree_id = d.worktree_id AND latest.delivery_id = d.delivery_id
@@ -288,10 +305,15 @@ impl StateTransaction<'_> {
                 ],
                 |r| {
                     Ok(HandoffRecipient {
-                        target: DeliveryAddress::new(
-                            PaneAddressId::new(r.get::<_, String>(0)?),
-                            r.get::<_, String>(1)?,
-                        ),
+                        target: DeliveryAddress {
+                            workspace: r
+                                .get::<_, Option<String>>(10)?
+                                .map(|label| crate::WorkspaceLabel::from_herdr(&label)),
+                            ..DeliveryAddress::new(
+                                PaneAddressId::new(r.get::<_, String>(0)?),
+                                r.get::<_, String>(1)?,
+                            )
+                        },
                         delivery_id: crate::DeliveryId::new(r.get::<_, String>(2)?),
                         state: parse_delivery_state(r.get(3)?)?,
                         created_at_ms: from_i64(r.get(4)?)?,

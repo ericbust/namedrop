@@ -15,7 +15,7 @@ Activation manages collaboration and `address list` at the installed prefix. Reg
 
 ## Name and manage panes
 
-Use `namedrop name @alias` and `namedrop address list` for the requested `address_id`. Names are per space; `#label`/`#all` reach others. `--type terminal|agent` overrides `pane_type`. Terminals return output/exit status.
+Use `namedrop name @alias` and `namedrop address list` for its `address_id`. Names are per space; `#label`/`#all` reach others, tracked too; context stays local. `--type terminal|agent` overrides `pane_type`. Terminals return output/exit status.
 
 ## Personas
 
@@ -25,7 +25,7 @@ An optional persona describes intended work; Generic stays eligible. The roster 
 
 Multi-step delegation: `handoff.begin` takes `request_id` and human `deliverable`; use its `coordination_id` on worker `send`s. Before yielding, verify active work, continue, or state a blocker. Restarted lead: `handoff.adopt` retakes its open `coordination_id`.
 
-`handoff.results` takes `coordination_id` or `message_id`. Keep follow-ups tracked with `coordination_id`, `assignment_id`, `expected_revision` and the original recipient/session. Ordinary sends remain untracked.
+`handoff.results` takes `coordination_id` or `message_id`. Keep follow-ups tracked with `coordination_id`, `assignment_id`, `expected_revision` and the original recipient/session.
 
 Workers: end progress turns with `work_outcome: needs_continuation`; `completed` awaits lead review; `blocked` requires `blocked_reason`, optionally `waiting_on_assignment_id`. Omission is unclassified; `ack`/`complete.no-reply` settle transport only.
 

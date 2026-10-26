@@ -392,6 +392,7 @@ where
                 let mut incomplete = ids.len() > HANDOFF_PAGE_LIMIT as usize;
                 ids.truncate(HANDOFF_PAGE_LIMIT as usize);
                 let mut reports = Vec::with_capacity(ids.len());
+                let live = crate::spaces::LiveSpaces::here(discovered.clone());
                 for id in &ids {
                     // Stop between rows rather than finish a long page after
                     // the panel needed it.
@@ -403,7 +404,7 @@ where
                     }
                     let mut report =
                         transaction.handoff_report(&namespace, &author, id, now, false)?;
-                    transaction.add_handoff_outlooks(&namespace, discovered, &mut report)?;
+                    transaction.add_handoff_outlooks(&namespace, &live, &mut report)?;
                     reports.push(report);
                 }
                 Ok((reports, incomplete))

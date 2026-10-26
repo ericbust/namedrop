@@ -1,438 +1,19 @@
 use namedrop::{
-    ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
-    IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
-    PaneBindingId, PaneRoleId, StateNamespace, StateStore, complete_capability_profile,
-    diagnose_collaboration, drain_mailboxes, execute_control_operation, execute_group_operation,
-    execute_handoff_operation, execute_integration_operation, execute_lifecycle_operation,
-    execute_message_operation, execute_user_prompt_submit_hook, install_integration_package,
-    issue_registration_challenge, render_health_report_to_text, spaces_to_wake,
+    AgentRuntime, StateNamespace, StateStore, diagnose_collaboration, execute_control_operation,
+    execute_group_operation, execute_handoff_operation, execute_integration_operation,
+    execute_lifecycle_operation, execute_message_operation, install_integration_package,
+    render_health_report_to_text, spaces_to_wake,
 };
 use serde_json::{Value, json};
-use std::{
-    fs,
-    path::PathBuf,
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-};
+use std::{fs, sync::atomic::Ordering};
 
 const ROSTER_MARKER: &str = "Namedrop workspace roster.";
 const MISS_GUIDANCE: &str = "Namedrop could not resolve at least one leading recipient. The prompt was preserved for you unchanged; do not retry automatically. Tell the person to check the Mention name or name the target pane.";
 
-static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
+#[path = "support/xws.rs"]
+mod xws;
 
-type Space = (
-    &'static str,
-    &'static str,
-    &'static [(&'static str, &'static str)],
-);
-const SPACES: [Space; 3] = [
-    (
-        "w1",
-        "ws1",
-        &[("lead", "pane-1-lead"), ("planner", "pane-1-planner")],
-    ),
-    (
-        "w2",
-        "ws2",
-        &[
-            ("lead", "pane-2-lead"),
-            ("tester", "pane-2-tester"),
-            ("scout", "pane-2-scout"),
-        ],
-    ),
-    (
-        "w3",
-        "ws3",
-        &[("lead", "pane-3-lead"), ("scout", "pane-3-scout")],
-    ),
-];
-
-struct FakeHerdr {
-    repo: String,
-    labels: Mutex<Vec<(String, String)>>,
-    /// The repository Herdr stamps on a workspace's checkout, by workspace id.
-    repos: Mutex<Vec<(String, String)>>,
-    workspace_list_fails: AtomicBool,
-    prompts: Mutex<Vec<(String, String)>>,
-    notifications: Mutex<Vec<Vec<String>>>,
-    commands: Mutex<Vec<String>>,
-}
-
-impl FakeHerdr {
-    fn new(repo: &std::path::Path) -> Self {
-        Self {
-            repo: repo.display().to_string(),
-            labels: Mutex::new(
-                SPACES
-                    .iter()
-                    .map(|(id, label, _)| ((*id).to_owned(), (*label).to_owned()))
-                    .collect(),
-            ),
-            repos: Mutex::new(Vec::new()),
-            workspace_list_fails: AtomicBool::new(false),
-            prompts: Mutex::new(Vec::new()),
-            notifications: Mutex::new(Vec::new()),
-            commands: Mutex::new(Vec::new()),
-        }
-    }
-
-    fn envelopes(&self, pane: &str) -> Vec<Value> {
-        self.prompts
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(target, _)| target == pane)
-            .filter_map(|(_, prompt)| serde_json::from_str::<Value>(prompt).ok())
-            .filter(|prompt| prompt.get("control").is_some())
-            .collect()
-    }
-
-    fn last_envelope(&self, pane: &str) -> Value {
-        self.envelopes(pane)
-            .pop()
-            .unwrap_or_else(|| panic!("no envelope was dispatched to {pane}"))
-    }
-}
-
-impl HerdrCommandExecutor for FakeHerdr {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.commands.lock().unwrap().push(args.join(" "));
-        let stdout = match args {
-            ["workspace", "list"] if self.workspace_list_fails.load(Ordering::Relaxed) => {
-                return Err("herdr: workspace list is unavailable".to_owned());
-            }
-            ["workspace", "list"] => {
-                let labels = self.labels.lock().unwrap();
-                let repos = self.repos.lock().unwrap();
-                json!({"result":{"type":"workspace_list","workspaces": labels.iter().enumerate()
-                    .map(|(number, (id, label))| {
-                        let mut workspace = json!({"workspace_id":id,"label":label,"number":number + 1});
-                        if let Some((_, repo)) = repos.iter().find(|(space, _)| space == id) {
-                            workspace["worktree"] = json!({
-                                "checkout_path": format!("/worktrees/{repo}/{label}"),
-                                "is_linked_worktree": true,
-                                "repo_name": repo,
-                            });
-                        }
-                        workspace
-                    })
-                    .collect::<Vec<_>>()}})
-                .to_string()
-            }
-            ["worktree", "list", "--workspace", "w1", "--json"] => {
-                json!({"result":{"worktrees":[{"path":self.repo,"open_workspace_id":"w1"}]}})
-                    .to_string()
-            }
-            ["worktree", "list", "--workspace", _, "--json"] => {
-                return Err(json!({"error":{"code":"not_git_worktree"}}).to_string());
-            }
-            ["pane", "list", "--workspace", workspace] => {
-                let panes: Vec<Value> = SPACES
-                    .iter()
-                    .filter(|(id, _, _)| id == workspace)
-                    .flat_map(|(id, _, agents)| {
-                        agents.iter().enumerate().map(move |(index, (_, pane))| {
-                            json!({"pane_id":pane,"terminal_id":format!("t-{pane}"),
-                                   "tab_id":format!("tab-{index}"),"workspace_id":id,"agent":"codex",
-                                   "agent_session":{"value":session(pane)},"agent_status":"idle"})
-                        })
-                    })
-                    .collect();
-                json!({"result":{"panes":panes}}).to_string()
-            }
-            ["agent", "prompt", pane, prompt] => {
-                self.prompts
-                    .lock()
-                    .unwrap()
-                    .push(((*pane).to_owned(), (*prompt).to_owned()));
-                "{}".to_owned()
-            }
-            ["notification", "show", ..] => {
-                self.notifications
-                    .lock()
-                    .unwrap()
-                    .push(args.iter().map(|arg| (*arg).to_owned()).collect());
-                "{}".to_owned()
-            }
-            ["pane", "report-metadata", ..] => "{}".to_owned(),
-            _ => return Err(format!("unexpected Herdr command: {args:?}")),
-        };
-        Ok(HerdrCommandOutput { stdout })
-    }
-}
-
-fn git(repo: &std::path::Path, args: &[&str]) -> String {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["-c", "commit.gpgsign=false"])
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "git {args:?}");
-    String::from_utf8(output.stdout).unwrap()
-}
-
-fn session(pane: &str) -> String {
-    format!("session-{pane}")
-}
-
-fn address_id(workspace: &str, alias: &str) -> String {
-    format!("address-{workspace}-{alias}")
-}
-
-struct FixedClock;
-impl Clock for FixedClock {
-    fn now_unix_ms(&self) -> u64 {
-        42
-    }
-    fn wait_ms(&self, _: u64) {}
-}
-
-struct SequenceIds(AtomicU64);
-impl IdGenerator for SequenceIds {
-    fn next_id(&self, kind: &str) -> String {
-        format!("{kind}-{}", self.0.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
-struct Fixture {
-    root: PathBuf,
-    state: PathBuf,
-    herdr: FakeHerdr,
-    ids: SequenceIds,
-}
-
-type Runtime<'a> = LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds>;
-
-impl Fixture {
-    fn new() -> Self {
-        Self::with_activated(SPACES.len())
-    }
-
-    fn with_activated(activated: usize) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "namedrop-cross-workspace-{}-{}",
-            std::process::id(),
-            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
-        ));
-        for path in ["state", "home", "repo"] {
-            fs::create_dir_all(root.join(path)).unwrap();
-        }
-        let repo = root.join("repo");
-        for args in [
-            &["init", "-q", "-b", "main"][..],
-            &["config", "user.name", "Cross Workspace Test"],
-            &["config", "user.email", "cross@test"],
-            &["commit", "-q", "--allow-empty", "-m", "initial"],
-        ] {
-            git(&repo, args);
-        }
-        let fixture = Self {
-            state: root.join("state"),
-            herdr: FakeHerdr::new(&repo),
-            root,
-            ids: SequenceIds(AtomicU64::new(1)),
-        };
-        let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
-        for (workspace, _, agents) in SPACES.into_iter().take(activated) {
-            let namespace = StateNamespace::for_space("socket-a", workspace);
-            let mut store = StateStore::open(&fixture.state).unwrap();
-            store
-                .transaction(|transaction| {
-                    transaction.activate_worktree(&namespace, &attribution)?;
-                    for (alias, pane) in agents {
-                        let draft = PaneAddressDraft {
-                            id: PaneAddressId::new(address_id(workspace, alias)),
-                            role_id: PaneRoleId::new(format!("role-{workspace}-{alias}")),
-                            role_name: (*alias).to_owned(),
-                            role_description: format!("{alias} test role"),
-                            alias: (*alias).to_owned(),
-                        };
-                        transaction.create_pane_address(&namespace, &draft, &attribution)?;
-                        transaction.bind_pane(
-                            &namespace,
-                            &PaneBindingId::new(format!("binding-{pane}")),
-                            &draft.id,
-                            pane,
-                            &attribution,
-                        )?;
-                        transaction.observe_agent_session(
-                            &namespace,
-                            &format!("observation-{pane}"),
-                            &draft.id,
-                            &AgentSessionId::new(session(pane)),
-                            "idle",
-                            &attribution,
-                        )?;
-                    }
-                    Ok(())
-                })
-                .unwrap();
-            store
-                .transaction(|transaction| transaction.complete_reconciliation(&namespace))
-                .unwrap();
-        }
-        fixture
-    }
-
-    fn runtime<'a>(&'a self, workspace: &'a str, pane: &'a str) -> Runtime<'a> {
-        LifecycleRuntime {
-            state_directory: &self.state,
-            home_directory: Some(self.root.join("home").leak()),
-            agent_config: namedrop::AgentConfigDirectories::default(),
-            cwd: self.root.join("repo").leak(),
-            workspace_id: Some(workspace),
-            current_pane_id: Some(pane),
-            session_socket_id: "socket-a",
-            herdr: &self.herdr,
-            clock: &FixedClock,
-            ids: &self.ids,
-        }
-    }
-
-    fn register_all(&self) {
-        self.register_all_activated(SPACES.len());
-    }
-
-    fn register(&self, workspace: &str, alias: &str, pane: &str) {
-        {
-            {
-                let runtime = self.runtime(workspace, pane);
-                let challenge = issue_registration_challenge(
-                    &PaneAddressId::new(address_id(workspace, alias)),
-                    AgentRuntime::Codex,
-                    &runtime,
-                )
-                .unwrap();
-                execute_integration_operation(
-                    "register",
-                    json!({"runtime":"codex","protocol_version":"collab/v1",
-                           "nonce":challenge.nonce,"capabilities":complete_capability_profile()}),
-                    &runtime,
-                )
-                .unwrap();
-            }
-        }
-    }
-
-    fn register_all_activated(&self, activated: usize) {
-        for (workspace, _, agents) in SPACES.into_iter().take(activated) {
-            for (alias, pane) in agents {
-                self.register(workspace, alias, pane);
-            }
-        }
-    }
-
-    fn rename(&self, workspace: &str, alias: &str, replacement: &str) {
-        let namespace = StateNamespace::for_space("socket-a", workspace);
-        StateStore::open(&self.state)
-            .unwrap()
-            .transaction(|transaction| {
-                transaction.replace_alias(
-                    &namespace,
-                    &PaneAddressId::new(address_id(workspace, alias)),
-                    replacement,
-                    &MutationAttribution::new(ActorKind::Human, "test", 2),
-                )
-            })
-            .unwrap();
-    }
-
-    fn release(&self, workspace: &str, alias: &str) {
-        let namespace = StateNamespace::for_space("socket-a", workspace);
-        StateStore::open(&self.state)
-            .unwrap()
-            .transaction(|transaction| {
-                transaction.release_alias(
-                    &namespace,
-                    alias,
-                    &MutationAttribution::new(ActorKind::Human, "test", 3),
-                )
-            })
-            .unwrap();
-    }
-
-    fn remove(&self, workspace: &str, alias: &str) {
-        let namespace = StateNamespace::for_space("socket-a", workspace);
-        StateStore::open(&self.state)
-            .unwrap()
-            .transaction(|transaction| {
-                transaction.remove_pane_address(
-                    &namespace,
-                    &PaneAddressId::new(address_id(workspace, alias)),
-                    &MutationAttribution::new(ActorKind::Human, "test", 2),
-                )
-            })
-            .unwrap();
-    }
-
-    fn drain(&self, workspace: &str) {
-        drain_mailboxes(&self.runtime(workspace, "pane-none")).unwrap();
-    }
-
-    fn agent_send(&self, workspace: &str, pane: &str, request: &str, source: &str) -> Value {
-        execute_message_operation(
-            "send",
-            json!({"request_id":request,"source":source,"author_kind":"agent_session"}),
-            &self.runtime(workspace, pane),
-        )
-        .unwrap()
-    }
-
-    fn reply_to(&self, workspace: &str, pane: &str, envelope: &Value, source: &str) -> Value {
-        execute_message_operation(
-            "reply",
-            json!({"request_id":format!("reply-{}", envelope["control"]["attempt_id"]),
-                   "source":source,"author_kind":"agent_session",
-                   "in_reply_to":envelope["control"]["message_id"],
-                   "attempt_id":envelope["control"]["attempt_id"]}),
-            &self.runtime(workspace, pane),
-        )
-        .unwrap()
-    }
-
-    fn try_send(&self, workspace: &str, pane: &str, input: Value) -> Result<Value, String> {
-        execute_message_operation("send", input, &self.runtime(workspace, pane))
-    }
-
-    fn hook(&self, workspace: &str, pane: &str, prompt: &str) -> Option<Value> {
-        execute_user_prompt_submit_hook(
-            &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt}).to_string(),
-            &self.runtime(workspace, pane),
-        )
-    }
-
-    fn sql(&self, statement: &str) {
-        rusqlite::Connection::open(self.state.join("namedrop.sqlite3"))
-            .unwrap()
-            .execute_batch(statement)
-            .unwrap();
-    }
-
-    fn message_rows(&self) -> (i64, i64) {
-        let db = rusqlite::Connection::open(self.state.join("namedrop.sqlite3")).unwrap();
-        let count = |table: &str| {
-            db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get(0)
-            })
-            .unwrap()
-        };
-        (count("collaboration_messages"), count("mailbox_deliveries"))
-    }
-
-    fn untrusted_body(envelope: &Value) -> &str {
-        envelope["untrusted_body"].as_str().unwrap()
-    }
-}
-
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
-    }
-}
+use xws::*;
 
 #[test]
 fn an_agent_send_reaches_only_the_named_workspace_and_the_reply_returns_to_its_thread() {
@@ -1460,7 +1041,7 @@ fn a_paused_workspace_queues_and_says_so_until_it_resumes() {
 }
 
 #[test]
-fn context_and_tracking_never_cross_workspaces_and_leave_no_pin() {
+fn context_never_crosses_workspaces_and_leaves_no_pin() {
     let fixture = Fixture::new();
     fixture.register_all();
     let repo = fixture.root.join("repo");
@@ -1476,7 +1057,6 @@ fn context_and_tracking_never_cross_workspaces_and_leave_no_pin() {
     for input in [
         json!({"request_id":"ctx-1","source":"#ws2 @lead Review this.","author_kind":"agent_session","context":context}),
         json!({"request_id":"ctx-2","source":"#ws2 @tester Review this.","author_kind":"agent_session","context":context}),
-        json!({"request_id":"track-1","source":"#ws2 @lead Review this.","author_kind":"agent_session","coordination_id":"coordination-1"}),
     ] {
         let error = fixture.try_send("w1", "pane-1-lead", input).unwrap_err();
         assert!(error.contains("stay inside one workspace"), "{error}");
@@ -2679,4 +2259,150 @@ fn address_list_reads_every_workspace_when_asked() {
         execute_lifecycle_operation("address.list", json!({"workspaces":"some"}), &runtime)
             .is_err()
     );
+}
+
+#[test]
+fn every_unsent_delivery_cancel_goes_through_the_one_reflecting_helper() {
+    fn sources(directory: &std::path::Path, found: &mut Vec<(String, String)>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                sources(&path, found);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                found.push((
+                    path.display().to_string(),
+                    fs::read_to_string(&path).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    let raw_cancels: Vec<String> = files
+        .iter()
+        .flat_map(|(path, text)| {
+            let compact: String = text.split_whitespace().collect();
+            let count = compact.matches("SETstate='cancelled'").count();
+            std::iter::repeat_n(path.clone(), count)
+        })
+        .collect();
+    assert_eq!(
+        raw_cancels.len(),
+        1,
+        "only cancel_unsent_delivery may write a cancelled delivery state, so a forwarded \
+         copy's cancel always reaches its other workspace: {raw_cancels:?}"
+    );
+    assert!(raw_cancels[0].ends_with("src/store.rs"), "{raw_cancels:?}");
+}
+
+fn copy_attempt(fixture: &Fixture, workspace: &str, alias: &str) -> String {
+    fixture
+        .text(&format!(
+            "SELECT a.attempt_id FROM delivery_attempts a
+             JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
+             WHERE a.worktree_id = '{workspace}' AND a.address_id = '{}' AND d.message_id LIKE 'bridge:%'
+             ORDER BY a.rowid DESC LIMIT 1",
+            address_id(workspace, alias)
+        ))
+        .expect("the copy was dispatched")
+}
+
+fn results(fixture: &Fixture, workspace: &str, pane: &str, message: &Value) -> Value {
+    execute_handoff_operation(
+        "handoff.results",
+        json!({"message_id":message}),
+        &fixture.runtime(workspace, pane),
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_remote_request_that_settles_unanswered_shows_its_attempt_to_the_author() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    let sent = fixture.agent_send("w1", "pane-1-lead", "settle-1", "#ws2 @tester Check this.");
+    fixture.drain("w2");
+    let attempt = copy_attempt(&fixture, "w2", "tester");
+    let before = results(&fixture, "w1", "pane-1-lead", &sent["message_id"]);
+    assert_eq!(before["recipients"][0]["attempt_id"], Value::Null);
+
+    fixture.advance(31_000);
+    fixture.drain("w2");
+    assert_eq!(
+        fixture.text(&format!(
+            "SELECT state FROM delivery_attempt_state WHERE attempt_id = '{attempt}'"
+        )),
+        Some("settled".to_owned())
+    );
+    let after = results(&fixture, "w1", "pane-1-lead", &sent["message_id"]);
+    let recipient = &after["recipients"][0];
+    assert_eq!(recipient["attempt_id"], format!("bridge:w2:{attempt}"));
+    assert_eq!(recipient["result_status"], Value::Null);
+    assert_eq!(recipient["needs_attention"], true);
+
+    let reply = fixture.herdr.last_envelope("pane-2-tester");
+    fixture.reply_to("w2", "pane-2-tester", &reply, "@lead Checked, all good.");
+    let replied = results(&fixture, "w1", "pane-1-lead", &sent["message_id"]);
+    assert_eq!(
+        replied["recipients"][0]["result_status"], "replied",
+        "a disposition that arrives after the settle is still reflected"
+    );
+    assert_eq!(
+        replied["recipients"][0]["untrusted_reply"],
+        "Checked, all good."
+    );
+}
+
+#[test]
+fn purging_a_workspace_cancels_the_deliveries_its_copies_still_owed() {
+    let fixture = Fixture::new();
+    fixture.register_all();
+    fixture.agent_send(
+        "w1",
+        "pane-1-lead",
+        "purge-1",
+        "#ws1 #ws2 @planner @tester Check the release.",
+    );
+    let local = fixture.herdr.last_envelope("pane-1-planner");
+    fixture.reply_to("w1", "pane-1-planner", &local, "@lead Release checked.");
+    fixture.drain("w2");
+    fixture.advance(31_000);
+    fixture.drain("w2");
+    assert!(
+        result_sets(&fixture, "pane-1-lead").is_empty(),
+        "an unanswered remote request keeps the join open"
+    );
+
+    let namespace = StateNamespace::for_space("socket-a", "w2");
+    let attribution = namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "test", 50);
+    StateStore::open(&fixture.state)
+        .unwrap()
+        .transaction(|transaction| transaction.deactivate_worktree(&namespace, &attribution))
+        .unwrap();
+    execute_lifecycle_operation(
+        "purge",
+        json!({"typed_space_id":"w2"}),
+        &fixture.runtime("w2", "pane-2-lead"),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fixture.count("SELECT COUNT(*) FROM mailbox_deliveries WHERE worktree_id = 'w2'"),
+        0
+    );
+    assert_eq!(
+        fixture.text(
+            "SELECT state FROM mailbox_deliveries WHERE worktree_id = 'w1'
+             AND address_id = 'envoy:w2:address-w2-tester'"
+        ),
+        Some("cancelled".to_owned())
+    );
+    fixture.drain("w1");
+    let joined = result_sets(&fixture, "pane-1-lead");
+    assert_eq!(joined.len(), 1, "the purge completes the author's join");
+    let outcomes = joined[0]["control"]["result_set"]["outcomes"].to_string();
+    assert!(outcomes.contains("cancelled"), "{outcomes}");
 }

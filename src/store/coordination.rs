@@ -4,6 +4,16 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+/// Proof that an exact worker session holds the undisposed attempt on the
+/// request it answers, in the worker's own workspace. Only
+/// require_assignment_attempt makes one, and record_assignment_outcome takes
+/// one, so no path writes an outcome without that check.
+pub(crate) struct AssignmentAttempt {
+    ns: StateNamespace,
+    address_id: PaneAddressId,
+    session: Option<crate::AgentSessionId>,
+}
+
 struct CoordinationWakeState {
     outcome: String,
     revision: i64,
@@ -66,7 +76,7 @@ impl StateTransaction<'_> {
         recipient: &PaneAddressId,
         session: &crate::AgentSessionId,
     ) -> Result<bool, StoreError> {
-        let tracked=self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM coordination_links WHERE session_socket_id=?1 AND worktree_id=?2 AND (message_id=?3 OR message_id=(SELECT in_reply_to FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 AND grammar_version='result-set/v1'))) OR EXISTS(SELECT 1 FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND report_message_id=?3) OR EXISTS(SELECT 1 FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 AND grammar_version='coordination-nudge/v1')",params![ns.session_socket_id,ns.space_id.as_str(),message.as_str()],|r|r.get::<_,bool>(0))?;
+        let tracked=self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM coordination_links WHERE session_socket_id=?1 AND worktree_id=?2 AND (message_id=?3 OR message_id=(SELECT in_reply_to FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 AND grammar_version='result-set/v1'))) OR EXISTS(SELECT 1 FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND report_message_id=?3) OR EXISTS(SELECT 1 FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 AND grammar_version='coordination-nudge/v1') OR EXISTS(SELECT 1 FROM bridged_messages b JOIN coordination_links l ON l.session_socket_id=b.session_socket_id AND l.worktree_id=b.origin_space_id AND l.message_id=b.origin_message_id WHERE b.session_socket_id=?1 AND b.worktree_id=?2 AND b.message_id=?3)",params![ns.session_socket_id,ns.space_id.as_str(),message.as_str()],|r|r.get::<_,bool>(0))?;
         if !tracked {
             return Ok(true);
         }
@@ -105,14 +115,18 @@ impl StateTransaction<'_> {
         attempt: &crate::DeliveryAttemptId,
         message: &MessageId,
         author: &RoutingAddressSnapshot,
-    ) -> Result<(), StoreError> {
+    ) -> Result<AssignmentAttempt, StoreError> {
         let matches=self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,delivery_id,address_id) WHERE a.session_socket_id=?1 AND a.worktree_id=?2 AND a.attempt_id=?3 AND d.message_id=?4 AND a.address_id=?5 AND a.agent_session_id=?6 AND NOT EXISTS(SELECT 1 FROM delivery_dispositions p WHERE p.session_socket_id=a.session_socket_id AND p.worktree_id=a.worktree_id AND p.attempt_id=a.attempt_id))",params![ns.session_socket_id,ns.space_id.as_str(),attempt.as_str(),message.as_str(),author.address_id.as_str(),author.agent_session_id.as_ref().map(|s|s.as_str())],|r|r.get::<_,bool>(0))?;
         if !matches {
             return Err(StoreError::invalid_input(
                 "work outcome attempt must match its exact assignment message, address, and session",
             ));
         }
-        Ok(())
+        Ok(AssignmentAttempt {
+            ns: ns.clone(),
+            address_id: author.address_id.clone(),
+            session: author.agent_session_id.clone(),
+        })
     }
 
     pub(crate) fn require_coordination_capability(
@@ -219,7 +233,13 @@ impl StateTransaction<'_> {
                 "revision":from_i64(r.get(5)?)?,"work_outcome":r.get::<_,String>(6)?,"blocked_reason":r.get::<_,Option<String>>(7)?,
                 "waiting_on_assignment_id":r.get::<_,Option<String>>(8)?,"last_reply_message_id":r.get::<_,Option<String>>(9)?,
             }))).optional()?.ok_or_else(||StoreError::invalid_input("assignment does not exist in this workspace"))?;
-        assignment["delivery"] = self.transaction.query_row("SELECT d.delivery_id,d.state,(SELECT attempt_id FROM delivery_attempts a WHERE a.session_socket_id=d.session_socket_id AND a.worktree_id=d.worktree_id AND a.delivery_id=d.delivery_id ORDER BY a.rowid DESC LIMIT 1) FROM mailbox_deliveries d WHERE d.session_socket_id=?1 AND d.worktree_id=?2 AND d.message_id=?3 AND d.address_id=?4", params![ns.session_socket_id,ns.space_id.as_str(),assignment["current_message_id"].as_str(),assignment["recipient_address_id"].as_str()], |r|Ok(json!({"delivery_id":r.get::<_,String>(0)?,"state":r.get::<_,String>(1)?,"attempt_id":r.get::<_,Option<String>>(2)?})))?;
+        assignment["delivery"] = self.transaction.query_row("SELECT d.delivery_id,s.progress,(SELECT attempt_id FROM delivery_attempts a WHERE a.session_socket_id=d.session_socket_id AND a.worktree_id=d.worktree_id AND a.delivery_id=d.delivery_id ORDER BY a.rowid DESC LIMIT 1) FROM mailbox_deliveries d JOIN delivery_seats s USING(session_socket_id,worktree_id,delivery_id) WHERE d.session_socket_id=?1 AND d.worktree_id=?2 AND d.message_id=?3 AND d.address_id=?4", params![ns.session_socket_id,ns.space_id.as_str(),assignment["current_message_id"].as_str(),assignment["recipient_address_id"].as_str()], |r|Ok(json!({"delivery_id":r.get::<_,String>(0)?,"state":r.get::<_,String>(1)?,"attempt_id":r.get::<_,Option<String>>(2)?})))?;
+        if let Some(origin) = self.envoy_origin(
+            ns,
+            &PaneAddressId::new(assignment["recipient_address_id"].as_str().unwrap()),
+        )? {
+            assignment["workspace"] = json!(origin.origin_label);
+        }
         Ok(assignment)
     }
 
@@ -303,8 +323,9 @@ impl StateTransaction<'_> {
                        WHERE p.session_socket_id=c.session_socket_id AND p.worktree_id=c.worktree_id
                          AND p.address_id=c.owner_address_id AND p.retired=1)))
                AND NOT EXISTS(SELECT 1 FROM mailbox_deliveries d
+                   JOIN delivery_seats s USING(session_socket_id,worktree_id,delivery_id)
                    WHERE d.session_socket_id=c.session_socket_id AND d.worktree_id=c.worktree_id
-                     AND d.state NOT IN ('settled','failed','cancelled')
+                     AND s.progress NOT IN ('settled','failed','cancelled')
                      AND (d.message_id=c.report_message_id OR d.message_id=c.wake_message_id
                        OR d.message_id IN (SELECT l.message_id FROM coordination_links l
                          JOIN coordination_assignments a USING(session_socket_id,worktree_id,assignment_id)
@@ -468,9 +489,10 @@ impl StateTransaction<'_> {
     pub(crate) fn reconcile_coordinations(
         &mut self,
         ns: &StateNamespace,
-        discovered: &crate::DiscoveredWorktree,
+        live: &crate::spaces::LiveSpaces,
         by: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        let discovered = live.local();
         self.reconcile_missing_dispositions(ns, by)?;
         let mut statement = self.transaction.prepare("SELECT coordination_id FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 ORDER BY rowid")?;
         let ids = statement
@@ -491,14 +513,7 @@ impl StateTransaction<'_> {
                 // never silently cancelled or retried here.
                 let delivery=self.transaction.query_row("SELECT delivery_id FROM mailbox_deliveries WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 AND state='queued'",params![ns.session_socket_id,ns.space_id.as_str(),message],|r|r.get::<_,String>(0)).optional()?;
                 if let Some(delivery) = delivery {
-                    self.transaction.execute("UPDATE mailbox_deliveries SET state='cancelled' WHERE session_socket_id=?1 AND worktree_id=?2 AND delivery_id=?3 AND state='queued'",params![ns.session_socket_id,ns.space_id.as_str(),delivery])?;
-                    self.append_transition(
-                        ns,
-                        TransitionEntityKind::MailboxDelivery,
-                        &delivery,
-                        TransitionKind::Cancelled,
-                        by,
-                    )?;
+                    self.cancel_unsent_delivery(ns, &crate::DeliveryId::new(delivery), by)?;
                 }
             }
             if outcome != "open" {
@@ -630,7 +645,7 @@ impl StateTransaction<'_> {
                 id.as_str(),
                 by,
             )?;
-            if !self.coordination_wake_eligible(ns, &id, discovered)? {
+            if !self.coordination_wake_eligible(ns, &id, live)? {
                 continue;
             }
             let message =
@@ -705,8 +720,9 @@ impl StateTransaction<'_> {
         &self,
         ns: &StateNamespace,
         id: &CoordinationId,
-        discovered: &crate::DiscoveredWorktree,
+        live: &crate::spaces::LiveSpaces,
     ) -> Result<bool, StoreError> {
+        let discovered = live.local();
         let (address,session,outcome):(String,String,String)=self.transaction.query_row("SELECT owner_address_id,owner_session_id,outcome FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),id.as_str()],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         if outcome != "open"
             || !self
@@ -766,14 +782,36 @@ impl StateTransaction<'_> {
             return Ok(false);
         }
         for (_, address, session, outcome, _, message) in &assignments {
+            if outcome == "completed" {
+                continue;
+            }
+            let seat = self.assignment_seat(
+                ns,
+                &PaneAddressId::new(address.clone()),
+                &MessageId::new(message.clone()),
+            )?;
+            let seat_ns = &seat.principal.ns;
+            let address = seat.principal.address_id.as_str();
+            // A remote worker's workspace that cannot be read, or cannot make
+            // progress, says nothing about the work, so no nudge is sent on it.
+            let Some(discovered) = live.of(&seat_ns.space_id) else {
+                return Ok(false);
+            };
+            if seat_ns != ns
+                && !self
+                    .worktree_state(seat_ns)?
+                    .is_some_and(|w| w.activated && !w.paused && !w.deactivated)
+            {
+                return Ok(false);
+            }
             let binding = self
-                .active_pane_bindings(ns)?
+                .active_pane_bindings(seat_ns)?
                 .into_iter()
                 .find(|b| b.address_id.as_str() == address);
-            let live = binding
+            let pane = binding
                 .as_ref()
                 .and_then(|b| discovered.panes.iter().find(|p| p.pane_id == b.pane_id));
-            let worker_working = live.is_some_and(|p| {
+            let worker_working = pane.is_some_and(|p| {
                 p.agent_session_id.as_ref().map(|s| s.as_str()) == Some(session.as_str())
                     && p.agent_status.as_deref() == Some("working")
             });
@@ -787,28 +825,28 @@ impl StateTransaction<'_> {
             if outcome != "pending" {
                 continue;
             }
-            let delivery=self.transaction.query_row("SELECT state FROM mailbox_deliveries WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 AND address_id=?4",params![ns.session_socket_id,ns.space_id.as_str(),message,address],|r|r.get::<_,String>(0))?;
+            let delivery = seat.progress;
             if matches!(
-                delivery.as_str(),
-                "dispatching" | "submitted" | "acknowledged"
+                delivery,
+                DeliveryState::Dispatching | DeliveryState::Submitted | DeliveryState::Acknowledged
             ) {
                 return Ok(false);
             }
-            if delivery == "queued"
-                && live.is_some_and(|p| {
+            if delivery == DeliveryState::Queued
+                && pane.is_some_and(|p| {
                     p.agent_session_id.as_ref().map(|s| s.as_str()) == Some(session.as_str())
                         && matches!(p.agent_status.as_deref(), Some("working" | "idle" | "done"))
                 })
             {
-                let (retired,disabled):(bool,bool)=self.transaction.query_row("SELECT retired,collaboration_disabled FROM pane_addresses WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),address],|r|Ok((r.get(0)?,r.get(1)?)))?;
-                let head=self.transaction.query_row("SELECT state FROM mailbox_deliveries WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3 AND state NOT IN ('settled','failed','cancelled') ORDER BY mailbox_order LIMIT 1",params![ns.session_socket_id,ns.space_id.as_str(),address],|r|r.get::<_,String>(0)).optional()?;
+                let (retired,disabled):(bool,bool)=self.transaction.query_row("SELECT retired,collaboration_disabled FROM pane_addresses WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3",params![seat_ns.session_socket_id,seat_ns.space_id.as_str(),address],|r|Ok((r.get(0)?,r.get(1)?)))?;
+                let head=self.transaction.query_row("SELECT state FROM mailbox_deliveries WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3 AND state NOT IN ('settled','failed','cancelled') ORDER BY mailbox_order LIMIT 1",params![seat_ns.session_socket_id,seat_ns.space_id.as_str(),address],|r|r.get::<_,String>(0)).optional()?;
                 if !retired
                     && !disabled
                     && head.as_deref().is_some_and(|s| {
                         matches!(s, "queued" | "dispatching" | "submitted" | "acknowledged")
                     })
                     && self
-                        .dispatch_candidate(ns, &crate::PaneAddressId::new(address.clone()))?
+                        .dispatch_candidate(seat_ns, &seat.principal.address_id)?
                         .is_some()
                 {
                     return Ok(false);
@@ -824,7 +862,7 @@ impl StateTransaction<'_> {
                     return Ok(false);
                 }
             }
-            if delivery == "settled" && worker_working {
+            if delivery == DeliveryState::Settled && worker_working {
                 return Ok(false);
             }
         }
@@ -843,7 +881,7 @@ impl StateTransaction<'_> {
         &self,
         ns: &StateNamespace,
         message: &MessageId,
-        discovered: &crate::DiscoveredWorktree,
+        live: &crate::spaces::LiveSpaces,
     ) -> Result<bool, StoreError> {
         if !self.coordination_wake_current(ns, message)? {
             return Ok(false);
@@ -851,7 +889,7 @@ impl StateTransaction<'_> {
         let Some((id, _)) = self.wake_identity(ns, message)? else {
             return Ok(true);
         };
-        self.coordination_wake_eligible(ns, &id, discovered)
+        self.coordination_wake_eligible(ns, &id, live)
     }
 
     pub(crate) fn wake_identity(
@@ -923,8 +961,11 @@ impl StateTransaction<'_> {
         input: &Value,
         author: &RoutingAddressSnapshot,
     ) -> Result<(), StoreError> {
-        let stored=self.transaction.query_row("SELECT input_json FROM coordination_links WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 LIMIT 1",
-            params![ns.session_socket_id,ns.space_id.as_str(),message.as_str()],|r|r.get::<_,String>(0)).optional()?;
+        let stored = match self.tracked_message(ns, message)? {
+            Some(tracked) => Some(self.transaction.query_row("SELECT input_json FROM coordination_links WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 LIMIT 1",
+                params![tracked.home.session_socket_id,tracked.home.space_id.as_str(),tracked.message_id.as_str()],|r|r.get::<_,String>(0))?),
+            None => None,
+        };
         if let Some(stored) = stored {
             self.require_coordination_capability(ns, author)?;
             let session=self.transaction.query_row("SELECT author_session_snapshot FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),message.as_str()],|r|r.get::<_,Option<String>>(0))?;
@@ -969,9 +1010,10 @@ impl StateTransaction<'_> {
         link: &CoordinationLink,
         draft: &MessageDraft,
         recipient: &crate::MessageRecipientDraft,
+        session: Option<&crate::AgentSessionId>,
         input: &Value,
     ) -> Result<(), StoreError> {
-        let session = recipient.agent_session_snapshot.as_ref().ok_or_else(|| {
+        let session = session.ok_or_else(|| {
             StoreError::invalid_input("tracked recipients require an exact session")
         })?;
         if link.revision == 1 {
@@ -987,13 +1029,23 @@ impl StateTransaction<'_> {
     pub(crate) fn record_assignment_outcome(
         &mut self,
         ns: &StateNamespace,
+        attempt: &AssignmentAttempt,
         link: &CoordinationLink,
-        draft: &MessageDraft,
+        reply: &MessageId,
         input: &crate::coordination::TrackingInput,
         now: u64,
     ) -> Result<(), StoreError> {
-        self.validate_assignment_wait(ns, link, input.waiting_on_assignment_id.as_ref())?;
         let assignment = self.coordination_assignment(ns, &link.assignment_id)?;
+        let worker = self.counterpart_address(&attempt.ns, &attempt.address_id, ns)?;
+        if worker.as_ref().map(PaneAddressId::as_str) != assignment["recipient_address_id"].as_str()
+            || attempt.session.as_ref().map(|s| s.as_str())
+                != assignment["recipient_session_id"].as_str()
+        {
+            return Err(StoreError::invalid_input(
+                "work outcome requires the assignment's exact recipient session",
+            ));
+        }
+        self.validate_assignment_wait(ns, link, input.waiting_on_assignment_id.as_ref())?;
         // An older revision can finish its transport, but cannot rewrite current work.
         let open=self.transaction.query_row("SELECT outcome='open' FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),link.coordination_id.as_str()],|r|r.get::<_,bool>(0))?;
         if open && assignment["revision"].as_u64() == Some(link.revision) {
@@ -1003,10 +1055,10 @@ impl StateTransaction<'_> {
                 .unwrap_or(json!("unclassified"));
             self.transaction.execute("UPDATE coordination_assignments SET work_outcome=?4,blocked_reason=?5,waiting_on_assignment_id=?6,last_reply_message_id=?7
                 WHERE session_socket_id=?1 AND worktree_id=?2 AND assignment_id=?3 AND revision=?8",
-                params![ns.session_socket_id,ns.space_id.as_str(),link.assignment_id.as_str(),outcome.as_str(),input.blocked_reason,input.waiting_on_assignment_id.as_ref().map(|v|v.as_str()),draft.message_id.as_str(),to_i64(link.revision)?])?;
+                params![ns.session_socket_id,ns.space_id.as_str(),link.assignment_id.as_str(),outcome.as_str(),input.blocked_reason,input.waiting_on_assignment_id.as_ref().map(|v|v.as_str()),reply.as_str(),to_i64(link.revision)?])?;
             self.advance_coordination(ns, &link.coordination_id, now)?;
         }
-        self.link_coordination_message(ns, &draft.message_id, link, "reply", &input.fingerprint())
+        self.link_coordination_message(ns, reply, link, "reply", &input.fingerprint())
     }
 
     fn validate_assignment_wait(
@@ -1088,18 +1140,7 @@ impl StateTransaction<'_> {
                 .collect::<Result<Vec<_>, _>>()?
         };
         for delivery in cancelled {
-            self.transaction.execute(
-                "UPDATE mailbox_deliveries SET state='cancelled'
-                 WHERE session_socket_id=?1 AND worktree_id=?2 AND delivery_id=?3 AND state='queued'",
-                params![ns.session_socket_id, ns.space_id.as_str(), delivery],
-            )?;
-            self.append_transition(
-                ns,
-                TransitionEntityKind::MailboxDelivery,
-                &delivery,
-                TransitionKind::Cancelled,
-                by,
-            )?;
+            self.cancel_unsent_delivery(ns, &crate::DeliveryId::new(delivery), by)?;
         }
         Ok(())
     }

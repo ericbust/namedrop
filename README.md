@@ -204,7 +204,7 @@ A workspace label with no mention after it, as in `#catchup-again run the tests`
 
 A mention without a label never leaves the current workspace. If the name isn't there but another workspace has it, nothing is sent, and your agent tells you which label to type, such as `#beta @lead`. You can also ask in plain words, such as "ask my @lead panes to report back" or "message the lead in beta".
 
-Replies come back to the workspace you sent from. Context handoffs and tracked coordination stay inside one workspace.
+Replies come back to the workspace you sent from. Tracked work crosses too. After `handoff begin`, send to `#label @name` with the `coordination_id`. The worker replies from its own workspace, and the coordination, its results and its report stay with the lead. Context handoffs still stay inside one workspace.
 
 ### Run tests in a shell pane
 
