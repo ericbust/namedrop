@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add a second Namedrop workspace, `beta`, to a profile kept by `./testbed test --keep`.
+"""Add a second Namedrop workspace, `beta`, to a profile kept by `testbed/testbed test --keep`.
 
 Usage: second-workspace.py PROFILE_NAME   (e.g. test-link-<checkout name>)
 

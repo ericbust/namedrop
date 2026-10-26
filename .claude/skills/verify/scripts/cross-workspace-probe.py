@@ -3,7 +3,7 @@
 
 Usage: cross-workspace-probe.py PROFILE_NAME   (after second-workspace.py PROFILE_NAME)
 
-Alpha is the workspace `./testbed test --keep` left; beta is the one second-workspace.py
+Alpha is the workspace `testbed/testbed test --keep` left; beta is the one second-workspace.py
 added. Each check types one mention, waits for every delivery to settle and every agent to
 go idle, and judges the rows Namedrop wrote. Exit 0 when every check passes.
 """
