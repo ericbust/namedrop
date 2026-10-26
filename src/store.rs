@@ -4924,28 +4924,26 @@ impl StateTransaction<'_> {
             permitted_operations,
             reply_mode,
         };
-        let mut envelope = DeliveryEnvelope::new(
-            DeliveryControl::new_with_git_state_paths(
-                draft,
-                tool,
-                &attached_context_git_state_paths,
-                review_source_message_id,
-            )
-            .map_err(StoreError::invalid_input)?,
-            body,
-        );
-        envelope.control.coordination_id = assignments.first().map(|a| a.coordination_id.clone());
+        // The control is finished first; the instruction is chosen from it.
+        let mut control = DeliveryControl::new_with_git_state_paths(
+            draft,
+            tool,
+            &attached_context_git_state_paths,
+            review_source_message_id,
+        )
+        .map_err(StoreError::invalid_input)?;
+        control.coordination_id = assignments.first().map(|a| a.coordination_id.clone());
         if nudge {
-            envelope.control.coordination_id = wake_identity.map(|(id, _)| id);
+            control.coordination_id = wake_identity.map(|(id, _)| id);
         }
-        if envelope.control.coordination_id.is_none() {
-            envelope.control.coordination_id = self.transaction.query_row("SELECT coordination_id FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND report_message_id=?3",params![namespace.session_socket_id,namespace.space_id.as_str(),envelope.control.message_id.as_str()],|r|r.get::<_,String>(0).map(crate::CoordinationId::new)).optional()?;
+        if control.coordination_id.is_none() {
+            control.coordination_id = self.transaction.query_row("SELECT coordination_id FROM coordinations WHERE session_socket_id=?1 AND worktree_id=?2 AND report_message_id=?3",params![namespace.session_socket_id,namespace.space_id.as_str(),control.message_id.as_str()],|r|r.get::<_,String>(0).map(crate::CoordinationId::new)).optional()?;
         }
-        envelope.control.assignments = assignments;
-        envelope.control.coordination_nudge = nudge;
-        envelope.control.coordination_nudge_stale = stale_nudge;
+        control.assignments = assignments;
+        control.coordination_nudge = nudge;
+        control.coordination_nudge_stale = stale_nudge;
         if nudge || tracked_join {
-            let id = envelope.control.coordination_id.clone().ok_or_else(|| {
+            let id = control.coordination_id.clone().ok_or_else(|| {
                 StoreError::invalid_input("continuation lost its coordination identity")
             })?;
             let mut statement=self.transaction.prepare("SELECT assignment_id,revision,recipient_address_id,recipient_session_id,work_outcome FROM coordination_assignments WHERE session_socket_id=?1 AND worktree_id=?2 AND coordination_id=?3 ORDER BY rowid")?;
@@ -4980,18 +4978,16 @@ impl StateTransaction<'_> {
                     Ok((assignment, revision, alias))
                 })
                 .collect::<Result<Vec<_>, StoreError>>()?;
-            envelope
-                .control
-                .bind_coordination_actions(&id, &actions, all_completed);
+            control.bind_coordination_actions(&id, &actions, all_completed);
         }
         if tracked_worker {
-            for operation in &mut envelope.control.tool.operations {
+            for operation in &mut control.tool.operations {
                 if operation.token == "reply" {
                     operation.input["work_outcome"] = serde_json::json!("needs_continuation");
                 }
             }
         }
-        Ok(envelope)
+        Ok(DeliveryEnvelope::new(control, body))
     }
 
     fn result_set_completion(

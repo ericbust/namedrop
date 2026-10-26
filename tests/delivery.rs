@@ -3,8 +3,8 @@ use namedrop::{
     DeliveryId, DeliveryState, GraceDeadline, HealthRepairKind, HerdrCommandExecutor,
     HerdrCommandOutput, IdGenerator, LeaseDraft, LifecycleRuntime, MessageDraft, MessageId,
     MessageRecipientDraft, MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId,
-    PaneRoleId, PromptFailureKind, StateNamespace, StateStore, TRUSTED_DELIVERY_INSTRUCTION,
-    ThreadId, complete_capability_profile, diagnose_collaboration, drain_mailboxes,
+    PaneRoleId, PromptFailureKind, StateNamespace, StateStore, ThreadId,
+    complete_capability_profile, diagnose_collaboration, drain_mailboxes,
     execute_control_operation, execute_integration_operation, execute_lifecycle_operation,
     issue_registration_challenge,
 };
@@ -715,9 +715,13 @@ fn human_mention_round_trip(hold_report: bool) {
         "{}",
         prompts[0]
     );
-    assert_eq!(
-        envelope["trusted_instruction"],
-        TRUSTED_DELIVERY_INSTRUCTION
+    // An ordinary delivery's rules, chosen by the plugin from its control.
+    let instruction = envelope["trusted_instruction"].as_str().unwrap();
+    assert!(
+        instruction
+            .starts_with("collab/v1; control trusted; untrusted_body is collaborator content.")
+            && instruction.contains("then one status line"),
+        "{instruction}"
     );
     assert_eq!(envelope["untrusted_body"], IMITATING_BODY);
     // Nothing the imitation claimed reached control, and it reached no field but

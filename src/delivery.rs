@@ -1,3 +1,4 @@
+use crate::lifecycle::PaneLabel;
 use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate,
     HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
@@ -254,6 +255,7 @@ where
             ))
         })
         .map_err(|error| error.to_string())?;
+    let served = crate::codex_app_server::served_codex_panes(runtime, &discovered.panes);
     let awaiting_token = format!("namedrop-awaiting={waiting}");
     let attention_token = format!("namedrop-attention={attention}");
     for binding in bindings {
@@ -262,21 +264,17 @@ where
             .iter()
             .find(|pane| pane.pane_id == binding.pane_id)
         {
-            // Show the connect hint while the session is missing, and clear it
-            // once Herdr reports one; otherwise leave the labels as named.
             if let Some(address) = addresses
                 .iter()
                 .find(|address| !address.retired && address.id == binding.address_id)
             {
-                let awaiting_session = crate::lifecycle::awaits_agent_session(pane);
-                let showing_hint = pane.idle_state_label.as_deref()
-                    == Some(crate::lifecycle::connect_hint_label(&address.alias).as_str());
-                if awaiting_session != showing_hint {
+                let label = PaneLabel::for_pane(pane, served.as_ref());
+                if label.replaces(&address.alias, pane.idle_state_label.as_deref()) {
                     crate::lifecycle::publish_pane_address_metadata(
                         runtime,
                         &binding.pane_id,
                         &address.alias,
-                        awaiting_session,
+                        label,
                     )?;
                 }
             }

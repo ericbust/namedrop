@@ -24,7 +24,7 @@ Preconditions:
 
 - The helper owns the server, two workspaces with separate Git checkouts, and the Namedrop state. No browser is needed.
 
-- Run `.agents/skills/verify/scripts/control-namedrop.py --feature dashboard`.
+- Run `.claude/skills/verify/native/control-namedrop.py --feature dashboard`.
 - It names `@build` as a terminal, then runs `dashboard --no-open` in the first workspace's pane. The response must report `server: started`, `opened: false`, the fixture workspace, and a loopback URL on the port in `<state>/dashboard/server.json`.
 - It redeems the link and requires `303` to `/w/<key>` with a `Set-Cookie`. Replaying the link and requesting the page without the cookie must both return `401`. With the cookie, the page returns `200` HTML.
 - It reads the first `snapshot` frame from `/w/<key>/events`. The space must be the fixture workspace in state `active`, and the only terminal participant must be `@build`. The frame is saved as `dashboard-snapshot.json`.

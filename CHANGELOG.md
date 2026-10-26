@@ -2,7 +2,7 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
-## [1.1.0] - 2026-10-20
+## [Unreleased]
 
 ### Added
 
@@ -16,6 +16,50 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Changed
 
 - Namedrop's state moves to schema 6 the first time the new release opens it. Context handoffs and tracked coordination still stay inside one workspace.
+## [1.3.1] - 2026-10-25
+
+### Fixed
+
+- Codex on `gpt-6-sol` closed ordinary requests without answering them. Since 1.1.1 an ordinary delivery's instruction carried a separate sentence telling a reviewed worker report to finish with `complete.no-reply`, and that model read it as an order for every delivery, so the sender waited for a reply that never came. The sentence is gone: an ordinary delivery offers `reply` and `complete.no-reply` as equal choices again. Replies to your own requests still close without a loop.
+
+## [1.3.0] - 2026-10-24
+
+### Added
+
+- GitHub-managed installations check for a newer version in the background once a day. Doctor reports the installed and available versions as ND-UPDATE-001 without affecting health status. Claude Code and Codex show a person-visible session-start line at most once a day for each available version, shared across panes. The line adds no agent context. Local links, archives and full commit pins make no update requests. Set `check_for_updates` to `false` in `settings.json` under `herdr plugin config-dir namedrop` to disable checks and notices.
+
+### Changed
+
+- The session-start wrapper forwards the update line alongside the existing selection policy and Codex shared app-server notice. Update Namedrop refreshes it during activation; restart agent sessions to load it. The installed hook command and `hooks.json` are unchanged, but Codex asks once to trust the refreshed hooks again in `/hooks`.
+
+## [1.2.0] - 2026-10-23
+
+### Added
+
+- Namedrop now tells you when Codex 0.162 or later runs a Codex pane's session through its shared app-server. That server keeps the environment of wherever it started, so Herdr cannot tell which pane the session is in: mentions to that agent stay queued, a second Codex pane's session can land on the first, and Namedrop's own Codex hooks go silent. `namedrop doctor` reports it once as ND-SESSION-003, and stops giving the first-prompt and reinstall advice that cannot help here. Naming a Codex pane, activation and the start of an affected Codex session say the same thing. Each explains what is wrong, what the fix does and costs, the commands to run, and how to undo it. Namedrop never changes the Codex setting itself. See [the shared app-server](docs/compatibility.md#codex-0162-and-later-the-shared-app-server).
+
+### Changed
+
+- A Codex pane that the shared app-server serves shows "@name: see namedrop doctor" while idle instead of "send a prompt to connect".
+- The Codex session-start hook changed, so Codex asks once to trust Namedrop's hooks again in `/hooks`. Restart Codex sessions after updating to load it.
+
+## [1.1.1] - 2026-10-22
+
+### Changed
+
+- Each delivery envelope carries only the rules for the kind of delivery it is: a context request, a result set, a report to the person, a coordination nudge or an ordinary message. The whole rulebook used to ride along on every delivery; the instruction text per envelope is now 57% to 79% shorter. Nothing changes in what an envelope authorizes.
+
+## [1.1.0] - 2026-10-22
+
+### Fixed
+
+- A delivery that Claude Code hands to the hook as marked pasted text, which it does for any prompt over 800 characters, now gets its verification context. Before, a long envelope arrived without it, so the agent could not tell a routed delivery from text the person pasted.
+
+### Changed
+
+- The selection policy arrives once per session through a new SessionStart hook on Claude Code and Codex, and again after a compaction. Each prompt now carries only the roster rows, about 95% less text than before. Restart agent sessions after updating so they load the new hook; a session started before the update keeps working and sees the roster rows without the policy until it restarts. Codex asks once to trust the new hook definition.
+- A delivery that needs no visible answer ends with one status line instead of silence, which saves the extra model call Claude Code spends continuing a turn that printed nothing.
+- Shorter command guidance in delivery envelopes. Nothing changes in what an envelope authorizes.
 
 ## [1.0.2] - 2026-10-12
 

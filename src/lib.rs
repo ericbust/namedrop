@@ -3,6 +3,7 @@ mod agent_status_model;
 pub mod cli;
 pub use agent_status::collect_agent_status;
 pub use agent_status_model::{suggest_agent_persona, summarize_agent_status};
+mod codex_app_server;
 mod context;
 mod controls;
 mod coordination;
@@ -31,6 +32,8 @@ mod store;
 pub use shortcuts::install_shortcuts;
 mod terminal;
 pub mod tour;
+#[doc(hidden)]
+pub mod update_check;
 pub use terminal::{default_pane_type, detect_pane_type, execute_terminal, verify_inherited_pane};
 
 pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integration-package-";
@@ -46,7 +49,9 @@ pub use health::{
     HealthIssue, HealthRepair, HealthRepairKind, HealthReport, HealthSeverity, HealthStatus,
     diagnose_collaboration, render_health_report_to_text, request_doctor_assistance,
 };
-pub use hook::execute_user_prompt_submit_hook;
+pub use hook::{
+    execute_codex_app_server_hook, execute_session_start_hook, execute_user_prompt_submit_hook,
+};
 pub use install::{AgentConfigDirectories, install_integration_package, package_directory};
 pub(crate) use install::{
     IntegrationPackageInstallation, disclosed_user_package_targets,
@@ -65,9 +70,9 @@ pub use integration::{
     DeliveryControlDraft, DeliveryEnvelope, INTEGRATION_PROTOCOL_VERSION, InputTransport,
     IntegrationChallenge, IntegrationPackage, IntegrationRegistration, IntegrationToolInvocation,
     OperationCatalog, REPLY_BODY_PLACEHOLDER, ResultSetCompletion, ResultSetOutcome,
-    ResultSetStatus, TRUSTED_DELIVERY_INSTRUCTION, complete_capability_profile,
-    describe_operations, execute_integration_operation, integration_package,
-    issue_registration_challenge, operation_catalog,
+    ResultSetStatus, complete_capability_profile, describe_operations,
+    execute_integration_operation, integration_package, issue_registration_challenge,
+    operation_catalog, trusted_delivery_instruction,
 };
 pub(crate) use integration::{collaboration_executable, tool_environment};
 pub use lifecycle::{

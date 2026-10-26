@@ -391,7 +391,14 @@ where
                 &attribution,
                 false,
             )?;
-            publish_pane_address_metadata(runtime, pane_id, &alias, awaits_agent_session(pane))?;
+            let served =
+                crate::codex_app_server::served_codex_panes(runtime, std::slice::from_ref(pane));
+            publish_pane_address_metadata(
+                runtime,
+                pane_id,
+                &alias,
+                PaneLabel::for_pane(pane, served.as_ref()),
+            )?;
             let addresses = store
                 .transaction(|transaction| transaction.list_pane_addresses(&namespace))
                 .map_err(|error| error.to_string())?;
@@ -434,7 +441,8 @@ where
                 "type_override": "name <alias> --type terminal|agent",
                 "pane_id": pane_id,
                 "agent_session_id": agent_session_id,
-                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none()).map(crate::install::native_session_setup),
+                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none() && served.is_none()).map(crate::install::native_session_setup),
+                "codex_app_server": served.as_ref().map(crate::codex_app_server::ServedPanes::advice),
                 "runtime": agent_runtime,
                 "activated": true,
                 "activation_was_needed": !was_activated,
@@ -1060,40 +1068,73 @@ where
     }
 }
 
-/// Whether Herdr sees a native agent in this pane but has not reported its
-/// session. A fresh Codex can show its composer before running SessionStart,
-/// so the human must submit a first prompt before the pane can register.
-pub(crate) fn awaits_agent_session(pane: &DiscoveredPane) -> bool {
-    pane.agent.is_some() && pane.agent_session_id.is_none()
+/// What a named pane's idle label tells the human.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PaneLabel {
+    Ready,
+    /// Herdr sees a native agent but has not reported its session. A fresh
+    /// Codex can show its composer before running SessionStart, so the human
+    /// must submit a first prompt before the pane can register.
+    AwaitingSession,
+    /// Codex's shared app-server serves this pane, so a prompt cannot connect
+    /// it; Doctor explains the fix.
+    SharedAppServer,
 }
 
-/// The idle label that tells the human to submit a first prompt.
-pub(crate) fn connect_hint_label(alias: &str) -> String {
-    format!("@{alias}: send a prompt to connect")
+impl PaneLabel {
+    pub(crate) const HINTS: [Self; 2] = [Self::AwaitingSession, Self::SharedAppServer];
+
+    pub(crate) fn for_pane(
+        pane: &DiscoveredPane,
+        served: Option<&crate::codex_app_server::ServedPanes>,
+    ) -> Self {
+        if served.is_some_and(|served| served.serves(&pane.pane_id)) {
+            Self::SharedAppServer
+        } else if pane.agent.is_some() && pane.agent_session_id.is_none() {
+            Self::AwaitingSession
+        } else {
+            Self::Ready
+        }
+    }
+
+    pub(crate) fn hint(self, alias: &str) -> Option<String> {
+        match self {
+            Self::Ready => None,
+            Self::AwaitingSession => Some(format!("@{alias}: send a prompt to connect")),
+            Self::SharedAppServer => Some(format!("@{alias}: see namedrop doctor")),
+        }
+    }
+
+    /// Whether the pane's labels must be published again: its hint changed, or
+    /// a hint that no longer applies is still showing. A label the person set
+    /// themselves is left alone.
+    pub(crate) fn replaces(self, alias: &str, showing: Option<&str>) -> bool {
+        let wanted = self.hint(alias);
+        if wanted.as_deref() == showing {
+            return false;
+        }
+        wanted.is_some()
+            || Self::HINTS
+                .iter()
+                .any(|hint| hint.hint(alias).as_deref() == showing)
+    }
 }
 
 pub(crate) fn publish_pane_address_metadata<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
     pane_id: &str,
     alias: &str,
-    awaiting_session: bool,
+    label: PaneLabel,
 ) -> Result<(), String>
 where
     E: HerdrCommandExecutor,
 {
     let title = format!("@{alias}");
-    let ready = if awaiting_session {
-        connect_hint_label(alias)
-    } else {
-        format!("@{alias} ready")
-    };
+    let hint = label.hint(alias);
+    let ready = hint.clone().unwrap_or_else(|| format!("@{alias} ready"));
     let working = format!("@{alias} working");
     let blocked = format!("@{alias} needs attention");
-    let unknown = if awaiting_session {
-        connect_hint_label(alias)
-    } else {
-        format!("@{alias} status unknown")
-    };
+    let unknown = hint.unwrap_or_else(|| format!("@{alias} status unknown"));
     runtime.herdr.execute(&[
         "pane",
         "report-metadata",

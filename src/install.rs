@@ -28,6 +28,7 @@ const CODEX_MANIFEST_FILE: &str = ".codex-plugin/plugin.json";
 const CLAUDE_MANIFEST_FILE: &str = ".claude-plugin/plugin.json";
 const HOOKS_FILE: &str = "hooks/hooks.json";
 const HOOK_SCRIPT_FILE: &str = "scripts/user-prompt-submit";
+const SESSION_START_SCRIPT_FILE: &str = "scripts/session-start";
 const MARKETPLACE_FILE: &str = ".agents/plugins/marketplace.json";
 const CODEX_RULES_MARKER: &str = "# Managed by Namedrop: collaboration command permissions.\n";
 const INSTALLED_COMMAND_MARKER: &str = "<!-- namedrop-installed-command -->";
@@ -39,12 +40,13 @@ const PACKAGE_DIRECTORIES: [&str; 6] = [
     "hooks",
     "scripts",
 ];
-const CODEX_SNAPSHOT_FILES: [&str; 5] = [
+const CODEX_SNAPSHOT_FILES: [&str; 6] = [
     CODEX_MANIFEST_FILE,
     INSTRUCTIONS_FILE,
     DESCRIPTOR_FILE,
     HOOKS_FILE,
     HOOK_SCRIPT_FILE,
+    SESSION_START_SCRIPT_FILE,
 ];
 
 /// Runtime configuration resolved at the CLI boundary. Library callers default
@@ -60,7 +62,7 @@ impl AgentConfigDirectories<'_> {
             .map(Path::to_owned)
             .unwrap_or_else(|| home.join(".claude"))
     }
-    fn codex(self, home: &Path) -> PathBuf {
+    pub(crate) fn codex(self, home: &Path) -> PathBuf {
         self.codex
             .map(Path::to_owned)
             .unwrap_or_else(|| home.join(".codex"))
@@ -161,7 +163,7 @@ pub(crate) fn user_hook_activation_guidance(
         }
         None => json!(["resolve an absolute HOME before activating the Codex plugin"]),
     };
-    json!({
+    let mut guidance = json!({
         "codex": {
             "status": "human_action_required",
             "cache_current": codex_cache_current,
@@ -172,7 +174,11 @@ pub(crate) fn user_hook_activation_guidance(
             "status": "loads_next_session",
             "steps": ["Start a new Claude Code session or run /reload-plugins. Verify a request and reply; doctor alone cannot verify hooks."]
         }
-    })
+    });
+    if let Some(advice) = crate::codex_app_server::observe(home_directory, config).advice() {
+        guidance["codex"]["app_server"] = advice;
+    }
+    guidance
 }
 
 pub(crate) fn native_session_setup(runtime: AgentRuntime) -> Value {
@@ -277,8 +283,13 @@ fn codex_snapshot_matches(installed: &Path, cached: &Path) -> bool {
             .ok()
             .zip(fs::read(cached.join(relative)).ok())
             .is_some_and(|(installed, cached)| installed == cached)
-    }) && fs::metadata(cached.join(HOOK_SCRIPT_FILE))
-        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o100 != 0)
+    }) && [HOOK_SCRIPT_FILE, SESSION_START_SCRIPT_FILE]
+        .into_iter()
+        .all(|script| {
+            fs::metadata(cached.join(script)).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o100 != 0
+            })
+        })
 }
 
 fn paths_resolve_to_same_target(configured: &Path, installed: &Path) -> bool {
@@ -373,7 +384,7 @@ fn install_integration_package_with_config(
 
 struct PreparedPackage {
     directory: PathBuf,
-    files: [(&'static str, String, Option<u32>); 8],
+    files: [(&'static str, String, Option<u32>); 9],
     codex_policy: Option<(PathBuf, String)>,
 }
 
@@ -409,12 +420,14 @@ fn prepare_integration_package(
         installed_instructions(package.instructions, runtime, executable, state_directory)?;
     let hooks = hooks_manifest(&directory)?;
     let hook = hook_script(runtime, executable, state_directory)?;
+    let session_start = session_start_script(runtime, executable, state_directory)?;
     let codex_version = codex_cache_version(&[
         runtime.as_str(),
         &instructions,
         package.tool_descriptor,
         &hooks,
         &hook,
+        &session_start,
     ]);
     let files = [
         (OWNERSHIP_MARKER_FILE, ownership_marker(), None),
@@ -424,6 +437,7 @@ fn prepare_integration_package(
         (CLAUDE_MANIFEST_FILE, claude_manifest(), None),
         (HOOKS_FILE, hooks, None),
         (HOOK_SCRIPT_FILE, hook, Some(0o700)),
+        (SESSION_START_SCRIPT_FILE, session_start, Some(0o700)),
         (MARKETPLACE_FILE, marketplace_manifest(), None),
     ];
     verify_owned_plugin_targets(&directory, &files)?;
@@ -847,25 +861,40 @@ fn claude_manifest() -> String {
     )
 }
 
+/// Both hosts read this file. Each entry launches the wrapper from the plugin
+/// root the host exports, or from the installed path when neither is set.
+/// SessionStart carries no matcher, so it runs for every source the host
+/// reports: a new session, a resume, a clear, a compaction, a fork. Each of
+/// those rebuilds the context the policy was in.
 fn hooks_manifest(package_directory: &Path) -> Result<String, String> {
-    let fallback = package_directory.join(HOOK_SCRIPT_FILE);
-    let fallback = fallback.to_str().ok_or_else(|| {
-        format!(
-            "the Agent Integration hook path is not valid UTF-8: {}",
-            fallback.display()
-        )
-    })?;
+    let launch = |script: &str| -> Result<String, String> {
+        let fallback = package_directory.join(script);
+        let fallback = fallback.to_str().ok_or_else(|| {
+            format!(
+                "the Agent Integration hook path is not valid UTF-8: {}",
+                fallback.display()
+            )
+        })?;
+        Ok(format!(
+            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/{script}\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/{script}\"; else {}; fi",
+            shell_single_quote(fallback)
+        ))
+    };
     Ok(format!(
         "{}\n",
         json!({
             "hooks": {
+                "SessionStart": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": launch(SESSION_START_SCRIPT_FILE)?,
+                        "timeout": 10
+                    }]
+                }],
                 "UserPromptSubmit": [{
                     "hooks": [{
                         "type": "command",
-                        "command": format!(
-                            "if [ -n \"${{PLUGIN_ROOT:-}}\" ]; then \"${{PLUGIN_ROOT}}/scripts/user-prompt-submit\"; elif [ -n \"${{CLAUDE_PLUGIN_ROOT:-}}\" ]; then \"${{CLAUDE_PLUGIN_ROOT}}/scripts/user-prompt-submit\"; else {}; fi",
-                            shell_single_quote(fallback)
-                        ),
+                        "command": launch(HOOK_SCRIPT_FILE)?,
                         "timeout": 10
                     }]
                 }]
@@ -928,12 +957,7 @@ fn hook_script(
         markers.push(crate::hook::DELIVERY_MARKER);
     }
     for marker in markers {
-        let (opening, closing) = crate::hook::context_bounds(marker);
-        safe_context.push_str(&format!(
-            "case \"$output\" in\n  {}*{}) printf '%s' \"$output\" ;;\nesac\n",
-            shell_single_quote(&opening),
-            shell_single_quote(&closing),
-        ));
+        safe_context.push_str(&forward_marked_context("UserPromptSubmit", marker));
     }
     Ok(format!(
         "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  {} hook mailbox-wake --state-directory {} </dev/null >/dev/null 2>&1 &\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
@@ -943,6 +967,97 @@ fn hook_script(
         shell_single_quote(state_directory),
         safe_context,
     ))
+}
+
+/// The shell that forwards one dynamic context, recognized by the serialized
+/// text either side of its fixed marker, which no other output carries.
+fn forward_marked_context(event: &str, marker: &str) -> String {
+    let (opening, closing) = crate::hook::context_bounds(event, marker);
+    format!(
+        "case \"$output\" in\n  {}*{}) printf '%s' \"$output\" ;;\nesac\n",
+        shell_single_quote(&opening),
+        shell_single_quote(&closing),
+    )
+}
+
+/// The session-start wrapper. It forwards only what the plugin produced: the
+/// selection policy, a numeric update notice, and Codex's shared-server advice.
+fn session_start_script(
+    runtime: AgentRuntime,
+    executable: &Path,
+    state_directory: &Path,
+) -> Result<String, String> {
+    let executable = executable.to_str().ok_or_else(|| {
+        format!(
+            "collaboration executable path is not valid UTF-8: {}",
+            executable.display()
+        )
+    })?;
+    let state_directory = state_directory.to_str().ok_or_else(|| {
+        format!(
+            "collaboration state directory path is not valid UTF-8: {}",
+            state_directory.display()
+        )
+    })?;
+    let app_server_notice = match runtime {
+        AgentRuntime::Codex => format!(
+            "if [ \"$output\" = {} ]; then\n  printf '%s' \"$output\"\n  exit 0\nfi\n",
+            shell_single_quote(&crate::hook::codex_app_server_hook_output().to_string())
+        ),
+        AgentRuntime::ClaudeCode => String::new(),
+    };
+    let update_notice = forward_update_notice(runtime);
+    Ok(format!(
+        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
+        shell_single_quote(executable),
+        shell_single_quote(state_directory),
+        forward_marked_context("SessionStart", crate::persona::POLICY_MARKER),
+    ))
+}
+
+fn forward_update_notice(runtime: AgentRuntime) -> String {
+    let (policy_start, policy_end) =
+        crate::hook::context_bounds("SessionStart", crate::persona::POLICY_MARKER);
+    let policy_end = policy_end
+        .strip_suffix('}')
+        .expect("hook output is an object");
+    let message_start = "\"systemMessage\":\"Namedrop ";
+    let message_middle = " is available (you have ";
+    let message_end = format!("). Update: {}\"}}", crate::update_check::UPDATE_COMMAND,);
+    let mut patterns = vec![
+        format!(
+            "{}*{}*{}",
+            shell_single_quote(&format!("{{{message_start}")),
+            shell_single_quote(message_middle),
+            shell_single_quote(&message_end)
+        ),
+        format!(
+            "{}*{}*{}*{}",
+            shell_single_quote(&policy_start),
+            shell_single_quote(&format!("{policy_end},{message_start}")),
+            shell_single_quote(message_middle),
+            shell_single_quote(&message_end)
+        ),
+    ];
+    if runtime == AgentRuntime::Codex {
+        let notice = crate::hook::codex_app_server_hook_output().to_string();
+        let start = notice
+            .strip_suffix("\"}")
+            .expect("notice ends with systemMessage");
+        patterns.push(format!(
+            "{}*{}*{}",
+            shell_single_quote(&format!("{start}\\nNamedrop ")),
+            shell_single_quote(message_middle),
+            shell_single_quote(&message_end)
+        ));
+    }
+    // Validate both versions with shell builtins; wrapper bytes must remain
+    // stable when only the release version changes.
+    format!(
+        "case \"$output\" in\n  {})\n    versions=${{output##*'Namedrop '}}\n    versions=${{versions%{}}}\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      case \"$1\" in ''|*[!0-9.]*) return 1 ;; esac\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      for part do\n        case \"$part\" in ''|0[0-9]*) return 1 ;; esac\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    printf '%s' \"$output\"\n    ;;\nesac\n",
+        patterns.join("|"),
+        shell_single_quote(&message_end),
+    )
 }
 
 pub(crate) fn shell_single_quote(value: &str) -> String {

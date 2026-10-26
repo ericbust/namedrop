@@ -313,6 +313,8 @@ A persona grants no permissions and no tool access. It isn't proof of skill, and
 
 ## Update Namedrop
 
+Namedrop checks for a newer version in the background, at most once a day. For GitHub-managed installations that follow a branch or tag, Doctor shows the installed and available versions. A new Claude Code or Codex session also shows one update line, at most once a day across all panes for that version. The line is visible to you and adds no agent context. Checks never download or install an update automatically. Local links, archives and full commit pins make no update requests.
+
 For a GitHub-managed installation, run this from a plain shell tab:
 
 ```sh
@@ -320,6 +322,8 @@ herdr plugin action invoke update --plugin namedrop
 ```
 
 The **Update Namedrop** tab checks your installed branch or ref for new commits, asks **Install update now?**, and then installs and activates it. A compatible update keeps your agents running. Panes, workspaces, names, groups, handoffs, and pause settings stay intact. Existing sessions keep the instructions they loaded, and new sessions load the updated ones.
+
+To turn off both background checks and notices, put `{"check_for_updates":false}` in `settings.json` inside the directory printed by `herdr plugin config-dir namedrop`. Create the file and directory if needed. Set it to `true`, or remove that setting, to enable checks again. Invalid settings disable checks; Doctor explains the error without marking Namedrop unhealthy. This setting survives updates and `namedrop purge`.
 
 - **Older installations.** An upgrade from an older installation may need one session refresh. The tab lists the affected sessions by workspace, tab, and pane. Choose **Wait here** or **Later**, and refresh them when you're ready. Complete any Codex cache-refresh steps that setup prints.
 - **Nothing is forced.** An update keeps your installed source and ref, including a fixed pin. It stops and cancels nothing. If activation fails, Namedrop selects the previous runtime again. Build and setup details go to `last-update.log` in Namedrop's state directory.

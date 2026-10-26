@@ -1024,7 +1024,7 @@ fn envoys_never_appear_where_a_workspace_lists_its_own_names() {
 
     let output = fixture.hook("w2", "pane-2-tester", "hello");
     let roster = additional_context(&output);
-    let this_workspace = &roster[..roster.find("Namedrop channel:").unwrap()];
+    let this_workspace = &roster[..roster.find("Other workspaces:").unwrap()];
     assert!(this_workspace.contains("@tester"), "{roster}");
     assert!(!this_workspace.contains("planner"), "{roster}");
     assert!(!roster.contains("envoy"), "{roster}");

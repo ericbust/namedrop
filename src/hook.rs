@@ -19,6 +19,64 @@ struct UserPromptSubmitInput {
     prompt: String,
 }
 
+#[derive(Deserialize)]
+struct SessionStartInput {
+    hook_event_name: String,
+    source: Option<String>,
+}
+
+/// Supplies the Namedrop selection policy once, when a native session starts
+/// or its host rebuilds the context (resume, clear, compaction, fork). The
+/// policy is fixed text, so reading it per turn would only repeat it; the
+/// roster it governs still arrives with every prompt.
+pub fn execute_session_start_hook<E, C, I>(
+    input: &str,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Option<Value>
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    let input: SessionStartInput = serde_json::from_str(input).ok()?;
+    if input.hook_event_name != "SessionStart" {
+        return None;
+    }
+    crate::persona::session_policy(runtime).map(|policy| hook_output("SessionStart", &policy))
+}
+
+/// The shared app-server notice for a SessionStart that runs inside Codex's
+/// shared app-server, or `None`. It needs no runtime, which under the server
+/// usually cannot be built. A cleared or compacted session already showed the
+/// notice in its window, so only a new, resumed or forked one gets it.
+pub fn execute_codex_app_server_hook(input: &str) -> Option<Value> {
+    let input: SessionStartInput = serde_json::from_str(input).ok()?;
+    let rebuilt = matches!(input.source.as_deref(), Some("clear" | "compact"));
+    (input.hook_event_name == "SessionStart"
+        && !rebuilt
+        && crate::codex_app_server::runs_inside_server())
+    .then(codex_app_server_hook_output)
+}
+
+/// One fixed output, so the Codex session-start wrapper can forward it as an
+/// exact literal. The person sees `systemMessage` as one warning line; the
+/// agent gets the full advice and how to offer the fix.
+pub(crate) fn codex_app_server_hook_output() -> Value {
+    let advice = crate::codex_app_server::advice_lines(false)
+        .collect::<Vec<_>>()
+        .join("\n");
+    json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": format!(
+                "{}\n\n{advice}",
+                crate::codex_app_server::agent_guidance()
+            ),
+        },
+        "systemMessage": crate::codex_app_server::banner(),
+    })
+}
+
 /// Routes one runtime UserPromptSubmit payload when a column-zero leading
 /// Mention can be confirmed as a Collaboration Message. Non-Mention input stays
 /// invisible; a failed leading handoff preserves the prompt and adds only safe,
@@ -199,10 +257,11 @@ fn recipient_picker(scope: &SpaceScope, names: &[ScopedName]) -> String {
 }
 
 /// The serialized text a generated wrapper must recognize around one dynamic
-/// context: everything before the marker, and everything after it. Deriving both
-/// from the real output keeps the wrapper in step with this serialization.
-pub(crate) fn context_bounds(marker: &str) -> (String, String) {
-    let output = context_hook_output(marker).to_string();
+/// context of one hook event: everything before the marker, and everything
+/// after it. Deriving both from the real output keeps the wrapper in step with
+/// this serialization.
+pub(crate) fn context_bounds(event: &str, marker: &str) -> (String, String) {
+    let output = hook_output(event, marker).to_string();
     let end = output
         .find(marker)
         .expect("a plain-text context marker serializes verbatim")
@@ -215,9 +274,13 @@ pub(crate) fn failed_handoff_hook_outputs() -> [Value; 2] {
 }
 
 fn context_hook_output(context: &str) -> Value {
+    hook_output("UserPromptSubmit", context)
+}
+
+fn hook_output(event: &str, context: &str) -> Value {
     json!({
         "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
+            "hookEventName": event,
             "additionalContext": context,
         }
     })
@@ -236,7 +299,7 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let envelope = serde_json::from_str::<Value>(prompt).ok()?;
+    let envelope = serde_json::from_str::<Value>(submitted_text(prompt)).ok()?;
     if !is_delivery_envelope(prompt) {
         return None;
     }
@@ -285,8 +348,27 @@ where
     )
 }
 
+/// Claude Code marks a long paste for the model and hands the hook that marked
+/// form: the submitted text between a `<pasted_content id="…">` line and a
+/// `</pasted_content id="…">` line, whitespace around both. A Delivery Envelope
+/// is always long enough to arrive that way, so the text inside one whole block
+/// is what was submitted. Anything shaped differently is returned as it came,
+/// and the exact-match authentication still decides what the text is.
+fn submitted_text(prompt: &str) -> &str {
+    pasted_content(prompt).unwrap_or(prompt)
+}
+
+fn pasted_content(prompt: &str) -> Option<&str> {
+    const OPENING: &str = "<pasted_content id=\"";
+    const CLOSING: &str = "</pasted_content id=\"";
+    let rest = prompt.trim().strip_prefix(OPENING)?;
+    let id_end = rest.find("\">")?;
+    let (id, body) = (&rest[..id_end], &rest[id_end + 2..]);
+    body.strip_suffix(format!("{CLOSING}{id}\">").as_str())
+}
+
 fn is_delivery_envelope(prompt: &str) -> bool {
-    let Ok(envelope) = serde_json::from_str::<Value>(prompt) else {
+    let Ok(envelope) = serde_json::from_str::<Value>(submitted_text(prompt)) else {
         return false;
     };
     let recognized = match envelope.get("envelope_kind") {

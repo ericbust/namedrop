@@ -172,6 +172,13 @@ def step(value, prefix="  • "):
         return
     print(textwrap.fill(safe(value), width=92, initial_indent=prefix, subsequent_indent="    "))
 
+def show_app_server(server):
+    print("\nCodex shared app-server")
+    for text in (server.get("summary"), server.get("explanation"), server.get("fix")):
+        step(text)
+    for instruction in server.get("steps", []):
+        step(instruction, "    • ")
+
 def show_report(payload):
     if payload.get("error"):
         print("Error: " + safe(payload["error"]["message"]), file=sys.stderr)
@@ -221,6 +228,9 @@ def show_report(payload):
     for state in ("held", "failed", "expired", "requeued", "submitted", "terminal_running", "terminal_waiting"):
         if drain.get(state):
             step(f"Deliveries {state.replace('_', ' ')}: {len(drain[state])}. Run namedrop doctor for details.")
+    server = data.get("agent_integration_hook_activation", {}).get("codex", {}).get("app_server")
+    if server:
+        show_app_server(server)
     live_update = data.get("runtime", {}).get("live_update") and all(
             package.get("installed") for package in data["integration_packages"].values()) and all(
             hook.get("status") not in ("setup_required", "setup_failed")
