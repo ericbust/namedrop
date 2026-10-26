@@ -24,8 +24,8 @@ eval "env -i $vars $ST/runtime/namedrop --plugin-state $ST --herdr-workspace $W 
 
 `--json` gives the structured result under `data`. Naming a pane again
 (`name @codex --human --type agent`) is idempotent and shows its advice. Panes are
-`w1:p1` `@shell`, `w1:p2` `@claude`, `w1:p3` `@codex` on a fresh profile. `./testbed test`
-without `--fresh` and `./testbed reset` open a new workspace (`w2`, …); `./testbed up` keeps
+`w1:p1` `@shell`, `w1:p2` `@claude`, `w1:p3` `@codex` on a fresh profile. `testbed/testbed test`
+without `--fresh` and `testbed/testbed reset` open a new workspace (`w2`, …); `testbed/testbed up` keeps
 the saved one. The current ids are in `PROFILE/state.json` under `workspace` and `panes`;
 the `w1` below stands for that workspace.
 
@@ -108,6 +108,6 @@ the `w1` below stands for that workspace.
 
 ## Finish
 
-`./testbed destroy --profile NAME --yes` stops the server, stops every process still
+`testbed/testbed destroy --profile NAME --yes` stops the server, stops every process still
 running from the profile (agents and Codex daemons), and deletes the profile. Reports
 under `~/.namedrop-testbed/reports/` stay.

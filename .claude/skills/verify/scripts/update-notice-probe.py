@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drive Namedrop's update notice (1.3.0+) in a profile kept by `./testbed test --keep`.
+"""Drive Namedrop's update notice (1.3.0+) in a profile kept by `testbed/testbed test --keep`.
 
 Usage: update-notice-probe.py PROFILE_NAME   (e.g. test-link-<checkout name>)
 
