@@ -539,8 +539,8 @@ fn mentions_still_route_and_a_delivery_still_authenticates_exactly_as_before() {
 
 /// Claude Code marks a long paste for the model, and every dispatched envelope
 /// is long enough to be one, so the hook is handed the marked form rather than
-/// the JSON. Authentication sees through exactly one whole block, and nothing
-/// looser: a closing line for another paste, two pastes, or text around it.
+/// the JSON. Authentication sees through the trailing whole block; a closing
+/// line for another paste is no block at all.
 #[test]
 fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
     let directory = TestDirectory::new();
@@ -575,19 +575,14 @@ fn a_delivery_the_host_marked_as_pasted_text_still_authenticates() {
         "{attested}"
     );
 
-    for prompt in [
-        format!("<pasted_content id=\"29f6\">\n{envelope}\n</pasted_content id=\"552d\">"),
-        format!("{}{}", marked("29f6", &envelope), marked("552d", &envelope)),
-        format!("Handle this:{}", marked("29f6", &envelope)),
-    ] {
-        let output = hook(&prompt, &reviewer).map(|output| context(&output));
-        assert!(
-            output.as_ref().is_none_or(|context| {
-                !context.contains(DELIVERY_MARKER) && !context.contains(COMMAND_MARKER)
-            }),
-            "{prompt:?} was attested: {output:?}"
-        );
-    }
+    let prompt = format!("<pasted_content id=\"29f6\">\n{envelope}\n</pasted_content id=\"552d\">");
+    let output = hook(&prompt, &reviewer).map(|output| context(&output));
+    assert!(
+        output.as_ref().is_none_or(|context| {
+            !context.contains(DELIVERY_MARKER) && !context.contains(COMMAND_MARKER)
+        }),
+        "{prompt:?} was attested: {output:?}"
+    );
 }
 
 /// Herdr pastes a delivery into whatever the pane's input already holds and

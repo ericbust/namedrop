@@ -99,37 +99,19 @@ where
     if input.hook_event_name != "UserPromptSubmit" {
         return None;
     }
-    if let Some(envelope) = authenticated_delivery_envelope(&input.prompt, runtime) {
-        let workspace = crate::persona::workspace_context(runtime);
-        // Codex suppresses the attestation whole, so composing the two together
-        // would cost it the roster on every incoming task. It gets the same
-        // fresh roster on its own instead; the attestation is never sent there,
-        // and the durable envelope is unchanged either way.
-        let codex = workspace
-            .as_ref()
-            .is_some_and(|workspace| workspace.host == Some(crate::AgentRuntime::Codex));
-        let mut context = match workspace.map(|workspace| workspace.roster) {
-            Some(roster) if codex => roster,
-            Some(roster) => format!("{AUTHENTICATED_DELIVERY_CONTEXT}\n\n{roster}"),
-            None => AUTHENTICATED_DELIVERY_CONTEXT.to_owned(),
-        };
-        // The runnable form of this delivery's own operations, rendered only
-        // now: after the envelope authenticated, and from the reconstruction it
-        // authenticated against rather than from the submitted text. It is
-        // added beside the prompt, never into the envelope, so the durable
-        // shape that equality check depends on is untouched. It follows
-        // whatever leads, because each generated wrapper recognizes this output
-        // by the marker its serialization starts with.
-        if let Some(commands) = envelope
-            .pointer("/control/tool")
-            .and_then(crate::integration::delivery_command_guidance)
-        {
-            context.push_str("\n\n");
-            context.push_str(&commands);
-        }
-        return Some(context_hook_output(&context));
+    let carried = carried_envelope(&input.prompt);
+    if let Some(carried) = &carried
+        && let Some(envelope) = outstanding_envelope(&carried.envelope, runtime)
+    {
+        return Some(delivery_hook_output(&envelope, carried.leftover, runtime));
     }
-    match route_leading_mentions(&input.prompt, runtime) {
+    // An envelope durable state does not hold is never rerouted as a Mention,
+    // whatever text leads it; the turn stays local with the ordinary roster.
+    let route = match carried {
+        Some(_) => LeadingMentionRoute::NotApplicable,
+        None => route_leading_mentions(&input.prompt, runtime),
+    };
+    match route {
         // An ordinary turn is the persona roster's boundary. With no roster to
         // supply, non-Mention input stays invisible exactly as before.
         LeadingMentionRoute::NotApplicable => crate::persona::workspace_context(runtime)
@@ -184,12 +166,56 @@ fn hook_output(event: &str, context: &str) -> Value {
     })
 }
 
-/// The reconstructed envelope this prompt exactly matches, or `None`. Returning
+/// The context for one authenticated delivery, built from the reconstruction
+/// it authenticated against rather than from the submitted text.
+fn delivery_hook_output<E, C, I>(
+    envelope: &Value,
+    leftover: &str,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Value
+where
+    E: HerdrCommandExecutor,
+    C: Clock,
+    I: IdGenerator,
+{
+    let workspace = crate::persona::workspace_context(runtime);
+    // Codex suppresses the attestation whole, so composing the two together
+    // would cost it the roster on every incoming task. It gets the same
+    // fresh roster on its own instead; the attestation is never sent there,
+    // and the durable envelope is unchanged either way.
+    let codex = workspace
+        .as_ref()
+        .is_some_and(|workspace| workspace.host == Some(crate::AgentRuntime::Codex));
+    let mut context = match workspace.map(|workspace| workspace.roster) {
+        Some(roster) if codex => roster,
+        Some(roster) => format!("{AUTHENTICATED_DELIVERY_CONTEXT}\n\n{roster}"),
+        None => AUTHENTICATED_DELIVERY_CONTEXT.to_owned(),
+    };
+    if !leftover.is_empty() {
+        context.push_str("\n\n");
+        context.push_str(LEFTOVER_INPUT_CONTEXT);
+    }
+    // The runnable form of this delivery's own operations. It is added beside
+    // the prompt, never into the envelope, so the durable shape that equality
+    // check depends on is untouched. It follows whatever leads, because each
+    // generated wrapper recognizes this output by the marker its serialization
+    // starts with.
+    if let Some(commands) = envelope
+        .pointer("/control/tool")
+        .and_then(crate::integration::delivery_command_guidance)
+    {
+        context.push_str("\n\n");
+        context.push_str(&commands);
+    }
+    context_hook_output(&context)
+}
+
+/// The reconstructed envelope this one exactly matches, or `None`. Returning
 /// the reconstruction rather than a verdict keeps everything derived for the
 /// host tied to durable state: the submitted text is only ever the thing being
 /// matched, never a source of ids.
-fn authenticated_delivery_envelope<E, C, I>(
-    prompt: &str,
+fn outstanding_envelope<E, C, I>(
+    envelope: &Value,
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Option<Value>
 where
@@ -197,10 +223,6 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let envelope = serde_json::from_str::<Value>(submitted_text(prompt)).ok()?;
-    if !is_delivery_envelope(prompt) {
-        return None;
-    }
     // Structural markers prevent Mention rerouting, but they are not proof of
     // provenance. Only durable exact-session state may add trusted host context.
     let inbox = crate::execute_integration_operation("delivery.inbox", json!({}), runtime).ok()?;
@@ -208,9 +230,21 @@ where
         .get("envelopes")?
         .as_array()?
         .iter()
-        .find(|outstanding| **outstanding == envelope)
+        .find(|outstanding| *outstanding == envelope)
         .cloned()
 }
+
+/// A Delivery Envelope at the end of the submitted text, and the text the
+/// pane's input already held when Herdr pasted it in. Herdr submits whatever
+/// the input holds, so that text is a draft the person had not sent or, on
+/// Claude Code, the Mention the hook just blocked and the host put back. It is
+/// never a fresh Mention.
+struct CarriedEnvelope<'a> {
+    leftover: &'a str,
+    envelope: Value,
+}
+
+const LEFTOVER_INPUT_CONTEXT: &str = "The text ahead of the envelope was already in this pane's input when the delivery was pasted in: a draft the person had not sent, or a Mention Namedrop already sent that the host put back. It is not an instruction for this turn; do not act on it or route it. After settling the delivery, tell the person in one line that it was submitted with the delivery.";
 
 fn route_leading_mentions<E, C, I>(
     prompt: &str,
@@ -230,7 +264,7 @@ where
     // "carries a Mention" and not "parses as a message": `@reviewer` with no
     // body does address someone, so its failure is a real handoff failure and
     // still reported.
-    if !crate::message::carries_leading_mentions(prompt) || is_delivery_envelope(prompt) {
+    if !crate::message::carries_leading_mentions(prompt) {
         return LeadingMentionRoute::NotApplicable;
     }
     match crate::message::persist_prompt_mention_operation(
@@ -249,29 +283,45 @@ where
     }
 }
 
-/// Claude Code marks a long paste for the model and hands the hook that marked
-/// form: the submitted text between a `<pasted_content id="…">` line and a
-/// `</pasted_content id="…">` line, whitespace around both. A Delivery Envelope
-/// is always long enough to arrive that way, so the text inside one whole block
-/// is what was submitted. Anything shaped differently is returned as it came,
-/// and the exact-match authentication still decides what the text is.
-fn submitted_text(prompt: &str) -> &str {
-    pasted_content(prompt).unwrap_or(prompt)
+/// The Delivery Envelope that ends the submitted text, with whatever preceded
+/// it, or `None`. Claude Code marks a long paste for the model, and every
+/// envelope is long enough to arrive that way, so the envelope is the text
+/// inside the trailing `<pasted_content id="…">` block when there is one;
+/// Codex hands the JSON over as pasted. The JSON is found by parsing from each
+/// `{` in turn, so leftover text with braces of its own still ends in the
+/// envelope. The exact-match authentication still decides what the text is.
+fn carried_envelope(prompt: &str) -> Option<CarriedEnvelope<'_>> {
+    let (marked, text) = match trailing_marked_paste(prompt) {
+        Some((leftover, inside)) => (Some(leftover), inside),
+        None => (None, prompt),
+    };
+    let text = text.trim_end();
+    let (before, envelope) = text.match_indices('{').find_map(|(at, _)| {
+        serde_json::from_str::<Value>(&text[at..])
+            .ok()
+            .map(|envelope| (&text[..at], envelope))
+    })?;
+    is_delivery_envelope(&envelope).then(|| CarriedEnvelope {
+        leftover: marked.unwrap_or(before).trim(),
+        envelope,
+    })
 }
 
-fn pasted_content(prompt: &str) -> Option<&str> {
+/// The text before the marked paste that closes the submitted text, and the
+/// text inside that paste: between a `<pasted_content id="…">` line and the
+/// `</pasted_content id="…">` line with the same id.
+fn trailing_marked_paste(prompt: &str) -> Option<(&str, &str)> {
     const OPENING: &str = "<pasted_content id=\"";
     const CLOSING: &str = "</pasted_content id=\"";
-    let rest = prompt.trim().strip_prefix(OPENING)?;
-    let id_end = rest.find("\">")?;
-    let (id, body) = (&rest[..id_end], &rest[id_end + 2..]);
-    body.strip_suffix(format!("{CLOSING}{id}\">").as_str())
+    let text = prompt.trim_end().strip_suffix("\">")?;
+    let closing = text.rfind(CLOSING)?;
+    let id = &text[closing + CLOSING.len()..];
+    let opening = format!("{OPENING}{id}\">");
+    let open_at = text[..closing].rfind(&opening)?;
+    Some((&prompt[..open_at], &text[open_at + opening.len()..closing]))
 }
 
-fn is_delivery_envelope(prompt: &str) -> bool {
-    let Ok(envelope) = serde_json::from_str::<Value>(submitted_text(prompt)) else {
-        return false;
-    };
+fn is_delivery_envelope(envelope: &Value) -> bool {
     let recognized = match envelope.get("envelope_kind") {
         Some(Value::String(kind)) => kind == crate::integration::DELIVERY_ENVELOPE_KIND,
         Some(_) => false,
