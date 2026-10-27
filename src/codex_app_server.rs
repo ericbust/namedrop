@@ -468,8 +468,9 @@ mod tests {
     }
 
     #[test]
-    fn process_arguments_round_trip_spaces_and_non_ascii() {
-        let arguments = ["two words", "naïve café", "", "--no-daemon"];
+    fn process_arguments_round_trip_spaces_non_ascii_and_long_argv() {
+        let long = "x".repeat(5000);
+        let arguments = ["two words", "naïve café", "", "--no-daemon", &long];
         let child = Process::spawn(Command::new("sleep").arg0("my sleep").arg("30"));
         let probe = Process::spawn(
             Command::new("/bin/sh")
