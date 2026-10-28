@@ -2,7 +2,7 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
-## [Unreleased]
+## [1.5.0] - 2026-10-28
 
 ### Removed
 
