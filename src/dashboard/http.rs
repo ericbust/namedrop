@@ -300,6 +300,7 @@ fn stream_events(
             id,
             subscription,
             frames,
+            notify: front.hub.clone(),
         })
         .is_err()
     {

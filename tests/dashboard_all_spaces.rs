@@ -70,6 +70,10 @@ if [ -f "$ND_TEST_ROOT/transient-$HERDR_SOCKET_PATH" ]; then
     printf 'Herdr read timed out\n' >&2
     exit 1
 fi
+if [ -f "$ND_TEST_ROOT/error-$HERDR_SOCKET_PATH" ]; then
+    cat "$ND_TEST_ROOT/error-$HERDR_SOCKET_PATH" >&2
+    exit 1
+fi
 if [ -f "$ND_TEST_ROOT/snapshot-$HERDR_SOCKET_PATH.json" ]; then
     cat "$ND_TEST_ROOT/snapshot-$HERDR_SOCKET_PATH.json"
 else
@@ -1184,4 +1188,224 @@ fn ready_empty_completes_without_a_database_in_a_pristine_directory() {
     );
     assert!(calls(directory.path()).is_empty());
     assert!(all.next_raw(Duration::from_millis(350)).is_none());
+}
+
+fn collect_raw(events: &mut Events, limit: Duration) -> Vec<(String, Value)> {
+    let deadline = Instant::now() + limit;
+    let mut seen = Vec::new();
+    while let Some(event) = events.next_raw(deadline.saturating_duration_since(Instant::now())) {
+        seen.push(event);
+    }
+    seen
+}
+
+#[test]
+fn rv1_healthy_space_arrives_while_another_socket_times_out() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "a");
+    activate_on(&state, "hung", "x");
+    fs::write(directory.path().join("delay-hung"), "3").unwrap();
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let seen = collect_raw(&mut server.events("/api/events"), Duration::from_secs(3));
+    assert!(
+        seen.iter()
+            .any(|(event, data)| event == "space" && data["key"] == key("a")),
+        "healthy workspace was hidden by timeout; events {seen:?}"
+    );
+}
+
+#[test]
+fn rv1b_ready_arrives_within_a_bounded_sweep_when_another_socket_times_out() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "a");
+    activate_on(&state, "hung", "x");
+    fs::write(directory.path().join("delay-hung"), "3").unwrap();
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let seen = collect_raw(&mut server.events("/api/events"), Duration::from_secs(3));
+    let marker = seen.into_iter().find(|(event, _)| event == "ready");
+    assert!(
+        marker.is_some(),
+        "ready was blocked after multiple bounded reads"
+    );
+    assert_eq!(ready_keys(marker.unwrap()), HashSet::from([key("a")]));
+}
+
+#[test]
+fn rv2_plain_error_on_one_socket_does_not_hide_a_healthy_replay() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "a");
+    activate_on(&state, "flaky", "x");
+    fs::write(directory.path().join("transient-flaky"), "").unwrap();
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let seen = collect_raw(&mut server.events("/api/events"), Duration::from_secs(2));
+    assert!(
+        seen.iter()
+            .any(|(event, data)| event == "space" && data["key"] == key("a")),
+        "healthy workspace was hidden by a plain error; events {seen:?}"
+    );
+    let markers: Vec<_> = seen
+        .into_iter()
+        .filter(|(event, _)| event == "ready")
+        .collect();
+    assert_eq!(markers.len(), 1);
+    assert_eq!(
+        ready_keys(markers.into_iter().next().unwrap()),
+        HashSet::from([key("a")])
+    );
+}
+
+#[test]
+fn failed_socket_recovers_as_live_frames_after_ready() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "a");
+    activate_on(&state, "flaky", "x");
+    snapshot_on(directory.path(), "flaky", &[("x", None)]);
+    let error = directory.path().join("transient-flaky");
+    fs::write(&error, "").unwrap();
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let mut all = server.events("/api/events");
+    assert_eq!(
+        all.next_raw(WAIT).expect("healthy initial space").0,
+        "space"
+    );
+    assert_eq!(
+        ready_keys(all.next_raw(WAIT).expect("ready despite failed socket")),
+        HashSet::from([key("a")])
+    );
+    fs::remove_file(error).unwrap();
+    let (event, data) = all.next_raw(WAIT).expect("recovered workspace after ready");
+    assert_eq!(event, "space");
+    assert_eq!(
+        data["key"],
+        SpaceKey::of(&StateNamespace::for_space("flaky", "x")).as_str()
+    );
+    assert!(
+        all.next_raw(Duration::from_millis(350)).is_none(),
+        "ready repeated on recovery"
+    );
+}
+
+#[test]
+fn transient_failure_keeps_old_stream_membership_but_new_replay_omits_failed_socket() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "a");
+    activate_on(&state, "flaky", "x");
+    snapshot_on(directory.path(), "flaky", &[("x", None)]);
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let mut existing = server.events("/api/events");
+    for _ in 0..2 {
+        assert_eq!(existing.next_raw(WAIT).unwrap().0, "space");
+    }
+    assert_eq!(ready_keys(existing.next_raw(WAIT).unwrap()).len(), 2);
+    let error = directory.path().join("transient-flaky");
+    fs::write(&error, "").unwrap();
+    eventually(|| {
+        fs::read_to_string(directory.path().join("server.log"))
+            .unwrap()
+            .contains("flaky unavailable")
+    });
+    assert!(
+        existing.next_raw(Duration::from_millis(400)).is_none(),
+        "transient failure changed existing membership"
+    );
+    let mut newcomer = server.events("/api/events");
+    let mut initial = HashSet::new();
+    let marker = loop {
+        let (event, data) = newcomer
+            .next_raw(WAIT)
+            .expect("new replay with a failed socket");
+        if event == "ready" {
+            break (event, data);
+        }
+        assert_eq!(event, "space");
+        initial.insert(data["key"].as_str().unwrap().to_owned());
+    };
+    assert_eq!(
+        initial,
+        HashSet::from([key("a")]),
+        "new replay included an erroring socket"
+    );
+    assert_eq!(ready_keys(marker), initial);
+    fs::remove_file(error).unwrap();
+    let (event, data) = newcomer
+        .next_raw(WAIT)
+        .expect("recovered missing membership");
+    assert_eq!(event, "space");
+    assert_eq!(
+        data["key"],
+        SpaceKey::of(&StateNamespace::for_space("flaky", "x")).as_str()
+    );
+    assert!(
+        existing.next_raw(Duration::from_millis(400)).is_none(),
+        "unchanged recovery duplicated an existing workspace"
+    );
+}
+
+#[test]
+fn cold_ready_with_fast_discovery_does_not_wait_for_a_hub_tick() {
+    let mut elapsed = Vec::new();
+    for _ in 0..5 {
+        let directory = TestDirectory::new();
+        activate(&directory.path().join("state"), "a");
+        let server = Server::start(directory.path(), &[("a", None)]);
+        let started = Instant::now();
+        let mut all = server.events("/api/events");
+        assert_eq!(all.next_raw(WAIT).unwrap().0, "space");
+        assert_eq!(
+            ready_keys(all.next_raw(WAIT).unwrap()),
+            HashSet::from([key("a")])
+        );
+        elapsed.push(started.elapsed());
+    }
+    eprintln!("cold connect-to-ready with fast fake Herdr: {elapsed:?}");
+    assert!(
+        elapsed
+            .iter()
+            .all(|duration| *duration < Duration::from_millis(200)),
+        "cold ready still waited for the 250 ms hub tick: {elapsed:?}"
+    );
+}
+
+#[test]
+fn json_parse_and_output_limit_errors_complete_partial_replay() {
+    for failure in ["json-error", "parse-error", "output-limit"] {
+        let directory = TestDirectory::new();
+        let state = directory.path().join("state");
+        activate(&state, "a");
+        activate_on(&state, "faulty", "x");
+        match failure {
+            "json-error" => fs::write(
+                directory.path().join("error-faulty"),
+                r#"{"error":{"code":"unsupported","message":"not available"}}"#,
+            )
+            .unwrap(),
+            "parse-error" => fs::write(directory.path().join("snapshot-faulty.json"), "{").unwrap(),
+            "output-limit" => fs::write(
+                directory.path().join("snapshot-faulty.json"),
+                vec![b'x'; 8 * 1024 * 1024 + 1],
+            )
+            .unwrap(),
+            _ => unreachable!(),
+        }
+        let server = Server::start(directory.path(), &[("a", None)]);
+        let mut all = server.events("/api/events");
+        let (event, data) = all
+            .next_raw(WAIT)
+            .unwrap_or_else(|| panic!("{failure} blocked healthy data"));
+        assert_eq!(event, "space");
+        assert_eq!(data["key"], key("a"));
+        assert_eq!(
+            ready_keys(
+                all.next_raw(WAIT)
+                    .unwrap_or_else(|| panic!("{failure} blocked ready"))
+            ),
+            HashSet::from([key("a")])
+        );
+        assert!(all.next_raw(Duration::from_millis(100)).is_none());
+    }
 }

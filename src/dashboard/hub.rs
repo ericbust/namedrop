@@ -28,6 +28,7 @@ pub(crate) enum HubCommand {
         id: u64,
         subscription: Subscription,
         frames: SyncSender<Frame>,
+        notify: Sender<HubCommand>,
     },
     Unsubscribe {
         id: u64,
@@ -35,6 +36,7 @@ pub(crate) enum HubCommand {
     Spaces {
         reply: Sender<String>,
     },
+    DiscoveryReady,
 }
 
 #[derive(Clone)]
@@ -49,6 +51,7 @@ pub(crate) enum Subscription {
     All,
 }
 
+#[derive(Clone)]
 pub(crate) enum SpaceEvent {
     Space { key: SpaceKey, frame: Arc<str> },
     Gone { key: SpaceKey },
@@ -91,6 +94,35 @@ struct Discovery {
 struct DiscoveryMailbox {
     sockets: BTreeSet<String>,
     latest: HashMap<String, Vec<HerdrSpace>>,
+    answered: HashSet<String>,
+    failed: HashSet<String>,
+    notified: bool,
+}
+
+enum DiscoveryAnswer {
+    Snapshot(Vec<HerdrSpace>),
+    Failed,
+    Retired,
+}
+
+impl DiscoveryMailbox {
+    fn answer(&mut self, socket: String, answer: DiscoveryAnswer) -> bool {
+        self.answered.insert(socket.clone());
+        match answer {
+            DiscoveryAnswer::Snapshot(spaces) => {
+                self.failed.remove(&socket);
+                self.latest.insert(socket, spaces);
+            }
+            DiscoveryAnswer::Failed => {
+                self.failed.insert(socket);
+            }
+            DiscoveryAnswer::Retired => {
+                self.failed.insert(socket.clone());
+                self.latest.insert(socket, Vec::new());
+            }
+        }
+        !std::mem::replace(&mut self.notified, true)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -106,15 +138,23 @@ enum SocketState {
 }
 
 impl Discovery {
-    fn start(sockets: BTreeSet<String>, states: Arc<Mutex<HashMap<String, SocketState>>>) -> Self {
+    fn start(
+        sockets: BTreeSet<String>,
+        states: Arc<Mutex<HashMap<String, SocketState>>>,
+        notify: Sender<HubCommand>,
+    ) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let mailbox = Arc::new(Mutex::new(DiscoveryMailbox {
             sockets,
             latest: HashMap::new(),
+            answered: HashSet::new(),
+            failed: HashSet::new(),
+            notified: false,
         }));
         let worker_cancel = cancel.clone();
         let worker_mailbox = mailbox.clone();
-        let thread = thread::spawn(move || Self::run(worker_cancel, worker_mailbox, states));
+        let thread =
+            thread::spawn(move || Self::run(worker_cancel, worker_mailbox, states, notify));
         Self {
             cancel,
             mailbox,
@@ -137,6 +177,7 @@ impl Discovery {
         cancel: Arc<AtomicBool>,
         mailbox: Arc<Mutex<DiscoveryMailbox>>,
         states: Arc<Mutex<HashMap<String, SocketState>>>,
+        notify: Sender<HubCommand>,
     ) {
         while !cancel.load(Ordering::Relaxed) {
             let started = Instant::now();
@@ -177,7 +218,7 @@ impl Discovery {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                match result {
+                let answer = match result {
                     Ok(snapshot) => {
                         if !matches!(state, SocketState::Healthy) {
                             eprintln!("dashboard: live workspaces on {socket} recovered");
@@ -186,11 +227,7 @@ impl Discovery {
                             .lock()
                             .unwrap()
                             .insert(socket.clone(), SocketState::Healthy);
-                        mailbox
-                            .lock()
-                            .unwrap()
-                            .latest
-                            .insert(socket, snapshot.result.snapshot.workspaces);
+                        DiscoveryAnswer::Snapshot(snapshot.result.snapshot.workspaces)
                     }
                     Err(error) => {
                         if matches!(state, SocketState::Healthy) {
@@ -209,26 +246,34 @@ impl Discovery {
                         } else {
                             0
                         };
-                        let next = if matches!(state, SocketState::Backoff { .. })
+                        let (next, answer) = if matches!(state, SocketState::Backoff { .. })
                             || consecutive_unavailable >= UNAVAILABLE_LIMIT
                         {
-                            if unavailable {
-                                mailbox
-                                    .lock()
-                                    .unwrap()
-                                    .latest
-                                    .insert(socket.clone(), Vec::new());
-                            }
-                            SocketState::Backoff {
-                                retry_at: Instant::now() + RECOVERY_BACKOFF,
-                            }
+                            (
+                                SocketState::Backoff {
+                                    retry_at: Instant::now() + RECOVERY_BACKOFF,
+                                },
+                                if unavailable {
+                                    DiscoveryAnswer::Retired
+                                } else {
+                                    DiscoveryAnswer::Failed
+                                },
+                            )
                         } else {
-                            SocketState::Failing {
-                                consecutive_unavailable,
-                            }
+                            (
+                                SocketState::Failing {
+                                    consecutive_unavailable,
+                                },
+                                DiscoveryAnswer::Failed,
+                            )
                         };
-                        states.lock().unwrap().insert(socket, next);
+                        states.lock().unwrap().insert(socket.clone(), next);
+                        answer
                     }
+                };
+                let wake = mailbox.lock().unwrap().answer(socket, answer);
+                if wake {
+                    let _ = notify.send(HubCommand::DiscoveryReady);
                 }
             }
             thread::park_timeout(TICK.saturating_sub(started.elapsed()));
@@ -263,12 +308,13 @@ impl Verdict {
 struct Subscriber {
     state: ConnectionState,
     frames: SyncSender<Frame>,
+    notify: Sender<HubCommand>,
 }
 
 enum ConnectionState {
     Space(SpaceKey),
     PendingAll,
-    LiveAll,
+    LiveAll { known_keys: HashSet<SpaceKey> },
 }
 
 struct Published {
@@ -292,8 +338,10 @@ struct Hub<'a> {
     published: HashMap<SpaceKey, Published>,
     live_spaces: HashMap<SpaceKey, LiveSpace>,
     observed_sockets: HashSet<String>,
+    failed_sockets: HashSet<String>,
     unpublished_spaces: HashSet<SpaceKey>,
     discovery: Option<Discovery>,
+    retry_discovery_drain: bool,
     socket_states: Arc<Mutex<HashMap<String, SocketState>>>,
     metadata_dirty: bool,
     idle_since: Option<Instant>,
@@ -318,8 +366,10 @@ pub(crate) fn run(
         published: HashMap::new(),
         live_spaces: HashMap::new(),
         observed_sockets: HashSet::new(),
+        failed_sockets: HashSet::new(),
         unpublished_spaces: HashSet::new(),
         discovery: None,
+        retry_discovery_drain: false,
         socket_states: Arc::new(Mutex::new(HashMap::new())),
         metadata_dirty: false,
         idle_since: Some(Instant::now()),
@@ -327,7 +377,12 @@ pub(crate) fn run(
         last_error: None,
     };
     let verdict = loop {
-        match commands.recv_timeout(TICK) {
+        let wait = if hub.retry_discovery_drain {
+            Duration::from_millis(1)
+        } else {
+            TICK
+        };
+        match commands.recv_timeout(wait) {
             Ok(command) => hub.handle(command),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break Verdict::Exit("listener stopped"),
@@ -354,6 +409,7 @@ impl Hub<'_> {
                 id,
                 subscription,
                 frames,
+                notify,
             } => {
                 let refreshed = self.refresh(Some(&subscription));
                 let (state, initial) = match subscription {
@@ -369,7 +425,14 @@ impl Hub<'_> {
                     Subscription::All => (ConnectionState::PendingAll, None),
                 };
                 let sent = initial.is_none_or(|frame| frames.try_send(frame).is_ok());
-                self.subscribers.insert(id, Subscriber { state, frames });
+                self.subscribers.insert(
+                    id,
+                    Subscriber {
+                        state,
+                        frames,
+                        notify,
+                    },
+                );
                 self.idle_since = None;
                 if !sent {
                     self.drop_subscriber(id);
@@ -383,6 +446,7 @@ impl Hub<'_> {
             HubCommand::Spaces { reply } => {
                 let _ = reply.send(self.spaces_json());
             }
+            HubCommand::DiscoveryReady => {}
         }
     }
 
@@ -391,7 +455,7 @@ impl Hub<'_> {
             if let ConnectionState::Space(key) = gone.state
                 && !self.subscribers.values().any(|s| match &s.state {
                     ConnectionState::Space(other) => other == &key,
-                    ConnectionState::PendingAll | ConnectionState::LiveAll => {
+                    ConnectionState::PendingAll | ConnectionState::LiveAll { .. } => {
                         self.live_spaces.contains_key(&key)
                     }
                 })
@@ -512,12 +576,14 @@ impl Hub<'_> {
             .map(|key| SpaceEvent::Gone { key })
             .collect();
         let mut failed = false;
+        let mut published_keys = HashSet::new();
         for key in keys {
             let before = self.published.get(&key).map(|p| p.hash);
             let Some(frame) = self.publish(&key) else {
                 failed = true;
                 continue;
             };
+            published_keys.insert(key.clone());
             let content_changed = before != self.published.get(&key).map(|p| p.hash);
             let joined = self.unpublished_spaces.contains(&key);
             if !content_changed && !(all && joined) {
@@ -545,14 +611,56 @@ impl Hub<'_> {
                 changes.push(SpaceEvent::Space { key, frame });
             }
         }
-        if all && !changes.is_empty() {
-            let batch = Frame::Spaces(changes.into());
-            let stale: Vec<_> = self
-                .subscribers
-                .iter()
-                .filter(|(_, s)| matches!(s.state, ConnectionState::LiveAll))
-                .filter_map(|(id, s)| s.frames.try_send(batch.clone()).err().map(|_| *id))
-                .collect();
+        if all {
+            let mut stale = Vec::new();
+            for (id, subscriber) in &mut self.subscribers {
+                let ConnectionState::LiveAll { known_keys } = &mut subscriber.state else {
+                    continue;
+                };
+                let mut events = Vec::new();
+                for change in &changes {
+                    match change {
+                        SpaceEvent::Space { key, .. }
+                            if known_keys.contains(key)
+                                || self.live_spaces.get(key).is_some_and(|space| {
+                                    !self
+                                        .failed_sockets
+                                        .contains(&space.namespace.session_socket_id)
+                                }) =>
+                        {
+                            events.push(change.clone());
+                            known_keys.insert(key.clone());
+                        }
+                        SpaceEvent::Gone { key } if known_keys.remove(key) => {
+                            events.push(change.clone())
+                        }
+                        _ => {}
+                    }
+                }
+                for (key, space) in &self.live_spaces {
+                    if !known_keys.contains(key)
+                        && published_keys.contains(key)
+                        && !self
+                            .failed_sockets
+                            .contains(&space.namespace.session_socket_id)
+                        && let Some(published) = self.published.get(key)
+                    {
+                        events.push(SpaceEvent::Space {
+                            key: key.clone(),
+                            frame: published.frame.clone(),
+                        });
+                        known_keys.insert(key.clone());
+                    }
+                }
+                if !events.is_empty()
+                    && subscriber
+                        .frames
+                        .try_send(Frame::Spaces(events.into()))
+                        .is_err()
+                {
+                    stale.push(*id);
+                }
+            }
             for id in stale {
                 self.drop_subscriber(id);
             }
@@ -600,7 +708,16 @@ impl Hub<'_> {
         {
             return;
         }
-        let mut keys: Vec<_> = self.live_spaces.keys().cloned().collect();
+        let mut keys: Vec<_> = self
+            .live_spaces
+            .iter()
+            .filter(|(_, space)| {
+                !self
+                    .failed_sockets
+                    .contains(&space.namespace.session_socket_id)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
         keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         let initial: Option<Vec<_>> = keys
             .iter()
@@ -612,13 +729,16 @@ impl Hub<'_> {
             })
             .collect();
         let Some(mut initial) = initial else { return };
+        let known_keys: HashSet<_> = keys.iter().cloned().collect();
         initial.push(SpaceEvent::Ready { keys });
         let batch = Frame::Spaces(initial.into());
         let mut stale = Vec::new();
         for (id, subscriber) in &mut self.subscribers {
             if matches!(subscriber.state, ConnectionState::PendingAll) {
                 if subscriber.frames.try_send(batch.clone()).is_ok() {
-                    subscriber.state = ConnectionState::LiveAll;
+                    subscriber.state = ConnectionState::LiveAll {
+                        known_keys: known_keys.clone(),
+                    };
                 } else {
                     stale.push(*id);
                 }
@@ -644,6 +764,8 @@ impl Hub<'_> {
             }
             self.unpublished_spaces.clear();
             self.observed_sockets.clear();
+            self.failed_sockets.clear();
+            self.retry_discovery_drain = false;
             return;
         }
         if self.discovery.as_ref().is_some_and(|discovery| {
@@ -662,7 +784,20 @@ impl Hub<'_> {
             )
             .collect();
         match &self.discovery {
-            None => self.discovery = Some(Discovery::start(sockets, self.socket_states.clone())),
+            None => {
+                let notify = self
+                    .subscribers
+                    .values()
+                    .find(|subscriber| !matches!(subscriber.state, ConnectionState::Space(_)))
+                    .unwrap()
+                    .notify
+                    .clone();
+                self.discovery = Some(Discovery::start(
+                    sockets,
+                    self.socket_states.clone(),
+                    notify,
+                ));
+            }
             Some(discovery) if !discovery.cancel.load(Ordering::Relaxed) => {
                 if let Ok(mut mailbox) = discovery.mailbox.try_lock() {
                     mailbox.sockets = sockets;
@@ -673,22 +808,36 @@ impl Hub<'_> {
     }
 
     fn refresh_live_spaces(&mut self) {
+        self.retry_discovery_drain = false;
         let Some(discovery) = &self.discovery else {
             return;
         };
         if discovery.cancel.load(Ordering::Relaxed) {
             return;
         }
-        let latest = match discovery.mailbox.try_lock() {
+        let (latest, answered, failed) = match discovery.mailbox.try_lock() {
             Ok(mut mailbox) => {
                 let mut latest = std::mem::take(&mut mailbox.latest);
                 latest.retain(|socket, _| mailbox.sockets.contains(socket));
-                latest
+                let mut answered = std::mem::take(&mut mailbox.answered);
+                answered.retain(|socket| mailbox.sockets.contains(socket));
+                mailbox.notified = false;
+                (latest, answered, mailbox.failed.clone())
             }
-            Err(_) => return,
+            Err(_) => {
+                self.retry_discovery_drain = true;
+                return;
+            }
         };
-        for (socket, workspaces) in latest {
+        for socket in answered {
             self.metadata_dirty |= self.observed_sockets.insert(socket.clone());
+            self.metadata_dirty |= if failed.contains(&socket) {
+                self.failed_sockets.insert(socket)
+            } else {
+                self.failed_sockets.remove(&socket)
+            };
+        }
+        for (socket, workspaces) in latest {
             self.live_spaces
                 .retain(|_, space| space.namespace.session_socket_id != socket);
             for workspace in workspaces {
@@ -919,14 +1068,35 @@ mod tests {
             published: HashMap::new(),
             live_spaces: HashMap::new(),
             observed_sockets: HashSet::new(),
+            failed_sockets: HashSet::new(),
             unpublished_spaces: HashSet::new(),
             discovery: None,
+            retry_discovery_drain: false,
             socket_states: Arc::new(Mutex::new(HashMap::new())),
             metadata_dirty: false,
             idle_since: None,
             unsupported_schema: false,
             last_error: None,
         }
+    }
+
+    fn freeze_discovery(hub: &mut Hub<'_>) {
+        hub.discovery = None;
+        hub.discovery = Some(Discovery {
+            cancel: Arc::new(AtomicBool::new(false)),
+            mailbox: Arc::new(Mutex::new(DiscoveryMailbox {
+                sockets: hub
+                    .spaces
+                    .values()
+                    .map(|space| space.namespace.session_socket_id.clone())
+                    .collect(),
+                latest: HashMap::new(),
+                answered: HashSet::new(),
+                failed: HashSet::new(),
+                notified: false,
+            })),
+            thread: None,
+        });
     }
 
     #[test]
@@ -951,6 +1121,7 @@ mod tests {
             id: 1,
             subscription: Subscription::Space(SpaceKey::of(&namespace)),
             frames,
+            notify: std::sync::mpsc::channel().0,
         });
         hub.refresh(None);
         assert!(matches!(inbox.try_recv(), Ok(Frame::Snapshot(_))));
@@ -1008,6 +1179,7 @@ mod tests {
             id: 1,
             subscription: Subscription::Space(key.clone()),
             frames,
+            notify: std::sync::mpsc::channel().0,
         });
         assert!(matches!(legacy.try_recv(), Ok(Frame::Snapshot(_))));
         let (frames, all) = sync_channel(8);
@@ -1015,7 +1187,9 @@ mod tests {
             id: 2,
             subscription: Subscription::All,
             frames,
+            notify: std::sync::mpsc::channel().0,
         });
+        freeze_discovery(&mut hub);
         hub.observed_sockets.insert("socket-a".to_owned());
         hub.complete_replays();
         assert!(matches!(all.try_recv(), Ok(Frame::Spaces(_))));
@@ -1083,6 +1257,7 @@ mod tests {
             id: 1,
             subscription: Subscription::Space(key.clone()),
             frames,
+            notify: std::sync::mpsc::channel().0,
         });
         assert!(matches!(legacy.try_recv(), Ok(Frame::Snapshot(_))));
         let (frames, all) = sync_channel(8);
@@ -1090,7 +1265,9 @@ mod tests {
             id: 2,
             subscription: Subscription::All,
             frames,
+            notify: std::sync::mpsc::channel().0,
         });
+        freeze_discovery(&mut hub);
         assert!(all.try_recv().is_err());
         hub.live_spaces.insert(
             key.clone(),
