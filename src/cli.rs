@@ -201,17 +201,6 @@ impl Cli {
         }
     }
 
-    pub fn dashboard_open_browser(&self) -> Option<bool> {
-        match &self.command {
-            Command::Dashboard(args) => Some(!args.no_open),
-            _ => None,
-        }
-    }
-
-    pub fn is_dashboard_server(&self) -> bool {
-        matches!(self.command, Command::DashboardServer)
-    }
-
     pub fn is_reset_tour(&self) -> bool {
         matches!(
             self.command,
@@ -300,11 +289,6 @@ enum Command {
         #[command(subcommand)]
         command: EventCommand,
     },
-    /// Open a live dashboard of this workspace's agents in your browser.
-    Dashboard(DashboardArgs),
-    /// The singleton dashboard server; `namedrop dashboard` starts it.
-    #[command(hide = true)]
-    DashboardServer,
     /// Runtime hooks installed for supported agents.
     #[command(hide = true)]
     Hook {
@@ -353,8 +337,6 @@ impl Command {
             Self::Space { command } => command.operation(),
             Self::Reconcile => "reconcile",
             Self::Event { command } => command.operation(),
-            Self::Dashboard(_) => "dashboard",
-            Self::DashboardServer => "dashboard.server",
             Self::Hook { command } => command.operation(),
         }
     }
@@ -428,13 +410,6 @@ impl GroupCommand {
             Self::Remove => "group.remove",
         }
     }
-}
-
-#[derive(Debug, Args)]
-struct DashboardArgs {
-    /// Print the URL without opening a browser.
-    #[arg(long = "no-open")]
-    no_open: bool,
 }
 
 #[derive(Debug, Args)]

@@ -7,7 +7,6 @@ mod codex_app_server;
 mod context;
 mod controls;
 mod coordination;
-pub mod dashboard;
 mod delivery;
 mod domain;
 mod groups;

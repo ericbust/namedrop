@@ -122,12 +122,9 @@ fn main() -> ExitCode {
                 .map(Path::to_path_buf)
         })
         .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
-    // A dashboard successor started mid-update waits a bounded time rather
-    // than parking forever behind a stuck migration.
-    let gate_wait = cli.is_dashboard_server().then_some(Duration::from_secs(60));
-    let mut command_guard = match selected_state
+    let _command_guard = match selected_state
         .as_deref()
-        .map(|state| namedrop::runtime_command_guard(state, gate_wait))
+        .map(namedrop::runtime_command_guard)
         .transpose()
     {
         Ok(guard) => guard,
@@ -150,13 +147,6 @@ fn main() -> ExitCode {
                 return ExitCode::from(69);
             }
         }
-    }
-    if cli.is_dashboard_server() {
-        let Some(state) = selected_state else {
-            eprintln!("dashboard-server requires --plugin-state");
-            return ExitCode::from(64);
-        };
-        return namedrop::dashboard::serve(&state, command_guard.take().flatten());
     }
     let human = cli.human_output(io::stdout().is_terminal());
     let input_file = cli.input_is_file();
@@ -209,14 +199,6 @@ fn main() -> ExitCode {
                 ExitCode::from(65)
             }
         };
-    }
-    if let Some(open_browser) = cli.dashboard_open_browser() {
-        return finish(
-            "dashboard",
-            with_runtime_options(&cli.runtime, |runtime| {
-                namedrop::dashboard::open(runtime, open_browser)
-            }),
-        );
     }
     if let Some(config) = cli.shortcuts_config() {
         return finish("ui.install-shortcuts", naming_ui::install_shortcuts(config));
