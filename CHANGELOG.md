@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.4.2] - 2026-10-28
+
+### Removed
+
+- The `namedrop dashboard` command is removed. Namedrop 1.4.0 shipped this browser dashboard without announcing it, because that release was cut from the `experimental` branch. Its code is kept on the `exp/dashboard` branch. The README also described a `herdr plugin action invoke dashboard` action, which no release registered. That text is removed.
+
 ## [1.4.1] - 2026-10-26
 
 ### Fixed

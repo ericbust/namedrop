@@ -23,7 +23,7 @@ use std::{
 };
 
 const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
-pub(crate) const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 6;
 
 /// Personas live on the Pane Address, which survives renaming and rebinding,
 /// rather than on the role record the native naming path overwrites. Upgrading
@@ -47,7 +47,6 @@ pub(crate) use groups::addressed_recipients;
 mod coordination;
 mod coordination_bridge;
 mod coordination_ownership;
-pub mod dashboard;
 mod missing_disposition;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;

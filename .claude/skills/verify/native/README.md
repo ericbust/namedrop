@@ -1,6 +1,6 @@
 # Native recipes (experimental branch)
 
-`control-namedrop.py` drives the cross-workspace, tracked-handoff, remote-terminal and dashboard features in a disposable
+`control-namedrop.py` drives the cross-workspace, tracked-handoff and remote-terminal features in a disposable
 native Herdr with no model: it fakes agent sessions, so it proves routing, envelopes and
 database state, not how a real agent reads them. Pair it with a real-agent drive on a
 kept testbed profile. For cross-workspace mentions that drive is two scripts,
@@ -15,7 +15,6 @@ cargo build --locked --bin namedrop
 .claude/skills/verify/native/control-namedrop.py --feature cross-workspace --binary target/debug/namedrop
 .claude/skills/verify/native/control-namedrop.py --feature cross-workspace-tracked --binary target/debug/namedrop
 .claude/skills/verify/native/control-namedrop.py --feature remote-terminal --binary target/debug/namedrop
-.claude/skills/verify/native/control-namedrop.py --feature dashboard
 ```
 
 Requires Python 3.9+, Git, Bash and native Herdr on PATH. The helper starts its own
@@ -33,4 +32,3 @@ JSON summary land under `.scratch/verify/`. It never touches the real `~/.herdr`
 - [remote-terminal.md](remote-terminal.md): a named terminal that refuses another
   workspace's command until a person there runs `address allow-remote`, the allowed run
   with its result home in the sender's `handoff results`, and `address deny-remote`.
-- [dashboard.md](dashboard.md): the live dashboard server.

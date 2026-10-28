@@ -50,21 +50,6 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                 field("Tab label", &data["tab_label"], 0, &mut lines);
             }
         }
-        "dashboard" => {
-            lines.push(format!(
-                "Namedrop dashboard for workspace {} is live:",
-                text(&data["workspace_id"])
-            ));
-            lines.push(format!("  {}", text(&data["url"])));
-            lines.push(
-                if data["opened"] == true {
-                    "Opened in your browser. It stops on its own 10 minutes after the last tab closes."
-                } else {
-                    "Open that URL in a browser on this machine within 10 minutes; it works once. The server stops on its own 10 minutes after the last tab closes."
-                }
-                .into(),
-            );
-        }
         "activate" => {
             lines.push("Status".into());
             lines.push(format!(
