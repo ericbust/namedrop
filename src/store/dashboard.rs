@@ -36,6 +36,7 @@ pub struct AddressRow {
     pub bound: bool,
     pub occupied: bool,
     pub agent_status: Option<String>,
+    pub observed_at_ms: Option<i64>,
 }
 
 pub struct RegistrationRow {
@@ -343,7 +344,7 @@ impl StateTransaction<'_> {
                  GROUP BY address_id)
              SELECT a.address_id, COALESCE(c.alias, h.alias, ltrim(r.name, '@')), r.name, a.persona, a.pane_type, a.retired,
                     b.pane_id IS NOT NULL,
-                    COALESCE(o.agent_session_id, '') <> '', o.status
+                    COALESCE(o.agent_session_id, '') <> '', o.status, o.observed_at_ms
              FROM pane_addresses a
              JOIN pane_roles r USING (session_socket_id, worktree_id, role_id)
              -- A retired agent's alias can be released for reuse; its lane keeps the last one.
@@ -379,6 +380,7 @@ impl StateTransaction<'_> {
                     bound: row.get(6)?,
                     occupied: row.get(7)?,
                     agent_status: row.get(8)?,
+                    observed_at_ms: row.get(9)?,
                 })
             },
         )?;

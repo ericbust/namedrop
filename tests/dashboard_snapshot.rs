@@ -348,6 +348,195 @@ fn a_held_delivery_needs_the_human_and_blocks_its_recipient() {
     assert_eq!(lane(&held, "@b").mailbox[0].state, DeliveryState::Held);
 }
 
+fn observe_status(
+    store: &mut StateStore,
+    namespace: &StateNamespace,
+    alias: &str,
+    status: &str,
+    observed_at_ms: u64,
+) {
+    store
+        .transaction(|tx| {
+            tx.observe_agent_session(
+                namespace,
+                &format!("observation-{alias}-{status}"),
+                &id(namespace, alias),
+                &AgentSessionId::new(format!("session-{}-{alias}", namespace.space_id.as_str())),
+                status,
+                &MutationAttribution::new(ActorKind::Plugin, "test", observed_at_ms),
+            )
+        })
+        .unwrap();
+}
+
+#[test]
+fn a_permission_blocked_agent_needs_the_human_until_its_status_changes() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a"]);
+    assert_eq!(snapshot(&mut store, &ns).health, SpaceHealth::Calm);
+
+    observe_status(&mut store, &ns, "a", "blocked", 20);
+    let blocked = snapshot(&mut store, &ns);
+    assert_eq!(lane(&blocked, "@a").activity, Activity::Blocked);
+    assert_eq!(blocked.health, SpaceHealth::NeedsYou { items: 1 });
+    assert_eq!(blocked.attention.len(), 1);
+    assert_eq!(blocked.attention[0].opened_at_ms, 20);
+    assert_eq!(
+        blocked.attention[0].summary.text,
+        "@a is waiting on an approval or question."
+    );
+    let json = serde_json::to_value(&blocked).unwrap();
+    assert_eq!(json["wire"], 1);
+    assert_eq!(json["attention"][0]["source_kind"], "agent_status");
+    assert_eq!(json["attention"][0]["opened_at_ms"], 20);
+    let rows = store.dashboard_rows(&ns).unwrap();
+    for now_ms in [0, 2_000, 3_000] {
+        let rebuilt = build(&rows, None, now_ms);
+        assert_eq!(rebuilt.attention[0].opened_at_ms, 20);
+        assert_eq!(
+            serde_json::to_value(&rebuilt.attention).unwrap(),
+            json["attention"],
+            "status attention stays stable across frame times, including the hub's zero clock"
+        );
+    }
+    assert!(
+        store.dashboard_rows(&ns).unwrap().attention.is_empty(),
+        "status attention is not persisted"
+    );
+
+    observe_status(&mut store, &ns, "a", "idle", 30);
+    let idle = snapshot(&mut store, &ns);
+    assert_eq!(lane(&idle, "@a").activity, Activity::Idle);
+    assert_eq!(idle.health, SpaceHealth::Calm);
+    assert!(idle.attention.is_empty());
+}
+
+#[test]
+fn permission_blocked_agents_add_to_existing_attention_and_clear_individually() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b", "c"]);
+    send(&mut store, &ns, "m1", "a", "c", "Run the suite", None);
+    let attempt = submit(&mut store, &ns, "c");
+    store
+        .transaction(|tx| tx.hold_delivery_attempt(&ns, &attempt, &attribution()))
+        .unwrap();
+    let persisted = serde_json::to_value(&snapshot(&mut store, &ns).attention).unwrap();
+    observe_status(&mut store, &ns, "a", "blocked", 20);
+    observe_status(&mut store, &ns, "b", "blocked", 20);
+
+    let blocked = snapshot(&mut store, &ns);
+    assert_eq!(blocked.health, SpaceHealth::NeedsYou { items: 3 });
+    assert_eq!(blocked.attention.len(), 3);
+    let json = serde_json::to_value(&blocked).unwrap();
+    assert_eq!(
+        json["attention"][0], persisted[0],
+        "stored attention keeps its wire shape"
+    );
+    assert_eq!(json["attention"][1]["source_kind"], "agent_status");
+    assert_eq!(json["attention"][2]["source_kind"], "agent_status");
+    assert_eq!(
+        blocked.attention[1].summary.text,
+        "@a is waiting on an approval or question."
+    );
+    assert_eq!(
+        blocked.attention[2].summary.text,
+        "@b is waiting on an approval or question."
+    );
+
+    observe_status(&mut store, &ns, "a", "idle", 30);
+    let remaining = snapshot(&mut store, &ns);
+    assert_eq!(remaining.health, SpaceHealth::NeedsYou { items: 2 });
+    assert_eq!(remaining.attention.len(), 2);
+    assert_eq!(
+        remaining.attention[1].summary.text,
+        "@b is waiting on an approval or question."
+    );
+
+    observe_status(&mut store, &ns, "b", "idle", 30);
+    let cleared = snapshot(&mut store, &ns);
+    assert_eq!(cleared.health, SpaceHealth::NeedsYou { items: 1 });
+    assert_eq!(serde_json::to_value(&cleared.attention).unwrap(), persisted);
+}
+
+#[test]
+fn permission_blocking_keeps_retired_offline_and_terminal_precedence() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b", "c", "d", "e"]);
+    send(&mut store, &ns, "m1", "b", "a", "Old message", None);
+    let mut rows = store.dashboard_rows(&ns).unwrap();
+    for address in &mut rows.addresses {
+        address.agent_status = Some("blocked".to_owned());
+        match address.alias.as_str() {
+            "b" => address.retired = true,
+            "c" => address.bound = false,
+            "d" => address.occupied = false,
+            "e" => address.pane_type = namedrop::PaneType::Terminal,
+            _ => {}
+        }
+    }
+
+    let blocked = build(&rows, None, 0);
+    assert_eq!(lane(&blocked, "@b").activity, Activity::Retired);
+    assert_eq!(lane(&blocked, "@c").activity, Activity::Offline);
+    assert_eq!(lane(&blocked, "@d").activity, Activity::Offline);
+    assert_eq!(lane(&blocked, "@e").activity, Activity::Idle);
+    assert_eq!(
+        blocked.attention.len(),
+        1,
+        "only the online nonretired agent needs approval"
+    );
+    assert_eq!(blocked.health, SpaceHealth::NeedsYou { items: 1 });
+    assert_eq!(lane(&blocked, "@a").activity, Activity::Blocked);
+    assert_eq!(
+        blocked.attention[0].summary.text,
+        "@a is waiting on an approval or question."
+    );
+}
+
+#[test]
+fn permission_blocking_outranks_acknowledged_work() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    send(&mut store, &ns, "m1", "a", "b", "Run the suite", None);
+    let attempt = submit(&mut store, &ns, "b");
+    store
+        .transaction(|tx| {
+            tx.acknowledge_delivery_attempt(
+                &ns,
+                &attempt,
+                "ack-1",
+                &AgentSessionId::new("session-w1-b"),
+                &attribution(),
+            )
+        })
+        .unwrap();
+    observe_status(&mut store, &ns, "b", "blocked", 20);
+
+    let blocked = snapshot(&mut store, &ns);
+    assert_eq!(lane(&blocked, "@b").activity, Activity::Blocked);
+    assert_eq!(blocked.health, SpaceHealth::NeedsYou { items: 1 });
+    assert_eq!(
+        lane(&blocked, "@b").mailbox[0].state,
+        DeliveryState::Acknowledged
+    );
+
+    observe_status(&mut store, &ns, "b", "idle", 30);
+    let working = snapshot(&mut store, &ns);
+    assert_eq!(lane(&working, "@b").activity, Activity::Working);
+    assert!(working.attention.is_empty());
+    assert_eq!(
+        working.health,
+        SpaceHealth::Busy {
+            in_flight: 1,
+            working: 1
+        }
+    );
+}
+
 #[test]
 fn replies_results_and_nudges_are_not_open_requests() {
     let directory = TestDirectory::new();

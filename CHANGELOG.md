@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.4.2] - 2026-10-28
+
+### Fixed
+
+- An agent waiting on a Herdr approval or question now shows as blocked in the dashboard and makes its workspace need your attention. The warning clears when the agent leaves that dialog.
+
 ## [1.4.1] - 2026-10-26
 
 ### Fixed
