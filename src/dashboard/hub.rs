@@ -10,14 +10,17 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet},
     fs,
     sync::{
-        Arc,
-        atomic::AtomicBool,
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
         mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError},
     },
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 const TICK: Duration = Duration::from_millis(250);
+const HERDR_TIMEOUT: Duration = Duration::from_secs(1);
+const UNAVAILABLE_LIMIT: u8 = 3;
 
 pub(crate) enum HubCommand {
     Subscribe {
@@ -77,6 +80,128 @@ struct HerdrSpace {
     label: Option<String>,
 }
 
+struct Discovery {
+    cancel: Arc<AtomicBool>,
+    mailbox: Arc<Mutex<DiscoveryMailbox>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+struct DiscoveryMailbox {
+    sockets: BTreeSet<String>,
+    latest: HashMap<String, Vec<HerdrSpace>>,
+}
+
+#[derive(Default)]
+struct SocketState {
+    failing: bool,
+    unavailable: u8,
+    retired: bool,
+}
+
+impl Discovery {
+    fn start(sockets: BTreeSet<String>) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let mailbox = Arc::new(Mutex::new(DiscoveryMailbox {
+            sockets,
+            latest: HashMap::new(),
+        }));
+        let worker_cancel = cancel.clone();
+        let worker_mailbox = mailbox.clone();
+        let thread = thread::spawn(move || Self::run(worker_cancel, worker_mailbox));
+        Self {
+            cancel,
+            mailbox,
+            thread: Some(thread),
+        }
+    }
+
+    fn stop(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        if let Some(thread) = &self.thread {
+            thread.thread().unpark();
+        }
+    }
+
+    fn finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    fn run(cancel: Arc<AtomicBool>, mailbox: Arc<Mutex<DiscoveryMailbox>>) {
+        let mut states = HashMap::<String, SocketState>::new();
+        while !cancel.load(Ordering::Relaxed) {
+            let started = Instant::now();
+            let sockets = mailbox.lock().unwrap().sockets.clone();
+            states.retain(|socket, _| sockets.contains(socket));
+            for socket in sockets {
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                let state = states.entry(socket.clone()).or_default();
+                if state.retired {
+                    continue;
+                }
+                let result = ProcessHerdr::default()
+                    .with_socket(Some(socket.clone()))
+                    .execute_bounded(
+                        &["api", "snapshot"],
+                        HERDR_TIMEOUT,
+                        &cancel,
+                        8 * 1024 * 1024,
+                    )
+                    .and_then(|output| {
+                        serde_json::from_str::<HerdrSnapshot>(&output.stdout)
+                            .map_err(|error| error.to_string())
+                    });
+                if cancel.load(Ordering::Relaxed) {
+                    return;
+                }
+                match result {
+                    Ok(snapshot) => {
+                        if state.failing {
+                            eprintln!("dashboard: live workspaces on {socket} recovered");
+                        }
+                        state.failing = false;
+                        state.unavailable = 0;
+                        mailbox
+                            .lock()
+                            .unwrap()
+                            .latest
+                            .insert(socket, snapshot.result.snapshot.workspaces);
+                    }
+                    Err(error) => {
+                        if !state.failing {
+                            eprintln!("dashboard: live workspaces on {socket} unavailable");
+                        }
+                        state.failing = true;
+                        let unavailable = serde_json::from_str::<serde_json::Value>(&error)
+                            .ok()
+                            .is_some_and(|value| value["error"]["code"] == "server_not_running");
+                        state.unavailable = if unavailable {
+                            state.unavailable + 1
+                        } else {
+                            0
+                        };
+                        if state.unavailable >= UNAVAILABLE_LIMIT {
+                            state.retired = true;
+                            mailbox.lock().unwrap().latest.insert(socket, Vec::new());
+                        }
+                    }
+                }
+            }
+            thread::park_timeout(TICK.saturating_sub(started.elapsed()));
+        }
+    }
+}
+
+impl Drop for Discovery {
+    fn drop(&mut self) {
+        self.stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 pub(crate) enum Verdict {
     Handoff(&'static str),
     Idle,
@@ -113,8 +238,7 @@ struct Hub<'a> {
     published: HashMap<SpaceKey, Published>,
     live_spaces: HashMap<SpaceKey, LiveSpace>,
     unpublished_spaces: HashSet<SpaceKey>,
-    last_live_poll: Option<Instant>,
-    live_cursor: usize,
+    discovery: Option<Discovery>,
     metadata_dirty: bool,
     idle_since: Option<Instant>,
     unsupported_schema: bool,
@@ -138,8 +262,7 @@ pub(crate) fn run(
         published: HashMap::new(),
         live_spaces: HashMap::new(),
         unpublished_spaces: HashSet::new(),
-        last_live_poll: None,
-        live_cursor: 0,
+        discovery: None,
         metadata_dirty: false,
         idle_since: Some(Instant::now()),
         unsupported_schema: false,
@@ -209,6 +332,7 @@ impl Hub<'_> {
                 if !sent {
                     self.drop_subscriber(id);
                 }
+                self.sync_discovery();
             }
             HubCommand::Unsubscribe { id } => self.drop_subscriber(id),
             HubCommand::Spaces { reply } => {
@@ -231,6 +355,7 @@ impl Hub<'_> {
                 self.idle_since = Some(Instant::now());
                 self.published.clear();
             }
+            self.sync_discovery();
         }
     }
 
@@ -291,6 +416,7 @@ impl Hub<'_> {
         if database_changed && self.reload_spaces().is_none() {
             return;
         }
+        self.sync_discovery();
         let previous = self.live_spaces.clone();
         self.refresh_live_spaces();
         self.unpublished_spaces.extend(
@@ -389,59 +515,59 @@ impl Hub<'_> {
         }
     }
 
-    fn refresh_live_spaces(&mut self) {
-        if self
-            .last_live_poll
-            .is_some_and(|last| last.elapsed() < TICK)
-        {
+    fn sync_discovery(&mut self) {
+        let watching = self
+            .subscribers
+            .values()
+            .any(|subscriber| matches!(subscriber.subscription, Subscription::All));
+        if !watching {
+            if let Some(discovery) = &self.discovery {
+                discovery.stop();
+            }
             return;
         }
-        self.last_live_poll = Some(Instant::now());
-        let sockets: Vec<_> = self
+        if self.discovery.as_ref().is_some_and(|discovery| {
+            discovery.cancel.load(Ordering::Relaxed) && discovery.finished()
+        }) {
+            self.discovery = None;
+        }
+        let sockets = self
             .spaces
             .values()
-            .map(|ns| ns.session_socket_id.clone())
+            .map(|namespace| namespace.session_socket_id.clone())
             .chain(
                 self.live_spaces
                     .values()
                     .map(|space| space.namespace.session_socket_id.clone()),
             )
-            .collect::<BTreeSet<_>>()
-            .into_iter()
             .collect();
-        let deadline = Instant::now() + Duration::from_millis(100);
-        for _ in 0..sockets.len() {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let socket = &sockets[self.live_cursor % sockets.len()];
-            self.live_cursor = self.live_cursor.wrapping_add(1);
-            let herdr = ProcessHerdr::default().with_socket(Some(socket.clone()));
-            let snapshot = herdr
-                .execute_bounded(
-                    &["api", "snapshot"],
-                    remaining,
-                    &AtomicBool::new(false),
-                    8 * 1024 * 1024,
-                )
-                .and_then(|output| {
-                    serde_json::from_str::<HerdrSnapshot>(&output.stdout)
-                        .map_err(|error| error.to_string())
-                });
-            let snapshot = match snapshot {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    self.log(format!(
-                        "could not read live workspaces on {socket}: {error}"
-                    ));
-                    continue;
+        match &self.discovery {
+            None => self.discovery = Some(Discovery::start(sockets)),
+            Some(discovery) if !discovery.cancel.load(Ordering::Relaxed) => {
+                if let Ok(mut mailbox) = discovery.mailbox.try_lock() {
+                    mailbox.sockets = sockets;
                 }
-            };
+            }
+            Some(_) => {}
+        }
+    }
+
+    fn refresh_live_spaces(&mut self) {
+        let Some(discovery) = &self.discovery else {
+            return;
+        };
+        if discovery.cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let latest = match discovery.mailbox.try_lock() {
+            Ok(mut mailbox) => std::mem::take(&mut mailbox.latest),
+            Err(_) => return,
+        };
+        for (socket, workspaces) in latest {
             self.live_spaces
-                .retain(|_, space| space.namespace.session_socket_id != *socket);
-            for workspace in snapshot.result.snapshot.workspaces {
-                let namespace = StateNamespace::for_space(socket, workspace.workspace_id);
+                .retain(|_, space| space.namespace.session_socket_id != socket);
+            for workspace in workspaces {
+                let namespace = StateNamespace::for_space(&socket, workspace.workspace_id);
                 self.live_spaces.insert(
                     SpaceKey::of(&namespace),
                     LiveSpace {
@@ -501,31 +627,13 @@ impl Hub<'_> {
             .live_spaces
             .get(key)
             .and_then(|space| space.label.as_deref());
-        let unique = live_label.is_some_and(|label| {
-            let folded = crate::WorkspaceLabel::from_herdr(label);
-            !folded.as_str().is_empty()
-                && self
-                    .live_spaces
-                    .values()
-                    .filter(|space| {
-                        space
-                            .label
-                            .as_deref()
-                            .is_some_and(|other| crate::WorkspaceLabel::from_herdr(other) == folded)
-                    })
-                    .count()
-                    == 1
-        });
-        let workspace_id = self
-            .live_spaces
-            .get(key)
-            .map_or(snapshot.space.workspace_id.as_str(), |space| {
-                space.namespace.space_id.as_str()
-            })
-            .to_owned();
+        if let Some(space) = self.live_spaces.get(key) {
+            snapshot.space.workspace_id = space.namespace.space_id.as_str().to_owned();
+        }
+        let workspace_id = snapshot.space.workspace_id.clone();
         snapshot
             .space
-            .set_live_label(&workspace_id, live_label, unique);
+            .set_live_label(&workspace_id, live_label, self.addressable_label(key));
         // Hash without the timestamp, so an unchanged space sends no frame.
         let hash: [u8; 32] = Sha256::digest(serde_json::to_vec(&snapshot).ok()?).into();
         snapshot.generated_at_ms = now_ms();
@@ -538,6 +646,48 @@ impl Hub<'_> {
             },
         );
         Some(frame)
+    }
+
+    fn addressable_label(&self, key: &SpaceKey) -> Option<String> {
+        use crate::spaces::{SpaceDirectory, SpaceEntry, names_in_scope, workspace_token};
+        let target = self.live_spaces.get(key)?;
+        let folded = crate::WorkspaceLabel::from_herdr(target.label.as_deref()?);
+        let label = crate::WorkspaceLabel::from_token(folded.as_str())?;
+        let entries: Vec<_> = self
+            .live_spaces
+            .values()
+            .filter(|space| space.namespace.session_socket_id == target.namespace.session_socket_id)
+            .map(|space| SpaceEntry {
+                space: space.namespace.space_id.clone(),
+                label: space
+                    .label
+                    .as_deref()
+                    .map(crate::WorkspaceLabel::from_herdr),
+                repo: None,
+                display: space.namespace.space_id.as_str().to_owned(),
+                activated: true,
+                names: BTreeSet::new(),
+                retired: BTreeSet::new(),
+            })
+            .collect();
+        let token = workspace_token(
+            &target.namespace.space_id,
+            Some(&label),
+            entries
+                .iter()
+                .map(|entry| (&entry.space, entry.label.as_ref())),
+        );
+        if token != label {
+            return None;
+        }
+        let mut others = entries;
+        let index = others
+            .iter()
+            .position(|entry| entry.space == target.namespace.space_id)?;
+        let here = others.swap_remove(index);
+        let directory = SpaceDirectory::new(here, others);
+        names_in_scope(&crate::SpaceScope::Named(vec![label.clone()]), &directory).ok()?;
+        Some(label.as_str().to_owned())
     }
 
     fn namespace(&mut self, key: &SpaceKey) -> Option<StateNamespace> {
@@ -628,8 +778,7 @@ mod tests {
             published: HashMap::new(),
             live_spaces: HashMap::new(),
             unpublished_spaces: HashSet::new(),
-            last_live_poll: None,
-            live_cursor: 0,
+            discovery: None,
             metadata_dirty: false,
             idle_since: None,
             unsupported_schema: false,
@@ -735,7 +884,6 @@ mod tests {
         );
         hub.unpublished_spaces.insert(key.clone());
         hub.metadata_dirty = true;
-        hub.last_live_poll = Some(Instant::now());
         hub.store
             .as_ref()
             .unwrap()

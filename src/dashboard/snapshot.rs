@@ -99,10 +99,16 @@ pub struct SpaceHeader {
 }
 
 impl SpaceHeader {
-    pub(crate) fn set_live_label(&mut self, workspace_id: &str, label: Option<&str>, unique: bool) {
+    pub(crate) fn set_live_label(
+        &mut self,
+        workspace_id: &str,
+        label: Option<&str>,
+        addressable_label: Option<String>,
+    ) {
         let label = SafeText::optional(label, SHORT_CHARS).map(|label| label.text);
-        self.display_name = label.clone().unwrap_or_else(|| workspace_id.to_owned());
-        self.addressable_label = label.filter(|_| unique);
+        self.display_name = label.unwrap_or_else(|| workspace_id.to_owned());
+        self.addressable_label = addressable_label
+            .filter(|token| SafeText::from_untrusted(token, SHORT_CHARS).text == *token);
     }
 }
 

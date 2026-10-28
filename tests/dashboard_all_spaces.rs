@@ -51,7 +51,31 @@ impl Server {
         let herdr = root.join("herdr");
         fs::write(
             &herdr,
-            "#!/bin/sh\n[ \"$1 $2\" = \"api snapshot\" ] || exit 1\ncat \"$ND_TEST_SNAPSHOT\"\n",
+            r#"#!/bin/sh
+[ "$1 $2" = "api snapshot" ] || exit 1
+printf '%s\n' "$HERDR_SOCKET_PATH" >> "$ND_TEST_ROOT/calls"
+if [ -f "$ND_TEST_ROOT/block-$HERDR_SOCKET_PATH" ]; then
+    printf '%s' "$$" > "$ND_TEST_ROOT/active-$HERDR_SOCKET_PATH"
+    while [ -f "$ND_TEST_ROOT/block-$HERDR_SOCKET_PATH" ]; do sleep 0.01; done
+    rm -f "$ND_TEST_ROOT/active-$HERDR_SOCKET_PATH"
+fi
+if [ -f "$ND_TEST_ROOT/delay-$HERDR_SOCKET_PATH" ]; then
+    sleep "$(cat "$ND_TEST_ROOT/delay-$HERDR_SOCKET_PATH")"
+fi
+if [ -f "$ND_TEST_ROOT/down-$HERDR_SOCKET_PATH" ]; then
+    printf '{"error":{"code":"server_not_running","message":"socket unavailable"}}\n' >&2
+    exit 1
+fi
+if [ -f "$ND_TEST_ROOT/transient-$HERDR_SOCKET_PATH" ]; then
+    printf 'Herdr read timed out\n' >&2
+    exit 1
+fi
+if [ -f "$ND_TEST_ROOT/snapshot-$HERDR_SOCKET_PATH.json" ]; then
+    cat "$ND_TEST_ROOT/snapshot-$HERDR_SOCKET_PATH.json"
+else
+    cat "$ND_TEST_SNAPSHOT"
+fi
+"#,
         )
         .unwrap();
         fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
@@ -65,9 +89,10 @@ impl Server {
             .env_remove("HERDR_PLUGIN_STATE_DIR")
             .env("HERDR_BIN_PATH", herdr)
             .env("ND_TEST_SNAPSHOT", root.join("snapshot.json"))
+            .env("ND_TEST_ROOT", root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(fs::File::create(root.join("server.log")).unwrap())
             .spawn()
             .unwrap();
         let deadline = Instant::now() + WAIT;
@@ -247,7 +272,7 @@ fn live_membership_changes_without_database_writes() {
     server.set_workspaces(&[("a", Some("alpha")), ("new", None)]);
     let new = events.space();
     assert_eq!(new["key"], key("new"));
-    assert_eq!(new["frame"]["space"]["workspace_id"], "");
+    assert_eq!(new["frame"]["space"]["workspace_id"], "new");
     assert_eq!(new["frame"]["space"]["display_name"], "new");
     assert_eq!(new["frame"]["space"]["state"], "unknown");
 
@@ -311,7 +336,12 @@ fn labels_are_live_and_ambiguity_updates_both_workspaces() {
     );
     for data in updates {
         let space = &data["frame"]["space"];
-        assert_eq!(space["addressable_label"], space["display_name"]);
+        let expected = if space["workspace_id"] == "a" {
+            "same-label"
+        } else {
+            "beta"
+        };
+        assert_eq!(space["addressable_label"], expected);
     }
     assert!(events.next(Duration::from_millis(350)).is_none());
 
@@ -319,7 +349,7 @@ fn labels_are_live_and_ambiguity_updates_both_workspaces() {
     let (event, mut frame) = legacy.next(WAIT).unwrap();
     assert_eq!(event, "snapshot");
     assert_eq!(frame["space"]["display_name"], "Same Label");
-    assert_eq!(frame["space"]["addressable_label"], "Same Label");
+    assert_eq!(frame["space"]["addressable_label"], "same-label");
     let mut all = server.events("/api/events");
     let all_a = (0..3)
         .map(|_| all.space())
@@ -374,6 +404,7 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
     let header = expected["space"].as_object_mut().unwrap();
     header.remove("display_name");
     header.remove("addressable_label");
+    expected["space"]["workspace_id"] = json!("unknown");
     assert_eq!(actual, expected);
 
     server.set_workspaces(&[("unknown", None)]);
@@ -419,4 +450,346 @@ fn all_events_requires_session_cookie_and_loopback_host_without_sending_frames()
         assert!(!raw.contains("event:"), "{raw}");
         assert!(!raw.contains(&key("a")), "{raw}");
     }
+}
+
+fn calls(root: &Path) -> Vec<String> {
+    fs::read_to_string(root.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn eventually(mut probe: impl FnMut() -> bool) {
+    let deadline = Instant::now() + WAIT;
+    while !probe() {
+        assert!(Instant::now() < deadline, "condition did not become true");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn activate_on(state: &Path, socket: &str, id: &str) {
+    StateStore::open(state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.activate_worktree(&StateNamespace::for_space(socket, id), &attribution())
+        })
+        .unwrap();
+}
+
+fn snapshot_on(root: &Path, socket: &str, spaces: &[(&str, Option<&str>)]) {
+    let spaces: Vec<_> = spaces
+        .iter()
+        .map(|(id, label)| json!({"workspace_id":id,"label":label}))
+        .collect();
+    fs::write(
+        root.join(format!("snapshot-{socket}.json")),
+        json!({"result":{"snapshot":{"workspaces":spaces}}}).to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn discovery_runs_only_for_all_space_subscribers_and_stops_with_the_last_one() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "a");
+    let server = Server::start(directory.path(), &[("a", None)]);
+    thread::sleep(Duration::from_millis(550));
+    assert_eq!(
+        calls(directory.path()).len(),
+        0,
+        "idle dashboard spawned Herdr reads"
+    );
+    let mut legacy = server.events(&format!("/w/{}/events", key("a")));
+    assert_eq!(legacy.next(WAIT).unwrap().0, "snapshot");
+    thread::sleep(Duration::from_millis(550));
+    assert_eq!(
+        calls(directory.path()).len(),
+        0,
+        "legacy tab spawned Herdr reads"
+    );
+    let mut all = server.events("/api/events");
+    all.space();
+    assert!(!calls(directory.path()).is_empty());
+    drop(all);
+    thread::sleep(Duration::from_millis(1400));
+    let before = calls(directory.path()).len();
+    thread::sleep(Duration::from_millis(550));
+    assert_eq!(
+        calls(directory.path()).len(),
+        before,
+        "discovery continued after the last all-space tab closed"
+    );
+    assert!(legacy.next(Duration::from_millis(50)).is_none());
+}
+
+#[test]
+fn discovery_logs_failures_and_recovery_once_per_socket_state_change() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    for socket in ["dead-a", "dead-b"] {
+        activate_on(&state, socket, "a");
+        fs::write(directory.path().join(format!("transient-{socket}")), "").unwrap();
+    }
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let mut all = server.events("/api/events");
+    assert!(all.next(Duration::from_millis(1250)).is_none());
+    let log = fs::read_to_string(directory.path().join("server.log")).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("live workspaces on"))
+            .count(),
+        2,
+        "expected one stable failure per socket; log was {log}"
+    );
+    for socket in ["dead-a", "dead-b"] {
+        fs::remove_file(directory.path().join(format!("transient-{socket}"))).unwrap();
+    }
+    all.space();
+    all.space();
+    let log = fs::read_to_string(directory.path().join("server.log")).unwrap();
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("recovered"))
+            .count(),
+        2,
+        "log was {log}"
+    );
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("live workspaces on"))
+            .count(),
+        4,
+        "log was {log}"
+    );
+}
+
+#[test]
+fn slow_discovery_gives_every_socket_a_full_turn() {
+    let directory = TestDirectory::new();
+    for socket in ["slow-a", "slow-b"] {
+        activate_on(&directory.path().join("state"), socket, "a");
+        snapshot_on(directory.path(), socket, &[("a", None)]);
+        fs::write(directory.path().join(format!("delay-{socket}")), "0.065").unwrap();
+    }
+    let server = Server::start(directory.path(), &[]);
+    let mut all = server.events("/api/events");
+    let mut seen = HashSet::new();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while seen.len() < 2 && Instant::now() < deadline {
+        if let Some((event, data)) = all.next(deadline.saturating_duration_since(Instant::now())) {
+            assert_eq!(event, "space");
+            seen.insert(data["key"].as_str().unwrap().to_owned());
+        }
+    }
+    let expected: HashSet<_> = ["slow-a", "slow-b"]
+        .into_iter()
+        .map(|socket| {
+            SpaceKey::of(&StateNamespace::for_space(socket, "a"))
+                .as_str()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(seen, expected, "one socket was starved");
+}
+
+#[test]
+fn both_routes_publish_database_changes_while_a_herdr_read_is_still_blocked() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "a");
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let mut all = server.events("/api/events");
+    all.space();
+    let mut legacy = server.events(&format!("/w/{}/events", key("a")));
+    assert_eq!(legacy.next(WAIT).unwrap().0, "snapshot");
+    let block = directory.path().join(format!("block-{SOCKET}"));
+    let active = directory.path().join(format!("active-{SOCKET}"));
+    fs::write(&block, "").unwrap();
+    eventually(|| active.exists());
+    let pid = fs::read_to_string(active).unwrap();
+    let alive = || {
+        Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(alive(), "fixture read was not blocked");
+    StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.create_pane_address(
+                &namespace("a"),
+                &address("during-read", "during-read"),
+                &attribution(),
+            )
+        })
+        .unwrap();
+    let (_, legacy_frame) = legacy
+        .next(WAIT)
+        .expect("legacy change during blocked read");
+    assert!(
+        legacy_frame["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["alias"] == "@during-read")
+    );
+    assert!(
+        alive(),
+        "legacy publication waited for the Herdr read to end"
+    );
+    let changed = all.space();
+    assert!(
+        changed["frame"]["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["alias"] == "@during-read")
+    );
+    assert!(
+        alive(),
+        "all-space publication waited for the Herdr read to end"
+    );
+    fs::remove_file(block).unwrap();
+}
+
+#[test]
+fn repeated_unavailable_socket_sends_gone_then_stops_polling_but_timeouts_keep_spaces() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "a");
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let mut all = server.events("/api/events");
+    all.space();
+    let transient = directory.path().join(format!("transient-{SOCKET}"));
+    fs::write(&transient, "").unwrap();
+    assert!(
+        all.next(Duration::from_millis(1100)).is_none(),
+        "timeout removed a workspace"
+    );
+    fs::remove_file(transient).unwrap();
+    fs::write(directory.path().join(format!("down-{SOCKET}")), "").unwrap();
+    assert_eq!(
+        all.next(WAIT).expect("gone after repeated unavailability"),
+        ("gone".to_owned(), json!({"key":key("a")}))
+    );
+    let before = calls(directory.path()).len();
+    thread::sleep(Duration::from_millis(700));
+    assert_eq!(
+        calls(directory.path()).len(),
+        before,
+        "retired socket was polled again"
+    );
+}
+
+#[test]
+fn addressable_labels_are_typeable_tokens_with_actual_socket_scoped_resolution() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "project");
+    activate_on(&directory.path().join("state"), "other-socket", "other");
+    snapshot_on(
+        directory.path(),
+        "other-socket",
+        &[("other", Some("My Project"))],
+    );
+    let live = [
+        ("project", Some("My Project")),
+        ("reserved", Some("All")),
+        ("colliding", Some("target")),
+        ("target", None),
+        ("dup-a", Some("Duplicate Label")),
+        ("dup-b", Some("duplicate-label")),
+        ("own-id", Some("own-id")),
+        ("own-id-peer", Some("own-id")),
+    ];
+    let server = Server::start(directory.path(), &live);
+    let mut all = server.events("/api/events");
+    let frames: Vec<_> = (0..live.len() + 1).map(|_| all.space()).collect();
+    let project = frames
+        .iter()
+        .find(|frame| frame["key"] == key("project"))
+        .unwrap();
+    assert_eq!(project["frame"]["space"]["display_name"], "My Project");
+    assert_eq!(project["frame"]["space"]["addressable_label"], "my-project");
+    let other_key = SpaceKey::of(&StateNamespace::for_space("other-socket", "other"));
+    let other = frames
+        .iter()
+        .find(|frame| frame["key"] == other_key.as_str())
+        .unwrap();
+    assert_eq!(
+        other["frame"]["space"]["addressable_label"], "my-project",
+        "another socket's label must not create ambiguity"
+    );
+    for id in [
+        "reserved",
+        "colliding",
+        "dup-a",
+        "dup-b",
+        "own-id",
+        "own-id-peer",
+    ] {
+        let frame = frames.iter().find(|frame| frame["key"] == key(id)).unwrap();
+        assert!(
+            frame["frame"]["space"]["addressable_label"].is_null(),
+            "{id} offered an ambiguous/reserved token: {frame}"
+        );
+    }
+}
+
+#[test]
+fn operations_describes_label_resolution_unknown_display_and_connection_limit() {
+    let operations = include_str!("../docs/operations.md");
+    for required in [
+        "`my-project`",
+        "reserved `all`",
+        "another workspace's id",
+        "same Herdr socket",
+        "saved label",
+        "empty string",
+        "six HTTP/1.1",
+    ] {
+        assert!(
+            operations.contains(required),
+            "operations.md omits the {required} contract"
+        );
+    }
+}
+
+#[test]
+fn unactivated_live_workspace_carries_its_id() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "activated");
+    let server = Server::start(directory.path(), &[("unactivated", None)]);
+    let frame = server.events("/api/events").space();
+    assert_eq!(frame["frame"]["space"]["workspace_id"], "unactivated");
+}
+
+#[test]
+fn closed_saved_labels_and_unknown_keys_use_the_documented_display_fallbacks() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "closed");
+    fs::create_dir_all(state.join("dashboard")).unwrap();
+    fs::write(
+        state.join("dashboard/labels.json"),
+        json!({key("closed"):"saved label"}).to_string(),
+    )
+    .unwrap();
+    let server = Server::start(directory.path(), &[]);
+    let (_, closed) = server
+        .events(&format!("/w/{}/events", key("closed")))
+        .next(WAIT)
+        .unwrap();
+    assert_eq!(closed["space"]["display_name"], "closed");
+    assert_eq!(closed["space"]["label"]["text"], "saved label");
+    assert!(closed["space"]["addressable_label"].is_null());
+    let (_, unknown) = server
+        .events(&format!("/w/{}/events", key("unknown")))
+        .next(WAIT)
+        .unwrap();
+    assert_eq!(unknown["space"]["display_name"], "");
+    assert!(unknown["space"]["addressable_label"].is_null());
+    assert!(calls(directory.path()).is_empty());
 }
