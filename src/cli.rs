@@ -211,9 +211,19 @@ impl Cli {
     pub fn dashboard_ui(&self) -> Option<&Path> {
         match &self.command {
             Command::Dashboard(args) => args.ui.as_deref(),
-            Command::DashboardServer { ui } => ui.as_deref(),
+            Command::DashboardServer { ui, .. } => ui.as_deref(),
             _ => None,
         }
+    }
+
+    pub fn dashboard_inherit_claim(&self) -> bool {
+        matches!(
+            self.command,
+            Command::DashboardServer {
+                inherit_claim: true,
+                ..
+            }
+        )
     }
 
     pub fn is_dashboard_server(&self) -> bool {
@@ -315,6 +325,8 @@ enum Command {
     DashboardServer {
         #[arg(long, value_name = "DIR")]
         ui: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        inherit_claim: bool,
     },
     /// Runtime hooks installed for supported agents.
     #[command(hide = true)]

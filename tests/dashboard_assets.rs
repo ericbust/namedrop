@@ -110,7 +110,7 @@ use std::{
     net::TcpStream,
     os::unix::fs::{PermissionsExt, symlink},
     path::{Path, PathBuf},
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
     sync::{Arc, Barrier},
     thread,
     time::{Duration, Instant},
@@ -382,20 +382,34 @@ fn directory_assets_have_correct_types_and_are_read_fresh() {
         ("json", "application/json"),
         ("woff2", "font/woff2"),
         ("map", "application/json"),
+        ("mjs", "text/javascript; charset=utf-8"),
+        ("wasm", "application/wasm"),
+        ("ico", "image/x-icon"),
+        ("jpg", "image/jpeg"),
+        ("jpeg", "image/jpeg"),
+        ("gif", "image/gif"),
+        ("webp", "image/webp"),
+        ("avif", "image/avif"),
+        ("woff", "font/woff"),
+        ("txt", "text/plain; charset=utf-8"),
         ("bin", "application/octet-stream"),
     ];
     for (extension, _) in cases {
-        fs::write(ui.join(format!("assets/hash.{extension}")), [0, 128, 255]).unwrap();
+        for extension in [extension.to_owned(), extension.to_ascii_uppercase()] {
+            fs::write(ui.join(format!("assets/hash.{extension}")), [0, 128, 255]).unwrap();
+        }
     }
     fs::write(ui.join("assets/space name.js"), "space").unwrap();
     dashboard.open(Some(&ui));
     let baseline = dashboard.get("/", true);
     for (extension, mime) in cases {
-        let response = dashboard.get(&format!("/assets/hash.{extension}"), false);
-        response.status(200);
-        assert_eq!(response.headers["Content-Type"], mime);
-        assert_eq!(response.body, [0, 128, 255]);
-        assert_eq!(response.security(), baseline.security());
+        for extension in [extension.to_owned(), extension.to_ascii_uppercase()] {
+            let response = dashboard.get(&format!("/assets/hash.{extension}"), false);
+            response.status(200);
+            assert_eq!(response.headers["Content-Type"], mime);
+            assert_eq!(response.body, [0, 128, 255]);
+            assert_eq!(response.security(), baseline.security());
+        }
     }
     assert_eq!(
         dashboard.get("/assets/space%20name%2ejs", false).body,
@@ -640,18 +654,415 @@ fn old_embedded_metadata_defaults_to_embedded_and_stale_metadata_does_not_choose
 }
 
 #[test]
-fn the_directory_handle_stays_anchored_when_its_path_is_replaced() {
+fn fix_forward_recreated_and_renamed_ui_directory_serves_current_files() {
     let dashboard = Dashboard::new();
     let ui = dashboard.ui("dist");
-    let outside = dashboard.ui("outside");
     dashboard.open(Some(&ui));
-    fs::rename(&ui, dashboard.root().join("original")).unwrap();
-    symlink(&outside, &ui).unwrap();
     assert_eq!(dashboard.get("/", true).body, b"<h1>dist</h1>");
-    fs::write(
-        dashboard.root().join("original/index.html"),
-        "anchored and fresh",
+    fs::remove_dir_all(&ui).unwrap();
+    fs::create_dir(&ui).unwrap();
+    fs::write(ui.join("index.html"), "rebuilt directory").unwrap();
+    fs::write(ui.join("asset.txt"), "rebuilt asset").unwrap();
+    assert_eq!(dashboard.open(Some(&ui))["server"], "running");
+    assert_eq!(dashboard.get("/", true).body, b"rebuilt directory");
+    assert_eq!(dashboard.get("/asset.txt", false).body, b"rebuilt asset");
+    fs::rename(&ui, dashboard.root().join("old-dist")).unwrap();
+    fs::create_dir(&ui).unwrap();
+    fs::write(ui.join("index.html"), "new directory").unwrap();
+    assert_eq!(dashboard.get("/", true).body, b"new directory");
+    fs::remove_dir_all(&ui).unwrap();
+    symlink(dashboard.root().join("old-dist"), &ui).unwrap();
+    dashboard.get("/", true).status(404);
+}
+
+#[test]
+fn fix_forward_index_file_aliases_require_the_session_cookie() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    if !ui.join("INDEX.HTML").exists() {
+        fs::hard_link(ui.join("index.html"), ui.join("INDEX.HTML")).unwrap();
+    }
+    fs::hard_link(ui.join("index.html"), ui.join("alias.html")).unwrap();
+    dashboard.open(Some(&ui));
+    for path in ["/INDEX.HTML", "/alias.html", "/%61lias.html"] {
+        dashboard.get(path, false).status(401);
+        dashboard
+            .request(path, vec![("Cookie", "wrong=wrong".to_owned())])
+            .status(401);
+        let page = dashboard.get(path, true);
+        page.status(200);
+        assert_eq!(page.body, b"<h1>dist</h1>");
+    }
+}
+
+#[test]
+fn fix_forward_handoff_refuses_a_competing_embedded_ui() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    let opened = dashboard.open(Some(&ui));
+    let first = dashboard.info();
+    let cookie = dashboard.cookie();
+    let mut events = BufReader::new(connect(
+        dashboard.port(),
+        &format!("/w/{}/events", opened["space_key"].as_str().unwrap()),
+        &[("Cookie", cookie.clone())],
+    ));
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(events.read_line(&mut line).unwrap(), 0);
+        if line.starts_with("event: snapshot") {
+            break;
+        }
+    }
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("release")).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_namedrop"),
+        runtime.join("release/namedrop"),
     )
     .unwrap();
-    assert_eq!(dashboard.get("/", true).body, b"anchored and fresh");
+    symlink("release", runtime.join("current")).unwrap();
+    fs::write(
+        runtime.join("namedrop"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *dashboard-server*) touch '{}'; sleep 7;; esac\nexec '{}' \"$@\"\n",
+            dashboard.root().join("successor-launching").display(),
+            runtime.join("current/namedrop").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755)).unwrap();
+    eventually(|| {
+        dashboard
+            .root()
+            .join("successor-launching")
+            .exists()
+            .then_some(())
+    })
+    .expect("successor reaches delayed launcher");
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(6) {
+        let output = dashboard.command(None).output().unwrap();
+        assert!(
+            !output.status.success(),
+            "embedded caller took over the custom UI: {output:?}"
+        );
+        let diagnostic = String::from_utf8_lossy(&output.stdout);
+        assert!(diagnostic.contains(ui.to_str().unwrap()), "{diagnostic}");
+        assert!(diagnostic.contains("stop it with"), "{diagnostic}");
+        thread::sleep(Duration::from_millis(200));
+    }
+    let output = dashboard.command(None).output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let diagnostic = String::from_utf8_lossy(&output.stdout);
+    assert!(diagnostic.contains(ui.to_str().unwrap()), "{diagnostic}");
+    let successor = eventually(|| {
+        let info = dashboard.info();
+        (info["instance"] != first["instance"]).then_some(info)
+    })
+    .expect("custom successor publishes metadata");
+    assert_eq!(successor["ui"], first["ui"]);
+    assert_eq!(successor["port"], first["port"]);
+    assert_eq!(dashboard.cookie(), cookie);
+    assert_eq!(dashboard.get("/", true).body, b"<h1>dist</h1>");
+}
+
+#[cfg(target_os = "linux")]
+fn resident_kib(pid: u64) -> u64 {
+    fs::read_to_string(format!("/proc/{pid}/status"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("VmRSS:").map(str::trim))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fix_forward_large_asset_memory_is_bounded() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    fs::File::create(ui.join("large.bin"))
+        .unwrap()
+        .set_len(256 * 1024 * 1024)
+        .unwrap();
+    dashboard.open(Some(&ui));
+    let pid = dashboard.info()["pid"].as_u64().unwrap();
+    let before = resident_kib(pid);
+    let mut stream = connect(dashboard.port(), "/large.bin", &[]);
+    let mut byte = [0];
+    assert_eq!(stream.read(&mut byte).unwrap(), 1, "asset response starts");
+    let after = resident_kib(pid);
+    assert!(
+        after.saturating_sub(before) < 32 * 1024,
+        "one stalled asset retained {} KiB beyond baseline {before} KiB",
+        after.saturating_sub(before)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fix_forward_stalled_asset_writer_times_out() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    fs::File::create(ui.join("large.bin"))
+        .unwrap()
+        .set_len(128 * 1024 * 1024)
+        .unwrap();
+    dashboard.open(Some(&ui));
+    let pid = dashboard.info()["pid"].as_u64().unwrap();
+    let thread_count = || fs::read_dir(format!("/proc/{pid}/task")).unwrap().count();
+    eventually(|| (thread_count() == 2).then_some(())).expect("initial health workers finish");
+    let mut stream = connect(dashboard.port(), "/large.bin", &[]);
+    let mut byte = [0];
+    assert_eq!(stream.read(&mut byte).unwrap(), 1);
+    assert!(thread_count() > 2, "asset worker starts");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while thread_count() > 2 && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        thread_count(),
+        2,
+        "stalled asset writer did not release its connection"
+    );
+    dashboard.get("/", true).status(200);
+}
+
+#[test]
+fn directory_dot_components_are_private_and_regular_hardlinks_are_public() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    fs::write(ui.join(".env"), "private").unwrap();
+    fs::create_dir(ui.join(".hidden")).unwrap();
+    fs::write(ui.join(".hidden/asset.js"), "private").unwrap();
+    fs::write(dashboard.root().join("public.txt"), "public hardlink").unwrap();
+    fs::hard_link(dashboard.root().join("public.txt"), ui.join("hardlink.txt")).unwrap();
+    dashboard.open(Some(&ui));
+    for path in [
+        "/.env",
+        "/%2eenv",
+        "/.hidden/asset.js",
+        "/%2ehidden/asset.js",
+    ] {
+        dashboard.get(path, false).status(404);
+    }
+    let response = dashboard.get("/hardlink.txt", false);
+    response.status(200);
+    assert_eq!(response.body, b"public hardlink");
+}
+
+#[test]
+fn directory_validation_names_unreadable_and_non_utf8_paths_without_starting() {
+    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    let dashboard = Dashboard::new();
+    let unreadable = dashboard.ui("unreadable");
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+    let start = Instant::now();
+    let output = dashboard.command(Some(&unreadable)).output().unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(unreadable.to_str().unwrap()),
+        "{output:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "unreadable path waited for server startup"
+    );
+
+    let invalid = dashboard
+        .root()
+        .join(OsString::from_vec(b"dist-\xff".to_vec()));
+    fs::create_dir(&invalid).unwrap();
+    let start = Instant::now();
+    let output = dashboard.command(Some(&invalid)).output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let diagnostic = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        diagnostic.contains(invalid.to_string_lossy().as_ref()),
+        "{diagnostic}"
+    );
+    assert!(diagnostic.contains("UTF-8"), "{diagnostic}");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "invalid UTF-8 path waited for server startup"
+    );
+    assert!(!dashboard.state().join("dashboard/server.json").exists());
+}
+
+#[test]
+fn replaced_ui_ancestor_symlinks_are_not_followed() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("build/dist");
+    dashboard.open(Some(&ui));
+    fs::rename(
+        dashboard.root().join("build"),
+        dashboard.root().join("old-build"),
+    )
+    .unwrap();
+    symlink(
+        dashboard.root().join("old-build"),
+        dashboard.root().join("build"),
+    )
+    .unwrap();
+    dashboard.get("/", true).status(404);
+    fs::remove_file(dashboard.root().join("build")).unwrap();
+    fs::create_dir_all(&ui).unwrap();
+    fs::write(ui.join("index.html"), "new ancestor").unwrap();
+    assert_eq!(dashboard.get("/", true).body, b"new ancestor");
+}
+
+fn inherited_server(dashboard: &Dashboard) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+    command
+        .args(["--plugin-state"])
+        .arg(dashboard.state())
+        .args(["dashboard-server", "--inherit-claim"])
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_PLUGIN_STATE_DIR")
+        .env("HERDR_BIN_PATH", dashboard.root().join("herdr"));
+    command
+}
+
+#[test]
+fn inherited_claim_rejects_foreign_or_separately_locked_descriptors() {
+    let dashboard = Dashboard::new();
+    let output = inherited_server(&dashboard)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("does not match server.lock"),
+        "{output:?}"
+    );
+    let path = dashboard.state().join("dashboard/server.lock");
+    let owner = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    owner.try_lock().unwrap();
+    let other = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let output = inherited_server(&dashboard).stdin(other).output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("could not acquire inherited dashboard claim"),
+        "{output:?}"
+    );
+    assert!(!dashboard.state().join("dashboard/server.json").exists());
+}
+
+#[test]
+fn inherited_claim_survives_parent_close_and_is_released_after_crash() {
+    let dashboard = Dashboard::new();
+    fs::create_dir_all(dashboard.state().join("dashboard")).unwrap();
+    let path = dashboard.state().join("dashboard/server.lock");
+    let owner = fs::File::create(&path).unwrap();
+    owner.try_lock().unwrap();
+    let mut child = inherited_server(&dashboard)
+        .stdin(owner.try_clone().unwrap())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(owner);
+    eventually(|| {
+        dashboard
+            .state()
+            .join("dashboard/server.json")
+            .exists()
+            .then_some(())
+    })
+    .expect("successor adopts inherited claim");
+    let contender = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    assert!(matches!(
+        contender.try_lock(),
+        Err(fs::TryLockError::WouldBlock)
+    ));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    contender
+        .try_lock()
+        .expect("crash releases inherited claim");
+}
+
+#[test]
+fn failed_handoff_stops_launcher_helpers_and_releases_the_claim() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    dashboard.open(Some(&ui));
+    let opened = dashboard.open(Some(&ui));
+    let mut events = BufReader::new(connect(
+        dashboard.port(),
+        &format!("/w/{}/events", opened["space_key"].as_str().unwrap()),
+        &[("Cookie", dashboard.cookie())],
+    ));
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(events.read_line(&mut line).unwrap(), 0);
+        if line.starts_with("event: snapshot") {
+            break;
+        }
+    }
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("release")).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_namedrop"),
+        runtime.join("release/namedrop"),
+    )
+    .unwrap();
+    symlink("release", runtime.join("current")).unwrap();
+    let helper = dashboard.root().join("helper-pid");
+    fs::write(runtime.join("namedrop"), format!(
+        "#!/bin/sh\ncase \"$*\" in *dashboard-server*) exec 3<&0; sleep 60 <&3 & echo $! > '{}'; exit 1;; esac\nexec '{}' \"$@\"\n",
+        helper.display(), runtime.join("current/namedrop").display()
+    )).unwrap();
+    fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755)).unwrap();
+    let pid =
+        eventually(|| fs::read_to_string(&helper).ok()).expect("handoff launcher starts helper");
+    let contender = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dashboard.state().join("dashboard/server.lock"))
+        .unwrap();
+    let released = eventually(|| contender.try_lock().ok()).is_some();
+    let _ = Command::new("kill")
+        .arg(pid.trim())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    assert!(
+        released,
+        "failed handoff left its helper holding the singleton claim"
+    );
+    drop(contender);
+    fs::write(
+        runtime.join("namedrop"),
+        format!(
+            "#!/bin/sh\nexec '{}' \"$@\"\n",
+            runtime.join("current/namedrop").display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(dashboard.open(Some(&ui))["server"], "started");
+    assert_eq!(dashboard.get("/", true).body, b"<h1>dist</h1>");
 }

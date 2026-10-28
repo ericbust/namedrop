@@ -1,16 +1,16 @@
 use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
-use super::server_files::{ServerFiles, Token, UiSource};
+use super::server_files::{ServerFiles, Token, UiSource, open_directory};
 use super::snapshot::SpaceKey;
 use std::{
     ffi::CString,
-    fs::{File, OpenOptions},
+    fs::File,
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::fs::OpenOptionsExt,
+        unix::fs::MetadataExt,
     },
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -139,67 +139,89 @@ impl Status {
 
 pub(crate) enum Assets {
     Embedded,
-    Directory(File),
+    Directory(PathBuf),
+}
+
+enum AssetBody {
+    Embedded(&'static [u8]),
+    File(File),
+}
+
+struct ResolvedAsset {
+    body: AssetBody,
+    length: u64,
+    is_index: bool,
 }
 
 impl Assets {
-    pub fn new(source: &UiSource) -> Result<Self, String> {
+    pub fn new(source: &UiSource) -> Self {
         match source {
-            UiSource::Embedded => Ok(Self::Embedded),
-            UiSource::Directory(path) => OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(path)
-                .map(Self::Directory)
-                .map_err(|error| format!("dashboard UI directory {}: {error}", path.display())),
+            UiSource::Embedded => Self::Embedded,
+            UiSource::Directory(path) => Self::Directory(path.clone()),
         }
     }
 
-    fn read(&self, path: &str) -> Option<Vec<u8>> {
+    fn resolve(&self, path: &str) -> Option<ResolvedAsset> {
         match self {
-            Self::Embedded => Some(match path {
-                "/index.html" => INDEX_HTML.as_bytes().to_vec(),
-                "/assets/app.js" => APP_JS.as_bytes().to_vec(),
-                "/assets/app.css" => APP_CSS.as_bytes().to_vec(),
-                _ => return None,
-            }),
-            Self::Directory(root) => {
-                let parts: Vec<_> = path.strip_prefix('/')?.split('/').collect();
-                if parts
-                    .iter()
-                    .any(|part| part.is_empty() || *part == "." || *part == "..")
-                {
-                    return None;
-                }
-                let mut file = root.try_clone().ok()?;
-                for (index, part) in parts.iter().enumerate() {
-                    let name = CString::new(*part).ok()?;
-                    let flags = libc::O_RDONLY
-                        | libc::O_CLOEXEC
-                        | libc::O_NOFOLLOW
-                        | if index + 1 == parts.len() {
-                            libc::O_NONBLOCK
-                        } else {
-                            libc::O_DIRECTORY
-                        };
-                    // Every lookup is relative to a held directory descriptor, and no
-                    // component may follow a symlink, even while files are replaced.
-                    let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
-                    if fd < 0 {
-                        return None;
-                    }
-                    // openat returned a new owned descriptor.
-                    file = unsafe { File::from_raw_fd(fd) };
-                }
-                if !file.metadata().ok()?.is_file() {
-                    return None;
-                }
-                let mut bytes = Vec::new();
-                file.read_to_end(&mut bytes).ok()?;
-                Some(bytes)
+            Self::Embedded => {
+                let bytes = match path {
+                    "/index.html" => INDEX_HTML.as_bytes(),
+                    "/assets/app.js" => APP_JS.as_bytes(),
+                    "/assets/app.css" => APP_CSS.as_bytes(),
+                    _ => return None,
+                };
+                Some(ResolvedAsset {
+                    body: AssetBody::Embedded(bytes),
+                    length: bytes.len() as u64,
+                    is_index: path == "/index.html",
+                })
+            }
+            Self::Directory(path_root) => {
+                let root = open_directory(path_root).ok()?;
+                let file = open_asset(&root, path)?;
+                let metadata = file.metadata().ok()?;
+                let is_index = open_asset(&root, "/index.html")
+                    .and_then(|index| index.metadata().ok())
+                    .is_some_and(|index| {
+                        (index.dev(), index.ino()) == (metadata.dev(), metadata.ino())
+                    });
+                Some(ResolvedAsset {
+                    body: AssetBody::File(file),
+                    length: metadata.len(),
+                    is_index,
+                })
             }
         }
     }
+}
+
+fn open_asset(root: &File, path: &str) -> Option<File> {
+    let parts: Vec<_> = path.strip_prefix('/')?.split('/').collect();
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || part.starts_with('.'))
+    {
+        return None;
+    }
+    let mut file = root.try_clone().ok()?;
+    for (index, part) in parts.iter().enumerate() {
+        let name = CString::new(*part).ok()?;
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | if index + 1 == parts.len() {
+                libc::O_NONBLOCK
+            } else {
+                libc::O_DIRECTORY
+            };
+        let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return None;
+        }
+        // openat returned a new owned descriptor.
+        file = unsafe { File::from_raw_fd(fd) };
+    }
+    file.metadata().ok()?.is_file().then_some(file)
 }
 
 fn decode_asset_path(path: &str) -> Option<String> {
@@ -222,17 +244,27 @@ fn decode_asset_path(path: &str) -> Option<String> {
 }
 
 fn content_type(path: &str) -> &'static str {
-    match Path::new(path)
+    let extension = Path::new(path)
         .extension()
         .and_then(|extension| extension.to_str())
-    {
-        Some("html") => "text/html; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("json" | "map") => "application/json",
-        Some("woff2") => "font/woff2",
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "json" | "map" => "application/json",
+        "wasm" => "application/wasm",
+        "ico" => "image/x-icon",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "txt" => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
     }
 }
@@ -360,8 +392,8 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
             );
             respond(&mut writer, "303 See Other", "text/plain", &headers, b"")
         }
-        Ok(Route::Page) => serve_asset(&mut writer, &front.assets, "/index.html"),
-        Ok(Route::Asset(path)) => serve_asset(&mut writer, &front.assets, &path),
+        Ok(Route::Page) => serve_asset(&mut writer, front, &request, "/index.html"),
+        Ok(Route::Asset(path)) => serve_asset(&mut writer, front, &request, &path),
         Ok(Route::Favicon) => respond(&mut writer, "204 No Content", "text/plain", "", b""),
         Ok(Route::Health) => respond(
             &mut writer,
@@ -395,11 +427,44 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
     }
 }
 
-fn serve_asset(writer: &mut TcpStream, assets: &Assets, path: &str) -> io::Result<()> {
-    match assets.read(path) {
-        Some(body) => respond(writer, "200 OK", content_type(path), "", &body),
-        None => respond_status(writer, Status::NotFound),
+fn serve_asset(
+    writer: &mut TcpStream,
+    front: &Front,
+    request: &Request,
+    path: &str,
+) -> io::Result<()> {
+    writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let Some(asset) = front.assets.resolve(path) else {
+        return respond_status(writer, Status::NotFound);
+    };
+    if asset.is_index
+        && !request
+            .cookie(&cookie_name(front.port))
+            .is_some_and(|candidate| front.session.matches(candidate))
+    {
+        return respond_status(writer, Status::Unauthorized);
     }
+    write!(
+        writer,
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}Connection: close\r\n\r\n",
+        content_type(path),
+        asset.length
+    )?;
+    match asset.body {
+        AssetBody::Embedded(bytes) => writer.write_all(bytes)?,
+        AssetBody::File(file) => {
+            let mut reader = file.take(asset.length);
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                let count = reader.read(&mut chunk)?;
+                if count == 0 {
+                    break;
+                }
+                writer.write_all(&chunk[..count])?;
+            }
+        }
+    }
+    writer.flush()
 }
 
 fn stream_events(

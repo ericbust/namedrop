@@ -1,13 +1,20 @@
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
+    ffi::CString,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
-    path::{Path, PathBuf},
+    os::{
+        fd::{AsFd, AsRawFd, FromRawFd},
+        unix::{
+            ffi::OsStrExt,
+            fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        },
+    },
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -24,12 +31,14 @@ impl UiSource {
         };
         let canonical = fs::canonicalize(path)
             .map_err(|error| format!("dashboard UI directory {}: {error}", path.display()))?;
-        if !canonical.is_dir() {
+        if path.to_str().is_none() || canonical.to_str().is_none() {
             return Err(format!(
-                "dashboard UI directory {} is not a directory",
+                "dashboard UI directory {} is not valid UTF-8",
                 path.display()
             ));
         }
+        open_directory(&canonical)
+            .map_err(|error| format!("dashboard UI directory {}: {error}", path.display()))?;
         Ok(Self::Directory(canonical))
     }
 
@@ -42,6 +51,7 @@ impl UiSource {
 }
 
 const ENTRY_TTL: Duration = Duration::from_secs(10 * 60);
+const CLAIM_READY: u8 = b'R';
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ServerInfo {
@@ -56,7 +66,17 @@ pub(crate) struct ServerInfo {
 /// Held for the server's lifetime; the kernel releases it on any exit, so a
 /// crashed server never leaves a stale claim behind.
 pub(crate) struct SingletonLock {
-    _file: File,
+    file: File,
+}
+
+impl SingletonLock {
+    pub fn notify_predecessor_ready(&self) -> Result<(), String> {
+        let mut ready = io::stdout().lock();
+        ready
+            .write_all(&[CLAIM_READY])
+            .and_then(|()| ready.flush())
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[derive(Clone)]
@@ -97,15 +117,39 @@ impl ServerFiles {
         private_file(&self.dir.join("server.lock"))
     }
 
-    /// `None` while another server holds the claim. A predecessor releases
-    /// it before spawning its successor, so there is nothing to wait for.
+    /// `None` while another server holds the claim.
     pub fn claim(&self) -> Result<Option<SingletonLock>, String> {
         let file = self.lock_file()?;
         match file.try_lock() {
-            Ok(()) => Ok(Some(SingletonLock { _file: file })),
+            Ok(()) => Ok(Some(SingletonLock { file })),
             Err(fs::TryLockError::WouldBlock) => Ok(None),
             Err(fs::TryLockError::Error(error)) => Err(error.to_string()),
         }
+    }
+
+    pub fn inherit_claim(&self) -> Result<SingletonLock, String> {
+        let file = File::from(
+            io::stdin()
+                .as_fd()
+                .try_clone_to_owned()
+                .map_err(|e| e.to_string())?,
+        );
+        let inherited = file.metadata().map_err(|e| e.to_string())?;
+        let expected = self.lock_file()?.metadata().map_err(|e| e.to_string())?;
+        if (inherited.dev(), inherited.ino()) != (expected.dev(), expected.ino()) {
+            return Err("inherited dashboard claim does not match server.lock".to_owned());
+        }
+        file.try_lock()
+            .map_err(|e| format!("could not acquire inherited dashboard claim: {e}"))?;
+        // Stdin must survive the launcher exec, but not helpers spawned by this server.
+        let flags = unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_GETFD) };
+        if flags < 0
+            || unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_SETFD, flags | libc::FD_CLOEXEC) }
+                < 0
+        {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        Ok(SingletonLock { file })
     }
 
     pub fn claimed(&self) -> Result<bool, String> {
@@ -252,7 +296,7 @@ impl ServerFiles {
             })
     }
 
-    pub fn spawn(&self, ui: &UiSource) -> Result<(), String> {
+    pub fn spawn(&self, ui: &UiSource, claim: Option<&SingletonLock>) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
         let log = OpenOptions::new()
             .create(true)
@@ -268,17 +312,74 @@ impl ServerFiles {
         if let UiSource::Directory(path) = ui {
             command.arg("--ui").arg(path);
         }
-        command
+        let stdin = match claim {
+            Some(claim) => {
+                command.arg("--inherit-claim");
+                Stdio::from(claim.file.try_clone().map_err(|e| e.to_string())?)
+            }
+            None => Stdio::null(),
+        };
+        let mut child = command
             .process_group(0)
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_SOCKET_PATH")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdin(stdin)
+            .stdout(if claim.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stderr(log)
             .spawn()
-            .map(drop)
-            .map_err(|e| format!("could not start the dashboard server: {e}"))
+            .map_err(|e| format!("could not start the dashboard server: {e}"))?;
+        let Some(mut ready) = child.stdout.take() else {
+            return Ok(());
+        };
+        let deadline = Instant::now() + Duration::from_secs(65);
+        let result = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    break Err(format!(
+                        "dashboard successor exited before adopting its claim: {status}"
+                    ));
+                }
+                Ok(None) => {}
+                Err(error) => break Err(error.to_string()),
+            }
+            let mut descriptor = libc::pollfd {
+                fd: ready.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let polled = unsafe { libc::poll(&mut descriptor, 1, 50) };
+            if polled < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                break Err(error.to_string());
+            }
+            if polled > 0 {
+                let mut byte = [0];
+                break match ready.read(&mut byte) {
+                    Ok(1) if byte[0] == CLAIM_READY => Ok(()),
+                    Ok(_) => Err("dashboard successor closed its readiness pipe".to_owned()),
+                    Err(error) => Err(error.to_string()),
+                };
+            }
+            if Instant::now() >= deadline {
+                break Err(
+                    "dashboard successor did not adopt its claim within 65 seconds".to_owned(),
+                );
+            }
+        };
+        if result.is_err() {
+            // Launcher helpers can inherit the claim too, so stop the whole child group.
+            let _ = unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+            let _ = child.wait();
+        }
+        result
     }
 }
 
@@ -309,4 +410,42 @@ pub(crate) fn random_hex(bytes: usize) -> Result<String, String> {
         .and_then(|mut source| source.read_exact(&mut buffer))
         .map_err(|e| format!("could not read randomness: {e}"))?;
     Ok(buffer.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+pub(super) fn open_directory(path: &Path) -> io::Result<File> {
+    if !path.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "directory path must be absolute",
+        ));
+    }
+    let mut directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open("/")?;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            if component == Component::RootDir {
+                continue;
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid directory component",
+            ));
+        };
+        let name = CString::new(name.as_bytes())?;
+        let fd = unsafe {
+            libc::openat(
+                directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // openat returned a new owned descriptor.
+        directory = unsafe { File::from_raw_fd(fd) };
+    }
+    Ok(directory)
 }

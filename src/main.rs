@@ -160,6 +160,7 @@ fn main() -> ExitCode {
             &state,
             command_guard.take().flatten(),
             cli.dashboard_ui(),
+            cli.dashboard_inherit_claim(),
         );
     }
     let human = cli.human_output(io::stdout().is_terminal());

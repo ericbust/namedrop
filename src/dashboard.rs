@@ -83,7 +83,7 @@ fn ensure(
                 return Ok((if spawned { "started" } else { "running" }, info));
             }
         } else if !spawned {
-            files.spawn(ui)?;
+            files.spawn(ui, None)?;
             spawned = true;
         }
         if Instant::now() >= deadline {
@@ -147,8 +147,14 @@ fn launch_browser(url: &str) -> bool {
         .is_ok()
 }
 
-pub fn serve(state: &Path, command_gate: Option<File>, ui_directory: Option<&Path>) -> ExitCode {
-    match UiSource::from_directory(ui_directory).and_then(|ui| run_server(state, command_gate, ui))
+pub fn serve(
+    state: &Path,
+    command_gate: Option<File>,
+    ui_directory: Option<&Path>,
+    inherit_claim: bool,
+) -> ExitCode {
+    match UiSource::from_directory(ui_directory)
+        .and_then(|ui| run_server(state, command_gate, ui, inherit_claim))
     {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -158,17 +164,30 @@ pub fn serve(state: &Path, command_gate: Option<File>, ui_directory: Option<&Pat
     }
 }
 
-fn run_server(state: &Path, command_gate: Option<File>, ui: UiSource) -> Result<(), String> {
+fn run_server(
+    state: &Path,
+    command_gate: Option<File>,
+    ui: UiSource,
+    inherit_claim: bool,
+) -> Result<(), String> {
     let files = ServerFiles::at(state)?;
-    let Some(claim) = files.claim()? else {
-        return Ok(());
+    let claim = if inherit_claim {
+        files.inherit_claim()?
+    } else {
+        let Some(claim) = files.claim()? else {
+            return Ok(());
+        };
+        claim
     };
     // Holding the shared command gate for a long-lived process would make
     // every update time out waiting for it to drain.
     drop(command_gate);
-    let assets = http::Assets::new(&ui)?;
+    let assets = http::Assets::new(&ui);
     // Before server.json, so whoever sees this server can already enter it.
     let session = files.session()?;
+    if inherit_claim {
+        claim.notify_predecessor_ready()?;
+    }
     let listener = bind(files.info().map(|info| info.port))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let instance = server_files::random_hex(16)?;
@@ -198,8 +217,8 @@ fn run_server(state: &Path, command_gate: Option<File>, ui: UiSource) -> Result<
     eprintln!("dashboard: stopping: {}", verdict.reason());
     match verdict {
         hub::Verdict::Handoff(_) => {
+            files.spawn(&ui, Some(&claim))?;
             drop(claim);
-            files.spawn(&ui)?;
         }
         // Still holding the claim, so no successor reads the old session.
         hub::Verdict::Idle => files.rotate_session()?,
