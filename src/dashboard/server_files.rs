@@ -52,7 +52,6 @@ impl UiSource {
 }
 
 const ENTRY_TTL: Duration = Duration::from_secs(10 * 60);
-const CLAIM_READY: u8 = b'R';
 
 struct Successor {
     executable: PathBuf,
@@ -168,16 +167,6 @@ pub(crate) struct ServerInfo {
 /// crashed server never leaves a stale claim behind.
 pub(crate) struct SingletonLock {
     file: File,
-}
-
-impl SingletonLock {
-    pub fn notify_predecessor_ready(&self) -> Result<(), String> {
-        let mut ready = io::stdout().lock();
-        ready
-            .write_all(&[CLAIM_READY])
-            .and_then(|()| ready.flush())
-            .map_err(|e| e.to_string())
-    }
 }
 
 #[derive(Clone)]
@@ -410,7 +399,8 @@ impl ServerFiles {
     ) -> Result<(), String> {
         let mut log = self.server_log()?;
         let result = (|| {
-            let _gate = crate::runtime_command_guard(&self.state, Some(Duration::from_secs(60)))?;
+            let command_gate =
+                crate::runtime_command_guard(&self.state, Some(Duration::from_secs(60)))?;
             let runtime = self.state.join("runtime");
             let packages = runtime
                 .is_dir()
@@ -445,6 +435,8 @@ impl ServerFiles {
             let token = self.token()?;
             let mut child =
                 self.spawn_selected(&selected.executable, effective_ui, claim.as_ref())?;
+            drop(packages);
+            drop(command_gate);
             let deadline = Instant::now() + Duration::from_secs(65);
             let result = loop {
                 match child.try_wait() {

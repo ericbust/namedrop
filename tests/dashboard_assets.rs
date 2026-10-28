@@ -1661,3 +1661,142 @@ fn failed_handoff_stops_launcher_helpers_and_releases_the_claim() {
     assert_eq!(dashboard.open(Some(&ui))["server"], "started");
     assert_eq!(dashboard.get("/", true).body, b"<h1>dist</h1>");
 }
+
+#[test]
+fn fix_four_current_handoff_keeps_server_log_lines_prefixed() {
+    let dashboard = Dashboard::new();
+    let opened = dashboard.open(None);
+    let first = dashboard.info();
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("release")).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_namedrop"),
+        runtime.join("release/namedrop"),
+    )
+    .unwrap();
+    symlink("release", runtime.join("current")).unwrap();
+    symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+    let serving = format!("dashboard: serving 127.0.0.1:{}", first["port"]);
+    let log = eventually(|| {
+        let info = dashboard.info();
+        let log = fs::read_to_string(dashboard.state().join("dashboard/server.log")).ok()?;
+        (info["instance"] != first["instance"] && log.matches(&serving).count() == 2).then_some(log)
+    })
+    .expect("successor publishes metadata and logs that it is serving");
+    dashboard.get("/", true).status(200);
+    for line in log.lines().filter(|line| !line.is_empty()) {
+        assert!(
+            line.starts_with("dashboard:"),
+            "unexpected server.log line {line:?}"
+        );
+    }
+}
+
+#[test]
+fn fix_four_same_ui_open_during_slow_handoff_returns_running_space_url() {
+    for custom in [false, true] {
+        let dashboard = Dashboard::new();
+        let ui = dashboard.ui("dist");
+        let requested_ui = custom.then_some(ui.as_path());
+        let opened = dashboard.open(requested_ui);
+        let first = dashboard.info();
+        let _events = fix_two_subscribe(&dashboard, &opened);
+        let runtime = dashboard.state().join("runtime");
+        fs::create_dir_all(runtime.join("release")).unwrap();
+        let delayed = dashboard.root().join("successor-delayed");
+        let resumed = dashboard.root().join("successor-resumed");
+        selected_startup_fixture(
+            &dashboard,
+            &format!(
+                "touch '{}'; sleep 7; touch '{}'",
+                delayed.display(),
+                resumed.display()
+            ),
+        );
+        eventually(|| delayed.exists().then_some(())).expect("successor startup is delayed");
+        let output = dashboard.command(requested_ui).output().unwrap();
+        assert!(
+            output.status.success(),
+            "same-UI open failed during handoff, custom={custom}: {output:?}"
+        );
+        assert!(!resumed.exists(), "caller waited for successor startup");
+        let reopened = data(output);
+        assert_eq!(reopened["server"], "running");
+        assert_eq!(reopened["space_key"], opened["space_key"]);
+        assert_eq!(reopened["workspace_id"], "w1");
+        assert!(
+            reopened["url"].as_str().unwrap().starts_with(&format!(
+                "http://127.0.0.1:{}/w/{}?n=",
+                first["port"],
+                opened["space_key"].as_str().unwrap()
+            )),
+            "handoff changed the running port or requested space: {reopened}"
+        );
+    }
+}
+
+#[test]
+fn fix_four_runtime_update_locks_are_available_during_slow_successor_startup() {
+    let dashboard = Dashboard::new();
+    let opened = dashboard.open(None);
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("release")).unwrap();
+    let delayed = dashboard.root().join("successor-delayed");
+    let resumed = dashboard.root().join("successor-resumed");
+    selected_startup_fixture(
+        &dashboard,
+        &format!(
+            "touch '{}'; sleep 7; touch '{}'",
+            delayed.display(),
+            resumed.display()
+        ),
+    );
+    eventually(|| delayed.exists().then_some(())).expect("successor startup is delayed");
+    let acquired = ["packages.lock", "commands.lock"].map(|name| {
+        let contender = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(runtime.join(name))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            assert!(
+                !resumed.exists(),
+                "successor resumed before testing exclusive acquisition of {name}"
+            );
+            match contender.try_lock() {
+                Ok(()) => {
+                    assert!(
+                        !resumed.exists(),
+                        "{name} became available only after successor resumed"
+                    );
+                    break true;
+                }
+                Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(fs::TryLockError::WouldBlock) => break false,
+                Err(fs::TryLockError::Error(error)) => panic!("{name}: {error}"),
+            }
+        }
+    });
+    let phase = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dashboard.state().join("dashboard/handoff.lock"))
+        .unwrap();
+    assert!(!resumed.exists(), "successor startup is still delayed");
+    assert!(
+        matches!(phase.try_lock_shared(), Err(fs::TryLockError::WouldBlock)),
+        "dashboard handoff lease must outlive the update locks"
+    );
+    assert_eq!(
+        acquired,
+        [true, true],
+        "exclusive update locks stayed held during successor startup: packages.lock={}, commands.lock={}",
+        acquired[0],
+        acquired[1]
+    );
+}

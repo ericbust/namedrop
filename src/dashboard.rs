@@ -75,7 +75,12 @@ fn ensure(
         let handoff_reader = files.handoff_reader()?;
         if handoff_reader.is_none() {
             let active = files.info();
-            if active.as_ref().is_some_and(|info| &info.ui != ui) || Instant::now() >= deadline {
+            if let Some(info) = &active
+                && &info.ui == ui
+            {
+                return Ok((if spawned { "started" } else { "running" }, info.clone()));
+            }
+            if active.is_some() || Instant::now() >= deadline {
                 let active =
                     active.map_or_else(|| "its active UI".to_owned(), |info| info.ui.setting());
                 return Err(format!(
@@ -227,9 +232,6 @@ fn run_server(
     let assets = http::Assets::new(&ui);
     // Before server.json, so whoever sees this server can already enter it.
     let session = files.session()?;
-    if inherit_claim {
-        claim.notify_predecessor_ready()?;
-    }
     let listener = bind(files.info().map(|info| info.port))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let instance = server_files::random_hex(16)?;
