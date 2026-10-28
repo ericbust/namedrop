@@ -284,12 +284,6 @@ In a Codex or Claude Code pane, press **Prefix**, then **Shift-S**. The panel sh
 
 Each description comes from a separate background request through the host of the pane you opened the panel from: Haiku for Claude Code, Luna for Codex. The request uses your existing sign-in and usage allowance, and it doesn't prompt or interrupt the active session. Outstanding requests come from Namedrop's delivery records. The model writes only the descriptions. If a summary fails, the panel shows the reason and the pane's recent output. See [panel behavior and limits](docs/operations.md#agent-status-panel).
 
-## Dashboard
-
-To watch a workspace in your browser, run `namedrop dashboard` in any of its panes, or run `herdr plugin action invoke dashboard --plugin namedrop`. The page shows each agent as a column with its state and mailbox, and each message as an arrow between columns. Each arrowhead marks how far that delivery got: queued, delivered, working, replied, held, or failed. Handoffs, coordinations, and recent terminal commands sit beside the conversation. The page updates as agents work.
-
-One local server serves every workspace, and each workspace gets its own page. The dashboard is read-only. It never shows shared context or terminal output, and it redacts secrets from message text. The server stops on its own 10 minutes after the last tab closes. See [dashboard behavior and limits](docs/operations.md#dashboard).
-
 ## Tour
 
 The tour is a short walkthrough of names, mentions, terminals, groups, Agent status, and Doctor, shown in a popup. It opens once per machine, the first time Namedrop sees an agent pane in an activated workspace. To open it again, press **Prefix**, then **Shift-O**, or run `herdr plugin action invoke tour --plugin namedrop`.
