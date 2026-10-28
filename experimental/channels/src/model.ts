@@ -55,6 +55,7 @@ export type Event =
   | WireEvent
   | { type: "select"; key: SpaceKey }
   | { type: "opened" }
+  | { type: "replay-timeout" }
   | { type: "disconnected" }
   | { type: "visibility"; visible: boolean };
 export type Sync =

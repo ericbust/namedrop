@@ -193,6 +193,10 @@ Read its generated `env.sh` to build the wrapper below. The socket assertion run
 before the first Herdr command. Keep all Herdr and Namedrop calls inside `tb`.
 
 ```sh
+export CHANNELS_OUTPUT_DIR="${CHANNELS_OUTPUT_DIR:-/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}}"
+mkdir -p "$CHANNELS_OUTPUT_DIR"
+export CHANNELS_OUTPUT_DIR="$(cd "$CHANNELS_OUTPUT_DIR" && pwd)"
+export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
 tb_profile="$TESTBED_HOME/profiles/link-$(basename "$PWD")"
 tb_vars=$(sed -n 's/^ *env -i \(.*\) \/bin\/bash --noprofile.*/\1/p' "$tb_profile/env.sh")
 test -n "$tb_vars" || exit 1
@@ -218,15 +222,21 @@ profile directory. Use `tb herdr workspace create --cwd <directory> --label alph
 Use `tb herdr agent prompt <pane> <task>` for presence changes and `tb herdr
 workspace close <workspace>` for removal. Never address the real Herdr socket.
 
-From `experimental/channels`, set `CHANNELS_URL` to the returned `data.url` and
-`CHROME` to the installed Chrome or Chromium executable. This browser probe uses
-only the pinned `playwright-core` package. It saves a screenshot and performance
+Run the browser block from `experimental/channels`. Run the other shell blocks from
+the repository root. Each block sets its own defaults and works in a fresh shell.
+Use an absolute `CHANNELS_OUTPUT_DIR` to share artifacts between working directories.
+Set `CHROME` to the installed Chrome or Chromium executable if it is absent from `PATH`.
+This browser probe uses only the pinned `playwright-core` package. It saves a screenshot and performance
 entries in `CHANNELS_OUTPUT_DIR`.
 
 ```sh
+export CHANNELS_OUTPUT_DIR="${CHANNELS_OUTPUT_DIR:-/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}}"
+mkdir -p "$CHANNELS_OUTPUT_DIR"
+export CHANNELS_OUTPUT_DIR="$(cd "$CHANNELS_OUTPUT_DIR" && pwd)"
+export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
 CHANNELS_URL=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["url"])' "$CHANNELS_OUTPUT_DIR/channels-dashboard.json")
 export CHANNELS_URL
-export CHROME="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable)"
+export CHROME="${CHROME:-$(command -v chromium || command -v google-chrome || command -v google-chrome-stable)}"
 node --input-type=module <<'JS'
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
@@ -234,7 +244,7 @@ import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 const output = process.env.CHANNELS_OUTPUT_DIR;
 assert.ok(output, 'CHANNELS_OUTPUT_DIR must be exported');
-const browser = await chromium.launch({executablePath: process.env.CHROME, headless: true});
+const browser = await chromium.launch({executablePath: process.env.CHROME, headless: true, args: ['--no-sandbox']});
 try {
   const context = await browser.newContext({viewport: {width: 1024, height: 700}});
   const page = await context.newPage();
@@ -269,8 +279,9 @@ Use these selectors for later live lanes.
 
 - `getByRole('navigation', {name: 'Channels', exact: true})` holds every channel.
   Channel buttons carry `data-channel-key` with the opaque key. Same-name buttons
-  use `name (workspace_id)` as their display name. Repeated workspace IDs also
-  include a stable unique key prefix. `.channel-name` holds only that name;
+  use `name (workspace_id · full-space-key)` as their display name. Each suffix
+  stays fixed when more same-name channels arrive. `.channel-name` holds only that
+  name;
   `.channel-token` holds the separate `#token` or **Not addressable**.
 - `getByRole('navigation', {name: 'Needs you', exact: true})` holds channels with `health.level === "needs_you"`.
   Their dots have `data-activity="blocked"` and the accessible name **Needs you**.
@@ -279,14 +290,17 @@ Use these selectors for later live lanes.
   Activity values are `working`, `waiting`, `blocked`, `idle`, `offline`, and `retired`.
 - `getByRole('status')` exposes the reconnect banner. Kill and restart only the
   profile's dashboard, then wait for this banner to disappear and the channel
-  collection to reconcile at `ready` without reloading the page. Select a channel,
+  collection to reconcile at `ready` without reloading the page. A server without
+  `ready` resumes live updates after a two-second fallback that keeps old channels.
+  Select a channel,
   focus its canonical Channels button, and create unread activity elsewhere before
   dropping the stream. Delay replay to check that the sidebar stays populated.
   After `ready`, confirm selection, unread marks, and focus survive for retained
   keys, then press an arrow key. Confirm omitted keys disappear and an empty ready
   set clears the view. The app opens exactly one `/api/events` EventSource per tab.
 - `performance.getEntriesByName('namedrop:frame-apply', 'measure')` measures reducer
-  calls. `namedrop:load-to-sidebar-paint` measures navigation start to the first
+  calls, including replay timeout reconciliation. `namedrop:load-to-sidebar-paint`
+  measures navigation start to the first
   populated sidebar after two animation frames. The app retains at most 200
   reducer measures and one load measure per navigation.
 
@@ -301,5 +315,9 @@ performance pass from the npm checks.
 Destroy the profile when the lane finishes.
 
 ```sh
+export CHANNELS_OUTPUT_DIR="${CHANNELS_OUTPUT_DIR:-/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}}"
+mkdir -p "$CHANNELS_OUTPUT_DIR"
+export CHANNELS_OUTPUT_DIR="$(cd "$CHANNELS_OUTPUT_DIR" && pwd)"
+export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
 testbed/testbed destroy --profile "link-$(basename "$PWD")" --yes
 ```

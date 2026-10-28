@@ -8,6 +8,7 @@
     "lint": "biome check .",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test --test-isolation=none src/*.test.ts",
+    "test:browser": "npm run build && node --test test/browser.test.mjs",
     "build": "vite build"
   },
   "dependencies": {

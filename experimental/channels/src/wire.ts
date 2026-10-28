@@ -166,7 +166,6 @@ export function parseEvent(name: string, rawJson: string): WireEvent | null {
     if (name === "ready") {
       const values = array(envelope.keys).map(spaceKey);
       const keys = new Set(values);
-      if (keys.size !== values.length) throw new Error("Duplicate ready key");
       return { type: "ready", keys };
     }
     const key = spaceKey(envelope.key);

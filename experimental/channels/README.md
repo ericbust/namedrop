@@ -21,6 +21,17 @@ one process so every test registers in the same runner. `npm run build` emits
 `dist/index.html` and external JavaScript and CSS. Fonts come from the system.
 No inline scripts, inline styles, or remote assets are needed under the dashboard CSP.
 
+Run the committed browser regressions from the same app directory. They build the
+actual app and serve an isolated local SSE fixture under the dashboard CSP.
+
+```sh
+CHROME=/opt/google/chrome/chrome npm run test:browser
+```
+
+Set `CHROME` to your installed Chrome or Chromium executable. The headless runner
+uses `--no-sandbox` and needs permission to bind a local test port. It covers focus
+restoration, replay mismatches, old servers without `ready`, and replay removal.
+
 The optional, path-filtered **Channels experiment** workflow runs these checks.
 It adds no required-check configuration. Cargo excludes `/experimental/**` from
 the package.
@@ -43,7 +54,8 @@ Namedrop API.
 The **Channels** and **Needs you** navigation regions expose buttons by workspace
 name. Display names have no mention prefix. Each row and channel header shows
 its exact `#token` separately, or **Not addressable**. Duplicate names include the
-full workspace ID and, when IDs also match across sockets, a unique space-key prefix.
+full workspace ID and full 20-character space key. These suffixes stay fixed when
+more same-name channels arrive.
 Arrow keys, Home, and End select and focus channel buttons inside each region. Tab
 moves between regions. The first channel in sidebar order opens when initial replay
 completes. Closing the selected workspace leaves **Choose a channel** when other
@@ -67,11 +79,20 @@ and clears the timer.
 During an outage and replay, the app keeps the last received channels and shows a
 reconnect banner. Each `open` starts a pending snapshot collection. The server sends
 exactly one `ready` event with `{ "keys": [...] }` after all initial `space` frames,
-including an empty list when no workspace is live. A validated `ready` set matching
-the pending keys replaces the visible collection atomically. Selection, unread
+including an empty list when no workspace is live. A validated `ready` merges parsed
+snapshots into the visible collection and removes only omitted keys. A listed key
+with a rejected snapshot keeps its last good channel when one exists. Selection, unread
 flags, and focused channel buttons survive for retained keys. Omitted keys disappear,
 and a removed selection falls back to the first channel in sidebar order. An
-interrupted replay is discarded. Duplicate or incomplete `ready` events are ignored.
+interrupted replay is discarded. Duplicate keys in `ready` are normalized. Subsets
+and supersets also end replay. `gone` removes committed and pending snapshots in
+stream order, and a later snapshot can recreate the channel.
+
+Each open starts one two-second replay timer. If `ready` never arrives, the app
+merges parsed snapshots without pruning existing channels, then resumes live updates.
+This compatibility interval gives ordinary replay time to complete. It does not
+infer which channels an old server omitted. A late `ready` after fallback is ignored.
+Ready, errors, restarting, a new open, and unmount cancel the current timer.
 
 New channels establish a read baseline. New message IDs or changes to membership,
 activity, or attention mark a background channel unread. Messages leaving the live
@@ -86,7 +107,7 @@ and inactive channels do not show attention shortcuts or summaries.
 The browser's standard Performance API exposes these measures.
 
 - `namedrop:frame-apply` measures the actual pure reducer call for each accepted
-  `space`, `gone`, or `ready` event, including the atomic replay commit. Parsing and
+  `space`, `gone`, `ready`, or replay timeout event, including the replay commit. Parsing and
   React rendering are outside this interval.
   The app clears this measure after 200 samples, then starts a new batch.
 - `namedrop:load-to-sidebar-paint` starts at the navigation time origin, `0`, and

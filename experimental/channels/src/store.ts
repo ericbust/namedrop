@@ -51,6 +51,33 @@ function clearUnread(
   next.delete(key);
   return next;
 }
+function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
+  if (state.sync.kind !== "replaying") return state;
+  const channels = new Map(state.channels);
+  for (const [key, channel] of state.sync.pending) {
+    const previous = state.channels.get(key);
+    channels.set(
+      key,
+      previous && sameChannel(previous, channel) ? previous : channel,
+    );
+  }
+  if (keys !== null) {
+    for (const key of channels.keys()) {
+      if (!keys.has(key)) channels.delete(key);
+    }
+  }
+  const selectedKey =
+    state.selectedKey !== null && channels.has(state.selectedKey)
+      ? state.selectedKey
+      : (sortedChannels({ ...state, channels })[0]?.key ?? null);
+  const unread = new Set([...state.unread].filter((key) => channels.has(key)));
+  for (const [key, channel] of channels) {
+    const previous = state.channels.get(key);
+    if (previous && hasActivity(previous, channel)) unread.add(key);
+  }
+  if (state.visible && selectedKey !== null) unread.delete(selectedKey);
+  return { ...state, channels, selectedKey, unread, sync: { kind: "live" } };
+}
 export function reduce(state: State, event: Event): State {
   switch (event.type) {
     case "space": {
@@ -75,51 +102,28 @@ export function reduce(state: State, event: Event): State {
         unread = new Set([...unread, channel.key]);
       return { ...state, channels, selectedKey, unread };
     }
-    case "ready": {
-      if (state.sync.kind !== "replaying") return state;
-      const { pending } = state.sync;
+    case "ready":
+      return finishReplay(state, event.keys);
+    case "replay-timeout":
+      return finishReplay(state, null);
+    case "gone": {
       if (
-        event.keys.size !== pending.size ||
-        [...event.keys].some((key) => !pending.has(key))
+        !state.channels.has(event.key) &&
+        !(state.sync.kind === "replaying" && state.sync.pending.has(event.key))
       )
         return state;
-      const channels = new Map<SpaceKey, Channel>();
-      const unread = new Set(
-        [...state.unread].filter((key) => pending.has(key)),
-      );
-      const selectedKey =
-        state.selectedKey !== null && pending.has(state.selectedKey)
-          ? state.selectedKey
-          : (sortedChannels({ ...state, channels: pending })[0]?.key ?? null);
-      for (const [key, channel] of pending) {
-        const previous = state.channels.get(key);
-        channels.set(
-          key,
-          previous && sameChannel(previous, channel) ? previous : channel,
-        );
-        if (
-          previous &&
-          hasActivity(previous, channel) &&
-          !(selectedKey === key && state.visible)
-        )
-          unread.add(key);
+      const channels = new Map(state.channels);
+      channels.delete(event.key);
+      let sync = state.sync;
+      if (sync.kind === "replaying") {
+        const pending = new Map(sync.pending);
+        pending.delete(event.key);
+        sync = { ...sync, pending };
       }
       return {
         ...state,
         channels,
-        selectedKey,
-        unread,
-        sync: { kind: "live" },
-      };
-    }
-    case "gone": {
-      if (state.sync.kind === "replaying" || !state.channels.has(event.key))
-        return state;
-      const channels = new Map(state.channels);
-      channels.delete(event.key);
-      return {
-        ...state,
-        channels,
+        sync,
         selectedKey: state.selectedKey === event.key ? null : state.selectedKey,
         unread: clearUnread(state.unread, event.key),
       };
@@ -179,21 +183,7 @@ export function channelName(
     (other) => other.displayName === channel.displayName,
   );
   if (sameName.length < 2) return channel.displayName;
-  const sameWorkspace = sameName.filter(
-    (other) => other.workspaceId === channel.workspaceId,
-  );
-  if (sameWorkspace.length < 2)
-    return `${channel.displayName} (${channel.workspaceId})`;
-  let length = 6;
-  while (
-    sameWorkspace.some(
-      (other) =>
-        other.key !== channel.key &&
-        other.key.slice(0, length) === channel.key.slice(0, length),
-    )
-  )
-    length += 1;
-  return `${channel.displayName} (${channel.workspaceId} · ${channel.key.slice(0, length)})`;
+  return `${channel.displayName} (${channel.workspaceId} · ${channel.key})`;
 }
 export function connectionStatus(
   state: State,

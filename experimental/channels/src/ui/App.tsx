@@ -11,7 +11,12 @@ import { MemberList } from "./MemberList.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 
 function measuredReduce(state: State, event: Event): State {
-  if (event.type !== "space" && event.type !== "gone" && event.type !== "ready")
+  if (
+    event.type !== "space" &&
+    event.type !== "gone" &&
+    event.type !== "ready" &&
+    event.type !== "replay-timeout"
+  )
     return reduce(state, event);
   performance.mark("namedrop:frame-start");
   const next = reduce(state, event);
@@ -33,23 +38,49 @@ export function App() {
     let stream: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
+    let replayTimer: ReturnType<typeof setTimeout> | undefined;
+    let generation = 0;
+    function cancelReplay() {
+      clearTimeout(replayTimer);
+      replayTimer = undefined;
+      generation += 1;
+    }
     function connect() {
       if (disposed) return;
+      cancelReplay();
       const source = new EventSource("/api/events");
       stream = source;
-      source.addEventListener("open", () => dispatch({ type: "opened" }));
+      source.addEventListener("open", () => {
+        if (disposed || stream !== source) return;
+        cancelReplay();
+        dispatch({ type: "opened" });
+        const openedGeneration = generation;
+        replayTimer = setTimeout(() => {
+          if (disposed || stream !== source || generation !== openedGeneration)
+            return;
+          replayTimer = undefined;
+          dispatch({ type: "replay-timeout" });
+        }, 2000);
+      });
       for (const name of ["space", "gone", "ready"]) {
         source.addEventListener(name, (message) => {
           if (
+            disposed ||
+            stream !== source ||
             !(message instanceof MessageEvent) ||
             typeof message.data !== "string"
           )
             return;
           const event = parseEvent(name, message.data);
-          if (event) dispatch(event);
+          if (event) {
+            if (event.type === "ready") cancelReplay();
+            dispatch(event);
+          }
         });
       }
       const disconnected = () => {
+        if (disposed || stream !== source) return;
+        cancelReplay();
         dispatch({ type: "disconnected" });
         if (source.readyState === EventSource.CLOSED && retry === undefined) {
           source.close();
@@ -68,6 +99,7 @@ export function App() {
     connect();
     return () => {
       disposed = true;
+      cancelReplay();
       stream?.close();
       clearTimeout(retry);
       document.removeEventListener("visibilitychange", visibility);
