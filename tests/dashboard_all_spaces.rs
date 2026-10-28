@@ -163,8 +163,36 @@ fi
 
 impl Drop for Server {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let shutdown =
+            (|| {
+                fs::remove_file(self.root.join("state/dashboard/server.json"))
+                    .map_err(|error| format!("could not request dashboard shutdown: {error}"))?;
+                let deadline = Instant::now() + WAIT;
+                loop {
+                    if let Some(status) = self.child.try_wait().map_err(|error| {
+                        format!("could not wait for dashboard shutdown: {error}")
+                    })? {
+                        return if status.success() {
+                            Ok(())
+                        } else {
+                            Err(format!("dashboard shutdown failed: {status}"))
+                        };
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(format!("dashboard did not shut down within {WAIT:?}"));
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+            })();
+        if let Err(error) = shutdown {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            if thread::panicking() {
+                eprintln!("{error}");
+            } else {
+                panic!("{error}");
+            }
+        }
     }
 }
 
@@ -1029,6 +1057,53 @@ fn ready_lists_exactly_the_three_initial_space_keys_once() {
         all.next_raw(Duration::from_millis(400)).is_none(),
         "ready repeated after the initial replay"
     );
+}
+
+#[test]
+fn dropping_server_waits_for_an_active_herdr_read() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "a");
+    let block = directory.path().join(format!("block-{SOCKET}"));
+    fs::write(&block, "").unwrap();
+    let server = Server::start(directory.path(), &[]);
+    let _events = server.events("/api/events");
+    let active = directory.path().join(format!("active-{SOCKET}"));
+    let mut pid = None;
+    eventually(|| {
+        pid = fs::read_to_string(&active)
+            .ok()
+            .and_then(|value| value.parse::<libc::pid_t>().ok());
+        pid.is_some()
+    });
+    let pid = pid.unwrap();
+    assert!(pid > 0);
+
+    drop(server);
+    let survived = Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    if survived {
+        fs::remove_file(block).unwrap();
+        eventually(|| {
+            let processes = Command::new("ps")
+                .args(["-axo", "pgid=,stat="])
+                .output()
+                .unwrap();
+            assert!(processes.status.success());
+            !String::from_utf8(processes.stdout)
+                .unwrap()
+                .lines()
+                .any(|line| {
+                    let mut fields = line.split_whitespace();
+                    fields.next().and_then(|value| value.parse().ok()) == Some(pid)
+                        && fields.next().is_some_and(|state| !state.starts_with('Z'))
+                })
+        });
+    }
+    assert!(!survived, "fake Herdr process {pid} survived Server::drop");
 }
 
 #[test]
