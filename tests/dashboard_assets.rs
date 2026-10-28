@@ -750,7 +750,8 @@ fn fix_forward_handoff_refuses_a_competing_embedded_ui() {
         );
         let diagnostic = String::from_utf8_lossy(&output.stdout);
         assert!(diagnostic.contains(ui.to_str().unwrap()), "{diagnostic}");
-        assert!(diagnostic.contains("stop it with"), "{diagnostic}");
+        assert!(diagnostic.contains("restarting"), "{diagnostic}");
+        assert!(diagnostic.contains("retry"), "{diagnostic}");
         thread::sleep(Duration::from_millis(200));
     }
     let output = dashboard.command(None).output().unwrap();
@@ -797,11 +798,248 @@ fn fix_forward_large_asset_memory_is_bounded() {
     let mut stream = connect(dashboard.port(), "/large.bin", &[]);
     let mut byte = [0];
     assert_eq!(stream.read(&mut byte).unwrap(), 1, "asset response starts");
-    let after = resident_kib(pid);
+    let deadline = Instant::now() + Duration::from_millis(900);
+    let mut after = resident_kib(pid);
+    while Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+        after = after.max(resident_kib(pid));
+    }
     assert!(
         after.saturating_sub(before) < 32 * 1024,
         "one stalled asset retained {} KiB beyond baseline {before} KiB",
         after.saturating_sub(before)
+    );
+}
+
+#[test]
+fn fix_two_search_only_ancestors_allow_a_readable_ui_directory() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("ancestor/dist");
+    let ancestor = dashboard.root().join("ancestor");
+    fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o311)).unwrap();
+    let output = dashboard.command(Some(&ui)).output().unwrap();
+    fs::set_permissions(&ancestor, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        output.status.success(),
+        "searchable ancestor was refused: {output:?}"
+    );
+    let page = dashboard.get("/", true);
+    page.status(200);
+    assert_eq!(page.body, b"<h1>ancestor/dist</h1>");
+}
+
+#[test]
+fn fix_two_unsearchable_ui_directory_fails_fast_with_its_path() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("no-search");
+    fs::set_permissions(&ui, fs::Permissions::from_mode(0o444)).unwrap();
+    let start = Instant::now();
+    let output = dashboard.command(Some(&ui)).output().unwrap();
+    fs::set_permissions(&ui, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        !output.status.success(),
+        "unsearchable UI was accepted: {output:?}"
+    );
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(diagnostic.contains(ui.to_str().unwrap()), "{diagnostic}");
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert!(!dashboard.state().join("dashboard/server.json").exists());
+}
+
+fn fix_two_subscribe(dashboard: &Dashboard, opened: &Value) -> BufReader<TcpStream> {
+    let mut events = BufReader::new(connect(
+        dashboard.port(),
+        &format!("/w/{}/events", opened["space_key"].as_str().unwrap()),
+        &[("Cookie", dashboard.cookie())],
+    ));
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(events.read_line(&mut line).unwrap(), 0);
+        if line.starts_with("event: snapshot") {
+            return events;
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires REVIEW_OLD_BINARY pointing to the real 5552bd6 release"]
+fn fix_two_handoff_to_a_release_without_claim_support_stays_running() {
+    let old = std::env::var_os("REVIEW_OLD_BINARY").expect("REVIEW_OLD_BINARY");
+    for custom in [false, true] {
+        let dashboard = Dashboard::new();
+        let ui = dashboard.ui("dist");
+        let opened = dashboard.open(custom.then_some(ui.as_path()));
+        let first = dashboard.info();
+        let cookie = dashboard.cookie();
+        let _events = fix_two_subscribe(&dashboard, &opened);
+        let runtime = dashboard.state().join("runtime");
+        fs::create_dir_all(runtime.join("release")).unwrap();
+        fs::copy(&old, runtime.join("release/namedrop")).unwrap();
+        symlink("release", runtime.join("current")).unwrap();
+        symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+        let successor = eventually(|| {
+            let info: Value = serde_json::from_slice(
+                &fs::read(dashboard.state().join("dashboard/server.json")).ok()?,
+            )
+            .ok()?;
+            (info["instance"] != first["instance"]).then_some(info)
+        });
+        let log =
+            fs::read_to_string(dashboard.state().join("dashboard/server.log")).unwrap_or_default();
+        assert!(
+            successor.is_some(),
+            "old release did not become the running dashboard: {log}"
+        );
+        let successor = successor.unwrap();
+        assert_eq!(successor["port"], first["port"]);
+        assert_eq!(dashboard.cookie(), cookie);
+        let response = dashboard.get("/", true);
+        response.status(200);
+        assert_eq!(
+            response.body,
+            if custom {
+                b"<h1>dist</h1>".as_slice()
+            } else {
+                INDEX_HTML.as_bytes()
+            }
+        );
+    }
+}
+
+#[test]
+fn fix_two_handoff_mismatch_says_restarting_instead_of_a_retiring_pid() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    let opened = dashboard.open(Some(&ui));
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("release")).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_namedrop"),
+        runtime.join("release/namedrop"),
+    )
+    .unwrap();
+    symlink("release", runtime.join("current")).unwrap();
+    fs::write(runtime.join("namedrop"), format!(
+        "#!/bin/sh\ncase \"$*\" in *dashboard-server*--help*) ;; *dashboard-server*) touch '{}'; sleep 2;; esac\nexec '{}' \"$@\"\n",
+        dashboard.root().join("successor-delayed").display(), runtime.join("current/namedrop").display()
+    )).unwrap();
+    fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755)).unwrap();
+    eventually(|| {
+        dashboard
+            .root()
+            .join("successor-delayed")
+            .exists()
+            .then_some(())
+    })
+    .expect("handoff is delayed in its launcher");
+    let output = dashboard.command(None).output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let diagnostic = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        diagnostic.contains("restarting") && diagnostic.contains("retry"),
+        "{diagnostic}"
+    );
+    assert!(
+        !diagnostic.contains("kill "),
+        "retiring PID advice: {diagnostic}"
+    );
+}
+
+#[test]
+fn fix_two_handoff_resolves_and_probes_the_release_after_acquiring_the_runtime_gate() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    let opened = dashboard.open(Some(&ui));
+    let first = dashboard.info();
+    let mut events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("before-update")).unwrap();
+    fs::create_dir_all(runtime.join("release")).unwrap();
+    let gate = fs::File::create(runtime.join("commands.lock")).unwrap();
+    gate.lock().unwrap();
+    let premature_probe = dashboard.root().join("premature-probe");
+    fs::write(
+        runtime.join("before-update/namedrop"),
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", premature_probe.display()),
+    )
+    .unwrap();
+    fs::set_permissions(
+        runtime.join("before-update/namedrop"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_namedrop"),
+        runtime.join("release/namedrop"),
+    )
+    .unwrap();
+    symlink("before-update", runtime.join("current")).unwrap();
+    symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert_ne!(events.read_line(&mut line).unwrap(), 0);
+        if line.starts_with("event: restarting") {
+            break;
+        }
+    }
+    eventually(|| {
+        fs::read_to_string(dashboard.state().join("dashboard/server.log"))
+            .ok()
+            .filter(|log| log.contains("dashboard: stopping: a newer release is current"))
+    })
+    .expect("server enters handoff while the update gate is held");
+    assert!(
+        !premature_probe.exists(),
+        "probed a release before the update gate opened"
+    );
+    symlink("release", runtime.join("next-current")).unwrap();
+    fs::rename(runtime.join("next-current"), runtime.join("current")).unwrap();
+    drop(gate);
+    let successor = eventually(|| {
+        let info = dashboard.info();
+        (info["instance"] != first["instance"]).then_some(info)
+    })
+    .expect("handoff selects the release committed behind the gate");
+    assert!(!premature_probe.exists());
+    assert_eq!(successor["ui"], first["ui"]);
+    assert_eq!(successor["port"], first["port"]);
+    assert_eq!(dashboard.get("/", true).body, b"<h1>dist</h1>");
+}
+
+#[test]
+fn fix_two_probe_failure_does_not_fall_back_to_a_legacy_spawn() {
+    let dashboard = Dashboard::new();
+    let opened = dashboard.open(None);
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("release")).unwrap();
+    let spawned = dashboard.root().join("unexpected-legacy-spawn");
+    fs::write(runtime.join("release/namedrop"), format!(
+        "#!/bin/sh\ncase \"$*\" in *--help*) echo 'could not acquire --inherit-claim' >&2; exit 69;; esac\ntouch '{}'\nexit 1\n", spawned.display()
+    )).unwrap();
+    fs::set_permissions(
+        runtime.join("release/namedrop"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    symlink("release", runtime.join("current")).unwrap();
+    symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+    eventually(|| {
+        fs::read_to_string(dashboard.state().join("dashboard/server.log"))
+            .ok()
+            .filter(|log| log.contains("capability probe failed"))
+    })
+    .expect("arbitrary probe errors are reported");
+    assert!(
+        !spawned.exists(),
+        "arbitrary failure started a legacy successor"
     );
 }
 

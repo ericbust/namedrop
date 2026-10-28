@@ -14,7 +14,11 @@ use std::{
     net::{Ipv4Addr, TcpListener, TcpStream},
     path::Path,
     process::{Command, ExitCode, Stdio},
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -70,9 +74,16 @@ fn ensure(
     loop {
         if files.claimed()? {
             if let Some(info) = files.info()
-                && answers(&info, token)
+                && let Some(phase) = answers(&info, token)
             {
                 if &info.ui != ui {
+                    if phase == ServerPhase::Restarting {
+                        return Err(format!(
+                            "the dashboard server is running with {} and is restarting; retry when it finishes before requesting {}",
+                            info.ui.setting(),
+                            ui.setting()
+                        ));
+                    }
                     return Err(format!(
                         "the dashboard server is running with {}; stop it with `kill {}` before requesting {}",
                         info.ui.setting(),
@@ -96,9 +107,15 @@ fn ensure(
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum ServerPhase {
+    Running,
+    Restarting,
+}
+
 /// Liveness is the claim plus this instance answering on its port; a stale
 /// `server.json` from a crashed server never matches.
-fn answers(info: &ServerInfo, token: &Token) -> bool {
+fn answers(info: &ServerInfo, token: &Token) -> Option<ServerPhase> {
     let probe = || -> std::io::Result<String> {
         let mut stream = TcpStream::connect((Ipv4Addr::LOCALHOST, info.port))?;
         stream.set_read_timeout(Some(Duration::from_secs(1)))?;
@@ -112,9 +129,19 @@ fn answers(info: &ServerInfo, token: &Token) -> bool {
         stream.read_to_string(&mut response)?;
         Ok(response)
     };
-    probe().is_ok_and(|response| {
-        response.starts_with("HTTP/1.1 200")
-            && response.contains(&format!("\"instance\":\"{}\"", info.instance))
+    let response = probe().ok()?;
+    if !response.starts_with("HTTP/1.1 200") {
+        return None;
+    }
+    let (_, body) = response.split_once("\r\n\r\n")?;
+    let health: Value = serde_json::from_str(body).ok()?;
+    if health["instance"].as_str() != Some(&info.instance) {
+        return None;
+    }
+    Some(if health["restarting"] == true {
+        ServerPhase::Restarting
+    } else {
+        ServerPhase::Running
     })
 }
 
@@ -202,6 +229,7 @@ fn run_server(
         },
     )?;
     let (hub, commands) = mpsc::channel();
+    let restarting = Arc::new(AtomicBool::new(false));
     let front = Arc::new(http::Front {
         port,
         files: ServerFiles::at(state)?,
@@ -210,6 +238,7 @@ fn run_server(
         instance: instance.clone(),
         hub,
         assets,
+        restarting: restarting.clone(),
     });
     thread::spawn(move || http::accept_loop(listener, front));
     eprintln!("dashboard: serving 127.0.0.1:{port}");
@@ -217,8 +246,8 @@ fn run_server(
     eprintln!("dashboard: stopping: {}", verdict.reason());
     match verdict {
         hub::Verdict::Handoff(_) => {
-            files.spawn(&ui, Some(&claim))?;
-            drop(claim);
+            restarting.store(true, Ordering::Release);
+            files.handoff(&ui, claim)?;
         }
         // Still holding the claim, so no successor reads the old session.
         hub::Verdict::Idle => files.rotate_session()?,

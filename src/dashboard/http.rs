@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
     },
     thread,
@@ -39,6 +39,7 @@ pub(crate) struct Front {
     pub instance: String,
     pub hub: Sender<HubCommand>,
     pub assets: Assets,
+    pub restarting: Arc<AtomicBool>,
 }
 
 pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>) {
@@ -400,9 +401,12 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
             "200 OK",
             "application/json",
             "",
-            serde_json::json!({"instance": front.instance})
-                .to_string()
-                .as_bytes(),
+            serde_json::json!({
+                "instance": front.instance,
+                "restarting": front.restarting.load(Ordering::Acquire) || front.files.restarting(),
+            })
+            .to_string()
+            .as_bytes(),
         ),
         Ok(Route::Spaces) => {
             let (reply, answer) = mpsc::channel();

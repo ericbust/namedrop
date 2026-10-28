@@ -5,14 +5,15 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     os::{
-        fd::{AsFd, AsRawFd, FromRawFd},
+        fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
         unix::{
             ffi::OsStrExt,
             fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+            net::UnixStream,
         },
     },
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -52,6 +53,82 @@ impl UiSource {
 
 const ENTRY_TTL: Duration = Duration::from_secs(10 * 60);
 const CLAIM_READY: u8 = b'R';
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimProtocol {
+    Current,
+    Legacy,
+}
+
+fn claim_protocol(status: ExitStatus, output: &[u8]) -> Result<ClaimProtocol, String> {
+    if status.success() {
+        return Ok(ClaimProtocol::Current);
+    }
+    let output = String::from_utf8_lossy(output);
+    if output.contains("unexpected argument '--inherit-claim'") {
+        return Ok(ClaimProtocol::Legacy);
+    }
+    Err(format!(
+        "dashboard successor capability probe failed ({status}): {output}"
+    ))
+}
+
+fn probe_claim_protocol(executable: &Path) -> Result<ClaimProtocol, String> {
+    use std::os::unix::process::CommandExt;
+    let (mut reader, writer) = UnixStream::pair().map_err(|e| e.to_string())?;
+    reader.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let stderr = writer.try_clone().map_err(|e| e.to_string())?;
+    let mut child = Command::new(executable)
+        .args(["dashboard-server", "--inherit-claim", "--help"])
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(OwnedFd::from(writer)))
+        .stderr(Stdio::from(OwnedFd::from(stderr)))
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "could not probe dashboard successor {}: {e}",
+                executable.display()
+            )
+        })?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut output = Vec::new();
+    let result = loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => break Err(error.to_string()),
+        };
+        let mut buffer = [0; 4096];
+        let read = reader.read(&mut buffer);
+        let drained = matches!(read, Ok(0))
+            || matches!(&read, Err(e) if e.kind() == io::ErrorKind::WouldBlock);
+        match read {
+            Ok(count) if output.len() + count > 64 * 1024 => {
+                break Err(
+                    "dashboard successor capability probe exceeded its output limit".to_owned(),
+                );
+            }
+            Ok(count) => output.extend_from_slice(&buffer[..count]),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => break Err(error.to_string()),
+        }
+        if drained {
+            if let Some(status) = status {
+                break claim_protocol(status, &output);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if Instant::now() >= deadline {
+            break Err("dashboard successor capability probe timed out after 5 seconds".to_owned());
+        }
+    };
+    if result.is_err() {
+        let _ = unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        let _ = child.wait();
+    }
+    result
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ServerInfo {
@@ -296,14 +373,55 @@ impl ServerFiles {
             })
     }
 
-    pub fn spawn(&self, ui: &UiSource, claim: Option<&SingletonLock>) -> Result<(), String> {
-        use std::os::unix::process::CommandExt;
-        let log = OpenOptions::new()
+    pub fn restarting(&self) -> bool {
+        let runtime = self.state.join("runtime");
+        fs::symlink_metadata(runtime.join("migration.json")).is_ok()
+            || (runtime.join("namedrop").exists()
+                && fs::canonicalize(runtime.join("current/namedrop")).ok()
+                    != std::env::current_exe().and_then(fs::canonicalize).ok())
+    }
+
+    pub fn handoff(&self, ui: &UiSource, claim: SingletonLock) -> Result<(), String> {
+        let mut log = self.server_log()?;
+        let result = (|| {
+            let _gate = crate::runtime_command_guard(&self.state, Some(Duration::from_secs(60)))?;
+            let runtime = self.state.join("runtime");
+            let selected = if runtime.join("namedrop").exists() {
+                fs::canonicalize(runtime.join("current/namedrop")).map_err(|e| e.to_string())?
+            } else {
+                crate::runtime_executable()?
+            };
+            match probe_claim_protocol(&selected)? {
+                ClaimProtocol::Current => self.spawn(ui, Some(&claim)),
+                ClaimProtocol::Legacy => {
+                    let _ = writeln!(
+                        log,
+                        "dashboard: successor {} rejected --inherit-claim; using legacy handoff compatibility",
+                        selected.display()
+                    );
+                    drop(claim);
+                    self.spawn(ui, None)
+                }
+            }
+        })();
+        if let Err(error) = &result {
+            let _ = writeln!(log, "dashboard: handoff failed: {error}");
+        }
+        result
+    }
+
+    fn server_log(&self) -> Result<File, String> {
+        OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
             .open(self.dir.join("server.log"))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn spawn(&self, ui: &UiSource, claim: Option<&SingletonLock>) -> Result<(), String> {
+        use std::os::unix::process::CommandExt;
+        let log = self.server_log()?;
         let mut command = Command::new(crate::runtime_executable()?);
         command
             .arg("--plugin-state")
@@ -419,10 +537,16 @@ pub(super) fn open_directory(path: &Path) -> io::Result<File> {
             "directory path must be absolute",
         ));
     }
-    let mut directory = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open("/")?;
+    #[cfg(target_os = "linux")]
+    let search = libc::O_PATH;
+    #[cfg(target_os = "macos")]
+    let search = libc::O_SEARCH;
+    let flags = search | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    let fd = unsafe { libc::open(c"/".as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut directory = unsafe { File::from_raw_fd(fd) };
     for component in path.components() {
         let Component::Normal(name) = component else {
             if component == Component::RootDir {
@@ -434,18 +558,48 @@ pub(super) fn open_directory(path: &Path) -> io::Result<File> {
             ));
         };
         let name = CString::new(name.as_bytes())?;
-        let fd = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
         // openat returned a new owned descriptor.
         directory = unsafe { File::from_raw_fd(fd) };
     }
-    Ok(directory)
+    let fd = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn claim_protocol_requires_success_or_explicit_flag_rejection() {
+        assert_eq!(
+            claim_protocol(ExitStatus::from_raw(0), b"Usage: namedrop").unwrap(),
+            ClaimProtocol::Current
+        );
+        let old = br#"{"status":"rejected","error":{"code":"invalid_request","message":"error: unexpected argument '--inherit-claim' found\n"}}"#;
+        assert_eq!(
+            claim_protocol(ExitStatus::from_raw(64 << 8), old).unwrap(),
+            ClaimProtocol::Legacy
+        );
+        for output in [
+            b"error: unexpected argument '--other' found".as_slice(),
+            b"could not acquire --inherit-claim",
+            b"dashboard successor closed its readiness pipe",
+        ] {
+            assert!(claim_protocol(ExitStatus::from_raw(69 << 8), output).is_err());
+        }
+    }
 }
