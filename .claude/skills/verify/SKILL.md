@@ -170,3 +170,119 @@ testbed/testbed destroy --profile test-link-<name> --yes
 
 Where the testbed cannot run, follow `testbed/CHECKLIST.md` by hand and use the manual
 drive notes for the pane mechanics.
+
+## Channels browser app
+
+Use this driver for `experimental/channels` lanes. Run every testbed command from
+this checkout. Build the app, then boot an isolated profile.
+
+```sh
+(cd experimental/channels && npm ci && npm run build)
+testbed/testbed up --link "$PWD" --fresh --yes
+```
+
+Use `--no-launch` for lanes that do not prompt real agents. Do not use
+`testbed/testbed attach`. The profile is `link-<checkout basename>`.
+Read its generated `env.sh` to build the wrapper below. The socket assertion runs
+before the first Herdr command. Keep all Herdr and Namedrop calls inside `tb`.
+
+```sh
+tb_profile="$HOME/.namedrop-testbed/profiles/link-$(basename "$PWD")"
+tb_vars=$(sed -n 's/^ *env -i \(.*\) \/bin\/bash --noprofile.*/\1/p' "$tb_profile/env.sh")
+test -n "$tb_vars" || exit 1
+tb() { eval "env -i $tb_vars \"\$@\""; }
+tb_socket=$(tb printenv HERDR_SOCKET_PATH)
+case "$tb_socket" in /tmp/nd-tb-*) ;; *) echo "Not a testbed socket" >&2; exit 1 ;; esac
+tb herdr pane list
+tb_workspace=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace"])' "$tb_profile/state.json")
+tb_state="$tb_profile/state/herdr/plugins/namedrop"
+tb "$tb_state/runtime/namedrop" --plugin-state "$tb_state" --herdr-workspace "$tb_workspace" dashboard --no-open --json --ui "$PWD/experimental/channels/dist" > /tmp/channels-dashboard.json
+```
+
+Read `data.url` from `/tmp/channels-dashboard.json`. The nonce is single use.
+Navigate once with a fresh browser context. The redirect redeems it for the session
+cookie, which the app's same-origin EventSource uses automatically.
+
+For three channels, create `alpha` and `beta` through the wrapper, each in its own
+profile directory. Use `tb herdr workspace create --cwd <directory> --label alpha
+--no-focus`, then repeat for `beta`. Name a member in each using Namedrop through
+`tb` with that workspace and pane. For real agent coverage, use the existing
+[second workspace helper](scripts/second-workspace.py) and
+[manual drive notes](references/manual-drive.md), with the same socket assertion.
+Use `tb herdr agent prompt <pane> <task>` for presence changes and `tb herdr
+workspace close <workspace>` for removal. Never address the real Herdr socket.
+
+From `experimental/channels`, set `CHANNELS_URL` to the returned `data.url` and
+`CHROME` to the installed Chrome or Chromium executable. This browser probe uses
+only the pinned `playwright-core` package. It saves a screenshot and performance
+entries in `/tmp`.
+
+```sh
+CHANNELS_URL=$(python3 -c 'import json; print(json.load(open("/tmp/channels-dashboard.json"))["data"]["url"])')
+export CHANNELS_URL
+export CHROME="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable)"
+node --input-type=module <<'JS'
+import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+import { chromium } from 'playwright-core';
+const browser = await chromium.launch({executablePath: process.env.CHROME, headless: true});
+try {
+  const context = await browser.newContext({viewport: {width: 1024, height: 700}});
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(process.env.CHANNELS_URL);
+  const channels = page.getByRole('navigation', {name: 'Channels', exact: true});
+  await channels.getByRole('button').first().waitFor();
+  await channels.getByRole('button', {name: 'alpha', exact: true}).click();
+  await page.getByRole('heading', {name: 'alpha', exact: true}).waitFor();
+  await channels.getByRole('button', {name: 'alpha', exact: true}).focus();
+  await page.keyboard.press('End');
+  await page.keyboard.press('Home');
+  await page.waitForFunction(() => performance.getEntriesByName('namedrop:load-to-sidebar-paint').length > 0);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.screenshot({path: '/tmp/ui1-channels.png', fullPage: true});
+  await page.setViewportSize({width: 1600, height: 1000});
+  await page.emulateMedia({colorScheme: 'dark'});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.screenshot({path: '/tmp/ui1-dark.png', fullPage: true});
+  const measures = await page.evaluate(() => performance.getEntriesByType('measure').map(entry => entry.toJSON()));
+  await writeFile('/tmp/ui1-measures.json', JSON.stringify(measures, null, 2));
+  assert.deepEqual(errors, []);
+} finally {
+  await browser.close();
+}
+JS
+```
+
+Use these selectors for later live lanes.
+
+- `getByRole('navigation', {name: 'Channels', exact: true})` holds every channel.
+  Channel buttons carry `data-channel-key` with the opaque key. Same-name buttons
+  use `name (workspace_id)` as visible text.
+- `getByRole('navigation', {name: 'Needs you', exact: true})` holds attention channels.
+  Their dots have `data-activity="blocked"` and the accessible name **Needs you**.
+- `getByRole('list', {name: 'Members'})` holds member rows. Rows carry
+  `data-address-id` and `data-activity`. Each dot also carries `data-activity`.
+  Activity values are `working`, `waiting`, `blocked`, `idle`, `offline`, and `retired`.
+- `getByRole('status')` exposes the reconnect banner. Kill and restart only the
+  profile's dashboard, then wait for this banner to disappear and the channel
+  collection to rebuild without reloading the page.
+- `performance.getEntriesByName('namedrop:frame-apply', 'measure')` measures reducer
+  calls. `namedrop:load-to-sidebar-paint` measures navigation start to the first
+  populated sidebar after two animation frames. The app retains at most 200
+  reducer measures and one load measure per navigation.
+
+Save each lane's screenshots under `/tmp/swarm-<pr-id>/worker-<n>/`. Record the
+channel count, member presence transition, duplicate-name suffixes, keyboard focus,
+reconnect recovery, and dark surfaces against the plan's lanes. Use a fresh nonce
+and context for each navigation trial. The performance lane reads both measures
+across ten loads of 20 workspaces with 10 members. It compares the old dashboard's
+first participant paint before checking the plan's p95 limits. Do not infer a
+performance pass from the npm checks.
+
+Destroy the profile when the lane finishes.
+
+```sh
+testbed/testbed destroy --profile "link-$(basename "$PWD")" --yes
+```

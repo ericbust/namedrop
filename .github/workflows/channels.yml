@@ -1,0 +1,32 @@
+name: Channels experiment (optional)
+
+on:
+  pull_request:
+    paths:
+      - 'experimental/channels/**'
+  push:
+    paths:
+      - 'experimental/channels/**'
+
+permissions:
+  contents: read
+
+jobs:
+  channels-experiment:
+    name: Experimental channels checks
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: experimental/channels
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '26.7.0'
+          cache: npm
+          cache-dependency-path: experimental/channels/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
