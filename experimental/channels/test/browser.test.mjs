@@ -214,7 +214,6 @@ test("fix2 item 2: old server first load and reconnect fall back without pruning
   await ui.live();
   assert.equal(await ui.channels.getByRole("button").count(), 2);
   assert.equal(await ui.row(3).getAttribute("aria-current"), "page");
-  ui.connections[1].send("ready", { keys: [] });
   ui.connections[1].send("space", frame(3, "after-fallback"));
   await ui.page
     .getByRole("heading", { name: "after-fallback", exact: true })
@@ -248,14 +247,33 @@ test("fix2 item 6: gone during replay removes both committed and pending channel
   await ui.row(1).waitFor();
 });
 
-test("fix2 item 2: empty open times out and later frames apply live", async (t) => {
+test("fix3 item 2: slow first discovery stays loading at 2.4s until data arrives at 3s", async (t) => {
   const ui = await open(t, () => {});
-  await ui.live();
-  await ui.page
-    .getByRole("heading", { name: "No live workspaces", exact: true })
-    .waitFor();
+  await new Promise((resolve) => setTimeout(resolve, 2400));
+  assert.ok(
+    (await ui.page.evaluate(
+      () => performance.getEntriesByName("namedrop:frame-apply").length,
+    )) > 0,
+  );
+  assert.equal(
+    await ui.page.getByRole("heading", { level: 1 }).textContent(),
+    "Connecting to Namedrop",
+  );
+  assert.equal(
+    await ui.page.locator(".sidebar-footer").textContent(),
+    "Connecting…Read only",
+  );
+  assert.equal(
+    await ui.page.getByText("No live workspaces.", { exact: true }).count(),
+    0,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  ui.connections[0].send("space", frame(2, "beta"));
   ui.connections[0].send("space", frame(1, "alpha"));
-  await ui.row(1).waitFor();
+  ui.connections[0].send("ready", { keys: [key(1), key(2)] });
+  await ui.live();
+  await ui.page.getByRole("heading", { name: "alpha", exact: true }).waitFor();
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
   assert.equal(ui.connections.length, 1);
 });
 
@@ -324,4 +342,144 @@ test("fix2 item 2: ready cancels the pending timeout measurement", async (t) => 
     ),
     count,
   );
+});
+
+function activity(n, name) {
+  const value = frame(n, name);
+  value.frame.messages.push({ message_id: "new-background-activity" });
+  return value;
+}
+async function focused(ui, n) {
+  await ui.page.waitForFunction(
+    (selected) =>
+      document.activeElement?.matches(
+        `.channels-navigation button[data-channel-key="${selected}"]`,
+      ),
+    key(n),
+  );
+}
+
+test("fix3 item 1: lateReady prunes omitted selected gamma and restores sorted read fallback focus", async (t) => {
+  const ui = await open(t, (client, n) => {
+    if (n === 1)
+      replay(client, [frame(1, "zeta"), frame(2, "beta"), frame(3, "gamma")]);
+  });
+  await ui.live();
+  await ui.row(3).click();
+  ui.connections[0].send("space", activity(2, "beta"));
+  await ui.row(2).getByRole("img", { name: "Unread activity" }).waitFor();
+  await ui.row(3).focus();
+  ui.connections[0].destroy();
+  await ui.page.getByRole("status").waitFor();
+  await ui.live();
+  assert.equal(ui.connections.length, 2);
+  ui.connections[1].send("ready", { keys: [key(1), key(2)] });
+  await ui.row(3).waitFor({ state: "detached" });
+  assert.equal(await ui.row(2).getAttribute("aria-current"), "page");
+  assert.equal(
+    await ui.row(2).getByRole("img", { name: "Unread activity" }).count(),
+    0,
+  );
+  await focused(ui, 2);
+  await ui.page.keyboard.press("End");
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+});
+
+test("fix3 item 1: slowDiscoveryReconnect retains gamma selection, focus and alpha unread through late ready", async (t) => {
+  const ui = await open(t, (client, n) => {
+    if (n === 1)
+      replay(client, [frame(1, "alpha"), frame(2, "beta"), frame(3, "gamma")]);
+  });
+  await ui.live();
+  await ui.row(3).click();
+  ui.connections[0].send("space", activity(1, "alpha"));
+  await ui.row(1).getByRole("img", { name: "Unread activity" }).waitFor();
+  await ui.row(3).focus();
+  ui.connections[0].destroy();
+  await ui.page.getByRole("status").waitFor();
+  await ui.live();
+  ui.connections[1].send("space", frame(3, "gamma-current"));
+  await ui.page
+    .getByRole("heading", { name: "gamma-current", exact: true })
+    .waitFor();
+  const rejected = frame(1, "invalid alpha");
+  rejected.frame.wire = 99;
+  ui.connections[1].send("space", rejected);
+  ui.connections[1].send("ready", { keys: [key(1), key(3), key(4)] });
+  await ui.row(2).waitFor({ state: "detached" });
+  assert.equal(await ui.row(3).getAttribute("aria-current"), "page");
+  assert.equal(
+    await ui.row(1).getByRole("img", { name: "Unread activity" }).count(),
+    1,
+  );
+  await focused(ui, 3);
+  ui.connections[1].send("space", frame(2, "beta-live"));
+  await ui.row(2).waitFor();
+  ui.connections[1].send("ready", { keys: [] });
+  ui.connections[1].send("space", frame(3, "gamma-after-duplicate"));
+  await ui.page
+    .getByRole("heading", { name: "gamma-after-duplicate", exact: true })
+    .waitFor();
+  assert.equal(await ui.channels.getByRole("button").count(), 3);
+  assert.equal(ui.connections.length, 2);
+});
+
+test("fix3 item 1: tricklingReplay falls back on time then late ready chooses sidebar order", async (t) => {
+  const ui = await open(t, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 1300));
+  ui.connections[0].send("space", frame(2, "beta"));
+  await ui.page.locator(".connection-dot.live").waitFor({ timeout: 1400 });
+  assert.equal(await ui.row(2).getAttribute("aria-current"), "page");
+  ui.connections[0].send("space", frame(1, "alpha"));
+  ui.connections[0].send("ready", { keys: [key(1), key(2)] });
+  await ui.page.getByRole("heading", { name: "alpha", exact: true }).waitFor();
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+});
+
+test("fix3 item 2: interrupted staged discovery and first retries remain loading until empty ready", async (t) => {
+  const ui = await open(t, (client, n) => {
+    if (n === 1) client.send("space", frame(1, "discarded"));
+  });
+  await ui.page.waitForFunction(
+    () => performance.getEntriesByName("namedrop:frame-apply").length > 0,
+  );
+  await ui.page
+    .getByRole("heading", { name: "Connecting to Namedrop", exact: true })
+    .waitFor();
+  ui.connections[0].destroy();
+  await ui.page.getByRole("status").waitFor();
+  await ui.page
+    .getByRole("heading", { name: "Connecting to Namedrop", exact: true })
+    .waitFor();
+  await new Promise((resolve) => setTimeout(resolve, 2400));
+  assert.equal(
+    await ui.page.getByRole("heading", { level: 1 }).textContent(),
+    "Connecting to Namedrop",
+  );
+  assert.equal(await ui.channels.getByRole("button").count(), 0);
+  assert.equal(
+    await ui.page.locator(".sidebar-footer").textContent(),
+    "Connecting…Read only",
+  );
+  ui.connections[1].send("ready", { keys: [] });
+  await ui.page
+    .getByRole("heading", { name: "No live workspaces", exact: true })
+    .waitFor();
+  await ui.live();
+  assert.equal(ui.connections.length, 2);
+});
+
+test("fix3 item 2: legacy fallback data followed by last gone keeps known empty live view", async (t) => {
+  const ui = await open(t, (client) => client.send("space", frame(1, "alpha")));
+  await ui.live();
+  await ui.row(1).waitFor();
+  ui.connections[0].send("gone", { key: key(1) });
+  await ui.page
+    .getByRole("heading", { name: "No live workspaces", exact: true })
+    .waitFor();
+  assert.equal(
+    await ui.page.locator(".sidebar-footer").textContent(),
+    "Live updatesRead only",
+  );
+  assert.equal(ui.connections.length, 1);
 });

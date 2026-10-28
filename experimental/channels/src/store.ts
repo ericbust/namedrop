@@ -7,6 +7,7 @@ export function initialState(visible = true): State {
     unread: new Set(),
     sync: { kind: "connecting" },
     visible,
+    viewKnown: false,
   };
 }
 function sameMembers(a: Channel, b: Channel): boolean {
@@ -52,9 +53,14 @@ function clearUnread(
   return next;
 }
 function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
-  if (state.sync.kind !== "replaying") return state;
+  if (state.sync.kind !== "replaying" && state.sync.kind !== "fallback")
+    return state;
   const channels = new Map(state.channels);
-  for (const [key, channel] of state.sync.pending) {
+  const pending =
+    state.sync.kind === "replaying"
+      ? state.sync.pending
+      : new Map<SpaceKey, Channel>();
+  for (const [key, channel] of pending) {
     const previous = state.channels.get(key);
     channels.set(
       key,
@@ -66,8 +72,12 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
       if (!keys.has(key)) channels.delete(key);
     }
   }
+  const preserveSelection =
+    state.sync.kind !== "fallback" || state.sync.preserveSelection;
   const selectedKey =
-    state.selectedKey !== null && channels.has(state.selectedKey)
+    preserveSelection &&
+    state.selectedKey !== null &&
+    channels.has(state.selectedKey)
       ? state.selectedKey
       : (sortedChannels({ ...state, channels })[0]?.key ?? null);
   const unread = new Set([...state.unread].filter((key) => channels.has(key)));
@@ -76,7 +86,17 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     if (previous && hasActivity(previous, channel)) unread.add(key);
   }
   if (state.visible && selectedKey !== null) unread.delete(selectedKey);
-  return { ...state, channels, selectedKey, unread, sync: { kind: "live" } };
+  return {
+    ...state,
+    channels,
+    selectedKey,
+    unread,
+    viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
+    sync:
+      keys === null
+        ? { kind: "fallback", preserveSelection: state.viewKnown }
+        : { kind: "live" },
+  };
 }
 export function reduce(state: State, event: Event): State {
   switch (event.type) {
@@ -100,12 +120,14 @@ export function reduce(state: State, event: Event): State {
         !(selectedKey === channel.key && state.visible)
       )
         unread = new Set([...unread, channel.key]);
-      return { ...state, channels, selectedKey, unread };
+      return { ...state, channels, selectedKey, unread, viewKnown: true };
     }
     case "ready":
       return finishReplay(state, event.keys);
     case "replay-timeout":
-      return finishReplay(state, null);
+      return state.sync.kind === "replaying"
+        ? finishReplay(state, null)
+        : state;
     case "gone": {
       if (
         !state.channels.has(event.key) &&
@@ -133,19 +155,24 @@ export function reduce(state: State, event: Event): State {
       const unread = state.visible
         ? clearUnread(state.unread, event.key)
         : state.unread;
-      if (state.selectedKey === event.key && unread === state.unread)
+      const sync =
+        state.sync.kind === "fallback" && !state.sync.preserveSelection
+          ? { ...state.sync, preserveSelection: true }
+          : state.sync;
+      if (
+        state.selectedKey === event.key &&
+        unread === state.unread &&
+        sync === state.sync
+      )
         return state;
-      return { ...state, selectedKey: event.key, unread };
+      return { ...state, selectedKey: event.key, unread, sync };
     }
     case "opened":
       return {
         ...state,
         sync: {
           kind: "replaying",
-          status:
-            connectionStatus(state) === "connecting"
-              ? "connecting"
-              : "reconnecting",
+          status: state.viewKnown ? "reconnecting" : "connecting",
           pending: new Map(),
         },
       };
@@ -188,5 +215,8 @@ export function channelName(
 export function connectionStatus(
   state: State,
 ): "connecting" | "reconnecting" | "live" {
-  return state.sync.kind === "replaying" ? state.sync.status : state.sync.kind;
+  if (state.sync.kind === "replaying") return state.sync.status;
+  if (state.sync.kind === "fallback")
+    return state.viewKnown ? "live" : "connecting";
+  return state.sync.kind;
 }

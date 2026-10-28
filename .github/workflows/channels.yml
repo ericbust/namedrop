@@ -31,4 +31,16 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
-      - run: npm run build
+      - name: Run browser regressions with the runner's browser
+        run: |
+          for browser in google-chrome google-chrome-stable chromium chromium-browser; do
+            if browser_path="$(command -v "$browser")"; then
+              export CHROME="$browser_path"
+              break
+            fi
+          done
+          if [ -z "${CHROME:-}" ]; then
+            echo "Chrome or Chromium is required for browser regressions" >&2
+            exit 1
+          fi
+          npm run test:browser

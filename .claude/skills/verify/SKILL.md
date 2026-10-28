@@ -292,6 +292,10 @@ Use these selectors for later live lanes.
   profile's dashboard, then wait for this banner to disappear and the channel
   collection to reconcile at `ready` without reloading the page. A server without
   `ready` resumes live updates after a two-second fallback that keeps old channels.
+  Delay `ready` past that interval and confirm it still removes omitted keys. Before
+  first discovery, an empty fallback keeps the loading state until a channel commits
+  or `ready` confirms the empty view. A first late `ready` selects sidebar order unless
+  you selected a channel during fallback.
   Select a channel,
   focus its canonical Channels button, and create unread activity elsewhere before
   dropping the stream. Delay replay to check that the sidebar stays populated.

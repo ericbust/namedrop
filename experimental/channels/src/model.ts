@@ -60,6 +60,7 @@ export type Event =
   | { type: "visibility"; visible: boolean };
 export type Sync =
   | { kind: "connecting" | "reconnecting" | "live" }
+  | { kind: "fallback"; preserveSelection: boolean }
   | {
       kind: "replaying";
       status: "connecting" | "reconnecting";
@@ -71,4 +72,5 @@ export type State = {
   unread: ReadonlySet<SpaceKey>;
   sync: Sync;
   visible: boolean;
+  viewKnown: boolean;
 };

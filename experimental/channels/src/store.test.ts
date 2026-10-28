@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Activity, Channel, State } from "./model.ts";
-import { channelName, initialState, reduce, sortedChannels } from "./store.ts";
+import {
+  channelName,
+  connectionStatus,
+  initialState,
+  reduce,
+  sortedChannels,
+} from "./store.ts";
 import { parseEvent } from "./wire.ts";
 
 const keyA = "a".repeat(20);
@@ -403,7 +409,7 @@ test("item 2: initial ready selects sidebar order and ready removes omitted keys
   assert.equal(empty.selectedKey, null);
   assert.equal(empty.unread.size, 0);
 });
-test("interrupted replay and late ready cannot replace the view", () => {
+test("interrupted replay and duplicate ready cannot replace the view", () => {
   const before = twoChannels();
   const pending = apply(reduce(before, { type: "opened" }), changedChannel());
   const disconnected = reduce(pending, { type: "disconnected" });
@@ -564,22 +570,21 @@ for (const [name, keys, expected] of [
     assert.deepEqual([...next.channels.keys()].sort(), expected);
   });
 }
-test("fix2 item 2: timeout publishes first load and reconnect without pruning, then ignores late ready", () => {
+test("fix3 item 1: timeout publishes first load and reconnect without pruning and keeps updating", () => {
   const opened = reduce(initialState(), { type: "opened" });
   const first = reduce(apply(opened, snapshot(keyB, "beta", "w2")), {
     type: "replay-timeout",
   });
-  assert.equal(first.sync?.kind, "live");
+  assert.equal(first.sync.kind, "fallback");
   assert.equal(first.selectedKey, parsed(snapshot(keyB)).key);
   const before = apply(first, snapshot());
   const next = reduce(
     apply(reduce(before, { type: "opened" }), changedChannel()),
     { type: "replay-timeout" },
   );
-  assert.equal(next.sync.kind, "live");
+  assert.equal(next.sync.kind, "fallback");
   assert.equal(next.channels.size, 2);
   assert.equal(next.selectedKey, before.selectedKey);
-  assert.equal(ready(next, []), next);
   assert.equal(reduce(next, { type: "replay-timeout" }), next);
   assert.equal(
     apply(next, snapshot(keyB, "live beta", "w2")).channels.get(
@@ -639,3 +644,140 @@ test("fix2 item 6: gone removes committed and pending snapshots during replay an
   const removed = reduce(pendingOnly, { type: "gone", key: alpha });
   assert.equal(ready(removed, [keyA]).channels.size, 0);
 });
+
+test("fix3 item 1: late ready prunes the current map and retains gamma selection and alpha unread", () => {
+  const gamma = snapshot("c".repeat(20), "gamma", "w3");
+  const gammaKey = parsed(gamma).key;
+  const alphaKey = parsed(snapshot()).key;
+  const before = reduce(apply(twoChannels(), gamma), {
+    type: "select",
+    key: gammaKey,
+  });
+  const fallback = reduce(reduce(before, { type: "opened" }), {
+    type: "replay-timeout",
+  });
+  const alpha = snapshot();
+  alpha.frame.messages.push({ message_id: "new-after-timeout" });
+  const current = apply(
+    apply(fallback, alpha),
+    snapshot(gammaKey, "gamma-current", "w3"),
+  );
+  assert.ok(current.unread.has(alphaKey));
+  const bad = snapshot();
+  bad.frame.wire = 99;
+  const next = ready(apply(current, bad), [keyA, gammaKey, "d".repeat(20)]);
+  assert.deepEqual([...next.channels.keys()].sort(), [keyA, gammaKey]);
+  assert.equal(next.channels.get(alphaKey), current.channels.get(alphaKey));
+  assert.equal(next.channels.get(gammaKey)?.displayName, "gamma-current");
+  assert.equal(next.selectedKey, gammaKey);
+  assert.deepEqual([...next.unread], [alphaKey]);
+  assert.equal(next.sync.kind, "live");
+});
+
+test("fix3 item 1: late ready removes selected gamma and selects the sorted visible fallback as read", () => {
+  const gamma = parsed(snapshot("c".repeat(20), "gamma", "w3"));
+  const beta = parsed(snapshot(keyB, "beta", "w2"));
+  const before = reduce(
+    apply(twoChannels(), snapshot(gamma.key, "gamma", "w3")),
+    { type: "select", key: gamma.key },
+  );
+  const fallback = reduce(reduce(before, { type: "opened" }), {
+    type: "replay-timeout",
+  });
+  const alpha = snapshot(keyA, "zeta");
+  const current = apply(apply(fallback, alpha), changedChannel());
+  assert.ok(current.unread.has(beta.key));
+  const next = ready(current, [keyA, keyB]);
+  assert.equal(next.channels.has(gamma.key), false);
+  assert.equal(next.selectedKey, beta.key);
+  assert.equal(next.unread.has(beta.key), false);
+  const hidden = reduce(current, { type: "visibility", visible: false });
+  assert.ok(ready(hidden, [keyA, keyB]).unread.has(beta.key));
+});
+
+test("fix3 item 1: each open accepts only its first ready and disconnected markers cannot prune", () => {
+  const fallback = reduce(reduce(twoChannels(), { type: "opened" }), {
+    type: "replay-timeout",
+  });
+  const first = ready(fallback, [keyB]);
+  assert.deepEqual([...first.channels.keys()], [keyB]);
+  const later = apply(first, snapshot());
+  assert.equal(ready(later, [keyB]), later);
+  assert.equal(reduce(later, { type: "replay-timeout" }), later);
+  const disconnected = reduce(reduce(later, { type: "opened" }), {
+    type: "disconnected",
+  });
+  assert.equal(ready(disconnected, []), disconnected);
+  assert.equal(reduce(disconnected, { type: "replay-timeout" }), disconnected);
+  const reopened = ready(reduce(disconnected, { type: "opened" }), []);
+  assert.equal(reopened.channels.size, 0);
+  assert.equal(reopened.sync.kind, "live");
+});
+
+test("fix3 item 2: empty timeout and interrupted staged snapshots stay unknown across retries", () => {
+  const initial = initialState();
+  assert.equal(initial.viewKnown, false);
+  const staged = apply(reduce(initial, { type: "opened" }), snapshot());
+  assert.equal(staged.viewKnown, false);
+  const disconnected = reduce(staged, { type: "disconnected" });
+  assert.equal(disconnected.channels.size, 0);
+  assert.equal(disconnected.viewKnown, false);
+  const empty = reduce(reduce(disconnected, { type: "opened" }), {
+    type: "replay-timeout",
+  });
+  assert.equal(empty.channels.size, 0);
+  assert.equal(empty.viewKnown, false);
+  assert.equal(connectionStatus(empty), "connecting");
+  assert.equal(reduce(empty, { type: "replay-timeout" }), empty);
+  const retry = reduce(reduce(empty, { type: "disconnected" }), {
+    type: "opened",
+  });
+  assert.equal(connectionStatus(retry), "connecting");
+  assert.equal(retry.viewKnown, false);
+});
+
+test("fix3 item 2: committed data and authoritative empty ready establish lasting view knowledge", () => {
+  const opened = reduce(initialState(), { type: "opened" });
+  const fallback = reduce(opened, { type: "replay-timeout" });
+  const data = apply(fallback, snapshot());
+  assert.equal(data.viewKnown, true);
+  assert.equal(connectionStatus(data), "live");
+  const gone = reduce(data, { type: "gone", key: parsed(snapshot()).key });
+  assert.equal(gone.channels.size, 0);
+  assert.equal(gone.viewKnown, true);
+  assert.equal(connectionStatus(gone), "live");
+  const committedReplay = reduce(apply(opened, snapshot()), {
+    type: "replay-timeout",
+  });
+  assert.equal(committedReplay.viewKnown, true);
+  const empty = ready(fallback, []);
+  assert.equal(empty.viewKnown, true);
+  assert.equal(connectionStatus(empty), "live");
+  const retry = reduce(reduce(empty, { type: "disconnected" }), {
+    type: "opened",
+  });
+  assert.equal(retry.viewKnown, true);
+  assert.equal(connectionStatus(retry), "reconnecting");
+  assert.equal(
+    connectionStatus(reduce(retry, { type: "replay-timeout" })),
+    "live",
+  );
+});
+
+for (const beforeTimeout of [false, true]) {
+  test(`fix3 item 1: late initial ready selects sidebar order after ${beforeTimeout ? "trickling" : "empty"} fallback unless the user chose`, () => {
+    const opened = reduce(initialState(), { type: "opened" });
+    const beta = snapshot(keyB, "beta", "w2");
+    const pending = beforeTimeout ? apply(opened, beta) : opened;
+    const fallback = reduce(pending, { type: "replay-timeout" });
+    const current = apply(apply(fallback, beta), snapshot());
+    const betaKey = parsed(beta).key;
+    assert.equal(current.selectedKey, betaKey);
+    assert.equal(
+      ready(current, [keyA, keyB]).selectedKey,
+      parsed(snapshot()).key,
+    );
+    const chosen = reduce(current, { type: "select", key: betaKey });
+    assert.equal(ready(chosen, [keyA, keyB]).selectedKey, betaKey);
+  });
+}

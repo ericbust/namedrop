@@ -30,7 +30,8 @@ CHROME=/opt/google/chrome/chrome npm run test:browser
 
 Set `CHROME` to your installed Chrome or Chromium executable. The headless runner
 uses `--no-sandbox` and needs permission to bind a local test port. It covers focus
-restoration, replay mismatches, old servers without `ready`, and replay removal.
+restoration, late `ready`, slow discovery, replay mismatches, old servers without
+`ready`, and replay removal.
 
 The optional, path-filtered **Channels experiment** workflow runs these checks.
 It adds no required-check configuration. Cargo excludes `/experimental/**` from
@@ -91,8 +92,18 @@ stream order, and a later snapshot can recreate the channel.
 Each open starts one two-second replay timer. If `ready` never arrives, the app
 merges parsed snapshots without pruning existing channels, then resumes live updates.
 This compatibility interval gives ordinary replay time to complete. It does not
-infer which channels an old server omitted. A late `ready` after fallback is ignored.
+infer which channels an old server omitted. The first `ready` on that connection
+still removes omitted keys from the current collection after fallback. Later
+`ready` events on the same connection are ignored. On first load, that first
+`ready` selects the first channel in sidebar order unless you selected one during
+fallback.
 Ready, errors, restarting, a new open, and unmount cancel the current timer.
+
+Before any channel is committed or an authoritative `ready` arrives, the page keeps
+showing **Connecting to Namedrop** and **Waiting for workspaces**. An empty timeout
+cannot confirm that no workspaces exist. This loading state survives retries that
+discard staged snapshots. An empty `ready` or removal of the last committed channel
+shows **No live workspaces**. Reconnects preserve that knowledge.
 
 New channels establish a read baseline. New message IDs or changes to membership,
 activity, or attention mark a background channel unread. Messages leaving the live
