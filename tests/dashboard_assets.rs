@@ -1694,13 +1694,81 @@ fn fix_four_current_handoff_keeps_server_log_lines_prefixed() {
 }
 
 #[test]
-fn fix_four_same_ui_open_during_slow_handoff_returns_running_space_url() {
+fn fix_four_b_same_ui_waits_for_a_ready_successor_url() {
     for custom in [false, true] {
         let dashboard = Dashboard::new();
         let ui = dashboard.ui("dist");
         let requested_ui = custom.then_some(ui.as_path());
         let opened = dashboard.open(requested_ui);
         let first = dashboard.info();
+        let cookie = dashboard.cookie();
+        let _events = fix_two_subscribe(&dashboard, &opened);
+        let runtime = dashboard.state().join("runtime");
+        fs::create_dir_all(runtime.join("release")).unwrap();
+        let delayed = dashboard.root().join("successor-delayed");
+        let resumed = dashboard.root().join("successor-resumed");
+        selected_startup_fixture(
+            &dashboard,
+            &format!(
+                "touch '{}'; sleep 1; touch '{}'",
+                delayed.display(),
+                resumed.display()
+            ),
+        );
+        eventually(|| delayed.exists().then_some(())).expect("successor startup is delayed");
+        let output = dashboard.command(requested_ui).output().unwrap();
+        assert!(
+            output.status.success(),
+            "same-UI open failed during handoff, custom={custom}: {output:?}"
+        );
+        assert!(resumed.exists(), "caller returned before successor startup");
+        let reopened = data(output);
+        assert_eq!(reopened["server"], "running");
+        assert_eq!(reopened["space_key"], opened["space_key"]);
+        assert_eq!(reopened["workspace_id"], "w1");
+        assert!(
+            reopened["url"].as_str().unwrap().starts_with(&format!(
+                "http://127.0.0.1:{}/w/{}?n=",
+                first["port"],
+                opened["space_key"].as_str().unwrap()
+            )),
+            "handoff changed the running port or requested space: {reopened}"
+        );
+        let url = reopened["url"].as_str().unwrap();
+        let path = url
+            .strip_prefix(&format!("http://127.0.0.1:{}", first["port"]))
+            .unwrap();
+        let entry = dashboard.get(path, false);
+        entry.status(303);
+        let successor = dashboard.info();
+        assert_ne!(successor["instance"], first["instance"]);
+        assert_ne!(successor["pid"], first["pid"]);
+        assert_eq!(successor["port"], first["port"]);
+        assert_eq!(successor["ui"], first["ui"]);
+        assert_eq!(dashboard.cookie(), cookie);
+        let page = dashboard.request(
+            &format!("/w/{}", opened["space_key"].as_str().unwrap()),
+            vec![("Cookie", cookie)],
+        );
+        page.status(200);
+        assert_eq!(
+            page.body,
+            if custom {
+                b"<h1>dist</h1>".as_slice()
+            } else {
+                INDEX_HTML.as_bytes()
+            }
+        );
+    }
+}
+
+#[test]
+fn fix_four_b_same_ui_times_out_without_a_url_during_a_long_handoff() {
+    for custom in [false, true] {
+        let dashboard = Dashboard::new();
+        let ui = dashboard.ui("dist");
+        let requested_ui = custom.then_some(ui.as_path());
+        let opened = dashboard.open(requested_ui);
         let _events = fix_two_subscribe(&dashboard, &opened);
         let runtime = dashboard.state().join("runtime");
         fs::create_dir_all(runtime.join("release")).unwrap();
@@ -1715,25 +1783,119 @@ fn fix_four_same_ui_open_during_slow_handoff_returns_running_space_url() {
             ),
         );
         eventually(|| delayed.exists().then_some(())).expect("successor startup is delayed");
+        let started = Instant::now();
         let output = dashboard.command(requested_ui).output().unwrap();
+        let elapsed = started.elapsed();
+        assert!(!output.status.success(), "custom={custom}: {output:?}");
         assert!(
-            output.status.success(),
-            "same-UI open failed during handoff, custom={custom}: {output:?}"
+            elapsed >= Duration::from_secs(5) && elapsed < Duration::from_millis(6500),
+            "matching caller did not respect the five-second startup bound: {elapsed:?}"
         );
-        assert!(!resumed.exists(), "caller waited for successor startup");
-        let reopened = data(output);
-        assert_eq!(reopened["server"], "running");
-        assert_eq!(reopened["space_key"], opened["space_key"]);
-        assert_eq!(reopened["workspace_id"], "w1");
         assert!(
-            reopened["url"].as_str().unwrap().starts_with(&format!(
-                "http://127.0.0.1:{}/w/{}?n=",
-                first["port"],
-                opened["space_key"].as_str().unwrap()
-            )),
-            "handoff changed the running port or requested space: {reopened}"
+            !resumed.exists(),
+            "caller waited for the seven-second successor"
+        );
+        let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["error"]["code"], "operation_failed");
+        assert!(response["data"]["url"].is_null(), "{response}");
+        let diagnostic = response["error"]["message"].as_str().unwrap();
+        assert!(diagnostic.contains("restarting"), "{diagnostic}");
+        assert!(diagnostic.contains("retry in a moment"), "{diagnostic}");
+        assert!(!diagnostic.contains("before requesting"), "{diagnostic}");
+        assert!(
+            !String::from_utf8_lossy(&output.stdout).contains("http://"),
+            "{response}"
         );
     }
+}
+
+#[test]
+fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    let opened = dashboard.open(Some(&ui));
+    let first = dashboard.info();
+    let cookie = dashboard.cookie();
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    let legacy = if let Some(old) = std::env::var_os("REVIEW_PRE_ND2_BINARY") {
+        fs::create_dir_all(runtime.join("legacy")).unwrap();
+        let legacy = runtime.join("legacy/namedrop");
+        fs::copy(old, &legacy).unwrap();
+        legacy
+    } else {
+        fix_three_legacy_stub(&dashboard, false)
+    };
+    fs::create_dir_all(runtime.join("release")).unwrap();
+    let delayed = dashboard.root().join("successor-delayed");
+    let resumed = dashboard.root().join("successor-resumed");
+    fs::write(runtime.join("release/namedrop"), format!(
+        "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) touch '{}'; sleep 2; touch '{}';; esac\nexec '{}' \"$@\"\n",
+        delayed.display(), resumed.display(), legacy.display()
+    )).unwrap();
+    fs::set_permissions(
+        runtime.join("release/namedrop"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    fs::write(
+        runtime.join("caller-launcher"),
+        format!(
+            "#!/bin/sh\nrm '{}'\nexec '{}' \"$@\"\n",
+            runtime.join("namedrop").display(),
+            env!("CARGO_BIN_EXE_namedrop")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(
+        runtime.join("caller-launcher"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    symlink("release", runtime.join("current")).unwrap();
+    fs::rename(runtime.join("caller-launcher"), runtime.join("namedrop")).unwrap();
+    eventually(|| delayed.exists().then_some(())).expect("legacy successor startup is delayed");
+    let output = dashboard.command(Some(&ui)).output().unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        resumed.exists(),
+        "custom caller refused before successor startup"
+    );
+    let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["error"]["code"], "operation_failed");
+    assert!(response["data"]["url"].is_null(), "{response}");
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("http://"),
+        "{response}"
+    );
+    let successor = dashboard.info();
+    assert_ne!(successor["instance"], first["instance"]);
+    assert_ne!(successor["pid"], first["pid"]);
+    assert_eq!(successor["port"], first["port"]);
+    assert_eq!(dashboard.cookie(), cookie);
+    let diagnostic = response["error"]["message"].as_str().unwrap();
+    assert!(
+        diagnostic.contains("the dashboard server is running with embedded UI"),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&format!("stop it with `kill {}`", successor["pid"])),
+        "{diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&format!(
+            "before requesting --ui {}",
+            ui.canonicalize().unwrap().display()
+        )),
+        "{diagnostic}"
+    );
+    assert!(!diagnostic.contains("restarting"), "{diagnostic}");
+    let page = dashboard.request(
+        &format!("/w/{}", opened["space_key"].as_str().unwrap()),
+        vec![("Cookie", cookie)],
+    );
+    page.status(200);
+    assert_eq!(page.body, INDEX_HTML.as_bytes());
 }
 
 #[test]

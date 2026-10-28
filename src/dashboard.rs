@@ -71,26 +71,29 @@ fn ensure(
 ) -> Result<(&'static str, ServerInfo), String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut spawned = false;
+    let mut waiting_for_matching_handoff = false;
     loop {
         let handoff_reader = files.handoff_reader()?;
         if handoff_reader.is_none() {
             let active = files.info();
-            if let Some(info) = &active
-                && &info.ui == ui
-            {
-                return Ok((if spawned { "started" } else { "running" }, info.clone()));
+            if let Some(info) = &active {
+                if &info.ui == ui {
+                    waiting_for_matching_handoff = true;
+                } else if !waiting_for_matching_handoff || Instant::now() >= deadline {
+                    return Err(format!(
+                        "the dashboard server is running with {} and is restarting; retry when it finishes before requesting {}",
+                        info.ui.setting(),
+                        ui.setting()
+                    ));
+                }
             }
-            if active.is_some() || Instant::now() >= deadline {
-                let active =
-                    active.map_or_else(|| "its active UI".to_owned(), |info| info.ui.setting());
-                return Err(format!(
-                    "the dashboard server is running with {active} and is restarting; retry when it finishes before requesting {}",
-                    ui.setting()
-                ));
+            if Instant::now() >= deadline {
+                return Err("the dashboard server is restarting; retry in a moment".to_owned());
             }
             thread::sleep(Duration::from_millis(50));
             continue;
         }
+        waiting_for_matching_handoff = false;
         if files.claimed()? {
             if let Some(info) = files.info()
                 && let Some(phase) = answers(&info, token)
