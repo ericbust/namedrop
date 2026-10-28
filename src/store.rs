@@ -127,13 +127,7 @@ impl StateStore {
             Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         connection.busy_timeout(Duration::from_secs(2))?;
         verify_integrity(&connection, &database_path)?;
-        let schema_version: u32 =
-            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if schema_version != SCHEMA_VERSION {
-            return Err(StoreError::unsupported_schema(format!(
-                "state has schema {schema_version}; expected {SCHEMA_VERSION}"
-            )));
-        }
+        check_read_only_schema(&connection)?;
         Ok(Some(Self {
             connection,
             state_directory: state_directory.to_path_buf(),
@@ -188,13 +182,7 @@ impl StateStore {
             });
             let _finish = Finish(&finished);
             verify_integrity(&connection, &database_path)?;
-            let version: u32 =
-                connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version != SCHEMA_VERSION {
-                return Err(StoreError::unsupported_schema(format!(
-                    "state has schema {version}; expected {SCHEMA_VERSION}"
-                )));
-            }
+            check_read_only_schema(&connection)?;
             if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return Err(StoreError::invalid_input(
                     "Status read cancelled or timed out",
@@ -7085,16 +7073,72 @@ fn initialize_schema(
         (4, coordination::SCHEMA),
         (5, PERSONA_SCHEMA),
         (6, bridge::SCHEMA),
+        (6, bridge::DELIVERY_SEATS_SCHEMA),
         (6, terminal::REMOTE_SCHEMA),
     ] {
         if version < introduced_in {
             transaction.execute_batch(schema)?;
         }
     }
+    if version == SCHEMA_VERSION {
+        for gap in pre_release_schema_6_gaps(&transaction)? {
+            transaction.execute_batch(gap.ddl)?;
+        }
+    }
     if version < SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     transaction.commit()?;
+    Ok(())
+}
+
+/// The public `experimental` branch wrote user_version 6 before 1.4.0 added
+/// these two pieces to schema 6, so a database at version 6 may lack either.
+fn pre_release_schema_6_gaps(connection: &Connection) -> Result<Vec<SchemaGap>, rusqlite::Error> {
+    let present = |query: &str| {
+        connection.query_row(query, [], |row| row.get::<_, i64>(0).map(|count| count > 0))
+    };
+    let mut gaps = Vec::new();
+    if !present(
+        "SELECT count(*) FROM pragma_table_info('pane_addresses')
+          WHERE name = 'remote_commands_terminal_id'",
+    )? {
+        gaps.push(SchemaGap {
+            name: "pane_addresses.remote_commands_terminal_id",
+            ddl: terminal::REMOTE_SCHEMA,
+        });
+    }
+    if !present(
+        "SELECT count(*) FROM sqlite_master WHERE type = 'view' AND name = 'delivery_seats'",
+    )? {
+        gaps.push(SchemaGap {
+            name: "delivery_seats",
+            ddl: bridge::DELIVERY_SEATS_SCHEMA,
+        });
+    }
+    Ok(gaps)
+}
+
+struct SchemaGap {
+    name: &'static str,
+    ddl: &'static str,
+}
+
+fn check_read_only_schema(connection: &Connection) -> Result<(), StoreError> {
+    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version != SCHEMA_VERSION {
+        return Err(StoreError::unsupported_schema(format!(
+            "state has schema {version}; expected {SCHEMA_VERSION}"
+        )));
+    }
+    let gaps = pre_release_schema_6_gaps(connection)?;
+    if !gaps.is_empty() {
+        let names: Vec<&str> = gaps.iter().map(|gap| gap.name).collect();
+        return Err(StoreError::unsupported_schema(format!(
+            "state has pre-release schema 6 without {}; activating Namedrop completes it",
+            names.join(" and ")
+        )));
+    }
     Ok(())
 }
 
@@ -7792,5 +7836,68 @@ mod tests {
                 .any(|table| table.contains("conversation_workspace"))
         );
         assert!(!tables.iter().any(|table| table.contains("acp")));
+    }
+
+    fn schema_shape(connection: &Connection) -> String {
+        let mut statement = connection
+            .prepare(
+                "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL
+                  ORDER BY type, name",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| {
+                let sql: String = row.get(2)?;
+                let structure = sql
+                    .lines()
+                    .map(|line| line.split_once("--").map_or(line, |(code, _)| code))
+                    .flat_map(str::split_whitespace)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                Ok(format!(
+                    "{} {}: {structure}\n",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                ))
+            })
+            .unwrap()
+            .collect::<Result<String, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_schema_change_without_a_version_bump_is_refused() {
+        let directory = TestDirectory::new();
+        let store = StateStore::open(&directory.0).unwrap();
+        let shape = schema_shape(&store.connection);
+        let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("src/store/schema-v{SCHEMA_VERSION}.txt"));
+        if std::env::var_os("NAMEDROP_WRITE_SCHEMA_GOLDEN").is_some() {
+            fs::write(&golden, &shape).unwrap();
+        }
+        let pinned = fs::read_to_string(&golden).unwrap_or_else(|_| {
+            panic!(
+                "schema {SCHEMA_VERSION} has no pinned shape at {}; write it with \
+                 NAMEDROP_WRITE_SCHEMA_GOLDEN=1 once its migration step exists",
+                golden.display()
+            )
+        });
+        let actual: Vec<&str> = shape.lines().collect();
+        let expected: Vec<&str> = pinned.lines().collect();
+        if let Some(line) = (0..actual.len().max(expected.len()))
+            .find(|&line| actual.get(line) != expected.get(line))
+        {
+            panic!(
+                "a fresh database at schema {SCHEMA_VERSION} differs from {} at line {}:\n  \
+                 now:    {}\n  pinned: {}\n\
+                 Installed databases already at schema {SCHEMA_VERSION} would never receive \
+                 this change. Bump SCHEMA_VERSION, add its step to initialize_schema, and \
+                 write the new file with NAMEDROP_WRITE_SCHEMA_GOLDEN=1.",
+                golden.display(),
+                line + 1,
+                actual.get(line).copied().unwrap_or("<nothing>"),
+                expected.get(line).copied().unwrap_or("<nothing>")
+            );
+        }
     }
 }

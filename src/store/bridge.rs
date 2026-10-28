@@ -46,6 +46,9 @@ CREATE TABLE bridged_threads (
     FOREIGN KEY (session_socket_id, worktree_id, thread_id)
         REFERENCES collaboration_threads (session_socket_id, worktree_id, thread_id)
 );
+"#;
+
+pub(super) const DELIVERY_SEATS_SCHEMA: &str = r#"
 -- An envoy delivery settles when its copy is forwarded; the copy's own
 -- delivery carries the real progress. Every other delivery is its own seat.
 CREATE VIEW delivery_seats AS

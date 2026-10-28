@@ -2561,6 +2561,147 @@ fn state_newer_than_the_executable_is_refused_instead_of_downgraded() {
     );
 }
 
+fn missing_schema_6_pieces(database: &std::path::Path) -> Vec<&'static str> {
+    let connection = rusqlite::Connection::open(database).unwrap();
+    let count = |query: &str| {
+        connection
+            .query_row(query, [], |row| row.get::<_, i64>(0))
+            .unwrap()
+    };
+    let mut missing = Vec::new();
+    if count("SELECT count(*) FROM sqlite_master WHERE type = 'view' AND name = 'delivery_seats'")
+        == 0
+    {
+        missing.push("delivery_seats");
+    }
+    if count(
+        "SELECT count(*) FROM pragma_table_info('pane_addresses')
+          WHERE name = 'remote_commands_terminal_id'",
+    ) == 0
+    {
+        missing.push("remote_commands_terminal_id");
+    }
+    missing
+}
+
+#[test]
+fn pre_release_schema_6_state_is_completed_on_open() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    state_worth_preserving(&directory, &herdr, &ids);
+    let before = durable_records(&directory);
+    let database = directory.state.join("namedrop.sqlite3");
+
+    for (missing, strip) in [
+        (
+            vec!["delivery_seats", "remote_commands_terminal_id"],
+            "DROP VIEW delivery_seats; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id;",
+        ),
+        (vec!["delivery_seats"], "DROP VIEW delivery_seats;"),
+        (
+            vec!["remote_commands_terminal_id"],
+            "ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id;",
+        ),
+    ] {
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        connection.execute_batch(strip).unwrap();
+        drop(connection);
+        assert_eq!(missing_schema_6_pieces(&database), missing);
+
+        let listed = namedrop::execute_lifecycle_operation(
+            "address.list",
+            serde_json::json!({}),
+            &runtime(&directory, &herdr, &ids, "pane-source"),
+        )
+        .unwrap_or_else(|error| panic!("pre-release schema 6 {missing:?} did not open: {error}"));
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|record| record["alias"] == "build"),
+            "{listed}"
+        );
+        assert!(missing_schema_6_pieces(&database).is_empty());
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        drop(connection);
+        assert_eq!(version, 6);
+        assert_eq!(
+            durable_records(&directory),
+            before,
+            "completing the schema changed durable collaboration records"
+        );
+    }
+}
+
+#[test]
+fn read_only_opens_name_pre_release_schema_6_and_never_complete_it() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    state_worth_preserving(&directory, &herdr, &ids);
+    let before = durable_records(&directory);
+    let database = directory.state.join("namedrop.sqlite3");
+    let connection = rusqlite::Connection::open(&database).unwrap();
+    connection
+        .execute_batch("DROP VIEW delivery_seats; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id;")
+        .unwrap();
+    drop(connection);
+
+    let report = serde_json::to_value(namedrop::diagnose_collaboration(&runtime(
+        &directory,
+        &herdr,
+        &ids,
+        "pane-source",
+    )))
+    .unwrap();
+    assert_eq!(report["status"], "unavailable", "{report}");
+    let issue = report["issues"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|issue| issue["code"] == "ND-INSPECT-001")
+        .unwrap_or_else(|| panic!("doctor did not report the schema it cannot read: {report}"));
+    let explanation = issue["explanation"].as_str().unwrap();
+    assert!(
+        explanation.contains("pre-release schema 6") && explanation.contains("activat"),
+        "doctor must name the pre-release shape and what completes it: {explanation}"
+    );
+    let read_only = StateStore::open_read_only(&directory.state)
+        .err()
+        .expect("pre-release schema 6 must not open read-only");
+    assert_eq!(
+        read_only.kind(),
+        namedrop::StoreErrorKind::UnsupportedSchema
+    );
+    assert_eq!(
+        missing_schema_6_pieces(&database),
+        ["delivery_seats", "remote_commands_terminal_id"],
+        "a read-only open completed the schema"
+    );
+    assert_eq!(durable_records(&directory), before);
+
+    assert_eq!(
+        StateStore::open(&directory.state)
+            .unwrap()
+            .schema_version()
+            .unwrap(),
+        6
+    );
+    assert!(missing_schema_6_pieces(&database).is_empty());
+    assert!(
+        StateStore::open_read_only(&directory.state)
+            .unwrap()
+            .is_some()
+    );
+}
+
 /// The documented backup is a consistent online copy, and restoring it brings
 /// back exactly the records the backup held — including a held attempt — while
 /// discarding everything written after it.

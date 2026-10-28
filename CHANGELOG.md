@@ -2,6 +2,13 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.4.1] - 2026-10-26
+
+### Fixed
+
+- Namedrop 1.4.0 could not activate over state written by the public `experimental` branch before the release. That branch had already marked the state as schema 6 when the release added the `remote_commands_terminal_id` column and the `delivery_seats` view to schema 6, so 1.4.0 took the number at its word, skipped both, and activation stopped at `no such column: a.remote_commands_terminal_id` with the previous release still selected. State at schema 6 now receives whichever of the two it lacks the first time 1.4.1 opens it, every record is kept, and activation completes. Until that open, Doctor names the pre-release schema instead of failing on a query. Installs upgraded from 1.3.3 or earlier were never affected.
+- Namedrop could misread another process's command line while that process was starting, because it read `/proc/<pid>/cmdline` in pieces that could straddle the process's `exec`. Doctor's check for a running Codex shared app-server could then miss a live server for a moment. It now reads the command line in one call.
+
 ## [1.4.0] - 2026-10-26
 
 ### Added
