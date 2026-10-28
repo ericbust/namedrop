@@ -558,14 +558,15 @@ fn concurrent_first_opens_choose_one_ui_and_reject_the_other() {
         "{results:?}"
     );
     let winner = if results[0].status.success() { &a } else { &b };
+    let canonical_winner = winner.canonicalize().unwrap();
     let loser = results
         .iter()
         .find(|output| !output.status.success())
         .unwrap();
-    assert!(String::from_utf8_lossy(&loser.stdout).contains(winner.to_str().unwrap()));
+    assert!(String::from_utf8_lossy(&loser.stdout).contains(canonical_winner.to_str().unwrap()));
     assert_eq!(
         dashboard.info()["ui"]["Directory"],
-        winner.to_str().unwrap()
+        canonical_winner.to_str().unwrap()
     );
     assert_eq!(
         dashboard.get("/", true).body,
@@ -1456,7 +1457,6 @@ fn directory_dot_components_are_private_and_regular_hardlinks_are_public() {
 
 #[test]
 fn directory_validation_names_unreadable_and_non_utf8_paths_without_starting() {
-    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
     let dashboard = Dashboard::new();
     let unreadable = dashboard.ui("unreadable");
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
@@ -1473,22 +1473,31 @@ fn directory_validation_names_unreadable_and_non_utf8_paths_without_starting() {
         "unreadable path waited for server startup"
     );
 
-    let invalid = dashboard
-        .root()
-        .join(OsString::from_vec(b"dist-\xff".to_vec()));
-    fs::create_dir(&invalid).unwrap();
-    let start = Instant::now();
-    let output = dashboard.command(Some(&invalid)).output().unwrap();
-    assert!(!output.status.success(), "{output:?}");
-    let diagnostic = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        diagnostic.contains(invalid.to_string_lossy().as_ref()),
-        "{diagnostic}"
-    );
-    assert!(diagnostic.contains("UTF-8"), "{diagnostic}");
-    assert!(
-        start.elapsed() < Duration::from_secs(2),
-        "invalid UTF-8 path waited for server startup"
+    #[cfg(not(target_os = "macos"))]
+    {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
+        let invalid = dashboard
+            .root()
+            .join(OsString::from_vec(b"dist-\xff".to_vec()));
+        fs::create_dir(&invalid).unwrap();
+        let start = Instant::now();
+        let output = dashboard.command(Some(&invalid)).output().unwrap();
+        assert!(!output.status.success(), "{output:?}");
+        let diagnostic = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            diagnostic.contains(invalid.to_string_lossy().as_ref()),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("UTF-8"), "{diagnostic}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "invalid UTF-8 path waited for server startup"
+        );
+    }
+    #[cfg(target_os = "macos")]
+    eprintln!(
+        "skipping invalid UTF-8 path fixture on macOS because APFS rejects non-UTF-8 file names"
     );
     assert!(!dashboard.state().join("dashboard/server.json").exists());
 }
