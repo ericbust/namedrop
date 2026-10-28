@@ -149,6 +149,10 @@ An online agent waiting on an approval or question in Herdr shows as blocked and
 
 In snapshot JSON, these entries use `source_kind` `agent_status`. Their `opened_at_ms` is the first blocked observation in the current uninterrupted blocked run since the current binding. Repeated blocked observations keep that time. Leaving blocked status and blocking again starts a new time.
 
+`GET /api/events` streams every live Herdr workspace over one Server-Sent Events connection. It requires the same session cookie and loopback `Host` as the workspace pages. On connect, each workspace arrives as `event: space` with JSON `{key, frame}`. Later, only workspaces whose content changes send another `space` event. A workspace that leaves Herdr sends `event: gone` with JSON `{key}`. Reconnecting sends the full live set again. A failed Herdr read keeps the last known set until discovery succeeds.
+
+Every frame's `space.display_name` uses the live Herdr label, or its workspace id when unlabeled. `space.addressable_label` is the label when it uniquely identifies a live workspace, otherwise `null`. Uniqueness uses Namedrop's label matching rules, so `Same Label` and `same-label` are ambiguous. The existing `space.label` keeps its saved value. `/w/<key>/events` still sends `snapshot` events with the same frame format plus these two fields. Both routes share the hub's database poll and content hashes. The hub also checks live membership and labels in that loop, so workspace closure and renaming do not require a Namedrop write.
+
 The server stops 10 minutes after the last tab closes. Set `NAMEDROP_DASHBOARD_IDLE_MS` to change this. The server does not hold the update lock that commands hold, so it never delays an update. When the update migrates state or a new release becomes current, open tabs show "Updating Namedrop…". A new server then starts on the same port, and the tabs reconnect without a reload. Its log is `<state>/dashboard/server.log`. If a tab stays disconnected, run `namedrop dashboard` again.
 
 ## Tour presentations
