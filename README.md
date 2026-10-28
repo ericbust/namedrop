@@ -22,6 +22,7 @@
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#examples">Examples</a> ·
+  <a href="#mention-agents-in-other-workspaces">Other workspaces</a> ·
   <a href="#agent-status">Agent status</a> ·
   <a href="#tour">Tour</a> ·
   <a href="#personas">Personas</a> ·
@@ -51,9 +52,19 @@ Your agent delegates the review and keeps working toward your goal. To hand off 
 @reviewer Check the retry logic and report any bugs.
 ```
 
+Mentions also reach agents in your other Herdr workspaces. Put the workspace label before the name, or use `#all` to reach that name in every workspace:
+
+```text
+#checkout-v2 @lead Rebase on main and tell me the new HEAD.
+#all @lead Report back your status in two lines.
+```
+
+The reply comes back to the workspace you sent from. A mention without a label stays in the current workspace. See [mention agents in other workspaces](#mention-agents-in-other-workspaces).
+
 ## What you get
 
 - **Mentions that come back.** A reply returns to the pane that asked. Ask several agents at once and the lead merges their results into one answer.
+- **Mentions across workspaces.** `#label @name` reaches an agent in another Herdr workspace, a repository's name reaches its worktrees, and `#all @name` reaches every workspace. Replies and tracked work come back to you.
 - **Personas.** Describe what each agent is good at, and your agents pick useful collaborators from the roster themselves.
 - **Named terminals.** `@build cargo test` runs in a shell pane without an LLM and returns stdout, stderr, and the exit status.
 - **Groups.** Save `@review-team` once, then mention it like a name.
@@ -157,7 +168,27 @@ To open a popup without a key, run `herdr plugin action invoke <action> --plugin
 
 ## Examples
 
-Names belong to a Herdr workspace; see [other workspaces](#mention-agents-in-other-workspaces). A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
+Names belong to a Herdr workspace, and a `#label` before a mention reaches another one. A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
+
+### Mention agents in other workspaces
+
+Names are unique per Herdr workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:
+
+```text
+#checkout-v2 @lead Rebase on main and tell me the new HEAD.
+#checkout-v2 #billing @lead Status?
+#all @lead Report back your status in two lines.
+```
+
+Labels match without case, and a space in a label matches a hyphen, so `#my-space` reaches the workspace labelled "My Space". Every workspace also answers to its Herdr id, such as `#w12`. Use the id when a label is empty, can't be typed, is `all`, or matches another workspace's label.
+
+Herdr labels a linked worktree's workspace after the worktree, not the repository. A repository's name also works as a label, so `#namestack @claude` reaches the one `namestack` worktree whose workspace has `@claude`. A workspace labelled `namestack` that has the name still wins. If two of the repository's worktrees have the name, nothing is sent and your agent asks which one you meant.
+
+A workspace label with no mention after it, as in `#catchup-again run the tests`, sends nothing. Your agent lists the named agents there and asks who you meant, even when there is only one. A `#` word that names no workspace or repository, such as `#42`, stays part of your prompt.
+
+A mention without a label never leaves the current workspace. If the name isn't there but another workspace has it, nothing is sent, and your agent tells you which label to type, such as `#beta @lead`. You can also ask in plain words, such as "ask my @lead panes to report back" or "message the lead in beta".
+
+Replies come back to the workspace you sent from. Tracked work crosses too. After `handoff begin`, send to `#label @name` with the `coordination_id`. The worker replies from its own workspace, and the coordination, its results and its report stay with the lead. Context handoffs still stay inside one workspace.
 
 ### Get two perspectives on a change
 
@@ -185,26 +216,6 @@ Then use it like a name:
 ```
 
 A group holds up to 64 agents. If mentions overlap, each agent still gets one delivery. Membership changes apply to future requests. Work already sent keeps its original recipients.
-
-### Mention agents in other workspaces
-
-Names are unique per Herdr workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:
-
-```text
-#exp-dashboard @lead Rebase on main and tell me the new HEAD.
-#exp-dashboard #feature-x @lead Status?
-#all @lead Report back your status in two lines.
-```
-
-Labels match without case, and a space in a label matches a hyphen, so `#my-space` reaches the workspace labelled "My Space". Every workspace also answers to its Herdr id, such as `#w12`. Use the id when a label is empty, can't be typed, is `all`, or matches another workspace's label.
-
-Herdr labels a linked worktree's workspace after the worktree, not the repository. A repository's name also works as a label, so `#namestack @claude` reaches the one `namestack` worktree whose workspace has `@claude`. A workspace labelled `namestack` that has the name still wins. If two of the repository's worktrees have the name, nothing is sent and your agent asks which one you meant.
-
-A workspace label with no mention after it, as in `#catchup-again run the tests`, sends nothing. Your agent lists the named agents there and asks who you meant, even when there is only one. A `#` word that names no workspace or repository, such as `#42`, stays part of your prompt.
-
-A mention without a label never leaves the current workspace. If the name isn't there but another workspace has it, nothing is sent, and your agent tells you which label to type, such as `#beta @lead`. You can also ask in plain words, such as "ask my @lead panes to report back" or "message the lead in beta".
-
-Replies come back to the workspace you sent from. Tracked work crosses too. After `handoff begin`, send to `#label @name` with the `coordination_id`. The worker replies from its own workspace, and the coordination, its results and its report stay with the lead. Context handoffs still stay inside one workspace.
 
 ### Run tests in a shell pane
 
