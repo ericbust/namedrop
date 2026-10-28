@@ -42,10 +42,13 @@ pub(crate) struct Front {
     pub restarting: Arc<AtomicBool>,
 }
 
-pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>) {
+pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<AtomicBool>) {
     let next_id = Arc::new(AtomicU64::new(1));
     let open = Arc::new(AtomicUsize::new(0));
     for mut stream in listener.incoming().flatten() {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         if open.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             open.fetch_sub(1, Ordering::AcqRel);
             let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));

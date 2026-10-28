@@ -138,7 +138,9 @@ fn main() -> ExitCode {
     };
     // Recheck selection after acquiring the gate: a queued command may have
     // started before activation completed or before a failed switch rolled back.
-    if let Some(state) = selected_state.as_deref() {
+    if let Some(state) = selected_state.as_deref()
+        && !cli.dashboard_inherit_claim()
+    {
         let launcher = state.join("runtime/namedrop");
         if launcher.exists() {
             let selected = fs::canonicalize(state.join("runtime/current/namedrop"));

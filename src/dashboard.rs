@@ -72,6 +72,20 @@ fn ensure(
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut spawned = false;
     loop {
+        let handoff_reader = files.handoff_reader()?;
+        if handoff_reader.is_none() {
+            let active = files.info();
+            if active.as_ref().is_some_and(|info| &info.ui != ui) || Instant::now() >= deadline {
+                let active =
+                    active.map_or_else(|| "its active UI".to_owned(), |info| info.ui.setting());
+                return Err(format!(
+                    "the dashboard server is running with {active} and is restarting; retry when it finishes before requesting {}",
+                    ui.setting()
+                ));
+            }
+            thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         if files.claimed()? {
             if let Some(info) = files.info()
                 && let Some(phase) = answers(&info, token)
@@ -94,7 +108,7 @@ fn ensure(
                 return Ok((if spawned { "started" } else { "running" }, info));
             }
         } else if !spawned {
-            files.spawn(ui, None)?;
+            files.spawn(ui)?;
             spawned = true;
         }
         if Instant::now() >= deadline {
@@ -103,6 +117,7 @@ fn ensure(
                 files.state().join("dashboard/server.log").display()
             ));
         }
+        drop(handoff_reader);
         thread::sleep(Duration::from_millis(50));
     }
 }
@@ -240,14 +255,26 @@ fn run_server(
         assets,
         restarting: restarting.clone(),
     });
-    thread::spawn(move || http::accept_loop(listener, front));
+    let stop = Arc::new(AtomicBool::new(false));
+    let accept_stop = stop.clone();
+    let acceptor = thread::spawn(move || http::accept_loop(listener, front, accept_stop));
     eprintln!("dashboard: serving 127.0.0.1:{port}");
     let verdict = hub::run(&files, &instance, idle(), commands);
     eprintln!("dashboard: stopping: {}", verdict.reason());
     match verdict {
         hub::Verdict::Handoff(_) => {
             restarting.store(true, Ordering::Release);
-            files.handoff(&ui, claim)?;
+            files.handoff(&ui, claim, || {
+                stop.store(true, Ordering::Release);
+                TcpStream::connect_timeout(
+                    &(Ipv4Addr::LOCALHOST, port).into(),
+                    Duration::from_secs(1),
+                )
+                .map_err(|e| format!("could not retire dashboard listener: {e}"))?;
+                acceptor
+                    .join()
+                    .map_err(|_| "dashboard listener panicked".to_owned())
+            })?;
         }
         // Still holding the claim, so no successor reads the old session.
         hub::Verdict::Idle => files.rotate_session()?,

@@ -695,6 +695,30 @@ fn fix_forward_index_file_aliases_require_the_session_cookie() {
     }
 }
 
+fn selected_startup_fixture(dashboard: &Dashboard, startup: &str) {
+    let runtime = dashboard.state().join("runtime");
+    fs::write(runtime.join("release/namedrop"), format!(
+        "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) {startup};; esac\nexec '{}' \"$@\"\n",
+        env!("CARGO_BIN_EXE_namedrop")
+    )).unwrap();
+    fs::set_permissions(
+        runtime.join("release/namedrop"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    symlink("release", runtime.join("current")).unwrap();
+    fs::write(
+        runtime.join("namedrop"),
+        format!(
+            "#!/bin/sh\nrm '{}'\nexec '{}' \"$@\"\n",
+            runtime.join("namedrop").display(),
+            env!("CARGO_BIN_EXE_namedrop")
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 #[test]
 fn fix_forward_handoff_refuses_a_competing_embedded_ui() {
     let dashboard = Dashboard::new();
@@ -717,22 +741,13 @@ fn fix_forward_handoff_refuses_a_competing_embedded_ui() {
     }
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
-    fs::copy(
-        env!("CARGO_BIN_EXE_namedrop"),
-        runtime.join("release/namedrop"),
-    )
-    .unwrap();
-    symlink("release", runtime.join("current")).unwrap();
-    fs::write(
-        runtime.join("namedrop"),
-        format!(
-            "#!/bin/sh\ncase \"$*\" in *dashboard-server*) touch '{}'; sleep 7;; esac\nexec '{}' \"$@\"\n",
-            dashboard.root().join("successor-launching").display(),
-            runtime.join("current/namedrop").display()
+    selected_startup_fixture(
+        &dashboard,
+        &format!(
+            "touch '{}'; sleep 7",
+            dashboard.root().join("successor-launching").display()
         ),
-    )
-    .unwrap();
-    fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755)).unwrap();
+    );
     eventually(|| {
         dashboard
             .root()
@@ -919,17 +934,13 @@ fn fix_two_handoff_mismatch_says_restarting_instead_of_a_retiring_pid() {
     let _events = fix_two_subscribe(&dashboard, &opened);
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
-    fs::copy(
-        env!("CARGO_BIN_EXE_namedrop"),
-        runtime.join("release/namedrop"),
-    )
-    .unwrap();
-    symlink("release", runtime.join("current")).unwrap();
-    fs::write(runtime.join("namedrop"), format!(
-        "#!/bin/sh\ncase \"$*\" in *dashboard-server*--help*) ;; *dashboard-server*) touch '{}'; sleep 2;; esac\nexec '{}' \"$@\"\n",
-        dashboard.root().join("successor-delayed").display(), runtime.join("current/namedrop").display()
-    )).unwrap();
-    fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755)).unwrap();
+    selected_startup_fixture(
+        &dashboard,
+        &format!(
+            "touch '{}'; sleep 2",
+            dashboard.root().join("successor-delayed").display()
+        ),
+    );
     eventually(|| {
         dashboard
             .root()
@@ -1041,6 +1052,354 @@ fn fix_two_probe_failure_does_not_fall_back_to_a_legacy_spawn() {
         !spawned.exists(),
         "arbitrary failure started a legacy successor"
     );
+}
+
+fn fix_three_legacy_stub(dashboard: &Dashboard, fail_start: bool) -> PathBuf {
+    let release = dashboard.state().join("runtime/legacy");
+    fs::create_dir_all(&release).unwrap();
+    let executable = release.join("namedrop");
+    let target = serde_json::to_string(env!("CARGO_BIN_EXE_namedrop")).unwrap();
+    let marker = serde_json::to_string(
+        dashboard
+            .root()
+            .join("legacy-started.json")
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(&executable, format!(r#"#!/usr/bin/env python3
+import json,os,sys
+from pathlib import Path
+for argument in sys.argv[1:]:
+    if argument in ('--inherit-claim','--ui'):
+        message="error: unexpected argument '"+argument+"' found\n\nUsage: namedrop dashboard-server [OPTIONS]\n\nFor more information, try '--help'.\n"
+        print(json.dumps({{"protocol_version":"collab/v1","status":"rejected","operation":None,"error":{{"code":"invalid_request","message":message}}}}),flush=True)
+        sys.exit(64)
+if '--help' in sys.argv:
+    print('Usage: namedrop dashboard-server [OPTIONS]')
+    sys.exit(0)
+Path({marker}).write_text(json.dumps(sys.argv[1:]))
+print('legacy startup stdout',flush=True)
+print('legacy startup stderr',file=sys.stderr,flush=True)
+if {fail_start}:
+    sys.exit(69)
+state=Path(sys.argv[sys.argv.index('--plugin-state')+1])
+(state/'runtime/namedrop').unlink(missing_ok=True)
+os.execv({target},[{target}]+sys.argv[1:])
+"#, fail_start=if fail_start {"True"} else {"False"})).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    executable
+}
+
+#[test]
+fn fix_three_legacy_stub_rolls_back_embedded_and_custom_ui() {
+    for custom in [true, false] {
+        let dashboard = Dashboard::new();
+        let ui = dashboard.ui("dist");
+        let opened = dashboard.open(custom.then_some(ui.as_path()));
+        let first = dashboard.info();
+        let cookie = dashboard.cookie();
+        let _events = fix_two_subscribe(&dashboard, &opened);
+        let executable = fix_three_legacy_stub(&dashboard, false);
+        for flag in ["--inherit-claim", "--ui"] {
+            let output = Command::new(&executable)
+                .args(["dashboard-server", flag, "--help"])
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(64));
+            let rejection: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(rejection["error"]["code"], "invalid_request");
+            assert!(
+                rejection["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("unexpected argument '{flag}' found"))
+            );
+        }
+        let runtime = dashboard.state().join("runtime");
+        symlink("legacy", runtime.join("current")).unwrap();
+        symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+        let successor = eventually(|| {
+            let info = dashboard.info();
+            (info["instance"] != first["instance"]).then_some(info)
+        });
+        let log =
+            fs::read_to_string(dashboard.state().join("dashboard/server.log")).unwrap_or_default();
+        assert!(successor.is_some(), "legacy stub left no dashboard: {log}");
+        assert_eq!(successor.unwrap()["port"], first["port"]);
+        assert_eq!(dashboard.cookie(), cookie);
+        assert_eq!(dashboard.get("/", true).body, INDEX_HTML.as_bytes());
+        assert!(
+            log.contains("legacy startup stdout") && log.contains("legacy startup stderr"),
+            "{log}"
+        );
+        let drops = log
+            .lines()
+            .filter(|line| line.contains("custom UI") && line.contains("does not support --ui"))
+            .count();
+        assert_eq!(drops, usize::from(custom), "{log}");
+        let arguments: Vec<String> = serde_json::from_slice(
+            &fs::read(dashboard.root().join("legacy-started.json")).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument == "--ui" || argument == "--inherit-claim")
+        );
+    }
+}
+
+#[test]
+fn fix_three_inherited_successor_can_release_its_claim_for_a_legacy_rollback() {
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    let opened = dashboard.open(Some(&ui));
+    let first = dashboard.info();
+    let cookie = dashboard.cookie();
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("current-release")).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_namedrop"),
+        runtime.join("current-release/namedrop"),
+    )
+    .unwrap();
+    symlink("current-release", runtime.join("current")).unwrap();
+    symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+    let inherited = eventually(|| {
+        let info = dashboard.info();
+        (info["instance"] != first["instance"]).then_some(info)
+    })
+    .expect("current release adopts the claim");
+    assert_eq!(inherited["port"], first["port"]);
+    let _successor_events = fix_two_subscribe(&dashboard, &opened);
+    fix_three_legacy_stub(&dashboard, false);
+    symlink("legacy", runtime.join("next-current")).unwrap();
+    fs::rename(runtime.join("next-current"), runtime.join("current")).unwrap();
+    let successor = eventually(|| {
+        let info = dashboard.info();
+        (info["instance"] != inherited["instance"]).then_some(info)
+    });
+    let log =
+        fs::read_to_string(dashboard.state().join("dashboard/server.log")).unwrap_or_default();
+    assert!(
+        successor.is_some(),
+        "inherited stdin retained the legacy claim: {log}"
+    );
+    assert_eq!(successor.unwrap()["port"], first["port"]);
+    assert_eq!(dashboard.cookie(), cookie);
+    assert_eq!(dashboard.get("/", true).body, INDEX_HTML.as_bytes());
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("custom UI") && line.contains("does not support --ui"))
+            .count(),
+        1,
+        "{log}"
+    );
+}
+
+#[test]
+fn fix_three_failed_successor_stdout_and_stderr_are_logged() {
+    let dashboard = Dashboard::new();
+    let opened = dashboard.open(None);
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    fix_three_legacy_stub(&dashboard, true);
+    let runtime = dashboard.state().join("runtime");
+    symlink("legacy", runtime.join("current")).unwrap();
+    symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+    let reason = eventually(|| {
+        fs::read_to_string(dashboard.state().join("dashboard/server.log"))
+            .ok()
+            .filter(|log| {
+                log.contains("legacy startup stdout") && log.contains("legacy startup stderr")
+            })
+    });
+    let log =
+        fs::read_to_string(dashboard.state().join("dashboard/server.log")).unwrap_or_default();
+    assert!(
+        reason.is_some(),
+        "failed successor output was discarded: {log}"
+    );
+}
+
+#[test]
+#[ignore = "requires REVIEW_PRE_ND2_BINARY pointing to the real 158592a release"]
+fn fix_three_real_pre_nd2_rollback_drops_custom_ui() {
+    let old = std::env::var_os("REVIEW_PRE_ND2_BINARY").expect("REVIEW_PRE_ND2_BINARY");
+    let dashboard = Dashboard::new();
+    let ui = dashboard.ui("dist");
+    let opened = dashboard.open(Some(&ui));
+    let first = dashboard.info();
+    let cookie = dashboard.cookie();
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("pre-nd2")).unwrap();
+    fs::copy(old, runtime.join("pre-nd2/namedrop")).unwrap();
+    symlink("pre-nd2", runtime.join("current")).unwrap();
+    symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+    let successor = eventually(|| {
+        let info = dashboard.info();
+        (info["instance"] != first["instance"]).then_some(info)
+    });
+    let log =
+        fs::read_to_string(dashboard.state().join("dashboard/server.log")).unwrap_or_default();
+    assert!(
+        successor.is_some(),
+        "real pre-ND2 rollback left no dashboard: {log}"
+    );
+    assert_eq!(successor.unwrap()["port"], first["port"]);
+    assert_eq!(dashboard.cookie(), cookie);
+    assert_eq!(dashboard.get("/", true).body, INDEX_HTML.as_bytes());
+    assert_eq!(
+        log.lines()
+            .filter(|line| line.contains("custom UI") && line.contains("does not support --ui"))
+            .count(),
+        1,
+        "{log}"
+    );
+}
+
+#[test]
+fn fix_three_package_switch_during_probe_starts_the_probed_executable() {
+    let dashboard = Dashboard::new();
+    let opened = dashboard.open(None);
+    let first = dashboard.info();
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("pinned")).unwrap();
+    fix_three_legacy_stub(&dashboard, false);
+    let target = serde_json::to_string(env!("CARGO_BIN_EXE_namedrop")).unwrap();
+    let marker =
+        serde_json::to_string(dashboard.root().join("probe-entered").to_str().unwrap()).unwrap();
+    let release =
+        serde_json::to_string(dashboard.root().join("release-probe").to_str().unwrap()).unwrap();
+    let spawned =
+        serde_json::to_string(dashboard.root().join("pinned-started").to_str().unwrap()).unwrap();
+    fs::write(
+        runtime.join("pinned/namedrop"),
+        format!(
+            r#"#!/usr/bin/env python3
+import os,sys,time
+from pathlib import Path
+if '--help' in sys.argv:
+    Path({marker}).touch()
+    deadline=time.monotonic()+4
+    while not Path({release}).exists() and time.monotonic()<deadline:
+        time.sleep(0.01)
+else:
+    Path({spawned}).touch()
+    state=Path(sys.argv[sys.argv.index('--plugin-state')+1])
+    (state/'runtime/namedrop').unlink(missing_ok=True)
+os.execv({target},[{target}]+sys.argv[1:])
+"#
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(
+        runtime.join("pinned/namedrop"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let packages = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(runtime.join("packages.lock"))
+        .unwrap();
+    symlink("pinned", runtime.join("current")).unwrap();
+    symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+    eventually(|| {
+        dashboard
+            .root()
+            .join("probe-entered")
+            .exists()
+            .then_some(())
+    })
+    .expect("selected executable is being probed");
+    let switch = move || {
+        symlink("legacy", runtime.join("next-current")).unwrap();
+        fs::rename(runtime.join("next-current"), runtime.join("current")).unwrap();
+    };
+    let publisher = match packages.try_lock() {
+        Ok(()) => {
+            switch();
+            drop(packages);
+            None
+        }
+        Err(fs::TryLockError::WouldBlock) => Some(thread::spawn(move || {
+            eventually(|| packages.try_lock().ok())
+                .expect("package publisher resumes after handoff");
+            switch();
+        })),
+        Err(error) => panic!("{error}"),
+    };
+    fs::write(dashboard.root().join("release-probe"), "go").unwrap();
+    let successor = eventually(|| {
+        let info = dashboard.info();
+        (info["instance"] != first["instance"]).then_some(info)
+    });
+    if let Some(publisher) = publisher {
+        publisher.join().unwrap();
+    }
+    let log =
+        fs::read_to_string(dashboard.state().join("dashboard/server.log")).unwrap_or_default();
+    assert!(
+        successor.is_some(),
+        "probe/spawn race left no dashboard: {log}"
+    );
+    assert!(
+        dashboard.root().join("pinned-started").exists(),
+        "spawn did not execute the probed path: {log}"
+    );
+    assert!(!dashboard.root().join("legacy-started.json").exists());
+    assert_eq!(successor.unwrap()["port"], first["port"]);
+    dashboard.get("/", true).status(200);
+}
+
+#[test]
+fn fix_three_current_successor_stays_pinned_when_its_probe_changes_current() {
+    let dashboard = Dashboard::new();
+    let opened = dashboard.open(None);
+    let first = dashboard.info();
+    let _events = fix_two_subscribe(&dashboard, &opened);
+    let runtime = dashboard.state().join("runtime");
+    fs::create_dir_all(runtime.join("new")).unwrap();
+    fix_three_legacy_stub(&dashboard, false);
+    fs::copy(env!("CARGO_BIN_EXE_namedrop"), runtime.join("new/real")).unwrap();
+    let started = dashboard.root().join("pinned-wrapper-started");
+    fs::write(runtime.join("new/namedrop"), format!(
+        "#!/bin/sh\ncase \"$*\" in *--help*) ln -s legacy '{r}/next' && mv -T '{r}/next' '{r}/current';; *) touch '{}' ;; esac\nexec '{r}/new/real' \"$@\"\n",
+        started.display(), r=runtime.display()
+    )).unwrap();
+    fs::set_permissions(
+        runtime.join("new/namedrop"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    symlink("new", runtime.join("current")).unwrap();
+    symlink("current/namedrop", runtime.join("namedrop")).unwrap();
+    let successor = eventually(|| {
+        let info = dashboard.info();
+        (info["instance"] != first["instance"]).then_some(info)
+    });
+    let log =
+        fs::read_to_string(dashboard.state().join("dashboard/server.log")).unwrap_or_default();
+    assert!(
+        successor.is_some(),
+        "wrapper changed current and prevented pinned startup: {log}"
+    );
+    assert!(
+        started.exists(),
+        "did not execute the probed wrapper: {log}"
+    );
+    assert!(
+        !dashboard.root().join("legacy-started.json").exists(),
+        "main reselected the replacement: {log}"
+    );
+    assert_eq!(successor.unwrap()["port"], first["port"]);
+    dashboard.get("/", true).status(200);
 }
 
 #[cfg(target_os = "linux")]
@@ -1263,18 +1622,14 @@ fn failed_handoff_stops_launcher_helpers_and_releases_the_claim() {
     }
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
-    fs::copy(
-        env!("CARGO_BIN_EXE_namedrop"),
-        runtime.join("release/namedrop"),
-    )
-    .unwrap();
-    symlink("release", runtime.join("current")).unwrap();
     let helper = dashboard.root().join("helper-pid");
-    fs::write(runtime.join("namedrop"), format!(
-        "#!/bin/sh\ncase \"$*\" in *dashboard-server*) exec 3<&0; sleep 60 <&3 & echo $! > '{}'; exit 1;; esac\nexec '{}' \"$@\"\n",
-        helper.display(), runtime.join("current/namedrop").display()
-    )).unwrap();
-    fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755)).unwrap();
+    selected_startup_fixture(
+        &dashboard,
+        &format!(
+            "exec 3<&0; sleep 60 <&3 & echo $! > '{}'; exit 1",
+            helper.display()
+        ),
+    );
     let pid =
         eventually(|| fs::read_to_string(&helper).ok()).expect("handoff launcher starts helper");
     let contender = fs::OpenOptions::new()
@@ -1293,14 +1648,7 @@ fn failed_handoff_stops_launcher_helpers_and_releases_the_claim() {
         "failed handoff left its helper holding the singleton claim"
     );
     drop(contender);
-    fs::write(
-        runtime.join("namedrop"),
-        format!(
-            "#!/bin/sh\nexec '{}' \"$@\"\n",
-            runtime.join("current/namedrop").display()
-        ),
-    )
-    .unwrap();
+    fs::remove_file(runtime.join("namedrop")).unwrap();
     assert_eq!(dashboard.open(Some(&ui))["server"], "started");
     assert_eq!(dashboard.get("/", true).body, b"<h1>dist</h1>");
 }
