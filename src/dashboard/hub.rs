@@ -52,6 +52,7 @@ pub(crate) enum Subscription {
 pub(crate) enum SpaceEvent {
     Space { key: SpaceKey, frame: Arc<str> },
     Gone { key: SpaceKey },
+    Ready { keys: Vec<SpaceKey> },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -211,7 +212,7 @@ impl Discovery {
                         let next = if matches!(state, SocketState::Backoff { .. })
                             || consecutive_unavailable >= UNAVAILABLE_LIMIT
                         {
-                            if !matches!(state, SocketState::Backoff { .. }) {
+                            if unavailable {
                                 mailbox
                                     .lock()
                                     .unwrap()
@@ -260,8 +261,14 @@ impl Verdict {
 }
 
 struct Subscriber {
-    subscription: Subscription,
+    state: ConnectionState,
     frames: SyncSender<Frame>,
+}
+
+enum ConnectionState {
+    Space(SpaceKey),
+    PendingAll,
+    LiveAll,
 }
 
 struct Published {
@@ -284,6 +291,7 @@ struct Hub<'a> {
     subscribers: HashMap<u64, Subscriber>,
     published: HashMap<SpaceKey, Published>,
     live_spaces: HashMap<SpaceKey, LiveSpace>,
+    observed_sockets: HashSet<String>,
     unpublished_spaces: HashSet<SpaceKey>,
     discovery: Option<Discovery>,
     socket_states: Arc<Mutex<HashMap<String, SocketState>>>,
@@ -309,6 +317,7 @@ pub(crate) fn run(
         subscribers: HashMap::new(),
         published: HashMap::new(),
         live_spaces: HashMap::new(),
+        observed_sockets: HashSet::new(),
         unpublished_spaces: HashSet::new(),
         discovery: None,
         socket_states: Arc::new(Mutex::new(HashMap::new())),
@@ -346,42 +355,29 @@ impl Hub<'_> {
                 subscription,
                 frames,
             } => {
-                self.refresh(Some(&subscription));
-                let frame = match &subscription {
-                    Subscription::Space(key) => self
-                        .published
-                        .get(key)
-                        .map(|published| Frame::Snapshot(published.frame.clone()))
-                        .or_else(|| self.publish(key).map(Frame::Snapshot)),
-                    Subscription::All => {
-                        let mut keys: Vec<_> = self.live_spaces.keys().collect();
-                        keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-                        let initial: Vec<_> = keys
-                            .into_iter()
-                            .filter_map(|key| {
-                                self.published.get(key).map(|published| SpaceEvent::Space {
-                                    key: key.clone(),
-                                    frame: published.frame.clone(),
-                                })
-                            })
-                            .collect();
-                        Some(Frame::Spaces(initial.into()))
+                let refreshed = self.refresh(Some(&subscription));
+                let (state, initial) = match subscription {
+                    Subscription::Space(key) => {
+                        let frame = self
+                            .published
+                            .get(&key)
+                            .map(|published| Frame::Snapshot(published.frame.clone()))
+                            .or_else(|| self.publish(&key).map(Frame::Snapshot));
+                        let Some(frame) = frame else { return };
+                        (ConnectionState::Space(key), Some(frame))
                     }
+                    Subscription::All => (ConnectionState::PendingAll, None),
                 };
-                let Some(frame) = frame else { return };
-                let sent = frames.try_send(frame).is_ok();
-                self.subscribers.insert(
-                    id,
-                    Subscriber {
-                        subscription,
-                        frames,
-                    },
-                );
+                let sent = initial.is_none_or(|frame| frames.try_send(frame).is_ok());
+                self.subscribers.insert(id, Subscriber { state, frames });
                 self.idle_since = None;
                 if !sent {
                     self.drop_subscriber(id);
                 }
                 self.sync_discovery();
+                if refreshed {
+                    self.complete_replays();
+                }
             }
             HubCommand::Unsubscribe { id } => self.drop_subscriber(id),
             HubCommand::Spaces { reply } => {
@@ -392,10 +388,12 @@ impl Hub<'_> {
 
     fn drop_subscriber(&mut self, id: u64) {
         if let Some(gone) = self.subscribers.remove(&id) {
-            if let Subscription::Space(key) = gone.subscription
-                && !self.subscribers.values().any(|s| match &s.subscription {
-                    Subscription::Space(other) => other == &key,
-                    Subscription::All => self.live_spaces.contains_key(&key),
+            if let ConnectionState::Space(key) = gone.state
+                && !self.subscribers.values().any(|s| match &s.state {
+                    ConnectionState::Space(other) => other == &key,
+                    ConnectionState::PendingAll | ConnectionState::LiveAll => {
+                        self.live_spaces.contains_key(&key)
+                    }
                 })
             {
                 self.published.remove(&key);
@@ -453,17 +451,21 @@ impl Hub<'_> {
         None
     }
 
-    fn refresh(&mut self, incoming: Option<&Subscription>) {
-        if self.store.is_none() {
-            self.open_store();
+    fn refresh(&mut self, incoming: Option<&Subscription>) -> bool {
+        if self.store.is_none() && !self.open_store() {
+            return false;
         }
-        let Some(store) = &self.store else { return };
+        let Some(store) = &self.store else {
+            self.sync_discovery();
+            self.complete_replays();
+            return true;
+        };
         let Ok(version) = store.data_version() else {
-            return;
+            return false;
         };
         let database_changed = self.data_version != Some(version);
         if database_changed && self.reload_spaces().is_none() {
-            return;
+            return false;
         }
         self.sync_discovery();
         let previous = self.live_spaces.clone();
@@ -479,22 +481,25 @@ impl Hub<'_> {
         self.metadata_dirty |= previous != self.live_spaces;
         let metadata_changed = std::mem::take(&mut self.metadata_dirty);
         if !database_changed && !metadata_changed && incoming.is_none() {
-            return;
+            self.complete_replays();
+            return true;
         }
-        let subscriptions: Vec<_> = self
+        let all = self
             .subscribers
             .values()
-            .map(|s| &s.subscription)
-            .chain(incoming)
-            .collect();
-        let all = subscriptions.iter().any(|s| matches!(s, Subscription::All));
-        let mut keys: Vec<SpaceKey> = subscriptions
-            .into_iter()
-            .filter_map(|s| match s {
-                Subscription::Space(key) => Some(key.clone()),
-                Subscription::All => None,
+            .any(|subscriber| !matches!(subscriber.state, ConnectionState::Space(_)))
+            || matches!(incoming, Some(Subscription::All));
+        let mut keys: Vec<_> = self
+            .subscribers
+            .values()
+            .filter_map(|subscriber| match &subscriber.state {
+                ConnectionState::Space(key) => Some(key.clone()),
+                _ => None,
             })
             .collect();
+        if let Some(Subscription::Space(key)) = incoming {
+            keys.push(key.clone());
+        }
         if all {
             keys.extend(self.live_spaces.keys().cloned());
         }
@@ -521,7 +526,7 @@ impl Hub<'_> {
             let mut stale = Vec::new();
             for (id, subscriber) in &self.subscribers {
                 if !content_changed
-                    || !matches!(&subscriber.subscription, Subscription::Space(wanted) if wanted == &key)
+                    || !matches!(&subscriber.state, ConnectionState::Space(wanted) if wanted == &key)
                 {
                     continue;
                 }
@@ -545,7 +550,7 @@ impl Hub<'_> {
             let stale: Vec<_> = self
                 .subscribers
                 .iter()
-                .filter(|(_, s)| matches!(s.subscription, Subscription::All))
+                .filter(|(_, s)| matches!(s.state, ConnectionState::LiveAll))
                 .filter_map(|(id, s)| s.frames.try_send(batch.clone()).err().map(|_| *id))
                 .collect();
             for id in stale {
@@ -555,21 +560,80 @@ impl Hub<'_> {
         self.published.retain(|key, _| {
             self.live_spaces.contains_key(key)
                 || matches!(incoming, Some(Subscription::Space(wanted)) if wanted == key)
-                || self.subscribers.values().any(
-                    |s| matches!(&s.subscription, Subscription::Space(wanted) if wanted == key),
-                )
+                || self
+                    .subscribers
+                    .values()
+                    .any(|s| matches!(&s.state, ConnectionState::Space(wanted) if wanted == key))
         });
         if !failed {
             self.data_version = Some(version);
         }
         self.metadata_dirty |= failed;
+        if !failed {
+            self.complete_replays();
+        }
+        !failed
+    }
+
+    fn complete_replays(&mut self) {
+        if !self
+            .subscribers
+            .values()
+            .any(|subscriber| matches!(subscriber.state, ConnectionState::PendingAll))
+        {
+            return;
+        }
+        let Some(discovery) = &self.discovery else {
+            return;
+        };
+        if discovery.cancel.load(Ordering::Relaxed)
+            || self
+                .spaces
+                .values()
+                .map(|space| &space.namespace.session_socket_id)
+                .chain(
+                    self.live_spaces
+                        .values()
+                        .map(|space| &space.namespace.session_socket_id),
+                )
+                .any(|socket| !self.observed_sockets.contains(socket))
+        {
+            return;
+        }
+        let mut keys: Vec<_> = self.live_spaces.keys().cloned().collect();
+        keys.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        let initial: Option<Vec<_>> = keys
+            .iter()
+            .map(|key| {
+                self.published.get(key).map(|published| SpaceEvent::Space {
+                    key: key.clone(),
+                    frame: published.frame.clone(),
+                })
+            })
+            .collect();
+        let Some(mut initial) = initial else { return };
+        initial.push(SpaceEvent::Ready { keys });
+        let batch = Frame::Spaces(initial.into());
+        let mut stale = Vec::new();
+        for (id, subscriber) in &mut self.subscribers {
+            if matches!(subscriber.state, ConnectionState::PendingAll) {
+                if subscriber.frames.try_send(batch.clone()).is_ok() {
+                    subscriber.state = ConnectionState::LiveAll;
+                } else {
+                    stale.push(*id);
+                }
+            }
+        }
+        for id in stale {
+            self.drop_subscriber(id);
+        }
     }
 
     fn sync_discovery(&mut self) {
         let watching = self
             .subscribers
             .values()
-            .any(|subscriber| matches!(subscriber.subscription, Subscription::All));
+            .any(|subscriber| !matches!(subscriber.state, ConnectionState::Space(_)));
         if !watching {
             if let Some(discovery) = &self.discovery {
                 discovery.stop();
@@ -579,6 +643,7 @@ impl Hub<'_> {
                 self.metadata_dirty = true;
             }
             self.unpublished_spaces.clear();
+            self.observed_sockets.clear();
             return;
         }
         if self.discovery.as_ref().is_some_and(|discovery| {
@@ -623,6 +688,7 @@ impl Hub<'_> {
             Err(_) => return,
         };
         for (socket, workspaces) in latest {
+            self.metadata_dirty |= self.observed_sockets.insert(socket.clone());
             self.live_spaces
                 .retain(|_, space| space.namespace.session_socket_id != socket);
             for workspace in workspaces {
@@ -638,7 +704,7 @@ impl Hub<'_> {
         }
     }
 
-    fn open_store(&mut self) {
+    fn open_store(&mut self) -> bool {
         match StateStore::open_read_only(self.files.state()) {
             Ok(store) => {
                 // One thread reads for every space, so a long wait on a busy
@@ -649,11 +715,16 @@ impl Hub<'_> {
                     self.log(format!("could not set the busy timeout: {error}"));
                 }
                 self.store = store;
+                true
             }
             Err(error) if error.kind() == StoreErrorKind::UnsupportedSchema => {
                 self.unsupported_schema = true;
+                false
             }
-            Err(error) => self.log(format!("could not open state: {error}")),
+            Err(error) => {
+                self.log(format!("could not open state: {error}"));
+                false
+            }
         }
     }
 
@@ -847,6 +918,7 @@ mod tests {
             subscribers: HashMap::new(),
             published: HashMap::new(),
             live_spaces: HashMap::new(),
+            observed_sockets: HashSet::new(),
             unpublished_spaces: HashSet::new(),
             discovery: None,
             socket_states: Arc::new(Mutex::new(HashMap::new())),
@@ -944,6 +1016,8 @@ mod tests {
             subscription: Subscription::All,
             frames,
         });
+        hub.observed_sockets.insert("socket-a".to_owned());
+        hub.complete_replays();
         assert!(matches!(all.try_recv(), Ok(Frame::Spaces(_))));
 
         hub.live_spaces.insert(
@@ -983,6 +1057,83 @@ mod tests {
         assert!(
             legacy.try_recv().is_err(),
             "unchanged legacy content sends no new frame"
+        );
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn pending_replay_waits_through_a_failed_read_and_includes_a_concurrent_write() {
+        let state = std::env::temp_dir().join(format!("namedrop-hub-ready-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let namespace = StateNamespace::for_space("socket-a", "w1");
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                tx.activate_worktree(
+                    &namespace,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 1),
+                )
+            })
+            .unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = test_hub(&files);
+        let key = SpaceKey::of(&namespace);
+        let (frames, legacy) = sync_channel(8);
+        hub.handle(HubCommand::Subscribe {
+            id: 1,
+            subscription: Subscription::Space(key.clone()),
+            frames,
+        });
+        assert!(matches!(legacy.try_recv(), Ok(Frame::Snapshot(_))));
+        let (frames, all) = sync_channel(8);
+        hub.handle(HubCommand::Subscribe {
+            id: 2,
+            subscription: Subscription::All,
+            frames,
+        });
+        assert!(all.try_recv().is_err());
+        hub.live_spaces.insert(
+            key.clone(),
+            LiveSpace {
+                namespace: namespace.clone(),
+                label: None,
+            },
+        );
+        hub.observed_sockets.insert("socket-a".to_owned());
+        hub.metadata_dirty = true;
+        hub.store
+            .as_ref()
+            .unwrap()
+            .connection()
+            .execute_batch("CREATE TEMP TABLE pane_addresses(broken INTEGER)")
+            .unwrap();
+        hub.refresh(None);
+        assert!(
+            all.try_recv().is_err(),
+            "failed read completed replay using a stale cached frame"
+        );
+        add_address(&state, &namespace, "during-initial");
+        hub.store
+            .as_ref()
+            .unwrap()
+            .connection()
+            .execute_batch("DROP TABLE temp.pane_addresses")
+            .unwrap();
+        hub.refresh(None);
+        match all.try_recv() {
+            Ok(Frame::Spaces(events)) => {
+                assert_eq!(events.len(), 2);
+                assert!(
+                    matches!(&events[0], SpaceEvent::Space { key: observed, frame } if observed == &key && frame.contains("@during-initial"))
+                );
+                assert!(matches!(&events[1], SpaceEvent::Ready { keys } if keys == &vec![key]));
+            }
+            _ => panic!("successful retry did not finish the initial replay"),
+        }
+        hub.refresh(None);
+        assert!(
+            all.try_recv().is_err(),
+            "ready repeated after successful retry"
         );
         let _ = fs::remove_dir_all(&state);
     }

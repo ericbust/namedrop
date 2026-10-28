@@ -320,6 +320,10 @@ fn stream_events(
                     "event: gone\ndata: {{\"key\":\"{}\"}}\n\n",
                     key.as_str()
                 ),
+                SpaceEvent::Ready { keys } => {
+                    let data = serde_json::json!({"keys": keys});
+                    write!(writer, "event: ready\ndata: {data}\n\n")
+                }
             }),
             Ok(Frame::Restarting) => {
                 let _ = write!(writer, "event: restarting\ndata: {{}}\n\n");

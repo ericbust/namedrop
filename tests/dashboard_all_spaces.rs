@@ -173,6 +173,16 @@ impl Events {
     fn next(&mut self, limit: Duration) -> Option<(String, Value)> {
         let deadline = Instant::now() + limit;
         loop {
+            match self.next_raw(deadline.saturating_duration_since(Instant::now())) {
+                Some((event, _)) if event == "ready" => continue,
+                event => return event,
+            }
+        }
+    }
+
+    fn next_raw(&mut self, limit: Duration) -> Option<(String, Value)> {
+        let deadline = Instant::now() + limit;
+        loop {
             while let Some(end) = self.buffer.find("\n\n") {
                 let raw: String = self.buffer.drain(..end + 2).collect();
                 let event = raw.lines().find_map(|line| line.strip_prefix("event: "));
@@ -967,4 +977,211 @@ fn unactivated_live_workspace_is_not_addressable_until_the_store_activates_it() 
         .transaction(|tx| tx.deactivate_worktree(&namespace("lonely"), &attribution()))
         .unwrap();
     assert!(all.space()["frame"]["space"]["addressable_label"].is_null());
+}
+
+fn ready_keys(event: (String, Value)) -> HashSet<String> {
+    assert_eq!(event.0, "ready");
+    let keys = event.1["keys"].as_array().expect("ready keys array");
+    let unique: HashSet<_> = keys
+        .iter()
+        .map(|key| key.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(keys.len(), unique.len(), "ready repeated a key");
+    unique
+}
+
+#[test]
+fn ready_lists_exactly_the_three_initial_space_keys_once() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "a");
+    let server = Server::start(directory.path(), &[("a", None), ("b", None), ("c", None)]);
+    let mut all = server.events("/api/events");
+    let mut preceding = HashSet::new();
+    for _ in 0..3 {
+        let (event, data) = all.next_raw(WAIT).expect("initial space");
+        assert_eq!(event, "space");
+        preceding.insert(data["key"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(preceding, HashSet::from([key("a"), key("b"), key("c")]));
+    assert_eq!(
+        ready_keys(all.next_raw(WAIT).expect("ready after initial spaces")),
+        preceding
+    );
+    StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.create_pane_address(
+                &namespace("a"),
+                &address("after-ready", "after-ready"),
+                &attribution(),
+            )
+        })
+        .unwrap();
+    let (event, data) = all.next_raw(WAIT).expect("space after database change");
+    assert_eq!(event, "space");
+    assert_eq!(data["key"], key("a"));
+    assert!(
+        all.next_raw(Duration::from_millis(400)).is_none(),
+        "ready repeated after the initial replay"
+    );
+}
+
+#[test]
+fn ready_empty_waits_for_a_successful_empty_discovery_answer() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "a");
+    let block = directory.path().join(format!("block-{SOCKET}"));
+    fs::write(&block, "").unwrap();
+    let server = Server::start(directory.path(), &[]);
+    let mut all = server.events("/api/events");
+    eventually(|| directory.path().join(format!("active-{SOCKET}")).exists());
+    assert!(
+        all.next_raw(Duration::from_millis(150)).is_none(),
+        "unknown membership was treated as known empty"
+    );
+    fs::remove_file(block).unwrap();
+    assert_eq!(
+        all.next_raw(WAIT),
+        Some(("ready".to_owned(), json!({"keys":[]})))
+    );
+    assert!(all.next_raw(Duration::from_millis(400)).is_none());
+}
+
+#[test]
+fn ready_precedes_later_space_and_gone_on_a_second_connection() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "a");
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let mut first = server.events("/api/events");
+    assert_eq!(first.next_raw(WAIT).unwrap().0, "space");
+    assert_eq!(
+        ready_keys(first.next_raw(WAIT).expect("first connection ready")),
+        HashSet::from([key("a")])
+    );
+    let mut second = server.events("/api/events");
+    assert_eq!(second.next_raw(WAIT).unwrap().0, "space");
+    StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.create_pane_address(
+                &namespace("a"),
+                &address("concurrent", "concurrent"),
+                &attribution(),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        ready_keys(
+            second
+                .next_raw(WAIT)
+                .expect("second connection ready before delta")
+        ),
+        HashSet::from([key("a")])
+    );
+    assert_eq!(second.next_raw(WAIT).unwrap().0, "space");
+    assert_eq!(first.next_raw(WAIT).unwrap().0, "space");
+    server.set_workspaces(&[]);
+    assert_eq!(
+        second.next_raw(WAIT),
+        Some(("gone".to_owned(), json!({"key":key("a")})))
+    );
+    assert!(second.next_raw(Duration::from_millis(400)).is_none());
+}
+
+#[test]
+fn reconnect_ready_excludes_a_workspace_closed_while_unwatched() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "a");
+    let server = Server::start(directory.path(), &[("a", None), ("b", None)]);
+    let mut first = server.events("/api/events");
+    for _ in 0..2 {
+        assert_eq!(first.next_raw(WAIT).unwrap().0, "space");
+    }
+    assert_eq!(
+        ready_keys(first.next_raw(WAIT).expect("initial ready")),
+        HashSet::from([key("a"), key("b")])
+    );
+    drop(first);
+    thread::sleep(Duration::from_millis(1500));
+    server.set_workspaces(&[("a", None)]);
+    let mut reconnect = server.events("/api/events");
+    let (event, space) = reconnect.next_raw(WAIT).unwrap();
+    assert_eq!(event, "space");
+    assert_eq!(space["key"], key("a"));
+    assert_eq!(
+        ready_keys(reconnect.next_raw(WAIT).expect("fresh replay ready")),
+        HashSet::from([key("a")])
+    );
+    assert!(reconnect.next_raw(Duration::from_millis(400)).is_none());
+}
+
+#[test]
+fn ready_waits_for_every_configured_socket() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    for socket in ["ready-a", "ready-b"] {
+        activate_on(&state, socket, "a");
+        snapshot_on(directory.path(), socket, &[("a", None)]);
+    }
+    let block = directory.path().join("block-ready-b");
+    fs::write(&block, "").unwrap();
+    let server = Server::start(directory.path(), &[]);
+    let mut all = server.events("/api/events");
+    eventually(|| directory.path().join("active-ready-b").exists());
+    let mut preceding = HashSet::new();
+    if let Some((event, data)) = all.next_raw(Duration::from_millis(150)) {
+        assert_eq!(event, "space", "ready preceded the second socket answer");
+        preceding.insert(data["key"].as_str().unwrap().to_owned());
+    }
+    fs::remove_file(block).unwrap();
+    loop {
+        let (event, data) = all.next_raw(WAIT).expect("initial replay completion");
+        if event == "ready" {
+            let keys = ready_keys((event, data));
+            assert_eq!(keys, preceding);
+            assert_eq!(keys.len(), 2);
+            break;
+        }
+        assert_eq!(event, "space");
+        preceding.insert(data["key"].as_str().unwrap().to_owned());
+    }
+    assert!(all.next_raw(Duration::from_millis(400)).is_none());
+}
+
+#[test]
+fn ready_empty_completes_after_a_fresh_probe_of_an_already_retired_socket() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "a");
+    let server = Server::start(directory.path(), &[("a", None)]);
+    let mut first = server.events("/api/events");
+    assert_eq!(first.next_raw(WAIT).unwrap().0, "space");
+    assert_eq!(
+        ready_keys(first.next_raw(WAIT).unwrap()),
+        HashSet::from([key("a")])
+    );
+    fs::write(directory.path().join(format!("down-{SOCKET}")), "").unwrap();
+    assert_eq!(first.next_raw(WAIT).unwrap().0, "gone");
+    drop(first);
+    thread::sleep(Duration::from_millis(1500));
+    let mut reconnect = server.events("/api/events");
+    assert_eq!(
+        reconnect.next_raw(WAIT),
+        Some(("ready".to_owned(), json!({"keys":[]})))
+    );
+    assert!(reconnect.next_raw(Duration::from_millis(400)).is_none());
+}
+
+#[test]
+fn ready_empty_completes_without_a_database_in_a_pristine_directory() {
+    let directory = TestDirectory::new();
+    let server = Server::start(directory.path(), &[]);
+    let mut all = server.events("/api/events");
+    assert_eq!(
+        all.next_raw(Duration::from_millis(600)),
+        Some(("ready".to_owned(), json!({"keys":[]})))
+    );
+    assert!(calls(directory.path()).is_empty());
+    assert!(all.next_raw(Duration::from_millis(350)).is_none());
 }
