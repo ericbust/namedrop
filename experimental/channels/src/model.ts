@@ -49,17 +49,25 @@ export type Channel = {
 };
 export type WireEvent =
   | { type: "space"; channel: Channel }
-  | { type: "gone"; key: SpaceKey };
+  | { type: "gone"; key: SpaceKey }
+  | { type: "ready"; keys: ReadonlySet<SpaceKey> };
 export type Event =
   | WireEvent
   | { type: "select"; key: SpaceKey }
   | { type: "opened" }
   | { type: "disconnected" }
   | { type: "visibility"; visible: boolean };
+export type Sync =
+  | { kind: "connecting" | "reconnecting" | "live" }
+  | {
+      kind: "replaying";
+      status: "connecting" | "reconnecting";
+      pending: Map<SpaceKey, Channel>;
+    };
 export type State = {
   channels: Map<SpaceKey, Channel>;
   selectedKey: SpaceKey | null;
   unread: ReadonlySet<SpaceKey>;
-  connection: "connecting" | "live" | "reconnecting";
+  sync: Sync;
   visible: boolean;
 };

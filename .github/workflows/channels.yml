@@ -4,9 +4,11 @@ on:
   pull_request:
     paths:
       - 'experimental/channels/**'
+      - '.github/workflows/channels.yml'
   push:
     paths:
       - 'experimental/channels/**'
+      - '.github/workflows/channels.yml'
 
 permissions:
   contents: read

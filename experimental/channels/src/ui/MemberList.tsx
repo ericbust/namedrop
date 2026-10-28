@@ -56,12 +56,7 @@ export function MemberList({
     >
       <header className="channel-header">
         <div>
-          <h1 id="channel-heading">
-            <span className="heading-hash" aria-hidden="true">
-              #
-            </span>
-            {name}
-          </h1>
+          <h1 id="channel-heading">{name}</h1>
           <p>
             {channel.members.size}{" "}
             {channel.members.size === 1 ? "member" : "members"}
@@ -69,13 +64,13 @@ export function MemberList({
             {healthLabel(channel.health)}
           </p>
         </div>
-        {channel.addressableLabel && (
-          <span className="address-label" title="Workspace mention">
-            {channel.addressableLabel}
-          </span>
-        )}
+        <span className="address-label" title="Workspace mention">
+          {channel.addressableLabel === null
+            ? "Not addressable"
+            : `#${channel.addressableLabel}`}
+        </span>
       </header>
-      {channel.attention.length > 0 && (
+      {channel.health.level === "needs_you" && (
         <section className="attention-summary" aria-label="Attention needed">
           <h2>
             <span

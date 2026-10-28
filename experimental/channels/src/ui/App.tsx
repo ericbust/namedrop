@@ -1,12 +1,17 @@
 import { useEffect, useReducer, useRef } from "react";
 import type { Event, State } from "../model.ts";
-import { channelName, initialState, reduce } from "../store.ts";
+import {
+  channelName,
+  connectionStatus,
+  initialState,
+  reduce,
+} from "../store.ts";
 import { parseEvent } from "../wire.ts";
 import { MemberList } from "./MemberList.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 
 function measuredReduce(state: State, event: Event): State {
-  if (event.type !== "space" && event.type !== "gone")
+  if (event.type !== "space" && event.type !== "gone" && event.type !== "ready")
     return reduce(state, event);
   performance.mark("namedrop:frame-start");
   const next = reduce(state, event);
@@ -33,7 +38,7 @@ export function App() {
       const source = new EventSource("/api/events");
       stream = source;
       source.addEventListener("open", () => dispatch({ type: "opened" }));
-      for (const name of ["space", "gone"]) {
+      for (const name of ["space", "gone", "ready"]) {
         source.addEventListener(name, (message) => {
           if (
             !(message instanceof MessageEvent) ||
@@ -87,6 +92,7 @@ export function App() {
       cancelAnimationFrame(second);
     };
   }, [state.channels.size]);
+  const connection = connectionStatus(state);
   const channel =
     state.selectedKey === null
       ? undefined
@@ -101,7 +107,7 @@ export function App() {
         onSelect={(key) => dispatch({ type: "select", key })}
       />
       <main id="main-content" tabIndex={-1}>
-        {state.connection === "reconnecting" && (
+        {connection === "reconnecting" && (
           <div className="reconnect-banner" role="status">
             Connection lost. Reconnecting automatically…
             <span>Showing the last received update.</span>
@@ -117,16 +123,16 @@ export function App() {
             <h1>
               {state.channels.size > 0
                 ? "Choose a channel"
-                : state.connection === "live"
+                : connection === "live"
                   ? "No live workspaces"
-                  : state.connection === "reconnecting"
+                  : connection === "reconnecting"
                     ? "Waiting to reconnect"
                     : "Connecting to Namedrop"}
             </h1>
             <p>
               {state.channels.size > 0
                 ? "Select a workspace to see its members and live status."
-                : state.connection === "live"
+                : connection === "live"
                   ? "Open a Herdr workspace to see its channel here."
                   : "Your workspaces will appear when the live connection is ready."}
             </p>

@@ -174,9 +174,15 @@ drive notes for the pane mechanics.
 ## Channels browser app
 
 Use this driver for `experimental/channels` lanes. Run every testbed command from
-this checkout. Build the app, then boot an isolated profile.
+this checkout. Set `CHANNELS_OUTPUT_DIR` to your lane's output directory. Its default
+is `/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}/`. Build the app, then boot an
+isolated profile. `TESTBED_HOME` selects the testbed root.
 
 ```sh
+export CHANNELS_OUTPUT_DIR="${CHANNELS_OUTPUT_DIR:-/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}}"
+mkdir -p "$CHANNELS_OUTPUT_DIR"
+export CHANNELS_OUTPUT_DIR="$(cd "$CHANNELS_OUTPUT_DIR" && pwd)"
+export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
 (cd experimental/channels && npm ci && npm run build)
 testbed/testbed up --link "$PWD" --fresh --yes
 ```
@@ -187,7 +193,7 @@ Read its generated `env.sh` to build the wrapper below. The socket assertion run
 before the first Herdr command. Keep all Herdr and Namedrop calls inside `tb`.
 
 ```sh
-tb_profile="$HOME/.namedrop-testbed/profiles/link-$(basename "$PWD")"
+tb_profile="$TESTBED_HOME/profiles/link-$(basename "$PWD")"
 tb_vars=$(sed -n 's/^ *env -i \(.*\) \/bin\/bash --noprofile.*/\1/p' "$tb_profile/env.sh")
 test -n "$tb_vars" || exit 1
 tb() { eval "env -i $tb_vars \"\$@\""; }
@@ -196,10 +202,10 @@ case "$tb_socket" in /tmp/nd-tb-*) ;; *) echo "Not a testbed socket" >&2; exit 1
 tb herdr pane list
 tb_workspace=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace"])' "$tb_profile/state.json")
 tb_state="$tb_profile/state/herdr/plugins/namedrop"
-tb "$tb_state/runtime/namedrop" --plugin-state "$tb_state" --herdr-workspace "$tb_workspace" dashboard --no-open --json --ui "$PWD/experimental/channels/dist" > /tmp/channels-dashboard.json
+tb "$tb_state/runtime/namedrop" --plugin-state "$tb_state" --herdr-workspace "$tb_workspace" dashboard --no-open --json --ui "$PWD/experimental/channels/dist" > "$CHANNELS_OUTPUT_DIR/channels-dashboard.json"
 ```
 
-Read `data.url` from `/tmp/channels-dashboard.json`. The nonce is single use.
+Read `data.url` from `$CHANNELS_OUTPUT_DIR/channels-dashboard.json`. The nonce is single use.
 Navigate once with a fresh browser context. The redirect redeems it for the session
 cookie, which the app's same-origin EventSource uses automatically.
 
@@ -215,16 +221,19 @@ workspace close <workspace>` for removal. Never address the real Herdr socket.
 From `experimental/channels`, set `CHANNELS_URL` to the returned `data.url` and
 `CHROME` to the installed Chrome or Chromium executable. This browser probe uses
 only the pinned `playwright-core` package. It saves a screenshot and performance
-entries in `/tmp`.
+entries in `CHANNELS_OUTPUT_DIR`.
 
 ```sh
-CHANNELS_URL=$(python3 -c 'import json; print(json.load(open("/tmp/channels-dashboard.json"))["data"]["url"])')
+CHANNELS_URL=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["url"])' "$CHANNELS_OUTPUT_DIR/channels-dashboard.json")
 export CHANNELS_URL
 export CHROME="$(command -v chromium || command -v google-chrome || command -v google-chrome-stable)"
 node --input-type=module <<'JS'
 import assert from 'node:assert/strict';
 import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { chromium } from 'playwright-core';
+const output = process.env.CHANNELS_OUTPUT_DIR;
+assert.ok(output, 'CHANNELS_OUTPUT_DIR must be exported');
 const browser = await chromium.launch({executablePath: process.env.CHROME, headless: true});
 try {
   const context = await browser.newContext({viewport: {width: 1024, height: 700}});
@@ -234,20 +243,21 @@ try {
   await page.goto(process.env.CHANNELS_URL);
   const channels = page.getByRole('navigation', {name: 'Channels', exact: true});
   await channels.getByRole('button').first().waitFor();
-  await channels.getByRole('button', {name: 'alpha', exact: true}).click();
+  const alpha = channels.getByRole('button').filter({has: page.locator('.channel-name', {hasText: /^alpha$/})});
+  await alpha.click();
   await page.getByRole('heading', {name: 'alpha', exact: true}).waitFor();
-  await channels.getByRole('button', {name: 'alpha', exact: true}).focus();
+  await alpha.focus();
   await page.keyboard.press('End');
   await page.keyboard.press('Home');
   await page.waitForFunction(() => performance.getEntriesByName('namedrop:load-to-sidebar-paint').length > 0);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-  await page.screenshot({path: '/tmp/ui1-channels.png', fullPage: true});
+  await page.screenshot({path: join(output, 'ui1-channels.png'), fullPage: true});
   await page.setViewportSize({width: 1600, height: 1000});
   await page.emulateMedia({colorScheme: 'dark'});
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-  await page.screenshot({path: '/tmp/ui1-dark.png', fullPage: true});
+  await page.screenshot({path: join(output, 'ui1-dark.png'), fullPage: true});
   const measures = await page.evaluate(() => performance.getEntriesByType('measure').map(entry => entry.toJSON()));
-  await writeFile('/tmp/ui1-measures.json', JSON.stringify(measures, null, 2));
+  await writeFile(join(output, 'ui1-measures.json'), JSON.stringify(measures, null, 2));
   assert.deepEqual(errors, []);
 } finally {
   await browser.close();
@@ -259,21 +269,28 @@ Use these selectors for later live lanes.
 
 - `getByRole('navigation', {name: 'Channels', exact: true})` holds every channel.
   Channel buttons carry `data-channel-key` with the opaque key. Same-name buttons
-  use `name (workspace_id)` as visible text.
-- `getByRole('navigation', {name: 'Needs you', exact: true})` holds attention channels.
+  use `name (workspace_id)` as their display name. Repeated workspace IDs also
+  include a stable unique key prefix. `.channel-name` holds only that name;
+  `.channel-token` holds the separate `#token` or **Not addressable**.
+- `getByRole('navigation', {name: 'Needs you', exact: true})` holds channels with `health.level === "needs_you"`.
   Their dots have `data-activity="blocked"` and the accessible name **Needs you**.
 - `getByRole('list', {name: 'Members'})` holds member rows. Rows carry
   `data-address-id` and `data-activity`. Each dot also carries `data-activity`.
   Activity values are `working`, `waiting`, `blocked`, `idle`, `offline`, and `retired`.
 - `getByRole('status')` exposes the reconnect banner. Kill and restart only the
   profile's dashboard, then wait for this banner to disappear and the channel
-  collection to rebuild without reloading the page.
+  collection to reconcile at `ready` without reloading the page. Select a channel,
+  focus its canonical Channels button, and create unread activity elsewhere before
+  dropping the stream. Delay replay to check that the sidebar stays populated.
+  After `ready`, confirm selection, unread marks, and focus survive for retained
+  keys, then press an arrow key. Confirm omitted keys disappear and an empty ready
+  set clears the view. The app opens exactly one `/api/events` EventSource per tab.
 - `performance.getEntriesByName('namedrop:frame-apply', 'measure')` measures reducer
   calls. `namedrop:load-to-sidebar-paint` measures navigation start to the first
   populated sidebar after two animation frames. The app retains at most 200
   reducer measures and one load measure per navigation.
 
-Save each lane's screenshots under `/tmp/swarm-<pr-id>/worker-<n>/`. Record the
+Save each lane's screenshots and measurements under `CHANNELS_OUTPUT_DIR`. Record the
 channel count, member presence transition, duplicate-name suffixes, keyboard focus,
 reconnect recovery, and dark surfaces against the plan's lanes. Use a fresh nonce
 and context for each navigation trial. The performance lane reads both measures

@@ -41,6 +41,11 @@ function integer(value: unknown): number {
     throw new Error("Expected nonnegative integer");
   return value;
 }
+function timestamp(value: unknown): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0)
+    throw new Error("Expected nonnegative timestamp");
+  return value;
+}
 function array(value: unknown): unknown[] {
   if (!Array.isArray(value)) throw new Error("Expected array");
   return value;
@@ -112,7 +117,7 @@ function attention(value: unknown): Attention {
       return {
         source,
         summary: safeText(item.summary),
-        openedAt: integer(item.opened_at_ms),
+        openedAt: timestamp(item.opened_at_ms),
       };
     default:
       throw new Error("Unknown attention source");
@@ -155,9 +160,15 @@ function channel(value: unknown, key: SpaceKey): Channel {
   };
 }
 export function parseEvent(name: string, rawJson: string): WireEvent | null {
-  if (name !== "space" && name !== "gone") return null;
+  if (name !== "space" && name !== "gone" && name !== "ready") return null;
   try {
     const envelope = record(JSON.parse(rawJson) as unknown);
+    if (name === "ready") {
+      const values = array(envelope.keys).map(spaceKey);
+      const keys = new Set(values);
+      if (keys.size !== values.length) throw new Error("Duplicate ready key");
+      return { type: "ready", keys };
+    }
     const key = spaceKey(envelope.key);
     return name === "gone"
       ? { type: "gone", key }

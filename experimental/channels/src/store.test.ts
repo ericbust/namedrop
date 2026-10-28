@@ -26,7 +26,7 @@ function snapshot(key = keyA, name = "alpha", workspace = "w1") {
         key,
         workspace_id: workspace,
         display_name: name,
-        addressable_label: `#${name}`,
+        addressable_label: name,
       },
       health: { level: "calm" },
       participants: [participant()],
@@ -129,10 +129,12 @@ test("channel ordering uses display name, then workspace id, then key", () => {
 });
 test("unknown wire versions leave state unchanged", () => {
   const state = apply(initialState(), snapshot());
-  assert.equal(
-    apply(state, { ...snapshot(), frame: { ...snapshot().frame, wire: 2 } }),
-    state,
-  );
+  const unknown = snapshot(keyB, "new channel", "w2");
+  unknown.frame.wire = 2;
+  assert.equal(parseEvent("space", JSON.stringify(unknown)), null);
+  const next = apply(state, unknown);
+  assert.equal(next, state);
+  assert.equal(next.channels.has(parsed(snapshot(keyB)).key), false);
 });
 test("malformed JSON, names, keys, or mismatched envelopes never install partial state", () => {
   assert.equal(parseEvent("space", "{"), null);
@@ -244,7 +246,7 @@ test("parser accepts opaque human IDs, all activities, safe text, null addressab
     [...channel.members.values()][1]?.role?.text,
     "<script>alert(1)</script>",
   );
-  assert.equal(parsed(snapshot()).addressableLabel, "#alpha");
+  assert.equal(parsed(snapshot()).addressableLabel, "alpha");
 });
 test("new channels establish a baseline while background message, member, and activity changes mark unread", () => {
   const state = twoChannels();
@@ -260,7 +262,7 @@ test("new channels establish a baseline while background message, member, and ac
   members.frame.participants = [];
   assert.ok(apply(state, members).unread.has(beta.key));
 });
-test("attention content changes mark unread independently of health and expose Needs you", () => {
+test("attention content changes mark unread independently of health", () => {
   const state = twoChannels();
   const beta = snapshot(keyB, "beta", "w2");
   const value = {
@@ -347,25 +349,89 @@ test("select clears background unread only for an existing channel", () => {
   );
   assert.equal(reduce(next, { type: "select", key }), next);
 });
-test("disconnect retains last good state; open resets replay baseline and reconciles missed gone", () => {
-  const before = apply(twoChannels(), changedChannel());
+function ready(state: State, keys: string[]): State {
+  const event = parseEvent("ready", JSON.stringify({ keys }));
+  assert.ok(event, "ready keys must parse");
+  return reduce(state, event);
+}
+test("item 2: reconnect retains the committed view until ready and preserves selection and unread", () => {
+  const alpha = parsed(snapshot()).key;
+  const beta = parsed(snapshot(keyB, "beta", "w2")).key;
+  const before = reduce(apply(twoChannels(), changedChannel()), {
+    type: "select",
+    key: alpha,
+  });
   const disconnected = reduce(before, { type: "disconnected" });
-  assert.equal(disconnected.channels, before.channels);
-  assert.equal(disconnected.selectedKey, before.selectedKey);
-  assert.equal(disconnected.connection, "reconnecting");
-  assert.equal(reduce(disconnected, { type: "disconnected" }), disconnected);
   const opened = reduce(disconnected, { type: "opened" });
-  assert.equal(opened.channels.size, 0);
-  assert.equal(opened.unread.size, 0);
-  assert.equal(opened.selectedKey, null);
-  assert.equal(opened.connection, "live");
-  const replay = apply(opened, snapshot());
-  assert.equal(replay.channels.size, 1);
-  assert.equal(replay.unread.size, 0);
-  assert.equal(
-    replay.channels.has(parsed(snapshot(keyB, "beta", "w2")).key),
-    false,
+  assert.equal(opened.channels, before.channels);
+  assert.equal(opened.selectedKey, alpha);
+  assert.equal(opened.unread, before.unread);
+  const partial = apply(opened, changedChannel());
+  assert.equal(partial.channels, before.channels);
+  assert.equal(partial.selectedKey, alpha);
+  assert.equal(partial.unread, before.unread);
+  const completed = ready(apply(partial, snapshot()), [keyB, keyA]);
+  assert.equal(completed.selectedKey, alpha);
+  assert.ok(completed.unread.has(beta));
+  assert.equal(completed.channels.get(alpha), before.channels.get(alpha));
+});
+test("item 2: initial ready selects sidebar order and ready removes omitted keys atomically", () => {
+  const opened = reduce(initialState(), { type: "opened" });
+  const pending = apply(
+    apply(opened, snapshot(keyA, "zeta")),
+    snapshot(keyB, "alpha"),
   );
+  assert.equal(pending.channels.size, 0);
+  const complete = ready(pending, [keyA, keyB]);
+  assert.equal(complete.selectedKey, parsed(snapshot(keyB)).key);
+  const reconnect = reduce(complete, { type: "opened" });
+  const replacement = ready(apply(reconnect, snapshot(keyA, "zeta")), [keyA]);
+  assert.equal(replacement.channels.size, 1);
+  assert.equal(replacement.selectedKey, parsed(snapshot()).key);
+  const empty = ready(reduce(replacement, { type: "opened" }), []);
+  assert.equal(empty.channels.size, 0);
+  assert.equal(empty.selectedKey, null);
+  assert.equal(empty.unread.size, 0);
+});
+test("item 2: interrupted replay, incomplete ready and duplicate ready cannot replace the view", () => {
+  const before = twoChannels();
+  const pending = apply(reduce(before, { type: "opened" }), changedChannel());
+  assert.equal(ready(pending, [keyA, keyB]), pending);
+  assert.equal(ready(pending, []), pending);
+  const disconnected = reduce(pending, { type: "disconnected" });
+  assert.equal(disconnected.channels, before.channels);
+  assert.equal(ready(disconnected, [keyB]), disconnected);
+  const complete = ready(
+    apply(reduce(disconnected, { type: "opened" }), snapshot()),
+    [keyA],
+  );
+  assert.equal(ready(complete, []), complete);
+});
+test("item 2: changed replay activity marks only unobserved surviving channels unread", () => {
+  const before = twoChannels();
+  const replay = apply(
+    apply(reduce(before, { type: "opened" }), snapshot()),
+    changedChannel(),
+  );
+  assert.ok(ready(replay, [keyA, keyB]).unread.has(parsed(snapshot(keyB)).key));
+  const hidden = reduce(before, { type: "visibility", visible: false });
+  const alpha = snapshot();
+  alpha.frame.participants = [participant("agent-1", "working")];
+  const next = ready(
+    apply(apply(reduce(hidden, { type: "opened" }), alpha), snapshot(keyB)),
+    [keyA, keyB],
+  );
+  assert.ok(next.unread.has(parsed(alpha).key));
+});
+test("item 2: ready rejects duplicate, malformed and missing keys", () => {
+  for (const value of [
+    {},
+    { keys: null },
+    { keys: [keyA, keyA] },
+    { keys: ["no"] },
+    { keys: [keyA, 1] },
+  ])
+    assert.equal(parseEvent("ready", JSON.stringify(value)), null);
 });
 
 test("messages leaving the live window replace retained IDs without marking background unread", () => {
@@ -378,4 +444,75 @@ test("messages leaving the live window replace retained IDs without marking back
   assert.equal(next.unread.has(key), false);
   assert.equal(next.channels.get(key)?.messages.size, 0);
   assert.equal(state.channels.get(key)?.messages.size, 1);
+});
+
+test("item 4: repeated workspace IDs extend the stable key suffix until labels differ", () => {
+  const keys = [
+    "abcdef00000000000000",
+    "abcdef00000000000001",
+    "abcdee00000000000000",
+  ];
+  const state = keys.reduce(
+    (state, key) => apply(state, snapshot(key, "shared", "w1")),
+    initialState(),
+  );
+  const channels = sortedChannels(state);
+  const names = channels.map((channel) => channelName(channel, channels));
+  assert.equal(new Set(names).size, 3);
+  for (const [index, name] of names.entries()) {
+    assert.ok(name.startsWith("shared (w1 · "));
+    assert.ok(name.endsWith(")"));
+    const suffix = name.slice("shared (w1 · ".length, -1);
+    assert.ok(suffix.length >= 6);
+    assert.ok(channels[index]?.key.startsWith(suffix));
+  }
+  assert.deepEqual(
+    [...channels]
+      .reverse()
+      .map((channel) => channelName(channel, channels))
+      .reverse(),
+    names,
+  );
+});
+test("item 7: overflow fallback timestamps preserve the channel while counts stay safe", () => {
+  const value = snapshot();
+  const overflow = Number("9223372036854775807");
+  const frame = {
+    ...value.frame,
+    attention: [
+      {
+        source_kind: "coordination",
+        summary: { text: "Help", truncated: false },
+        opened_at_ms: overflow,
+      },
+    ],
+  };
+  assert.equal(parsed({ ...value, frame }).attention[0]?.openedAt, overflow);
+  for (const opened_at_ms of [-1, 1.5, Number.POSITIVE_INFINITY])
+    assert.equal(
+      parseEvent(
+        "space",
+        JSON.stringify({
+          ...value,
+          frame: {
+            ...frame,
+            attention: [{ ...frame.attention[0], opened_at_ms }],
+          },
+        }),
+      ),
+      null,
+    );
+  assert.equal(
+    parseEvent(
+      "space",
+      JSON.stringify({
+        ...value,
+        frame: {
+          ...frame,
+          health: { level: "needs_you", items: overflow },
+        },
+      }),
+    ),
+    null,
+  );
 });
