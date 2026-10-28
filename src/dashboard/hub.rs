@@ -21,6 +21,7 @@ use std::{
 const TICK: Duration = Duration::from_millis(250);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(1);
 const UNAVAILABLE_LIMIT: u8 = 3;
+const RECOVERY_BACKOFF: Duration = Duration::from_secs(2);
 
 pub(crate) enum HubCommand {
     Subscribe {
@@ -91,15 +92,20 @@ struct DiscoveryMailbox {
     latest: HashMap<String, Vec<HerdrSpace>>,
 }
 
-#[derive(Default)]
-struct SocketState {
-    failing: bool,
-    unavailable: u8,
-    retired: bool,
+#[derive(Clone, Copy, Default)]
+enum SocketState {
+    #[default]
+    Healthy,
+    Failing {
+        consecutive_unavailable: u8,
+    },
+    Backoff {
+        retry_at: Instant,
+    },
 }
 
 impl Discovery {
-    fn start(sockets: BTreeSet<String>) -> Self {
+    fn start(sockets: BTreeSet<String>, states: Arc<Mutex<HashMap<String, SocketState>>>) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let mailbox = Arc::new(Mutex::new(DiscoveryMailbox {
             sockets,
@@ -107,7 +113,7 @@ impl Discovery {
         }));
         let worker_cancel = cancel.clone();
         let worker_mailbox = mailbox.clone();
-        let thread = thread::spawn(move || Self::run(worker_cancel, worker_mailbox));
+        let thread = thread::spawn(move || Self::run(worker_cancel, worker_mailbox, states));
         Self {
             cancel,
             mailbox,
@@ -126,19 +132,34 @@ impl Discovery {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }
 
-    fn run(cancel: Arc<AtomicBool>, mailbox: Arc<Mutex<DiscoveryMailbox>>) {
-        let mut states = HashMap::<String, SocketState>::new();
+    fn run(
+        cancel: Arc<AtomicBool>,
+        mailbox: Arc<Mutex<DiscoveryMailbox>>,
+        states: Arc<Mutex<HashMap<String, SocketState>>>,
+    ) {
         while !cancel.load(Ordering::Relaxed) {
             let started = Instant::now();
             let sockets = mailbox.lock().unwrap().sockets.clone();
-            states.retain(|socket, _| sockets.contains(socket));
             for socket in sockets {
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
-                let state = states.entry(socket.clone()).or_default();
-                if state.retired {
+                let state = states
+                    .lock()
+                    .unwrap()
+                    .get(&socket)
+                    .copied()
+                    .unwrap_or_default();
+                if matches!(state, SocketState::Backoff { retry_at } if Instant::now() < retry_at) {
                     continue;
+                }
+                if matches!(state, SocketState::Backoff { .. }) {
+                    states.lock().unwrap().insert(
+                        socket.clone(),
+                        SocketState::Backoff {
+                            retry_at: Instant::now() + RECOVERY_BACKOFF,
+                        },
+                    );
                 }
                 let result = ProcessHerdr::default()
                     .with_socket(Some(socket.clone()))
@@ -157,11 +178,13 @@ impl Discovery {
                 }
                 match result {
                     Ok(snapshot) => {
-                        if state.failing {
+                        if !matches!(state, SocketState::Healthy) {
                             eprintln!("dashboard: live workspaces on {socket} recovered");
                         }
-                        state.failing = false;
-                        state.unavailable = 0;
+                        states
+                            .lock()
+                            .unwrap()
+                            .insert(socket.clone(), SocketState::Healthy);
                         mailbox
                             .lock()
                             .unwrap()
@@ -169,22 +192,41 @@ impl Discovery {
                             .insert(socket, snapshot.result.snapshot.workspaces);
                     }
                     Err(error) => {
-                        if !state.failing {
+                        if matches!(state, SocketState::Healthy) {
                             eprintln!("dashboard: live workspaces on {socket} unavailable");
                         }
-                        state.failing = true;
                         let unavailable = serde_json::from_str::<serde_json::Value>(&error)
                             .ok()
                             .is_some_and(|value| value["error"]["code"] == "server_not_running");
-                        state.unavailable = if unavailable {
-                            state.unavailable + 1
+                        let consecutive_unavailable = if unavailable {
+                            match state {
+                                SocketState::Failing {
+                                    consecutive_unavailable,
+                                } => consecutive_unavailable + 1,
+                                _ => 1,
+                            }
                         } else {
                             0
                         };
-                        if state.unavailable >= UNAVAILABLE_LIMIT {
-                            state.retired = true;
-                            mailbox.lock().unwrap().latest.insert(socket, Vec::new());
-                        }
+                        let next = if matches!(state, SocketState::Backoff { .. })
+                            || consecutive_unavailable >= UNAVAILABLE_LIMIT
+                        {
+                            if !matches!(state, SocketState::Backoff { .. }) {
+                                mailbox
+                                    .lock()
+                                    .unwrap()
+                                    .latest
+                                    .insert(socket.clone(), Vec::new());
+                            }
+                            SocketState::Backoff {
+                                retry_at: Instant::now() + RECOVERY_BACKOFF,
+                            }
+                        } else {
+                            SocketState::Failing {
+                                consecutive_unavailable,
+                            }
+                        };
+                        states.lock().unwrap().insert(socket, next);
                     }
                 }
             }
@@ -227,18 +269,24 @@ struct Published {
     frame: Arc<str>,
 }
 
+struct KnownSpace {
+    namespace: StateNamespace,
+    activated: bool,
+}
+
 struct Hub<'a> {
     files: &'a ServerFiles,
     instance: &'a str,
     idle: Duration,
     store: Option<StateStore>,
     data_version: Option<i64>,
-    spaces: HashMap<SpaceKey, StateNamespace>,
+    spaces: HashMap<SpaceKey, KnownSpace>,
     subscribers: HashMap<u64, Subscriber>,
     published: HashMap<SpaceKey, Published>,
     live_spaces: HashMap<SpaceKey, LiveSpace>,
     unpublished_spaces: HashSet<SpaceKey>,
     discovery: Option<Discovery>,
+    socket_states: Arc<Mutex<HashMap<String, SocketState>>>,
     metadata_dirty: bool,
     idle_since: Option<Instant>,
     unsupported_schema: bool,
@@ -263,6 +311,7 @@ pub(crate) fn run(
         live_spaces: HashMap::new(),
         unpublished_spaces: HashSet::new(),
         discovery: None,
+        socket_states: Arc::new(Mutex::new(HashMap::new())),
         metadata_dirty: false,
         idle_since: Some(Instant::now()),
         unsupported_schema: false,
@@ -428,7 +477,8 @@ impl Hub<'_> {
         self.unpublished_spaces
             .retain(|key| self.live_spaces.contains_key(key));
         self.metadata_dirty |= previous != self.live_spaces;
-        if !database_changed && !self.metadata_dirty && incoming.is_none() {
+        let metadata_changed = std::mem::take(&mut self.metadata_dirty);
+        if !database_changed && !metadata_changed && incoming.is_none() {
             return;
         }
         let subscriptions: Vec<_> = self
@@ -511,8 +561,8 @@ impl Hub<'_> {
         });
         if !failed {
             self.data_version = Some(version);
-            self.metadata_dirty = false;
         }
+        self.metadata_dirty |= failed;
     }
 
     fn sync_discovery(&mut self) {
@@ -524,6 +574,11 @@ impl Hub<'_> {
             if let Some(discovery) = &self.discovery {
                 discovery.stop();
             }
+            if !self.live_spaces.is_empty() {
+                self.live_spaces.clear();
+                self.metadata_dirty = true;
+            }
+            self.unpublished_spaces.clear();
             return;
         }
         if self.discovery.as_ref().is_some_and(|discovery| {
@@ -534,7 +589,7 @@ impl Hub<'_> {
         let sockets = self
             .spaces
             .values()
-            .map(|namespace| namespace.session_socket_id.clone())
+            .map(|space| space.namespace.session_socket_id.clone())
             .chain(
                 self.live_spaces
                     .values()
@@ -542,7 +597,7 @@ impl Hub<'_> {
             )
             .collect();
         match &self.discovery {
-            None => self.discovery = Some(Discovery::start(sockets)),
+            None => self.discovery = Some(Discovery::start(sockets, self.socket_states.clone())),
             Some(discovery) if !discovery.cancel.load(Ordering::Relaxed) => {
                 if let Ok(mut mailbox) = discovery.mailbox.try_lock() {
                     mailbox.sockets = sockets;
@@ -560,7 +615,11 @@ impl Hub<'_> {
             return;
         }
         let latest = match discovery.mailbox.try_lock() {
-            Ok(mut mailbox) => std::mem::take(&mut mailbox.latest),
+            Ok(mut mailbox) => {
+                let mut latest = std::mem::take(&mut mailbox.latest);
+                latest.retain(|socket, _| mailbox.sockets.contains(socket));
+                latest
+            }
             Err(_) => return,
         };
         for (socket, workspaces) in latest {
@@ -665,7 +724,10 @@ impl Hub<'_> {
                     .map(crate::WorkspaceLabel::from_herdr),
                 repo: None,
                 display: space.namespace.space_id.as_str().to_owned(),
-                activated: true,
+                activated: self
+                    .spaces
+                    .get(&SpaceKey::of(&space.namespace))
+                    .is_some_and(|known| known.activated),
                 names: BTreeSet::new(),
                 retired: BTreeSet::new(),
             })
@@ -694,7 +756,7 @@ impl Hub<'_> {
         if !self.spaces.contains_key(key) && !self.live_spaces.contains_key(key) {
             self.reload_spaces();
         }
-        self.spaces.get(key).cloned()
+        self.spaces.get(key).map(|space| space.namespace.clone())
     }
 
     fn reload_spaces(&mut self) -> Option<Vec<crate::dashboard::rows::SpaceRow>> {
@@ -708,7 +770,15 @@ impl Hub<'_> {
         };
         self.spaces = rows
             .iter()
-            .map(|row| (SpaceKey::of(&row.namespace), row.namespace.clone()))
+            .map(|row| {
+                (
+                    SpaceKey::of(&row.namespace),
+                    KnownSpace {
+                        namespace: row.namespace.clone(),
+                        activated: row.state.activated && !row.state.deactivated,
+                    },
+                )
+            })
             .collect();
         Some(rows)
     }
@@ -779,6 +849,7 @@ mod tests {
             live_spaces: HashMap::new(),
             unpublished_spaces: HashSet::new(),
             discovery: None,
+            socket_states: Arc::new(Mutex::new(HashMap::new())),
             metadata_dirty: false,
             idle_since: None,
             unsupported_schema: false,
