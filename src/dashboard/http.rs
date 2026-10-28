@@ -1,9 +1,16 @@
 use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
-use super::server_files::{ServerFiles, Token};
+use super::server_files::{ServerFiles, Token, UiSource};
 use super::snapshot::SpaceKey;
 use std::{
+    ffi::CString,
+    fs::{File, OpenOptions},
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::fs::OpenOptionsExt,
+    },
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
@@ -31,6 +38,7 @@ pub(crate) struct Front {
     pub session: Token,
     pub instance: String,
     pub hub: Sender<HubCommand>,
+    pub assets: Assets,
 }
 
 pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>) {
@@ -129,9 +137,104 @@ impl Status {
     }
 }
 
-enum Asset {
-    Script,
-    Style,
+pub(crate) enum Assets {
+    Embedded,
+    Directory(File),
+}
+
+impl Assets {
+    pub fn new(source: &UiSource) -> Result<Self, String> {
+        match source {
+            UiSource::Embedded => Ok(Self::Embedded),
+            UiSource::Directory(path) => OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(path)
+                .map(Self::Directory)
+                .map_err(|error| format!("dashboard UI directory {}: {error}", path.display())),
+        }
+    }
+
+    fn read(&self, path: &str) -> Option<Vec<u8>> {
+        match self {
+            Self::Embedded => Some(match path {
+                "/index.html" => INDEX_HTML.as_bytes().to_vec(),
+                "/assets/app.js" => APP_JS.as_bytes().to_vec(),
+                "/assets/app.css" => APP_CSS.as_bytes().to_vec(),
+                _ => return None,
+            }),
+            Self::Directory(root) => {
+                let parts: Vec<_> = path.strip_prefix('/')?.split('/').collect();
+                if parts
+                    .iter()
+                    .any(|part| part.is_empty() || *part == "." || *part == "..")
+                {
+                    return None;
+                }
+                let mut file = root.try_clone().ok()?;
+                for (index, part) in parts.iter().enumerate() {
+                    let name = CString::new(*part).ok()?;
+                    let flags = libc::O_RDONLY
+                        | libc::O_CLOEXEC
+                        | libc::O_NOFOLLOW
+                        | if index + 1 == parts.len() {
+                            libc::O_NONBLOCK
+                        } else {
+                            libc::O_DIRECTORY
+                        };
+                    // Every lookup is relative to a held directory descriptor, and no
+                    // component may follow a symlink, even while files are replaced.
+                    let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
+                    if fd < 0 {
+                        return None;
+                    }
+                    // openat returned a new owned descriptor.
+                    file = unsafe { File::from_raw_fd(fd) };
+                }
+                if !file.metadata().ok()?.is_file() {
+                    return None;
+                }
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).ok()?;
+                Some(bytes)
+            }
+        }
+    }
+}
+
+fn decode_asset_path(path: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut bytes = path.bytes();
+    while let Some(byte) = bytes.next() {
+        let byte = if byte == b'%' {
+            let high = (bytes.next()? as char).to_digit(16)?;
+            let low = (bytes.next()? as char).to_digit(16)?;
+            (high * 16 + low) as u8
+        } else {
+            byte
+        };
+        if byte == 0 || byte == b'\\' {
+            return None;
+        }
+        decoded.push(byte);
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn content_type(path: &str) -> &'static str {
+    match Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+    {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("json" | "map") => "application/json",
+        Some("woff2") => "font/woff2",
+        _ => "application/octet-stream",
+    }
 }
 
 enum Route {
@@ -140,12 +243,18 @@ enum Route {
     Events(SpaceKey),
     AllEvents,
     Spaces,
-    Asset(Asset),
+    Asset(String),
     Favicon,
     Health,
 }
 
-fn route(request: &Request, port: u16, token: &Token, session: &Token) -> Result<Route, Status> {
+fn route(
+    request: &Request,
+    port: u16,
+    token: &Token,
+    session: &Token,
+    directory: bool,
+) -> Result<Route, Status> {
     let host = request.header("host").ok_or(Status::Forbidden)?;
     // Exact loopback Host defeats DNS rebinding onto this port.
     if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
@@ -165,13 +274,32 @@ fn route(request: &Request, port: u16, token: &Token, session: &Token) -> Result
                 _ => Err(Status::Unauthorized),
             };
         }
-        "/assets/app.js" => return Ok(Route::Asset(Asset::Script)),
-        "/assets/app.css" => return Ok(Route::Asset(Asset::Style)),
-        "/favicon.ico" => return Ok(Route::Favicon),
+        "/assets/app.js" => return Ok(Route::Asset(path.to_owned())),
+        "/assets/app.css" => return Ok(Route::Asset(path.to_owned())),
+        "/favicon.ico" if !directory => return Ok(Route::Favicon),
         _ => {}
+    }
+    let decoded = if directory {
+        Some(decode_asset_path(path).ok_or(Status::NotFound)?)
+    } else {
+        None
+    };
+    let custom_index = decoded.as_deref() == Some("/index.html");
+    if directory
+        && path != "/"
+        && !custom_index
+        && !path.starts_with("/api/")
+        && !path.starts_with("/w/")
+    {
+        let decoded = decoded.as_deref().ok_or(Status::NotFound)?;
+        if decoded == "/healthz" || decoded.starts_with("/api/") || decoded.starts_with("/w/") {
+            return Err(Status::NotFound);
+        }
+        return Ok(Route::Asset(decoded.to_owned()));
     }
     let page = match path {
         "/" | "/api/spaces" | "/api/events" => None,
+        _ if custom_index => None,
         _ => {
             let rest = path.strip_prefix("/w/").ok_or(Status::NotFound)?;
             let (segment, events) = match rest.strip_suffix("/events") {
@@ -213,7 +341,13 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
         Ok(request) => request,
         Err(status) => return respond_status(&mut writer, status),
     };
-    match route(&request, front.port, &front.token, &front.session) {
+    match route(
+        &request,
+        front.port,
+        &front.token,
+        &front.session,
+        matches!(front.assets, Assets::Directory(_)),
+    ) {
         Err(status) => respond_status(&mut writer, status),
         Ok(Route::Redeem { nonce, .. }) if !front.files.consume_entry(&nonce) => {
             respond_status(&mut writer, Status::Unauthorized)
@@ -226,27 +360,8 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
             );
             respond(&mut writer, "303 See Other", "text/plain", &headers, b"")
         }
-        Ok(Route::Page) => respond(
-            &mut writer,
-            "200 OK",
-            "text/html; charset=utf-8",
-            "",
-            INDEX_HTML.as_bytes(),
-        ),
-        Ok(Route::Asset(Asset::Script)) => respond(
-            &mut writer,
-            "200 OK",
-            "text/javascript; charset=utf-8",
-            "",
-            APP_JS.as_bytes(),
-        ),
-        Ok(Route::Asset(Asset::Style)) => respond(
-            &mut writer,
-            "200 OK",
-            "text/css; charset=utf-8",
-            "",
-            APP_CSS.as_bytes(),
-        ),
+        Ok(Route::Page) => serve_asset(&mut writer, &front.assets, "/index.html"),
+        Ok(Route::Asset(path)) => serve_asset(&mut writer, &front.assets, &path),
         Ok(Route::Favicon) => respond(&mut writer, "204 No Content", "text/plain", "", b""),
         Ok(Route::Health) => respond(
             &mut writer,
@@ -277,6 +392,13 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
             stream_events(stream, writer, front, next_id, Subscription::Space(key))
         }
         Ok(Route::AllEvents) => stream_events(stream, writer, front, next_id, Subscription::All),
+    }
+}
+
+fn serve_asset(writer: &mut TcpStream, assets: &Assets, path: &str) -> io::Result<()> {
+    match assets.read(path) {
+        Some(body) => respond(writer, "200 OK", content_type(path), "", &body),
+        None => respond_status(writer, Status::NotFound),
     }
 }
 

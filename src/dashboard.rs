@@ -6,7 +6,7 @@ pub mod snapshot;
 
 use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, StateNamespace};
 use serde_json::{Value, json};
-use server_files::{ServerFiles, ServerInfo, Token};
+use server_files::{ServerFiles, ServerInfo, Token, UiSource};
 use snapshot::SpaceKey;
 use std::{
     fs::File,
@@ -24,7 +24,9 @@ const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
 pub fn open(
     runtime: &LifecycleRuntime<'_, impl HerdrCommandExecutor, impl Clock, impl IdGenerator>,
     open_browser: bool,
+    ui_directory: Option<&Path>,
 ) -> Result<Value, String> {
+    let ui = UiSource::from_directory(ui_directory)?;
     let workspace_id = match runtime.workspace_id {
         Some(id) => id.to_owned(),
         None => crate::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
@@ -39,7 +41,7 @@ pub fn open(
     {
         eprintln!("Could not save the workspace label: {error}");
     }
-    let (server, info) = ensure(&files, &files.token()?)?;
+    let (server, info) = ensure(&files, &files.token()?, &ui)?;
     let url = format!(
         "http://127.0.0.1:{}/w/{}?n={}",
         info.port,
@@ -58,7 +60,11 @@ pub fn open(
 
 /// Idempotent: converges on the one live server whether it was already
 /// running, is starting, or two callers race to start it.
-fn ensure(files: &ServerFiles, token: &Token) -> Result<(&'static str, ServerInfo), String> {
+fn ensure(
+    files: &ServerFiles,
+    token: &Token,
+    ui: &UiSource,
+) -> Result<(&'static str, ServerInfo), String> {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut spawned = false;
     loop {
@@ -66,10 +72,18 @@ fn ensure(files: &ServerFiles, token: &Token) -> Result<(&'static str, ServerInf
             if let Some(info) = files.info()
                 && answers(&info, token)
             {
+                if &info.ui != ui {
+                    return Err(format!(
+                        "the dashboard server is running with {}; stop it with `kill {}` before requesting {}",
+                        info.ui.setting(),
+                        info.pid,
+                        ui.setting()
+                    ));
+                }
                 return Ok((if spawned { "started" } else { "running" }, info));
             }
         } else if !spawned {
-            files.spawn()?;
+            files.spawn(ui)?;
             spawned = true;
         }
         if Instant::now() >= deadline {
@@ -133,8 +147,9 @@ fn launch_browser(url: &str) -> bool {
         .is_ok()
 }
 
-pub fn serve(state: &Path, command_gate: Option<File>) -> ExitCode {
-    match run_server(state, command_gate) {
+pub fn serve(state: &Path, command_gate: Option<File>, ui_directory: Option<&Path>) -> ExitCode {
+    match UiSource::from_directory(ui_directory).and_then(|ui| run_server(state, command_gate, ui))
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("dashboard: {error}");
@@ -143,7 +158,7 @@ pub fn serve(state: &Path, command_gate: Option<File>) -> ExitCode {
     }
 }
 
-fn run_server(state: &Path, command_gate: Option<File>) -> Result<(), String> {
+fn run_server(state: &Path, command_gate: Option<File>, ui: UiSource) -> Result<(), String> {
     let files = ServerFiles::at(state)?;
     let Some(claim) = files.claim()? else {
         return Ok(());
@@ -151,6 +166,7 @@ fn run_server(state: &Path, command_gate: Option<File>) -> Result<(), String> {
     // Holding the shared command gate for a long-lived process would make
     // every update time out waiting for it to drain.
     drop(command_gate);
+    let assets = http::Assets::new(&ui)?;
     // Before server.json, so whoever sees this server can already enter it.
     let session = files.session()?;
     let listener = bind(files.info().map(|info| info.port))?;
@@ -163,6 +179,7 @@ fn run_server(state: &Path, command_gate: Option<File>) -> Result<(), String> {
             port,
             instance: instance.clone(),
             started_at_ms: hub::now_ms(),
+            ui: ui.clone(),
         },
     )?;
     let (hub, commands) = mpsc::channel();
@@ -173,6 +190,7 @@ fn run_server(state: &Path, command_gate: Option<File>) -> Result<(), String> {
         session,
         instance: instance.clone(),
         hub,
+        assets,
     });
     thread::spawn(move || http::accept_loop(listener, front));
     eprintln!("dashboard: serving 127.0.0.1:{port}");
@@ -181,7 +199,7 @@ fn run_server(state: &Path, command_gate: Option<File>) -> Result<(), String> {
     match verdict {
         hub::Verdict::Handoff(_) => {
             drop(claim);
-            files.spawn()?;
+            files.spawn(&ui)?;
         }
         // Still holding the claim, so no successor reads the old session.
         hub::Verdict::Idle => files.rotate_session()?,

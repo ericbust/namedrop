@@ -156,7 +156,11 @@ fn main() -> ExitCode {
             eprintln!("dashboard-server requires --plugin-state");
             return ExitCode::from(64);
         };
-        return namedrop::dashboard::serve(&state, command_guard.take().flatten());
+        return namedrop::dashboard::serve(
+            &state,
+            command_guard.take().flatten(),
+            cli.dashboard_ui(),
+        );
     }
     let human = cli.human_output(io::stdout().is_terminal());
     let input_file = cli.input_is_file();
@@ -214,7 +218,7 @@ fn main() -> ExitCode {
         return finish(
             "dashboard",
             with_runtime_options(&cli.runtime, |runtime| {
-                namedrop::dashboard::open(runtime, open_browser)
+                namedrop::dashboard::open(runtime, open_browser, cli.dashboard_ui())
             }),
         );
     }

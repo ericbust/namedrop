@@ -6,6 +6,8 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Added
 
+- `namedrop dashboard --ui <dir>` serves a custom browser app from a directory under the dashboard's existing security headers. The shared server keeps that UI setting through upgrades and rejects calls requesting a different UI.
+
 - The dashboard's `/api/events` endpoint streams every live Herdr workspace over one authenticated connection. It sends changed workspaces as `space` events and closed workspaces as `gone` events. Dashboard frames now include a live `display_name` and a nullable `addressable_label` that identifies a workspace only when its label is unique.
 
 ## [1.4.2] - 2026-10-28

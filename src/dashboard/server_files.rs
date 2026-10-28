@@ -10,6 +10,37 @@ use std::{
     time::{Duration, SystemTime},
 };
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) enum UiSource {
+    #[default]
+    Embedded,
+    Directory(PathBuf),
+}
+
+impl UiSource {
+    pub fn from_directory(directory: Option<&Path>) -> Result<Self, String> {
+        let Some(path) = directory else {
+            return Ok(Self::Embedded);
+        };
+        let canonical = fs::canonicalize(path)
+            .map_err(|error| format!("dashboard UI directory {}: {error}", path.display()))?;
+        if !canonical.is_dir() {
+            return Err(format!(
+                "dashboard UI directory {} is not a directory",
+                path.display()
+            ));
+        }
+        Ok(Self::Directory(canonical))
+    }
+
+    pub fn setting(&self) -> String {
+        match self {
+            Self::Embedded => "embedded UI (without --ui)".to_owned(),
+            Self::Directory(path) => format!("--ui {}", path.display()),
+        }
+    }
+}
+
 const ENTRY_TTL: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -18,6 +49,8 @@ pub(crate) struct ServerInfo {
     pub port: u16,
     pub instance: String,
     pub started_at_ms: i64,
+    #[serde(default)]
+    pub ui: UiSource,
 }
 
 /// Held for the server's lifetime; the kernel releases it on any exit, so a
@@ -219,7 +252,7 @@ impl ServerFiles {
             })
     }
 
-    pub fn spawn(&self) -> Result<(), String> {
+    pub fn spawn(&self, ui: &UiSource) -> Result<(), String> {
         use std::os::unix::process::CommandExt;
         let log = OpenOptions::new()
             .create(true)
@@ -227,10 +260,15 @@ impl ServerFiles {
             .mode(0o600)
             .open(self.dir.join("server.log"))
             .map_err(|e| e.to_string())?;
-        Command::new(crate::runtime_executable()?)
+        let mut command = Command::new(crate::runtime_executable()?);
+        command
             .arg("--plugin-state")
             .arg(&self.state)
-            .arg("dashboard-server")
+            .arg("dashboard-server");
+        if let UiSource::Directory(path) = ui {
+            command.arg("--ui").arg(path);
+        }
+        command
             .process_group(0)
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
