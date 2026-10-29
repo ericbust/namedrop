@@ -508,12 +508,21 @@ workspaces would reach agents who are not in the thread.
   only when the page can be sure of it. The page sees the server's cleaned
   display name, not the raw Herdr label, so anything else gets general copy:
 
-  | Case, checked in this order                       | Tooltip                                                                                                                                  |
-  | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-  | The display name folds to nothing, as with 日本語 | "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr."                                           |
-  | The display name is the workspace id              | "This workspace has no label in Herdr. Name it to mention it."                                                                           |
-  | Another channel shows the same name               | "Another workspace shows the same name. Give one a unique label in Herdr to mention it."                                                 |
-  | Anything else                                     | "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there." |
+  | Case, checked in this order                                                | Tooltip                                                                                                                                  |
+  | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+  | The display name folds to nothing, as with 日本語                          | "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr."                                           |
+  | The display name is the workspace id                                       | "This workspace has no label in Herdr. Name it to mention it."                                                                           |
+  | Another labelled channel shows the same name, and none of them has a token | "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there."                      |
+  | Anything else                                                              | "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there." |
+
+  The server compares tokens folded from the raw label, so two channels can
+  show the same name and still have different tokens, as when one label hides
+  a soft hyphen. A shared name therefore counts only when every labelled
+  channel showing it lacks a token. A channel whose name is its workspace id
+  has no label, so it never makes another channel's name shared. The shared
+  copy also names activation. When one of two same-named workspaces isn't
+  active, both still lose their tokens, and renaming the inactive one won't
+  make it mentionable.
 - **Member rows**, 32px: a 20px avatar with its presence badge, the alias, and
   the presence word in muted text at the right. The members come from the
   channel named by the last `#token` before the caret, else the current
