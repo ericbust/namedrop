@@ -4373,6 +4373,12 @@ test("UI-4: Enter on a member chip opens the drawer with focus on the screen, an
     await drawer(ui).locator(".peek-where").textContent(),
     /^in #alpha · Read at \d/,
   );
+  // The mark lands two frames after the text paints; Escape before then cancels it.
+  await ui.page.waitForFunction(
+    () =>
+      performance.getEntriesByName("namedrop:click-to-peek-text", "measure")
+        .length > 0,
+  );
   await ui.page.keyboard.press("Escape");
   await drawer(ui).waitFor({ state: "detached" });
   assert.equal(
