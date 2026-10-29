@@ -66,7 +66,12 @@ test("item 1: rendered display names never invent mentions and exact tokens stay
       header,
     );
     const sidebar = renderToStaticMarkup(
-      createElement(Sidebar, { state, onSelect() {} }),
+      createElement(Sidebar, {
+        state,
+        busy: 0,
+        onSelect() {},
+        onActivity() {},
+      }),
     );
     assert.equal(
       text(sidebar.match(/<button[^>]*>(.*?)<\/button>/)?.[1] ?? ""),
@@ -108,7 +113,14 @@ test("a channel whose post was refused while the reader was elsewhere shows the 
   });
   const marker = /role="img" aria-label="A post wasn(?:'|&#x27;)t sent"/g;
   const render = (state: typeof failed) =>
-    renderToStaticMarkup(createElement(Sidebar, { state, onSelect() {} }));
+    renderToStaticMarkup(
+      createElement(Sidebar, {
+        state,
+        busy: 0,
+        onSelect() {},
+        onActivity() {},
+      }),
+    );
   assert.equal((render(sending).match(marker) ?? []).length, 0);
   assert.equal((render(failed).match(marker) ?? []).length, 1);
   const edited = reduce(failed, {
@@ -149,7 +161,12 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
     const event = space(fixture);
     const state = reduce(initialState(), event);
     const sidebar = renderToStaticMarkup(
-      createElement(Sidebar, { state, onSelect() {} }),
+      createElement(Sidebar, {
+        state,
+        busy: 0,
+        onSelect() {},
+        onActivity() {},
+      }),
     );
     const header = renderToStaticMarkup(
       createElement(ChannelHeader, { channel: event.channel, suffix: null }),

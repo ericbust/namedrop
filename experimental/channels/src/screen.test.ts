@@ -36,6 +36,7 @@ test("screen reads GET the member's screen in its channel with the session cooki
   assert.equal(seen.length, 1);
   assert.equal(seen[0]?.url, `/w/${key}/participants/pane%209%2Fx/screen`);
   assert.equal(seen[0]?.init?.credentials, "same-origin");
+  assert.equal(seen[0]?.init?.cache, "no-store");
   assert.equal(seen[0]?.init?.signal, controller.signal);
   assert.equal(seen[0]?.init?.method, undefined);
 });

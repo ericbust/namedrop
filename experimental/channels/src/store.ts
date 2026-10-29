@@ -487,7 +487,7 @@ export function landing(
 export function reduce(state: State, event: Event): State {
   return settleSlot(state, step(state, event));
 }
-function viewOf(selection: Selection): SpaceKey | "activity" | null {
+export function viewOf(selection: Selection): SpaceKey | "activity" | null {
   return selection.kind === "activity" ? "activity" : selection.key;
 }
 // Changing the view closes either pane. A thread also closes for good once none

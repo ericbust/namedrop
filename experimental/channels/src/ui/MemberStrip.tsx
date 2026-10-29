@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { presenceWord, runtimeName } from "../copy.ts";
 import type { Activity, ChannelSnapshot, Member } from "../model.ts";
+import { peekTarget } from "../peek.ts";
 import { Avatar } from "./Avatar.tsx";
+import { PeekControl, usePeek } from "./PeekContext.tsx";
 
 const order = {
   blocked: 0,
@@ -51,6 +53,7 @@ export function sortedMembers(members: ChannelSnapshot["members"]): Member[] {
   ];
 }
 function Chip({ member }: { member: Member }) {
+  const scope = usePeek()?.scope ?? null;
   const operator = member.kind.type === "human";
   const state = operator
     ? ""
@@ -60,7 +63,12 @@ function Chip({ member }: { member: Member }) {
         ? " is-offline"
         : "";
   return (
-    <span className={`member${state}`} title={tooltip(member)}>
+    <PeekControl
+      target={scope === null ? null : peekTarget(scope, member)}
+      className={`member${state}`}
+      title={tooltip(member)}
+      fallback="span"
+    >
       <Avatar
         alias={member.alias}
         type={member.kind.type}
@@ -71,7 +79,7 @@ function Chip({ member }: { member: Member }) {
       {!operator && (
         <span className="status">{presenceWord[member.activity]}</span>
       )}
-    </span>
+    </PeekControl>
   );
 }
 export function MemberStrip({

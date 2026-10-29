@@ -30,6 +30,7 @@ export type IconName =
   | "pause"
   | "plug"
   | "prompt"
+  | "pulse"
   | "refresh"
   | "reply"
   | "report"

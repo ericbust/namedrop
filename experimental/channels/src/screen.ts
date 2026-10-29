@@ -6,6 +6,7 @@ export type ScreenReader = (
   signal: AbortSignal,
 ) => Promise<ScreenResult>;
 // Never rejects, so an aborted read can't surface as an unhandled rejection.
+// Every read goes to the server: a cached answer would make Refresh a no-op.
 export function createScreenReader(
   fetcher: typeof fetch = fetch,
 ): ScreenReader {
@@ -13,7 +14,7 @@ export function createScreenReader(
     try {
       const response = await fetcher(
         `/w/${target.channel}/participants/${encodeURIComponent(target.member)}/screen`,
-        { credentials: "same-origin", signal },
+        { credentials: "same-origin", cache: "no-store", signal },
       );
       return response.ok
         ? { kind: "text", screen: parseScreen(await response.text()) }
