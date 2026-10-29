@@ -149,7 +149,7 @@ The UI setting belongs to the shared server. Calls from other workspaces must us
 
 Before starting a successor, the server takes the runtime command lock and package lock, resolves the selected executable once, and probes that same path for claim inheritance and, when needed, custom UI support. Only an explicit unexpected-argument error naming the probed flag enables compatibility. The successor starts from the probed path. The command and package locks are released immediately after spawning it, so updates and package refreshes can proceed during startup. The dashboard's private handoff lock stays held until that child's new server metadata and authenticated health response agree, or failure cleanup finishes. Other probe or startup failures stop the handoff and appear in `dashboard/server.log`, along with the successor's stdout and stderr.
 
-The server reads state read-only through one connection, a short transaction at a time, so it never holds up a write. It sends a new view only after a write changes what the page shows. The page shows the newest 150 messages of the workspace. Message bodies are capped at 2,000 characters, with secrets redacted and control characters removed. The page never reads shared context payloads, evidence or terminal output. Terminal runs show only the command and its exit code.
+The frame and history readers open state read-only and use short transactions. Operator posts use the ordinary message write path. It sends a new view only after a write changes what the page shows. The page shows the newest 150 messages of the workspace. Message bodies are capped at 2,000 characters, with secrets redacted and control characters removed. The page never reads shared context payloads, evidence or terminal output. Terminal runs show only the command and its exit code.
 
 An online agent waiting on an approval or question in Herdr shows as blocked and adds an attention entry. The workspace needs you until that agent leaves the dialog. Each blocked agent has its own entry, alongside any delivery or handoff warnings. These entries come from the current agent status and clear on the next view after that status changes. Retired and offline agents keep their existing status.
 
@@ -160,6 +160,33 @@ Every attention entry includes nullable `subject_alias` and `message_id` fields.
 Each `terminal_runs` entry includes a nullable `message_id` for the request that started the command, resolved through its delivery attempt. These links remain available when the request is older than the live frame's 150-message window. Message history rows keep their existing fields. The dashboard wire version remains `1`.
 
 `GET /w/<key>/messages?before=<message_id>&limit=<n>` returns a JSON array of older messages, newest first. Omit `before` for the newest page. The default page size is 50 and values are clamped to 1 through 100. Chain pages using the last message ID returned. An unknown cursor or a cursor from another workspace returns 404. The route requires the dashboard session cookie and a loopback `Host`, like `/api/events`. Message text has the same redaction and 2,000-character cap as live frames.
+
+`POST /w/<key>/messages` posts as the local operator without a Herdr pane. The URL key selects the source socket and workspace. The JSON body accepts only `request_id`, `source`, and optional `in_reply_to`. A request ID and reply ID must be nonblank, contain no control characters, and fit in 128 UTF-8 bytes. The source must be nonblank. The entire JSON body is capped at 64 KiB. Unknown fields, duplicate fields, and invalid JSON return 400. An oversized body returns 413. Request headers are capped at 8 KiB. The server requires one decimal `Content-Length` and `Content-Type: application/json`, and rejects duplicate headers, folded headers, `Transfer-Encoding`, and `Expect`.
+
+The post requires the session cookie and `X-Namedrop-Csrf`. An authenticated `GET /api/session` returns `{"csrf_token":"..."}` for a browser app's bootstrap. Authenticated index responses also carry that token in an `X-Namedrop-Csrf` response header. The server preserves index and asset bytes, including custom UI files. The token is derived from the session secret with a versioned SHA-256 domain separator and changes with the session. It does not grant access without the cookie.
+
+For posts, `Host` must be exactly `127.0.0.1:<port>` or `localhost:<port>`. If `Origin` is present, it must equal `http://` followed by that exact Host. A foreign Origin returns 403 before any database transaction. A missing Origin is allowed for authenticated command-line clients that supply the cookie and CSRF token. If `Sec-Fetch-Site` is present, only `same-origin` and `none` are allowed. Missing or invalid cookies return 401. Missing or invalid CSRF tokens return 403. The dashboard does not enable CORS.
+
+To post with curl, set `entry_url` to the link printed by `namedrop dashboard --no-open`, `base_url` to its `http://127.0.0.1:<port>` origin, and `space_key` to its workspace key. Use a private cookie jar.
+
+```sh
+cookie_jar=$(mktemp)
+chmod 600 "$cookie_jar"
+curl --silent --show-error --cookie-jar "$cookie_jar" "$entry_url" >/dev/null
+csrf=$(curl --silent --show-error --cookie "$cookie_jar" "$base_url/api/session" | jq -r .csrf_token)
+curl --silent --show-error --cookie "$cookie_jar" \
+  --header "X-Namedrop-Csrf: $csrf" \
+  --header 'Content-Type: application/json' \
+  --data '{"request_id":"operator-post-1","source":"@codex say hi"}' \
+  "$base_url/w/$space_key/messages"
+rm "$cookie_jar"
+```
+
+A successful post returns the existing send receipt, including `message_id` and `thread_id`. Repeating the same request ID, source, and reply target returns the original receipt without another delivery. Reusing an ID with changed content returns 400. Use a new request ID for each new message. To follow up in a thread, include `in_reply_to` with a message ID from that workspace and keep the leading recipient mentions in `source`.
+
+Source text retains the send grammar, including `@alias`, `#label`, `#workspace-id`, and `#all`. A duplicate workspace label is refused. Dashboard hashes identify URL namespaces only and are not a source-target syntax. An unknown alias is refused with its name in the error, without a message or delivery row. The first refused send can initialize the operator identity before routing.
+
+The operator uses one durable, claimless address per namespace at schema 6. It has no alias claim, pane binding, agent observation, or integration registration. A real pane may hold `@operator` without receiving the operator's thread replies. The reserved identity refuses pane lifecycle changes, and replies settle in the append transaction without pane input or a delivery attempt for the operator. Frames and history normalize operator recipients, including remote operator envoys, to the human participant. The human lane remains present after its messages leave the live window.
 
 `GET /api/events` streams every live Herdr workspace over one Server-Sent Events connection. It requires the same session cookie and loopback `Host` as the workspace pages. On connect, each workspace arrives as `event: space` with JSON `{key, frame}`. Later, only workspaces whose content changes send another `space` event. A workspace that leaves Herdr sends `event: gone` with JSON `{key}`. After the last all-space subscriber disconnects, the hub discards live membership and labels. A new subscription waits for fresh discovery before receiving its initial live set, so it never replays workspaces that closed while nobody watched. A timeout or transient read error keeps the last known set for connections that already received those workspaces. New replays omit that failed socket until it answers successfully; its recovered workspaces then arrive as ordinary live `space` frames. After three consecutive reports that a Herdr server is unavailable, its workspaces send `gone`. While an all-space subscriber remains connected, discovery retries that socket at two-second intervals instead of every regular poll. A successful retry restores its current workspaces, including new ones, without reconnecting the tab. Recovery time also includes the remaining reads in the current socket sweep. Failure logging persists across subscription sessions and repeats only after the socket has recovered and fails again. One browser profile can hold at most six HTTP/1.1 streams per site.
 

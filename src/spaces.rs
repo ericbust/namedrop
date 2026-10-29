@@ -679,16 +679,15 @@ fn reply_participants(
     Ok(pins)
 }
 
-/// A local participant named by the alias it had in the message being
-/// answered. The alias reaches it only while it still holds that alias here;
-/// an alias it gave up reaches no one else. The check runs when the reply is
-/// routed and again when it is written.
 fn local_participant(
     transaction: &crate::StateTransaction<'_>,
     namespace: &StateNamespace,
     participant: &RoutingAddressSnapshot,
 ) -> Result<RoutingAddressSnapshot, crate::StoreError> {
     let alias = &participant.alias;
+    if transaction.is_operator_address(namespace, &participant.address_id)? {
+        return transaction.routing_address_by_id(namespace, &participant.address_id);
+    }
     if transaction.alias_holder(namespace, alias)?.as_ref() == Some(&participant.address_id) {
         return transaction.resolve_routing_alias(namespace, alias);
     }

@@ -49,6 +49,7 @@ mod coordination_bridge;
 mod coordination_ownership;
 pub mod dashboard;
 mod missing_disposition;
+mod operator;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
 mod groups;
@@ -562,6 +563,7 @@ impl StateTransaction<'_> {
         draft: &PaneAddressDraft,
         attribution: &MutationAttribution,
     ) -> Result<PaneAddressRecord, StoreError> {
+        operator::refuse_reserved_creation(draft)?;
         crate::validate_alias(&draft.alias).map_err(StoreError::invalid_input)?;
         self.refuse_claimed_alias(namespace, &draft.alias)?;
         self.transaction.execute(
@@ -749,6 +751,7 @@ impl StateTransaction<'_> {
         disabled: bool,
         attribution: &MutationAttribution,
     ) -> Result<PaneAddressRecord, StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         let changed = self.transaction.execute(
             "UPDATE pane_addresses SET collaboration_disabled = ?4
              WHERE session_socket_id = ?1 AND worktree_id = ?2
@@ -974,6 +977,9 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         address_id: &PaneAddressId,
     ) -> Result<Option<RoutingAddressSnapshot>, StoreError> {
+        if let Some(operator) = self.operator_snapshot(namespace, address_id)? {
+            return Ok(Some(operator));
+        }
         let found = self
             .transaction
             .query_row(
@@ -1066,6 +1072,7 @@ impl StateTransaction<'_> {
         pane_id: &str,
         tab_id: &str,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         if pane_id.is_empty() || tab_id.is_empty() {
             return Err(StoreError::invalid_input(
                 "pane and tab identities are required for a binding location",
@@ -1099,6 +1106,7 @@ impl StateTransaction<'_> {
         pane_id: &str,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         self.transaction.execute(
             "INSERT INTO pane_bindings (
                 session_socket_id, worktree_id, binding_id, address_id, pane_id,
@@ -1137,6 +1145,7 @@ impl StateTransaction<'_> {
         pane_id: &str,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         let pane_owner = self
             .transaction
             .query_row(
@@ -1172,6 +1181,7 @@ impl StateTransaction<'_> {
         address_id: &PaneAddressId,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         let changed = self.transaction.execute(
             "UPDATE pane_bindings
              SET active = 0, unbound_at_ms = ?4
@@ -1208,6 +1218,7 @@ impl StateTransaction<'_> {
         status: &str,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         let bound = self
             .transaction
             .query_row(
@@ -1303,6 +1314,7 @@ impl StateTransaction<'_> {
         nonce: &str,
         attribution: &MutationAttribution,
     ) -> Result<IntegrationChallenge, StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         if registration_id.starts_with(crate::INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX) {
             return Err(StoreError::invalid_input(
                 "registration id uses the reserved integration-package Attention namespace",
@@ -1408,6 +1420,7 @@ impl StateTransaction<'_> {
         capabilities: &[String],
         attribution: &MutationAttribution,
     ) -> Result<IntegrationRegistration, StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         let current_session = self.current_agent_session(namespace, address_id)?;
         if current_session != *agent_session_id {
             return Err(StoreError::invalid_input(
@@ -1924,6 +1937,7 @@ impl StateTransaction<'_> {
         replacement_alias: &str,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         crate::validate_alias(replacement_alias).map_err(StoreError::invalid_input)?;
         self.refuse_claimed_alias(namespace, replacement_alias)?;
         let previous_alias = self.transaction.query_row(
@@ -2005,6 +2019,7 @@ impl StateTransaction<'_> {
         address_id: &PaneAddressId,
         alias: &str,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         crate::validate_alias(alias).map_err(StoreError::invalid_input)?;
         let changed = self.transaction.execute(
             "UPDATE pane_roles
@@ -2036,6 +2051,7 @@ impl StateTransaction<'_> {
         address_id: &PaneAddressId,
         persona: Option<&str>,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         if let Some(description) = persona {
             crate::validate_persona(description).map_err(StoreError::invalid_input)?;
             if self.pane_type(namespace, address_id)? == crate::PaneType::Terminal {
@@ -2127,6 +2143,7 @@ impl StateTransaction<'_> {
         address_id: &PaneAddressId,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         let outstanding: i64 = self.transaction.query_row(
             "SELECT COUNT(*) FROM mailbox_deliveries
              WHERE session_socket_id = ?1 AND worktree_id = ?2
@@ -2179,6 +2196,7 @@ impl StateTransaction<'_> {
         address_id: &PaneAddressId,
         attribution: &MutationAttribution,
     ) -> Result<Vec<String>, StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         self.retire_pane_address(namespace, address_id, attribution)?;
         let aliases = {
             let mut statement = self.transaction.prepare(
@@ -2213,6 +2231,7 @@ impl StateTransaction<'_> {
         address_id: &PaneAddressId,
         attribution: &MutationAttribution,
     ) -> Result<Vec<String>, StoreError> {
+        operator::refuse_pane_mutation(address_id)?;
         let attempt_ids = {
             let mut statement = self.transaction.prepare(
                 "SELECT a.attempt_id
@@ -2642,12 +2661,13 @@ impl StateTransaction<'_> {
                 TransitionKind::Queued,
                 attribution,
             )?;
-            if matches!(
-                draft.grammar_version.as_str(),
-                "terminal-result/v1" | "result-set/v1" | "mention-return/v1"
-            ) && self.pane_type(namespace, &recipient.address_id)? == crate::PaneType::Terminal
+            if self.is_operator_address(namespace, &recipient.address_id)?
+                || (matches!(
+                    draft.grammar_version.as_str(),
+                    "terminal-result/v1" | "result-set/v1" | "mention-return/v1"
+                ) && self.pane_type(namespace, &recipient.address_id)?
+                    == crate::PaneType::Terminal)
             {
-                // Router reports remain durable but are never shell input.
                 self.transaction.execute("UPDATE mailbox_deliveries SET state='settled' WHERE session_socket_id=?1 AND worktree_id=?2 AND delivery_id=?3",
                     params![namespace.session_socket_id,namespace.space_id.as_str(),recipient.delivery_id.as_str()])?;
                 self.append_transition(

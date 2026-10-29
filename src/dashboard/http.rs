@@ -2,6 +2,8 @@ use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
 use super::server_files::{ServerFiles, Token, UiSource, open_directory};
 use super::snapshot::{self, SpaceKey};
 use crate::StateStore;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::{
     ffi::CString,
     fs::File,
@@ -24,6 +26,7 @@ use std::{
 const INDEX_HTML: &str = include_str!("assets/index.html");
 const APP_JS: &str = include_str!("assets/app.js");
 const APP_CSS: &str = include_str!("assets/app.css");
+const BODY_LIMIT: usize = 64 * 1024;
 const HEADER_LIMIT: u64 = 8 * 1024;
 const PING_EVERY: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 64;
@@ -148,11 +151,13 @@ enum Status {
     NotFound,
     MethodNotAllowed,
     Unavailable,
+    PayloadTooLarge,
 }
 
 impl Status {
     fn line(self) -> &'static str {
         match self {
+            Self::PayloadTooLarge => "413 Payload Too Large",
             Self::BadRequest => "400 Bad Request",
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
@@ -167,10 +172,11 @@ impl Status {
             Self::Unauthorized => {
                 "This dashboard needs its key. Run `namedrop dashboard` in that workspace to open it.\n"
             }
+            Self::PayloadTooLarge => "Request body is too large.\n",
             Self::BadRequest => "Bad request.\n",
             Self::Forbidden => "Forbidden.\n",
             Self::NotFound => "Not found.\n",
-            Self::MethodNotAllowed => "The dashboard is read-only.\n",
+            Self::MethodNotAllowed => "Method not allowed.\n",
             Self::Unavailable => "History is temporarily unavailable.\n",
         }
     }
@@ -360,6 +366,8 @@ enum Route {
         nonce: String,
     },
     Page,
+    Session,
+    Send(SpaceKey),
     Events(SpaceKey),
     Messages {
         key: SpaceKey,
@@ -388,10 +396,20 @@ fn route(
     if request.header("sec-fetch-site") == Some("cross-site") {
         return Err(Status::Forbidden);
     }
-    if request.method != "GET" {
+    if request.method != "GET" && request.method != "POST" {
         return Err(Status::MethodNotAllowed);
     }
     let path = request.path.as_str();
+    if request.method == "POST" {
+        authenticate_session(request, port, session)?;
+        authenticate_mutation(request, session, host)?;
+        let key = path
+            .strip_prefix("/w/")
+            .and_then(|rest| rest.strip_suffix("/messages"))
+            .and_then(SpaceKey::parse)
+            .ok_or(Status::NotFound)?;
+        return Ok(Route::Send(key));
+    }
     match path {
         "/healthz" => {
             return match request.query("t") {
@@ -423,7 +441,7 @@ fn route(
         return Ok(Route::Asset(decoded.to_owned()));
     }
     let page = match path {
-        "/" | "/api/spaces" | "/api/events" => None,
+        "/" | "/api/spaces" | "/api/events" | "/api/session" => None,
         _ if custom_index => None,
         _ => {
             let rest = path.strip_prefix("/w/").ok_or(Status::NotFound)?;
@@ -445,22 +463,110 @@ fn route(
             nonce: nonce.to_owned(),
         });
     }
-    if !request
-        .cookie(&cookie_name(port))
-        .is_some_and(|candidate| session.matches(candidate))
-    {
-        return Err(Status::Unauthorized);
-    }
+    authenticate_session(request, port, session)?;
     if let Some((key, "messages")) = page {
         let (before, limit) = history_query(request)?;
         return Ok(Route::Messages { key, before, limit });
     }
     Ok(match (path, page) {
+        ("/api/session", _) => Route::Session,
         ("/api/spaces", _) => Route::Spaces,
         ("/api/events", _) => Route::AllEvents,
         (_, Some((key, "events"))) => Route::Events(key),
         _ => Route::Page,
     })
+}
+
+fn csrf_token(session: &Token) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"namedrop-dashboard-csrf/v1\0");
+    digest.update(session.as_str().as_bytes());
+    crate::lower_hex(&digest.finalize())
+}
+
+fn authenticate_session(request: &Request, port: u16, session: &Token) -> Result<(), Status> {
+    if request
+        .cookie(&cookie_name(port))
+        .is_some_and(|candidate| session.matches(candidate))
+    {
+        Ok(())
+    } else {
+        Err(Status::Unauthorized)
+    }
+}
+
+fn authenticate_mutation(request: &Request, session: &Token, host: &str) -> Result<(), Status> {
+    let expected = csrf_token(session);
+    let candidate = request.header("x-namedrop-csrf").ok_or(Status::Forbidden)?;
+    if expected.len() != candidate.len()
+        || expected
+            .bytes()
+            .zip(candidate.bytes())
+            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+            != 0
+    {
+        return Err(Status::Forbidden);
+    }
+    if request
+        .header("origin")
+        .is_some_and(|origin| origin != format!("http://{host}"))
+    {
+        return Err(Status::Forbidden);
+    }
+    if request
+        .header("sec-fetch-site")
+        .is_some_and(|site| !matches!(site, "same-origin" | "none"))
+    {
+        return Err(Status::Forbidden);
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OperatorPost {
+    request_id: String,
+    source: String,
+    #[serde(default)]
+    in_reply_to: Option<String>,
+}
+
+impl OperatorPost {
+    fn read(reader: &mut impl Read, request: &Request) -> Result<Self, Status> {
+        if request
+            .header("content-type")
+            .map(|value| value.split(';').next().unwrap_or("").trim())
+            != Some("application/json")
+        {
+            return Err(Status::BadRequest);
+        }
+        let length = request.header("content-length").ok_or(Status::BadRequest)?;
+        if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Status::BadRequest);
+        }
+        let length = length
+            .parse::<usize>()
+            .map_err(|_| Status::PayloadTooLarge)?;
+        if length > BODY_LIMIT {
+            return Err(Status::PayloadTooLarge);
+        }
+        let mut bytes = vec![0; length];
+        reader
+            .read_exact(&mut bytes)
+            .map_err(|_| Status::BadRequest)?;
+        let post: Self = serde_json::from_slice(&bytes).map_err(|_| Status::BadRequest)?;
+        let valid_id = |id: &str| {
+            !id.trim().is_empty() && id.len() <= 128 && !id.chars().any(char::is_control)
+        };
+        if !valid_id(&post.request_id)
+            || post.source.trim().is_empty()
+            || post.source.len() > BODY_LIMIT
+            || post.in_reply_to.as_deref().is_some_and(|id| !valid_id(id))
+        {
+            return Err(Status::BadRequest);
+        }
+        Ok(post)
+    }
 }
 
 /// Cookies ignore ports, so the name carries it to keep two servers apart.
@@ -476,7 +582,8 @@ fn serve_connection(
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
-    let request = match read_request(&stream) {
+    let mut reader = BufReader::new(&stream);
+    let request = match read_request(&mut reader) {
         Ok(request) => request,
         Err(status) => return respond_status(&mut writer, status),
     };
@@ -498,6 +605,22 @@ fn serve_connection(
                 front.session.as_str()
             );
             respond(&mut writer, "303 See Other", "text/plain", &headers, b"")
+        }
+        Ok(Route::Session) => respond(
+            &mut writer,
+            "200 OK",
+            "application/json",
+            "",
+            serde_json::json!({"csrf_token": csrf_token(&front.session)})
+                .to_string()
+                .as_bytes(),
+        ),
+        Ok(Route::Send(key)) => {
+            let post = match OperatorPost::read(&mut reader, &request) {
+                Ok(post) => post,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            send_operator_post(&mut writer, front, key, post)
         }
         Ok(Route::Page) => serve_asset(&mut writer, front, &request, "/index.html"),
         Ok(Route::Asset(path)) => serve_asset(&mut writer, front, &request, &path),
@@ -566,6 +689,59 @@ fn serve_connection(
     }
 }
 
+fn send_operator_post(
+    writer: &mut TcpStream,
+    front: &Front,
+    key: SpaceKey,
+    post: OperatorPost,
+) -> io::Result<()> {
+    let namespace = match StateStore::open_read_only(front.files.state())
+        .and_then(|store| store.map(|mut store| store.dashboard_spaces()).transpose())
+    {
+        Ok(Some(spaces)) => spaces
+            .into_iter()
+            .find(|space| SpaceKey::of(&space.namespace) == key)
+            .map(|space| space.namespace),
+        Ok(None) => return respond_status(writer, Status::NotFound),
+        Err(_) => return respond_status(writer, Status::Unavailable),
+    };
+    let Some(namespace) = namespace else {
+        return respond_status(writer, Status::NotFound);
+    };
+    let herdr =
+        crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+    let ids = crate::ProcessIds::default();
+    let runtime = crate::LifecycleRuntime {
+        state_directory: front.files.state(),
+        home_directory: None,
+        agent_config: crate::AgentConfigDirectories::default(),
+        cwd: Path::new("/"),
+        workspace_id: Some(namespace.space_id.as_str()),
+        current_pane_id: None,
+        session_socket_id: &namespace.session_socket_id,
+        herdr: &herdr,
+        clock: &crate::SystemClock,
+        ids: &ids,
+    };
+    let target = post.in_reply_to.map(crate::MessageId::new);
+    match crate::send_operator_message(&post.request_id, &post.source, target.as_ref(), &runtime) {
+        Ok(receipt) => respond(
+            writer,
+            "200 OK",
+            "application/json",
+            "",
+            receipt.to_string().as_bytes(),
+        ),
+        Err(error) => respond(
+            writer,
+            "400 Bad Request",
+            "application/json",
+            "",
+            serde_json::json!({"error": error}).to_string().as_bytes(),
+        ),
+    }
+}
+
 fn serve_asset(
     writer: &mut TcpStream,
     front: &Front,
@@ -585,9 +761,14 @@ fn serve_asset(
     }
     write!(
         writer,
-        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}Connection: close\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}{}Connection: close\r\n\r\n",
         content_type(path),
-        asset.length
+        asset.length,
+        if asset.is_index {
+            format!("X-Namedrop-Csrf: {}\r\n", csrf_token(&front.session))
+        } else {
+            String::new()
+        }
     )?;
     match asset.body {
         AssetBody::Embedded(bytes) => writer.write_all(bytes)?,
@@ -687,41 +868,73 @@ fn client_closed(stream: &TcpStream) -> bool {
     }
 }
 
-fn read_request(stream: &TcpStream) -> Result<Request, Status> {
-    let mut reader = BufReader::new(stream.take(HEADER_LIMIT));
-    let mut line = String::new();
-    reader
-        .read_line(&mut line)
-        .map_err(|_| Status::BadRequest)?;
-    let mut parts = line.split_whitespace();
-    let (Some(method), Some(target), Some(_version)) = (parts.next(), parts.next(), parts.next())
+fn read_request(reader: &mut impl BufRead) -> Result<Request, Status> {
+    fn line(reader: &mut impl BufRead, budget: &mut u64) -> Result<String, Status> {
+        let mut bytes = Vec::new();
+        let count = reader
+            .take(*budget + 1)
+            .read_until(b'\n', &mut bytes)
+            .map_err(|_| Status::BadRequest)? as u64;
+        if count > *budget || !bytes.ends_with(b"\r\n") {
+            return Err(Status::BadRequest);
+        }
+        *budget -= count;
+        bytes.truncate(bytes.len() - 2);
+        String::from_utf8(bytes).map_err(|_| Status::BadRequest)
+    }
+    let mut budget = HEADER_LIMIT;
+    let first = line(reader, &mut budget)?;
+    let mut parts = first.split(' ');
+    let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next())
     else {
         return Err(Status::BadRequest);
     };
+    if parts.next().is_some()
+        || !matches!(version, "HTTP/1.1" | "HTTP/1.0")
+        || method.is_empty()
+        || !target.starts_with('/')
+        || target.chars().any(char::is_control)
+    {
+        return Err(Status::BadRequest);
+    }
     let (path, query) = match target.split_once('?') {
         Some((path, query)) => (path.to_owned(), Some(query.to_owned())),
         None => (target.to_owned(), None),
     };
-    let method = method.to_owned();
-    let mut headers = Vec::new();
+    let mut headers: Vec<(String, String)> = Vec::new();
     loop {
-        line.clear();
-        if reader
-            .read_line(&mut line)
-            .map_err(|_| Status::BadRequest)?
-            == 0
-        {
-            return Err(Status::BadRequest);
-        }
-        let header = line.trim_end_matches(['\r', '\n']);
+        let header = line(reader, &mut budget)?;
         if header.is_empty() {
             break;
         }
         let (name, value) = header.split_once(':').ok_or(Status::BadRequest)?;
-        headers.push((name.trim().to_owned(), value.trim().to_owned()));
+        if name.is_empty()
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
+            || value.chars().any(|ch| ch.is_control() && ch != '\t')
+        {
+            return Err(Status::BadRequest);
+        }
+        let name = name.to_ascii_lowercase();
+        if matches!(name.as_str(), "transfer-encoding" | "expect")
+            || headers.iter().any(|(prior, _)| prior == &name)
+        {
+            return Err(Status::BadRequest);
+        }
+        headers.push((name, value.trim().to_owned()));
+    }
+    if let Some((_, cookie)) = headers.iter().find(|(name, _)| name == "cookie") {
+        let mut names = std::collections::HashSet::new();
+        for pair in cookie.split(';') {
+            let (name, _) = pair.trim().split_once('=').ok_or(Status::BadRequest)?;
+            if !names.insert(name) {
+                return Err(Status::BadRequest);
+            }
+        }
     }
     Ok(Request {
-        method,
+        method: method.to_owned(),
         path,
         query,
         headers,

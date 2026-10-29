@@ -1,8 +1,9 @@
 use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName, WorkspaceLabel};
 use crate::{
     ActorKind, ContextGrantDraft, ContextGrantId, ContextReferenceDraft, ContextSnapshotId,
-    DeliveryId, LifecycleRuntime, MessageDraft, MessageRecipientDraft, MutationAttribution,
-    PaneAddressLifecycle, PaneAddressRecord, StateNamespace, StateStore, ThreadId,
+    DeliveryId, LifecycleRuntime, MessageDraft, MessageId, MessageRecipientDraft,
+    MutationAttribution, PaneAddressLifecycle, PaneAddressRecord, StateNamespace, StateStore,
+    ThreadId,
     context::{MessageContextInput, prepare_message_context, record_snapshot_activation_failure},
     discover_worktree, discover_worktree_for_workspace, validate_alias,
 };
@@ -289,6 +290,9 @@ fn routed_recipient_outlooks(
 ) -> Result<Vec<RecipientOutlook>, crate::StoreError> {
     let mut outlooks = Vec::new();
     for recipient in recipients {
+        if transaction.is_operator_address(namespace, &recipient.address_id)? {
+            continue;
+        }
         let Some(origin) = transaction.envoy_origin(namespace, &recipient.address_id)? else {
             outlooks.extend(stored_recipient_outlooks(
                 transaction,
@@ -298,6 +302,9 @@ fn routed_recipient_outlooks(
             continue;
         };
         let there = StateNamespace::new(namespace.session_socket_id.clone(), origin.space);
+        if transaction.is_operator_address(&there, &origin.address_id)? {
+            continue;
+        }
         let paused = transaction
             .worktree_state(&there)?
             .is_some_and(|state| state.paused);
@@ -425,6 +432,12 @@ struct PreparedMessageOperation {
     grammar_version: &'static str,
 }
 
+#[derive(Clone, Copy)]
+enum Author<'a> {
+    Pane(&'a str),
+    Operator,
+}
+
 struct RelayPresentation {
     pane_id: String,
     sender_alias: String,
@@ -460,8 +473,60 @@ where
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces).to_string());
     }
     let input = prepare_source_message(input)?;
-    let (mut response, forwarded) = persist_prepared_message_operation(input, runtime, &workspaces)
-        .map_err(|error| error.to_string())?;
+    let author = pane_author(runtime)?;
+    dispatch_prepared_message(input, author, runtime, &workspaces)
+}
+
+pub fn send_operator_message<E, C, I>(
+    request_id: &str,
+    source: &str,
+    in_reply_to: Option<&MessageId>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Result<Value, String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    if runtime.workspace_id.is_none() {
+        return Err("an operator message requires an explicit source workspace".to_owned());
+    }
+    let input = prepare_source_message(MessageOperationInput {
+        request_id: required_nonempty(request_id.to_owned(), "request_id")?,
+        source: source.to_owned(),
+        author_kind: ActorKind::Human,
+        in_reply_to: in_reply_to.cloned(),
+        disposition_attempt_id: None,
+        context: None,
+        request_context: false,
+        decline_context_request: None,
+        tracking: crate::coordination::TrackingInput::default(),
+    })?;
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    dispatch_prepared_message(input, Author::Operator, runtime, &workspaces)
+}
+
+fn pane_author<'a, E, C, I>(runtime: &LifecycleRuntime<'a, E, C, I>) -> Result<Author<'a>, String> {
+    runtime
+        .current_pane_id
+        .map(Author::Pane)
+        .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())
+}
+
+fn dispatch_prepared_message<E, C, I>(
+    input: PreparedMessageOperation,
+    author: Author<'_>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+) -> Result<Value, String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    let (mut response, forwarded) =
+        persist_prepared_message_operation(input, author, runtime, workspaces)
+            .map_err(|error| error.to_string())?;
     response["drain"] = crate::drain_receipt(runtime);
     // A copy queued in another workspace drains there now rather than waiting
     // for that workspace's next event.
@@ -580,7 +645,7 @@ where
         tracking: input.tracking,
         grammar_version: "mention-hook/v1",
     };
-    persist_prepared_message_operation(prepared, runtime, &workspaces)
+    persist_prepared_message_operation(prepared, pane_author(runtime)?, runtime, &workspaces)
         .map(|(_, forwarded)| forwarded)
 }
 
@@ -672,6 +737,7 @@ type PersistedMessage = (Value, Vec<crate::store::ForwardedCopy>);
 
 fn persist_prepared_message_operation<E, C, I>(
     input: PreparedMessageOperation,
+    author_source: Author<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
 ) -> Result<PersistedMessage, SendError>
@@ -723,9 +789,6 @@ where
                 .into(),
         );
     }
-    let pane_id = runtime
-        .current_pane_id
-        .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())?;
     let discovered = match runtime.workspace_id {
         Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
         None => discover_worktree(runtime.herdr, runtime.cwd)?,
@@ -744,9 +807,10 @@ where
     // route or its context is read again, so it can never pin or route anew.
     let (author, replayed, tracked_home) = store
         .transaction(|transaction| {
-            let (author, _) = sending_author(transaction, &namespace, pane_id, &replay, runtime)?;
+            let (author, _) =
+                sending_author(transaction, &namespace, author_source, &replay, runtime)?;
             let replayed =
-                replay.receipt(transaction, &namespace, &author, pane_id, &discovered)?;
+                replay.receipt(transaction, &namespace, &author, author_source, &discovered)?;
             let tracked_home = in_reply_to
                 .as_ref()
                 .map(|message| transaction.tracked_message(&namespace, message))
@@ -826,9 +890,9 @@ where
     };
     let routed = store.transaction(|transaction| {
         let (author, attribution) =
-            sending_author(transaction, &namespace, pane_id, &replay, runtime)?;
+            sending_author(transaction, &namespace, author_source, &replay, runtime)?;
         // A concurrent retry may have committed since the check above.
-        if let Some(committed) = replay.receipt(transaction, &namespace, &author, pane_id, &discovered)? {
+        if let Some(committed) = replay.receipt(transaction, &namespace, &author, author_source, &discovered)? {
             return Ok(committed);
         }
         let reply_route = in_reply_to
@@ -1231,7 +1295,7 @@ impl Replay<'_> {
         transaction: &mut crate::StateTransaction<'_>,
         namespace: &StateNamespace,
         author: &crate::RoutingAddressSnapshot,
-        pane_id: &str,
+        author_source: Author<'_>,
         discovered: &crate::DiscoveredWorktree,
     ) -> Result<Option<Committed>, crate::StoreError> {
         let Some(replay) = transaction.replay_message(
@@ -1249,6 +1313,11 @@ impl Replay<'_> {
             .tracked_message(namespace, &replay.receipt.message_id)?
             .is_some()
         {
+            let Author::Pane(pane_id) = author_source else {
+                return Err(crate::StoreError::invalid_input(
+                    "operator messages cannot replay pane-owned tracked work",
+                ));
+            };
             crate::context::registered_current_address(
                 transaction,
                 namespace,
@@ -1275,9 +1344,9 @@ impl Replay<'_> {
 }
 
 fn sending_author<E, C, I>(
-    transaction: &crate::StateTransaction<'_>,
+    transaction: &mut crate::StateTransaction<'_>,
     namespace: &StateNamespace,
-    pane_id: &str,
+    author_source: Author<'_>,
     request: &Replay<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<(crate::RoutingAddressSnapshot, MutationAttribution), crate::StoreError>
@@ -1290,8 +1359,14 @@ where
             "Namedrop is not activated for this space",
         ));
     }
-    let author = transaction.routing_author_for_pane(namespace, pane_id)?;
     let author_kind = request.author_kind;
+    let author = match author_source {
+        Author::Pane(pane_id) => transaction.routing_author_for_pane(namespace, pane_id)?,
+        Author::Operator => transaction.ensure_operator_author(
+            namespace,
+            &MutationAttribution::new(ActorKind::Human, "local-human", runtime.clock.now_unix_ms()),
+        )?,
+    };
     if author_kind == ActorKind::AgentSession && author.agent_session_id.is_none() {
         return Err(crate::StoreError::invalid_input(
             "an agent-authored message requires a current Agent Session",

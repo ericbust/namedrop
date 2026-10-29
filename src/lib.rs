@@ -83,7 +83,7 @@ pub use lifecycle::{
 pub use message::{
     BodyMention, ParsedMessage, RecipientOutlook, RecipientRun, carries_leading_mentions,
     execute_message_operation, parse_mentions, parse_prompt_mentions, recipient_outlooks,
-    validate_message_input,
+    send_operator_message, validate_message_input,
 };
 pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
 pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};
