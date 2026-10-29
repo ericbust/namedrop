@@ -1025,7 +1025,6 @@ button.member:not(.more):hover {
   display: flex;
   align-items: flex-start;
   gap: var(--space-1);
-  max-width: var(--measure);
   margin-top: 3px;
   font-size: var(--text-xs);
   line-height: 16px;
