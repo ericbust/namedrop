@@ -133,6 +133,46 @@ test("channel ordering uses display name, then workspace id, then key", () => {
     ["alpha", "zeta"],
   );
 });
+test("fix5: channel collation preserves default locale Unicode ordering and every tie breaker", () => {
+  const values = [
+    snapshot("c".repeat(20), "éclair", "w1"),
+    snapshot("d".repeat(20), "eclair", "w1"),
+    snapshot("e".repeat(20), "Alpha", "w1"),
+    snapshot("f".repeat(20), "alpha", "w1"),
+    snapshot("1".repeat(20), "shared", "w2"),
+    snapshot("2".repeat(20), "shared", "w10"),
+    snapshot("3".repeat(20), "shared", "w10"),
+  ];
+  const expected = [...values]
+    .sort(
+      (a, b) =>
+        a.frame.space.display_name.localeCompare(b.frame.space.display_name) ||
+        a.frame.space.workspace_id.localeCompare(b.frame.space.workspace_id) ||
+        a.key.localeCompare(b.key),
+    )
+    .map((value) => value.key);
+  const replay = [...values]
+    .reverse()
+    .reduce(
+      (state, value) => apply(state, value),
+      reduce(initialState(), { type: "opened" }),
+    );
+  const state = ready(
+    replay,
+    values.map((value) => value.key),
+  );
+  assert.deepEqual(
+    sortedChannels(state).map((channel) => channel.key),
+    expected,
+  );
+  assert.equal(state.selectedKey, expected[0]);
+  assert.deepEqual(
+    sortedChannels(state)
+      .filter((channel) => channel.displayName === "shared")
+      .map((channel) => channel.key),
+    ["2".repeat(20), "3".repeat(20), "1".repeat(20)],
+  );
+});
 test("unknown wire versions leave state unchanged", () => {
   const state = apply(initialState(), snapshot());
   const unknown = snapshot(keyB, "new channel", "w2");
@@ -141,6 +181,168 @@ test("unknown wire versions leave state unchanged", () => {
   const next = apply(state, unknown);
   assert.equal(next, state);
   assert.equal(next.channels.has(parsed(snapshot(keyB)).key), false);
+});
+for (const source of ["agent_status", "future_attention"]) {
+  test(`fix5: ${source} attention parses and replaces a live channel`, () => {
+    const base = snapshot();
+    const before = apply(initialState(), base);
+    const next = apply(before, {
+      ...base,
+      frame: {
+        ...base.frame,
+        health: { level: "needs_you", items: 1 },
+        participants: [participant("agent-1", "blocked")],
+        attention: [
+          {
+            source_kind: source,
+            summary: { text: "Waiting for approval", truncated: true },
+            opened_at_ms: 42,
+          },
+        ],
+      },
+    });
+    assert.notEqual(next, before, "the new snapshot must replace the channel");
+    const channel = [...next.channels.values()][0];
+    assert.equal(channel?.members.values().next().value?.activity, "blocked");
+    assert.deepEqual(channel?.health, { level: "needs_you", items: 1 });
+    assert.deepEqual(
+      channel?.attention.map(({ source, summary, openedAt }) => ({
+        source,
+        summary,
+        openedAt,
+      })),
+      [
+        {
+          source: source === "agent_status" ? "agent_status" : "unknown",
+          summary: { text: "Waiting for approval", truncated: true },
+          openedAt: 42,
+        },
+      ],
+    );
+    assert.equal(channel?.messages.size, 1);
+  });
+}
+test("fix5: attention row keys distinguish duplicate content and stay stable across distinct insertion and reorder", () => {
+  const base = snapshot();
+  function row(source_kind: string, text = "Same request", truncated = false) {
+    return { source_kind, summary: { text, truncated }, opened_at_ms: 42 };
+  }
+  function rows(attention: ReturnType<typeof row>[]) {
+    return parsed({ ...base, frame: { ...base.frame, attention } }).attention;
+  }
+  const first = row("future_one");
+  const second = row("future_two");
+  const other = row("coordination", "Other request");
+  const original = rows([first, second, first, other]);
+  const keys = original.map((item) => item.rowKey);
+  for (const key of keys) assert.equal(typeof key, "string");
+  assert.equal(
+    new Set(keys).size,
+    4,
+    "distinct future kinds and exact duplicates need distinct row keys",
+  );
+  assert.deepEqual(
+    original.slice(0, 3).map((item) => item.source),
+    ["unknown", "unknown", "unknown"],
+  );
+  assert.deepEqual(
+    rows([first, second, first, other]).map((item) => item.rowKey),
+    keys,
+  );
+  const changed = rows([
+    other,
+    row("future_inserted", "Inserted request"),
+    first,
+    second,
+    first,
+  ]);
+  assert.deepEqual(
+    [
+      changed[2]?.rowKey,
+      changed[3]?.rowKey,
+      changed[4]?.rowKey,
+      changed[0]?.rowKey,
+    ],
+    keys,
+  );
+  assert.notEqual(
+    rows([row("future_one", "Same request", true)])[0]?.rowKey,
+    keys[0],
+    "truncation changes the row identity",
+  );
+});
+for (const field of ["activity", "health", "member kind"]) {
+  test(`fix5: future ${field} keeps the channel and normalizes at the boundary`, () => {
+    const base = snapshot();
+    const frame = {
+      ...base.frame,
+      health:
+        field === "health" ? { level: "future_health" } : base.frame.health,
+      participants: [
+        {
+          ...participant(),
+          activity: field === "activity" ? "future_activity" : "idle",
+          kind:
+            field === "member kind"
+              ? { type: "future_kind" }
+              : participant().kind,
+        },
+      ],
+    };
+    const next = apply(apply(initialState(), base), { ...base, frame });
+    const channel = [...next.channels.values()][0];
+    assert.ok(channel);
+    const member = [...channel.members.values()][0];
+    if (field === "activity") assert.equal(member?.activity, "unknown");
+    if (field === "health")
+      assert.deepEqual(channel.health, { level: "unknown" });
+    if (field === "member kind")
+      assert.deepEqual(member?.kind, { type: "unknown" });
+    assert.equal(channel.messages.size, 1);
+  });
+}
+test("fix5: malformed discriminators and shared or known payloads still reject the whole frame", () => {
+  const base = snapshot();
+  const attention = {
+    source_kind: "future_attention",
+    summary: { text: "Help", truncated: false },
+    opened_at_ms: 1,
+  };
+  for (const value of [undefined, null, 7, true, [], {}, "", " \t\n"]) {
+    for (const frame of [
+      { ...base.frame, health: { level: value } },
+      { ...base.frame, participants: [{ ...participant(), activity: value }] },
+      {
+        ...base.frame,
+        participants: [{ ...participant(), kind: { type: value } }],
+      },
+      { ...base.frame, attention: [{ ...attention, source_kind: value }] },
+    ])
+      assert.equal(
+        parseEvent("space", JSON.stringify({ ...base, frame })),
+        null,
+      );
+  }
+  for (const frame of [
+    { ...base.frame, health: { level: "busy", working: 1 } },
+    { ...base.frame, health: { level: "needs_you" } },
+    {
+      ...base.frame,
+      participants: [{ ...participant(), kind: { type: "agent" } }],
+    },
+    {
+      ...base.frame,
+      attention: [{ ...attention, summary: { text: "Help", truncated: 1 } }],
+    },
+    {
+      ...base.frame,
+      attention: [{ ...attention, summary: { text: 5, truncated: false } }],
+    },
+    { ...base.frame, attention: [{ ...attention, opened_at_ms: -1 }] },
+    { ...base.frame, attention: [{ ...attention, opened_at_ms: 1.5 }] },
+    { ...base.frame, wire: 2, attention: [attention] },
+  ])
+    assert.equal(parseEvent("space", JSON.stringify({ ...base, frame })), null);
 });
 test("malformed JSON, names, keys, or mismatched envelopes never install partial state", () => {
   assert.equal(parseEvent("space", "{"), null);
@@ -160,10 +362,10 @@ test("parser validates every retained participant, health, attention, and identi
   const invalid = [
     { ...base.frame, participants: [participant(), participant()] },
     { ...base.frame, participants: [{ ...participant(), address_id: "" }] },
-    { ...base.frame, participants: [{ ...participant(), activity: "asleep" }] },
+    { ...base.frame, participants: [{ ...participant(), activity: 5 }] },
     {
       ...base.frame,
-      participants: [{ ...participant(), kind: { type: "robot" } }],
+      participants: [{ ...participant(), kind: { type: "" } }],
     },
     {
       ...base.frame,
@@ -188,7 +390,7 @@ test("parser validates every retained participant, health, attention, and identi
     { ...base.frame, health: { level: "busy", in_flight: -1, working: 0 } },
     { ...base.frame, health: { level: "busy", in_flight: 1.5, working: 0 } },
     { ...base.frame, health: { level: "needs_you", items: "2" } },
-    { ...base.frame, health: { level: "unknown" } },
+    { ...base.frame, health: { level: null } },
     { ...base.frame, space: { ...base.frame.space, display_name: "" } },
     { ...base.frame, space: { ...base.frame.space, workspace_id: "" } },
     { ...base.frame, space: { ...base.frame.space, addressable_label: 8 } },
@@ -196,7 +398,7 @@ test("parser validates every retained participant, health, attention, and identi
       ...base.frame,
       attention: [
         {
-          source_kind: "other",
+          source_kind: [],
           summary: { text: "help", truncated: false },
           opened_at_ms: 1,
         },

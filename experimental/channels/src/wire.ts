@@ -61,52 +61,59 @@ function optionalSafeText(value: unknown): SafeText | null {
 }
 function health(value: unknown): Health {
   const item = record(value);
-  switch (item.level) {
+  const level = identity(item.level);
+  switch (level) {
     case "calm":
     case "paused":
     case "inactive":
-      return { level: item.level };
+      return { level };
     case "busy":
       return {
-        level: item.level,
+        level,
         inFlight: integer(item.in_flight),
         working: integer(item.working),
       };
     case "needs_you":
-      return { level: item.level, items: integer(item.items) };
+      return { level, items: integer(item.items) };
     default:
-      throw new Error("Unknown health");
+      return { level: "unknown" };
   }
 }
 function activity(value: unknown): Activity {
-  switch (value) {
+  const result = identity(value);
+  switch (result) {
     case "retired":
     case "offline":
     case "blocked":
     case "working":
     case "waiting":
     case "idle":
-      return value;
+      return result;
     default:
-      throw new Error("Unknown activity");
+      return "unknown";
   }
 }
 function memberKind(value: unknown): MemberKind {
   const item = record(value);
-  switch (item.type) {
+  const type = identity(item.type);
+  switch (type) {
     case "human":
     case "terminal":
-      return { type: item.type };
+      return { type };
     case "agent":
-      return { type: item.type, runtime: nullableText(item.runtime) };
+      return { type, runtime: nullableText(item.runtime) };
     default:
-      throw new Error("Unknown member kind");
+      return { type: "unknown" };
   }
 }
-function attention(value: unknown): Attention {
+function attention(
+  value: unknown,
+  occurrences: Map<string, number>,
+): Attention {
   const item = record(value);
-  const source = item.source_kind;
-  switch (source) {
+  const kind = identity(item.source_kind);
+  let source: Attention["source"];
+  switch (kind) {
     case "delivery_attempt":
     case "automatic_reply_limit":
     case "pane_binding":
@@ -114,14 +121,28 @@ function attention(value: unknown): Attention {
     case "agent_disposition":
     case "context_grant":
     case "coordination":
-      return {
-        source,
-        summary: safeText(item.summary),
-        openedAt: timestamp(item.opened_at_ms),
-      };
+    case "agent_status":
+      source = kind;
+      break;
     default:
-      throw new Error("Unknown attention source");
+      source = "unknown";
   }
+  const summary = safeText(item.summary);
+  const openedAt = timestamp(item.opened_at_ms);
+  const fingerprint = JSON.stringify([
+    kind,
+    summary.text,
+    summary.truncated,
+    openedAt,
+  ]);
+  const occurrence = occurrences.get(fingerprint) ?? 0;
+  occurrences.set(fingerprint, occurrence + 1);
+  return {
+    rowKey: JSON.stringify([fingerprint, occurrence]),
+    source,
+    summary,
+    openedAt,
+  };
 }
 function channel(value: unknown, key: SpaceKey): Channel {
   const frame = record(value);
@@ -148,6 +169,7 @@ function channel(value: unknown, key: SpaceKey): Channel {
     if (messages.has(id)) throw new Error("Duplicate message");
     messages.set(id, { id });
   }
+  const attentionOccurrences = new Map<string, number>();
   return {
     key,
     workspaceId: identity(space.workspace_id),
@@ -156,7 +178,9 @@ function channel(value: unknown, key: SpaceKey): Channel {
     health: health(frame.health),
     members,
     messages,
-    attention: array(frame.attention).map(attention),
+    attention: array(frame.attention).map((item) =>
+      attention(item, attentionOccurrences),
+    ),
   };
 }
 export function parseEvent(name: string, rawJson: string): WireEvent | null {

@@ -67,6 +67,10 @@ surface and text tokens.
 
 `wire.ts` validates retained fields before constructing branded `SpaceKey` and
 `AddressId` values. Unknown wire versions and malformed snapshots are ignored.
+New nonblank activity, health, member-kind, and attention-source strings retain
+the snapshot as explicit unknown variants. Unknown status values use neutral labels.
+Attention summaries remain visible only for known `needs_you` health, including
+`agent_status` and future attention sources.
 `store.ts` owns `channels: Map<SpaceKey, Channel>` and a pure reducer. Snapshots
 replace channels atomically. Equal retained content returns the same state.
 Message IDs are retained only for unread activity. Message bodies and history

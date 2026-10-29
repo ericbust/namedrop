@@ -7,6 +7,7 @@ const presence = {
   idle: "Idle",
   offline: "Offline",
   retired: "Retired",
+  unknown: "Unknown status",
 } satisfies Record<Activity, string>;
 function description(member: Member): string {
   if (member.role?.text) return member.role.text;
@@ -17,6 +18,8 @@ function description(member: Member): string {
       return "Terminal";
     case "agent":
       return member.kind.runtime || "Agent";
+    case "unknown":
+      return "Member";
     default: {
       const exhaustive: never = member.kind;
       return exhaustive;
@@ -35,6 +38,8 @@ function healthLabel(health: Health): string {
       return "Paused";
     case "inactive":
       return "Not active";
+    case "unknown":
+      return "Status unavailable";
     default: {
       const exhaustive: never = health;
       return exhaustive;
@@ -82,7 +87,7 @@ export function MemberList({
           </h2>
           <ul>
             {channel.attention.map((item) => (
-              <li key={`${item.source}-${item.openedAt}-${item.summary.text}`}>
+              <li key={item.rowKey}>
                 {item.summary.text}
                 {item.summary.truncated ? "…" : ""}
               </li>

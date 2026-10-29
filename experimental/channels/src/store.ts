@@ -1,5 +1,7 @@
 import type { Channel, Event, SpaceKey, State } from "./model.ts";
 
+const channelCollator = new Intl.Collator();
+
 export function initialState(visible = true): State {
   return {
     channels: new Map(),
@@ -197,9 +199,9 @@ export function reduce(state: State, event: Event): State {
 export function sortedChannels(state: State): Channel[] {
   return [...state.channels.values()].sort(
     (a, b) =>
-      a.displayName.localeCompare(b.displayName) ||
-      a.workspaceId.localeCompare(b.workspaceId) ||
-      a.key.localeCompare(b.key),
+      channelCollator.compare(a.displayName, b.displayName) ||
+      channelCollator.compare(a.workspaceId, b.workspaceId) ||
+      channelCollator.compare(a.key, b.key),
   );
 }
 export function channelName(

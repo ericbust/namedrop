@@ -128,6 +128,158 @@ function replay(client, values, keys = values.map((value) => value.key)) {
   client.send("ready", { keys });
 }
 
+function attentionFrame(source) {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants[0].activity = "blocked";
+  value.frame.attention = [
+    {
+      source_kind: source,
+      summary: { text: "Waiting on approval or a question", truncated: false },
+      opened_at_ms: 42,
+    },
+  ];
+  return value;
+}
+
+test("fix5: the page declares a data favicon", async (t) => {
+  const ui = await open(t, (client) => replay(client, [frame(1, "alpha")]));
+  await ui.live();
+  assert.equal(
+    await ui.page.locator('link[rel="icon"]').getAttribute("href"),
+    "data:,",
+  );
+});
+
+test("fix5: blocked agent_status attention survives replay and future attention updates stay live", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [attentionFrame("agent_status")]),
+  );
+  await ui.live();
+  assert.equal(await ui.channels.getByRole("button").count(), 1);
+  await ui.page
+    .getByText("Waiting on approval or a question", { exact: true })
+    .waitFor();
+  assert.equal(
+    await ui.page.locator('.member-row[data-activity="blocked"]').count(),
+    1,
+  );
+  assert.equal(
+    await ui.row(1).getByRole("img", { name: "Needs you" }).count(),
+    1,
+  );
+  const update = attentionFrame("future_attention");
+  update.frame.space.display_name = "alpha updated";
+  update.frame.attention[0].summary = {
+    text: "New future request",
+    truncated: true,
+  };
+  ui.connections[0].send("space", update);
+  await ui.page
+    .getByRole("heading", { name: "alpha updated", exact: true })
+    .waitFor();
+  await ui.page.getByText("New future request…", { exact: true }).waitFor();
+  assert.equal(
+    await ui.page
+      .getByText("Waiting on approval or a question", { exact: true })
+      .count(),
+    0,
+  );
+  ui.connections[0].send("space", frame(1, "alpha resolved"));
+  await ui.page
+    .getByRole("heading", { name: "alpha resolved", exact: true })
+    .waitFor();
+  assert.equal(
+    await ui.page.getByRole("region", { name: "Attention needed" }).count(),
+    0,
+  );
+  assert.equal(ui.connections.length, 1);
+});
+
+test("fix5: future statuses stay neutral and duplicate generic attention rows survive live replacement", async (t) => {
+  const initial = frame(1, "alpha");
+  const member = initial.frame.participants[0];
+  initial.frame.participants = [
+    {
+      ...member,
+      activity: "future_activity",
+      kind: { type: "future_kind" },
+      role: null,
+      pane_label: null,
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [initial]));
+  const keyErrors = [];
+  ui.page.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      /same key|unique.*key/i.test(message.text())
+    )
+      keyErrors.push(message.text());
+  });
+  await ui.live();
+  await ui.page.getByText("Unknown status", { exact: true }).waitFor();
+  assert.equal(
+    await ui.page.locator(".member-description").textContent(),
+    "Member",
+  );
+  const color = await ui.page
+    .locator('.presence-dot[data-activity="unknown"]')
+    .evaluate((dot) => getComputedStyle(dot).backgroundColor);
+  const offline = frame(2, "beta");
+  offline.frame.participants[0].activity = "offline";
+  ui.connections[0].send("space", offline);
+  await ui.row(2).click();
+  assert.equal(
+    color,
+    await ui.page
+      .locator('.presence-dot[data-activity="offline"]')
+      .evaluate((dot) => getComputedStyle(dot).backgroundColor),
+  );
+  await ui.row(1).click();
+  const update = attentionFrame("future_one");
+  update.frame.attention.push({
+    ...structuredClone(update.frame.attention[0]),
+    source_kind: "future_two",
+  });
+  ui.connections[0].send("space", update);
+  const rows = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("listitem");
+  await rows.nth(1).waitFor();
+  assert.equal(await rows.count(), 2);
+  update.frame.attention[0].summary.text = "First request changed";
+  ui.connections[0].send("space", update);
+  await rows.getByText("First request changed", { exact: true }).waitFor();
+  assert.equal(await rows.count(), 2);
+  assert.equal(
+    await rows.nth(1).textContent(),
+    "Waiting on approval or a question",
+  );
+  for (const level of ["future_health", "paused", "inactive"]) {
+    update.frame.health = { level };
+    ui.connections[0].send("space", update);
+    await ui.page
+      .getByText(
+        level === "future_health"
+          ? "Status unavailable"
+          : level === "paused"
+            ? "Paused"
+            : "Not active",
+        { exact: false },
+      )
+      .waitFor();
+    assert.equal(
+      await ui.page.getByRole("region", { name: "Attention needed" }).count(),
+      0,
+    );
+    assert.equal(
+      await ui.row(1).getByRole("img", { name: "Needs you" }).count(),
+      0,
+    );
+  }
+  assert.deepEqual(keyErrors, []);
+});
+
 test("fix2 item 3: disappearing focused Needs you shortcut restores canonical Channels focus", async (t) => {
   const ui = await open(t, (client) =>
     replay(client, [frame(1, "alpha"), frame(3, "gamma", "needs_you")]),

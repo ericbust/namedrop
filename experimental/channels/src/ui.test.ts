@@ -85,7 +85,7 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
         opened_at_ms: 1,
       },
     ];
-    for (const level of ["paused", "inactive", "needs_you"]) {
+    for (const level of ["paused", "inactive", "future_health", "needs_you"]) {
       fixture.frame.health =
         level === "needs_you" ? { level, items: 1 } : { level };
       const event = parseEvent("space", JSON.stringify(fixture));
@@ -110,7 +110,63 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
       );
       assert.equal(header.includes('class="attention-summary"'), needsYou);
       assert.equal(header.includes("Approve this"), needsYou);
+      if (level === "future_health")
+        assert.ok(header.includes("Status unavailable"));
     }
+  } finally {
+    await vite.close();
+  }
+});
+
+test("fix5: future member values show neutral labels and retain role and pane descriptions", async () => {
+  const vite = await createServer({
+    server: { middlewareMode: true, hmr: false, ws: false },
+  });
+  try {
+    const { MemberList } = await vite.ssrLoadModule("/src/ui/MemberList.tsx");
+    const fixture = JSON.parse(
+      (
+        await readFile(
+          new URL("./fixtures/real-frames.jsonl", import.meta.url),
+          "utf8",
+        )
+      )
+        .trim()
+        .split("\n")[0] ?? "null",
+    );
+    const member = fixture.frame.participants[0];
+    fixture.frame.participants = [
+      {
+        ...member,
+        address_id: "future-member",
+        alias: "Future",
+        activity: "future_activity",
+        kind: { type: "future_kind" },
+        role: null,
+        pane_label: null,
+      },
+      {
+        ...member,
+        address_id: "role-member",
+        alias: "Role",
+        activity: "future_activity",
+        kind: { type: "future_kind" },
+        role: { text: "Builder", truncated: true },
+        pane_label: { text: "pane 2", truncated: true },
+      },
+    ];
+    const event = parseEvent("space", JSON.stringify(fixture));
+    assert.ok(
+      event?.type === "space",
+      "future member values must retain the snapshot",
+    );
+    const markup = renderToStaticMarkup(
+      createElement(MemberList, { channel: event.channel, name: "alpha" }),
+    );
+    assert.equal((markup.match(/Unknown status/g) ?? []).length, 2);
+    assert.ok(markup.includes('class="member-description">Member</span>'));
+    assert.ok(markup.includes("Builder… · pane 2…"));
+    assert.ok(markup.includes('class="presence-dot" data-activity="unknown"'));
   } finally {
     await vite.close();
   }

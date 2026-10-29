@@ -7,13 +7,14 @@ export type Activity =
   | "blocked"
   | "working"
   | "waiting"
-  | "idle";
+  | "idle"
+  | "unknown";
 export type Health =
-  | { level: "calm" | "paused" | "inactive" }
+  | { level: "calm" | "paused" | "inactive" | "unknown" }
   | { level: "busy"; inFlight: number; working: number }
   | { level: "needs_you"; items: number };
 export type MemberKind =
-  | { type: "human" | "terminal" }
+  | { type: "human" | "terminal" | "unknown" }
   | { type: "agent"; runtime: string | null };
 export type SafeText = { text: string; truncated: boolean };
 export type Member = {
@@ -25,6 +26,7 @@ export type Member = {
   paneLabel: SafeText | null;
 };
 export type Attention = {
+  rowKey: string;
   source:
     | "delivery_attempt"
     | "automatic_reply_limit"
@@ -32,7 +34,9 @@ export type Attention = {
     | "integration_registration"
     | "agent_disposition"
     | "context_grant"
-    | "coordination";
+    | "coordination"
+    | "agent_status"
+    | "unknown";
   summary: SafeText;
   openedAt: number;
 };
