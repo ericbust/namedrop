@@ -4721,7 +4721,7 @@ test("UI-4: the drawer is 480 wide at 1440 and 400 at 1024, opening a row select
   assert.equal(await row.getAttribute("aria-expanded"), "false");
 });
 
-test("CH-2: the page fills the window and never scrolls, with a long channel and a thread open", async (t) => {
+test("CH-2: the page never scrolls with a long channel, at every width", async (t) => {
   const codex = fixture.frame.participants[0].address_id;
   const busy = frame(1, "alpha");
   busy.frame.messages = Array.from({ length: 80 }, (_, index) =>
@@ -4729,7 +4729,8 @@ test("CH-2: the page fills the window and never scrolls, with a long channel and
       `long-${index}`,
       `@codex message ${index} with enough words to wrap`,
       {
-        at_ms: 1_000 + index * 60_000,
+        // Six minutes apart, so no row groups and each draws a header with hidden text.
+        at_ms: 1_000 + index * 360_000,
         legs: [{ to: codex, stage: { stage: "delivered" } }],
       },
     ),
@@ -4750,6 +4751,7 @@ test("CH-2: the page fills the window and never scrolls, with a long channel and
     [1440, 900],
     [1024, 700],
     [640, 800],
+    [390, 844],
     [1152, 720],
   ]) {
     await ui.page.setViewportSize({ width, height });
@@ -4762,6 +4764,111 @@ test("CH-2: the page fills the window and never scrolls, with a long channel and
   await ui.page.setViewportSize({ width: 1440, height: 900 });
   await ui.page.locator('[data-message-id="long-79"]').hover();
   assert.deepEqual(await page(), { overflow: 0, scrolled: 0 });
+});
+
+test("CH-2: the page fills the window in every view and width, and only the panes inside it scroll", async (t) => {
+  const busy = crew(
+    1,
+    "alpha",
+    Array.from({ length: 40 }, (_, index) => [
+      `agent-${index}`,
+      `@agent-${index}`,
+      "working",
+      { mailbox: [inbox("you", `task ${index}`, 1_000 + index)] },
+    ]),
+  );
+  const requests = Array.from({ length: 60 }, (_, index) =>
+    message(
+      `long-${index}`,
+      `@agent-0 message ${index} with enough words to wrap`,
+      {
+        // Six minutes apart, so no row groups and each draws a header with hidden text.
+        at_ms: 1_000 + index * 360_000,
+        legs: [{ to: "agent-0", stage: { stage: "delivered" } }],
+      },
+    ),
+  );
+  const replies = Array.from({ length: 40 }, (_, index) =>
+    message(
+      `reply-${index}`,
+      `reply ${index} with enough words to wrap a line or two in the thread pane`,
+      {
+        thread_id: "long-59",
+        in_reply_to: index === 0 ? "long-59" : `reply-${index - 1}`,
+        kind: "reply",
+        author: "agent-0",
+        at_ms: 1_000 + 59 * 360_000 + (index + 1) * 1_000,
+      },
+    ),
+  );
+  busy.frame.messages = [...requests, ...replies];
+  const screen = Array.from({ length: 300 }, (_, index) => `line ${index}`);
+  const ui = await open(t, (client) => replay(client, [busy]), undefined, {
+    onScreen: () => ({ body: screen.join("\n") }),
+  });
+  await ui.page.locator('[data-message-id="long-59"]').waitFor();
+  const page = () =>
+    ui.page.evaluate(() => {
+      window.scrollTo(0, 100_000);
+      return {
+        overflow:
+          document.documentElement.scrollHeight -
+          document.documentElement.clientHeight,
+        scrolled: window.scrollY,
+      };
+    });
+  const fits = async (view) => {
+    for (const [width, height] of [
+      [1440, 900],
+      [1024, 700],
+      [640, 800],
+      [390, 844],
+      [1152, 720],
+    ]) {
+      await ui.page.setViewportSize({ width, height });
+      assert.deepEqual(
+        await page(),
+        { overflow: 0, scrolled: 0 },
+        `${view} at ${width}x${height}`,
+      );
+    }
+    await ui.page.setViewportSize({ width: 1440, height: 900 });
+  };
+  // A pane scrolls inside itself: its scrollTop moves and the page's does not.
+  const scrolls = async (selector, view) => {
+    const moved = await ui.page.locator(selector).evaluate((element) => {
+      element.scrollTop = 0;
+      const before = element.scrollTop;
+      element.scrollTop = element.scrollHeight;
+      return { before, after: element.scrollTop, page: window.scrollY };
+    });
+    assert.ok(moved.after > moved.before, `${view} scrolls inside itself`);
+    assert.equal(moved.page, 0, `${view} never scrolls the page`);
+  };
+  await fits("the channel");
+  await scrolls(".timeline", "the timeline");
+  await ui.page.locator('[data-message-id="long-59"] .reply-preview').click();
+  await ui.page
+    .getByRole("complementary", { name: "Thread", exact: true })
+    .waitFor();
+  await fits("an open thread");
+  await scrolls(".thread-body", "the thread");
+  await ui.page.keyboard.press("Escape");
+  await ui.page
+    .locator(".members")
+    .getByRole("button", { name: /@agent-0/ })
+    .click();
+  await screenText(ui).locator("pre").waitFor();
+  await fits("the peek drawer");
+  await scrolls(".peek-text", "the screen text");
+  await ui.page.keyboard.press("Escape");
+  await drawer(ui).waitFor({ state: "detached" });
+  await ui.page.getByRole("link", { name: /^All activity/ }).click();
+  await ui.page
+    .getByRole("heading", { name: "All activity", level: 1 })
+    .waitFor();
+  await fits("All activity");
+  await scrolls(".activity-list", "the activity list");
 });
 
 const routed = (reason = "build question", router = "claude-haiku") => ({
