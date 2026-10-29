@@ -221,6 +221,7 @@ async function open(
     path = "/",
     onPost = () => ({ status: 200 }),
     onScreen = () => ({ body: "" }),
+    onContext = null,
     observeLanding = false,
   } = {},
 ) {
@@ -228,6 +229,7 @@ async function open(
   const connections = [];
   const errors = [];
   const historyRequests = [];
+  const contextRequests = [];
   const posts = postRoute(onPost);
   const screens = screenRoute(onScreen);
   const server = createServer(async (req, res) => {
@@ -266,6 +268,14 @@ async function open(
         res.writeHead(404).end();
       }
       return;
+    }
+    if (/^\/w\/[^/]+\/messages\/[^/]+\/context$/.test(url.pathname)) {
+      contextRequests.push(url);
+      if (onContext === null) return res.writeHead(404).end();
+      const context = await onContext(url);
+      return context === null
+        ? res.writeHead(404).end()
+        : sendJson(res, 200, context);
     }
     const screen = /^\/w\/([^/]+)\/participants\/([^/]+)\/screen$/.exec(
       url.pathname,
@@ -344,6 +354,7 @@ async function open(
     connections,
     live,
     historyRequests,
+    contextRequests,
     posts,
     screens,
   };
@@ -5259,6 +5270,227 @@ for (const status of [404, 410, 401, 403]) {
     assert.equal(ui.screens.requests.length, 2);
   });
 }
+
+function actionableAttention(kind = "reply") {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants = people();
+  const root = message("attention-root", "Original request", {
+    at_ms: 1,
+    legs: [{ to: "codex", stage: { stage: "delivered" } }],
+  });
+  const target = message(
+    "attention-target",
+    "The decision needing a response",
+    {
+      thread_id: root.message_id,
+      in_reply_to: root.message_id,
+      at_ms: 2,
+      author: "codex",
+      kind: "reply",
+    },
+  );
+  const newer = message("attention-newer", "A newer reply in the same thread", {
+    thread_id: root.message_id,
+    in_reply_to: target.message_id,
+    at_ms: 3,
+    author: "codex",
+    kind: "reply",
+  });
+  value.frame.messages = [root, target, newer];
+  const conversation = {
+    thread_id: root.message_id,
+    message_id: target.message_id,
+  };
+  value.frame.attention = [
+    {
+      source_kind: kind === "reply" ? "delivery_attempt" : "coordination",
+      summary: { text: "A response is needed.", truncated: false },
+      opened_at_ms: 4,
+      subject_alias: null,
+      message_id: target.message_id,
+      conversation,
+      coordination_id: kind === "message" ? "decision-1" : null,
+      response:
+        kind === "reply"
+          ? { kind, ...conversation, address_id: "codex" }
+          : { kind, address_id: "codex" },
+    },
+  ];
+  return {
+    value,
+    context: {
+      thread_id: root.message_id,
+      message_count: 3,
+      earlier_omitted: false,
+      messages: [root, target, newer],
+    },
+  };
+}
+
+test("CL-A: legacy loaded navigation never requests context and restores focus", async (t) => {
+  const ui = await open(t, (client) => replay(client, [locatedChannel()]));
+  await ui.live();
+  const show = ui.page.getByRole("button", {
+    name: "Show message from @codex",
+    exact: true,
+  });
+  await show.click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await pane.locator('[data-message-id="m20"]').waitFor();
+  assert.deepEqual(ui.contextRequests, []);
+  assert.equal(
+    await pane
+      .getByRole("button", { name: "Close thread" })
+      .evaluate((button) => button === document.activeElement),
+    true,
+  );
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  assert.equal(
+    await show.evaluate((button) => button === document.activeElement),
+    true,
+  );
+});
+
+test("CL-A: explicit attention names its responsible member and focuses fetched evidence", async (t) => {
+  const { value, context } = actionableAttention();
+  value.frame.participants[0].alias = "@current-owner";
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  assert.equal(
+    await ui.page
+      .getByRole("button", { name: "Respond to @current-owner", exact: true })
+      .count(),
+    1,
+  );
+  await ui.page
+    .getByRole("button", {
+      name: "Show message from @current-owner",
+      exact: true,
+    })
+    .click();
+  const target = ui.page
+    .getByRole("complementary", { name: "Thread", exact: true })
+    .locator('[data-message-id="attention-target"]');
+  await target.waitFor();
+  assert.equal(
+    await target.evaluate((row) => row === document.activeElement),
+    true,
+  );
+  assert.equal(
+    ui.contextRequests.length,
+    1,
+    "explicit metadata fetches even when target is loaded",
+  );
+  assert.equal(
+    ui.contextRequests[0].pathname,
+    `/w/${key(1)}/messages/attention-target/context`,
+  );
+});
+
+test("CL-A: Respond posts the exact attention target despite newer context and SSE replies", async (t) => {
+  const { value, context } = actionableAttention();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await pane.locator('[data-message-id="attention-newer"]').waitFor();
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  await reply.fill("@codex Keep the selected decision");
+  const next = structuredClone(value);
+  next.frame.messages.push(
+    message("attention-live", "An even newer live reply", {
+      thread_id: "attention-root",
+      in_reply_to: "attention-newer",
+      at_ms: Date.now(),
+      author: "codex",
+      kind: "reply",
+    }),
+  );
+  ui.connections[0].send("space", next);
+  await pane.locator('[data-message-id="attention-live"]').waitFor();
+  await reply.press("Enter");
+  await until(
+    () => ui.posts.attempts.some((attempt) => attempt.body !== null),
+    "the attention reply POST",
+  );
+  assert.equal(ui.posts.attempts[0].body.in_reply_to, "attention-target");
+  assert.equal(
+    ui.posts.attempts[0].body.source,
+    "@codex Keep the selected decision",
+  );
+});
+
+test("CL-A: preparing an already prepared coordination response keeps the draft without a warning", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await ui.page.waitForFunction(() =>
+    document
+      .querySelector("main .composer textarea")
+      ?.value.includes("Regarding coordination decision-1:"),
+  );
+  const prepared = await draft.inputValue();
+  assert.equal(prepared, "@codex Regarding coordination decision-1: ");
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await pane
+    .getByRole("button", { name: "Prepare response", exact: true })
+    .click();
+  assert.equal(await draft.inputValue(), prepared);
+  assert.equal(
+    await ui.page
+      .getByText("Your channel draft or pending send was kept.", {
+        exact: false,
+      })
+      .count(),
+    0,
+  );
+  assert.equal(ui.posts.attempts.length, 0);
+  await draft.fill("");
+  await pane
+    .getByRole("button", { name: "Prepare response", exact: true })
+    .click();
+  await ui.page.waitForFunction(() =>
+    document
+      .querySelector("main .composer textarea")
+      ?.value.includes("Regarding coordination decision-1:"),
+  );
+  assert.equal(await draft.inputValue(), prepared);
+  assert.equal(
+    await ui.page
+      .getByText("Your channel draft or pending send was kept.", {
+        exact: false,
+      })
+      .count(),
+    0,
+  );
+});
 
 test("CH-2: the page fills the window and never scrolls, with a long channel and a thread open", async (t) => {
   const codex = fixture.frame.participants[0].address_id;
