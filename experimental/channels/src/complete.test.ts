@@ -233,9 +233,9 @@ test("complete: the #token before an @ resolves by folding, so #Beta @ lists bet
   ]);
   assert.equal(complete("#Beta @", 7, context)?.target, betaKey);
   assert.deepEqual(names(complete("#BETA @co", 9, context)), ["@coder"]);
-  assert.deepEqual(names(complete("#Alpha_Project @", 16, withProject)), []);
+  assert.deepEqual(names(complete("#Alpha-Project @", 16, withProject)), []);
   assert.equal(
-    complete("#Alpha_Project @", 16, withProject)?.target,
+    complete("#Alpha-Project @", 16, withProject)?.target,
     project.key,
   );
 });

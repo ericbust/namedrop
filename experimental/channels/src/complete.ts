@@ -1,12 +1,20 @@
+import { foldLabel } from "./label.ts";
 import type { ChannelSnapshot, Member, ReplyTo, SpaceKey } from "./model.ts";
 import { channelSuffix } from "./store.ts";
 
+// Why the server gave a channel no token, in the order DESIGN.md's table checks.
+export type DisabledReason =
+  | "no-label"
+  | "unusable-label"
+  | "all"
+  | "shared-label"
+  | "inactive";
 export type ChannelOption = {
   key: SpaceKey;
   name: string;
   suffix: string | null;
   token: string | null;
-  disabledReason: "shared-label" | "no-label" | null;
+  disabledReason: DisabledReason | null;
 };
 export type CompletionContext = {
   current: SpaceKey;
@@ -32,6 +40,17 @@ export type Completion = {
 const ALL = "#all";
 const WHITESPACE = /\s/;
 
+function disabledReason(
+  folded: string | null,
+  others: readonly (string | null)[],
+): DisabledReason {
+  if (folded === null) return "no-label";
+  if (folded === "") return "unusable-label";
+  if (folded === "all") return "all";
+  if (others.includes(folded)) return "shared-label";
+  return "inactive";
+}
+
 export function channelOptions(
   channels: Iterable<
     Pick<
@@ -41,19 +60,29 @@ export function channelOptions(
   >,
 ): ChannelOption[] {
   const all = [...channels];
-  return all.map((channel) => ({
+  // The server shows the workspace id as the name only when Herdr has no label.
+  const folded = all.map((channel) => ({
+    channel,
+    token:
+      channel.displayName === channel.workspaceId
+        ? null
+        : foldLabel(channel.displayName),
+  }));
+  return folded.map(({ channel, token }) => ({
     key: channel.key,
     name: channel.displayName,
     suffix: channelSuffix(channel, all),
     token:
       channel.addressableLabel === null ? null : `#${channel.addressableLabel}`,
-    // The server falls back to the workspace id only when Herdr has no label.
     disabledReason:
       channel.addressableLabel !== null
         ? null
-        : channel.displayName === channel.workspaceId
-          ? "no-label"
-          : "shared-label",
+        : disabledReason(
+            token,
+            folded.flatMap((other) =>
+              other.channel === channel ? [] : [other.token],
+            ),
+          ),
   }));
 }
 
@@ -73,22 +102,28 @@ function tokenAt(text: string, caret: number): Token | null {
   };
 }
 
+// An item matches when any of its names contains the query. The first name sorts ties.
 function ranked<T>(
   items: readonly T[],
-  name: (item: T) => string,
+  names: (item: T) => readonly [string, ...string[]],
   query: string,
 ): T[] {
   const needle = query.toLowerCase();
   return items
     .flatMap((item) => {
-      const folded = name(item).toLowerCase();
-      const at = folded.indexOf(needle);
-      return at < 0 ? [] : [{ item, prefix: at === 0, folded }];
+      const [first, ...rest] = names(item);
+      const name = first.toLowerCase();
+      const found = [name, ...rest.map((text) => text.toLowerCase())]
+        .map((text) => text.indexOf(needle))
+        .filter((at) => at >= 0);
+      return found.length === 0
+        ? []
+        : [{ item, prefix: found.includes(0), name }];
     })
     .sort(
       (a, b) =>
         Number(b.prefix) - Number(a.prefix) ||
-        (a.folded < b.folded ? -1 : a.folded > b.folded ? 1 : 0),
+        (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
     )
     .map(({ item }) => item);
 }
@@ -97,19 +132,24 @@ function bareAlias(member: Member): string {
   return member.alias.replace(/^@+/, "");
 }
 
+function bareToken(channel: ChannelOption): string | null {
+  return channel.token === null ? null : channel.token.slice(1);
+}
+
 function targetBefore(
   text: string,
   end: number,
   context: CompletionContext,
 ): SpaceKey {
   const byToken = new Map(
-    context.channels.flatMap((channel) =>
-      channel.token === null ? [] : [[channel.token, channel.key] as const],
-    ),
+    context.channels.flatMap((channel) => {
+      const token = bareToken(channel);
+      return token === null ? [] : [[token, channel.key] as const];
+    }),
   );
   let target = context.current;
-  for (const match of text.slice(0, end).matchAll(/(?:^|\s)(#\S+)/g)) {
-    const key = byToken.get(match[1] ?? "");
+  for (const match of text.slice(0, end).matchAll(/(?:^|\s)#(\S+)/g)) {
+    const key = byToken.get(foldLabel(match[1] ?? ""));
     if (key !== undefined) target = key;
   }
   return target;
@@ -125,7 +165,10 @@ export function complete(
   if (token.kind === "channel") {
     const candidates: Candidate[] = ranked(
       context.channels,
-      (channel) => channel.name,
+      (channel) => {
+        const bare = bareToken(channel);
+        return bare === null ? [channel.name] : [channel.name, bare];
+      },
       token.query,
     ).map((channel) => ({ kind: "channel", channel }));
     if (ALL.slice(1).includes(token.query.toLowerCase()))
@@ -141,10 +184,11 @@ export function complete(
   return {
     token,
     target,
-    candidates: ranked(members, bareAlias, token.query).map((member) => ({
-      kind: "member",
-      member,
-    })),
+    candidates: ranked(
+      members,
+      (member) => [bareAlias(member)],
+      token.query,
+    ).map((member) => ({ kind: "member", member })),
   };
 }
 

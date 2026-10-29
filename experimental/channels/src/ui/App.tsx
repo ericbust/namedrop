@@ -11,8 +11,8 @@ import {
 import { type CompletionContext, channelOptions } from "../complete.ts";
 import { composerPlaceholder } from "../copy.ts";
 import type {
+  ComposerId,
   Directory,
-  Draft,
   Event,
   Home,
   Message,
@@ -20,15 +20,16 @@ import type {
   SpaceKey,
   State,
 } from "../model.ts";
-import { createPoster, type Post } from "../send.ts";
+import { createPoster } from "../send.ts";
 import {
   channelSuffix,
   connectionStatus,
+  draftKey,
   homesOf,
   initialState,
   reduce,
-  retryId,
   runsByMessage,
+  sameComposer,
   type ThreadGroup,
   type TimelineRow,
   threadGroups,
@@ -88,7 +89,7 @@ export function App() {
   const requests = useRef(new Map<number, AbortController>());
   const lastUpdate = useRef<number | null>(null);
   const [poster] = useState(createPoster);
-  const posts = useRef(new Map<string, Post>());
+  const inFlightPosts = useRef(new Map<string, ComposerId>());
   const posted = useRef(new Set<string>());
   useEffect(() => poster.prepare(), [poster]);
   useEffect(() => {
@@ -339,34 +340,53 @@ export function App() {
       needsYou > 0 ? `(${needsYou}) Needs you · Namedrop` : "Namedrop";
   }, [needsYou]);
   const send = useCallback(
-    (draft: Draft, startedAt: number): string => {
-      for (const [requestId, post] of posts.current)
-        if (
-          post.key === draft.key &&
-          post.source === draft.source &&
-          post.inReplyTo === draft.inReplyTo
-        )
-          return requestId;
-      const requestId = retryId(state.outbox, draft) ?? crypto.randomUUID();
-      const post = { ...draft, requestId };
-      posts.current.set(requestId, post);
-      dispatch({ type: "send", outgoing: { ...post, at: Date.now() } });
-      void poster.post(post).then((result) => {
-        posts.current.delete(requestId);
-        if (result.kind === "failed") {
-          dispatch({ type: "send-failed", requestId, ...result });
-          return;
-        }
-        measure("namedrop:enter-to-sent", startedAt);
-        posted.current.add(result.messageId);
-        const [oldest] = posted.current;
-        if (posted.current.size > POSTED_LIMIT && oldest !== undefined)
-          posted.current.delete(oldest);
-        dispatch({ type: "sent", requestId, messageId: result.messageId });
+    (
+      outgoing: Pick<Outgoing, "composer" | "source" | "inReplyTo">,
+      startedAt: number,
+    ) => {
+      // A second Enter can land before the render that locks the box.
+      for (const composer of inFlightPosts.current.values())
+        if (sameComposer(composer, outgoing.composer)) return;
+      const requestId =
+        state.drafts.get(draftKey(outgoing.composer))?.failure?.requestId ??
+        crypto.randomUUID();
+      inFlightPosts.current.set(requestId, outgoing.composer);
+      dispatch({
+        type: "send",
+        outgoing: { ...outgoing, requestId, at: Date.now() },
       });
-      return requestId;
+      void poster
+        .post({
+          requestId,
+          key: outgoing.composer.key,
+          source: outgoing.source,
+          inReplyTo: outgoing.inReplyTo,
+        })
+        .then((result) => {
+          inFlightPosts.current.delete(requestId);
+          if (result.kind === "failed") {
+            dispatch({
+              type: "send-failed",
+              requestId,
+              status: result.status,
+              message: result.message,
+            });
+            return;
+          }
+          measure("namedrop:enter-to-sent", startedAt);
+          posted.current.add(result.messageId);
+          const [oldest] = posted.current;
+          if (posted.current.size > POSTED_LIMIT && oldest !== undefined)
+            posted.current.delete(oldest);
+          dispatch({ type: "sent", requestId, messageId: result.messageId });
+        });
     },
-    [poster, state.outbox],
+    [poster, state.drafts],
+  );
+  const edit = useCallback(
+    (composer: ComposerId, text: string) =>
+      dispatch({ type: "edit", composer, text }),
+    [],
   );
   const select = useCallback((key: SpaceKey) => {
     const path = `/w/${key}`;
@@ -420,18 +440,26 @@ export function App() {
           },
     [current, allChannels],
   );
+  const composerId = useMemo<ComposerId | null>(
+    () => (current === undefined ? null : { key: current, thread: null }),
+    [current],
+  );
   const pending = useMemo(
     () =>
-      current === undefined
+      composerId === null
         ? noPending
-        : [...state.outbox.values()].filter(
-            (entry) =>
-              entry.key === current &&
-              entry.inReplyTo === null &&
-              entry.phase.kind !== "failed",
+        : [...state.outbox.values()].filter((entry) =>
+            sameComposer(entry.composer, composerId),
           ),
-    [current, state.outbox],
+    [composerId, state.outbox],
   );
+  const unsentReplies = useMemo(() => {
+    const threads = new Set<string>();
+    for (const draft of state.drafts.values())
+      if (draft.key === current && draft.thread !== null && draft.failure)
+        threads.add(draft.thread);
+    return threads;
+  }, [current, state.drafts]);
   const terminalRuns = channel?.terminalRuns;
   const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
   const thread =
@@ -531,6 +559,7 @@ export function App() {
               pending={pending}
               posted={posted.current}
               located={located}
+              unsentReplies={unsentReplies}
               expandedThread={thread ? thread.id : null}
               onThread={openThread}
               paneId={paneId}
@@ -540,18 +569,22 @@ export function App() {
                 dispatch({ type: "follow", key, atBottom })
               }
             />
-            {completion && (
+            {completion && composerId && (
               <Composer
                 key={`composer:${channel.key}`}
                 context={completion}
+                composer={composerId}
+                drafts={state.drafts}
                 outbox={state.outbox}
                 placeholder={composerPlaceholder(channel)}
+                label={composerPlaceholder(channel)}
                 to={null}
+                onEdit={(text) => edit(composerId, text)}
                 onSend={(source, startedAt) => {
                   if (channel.viewMode === "browsing")
                     dispatch({ type: "latest", key: channel.key });
-                  return send(
-                    { key: channel.key, source, inReplyTo: null },
+                  send(
+                    { composer: composerId, source, inReplyTo: null },
                     startedAt,
                   );
                 }}
@@ -602,8 +635,10 @@ export function App() {
           runs={runs}
           directory={directory}
           completion={completion}
+          drafts={state.drafts}
           outbox={state.outbox}
           posted={posted.current}
+          onEdit={edit}
           onSend={send}
           onClose={closeThread}
           paneId={paneId}

@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { composerCopy } from "../copy.ts";
 import type { Channel, Directory, Outgoing, SpaceKey } from "../model.ts";
 import {
   exitFor,
@@ -52,6 +53,7 @@ export function Timeline({
   pending,
   posted,
   located,
+  unsentReplies,
   expandedThread,
   onThread,
   paneId,
@@ -66,6 +68,7 @@ export function Timeline({
   pending: readonly Outgoing[];
   posted: ReadonlySet<string>;
   located: Located | null;
+  unsentReplies: ReadonlySet<string>;
   expandedThread: string | null;
   onThread: (threadId: string, button: HTMLButtonElement) => void;
   paneId: string;
@@ -279,6 +282,20 @@ export function Timeline({
                   arrive={message.at > shownAt && !posted.has(message.id)}
                   located={located?.messageId === message.id}
                 />
+                {unsentReplies.has(thread.id) &&
+                  expandedThread !== thread.id &&
+                  message === thread.parents.at(-1) && (
+                    <button
+                      type="button"
+                      className="text-button reply-failed"
+                      data-thread-id={thread.id}
+                      onClick={(event) =>
+                        onThread(thread.id, event.currentTarget)
+                      }
+                    >
+                      {composerCopy.replyNotSent}
+                    </button>
+                  )}
               </Fragment>
             );
           }

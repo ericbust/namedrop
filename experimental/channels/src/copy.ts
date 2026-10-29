@@ -1,4 +1,4 @@
-import type { ChannelOption } from "./complete.ts";
+import type { DisabledReason } from "./complete.ts";
 import type {
   Activity,
   Attention,
@@ -8,6 +8,7 @@ import type {
   MemberKind,
   OutgoingPhase,
   Participant,
+  SendFailure,
 } from "./model.ts";
 
 export type IconName =
@@ -233,10 +234,7 @@ export function dayBounds(ms: number): { start: number; end: number } {
 export const pendingCopy = {
   sending: { label: "Sending…", icon: "clock" },
   sent: { label: "Sent", icon: "check" },
-} satisfies Record<
-  Exclude<OutgoingPhase["kind"], "failed">,
-  { label: string; icon: IconName }
->;
+} satisfies Record<OutgoingPhase["kind"], { label: string; icon: IconName }>;
 
 const couldNotSend = "Namedrop couldn't send this. Try again.";
 const sessionExpired = () =>
@@ -255,10 +253,7 @@ const sendErrors: ReadonlyMap<number, (message: string) => string> = new Map([
   [403, sessionExpired],
   [413, () => "This message is too long."],
 ]);
-export function sendErrorCopy({
-  status,
-  message,
-}: Extract<OutgoingPhase, { kind: "failed" }>): string {
+export function sendErrorCopy({ status, message }: SendFailure): string {
   return (sendErrors.get(status) ?? (() => couldNotSend))(message);
 }
 
@@ -268,6 +263,8 @@ export const composerCopy = {
   send: "Send",
   everyWorkspace: "every workspace",
   needsRecipient: "Start with @name to choose who gets this.",
+  postNotSent: "A post wasn't sent",
+  replyNotSent: "Reply not sent · Open thread",
 };
 export function channelToken(
   channel: Pick<ChannelSnapshot, "addressableLabel">,
@@ -286,19 +283,30 @@ export function composerPlaceholder(
 ): string {
   return `Message ${channelMention(channel)}`;
 }
+const noOneToReplyTo =
+  "No one in this thread can be mentioned. Start with @name to choose someone.";
+// The "To" label above the box already names the recipients.
 export function replyPlaceholder(recipients: readonly string[]): string {
+  return recipients.length === 0 ? noOneToReplyTo : "Write a reply";
+}
+export function replyLabel(recipients: readonly string[]): string {
   return recipients.length === 0
-    ? "No one in this thread can be mentioned. Start with @name to choose someone."
+    ? noOneToReplyTo
     : `Reply to ${recipients.join(", ")}`;
 }
 export function recipientsLabel(recipients: readonly string[]): string {
   return `To ${recipients.join(", ")}`;
 }
 export const disabledChannelCopy = {
+  "no-label": "This workspace has no label. Name it in Herdr to mention it.",
+  "unusable-label":
+    "This label has no letters or digits Namedrop can use. Rename it in Herdr to mention it.",
+  all: "“all” means every workspace. Rename this one in Herdr to mention it.",
   "shared-label":
     "Two workspaces share this label. Rename one in Herdr to mention it.",
-  "no-label": "This workspace has no label. Name it in Herdr to mention it.",
-} satisfies Record<NonNullable<ChannelOption["disabledReason"]>, string>;
+  inactive:
+    "Namedrop isn't active in this workspace yet, so it can't be mentioned.",
+} satisfies Record<DisabledReason, string>;
 
 export const SHOWN_RECIPIENTS = 2;
 export function overflowCopy(hidden: number): string {

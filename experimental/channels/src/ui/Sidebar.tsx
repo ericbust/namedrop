@@ -1,5 +1,5 @@
 import { type KeyboardEvent, useLayoutEffect, useRef } from "react";
-import { attentionCopy } from "../copy.ts";
+import { attentionCopy, composerCopy } from "../copy.ts";
 import type { Channel, SpaceKey, State } from "../model.ts";
 import { channelSuffix, connectionStatus, sortedChannels } from "../store.ts";
 import { Icon } from "./Icons.tsx";
@@ -34,6 +34,9 @@ export function Sidebar({ state, onSelect }: Props) {
   const needsYou = channels.filter(
     (channel) => channel.health.level === "needs_you",
   );
+  const notSent = new Set<SpaceKey>();
+  for (const draft of state.drafts.values())
+    if (draft.failure !== null) notSent.add(draft.key);
   function move(event: KeyboardEvent<HTMLElement>) {
     const buttons = [
       ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
@@ -167,6 +170,15 @@ export function Sidebar({ state, onSelect }: Props) {
                     >
                       <Icon name="hash" className="hash" />
                       {name(channel)}
+                      {notSent.has(channel.key) && (
+                        <span
+                          className="row-failed"
+                          role="img"
+                          aria-label={composerCopy.postNotSent}
+                        >
+                          <Icon name="alert" className="icon-14" />
+                        </span>
+                      )}
                       {channel.health.level === "needs_you" ? (
                         <span
                           className="dot dot-alert"

@@ -118,17 +118,22 @@ export type Channel = ChannelSnapshot & {
 };
 export type OutgoingPhase =
   | { kind: "sending" }
-  | { kind: "sent"; messageId: string }
-  | { kind: "failed"; status: number; message: string };
+  | { kind: "sent"; messageId: string };
+export type ComposerId = { key: SpaceKey; thread: string | null };
+export type DraftKey = `channel:${SpaceKey}` | `thread:${string}`;
+export type SendFailure = { status: number; message: string };
+export type Draft = ComposerId & {
+  text: string;
+  failure: (SendFailure & { requestId: string }) | null;
+};
 export type Outgoing = {
   requestId: string;
-  key: SpaceKey;
+  composer: ComposerId;
   source: string;
   inReplyTo: string | null;
   at: number;
   phase: OutgoingPhase;
 };
-export type Draft = Pick<Outgoing, "key" | "source" | "inReplyTo">;
 export type Home = {
   name: string;
   token: string | null;
@@ -170,6 +175,7 @@ export type Event =
   | { type: "input" }
   | { type: "disconnected" }
   | { type: "visibility"; visible: boolean }
+  | { type: "edit"; composer: ComposerId; text: string }
   | { type: "send"; outgoing: Omit<Outgoing, "phase"> }
   | { type: "sent"; requestId: string; messageId: string }
   | { type: "send-failed"; requestId: string; status: number; message: string };
@@ -200,4 +206,5 @@ export type State = {
   viewKnown: boolean;
   nextRequestId: number;
   outbox: ReadonlyMap<string, Outgoing>;
+  drafts: ReadonlyMap<DraftKey, Draft>;
 };

@@ -25,7 +25,14 @@ import {
   recipientsLabel,
   sendErrorCopy,
 } from "../copy.ts";
-import type { Outgoing, ReplyTo } from "../model.ts";
+import type {
+  ComposerId,
+  Draft,
+  DraftKey,
+  Outgoing,
+  ReplyTo,
+} from "../model.ts";
+import { draftKey, inFlight } from "../store.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
@@ -119,23 +126,29 @@ function Option({
 
 export function Composer({
   context,
+  composer,
+  drafts,
   outbox,
   placeholder,
+  label,
   to,
+  onEdit,
   onSend,
 }: {
   context: CompletionContext;
+  composer: ComposerId;
+  drafts: ReadonlyMap<DraftKey, Draft>;
   outbox: ReadonlyMap<string, Outgoing>;
   placeholder: string;
+  label: string;
   to: ReplyTo | null;
-  onSend: (source: string, startedAt: number) => string;
+  onEdit: (text: string) => void;
+  onSend: (source: string, startedAt: number) => void;
 }) {
-  const [text, setText] = useState("");
   const [caret, setCaret] = useState(0);
   const [focused, setFocused] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const [highlight, setHighlight] = useState({ token: "", index: 0 });
-  const [attempt, setAttempt] = useState<string | null>(null);
   const [guarded, setGuarded] = useState(false);
   const [width, setWidth] = useState(0);
   const box = useRef<HTMLTextAreaElement>(null);
@@ -145,19 +158,12 @@ export function Composer({
   const typedAt = useRef<number | null>(null);
   const listId = useId();
 
-  const phase = attempt === null ? null : (outbox.get(attempt)?.phase ?? null);
-  const sending = phase?.kind === "sending";
-  const failure = phase?.kind === "failed" ? phase : null;
-  // A post leaves the outbox only after its row arrives, so a missing entry was accepted too.
-  const accepted = attempt !== null && !sending && failure === null;
+  const draft = drafts.get(draftKey(composer));
+  const text = draft?.text ?? "";
+  const failure = draft?.failure ?? null;
+  const sending = inFlight(outbox, composer);
   const named = leadingMention(text);
   const source = postSource(text, to);
-  useLayoutEffect(() => {
-    if (!accepted) return;
-    setText("");
-    setCaret(0);
-    setAttempt(null);
-  }, [accepted]);
 
   const completion = useMemo(
     () => (sending ? null : complete(text, caret, context)),
@@ -226,11 +232,10 @@ export function Composer({
   });
 
   function edit(next: string, at: number) {
-    setText(next);
+    onEdit(next);
     setCaret(at);
     setDismissed(false);
     setGuarded(false);
-    if (failure !== null) setAttempt(null);
   }
   function choose(index: number) {
     const candidate = candidates[index];
@@ -246,7 +251,7 @@ export function Composer({
       setGuarded(true);
       return;
     }
-    setAttempt(onSend(source, startedAt));
+    onSend(source, startedAt);
   }
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing) return;
@@ -319,7 +324,7 @@ export function Composer({
           ref={box}
           rows={1}
           role="combobox"
-          aria-label={placeholder}
+          aria-label={label}
           aria-autocomplete="list"
           aria-expanded={open}
           aria-controls={open ? listId : undefined}

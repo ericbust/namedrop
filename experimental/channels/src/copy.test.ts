@@ -355,11 +355,7 @@ test("send errors show the server's words as a sentence for 400, 404 and 409 and
     [0, "", generic],
   ];
   for (const [status, message, shown] of cases)
-    assert.equal(
-      sendErrorCopy({ kind: "failed", status, message }),
-      shown,
-      `status ${status}`,
-    );
+    assert.equal(sendErrorCopy({ status, message }), shown, `status ${status}`);
 });
 
 test("a queued leg in a paused channel reads Held while paused, other stages keep their words", () => {

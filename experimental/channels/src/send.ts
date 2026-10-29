@@ -1,10 +1,15 @@
-import type { Draft, OutgoingPhase } from "./model.ts";
+import type { SendFailure, SpaceKey } from "./model.ts";
 import { parseReceipt, parseRefusal, parseSessionToken } from "./wire.ts";
 
-export type Post = Draft & { requestId: string };
+export type Post = {
+  requestId: string;
+  key: SpaceKey;
+  source: string;
+  inReplyTo: string | null;
+};
 export type PostResult =
   | { kind: "sent"; messageId: string }
-  | Extract<OutgoingPhase, { kind: "failed" }>;
+  | ({ kind: "failed" } & SendFailure);
 
 export function createPoster(fetcher: typeof fetch = fetch) {
   let session: Promise<string | null> | null = null;

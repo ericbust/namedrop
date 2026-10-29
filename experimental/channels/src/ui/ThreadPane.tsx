@@ -1,12 +1,20 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CompletionContext } from "../complete.ts";
-import { replyPlaceholder } from "../copy.ts";
-import type { Channel, Directory, Draft, Outgoing } from "../model.ts";
+import { replyLabel, replyPlaceholder } from "../copy.ts";
+import type {
+  Channel,
+  ComposerId,
+  Directory,
+  Draft,
+  DraftKey,
+  Outgoing,
+} from "../model.ts";
 import {
   exitFor,
   type RunIndex,
   recipients,
   replyRecipients,
+  sameComposer,
   type ThreadGroup,
 } from "../store.ts";
 import { Composer } from "./Composer.tsx";
@@ -19,8 +27,10 @@ export function ThreadPane({
   runs,
   directory,
   completion,
+  drafts,
   outbox,
   posted,
+  onEdit,
   onSend,
   onClose,
   paneId,
@@ -30,9 +40,14 @@ export function ThreadPane({
   runs: RunIndex;
   directory: Directory;
   completion: CompletionContext | null;
+  drafts: ReadonlyMap<DraftKey, Draft>;
   outbox: ReadonlyMap<string, Outgoing>;
   posted: ReadonlySet<string>;
-  onSend: (draft: Draft, startedAt: number) => string;
+  onEdit: (composer: ComposerId, text: string) => void;
+  onSend: (
+    outgoing: Pick<Outgoing, "composer" | "source" | "inReplyTo">,
+    startedAt: number,
+  ) => void;
   onClose: () => void;
   paneId: string;
 }) {
@@ -44,18 +59,17 @@ export function ThreadPane({
     [thread, directory],
   );
   const latest = thread.replies.at(-1) ?? thread.parents.at(-1);
-  const pending = useMemo(() => {
-    const ids = new Set(
-      [...thread.parents, ...thread.replies].map((message) => message.id),
-    );
-    return [...outbox.values()].filter(
-      (entry) =>
-        entry.key === channel.key &&
-        entry.inReplyTo !== null &&
-        ids.has(entry.inReplyTo) &&
-        entry.phase.kind !== "failed",
-    );
-  }, [outbox, thread, channel.key]);
+  const composer = useMemo<ComposerId>(
+    () => ({ key: channel.key, thread: thread.id }),
+    [channel.key, thread.id],
+  );
+  const pending = useMemo(
+    () =>
+      [...outbox.values()].filter((entry) =>
+        sameComposer(entry.composer, composer),
+      ),
+    [outbox, composer],
+  );
   const shownPending = useRef(pending);
   useLayoutEffect(() => {
     const earlier = new Set(
@@ -149,14 +163,15 @@ export function ThreadPane({
       {completion && latest && (
         <Composer
           context={completion}
+          composer={composer}
+          drafts={drafts}
           outbox={outbox}
           placeholder={replyPlaceholder(to?.names ?? [])}
+          label={replyLabel(to?.names ?? [])}
           to={to}
+          onEdit={(text) => onEdit(composer, text)}
           onSend={(source, startedAt) =>
-            onSend(
-              { key: channel.key, source, inReplyTo: latest.id },
-              startedAt,
-            )
+            onSend({ composer, source, inReplyTo: latest.id }, startedAt)
           }
         />
       )}

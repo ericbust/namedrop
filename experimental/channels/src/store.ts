@@ -3,8 +3,9 @@ import type {
   AddressId,
   Channel,
   ChannelSnapshot,
+  ComposerId,
   Directory,
-  Draft,
+  DraftKey,
   Event,
   HistoryRequest,
   Home,
@@ -43,6 +44,7 @@ export function initialState({
     viewKnown: false,
     nextRequestId: 1,
     outbox: new Map(),
+    drafts: new Map(),
   };
 }
 export const HISTORY_CAP = 600;
@@ -668,33 +670,72 @@ function step(state: State, event: Event): State {
       return state.visible === event.visible
         ? state
         : { ...state, visible: event.visible };
+    case "edit": {
+      const at = draftKey(event.composer);
+      const known = state.drafts.get(at);
+      if (
+        event.text === ""
+          ? known === undefined
+          : known?.text === event.text && known.failure === null
+      )
+        return state;
+      const drafts = new Map(state.drafts);
+      if (event.text === "") drafts.delete(at);
+      else
+        drafts.set(at, { ...event.composer, text: event.text, failure: null });
+      return { ...state, drafts };
+    }
     case "send": {
       const { outgoing } = event;
-      const known = state.outbox.get(outgoing.requestId);
-      if (known !== undefined && known.phase.kind !== "failed") return state;
+      if (state.outbox.has(outgoing.requestId)) return state;
       const outbox = new Map(state.outbox);
       outbox.set(outgoing.requestId, {
         ...outgoing,
         phase: { kind: "sending" },
       });
-      return { ...state, outbox };
+      const at = draftKey(outgoing.composer);
+      const draft = state.drafts.get(at);
+      return {
+        ...state,
+        outbox,
+        drafts: draft?.failure
+          ? new Map(state.drafts).set(at, { ...draft, failure: null })
+          : state.drafts,
+      };
     }
-    case "sent":
-    case "send-failed": {
+    case "sent": {
       const known = state.outbox.get(event.requestId);
       if (known?.phase.kind !== "sending") return state;
       const outbox = new Map(state.outbox);
       outbox.set(event.requestId, {
         ...known,
-        phase:
-          event.type === "sent"
-            ? { kind: "sent", messageId: event.messageId }
-            : { kind: "failed", status: event.status, message: event.message },
+        phase: { kind: "sent", messageId: event.messageId },
       });
+      const drafts = new Map(state.drafts);
+      drafts.delete(draftKey(known.composer));
       return {
         ...state,
         outbox: settleOutbox(outbox, [...state.channels.values()]),
+        drafts,
       };
+    }
+    case "send-failed": {
+      const known = state.outbox.get(event.requestId);
+      if (known?.phase.kind !== "sending") return state;
+      const outbox = new Map(state.outbox);
+      outbox.delete(event.requestId);
+      const at = draftKey(known.composer);
+      const drafts = new Map(state.drafts);
+      drafts.set(at, {
+        ...known.composer,
+        text: state.drafts.get(at)?.text ?? known.source,
+        failure: {
+          requestId: event.requestId,
+          status: event.status,
+          message: event.message,
+        },
+      });
+      return { ...state, outbox, drafts };
     }
     default: {
       const exhaustive: never = event;
@@ -720,19 +761,23 @@ function settleOutbox(
   }
   return settled ?? outbox;
 }
-function sameDraft(a: Draft, b: Draft): boolean {
-  return (
-    a.key === b.key && a.source === b.source && a.inReplyTo === b.inReplyTo
-  );
+export function draftKey({ key, thread }: ComposerId): DraftKey {
+  return thread === null ? `channel:${key}` : `thread:${thread}`;
 }
-export function retryId(
+export function sameComposer(a: ComposerId, b: ComposerId): boolean {
+  return a.key === b.key && a.thread === b.thread;
+}
+export function inFlight(
   outbox: ReadonlyMap<string, Outgoing>,
-  draft: Draft,
-): string | null {
+  composer: ComposerId,
+): boolean {
   for (const entry of outbox.values())
-    if (entry.phase.kind === "failed" && sameDraft(entry, draft))
-      return entry.requestId;
-  return null;
+    if (
+      entry.phase.kind === "sending" &&
+      sameComposer(entry.composer, composer)
+    )
+      return true;
+  return false;
 }
 export function sortedChannels(state: {
   channels: ReadonlyMap<SpaceKey, Channel>;

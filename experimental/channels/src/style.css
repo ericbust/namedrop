@@ -1479,3 +1479,14 @@ code.inline {
     background-color: var(--bg-selected);
   }
 }
+.row-failed {
+  display: inline-flex;
+  flex: none;
+  color: var(--failed-text);
+}
+.reply-failed {
+  display: block;
+  margin: 2px 0 0 calc(var(--avatar) + var(--space-3));
+  font-size: var(--text-xs);
+  color: var(--failed-text);
+}
