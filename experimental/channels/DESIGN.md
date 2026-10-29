@@ -536,7 +536,9 @@ workspaces would reach agents who are not in the thread.
   a soft hyphen. A shared name therefore counts only when every labelled
   channel showing it lacks a token. A channel whose name is its workspace id
   has no label, so it never makes another channel's name shared. Every channel
-  showing the name must also be active, from the frame's `space.state`. When
+  showing the name must also be active: its frame's `space.state` is `active`
+  or `paused`, since the server counts a paused workspace as active. A frame
+  without a state doesn't count as active. When
   one of them isn't, both still lose their tokens, but renaming won't make the
   inactive one mentionable, so it gets the general line. A name that folds to
   "all" is reserved, so two workspaces labelled "all" get the general line too,
@@ -608,8 +610,8 @@ The one view that spans every channel. It answers "who is busy, and on what?"
     2. A member waiting on others: "Waiting on @codex". Names follow
        [Recipients and envoys](#recipients-and-envoys), with at most two names
        and then "+N".
-    3. The oldest item in its mailbox: "From @lead:", then the preview in
-       quotation marks.
+    3. The oldest item in its mailbox: "From @lead:", or "From you:" when the
+       operator sent it, then the preview in quotation marks.
     4. Nothing. Line 1 then sits in the row's vertical center.
   - At the right of line 2, "since 10:38 PM" in 12px muted tabular numerals: when
     the oldest mailbox item arrived. It is absolute, so nothing ticks.
@@ -673,7 +675,7 @@ reads only when it opens and when the reader asks: never on a timer.
   | First read, over 2 s     | A second line under it: "Busy panes can take a few seconds."                              |
   | Refresh                  | The earlier text stays. **Refresh** is disabled. After 400 ms the stamp reads "Reading…". |
   | Read done                | The new text replaces the old, and the stamp reads "Read at 10:43 PM".                    |
-  | Empty screen             | "The screen is empty." in 13px muted.                                                     |
+  | Empty screen             | "The screen is empty." in 13px muted, for text that is empty or only whitespace.          |
 
   One read runs at a time. **Refresh** is disabled while it runs, so one click
   makes one request. A new drawer target cancels the earlier read.
