@@ -408,6 +408,74 @@ fn strips_terminal_sequences_and_invisible_characters_before_secret_redaction() 
 }
 
 #[test]
+fn peek_redacts_pem_joiners_next_to_spaces() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let mut failures = Vec::new();
+    for joiner in ['\u{200d}', '\u{2060}', '\u{200c}', '\u{fe0f}'] {
+        for header in [
+            format!("-----BEGIN{joiner} PRIVATE KEY-----"),
+            format!("-----BEGIN {joiner}RSA PRIVATE KEY-----"),
+            format!("-----BEGIN RSA PRIVATE{joiner} KEY-----"),
+            format!("-----BEGIN RSA PRIVATE {joiner}KEY-----"),
+        ] {
+            let raw = format!(
+                "👩‍💻 before\n{header}\nprivate-body\n-----END RSA PRIVATE KEY-----\nمی‌خواهم after"
+            );
+            configure(&f, json!({"stdout": raw}));
+            let response = server.get(&path("socket-a", "w1", "lead"));
+            assert_eq!(response.status, 200);
+            if response.body != "👩‍💻 before\n[REDACTED PRIVATE KEY]\nمی‌خواهم after"
+            {
+                failures.push((raw, response.body));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Peek PEM joiner bypasses: {failures:#?}"
+    );
+}
+
+#[test]
+fn peek_redacts_ansi_inside_tokens_and_pem_headers() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    for (raw, expected) in [
+        (
+            "s\u{1b}[31mk-abcdefghijklmnopqrstuvwxyz123456",
+            "[REDACTED TOKEN]",
+        ),
+        (
+            "ghp_abcdefgh\u{1b}[32mijklmnopqrstuvwxyz123456",
+            "[REDACTED TOKEN]",
+        ),
+        ("AKIAABCD\u{9b}31mEFGHIJKLMNOP", "[REDACTED AWS ACCESS KEY]"),
+        (
+            "-----BEGIN\u{1b}[31m PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----",
+            "[REDACTED PRIVATE KEY]",
+        ),
+    ] {
+        configure(&f, json!({"stdout": raw}));
+        let response = server.get(&path("socket-a", "w1", "lead"));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, expected, "{raw:?}");
+    }
+}
+
+#[test]
+fn peek_preserves_nonsecret_unicode_and_coloured_cli_output() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let expected = "👨‍👩‍👧‍👦 🇺🇸 🏳️‍🌈\nمی‌خواهم\n❤️ ✈︎ ✈️\nReady\t2 passed";
+    let raw = "👨‍👩‍👧‍👦 🇺🇸 🏳️‍🌈\nمی‌خواهم\n❤️ ✈︎ ✈️\n\u{1b}[32mReady\u{1b}[0m\t2 passed";
+    configure(&f, json!({"stdout": raw}));
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, expected);
+}
+
+#[test]
 fn screen_preserves_legitimate_unicode_beside_redacted_secrets() {
     let f = Fixture::new();
     let server = Server::start(&f);
