@@ -936,7 +936,7 @@ mod http {
     use serde_json::Value;
     use std::{
         fs,
-        io::{Read, Write},
+        io::{self, BufRead, BufReader, Read, Write},
         net::{Shutdown, TcpStream},
         os::unix::fs::PermissionsExt,
         path::Path,
@@ -957,6 +957,99 @@ mod http {
         status: u16,
         head: String,
         body: String,
+    }
+
+    fn assert_refusal_response(
+        reader: impl Read,
+        expected_status: &str,
+        expected_body: &str,
+    ) -> io::Result<()> {
+        let mut reader = BufReader::new(reader);
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("incomplete refusal headers: {head:?}"),
+                ));
+            }
+            if line == "\r\n" {
+                break;
+            }
+            head.push_str(&line);
+        }
+        assert_eq!(head.lines().next(), Some(expected_status), "{head}");
+        for expected in [
+            "Content-Type: text/plain; charset=utf-8".to_owned(),
+            "Connection: close".to_owned(),
+            format!("Content-Length: {}", expected_body.len()),
+        ] {
+            assert!(head.lines().any(|line| line == expected), "{head}");
+        }
+        let mut body = vec![0; expected_body.len()];
+        reader.read_exact(&mut body).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("incomplete refusal body for {expected_status}: {error}"),
+            )
+        })?;
+        assert_eq!(body, expected_body.as_bytes());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refusal_response_is_complete_before_connection_reset() {
+        use std::{net::TcpListener, os::fd::AsRawFd};
+
+        let response = b"HTTP/1.1 413 Payload Too Large\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 27\r\nConnection: close\r\n\r\nRequest body is too large.\n";
+        for length in [response.len(), response.len() - 1, 0] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let mut stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.write_all(&response[..length]).unwrap();
+            let linger = libc::linger {
+                l_onoff: 1,
+                l_linger: 0,
+            };
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        peer.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_LINGER,
+                        (&linger as *const libc::linger).cast(),
+                        std::mem::size_of_val(&linger) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+            drop(peer);
+            let result = assert_refusal_response(
+                &mut stream,
+                "HTTP/1.1 413 Payload Too Large",
+                "Request body is too large.\n",
+            );
+            if length == response.len() {
+                result.expect("read the complete refusal before the reset");
+                let error = stream.read(&mut [0]).expect_err("the peer sent a reset");
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            } else {
+                let error =
+                    result.expect_err("a reset must not hide a missing or truncated refusal");
+                assert!(
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof
+                    ),
+                    "{error}"
+                );
+            }
+        }
     }
 
     impl Server {
@@ -1286,10 +1379,22 @@ else:
         let server = Server::start(&f, None);
         let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
         let body = "x".repeat(1024 * 1024);
-        for (extra, expected) in [
-            ("", 413),
-            ("Origin: http://foreign.example\r\n", 403),
-            ("Content-Length: 1\r\n", 400),
+        for (extra, expected_status, expected_body) in [
+            (
+                "",
+                "HTTP/1.1 413 Payload Too Large",
+                "Request body is too large.\n",
+            ),
+            (
+                "Origin: http://foreign.example\r\n",
+                "HTTP/1.1 403 Forbidden",
+                "Forbidden.\n",
+            ),
+            (
+                "Content-Length: 1\r\n",
+                "HTTP/1.1 400 Bad Request",
+                "Bad request.\n",
+            ),
         ] {
             let request = format!(
                 "POST /w/{}/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}\r\n{body}",
@@ -1299,24 +1404,118 @@ else:
                 server.csrf,
                 body.len()
             );
-            let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+            let stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
             stream
-                .write_all(request.as_bytes())
-                .expect("send the entire large request");
-            let mut response = Vec::new();
-            stream
-                .read_to_end(&mut response)
-                .expect("read refusal without connection reset");
-            let response = String::from_utf8(response).unwrap();
-            assert!(
-                response.starts_with(&format!("HTTP/1.1 {expected} ")),
-                "{response}"
-            );
-            assert!(response.contains("Connection: close\r\n"));
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let write_result = thread::scope(|scope| {
+                let write = scope.spawn(move || writer.write_all(request.as_bytes()));
+                assert_refusal_response(stream, expected_status, expected_body)
+                    .expect("read the complete refusal response");
+                write.join().unwrap()
+            });
+            if let Err(error) = write_result {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                    ),
+                    "{error}"
+                );
+            }
         }
+        assert_eq!(f.message_rows(), (0, 0));
+    }
+
+    #[test]
+    fn early_refusal_stops_draining_a_body_larger_than_two_mib() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let body = vec![b'x'; 16 * 1024 * 1024];
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "POST /w/{}/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            key.as_str(),
+            server.port,
+            server.cookie,
+            server.csrf,
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 413 "), "{response}");
+        let error = stream
+            .write_all(&body)
+            .expect_err("the server must close instead of draining the entire oversized body");
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ),
+            "the drain must stop rather than wait for the write timeout: {error}"
+        );
+        assert_eq!(f.message_rows(), (0, 0));
+    }
+
+    #[test]
+    fn early_refusal_stops_draining_a_trickling_body() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "POST /w/{}/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: 1048576\r\n\r\n",
+            key.as_str(),
+            server.port,
+            server.cookie,
+            server.csrf
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 413 "), "{response}");
+        let started = Instant::now();
+        let error = loop {
+            match stream.write_all(b"x") {
+                Ok(()) => {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(1),
+                        "the server kept draining a trickling body past its 250 ms deadline"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ),
+            "the drain must close the connection: {error}"
+        );
         assert_eq!(f.message_rows(), (0, 0));
     }
 
@@ -2215,5 +2414,129 @@ else:
                 .status,
             403
         );
+    }
+}
+
+#[test]
+fn tracked_attention_offers_a_new_message_without_operator_tracking_authority() {
+    use namedrop::{
+        AttentionItemDraft, AttentionItemId, AttentionSourceKind, MessageId,
+        execute_handoff_operation,
+    };
+
+    for (workspace, pane, mention) in [
+        ("w1", "pane-1-planner", "@planner"),
+        ("w2", "pane-2-tester", "#ws2 @tester"),
+    ] {
+        let f = Fixture::new();
+        f.register_all();
+        let lead = f.runtime("w1", "pane-1-lead");
+        let coordination = execute_handoff_operation(
+            "handoff.begin",
+            json!({"request_id":"begin", "deliverable":"Review the result"}),
+            &lead,
+        )
+        .unwrap()["coordination_id"]
+            .clone();
+        let assignment = f
+            .try_send(
+                "w1",
+                "pane-1-lead",
+                json!({
+                    "request_id":"assignment", "source":format!("{mention} Review the result"),
+                    "author_kind":"agent_session", "coordination_id":coordination,
+                }),
+            )
+            .unwrap();
+        f.drain(workspace);
+        let envelope = f.herdr.last_envelope(pane);
+        let mut store = StateStore::open(&f.state).unwrap();
+        let attention = |store: &mut StateStore, space: &str, thread: &str| {
+            let ns = StateNamespace::for_space("socket-a", space);
+            store
+                .transaction(|tx| {
+                    tx.open_attention_item(
+                        &ns,
+                        &AttentionItemDraft {
+                            id: AttentionItemId::new("tracked-anchor"),
+                            source_kind: AttentionSourceKind::AutomaticReplyLimit,
+                            source_id: thread.to_owned(),
+                            summary: "Tracked thread needs a response".into(),
+                        },
+                        &MutationAttribution::new(ActorKind::Human, "test", 42),
+                    )
+                })
+                .unwrap();
+            let rows = store.dashboard_rows(&ns).unwrap();
+            serde_json::to_value(namedrop::dashboard::snapshot::build(&rows, None, 42)).unwrap()["attention"]
+                .as_array().unwrap().iter().find(|item| item["attention_id"] == "tracked-anchor").unwrap().clone()
+        };
+        for (space, thread, message) in [
+            ("w1", &assignment["thread_id"], &assignment["message_id"]),
+            (
+                workspace,
+                &envelope["control"]["thread_id"],
+                &envelope["control"]["message_id"],
+            ),
+        ] {
+            let card = attention(&mut store, space, thread.as_str().unwrap());
+            assert_eq!(card["conversation"]["message_id"], *message);
+            assert_eq!(card["response"]["kind"], "message", "request in {space}");
+        }
+        let reply = execute_message_operation("reply", json!({
+            "request_id":"completed", "source":"@lead Reviewed", "author_kind":"agent_session",
+            "in_reply_to":envelope["control"]["message_id"], "attempt_id":envelope["control"]["attempt_id"],
+            "work_outcome":"completed",
+        }), &f.runtime(workspace, pane)).unwrap();
+        for space in ["w1", workspace] {
+            let (thread, message): (String, String) = f.db().query_row(
+                "SELECT m.thread_id,m.message_id FROM collaboration_messages m
+                 WHERE m.session_socket_id='socket-a' AND m.worktree_id=?1
+                   AND (m.message_id=?2 OR EXISTS (
+                     SELECT 1 FROM bridged_messages copy WHERE copy.session_socket_id=m.session_socket_id
+                       AND copy.worktree_id=m.worktree_id AND copy.message_id=m.message_id
+                       AND copy.origin_space_id=?3 AND copy.origin_message_id=?2))",
+                rusqlite::params![space,reply["message_id"].as_str().unwrap(),workspace],
+                |row| Ok((row.get(0)?,row.get(1)?)),
+            ).unwrap();
+            let card = attention(&mut store, space, &thread);
+            assert_eq!(card["conversation"]["message_id"], message);
+            assert_eq!(card["response"]["kind"], "message", "reply in {space}");
+        }
+        let mut operator = f.runtime("w1", "unused");
+        operator.current_pane_id = None;
+        let before = f.message_rows();
+        let error = send_operator_message(
+            "tracked-reply",
+            "@lead Decide",
+            Some(&MessageId::new(assignment["message_id"].as_str().unwrap())),
+            &operator,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("tracked work requires an agent-authored message")
+        );
+        assert_eq!(f.message_rows(), before);
+        let source = format!(
+            "@lead Review coordination {}",
+            coordination.as_str().unwrap()
+        );
+        let sent = send_operator_message("safe-response", &source, None, &operator).unwrap();
+        let stored: (String, Option<String>, String) = f.db().query_row(
+            "SELECT author_kind,in_reply_to,authored_source FROM collaboration_messages WHERE worktree_id='w1' AND message_id=?1",
+            [sent["message_id"].as_str().unwrap()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(stored, ("human".to_owned(), None, source));
+        let results = execute_handoff_operation(
+            "handoff.results",
+            json!({"coordination_id":coordination}),
+            &lead,
+        )
+        .unwrap();
+        assert_eq!(results["outcome"], "open");
+        assert_eq!(results["assignments"][0]["work_outcome"], "completed");
+        assert!(reply["message_id"].is_string());
     }
 }

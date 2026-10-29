@@ -6,8 +6,9 @@ import {
   lineText,
 } from "../activity.ts";
 import { activityCopy, presenceWord } from "../copy.ts";
-import type { Home, SpaceKey } from "../model.ts";
+import type { Channel, Home, SpaceKey } from "../model.ts";
 import type { PeekKey } from "../peek.ts";
+import { AttentionActions, type FocusAttention } from "./AttentionActions.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 import { PeekControl } from "./PeekContext.tsx";
@@ -17,14 +18,19 @@ const Row = memo(function Row({
   homes,
   open,
   onJump,
+  channels,
+  onFocus,
 }: {
   row: ActivityRow;
   homes: ReadonlyMap<string, Home>;
   open: boolean;
   onJump: (key: SpaceKey) => void;
+  channels: ReadonlyMap<SpaceKey, Channel>;
+  onFocus: FocusAttention;
 }) {
   const { member, line, channel } = row;
   const text = lineText(line, homes);
+  const source = channels.get(channel.key);
   const held = line.kind === "mail" && line.held;
   return (
     <li className="activity-item">
@@ -72,6 +78,13 @@ const Row = memo(function Row({
       >
         #{channel.displayName}
       </button>
+      {line.kind === "attention" && source !== undefined && (
+        <AttentionActions
+          item={line.attention}
+          channel={source}
+          onFocus={onFocus}
+        />
+      )}
     </li>
   );
 });
@@ -81,11 +94,15 @@ export function ActivityView({
   homes,
   open,
   onJump,
+  channels,
+  onFocus,
 }: {
   list: ActivityList;
   homes: ReadonlyMap<string, Home>;
   open: PeekKey | null;
   onJump: (key: SpaceKey) => void;
+  channels: ReadonlyMap<SpaceKey, Channel>;
+  onFocus: FocusAttention;
 }) {
   const summary = activitySummary(list);
   return (
@@ -122,6 +139,8 @@ export function ActivityView({
                     homes={homes}
                     open={row.key === open}
                     onJump={onJump}
+                    channels={channels}
+                    onFocus={onFocus}
                   />
                 ))}
               </ul>
