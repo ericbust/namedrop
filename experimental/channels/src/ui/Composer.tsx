@@ -131,6 +131,7 @@ export function Composer({
   const [dismissed, setDismissed] = useState(false);
   const [highlight, setHighlight] = useState({ token: "", index: 0 });
   const [attempt, setAttempt] = useState<string | null>(null);
+  const [guarded, setGuarded] = useState(false);
   const [width, setWidth] = useState(0);
   const box = useRef<HTMLTextAreaElement>(null);
   const list = useRef<HTMLDivElement>(null);
@@ -223,6 +224,7 @@ export function Composer({
     setText(next);
     setCaret(at);
     setDismissed(false);
+    setGuarded(false);
     if (failure !== null) setAttempt(null);
   }
   function choose(index: number) {
@@ -234,7 +236,11 @@ export function Composer({
     edit(next.text, next.caret);
   }
   function submit(startedAt: number) {
-    if (sending || source === null) return;
+    if (sending) return;
+    if (source === null) {
+      setGuarded(true);
+      return;
+    }
     setAttempt(onSend(source, startedAt));
   }
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -343,7 +349,7 @@ export function Composer({
           </p>
         ) : sending ? (
           <p>{composerCopy.sending}</p>
-        ) : source === null && text.trim() !== "" ? (
+        ) : guarded && source === null && text.trim() !== "" ? (
           <p className="composer-guard">{composerCopy.needsRecipient}</p>
         ) : focused ? (
           <p>{composerCopy.hint}</p>
