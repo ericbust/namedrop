@@ -597,7 +597,8 @@ The one view that spans every channel. It answers "who is busy, and on what?"
   strip, Needs-you banner, or composer.
 - **Groups**, in this order: Needs you (`blocked`), Waiting, Working. Each group
   starts with a label in the sidebar's section-label style, with its count in
-  tabular numerals. An empty group is hidden. Idle, offline, retired, and
+  tabular numerals. An empty group is hidden. Groups are at most 880px wide, so
+  the channel and time stay near the name on a wide window. Idle, offline, retired, and
   unknown members never appear, and neither does the operator.
 - **Rows**, 56px, in the member-chip vocabulary at row size. A 32px avatar with
   its presence badge, then two lines:
@@ -612,7 +613,8 @@ The one view that spans every channel. It answers "who is busy, and on what?"
        and then "+N".
     3. The oldest item in its mailbox: "From @lead:", or "From you:" when the
        operator sent it, then the preview in quotation marks.
-    4. Nothing. Line 1 then sits in the row's vertical center.
+    4. Nothing. Line 1 and the channel button then sit in the row's vertical
+       center.
   - At the right of line 2, "since 10:38 PM" in 12px muted tabular numerals: when
     the oldest mailbox item arrived. It is absolute, so nothing ticks.
   - When that oldest item is held, or is queued in a paused channel, line 2 ends
@@ -653,15 +655,16 @@ reads only when it opens and when the reader asks: never on a timer.
 - **Header**, 60px, two lines. Line 1: a 20px avatar with its presence badge,
   the alias at 15px 600, and the presence word in 12px muted. Line 2, 12px
   muted: "in #alpha · Read at 10:42 PM". The stamp updates with every read and
-  is announced politely. At the right: **Refresh**, a 32px button with a drawn
+  is announced politely, including "Reading…". At the right: **Refresh**, a 32px button with a drawn
   circular-arrow icon and the word, then the 32px close button "Close screen".
 - **Text**: a `pre` on `--bg-raised`, `--font-mono` at 12.5px with 1.5 line
-  height, 12px 16px padding. It shows the text as text, never as markup. Long
-  lines wrap and may break anywhere, so the drawer never scrolls sideways. It
-  scrolls up and down, is focusable with the name "Screen text", and gets focus
-  when the drawer opens. When the text starts with the server's "[Earlier
-  screen text omitted]" line, that line shows as a 12px muted UI-font line,
-  "Earlier lines not shown", and is not part of the `pre`.
+  height, 12px 16px padding. It shows the text as text, never as markup. Each
+  line is its own block with a 2ch hanging indent, so a long line wraps under
+  its own start and the drawer never scrolls sideways. The text sits in a
+  scrolling region named "Screen text" that is focusable and gets focus when the
+  drawer opens. When the text starts with the server's "[Earlier screen text
+  omitted]" line, that line shows as a 12px muted UI-font line, "Earlier lines
+  not shown", at the top of the region, above the `pre`, and scrolls with it.
 - **Newest lines in view**: on open and after the first read, the text is
   scrolled to the bottom. After a refresh, it stays at the bottom if the reader
   was there, and otherwise keeps their place.
@@ -734,7 +737,8 @@ Motion shows state and nothing else.
   activity list in All activity.
 - Every presence dot, receipt icon, and avatar has a text equivalent. Decorative
   icons are `aria-hidden`.
-- Hit targets are at least 32 by 32px.
+- Hit targets are at least 32 by 32px. Names in a message header are the one
+  exception: they are inline text buttons, like links in a sentence.
 - The layout holds at 200 percent zoom and at 1024 by 700 without horizontal
   scroll.
 - Theme the browser surfaces: `::selection` uses `--bg-selected`, the scrollbar
