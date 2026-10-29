@@ -347,6 +347,20 @@ follows the hint. It scrolls the message to the middle of the timeline, tints it
 with `--bg-selected` for 1.5 seconds, and opens its thread. When that message is
 not loaded, the button is absent.
 
+| `source`                                   | Title when the item names its agent                                          |
+| ------------------------------------------ | ---------------------------------------------------------------------------- |
+| `agent_disposition`, `delivery_attempt`    | "@codex didn't answer a request", hint "It ended its turn without replying." |
+| `agent_status`, summary over 90 characters | "@claude needs you"                                                          |
+| `automatic_reply_limit`                    | "@codex hit the reply limit"                                                 |
+| `coordination`                             | "@claude's coordination needs a decision"                                    |
+| `context_grant`                            | "@codex is asking for context"                                               |
+| `pane_binding`                             | "@codex's pane changed"                                                      |
+| `integration_registration`                 | "@codex isn't set up yet"                                                    |
+| `unknown`                                  | "@codex needs you"                                                           |
+
+A short `agent_status` summary already names the agent, so it stays as the
+server wrote it. Hints keep their wording from the first table.
+
 ### Thread pane
 
 400px wide, with a 1px `--line` left border. The header is 52px: "Thread" at 15px
