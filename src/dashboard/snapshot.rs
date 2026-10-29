@@ -153,7 +153,7 @@ pub enum ParticipantKind {
 
 /// Mostly first-match top to bottom, except that acknowledged work in
 /// progress outranks a held delivery (which the tray and the attention
-/// ribbon already show); a blocked assignment still wins.
+/// ribbon already show); a blocked assignment or agent status still wins.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Activity {
@@ -305,9 +305,17 @@ pub struct TerminalRun {
 
 #[derive(Debug, Serialize)]
 pub struct AttentionCard {
-    pub source_kind: crate::AttentionSourceKind,
+    pub source_kind: AttentionSourceKind,
     pub summary: SafeText,
     pub opened_at_ms: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttentionSourceKind {
+    AgentStatus,
+    #[serde(untagged)]
+    Stored(crate::AttentionSourceKind),
 }
 
 /// One entry of the space index at `/`: labels only, never content.
@@ -365,6 +373,25 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .iter()
         .filter(|p| p.activity == Activity::Working)
         .count();
+    let mut attention: Vec<AttentionCard> = rows
+        .attention
+        .iter()
+        .map(|item| AttentionCard {
+            source_kind: AttentionSourceKind::Stored(item.source_kind),
+            summary: SafeText::from_untrusted(&item.summary, SHORT_CHARS),
+            opened_at_ms: i64::try_from(item.opened_at_ms).unwrap_or(i64::MAX),
+        })
+        .collect();
+    attention.extend(rows.addresses.iter().filter_map(|address| {
+        blocked_on_user_at(address).map(|opened_at_ms| AttentionCard {
+            source_kind: AttentionSourceKind::AgentStatus,
+            summary: SafeText::from_untrusted(
+                &format!("@{} is waiting on an approval or question.", address.alias),
+                SHORT_CHARS,
+            ),
+            opened_at_ms,
+        })
+    }));
     DashboardSnapshot {
         wire: WIRE_VERSION,
         generated_at_ms: now_ms,
@@ -374,7 +401,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             label: SafeText::optional(label, SHORT_CHARS),
             state,
         },
-        health: health(state, rows.attention.len(), in_flight, working),
+        health: health(state, attention.len(), in_flight, working),
         participants,
         threads: threads(rows, &messages),
         messages,
@@ -413,15 +440,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
                 exit_code: run.exit_code,
             })
             .collect(),
-        attention: rows
-            .attention
-            .iter()
-            .map(|item| AttentionCard {
-                source_kind: item.source_kind,
-                summary: SafeText::from_untrusted(&item.summary, SHORT_CHARS),
-                opened_at_ms: i64::try_from(item.opened_at_ms).unwrap_or(i64::MAX),
-            })
-            .collect(),
+        attention,
     }
 }
 
@@ -630,6 +649,19 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
     lanes
 }
 
+fn blocked_on_user_at(address: &rows::AddressRow) -> Option<i64> {
+    if address.pane_type == PaneType::Agent
+        && !address.retired
+        && address.bound
+        && address.occupied
+        && address.agent_status.as_deref() == Some("blocked")
+    {
+        address.observed_at_ms
+    } else {
+        None
+    }
+}
+
 fn activity(
     address: &rows::AddressRow,
     inbound: &[&rows::MailboxRow],
@@ -641,7 +673,7 @@ fn activity(
         Activity::Retired
     } else if !address.bound || unoccupied {
         Activity::Offline
-    } else if blocked_assignment {
+    } else if blocked_assignment || blocked_on_user_at(address).is_some() {
         Activity::Blocked
     } else if address.agent_status.as_deref() == Some("working")
         || inbound

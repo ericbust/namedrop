@@ -145,6 +145,10 @@ The first `namedrop dashboard` call starts one background server for your state 
 
 The server reads state read-only through one connection, a short transaction at a time, so it never holds up a write. It sends a new view only after a write changes what the page shows. The page shows the newest 150 messages of the workspace. Message bodies are capped at 2,000 characters, with secrets redacted and control characters removed. The page never reads shared context payloads, evidence or terminal output. Terminal runs show only the command and its exit code.
 
+An online agent waiting on an approval or question in Herdr shows as blocked and adds an attention entry. The workspace needs you until that agent leaves the dialog. Each blocked agent has its own entry, alongside any delivery or handoff warnings. These entries come from the current agent status and clear on the next view after that status changes. Retired and offline agents keep their existing status.
+
+In snapshot JSON, these entries use `source_kind` `agent_status` and set `opened_at_ms` to the latest status observation time. Rebuilding the view keeps that time until the status observation changes.
+
 The server stops 10 minutes after the last tab closes. Set `NAMEDROP_DASHBOARD_IDLE_MS` to change this. The server does not hold the update lock that commands hold, so it never delays an update. When the update migrates state or a new release becomes current, open tabs show "Updating Namedrop…". A new server then starts on the same port, and the tabs reconnect without a reload. Its log is `<state>/dashboard/server.log`. If a tab stays disconnected, run `namedrop dashboard` again.
 
 ## Tour presentations
