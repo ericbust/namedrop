@@ -652,7 +652,7 @@ export const Message = memo(
     const named = recipients.map((id) => who(directory, id));
     const result = variant === "output" ? terminalResult(message.body) : null;
     // A channel-chat message went to the room, so its route line says who got it.
-    const room = chat?.kind === "channel";
+    const channelChat = chat?.kind === "channel";
     return (
       <article
         className={`msg ${grouped ? "grouped" : "group-start"}${arrive ? " arrive" : ""}${located ? " located" : ""}`}
@@ -683,7 +683,7 @@ export const Message = memo(
                 </span>
               )}
               {!grouped && <Exit run={exit} result={result} />}
-              {!room && recipients.length > 0 && (
+              {!channelChat && recipients.length > 0 && (
                 <span
                   className="to"
                   title={
@@ -744,7 +744,7 @@ export const Message = memo(
               variant={variant}
             />
           )}
-          {room
+          {channelChat
             ? chat.route && (
                 <Route
                   line={chat.route}
@@ -765,7 +765,7 @@ export const Message = memo(
                   paused={paused}
                 />
               )}
-          {!room && onThread && replyCount > 0 && (
+          {!channelChat && onThread && replyCount > 0 && (
             <ReplyPreview
               message={message}
               directory={directory}
