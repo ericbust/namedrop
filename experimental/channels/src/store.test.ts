@@ -2481,7 +2481,7 @@ test("thread recipients: the agents who wrote, else the parent's recipients, nev
     mentions: "@codex",
   });
 });
-test("thread recipients: agents in other workspaces are named through their home channel's token, local agents first", () => {
+test("thread recipients: a reply goes to the workspace of the latest agent message, named through its home channel's token", () => {
   const agent = (address_id: string, alias: string) => ({
     ...participant(address_id),
     alias,
@@ -2503,7 +2503,10 @@ test("thread recipients: agents in other workspaces are named through their home
       },
     });
   };
-  const here = channel(keyA, "w1", "testbed", [agent("agent-1", "@codex")]);
+  const here = channel(keyA, "w1", "testbed", [
+    agent("agent-1", "@codex"),
+    agent("agent-2", "@claude"),
+  ]);
   const homes = homesOf(
     [
       here,
@@ -2560,30 +2563,29 @@ test("thread recipients: agents in other workspaces are named through their home
     "an envoy the parent asked",
   );
   assert.deepEqual(
-    thread(["envoy:w2:pane-9", "agent-1"]),
-    {
-      names: ["@codex", "@lead · #alpha"],
-      mentions: "#testbed #alpha @codex @lead",
-    },
-    "mixed: one #label run, then one @alias run, local first",
+    thread(["agent-1", "envoy:w2:pane-9", "agent-2"]),
+    { names: ["@codex", "@claude"], mentions: "@codex @claude" },
+    "mixed, latest local: every local agent who wrote, and no envoy",
   );
   assert.deepEqual(
-    thread(["envoy:w3:pane-4", "envoy:w2:pane-9", "envoy:w3:pane-4"]),
-    {
-      names: ["@reviewer · #beta", "@lead · #alpha"],
-      mentions: "#beta #alpha @reviewer @lead",
-    },
-    "two other workspaces",
-  );
-  assert.deepEqual(
-    thread(["envoy:w4:pane-5", "agent-1"]),
-    { names: ["@codex"], mentions: "@codex" },
-    "an envoy whose home channel has no token is left out",
-  );
-  assert.deepEqual(
-    thread(["agent-1", "envoy:w2:pane-9"], null),
+    thread(["agent-1", "envoy:w3:pane-4", "envoy:w2:pane-9"]),
     { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
-    "a local agent is left out when the reply must name workspaces and this channel has no token",
+    "mixed, latest an envoy: only that envoy's workspace",
+  );
+  assert.deepEqual(
+    thread([], "#testbed", ["envoy:w2:pane-9", "agent-1"]),
+    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
+    "no agent wrote: the parent's recipients from its first recipient's workspace",
+  );
+  assert.deepEqual(
+    thread([], "#testbed", ["agent-1", "envoy:w2:pane-9", "agent-2"]),
+    { names: ["@codex", "@claude"], mentions: "@codex @claude" },
+    "no agent wrote, first recipient local",
+  );
+  assert.equal(
+    thread(["agent-1", "envoy:w4:pane-5"]),
+    null,
+    "latest agent's workspace has no token: nobody left",
   );
   assert.equal(thread(["envoy:w4:pane-5"]), null, "nobody left");
 });

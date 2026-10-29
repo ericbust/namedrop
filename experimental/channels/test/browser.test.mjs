@@ -3495,3 +3495,37 @@ test("UI-3: the box grows a line at a time up to eight lines, then scrolls, and 
   await ui.page.locator("article.pending").getByText("Sent").waitFor();
   assert.equal(await height(), 32, "back to one line");
 });
+
+test("UI-3: the box re-fits a wrapped placeholder when the viewport narrows and widens", async (t) => {
+  const label = "release-coordination-and-incident-review";
+  const ui = await open(t, (client) => replay(client, [team(1, label)]));
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: `Message #${label}` });
+  const fit = async (width) => {
+    await ui.page.setViewportSize({ width, height: 900 });
+    return box.evaluate(
+      (element) =>
+        new Promise((resolve) =>
+          requestAnimationFrame(() =>
+            requestAnimationFrame(() =>
+              resolve({
+                height: element.getBoundingClientRect().height,
+                scrollHeight: element.scrollHeight,
+                clientHeight: element.clientHeight,
+              }),
+            ),
+          ),
+        ),
+    );
+  };
+  const wide = await fit(1440);
+  assert.equal(wide.height, 32, "one line when wide");
+  const narrow = await fit(480);
+  assert.ok(
+    Math.abs(narrow.scrollHeight - narrow.clientHeight) <= 1,
+    `the narrow box fits its placeholder: ${JSON.stringify(narrow)}`,
+  );
+  assert.ok(narrow.height > 32, "the placeholder wraps when narrow");
+  assert.deepEqual(await fit(1440), wide, "back to one line when wide again");
+});
