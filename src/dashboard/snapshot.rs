@@ -991,6 +991,64 @@ mod redaction_regression_tests {
     use super::SafeText;
 
     #[test]
+    fn pem_joiners_next_to_header_spaces_are_redacted() {
+        let mut failures = Vec::new();
+        for joiner in ['\u{200d}', '\u{2060}', '\u{200c}', '\u{fe0f}'] {
+            for header in [
+                format!("-----BEGIN{joiner} PRIVATE KEY-----"),
+                format!("-----BEGIN {joiner}RSA PRIVATE KEY-----"),
+                format!("-----BEGIN RSA PRIVATE{joiner} KEY-----"),
+                format!("-----BEGIN RSA PRIVATE {joiner}KEY-----"),
+            ] {
+                let raw = format!(
+                    "👩‍💻 before\n{header}\nprivate-body\n-----END RSA PRIVATE KEY-----\nمی‌خواهم after"
+                );
+                let actual = SafeText::from_untrusted(&raw, 2000).text;
+                if actual != "👩‍💻 before\n[REDACTED PRIVATE KEY]\nمی‌خواهم after" {
+                    failures.push((raw, actual));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "PEM joiner bypasses: {failures:#?}");
+    }
+
+    #[test]
+    fn ansi_inside_tokens_and_pem_headers_is_redacted() {
+        let mut failures = Vec::new();
+        for raw in [
+            "s\u{1b}[31mk-abcdefghijklmnopqrstuvwxyz123456",
+            "ghp_abcdefgh\u{1b}[32mijklmnopqrstuvwxyz123456",
+            "AKIAABCD\u{9b}31mEFGHIJKLMNOP",
+            "-----BEGIN\u{1b}[31m PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----",
+        ] {
+            let expected = if raw.starts_with("-----") {
+                "[REDACTED PRIVATE KEY]"
+            } else if raw.starts_with("AKIA") {
+                "[REDACTED AWS ACCESS KEY]"
+            } else {
+                "[REDACTED TOKEN]"
+            };
+            let actual = SafeText::from_untrusted(raw, 2000).text;
+            if actual != expected {
+                failures.push((raw, actual, expected));
+            }
+        }
+        assert!(failures.is_empty(), "ANSI secret bypasses: {failures:#?}");
+    }
+
+    #[test]
+    fn nonsecret_unicode_and_coloured_cli_output_keep_their_display_text() {
+        for text in ["👨‍👩‍👧‍👦 🇺🇸 🏳️‍🌈", "می‌خواهم", "❤️ ✈︎ ✈️"]
+        {
+            assert_eq!(SafeText::from_untrusted(text, 2000).text, text);
+        }
+        assert_eq!(
+            SafeText::from_untrusted("\u{1b}[32mReady\u{1b}[0m\t2 passed", 2000).text,
+            "[32mReady[0m\t2 passed"
+        );
+    }
+
+    #[test]
     fn legitimate_unicode_round_trips_through_safe_text_and_persona_display() {
         for text in [
             "👨‍👩‍👧",
