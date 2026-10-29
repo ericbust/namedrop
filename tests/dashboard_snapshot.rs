@@ -1048,3 +1048,44 @@ fn a_human_message_gets_the_you_lane_first() {
         .unwrap();
     assert_eq!(b["mailbox"][0]["from"], "you");
 }
+
+#[test]
+fn equal_timestamp_statuses_resolve_to_the_later_insert() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a"]);
+    observe_status(&mut store, &ns, "a", "working", 20);
+    observe_status(&mut store, &ns, "a", "idle", 20);
+    assert_eq!(
+        lane(&snapshot(&mut store, &ns), "@a").activity,
+        Activity::Idle
+    );
+}
+
+#[test]
+fn a_rebound_agent_ignores_status_from_its_old_binding() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    observe_status(&mut store, &ns, "a", "working", 20);
+    store
+        .transaction(|tx| {
+            tx.unbind_pane(
+                &ns,
+                &id(&ns, "a"),
+                &MutationAttribution::new(ActorKind::Plugin, "test", 30),
+            )?;
+            tx.bind_pane(
+                &ns,
+                &PaneBindingId::new("binding-new"),
+                &id(&ns, "a"),
+                "pane-w1-a-new",
+                &MutationAttribution::new(ActorKind::Plugin, "test", 30),
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        lane(&snapshot(&mut store, &ns), "@a").activity,
+        Activity::Offline
+    );
+}
