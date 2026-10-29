@@ -213,3 +213,49 @@ test("failure table: over earlier text the notice becomes the bar, and the text 
     assert.equal(peekView(retried, who).bar, null);
   }
 });
+
+test("a retained snapshot seeds a fresh read with its original timestamp", () => {
+  const snapshot = {
+    screen: { earlierOmitted: true, text: "retained tail" },
+    at: early,
+  };
+  const read = firstRead(snapshot);
+  assert.deepEqual(read, {
+    phase: "reading",
+    request: 1,
+    wait: "brief",
+    shown: snapshot,
+  });
+  assert.deepEqual(peekView(read, who), {
+    stamp: `Read at ${clock(early)}`,
+    refreshing: true,
+    bar: null,
+    body: { kind: "text", earlierOmitted: true, text: "retained tail" },
+  });
+  const settled = peekReduce(read, {
+    type: "settled",
+    request: 1,
+    result: text("fresh"),
+    at: later,
+  });
+  assert.equal(peekView(settled, who).stamp, `Read at ${clock(later)}`);
+  assert.deepEqual(settled.shown, {
+    screen: { earlierOmitted: false, text: "fresh" },
+    at: later,
+  });
+});
+
+test("a retained empty snapshot stays empty during a fresh read and failures keep it", () => {
+  const snapshot = { screen: { earlierOmitted: false, text: "" }, at: early };
+  const read = firstRead(snapshot);
+  assert.deepEqual(peekView(read, who).body, { kind: "empty" });
+  const failure = peekReduce(read, {
+    type: "settled",
+    request: 1,
+    result: failed("busy"),
+    at: later,
+  });
+  assert.equal(failure.shown, snapshot);
+  assert.equal(peekView(failure, who).stamp, `Read at ${clock(early)}`);
+  assert.deepEqual(peekView(failure, who).body, { kind: "empty" });
+});
