@@ -522,7 +522,9 @@ workspaces would reach agents who are not in the thread.
   has no label, so it never makes another channel's name shared. The shared
   copy also names activation. When one of two same-named workspaces isn't
   active, both still lose their tokens, and renaming the inactive one won't
-  make it mentionable.
+  make it mentionable. A label that equals its own workspace id looks the same
+  as no label, so it gets the no-label line. Herdr's ids make that label
+  unlikely.
 - **Member rows**, 32px: a 20px avatar with its presence badge, the alias, and
   the presence word in muted text at the right. The members come from the
   channel named by the last `#token` before the caret, else the current
