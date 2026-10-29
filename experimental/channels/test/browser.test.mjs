@@ -219,6 +219,7 @@ async function open(
     path = "/",
     onPost = () => ({ status: 200 }),
     onScreen = () => ({ body: "" }),
+    observeLanding = false,
   } = {},
 ) {
   const clients = new Set();
@@ -291,13 +292,31 @@ async function open(
   const page = await browser.newPage();
   page.setDefaultTimeout(5000);
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.addInitScript(() => {
+  await page.addInitScript((observeLanding) => {
     window.cspErrors = [];
     window.initialHistoryLength = history.length;
     document.addEventListener("securitypolicyviolation", (event) =>
       window.cspErrors.push(event.violatedDirective),
     );
-  });
+    if (observeLanding) {
+      window.landingHeadings = [];
+      window.operatorInputs = [];
+      for (const name of ["pointerdown", "keydown", "wheel", "touchstart"])
+        addEventListener(name, () => window.operatorInputs.push(name), true);
+      new MutationObserver(() => {
+        const heading = document.querySelector("main h1:not(.sr-only)");
+        if (
+          heading?.getClientRects().length &&
+          heading.textContent !== window.landingHeadings.at(-1)
+        )
+          window.landingHeadings.push(heading.textContent);
+      }).observe(document, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }
+  }, observeLanding);
   t.after(async () => {
     try {
       assert.deepEqual(errors, []);
@@ -1832,6 +1851,114 @@ function selected(ui, n) {
     key(n),
   );
 }
+test("landing without input: ready opens the channel that needs you first", async (t) => {
+  const needsYou = attentionFrame("agent_status");
+  needsYou.key = key(3);
+  needsYou.frame.space = frame(3, "gamma").frame.space;
+  needsYou.frame.messages = [message("gamma-request", "Please check gamma")];
+  const alpha = frame(1, "alpha");
+  alpha.frame.messages = [
+    message("alpha-recent", "Recent calm message", { at_ms: 500 }),
+  ];
+  const ui = await open(
+    t,
+    (client) => replay(client, [alpha, needsYou]),
+    undefined,
+    { observeLanding: true },
+  );
+  await ui.live();
+  assert.equal(
+    await ui.page.getByRole("heading", { level: 1 }).textContent(),
+    "gamma",
+  );
+  assert.equal(await ui.row(3).getAttribute("aria-current"), "page");
+  assert.equal(await ui.row(1).getAttribute("aria-current"), null);
+  const shortcut = ui.page.getByRole("navigation", {
+    name: "Needs you",
+    exact: true,
+  });
+  assert.equal(await shortcut.getByRole("button").count(), 1);
+  assert.equal(await shortcut.getByRole("button").isVisible(), true);
+  assert.match(
+    await shortcut.textContent(),
+    /gamma.*Waiting on approval or a question/,
+  );
+  const banner = ui.page.getByRole("region", { name: "Attention needed" });
+  assert.equal(await banner.isVisible(), true);
+  await banner
+    .getByText("Waiting on approval or a question", { exact: true })
+    .waitFor();
+  await ui.page.getByText("Please check gamma", { exact: true }).waitFor();
+  assert.deepEqual(await ui.page.evaluate(() => window.landingHeadings), [
+    "gamma",
+  ]);
+  assert.deepEqual(await ui.page.evaluate(() => window.operatorInputs), []);
+  assert.equal(await ui.page.evaluate(() => location.pathname), "/");
+  assert.equal(ui.posts.attempts.length, 0);
+});
+
+test("landing without input: late ready keeps alpha visible while Needs you lists late gamma", async (t) => {
+  const alpha = frame(1, "alpha");
+  alpha.frame.messages = [message("alpha-message", "Alpha is calm")];
+  const ui = await open(t, (client) => client.send("space", alpha), undefined, {
+    observeLanding: true,
+  });
+  await ui.live();
+  await ui.page.getByRole("heading", { name: "alpha", exact: true }).waitFor();
+  await ui.page.waitForTimeout(400);
+  assert.deepEqual(await ui.page.evaluate(() => window.landingHeadings), [
+    "alpha",
+  ]);
+  assert.equal(
+    await ui.page
+      .getByRole("navigation", { name: "Needs you", exact: true })
+      .count(),
+    0,
+  );
+  const needsYou = attentionFrame("agent_status");
+  needsYou.key = key(3);
+  needsYou.frame.space = frame(3, "gamma").frame.space;
+  needsYou.frame.messages = [message("gamma-request", "Please check gamma")];
+  ui.connections[0].send("space", needsYou);
+  ui.connections[0].send("ready", { keys: [key(1), key(3)] });
+  const shortcut = ui.page.getByRole("navigation", {
+    name: "Needs you",
+    exact: true,
+  });
+  await shortcut.getByRole("button").waitFor();
+  await nextFrames(ui.page);
+  assert.equal(await shortcut.getByRole("button").count(), 1);
+  assert.match(
+    await shortcut.textContent(),
+    /gamma.*Waiting on approval or a question/,
+  );
+  assert.equal(
+    await ui.page.getByRole("heading", { level: 1 }).textContent(),
+    "alpha",
+  );
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+  assert.equal(await ui.row(3).getAttribute("aria-current"), null);
+  assert.equal(
+    await ui.page.getByRole("region", { name: "Attention needed" }).count(),
+    0,
+  );
+  assert.equal(
+    await ui.page.getByText("Alpha is calm", { exact: true }).isVisible(),
+    true,
+  );
+  assert.equal(
+    await ui.page.getByText("Please check gamma", { exact: true }).count(),
+    0,
+  );
+  assert.deepEqual(await ui.page.evaluate(() => window.landingHeadings), [
+    "alpha",
+  ]);
+  assert.deepEqual(await ui.page.evaluate(() => window.operatorInputs), []);
+  assert.equal(await ui.page.evaluate(() => location.pathname), "/");
+  assert.equal(ui.posts.attempts.length, 0);
+  assert.equal(ui.connections.length, 1);
+});
+
 test("landing: late frames select the URL's channel when it arrives, and an automatic choice never rewrites the URL", async (t) => {
   const requested = await open(t, () => {}, undefined, {
     path: `/w/${key(2)}`,
