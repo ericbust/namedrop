@@ -6,6 +6,8 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Added
 
+- Dashboard attention entries include nullable `subject_alias` and `message_id` fields, and terminal runs include the request's nullable `message_id`. Links remain available for requests older than the live frame window.
+
 - The dashboard serves authenticated, paged channel history at `/w/<key>/messages`, including messages older than the live frame window.
 
 - `namedrop dashboard --ui <dir>` serves a custom browser app from a directory under the dashboard's existing security headers. Rebuilt directories are read fresh, large assets stream with bounded memory, dotfiles stay private, and aliases of the app shell require the session cookie. Ancestors need only search permission; the UI directory needs read and search permission. The shared server keeps its UI setting through upgrades, supports handoff to older releases without claim inheritance, falls back to their embedded UI when they lack `--ui` with a logged explanation, and spawns the exact executable it probed. During a handoff, matching UI requests wait up to five seconds for a ready successor and apply its UI setting before returning a URL. Longer startups return restart guidance without a URL, initially different UI requests receive restart guidance immediately, and updates and package refreshes can proceed while the successor starts.

@@ -317,6 +317,7 @@ pub struct TerminalRun {
     pub command: SafeText,
     pub started_at_ms: i64,
     pub exit_code: Option<i32>,
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -324,6 +325,8 @@ pub struct AttentionCard {
     pub source_kind: AttentionSourceKind,
     pub summary: SafeText,
     pub opened_at_ms: i64,
+    pub subject_alias: Option<String>,
+    pub message_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -399,9 +402,11 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .attention
         .iter()
         .map(|item| AttentionCard {
-            source_kind: AttentionSourceKind::Stored(item.source_kind),
-            summary: SafeText::from_untrusted(&item.summary, SHORT_CHARS),
-            opened_at_ms: i64::try_from(item.opened_at_ms).unwrap_or(i64::MAX),
+            source_kind: AttentionSourceKind::Stored(item.item.source_kind),
+            summary: SafeText::from_untrusted(&item.item.summary, SHORT_CHARS),
+            opened_at_ms: i64::try_from(item.item.opened_at_ms).unwrap_or(i64::MAX),
+            subject_alias: item.subject_alias.clone(),
+            message_id: item.message_id.clone(),
         })
         .collect();
     attention.extend(rows.addresses.iter().filter_map(|address| {
@@ -412,6 +417,8 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
                 SHORT_CHARS,
             ),
             opened_at_ms,
+            subject_alias: Some(address.alias.clone()),
+            message_id: address.blocked_message_id.clone(),
         })
     }));
     DashboardSnapshot {
@@ -462,6 +469,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
                 command: SafeText::from_untrusted(&run.command, SHORT_CHARS),
                 started_at_ms: run.started_at_ms,
                 exit_code: run.exit_code,
+                message_id: run.message_id.clone(),
             })
             .collect(),
         attention,
