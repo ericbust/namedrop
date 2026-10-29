@@ -281,7 +281,7 @@ impl StateTransaction<'_> {
         let values = std::iter::once(ns[0].to_owned())
             .chain(std::iter::once(ns[1].to_owned()))
             .chain(messages.iter().map(|message| message.message_id.clone()));
-        let legs = self.rows(&sql, rusqlite::params_from_iter(values), |row| {
+        let mut legs = self.rows(&sql, rusqlite::params_from_iter(values), |row| {
             Ok(LegRow {
                 message_id: row.get(0)?,
                 address_id: row.get(1)?,
@@ -294,6 +294,7 @@ impl StateTransaction<'_> {
                 disposition_id: row.get(5)?,
             })
         })?;
+        self.normalize_operator_legs(namespace, &mut legs)?;
         Ok(Some(HistoryRows { messages, legs }))
     }
 
@@ -577,7 +578,11 @@ impl StateTransaction<'_> {
                 })
             },
         )?;
+        let operators = self.operator_projection_addresses(namespace)?;
         let alias_for_address = |id: &str| {
+            if operators.iter().any(|operator| operator == id) {
+                return Some("you".to_owned());
+            }
             addresses
                 .iter()
                 .find(|address| address.address_id == id)
@@ -654,7 +659,7 @@ impl StateTransaction<'_> {
             (left.item.opened_at_ms, left.item.id.as_str())
                 .cmp(&(right.item.opened_at_ms, right.item.id.as_str()))
         });
-        Ok(DashboardRows {
+        let mut rows = DashboardRows {
             namespace: namespace.clone(),
             worktree: self.worktree_state(namespace)?,
             addresses,
@@ -667,7 +672,75 @@ impl StateTransaction<'_> {
             assignments,
             terminal_runs,
             attention,
-        })
+        };
+        Self::normalize_operator_rows(&mut rows, &operators);
+        Ok(rows)
+    }
+
+    fn normalize_operator_legs(
+        &self,
+        namespace: &StateNamespace,
+        legs: &mut [LegRow],
+    ) -> Result<(), StoreError> {
+        let operators = self.operator_projection_addresses(namespace)?;
+        for leg in legs {
+            if operators.contains(&leg.address_id) {
+                leg.address_id = crate::dashboard::snapshot::HUMAN.to_owned();
+            }
+        }
+        Ok(())
+    }
+
+    fn normalize_operator_rows(rows: &mut DashboardRows, operators: &[String]) {
+        if operators.is_empty() {
+            return;
+        }
+        let human = crate::dashboard::snapshot::HUMAN;
+        let normalize = |id: &mut String| {
+            if operators.contains(id) {
+                *id = human.to_owned();
+            }
+        };
+        for leg in &mut rows.legs {
+            normalize(&mut leg.address_id);
+        }
+        for message in &mut rows.messages {
+            if operators.contains(&message.author_address_id) {
+                message.author_is_human = true;
+                normalize(&mut message.author_address_id);
+            }
+        }
+        for entry in &mut rows.mailbox {
+            normalize(&mut entry.address_id);
+            if operators.contains(&entry.author_address_id) {
+                entry.author_is_human = true;
+                normalize(&mut entry.author_address_id);
+            }
+        }
+        for coordination in &mut rows.coordinations {
+            normalize(&mut coordination.owner_address_id);
+        }
+        for assignment in &mut rows.assignments {
+            normalize(&mut assignment.assignee_address_id);
+            if let Some(waiting) = &mut assignment.waiting_on_address_id {
+                normalize(waiting);
+            }
+        }
+        rows.addresses
+            .retain(|address| !operators.contains(&address.address_id));
+        rows.addresses.push(AddressRow {
+            address_id: human.to_owned(),
+            alias: "you".to_owned(),
+            role_name: String::new(),
+            persona: None,
+            pane_type: crate::PaneType::Agent,
+            retired: false,
+            bound: false,
+            occupied: false,
+            agent_status: None,
+            blocked_since_ms: None,
+            blocked_message_id: None,
+        });
     }
 
     fn dashboard_spaces(&self) -> Result<Vec<SpaceRow>, StoreError> {

@@ -539,7 +539,7 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
         .map(|a| (a.address_id.as_str(), a.alias.as_str()))
         .collect();
     let at = |address_id: &str, human: bool| {
-        if human {
+        if human || address_id == HUMAN {
             "you".to_owned()
         } else {
             format!(
@@ -576,7 +576,9 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
     let mut addresses: Vec<&rows::AddressRow> = rows
         .addresses
         .iter()
-        .filter(|a| !a.retired || referenced.contains(a.address_id.as_str()))
+        .filter(|a| {
+            a.address_id != HUMAN && (!a.retired || referenced.contains(a.address_id.as_str()))
+        })
         .collect();
     addresses.sort_by_key(|a| {
         (
@@ -606,7 +608,12 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
     };
 
     let mut lanes = Vec::new();
-    if rows.messages.iter().any(|m| m.author_is_human) {
+    if rows.messages.iter().any(|m| m.author_is_human)
+        || rows
+            .addresses
+            .iter()
+            .any(|address| address.address_id == HUMAN)
+    {
         let waiting_on = waiting_on(HUMAN, true);
         lanes.push(Participant {
             address_id: HUMAN.to_owned(),

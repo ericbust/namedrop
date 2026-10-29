@@ -1,8 +1,9 @@
 use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName, WorkspaceLabel};
 use crate::{
     ActorKind, ContextGrantDraft, ContextGrantId, ContextReferenceDraft, ContextSnapshotId,
-    DeliveryId, LifecycleRuntime, MessageDraft, MessageRecipientDraft, MutationAttribution,
-    PaneAddressLifecycle, PaneAddressRecord, StateNamespace, StateStore, ThreadId,
+    DeliveryId, LifecycleRuntime, MessageDraft, MessageId, MessageRecipientDraft,
+    MutationAttribution, PaneAddressLifecycle, PaneAddressRecord, StateNamespace, StateStore,
+    ThreadId,
     context::{MessageContextInput, prepare_message_context, record_snapshot_activation_failure},
     discover_worktree, discover_worktree_for_workspace, validate_alias,
 };
@@ -289,6 +290,9 @@ fn routed_recipient_outlooks(
 ) -> Result<Vec<RecipientOutlook>, crate::StoreError> {
     let mut outlooks = Vec::new();
     for recipient in recipients {
+        if transaction.is_operator_address(namespace, &recipient.address_id)? {
+            continue;
+        }
         let Some(origin) = transaction.envoy_origin(namespace, &recipient.address_id)? else {
             outlooks.extend(stored_recipient_outlooks(
                 transaction,
@@ -298,6 +302,9 @@ fn routed_recipient_outlooks(
             continue;
         };
         let there = StateNamespace::new(namespace.session_socket_id.clone(), origin.space);
+        if transaction.is_operator_address(&there, &origin.address_id)? {
+            continue;
+        }
         let paused = transaction
             .worktree_state(&there)?
             .is_some_and(|state| state.paused);
@@ -425,6 +432,12 @@ struct PreparedMessageOperation {
     grammar_version: &'static str,
 }
 
+#[derive(Clone, Copy)]
+enum Author<'a> {
+    Pane(&'a str),
+    Operator,
+}
+
 struct RelayPresentation {
     pane_id: String,
     sender_alias: String,
@@ -460,8 +473,66 @@ where
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces).to_string());
     }
     let input = prepare_source_message(input)?;
-    let (mut response, forwarded) = persist_prepared_message_operation(input, runtime, &workspaces)
-        .map_err(|error| error.to_string())?;
+    let author = pane_author(runtime)?;
+    dispatch_prepared_message(input, author, runtime, &workspaces)
+        .map_err(|error| error.to_string())
+}
+
+pub fn send_operator_message<E, C, I>(
+    request_id: &str,
+    source: &str,
+    in_reply_to: Option<&MessageId>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Result<Value, OperatorSendError>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    if runtime.workspace_id.is_none() {
+        return Err(SendError::Input(
+            "an operator message requires an explicit source workspace".to_owned(),
+        )
+        .into());
+    }
+    let input = prepare_source_message(MessageOperationInput {
+        request_id: required_nonempty(request_id.to_owned(), "request_id")
+            .map_err(SendError::Input)?,
+        source: source.to_owned(),
+        author_kind: ActorKind::Human,
+        in_reply_to: in_reply_to.cloned(),
+        disposition_attempt_id: None,
+        context: None,
+        request_context: false,
+        decline_context_request: None,
+        tracking: crate::coordination::TrackingInput::default(),
+    })
+    .map_err(SendError::Input)?;
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    dispatch_prepared_message(input, Author::Operator, runtime, &workspaces)
+        .map_err(OperatorSendError::from)
+}
+
+fn pane_author<'a, E, C, I>(runtime: &LifecycleRuntime<'a, E, C, I>) -> Result<Author<'a>, String> {
+    runtime
+        .current_pane_id
+        .map(Author::Pane)
+        .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())
+}
+
+fn dispatch_prepared_message<E, C, I>(
+    input: PreparedMessageOperation,
+    author: Author<'_>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+) -> Result<Value, SendError>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    let (mut response, forwarded) =
+        persist_prepared_message_operation(input, author, runtime, workspaces)?;
     response["drain"] = crate::drain_receipt(runtime);
     // A copy queued in another workspace drains there now rather than waiting
     // for that workspace's next event.
@@ -538,7 +609,9 @@ where
             PromptMentionOutcome::NeedsRecipient { scope, names }
         }
         Err(SendError::Refused(refusal)) => PromptMentionOutcome::Refused(refusal),
-        Err(SendError::Failed(_)) => PromptMentionOutcome::Failed,
+        Err(SendError::Input(_) | SendError::Store(_) | SendError::Failed(_)) => {
+            PromptMentionOutcome::Failed
+        }
     })
 }
 
@@ -551,19 +624,19 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let input = parse_operation_input("send", input)?;
+    let input = parse_operation_input("send", input).map_err(SendError::Input)?;
     if input.context.is_some() {
         // The native @alias hook shorthand keeps its current semantics: context
         // handoff belongs to the explicit agent-authored send and reply only.
-        return Err("a prompt Mention cannot carry a context block"
-            .to_owned()
-            .into());
+        return Err(SendError::Input(
+            "a prompt Mention cannot carry a context block".to_owned(),
+        ));
     }
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
     if let Some(scope) = workspace_prompt_scope(&input.source) {
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces));
     }
-    let parsed = parse_prompt_mentions(&input.source)?;
+    let parsed = parse_prompt_mentions(&input.source).map_err(SendError::Input)?;
     if !names_workspaces(&parsed.recipients.scope, &workspaces) {
         return Err(SendError::NotAMention);
     }
@@ -580,7 +653,7 @@ where
         tracking: input.tracking,
         grammar_version: "mention-hook/v1",
     };
-    persist_prepared_message_operation(prepared, runtime, &workspaces)
+    persist_prepared_message_operation(prepared, pane_author(runtime)?, runtime, &workspaces)
         .map(|(_, forwarded)| forwarded)
 }
 
@@ -620,7 +693,7 @@ where
         None => discover_worktree(runtime.herdr, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
-    let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
+    let mut store = StateStore::open(runtime.state_directory)?;
     let directory = crate::spaces::SpaceDirectory::load(
         &mut store,
         workspaces,
@@ -646,7 +719,10 @@ fn names_workspaces<E: crate::HerdrCommandExecutor>(
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum SendError {
+    Input(String),
+    Store(crate::StoreError),
     Refused(RouteRefusal),
     Failed(String),
     NotAMention,
@@ -658,11 +734,79 @@ impl From<String> for SendError {
     }
 }
 
+impl From<crate::StoreError> for SendError {
+    fn from(error: crate::StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+/// Safe categories for an operator send failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperatorSendErrorKind {
+    InvalidInput,
+    Unavailable,
+    Internal,
+}
+
+/// An operator failure with diagnostics retained separately from its public response.
+#[derive(Debug)]
+pub struct OperatorSendError {
+    cause: SendError,
+    kind: OperatorSendErrorKind,
+}
+
+impl OperatorSendError {
+    pub fn kind(&self) -> OperatorSendErrorKind {
+        self.kind
+    }
+
+    pub fn public_message(&self) -> String {
+        match self.kind {
+            OperatorSendErrorKind::InvalidInput => self.cause.to_string(),
+            OperatorSendErrorKind::Unavailable => {
+                "Message service is temporarily unavailable.".to_owned()
+            }
+            OperatorSendErrorKind::Internal => "Message could not be sent.".to_owned(),
+        }
+    }
+}
+
+impl From<SendError> for OperatorSendError {
+    fn from(cause: SendError) -> Self {
+        use crate::StoreErrorKind;
+        let kind = match &cause {
+            SendError::Input(_) | SendError::Refused(_) | SendError::NotAMention => {
+                OperatorSendErrorKind::InvalidInput
+            }
+            SendError::Store(error) => match error.kind() {
+                StoreErrorKind::InvalidInput => OperatorSendErrorKind::InvalidInput,
+                StoreErrorKind::Busy | StoreErrorKind::Storage => {
+                    OperatorSendErrorKind::Unavailable
+                }
+                StoreErrorKind::Conflict
+                | StoreErrorKind::UnsupportedSchema
+                | StoreErrorKind::Internal => OperatorSendErrorKind::Internal,
+            },
+            SendError::Failed(_) => OperatorSendErrorKind::Unavailable,
+        };
+        Self { cause, kind }
+    }
+}
+
+impl std::fmt::Display for OperatorSendError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.cause.fmt(formatter)
+    }
+}
+
+impl std::error::Error for OperatorSendError {}
+
 impl std::fmt::Display for SendError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused(refusal) => refusal.fmt(formatter),
-            Self::Failed(error) => formatter.write_str(error),
+            Self::Input(error) | Self::Failed(error) => formatter.write_str(error),
+            Self::Store(error) => error.fmt(formatter),
             Self::NotAMention => formatter.write_str(MISSING_RECIPIENTS),
         }
     }
@@ -672,6 +816,7 @@ type PersistedMessage = (Value, Vec<crate::store::ForwardedCopy>);
 
 fn persist_prepared_message_operation<E, C, I>(
     input: PreparedMessageOperation,
+    author_source: Author<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
 ) -> Result<PersistedMessage, SendError>
@@ -694,44 +839,38 @@ where
         tracking,
     } = input;
     if context.is_some() && author_kind != ActorKind::AgentSession {
-        return Err(
+        return Err(SendError::Input(
             "a context block requires an agent-authored message (author_kind agent_session)"
-                .to_owned()
-                .into(),
-        );
+                .to_owned(),
+        ));
     }
     if request_context && context.is_some() {
-        return Err(
+        return Err(SendError::Input(
             "a reply cannot both request context and attach it: request_context asks the \
              sender, the context block answers"
-                .to_owned()
-                .into(),
-        );
+                .to_owned(),
+        ));
     }
     if request_context && decline_context_request.is_some() {
-        return Err("a reply cannot both request context and decline a request"
-            .to_owned()
-            .into());
+        return Err(SendError::Input(
+            "a reply cannot both request context and decline a request".to_owned(),
+        ));
     }
     if (request_context || decline_context_request.is_some())
         && author_kind != ActorKind::AgentSession
     {
-        return Err(
+        return Err(SendError::Input(
             "a context request marker requires an agent-authored reply (author_kind \
              agent_session)"
-                .to_owned()
-                .into(),
-        );
+                .to_owned(),
+        ));
     }
-    let pane_id = runtime
-        .current_pane_id
-        .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())?;
     let discovered = match runtime.workspace_id {
         Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
         None => discover_worktree(runtime.herdr, runtime.cwd)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
-    let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
+    let mut store = StateStore::open(runtime.state_directory)?;
     let replay = Replay {
         request_id: &request_id,
         authored_source: &authored_source,
@@ -742,20 +881,18 @@ where
     };
     // A retry returns what the first send committed before anything about the
     // route or its context is read again, so it can never pin or route anew.
-    let (author, replayed, tracked_home) = store
-        .transaction(|transaction| {
-            let (author, _) = sending_author(transaction, &namespace, pane_id, &replay, runtime)?;
-            let replayed =
-                replay.receipt(transaction, &namespace, &author, pane_id, &discovered)?;
-            let tracked_home = in_reply_to
-                .as_ref()
-                .map(|message| transaction.tracked_message(&namespace, message))
-                .transpose()?
-                .flatten()
-                .map(|tracked| tracked.home);
-            Ok((author, replayed, tracked_home))
-        })
-        .map_err(|error| error.to_string())?;
+    let (author, replayed, tracked_home) = store.transaction(|transaction| {
+        let (author, _) = sending_author(transaction, &namespace, author_source, &replay, runtime)?;
+        let replayed =
+            replay.receipt(transaction, &namespace, &author, author_source, &discovered)?;
+        let tracked_home = in_reply_to
+            .as_ref()
+            .map(|message| transaction.tracked_message(&namespace, message))
+            .transpose()?
+            .flatten()
+            .map(|tracked| tracked.home);
+        Ok((author, replayed, tracked_home))
+    })?;
     if let Some(committed) = replayed {
         return present_committed(
             committed,
@@ -777,12 +914,11 @@ where
     if routing.crosses(&namespace.space_id)
         && (context.is_some() || request_context || decline_context_request.is_some())
     {
-        return Err(
+        return Err(SendError::Input(
             "context handoffs stay inside one workspace; send the cross-workspace part as a \
              plain message"
-                .to_owned()
-                .into(),
-        );
+                .to_owned(),
+        ));
     }
     // The lead's tracked work checks each remote assignee against its own
     // workspace's live panes, read here before the routing transaction. A
@@ -791,9 +927,8 @@ where
         && (tracking.present() || tracked_home.is_some())
         && tracked_home.as_ref().is_none_or(|home| home == &namespace)
     {
-        let spaces = store
-            .transaction(|transaction| routing.remote_spaces(transaction, &namespace))
-            .map_err(|error| error.to_string())?;
+        let spaces =
+            store.transaction(|transaction| routing.remote_spaces(transaction, &namespace))?;
         crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &spaces)
     } else {
         crate::spaces::LiveSpaces::here(discovered.clone())
@@ -807,12 +942,11 @@ where
         .map(MessageContextInput::fulfillment_grant_ids)
         .unwrap_or_default();
     if !fulfillment_grant_ids.is_empty() && in_reply_to.is_none() {
-        return Err(
+        return Err(SendError::Input(
             "context grant_ids fulfill a context request, so they ride a reply in the \
              requesting thread, never a send"
-                .to_owned()
-                .into(),
-        );
+                .to_owned(),
+        ));
     }
     let context = match context
         .map(|context| prepare_message_context(context, &discovered, runtime.ids, &mut store))
@@ -826,9 +960,9 @@ where
     };
     let routed = store.transaction(|transaction| {
         let (author, attribution) =
-            sending_author(transaction, &namespace, pane_id, &replay, runtime)?;
+            sending_author(transaction, &namespace, author_source, &replay, runtime)?;
         // A concurrent retry may have committed since the check above.
-        if let Some(committed) = replay.receipt(transaction, &namespace, &author, pane_id, &discovered)? {
+        if let Some(committed) = replay.receipt(transaction, &namespace, &author, author_source, &discovered)? {
             return Ok(committed);
         }
         let reply_route = in_reply_to
@@ -1200,8 +1334,7 @@ where
             runtime,
         ),
         Err(error) => {
-            let error = error.to_string();
-            record_snapshot_activation_failure(&fulfillment_grant_ids, &error, runtime);
+            record_snapshot_activation_failure(&fulfillment_grant_ids, &error.to_string(), runtime);
             Err(error.into())
         }
     }
@@ -1231,7 +1364,7 @@ impl Replay<'_> {
         transaction: &mut crate::StateTransaction<'_>,
         namespace: &StateNamespace,
         author: &crate::RoutingAddressSnapshot,
-        pane_id: &str,
+        author_source: Author<'_>,
         discovered: &crate::DiscoveredWorktree,
     ) -> Result<Option<Committed>, crate::StoreError> {
         let Some(replay) = transaction.replay_message(
@@ -1249,6 +1382,11 @@ impl Replay<'_> {
             .tracked_message(namespace, &replay.receipt.message_id)?
             .is_some()
         {
+            let Author::Pane(pane_id) = author_source else {
+                return Err(crate::StoreError::invalid_input(
+                    "operator messages cannot replay pane-owned tracked work",
+                ));
+            };
             crate::context::registered_current_address(
                 transaction,
                 namespace,
@@ -1275,9 +1413,9 @@ impl Replay<'_> {
 }
 
 fn sending_author<E, C, I>(
-    transaction: &crate::StateTransaction<'_>,
+    transaction: &mut crate::StateTransaction<'_>,
     namespace: &StateNamespace,
-    pane_id: &str,
+    author_source: Author<'_>,
     request: &Replay<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<(crate::RoutingAddressSnapshot, MutationAttribution), crate::StoreError>
@@ -1290,8 +1428,14 @@ where
             "Namedrop is not activated for this space",
         ));
     }
-    let author = transaction.routing_author_for_pane(namespace, pane_id)?;
     let author_kind = request.author_kind;
+    let author = match author_source {
+        Author::Pane(pane_id) => transaction.routing_author_for_pane(namespace, pane_id)?,
+        Author::Operator => transaction.ensure_operator_author(
+            namespace,
+            &MutationAttribution::new(ActorKind::Human, "local-human", runtime.clock.now_unix_ms()),
+        )?,
+    };
     if author_kind == ActorKind::AgentSession && author.agent_session_id.is_none() {
         return Err(crate::StoreError::invalid_input(
             "an agent-authored message requires a current Agent Session",
@@ -1344,16 +1488,14 @@ where
         context_request_grant,
         declined_context_request,
     } = committed;
-    let (links, forwarded) = store
-        .transaction(|tx| {
-            Ok((
-                tx.tracked_message(namespace, &routed.receipt.message_id)?
-                    .map(|tracked| tracked.links)
-                    .unwrap_or_default(),
-                tx.forwarded_copies(namespace, &routed.receipt.message_id)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?;
+    let (links, forwarded) = store.transaction(|tx| {
+        Ok((
+            tx.tracked_message(namespace, &routed.receipt.message_id)?
+                .map(|tracked| tracked.links)
+                .unwrap_or_default(),
+            tx.forwarded_copies(namespace, &routed.receipt.message_id)?,
+        ))
+    })?;
     let mut response = receipt_json(routed, outlook);
     if !forwarded.is_empty() {
         response["forwarded"] = json!(&forwarded);
