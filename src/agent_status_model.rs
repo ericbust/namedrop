@@ -1219,3 +1219,23 @@ fn store(key: String, summary: &Value) {
         },
     );
 }
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+
+    #[test]
+    fn json_fenced_model_response_is_extracted() {
+        let response = json!({
+            "type": "result",
+            "result": "```json\n{\n \"to\": [\"claude\"],\n \"reason\": \"Post requests Claude to take first turn and provide bound reply\"\n}\n```"
+        });
+        assert_eq!(
+            extract_response(&response.to_string(), "to"),
+            Ok(json!({
+                "to": ["claude"],
+                "reason": "Post requests Claude to take first turn and provide bound reply"
+            }))
+        );
+    }
+}
