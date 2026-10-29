@@ -1,3 +1,4 @@
+import type { ActivityGroupKind } from "./activity.ts";
 import type { DisabledReason } from "./complete.ts";
 import type {
   Activity,
@@ -352,3 +353,24 @@ export function participantCopy(who: Participant): ParticipantCopy {
     }
   }
 }
+
+export function timeOfDay(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+export const activityCopy = {
+  title: "All activity",
+  groups: { needs_you: "Needs you", waiting: "Waiting", working: "Working" },
+  counted: { needs_you: "needs you", waiting: "waiting", working: "working" },
+  since: (ms: number) => `since ${timeOfDay(ms)}`,
+  held: stageCopy.held.label,
+  idleTitle: "Every agent is idle",
+  idleBody:
+    "Agents show up here while they work, wait on each other, or need you.",
+} satisfies {
+  groups: Record<ActivityGroupKind, string>;
+  counted: Record<ActivityGroupKind, string>;
+  [copy: string]: unknown;
+};

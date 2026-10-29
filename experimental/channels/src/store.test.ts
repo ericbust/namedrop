@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { activityOf } from "./activity.ts";
 import type { Activity, ChannelSnapshot, ComposerId, State } from "./model.ts";
 import { peekTarget, peekTargetOf } from "./peek.ts";
 import {
@@ -3142,4 +3143,34 @@ test("peek targets: never the operator, a local member reads in the channel show
   );
   assert.equal(who?.kind, "agent");
   assert.equal(who?.activity, "working");
+});
+
+test("activity: three channels derive the list ordered blocked, then waiting, then working", () => {
+  let state = initialState();
+  for (const [letter, name, alias, activity] of [
+    ["a", "alpha", "@codex", "working"],
+    ["b", "beta", "@claude", "blocked"],
+    ["c", "gamma", "@lead", "waiting"],
+  ] as const) {
+    const value = snapshot(letter.repeat(20), name, `w-${name}`);
+    value.frame.participants = [
+      { ...participant(`${name}-agent`, activity), alias },
+    ];
+    state = apply(state, value);
+  }
+  const list = activityOf(state.channels);
+  assert.deepEqual(
+    list.groups.map((group) => [
+      group.kind,
+      group.rows.map(
+        (row) => `${row.member.alias} #${row.channel.displayName}`,
+      ),
+    ]),
+    [
+      ["needs_you", ["@claude #beta"]],
+      ["waiting", ["@lead #gamma"]],
+      ["working", ["@codex #alpha"]],
+    ],
+  );
+  assert.equal(list.count, 3);
 });
