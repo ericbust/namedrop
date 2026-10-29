@@ -78,8 +78,15 @@ channels remain. OS dark mode switches every token to the indigo night theme.
 ## Read messages and threads
 
 The timeline groups consecutive messages by author within five minutes and
-inserts day dividers. Each request shows its latest reply in a preview box. The
-preview opens the **Thread** pane, which updates when replies arrive. Opening a
+inserts day dividers. Each request the operator starts with `@name` shows its
+latest reply in a preview box. A channel post, and a conversation an agent
+started, read as a group chat instead: every reply is its own row in time order,
+and a reply whose row above is not its parent shows a one-line reference to it.
+Under each channel-chat message a route line says who got it and why, with the
+receipts until they answer, and offers **Send anyway** for a mentioned agent the
+post did not reach. `routeLine()` in `src/route.ts` holds that line's rules. The
+preview, the reference, and a post's reply count open the **Thread** pane, which
+updates when replies arrive. Opening a
 thread moves focus to **Close thread** once, and switching channels closes the
 pane. When none of the thread's messages are loaded any more, after Jump to
 latest or when the history cap evicts them, the pane closes for good and focus
