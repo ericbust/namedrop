@@ -646,11 +646,87 @@ pub struct TerminalRun {
 
 #[derive(Debug, Serialize)]
 pub struct AttentionCard {
+    pub attention_id: String,
+    pub source_id: String,
+    pub coordination_id: Option<String>,
+    pub conversation: Option<Conversation>,
+    pub response: AttentionResponse,
     pub source_kind: AttentionSourceKind,
     pub summary: SafeText,
     pub opened_at_ms: i64,
     pub subject_alias: Option<String>,
     pub message_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Conversation {
+    pub thread_id: String,
+    pub message_id: String,
+}
+
+impl From<&rows::ConversationRow> for Conversation {
+    fn from(row: &rows::ConversationRow) -> Self {
+        Self {
+            thread_id: row.thread_id.clone(),
+            message_id: row.message_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AttentionResponse {
+    Reply {
+        thread_id: String,
+        message_id: String,
+        address_id: String,
+    },
+    Message {
+        address_id: String,
+    },
+    Pane {
+        address_id: String,
+    },
+    Local,
+}
+
+fn attention_response(item: &rows::AttentionRow) -> AttentionResponse {
+    use crate::AttentionSourceKind;
+    let Some(address_id) = &item.response_address_id else {
+        return AttentionResponse::Local;
+    };
+    if item.response_is_terminal {
+        return AttentionResponse::Pane {
+            address_id: address_id.clone(),
+        };
+    }
+    match item.item.source_kind {
+        AttentionSourceKind::DeliveryAttempt
+        | AttentionSourceKind::AgentDisposition
+        | AttentionSourceKind::Coordination
+        | AttentionSourceKind::AutomaticReplyLimit => {
+            if let Some(conversation) = &item.conversation {
+                if item.reply_requires_message
+                    || item.item.source_kind == AttentionSourceKind::Coordination
+                {
+                    return AttentionResponse::Message {
+                        address_id: address_id.clone(),
+                    };
+                }
+                return AttentionResponse::Reply {
+                    thread_id: conversation.thread_id.clone(),
+                    message_id: conversation.message_id.clone(),
+                    address_id: address_id.clone(),
+                };
+            }
+        }
+        AttentionSourceKind::ContextGrant
+        | AttentionSourceKind::PaneBinding
+        | AttentionSourceKind::IntegrationRegistration => {}
+    }
+    AttentionResponse::Pane {
+        address_id: address_id.clone(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -726,6 +802,12 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .attention
         .iter()
         .map(|item| AttentionCard {
+            attention_id: item.item.id.as_str().to_owned(),
+            source_id: item.item.source_id.clone(),
+            coordination_id: (item.item.source_kind == crate::AttentionSourceKind::Coordination)
+                .then(|| item.item.source_id.clone()),
+            conversation: item.conversation.as_ref().map(Conversation::from),
+            response: attention_response(item),
             source_kind: AttentionSourceKind::Stored(item.item.source_kind),
             summary: SafeText::from_untrusted(&item.item.summary, SHORT_CHARS),
             opened_at_ms: i64::try_from(item.item.opened_at_ms).unwrap_or(i64::MAX),
@@ -735,6 +817,16 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .collect();
     attention.extend(rows.addresses.iter().filter_map(|address| {
         blocked_on_user_at(address).map(|opened_at_ms| AttentionCard {
+            attention_id: format!("agent-status-{}", address.address_id),
+            source_id: address.address_id.clone(),
+            coordination_id: None,
+            conversation: address
+                .blocked_conversation
+                .as_ref()
+                .map(Conversation::from),
+            response: AttentionResponse::Pane {
+                address_id: address.address_id.clone(),
+            },
             source_kind: AttentionSourceKind::AgentStatus,
             summary: SafeText::from_untrusted(
                 &format!("@{} is waiting on an approval or question.", address.alias),

@@ -174,8 +174,7 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
     const banner = renderToStaticMarkup(
       createElement(NeedsYou, {
         channel: event.channel,
-        inTimeline: new Map(),
-        onShow() {},
+        onFocus() {},
       }),
     );
     const needsYou = level === "needs_you";
@@ -344,4 +343,196 @@ test("a terminal run for the request decides Exit over the code in the result bo
   };
   assert.equal(exitShown("request"), "Exit 1");
   assert.equal(exitShown("another-request"), "Exit 0");
+});
+
+test("attention actions show historical evidence and safe responses for every source without loading the timeline", async () => {
+  const { AttentionActions } = await load<
+    typeof import("./ui/AttentionActions.tsx")
+  >("/src/ui/AttentionActions.tsx");
+  const { PeekContext } = await load<typeof import("./ui/PeekContext.tsx")>(
+    "/src/ui/PeekContext.tsx",
+  );
+  const value = JSON.parse((await fixtures())[0] ?? "null");
+  const responsible = value.frame.participants[0].address_id;
+  for (const source of [
+    "delivery_attempt",
+    "agent_disposition",
+    "automatic_reply_limit",
+    "coordination",
+    "agent_status",
+    "context_grant",
+    "pane_binding",
+    "integration_registration",
+  ]) {
+    const paneOnly = [
+      "agent_status",
+      "context_grant",
+      "pane_binding",
+      "integration_registration",
+    ].includes(source);
+    value.frame.attention = [
+      {
+        attention_id: source,
+        source_kind: source,
+        summary: { text: "Needs you", truncated: false },
+        opened_at_ms: 1,
+        conversation: {
+          thread_id: "historical-thread",
+          message_id: "historical-message",
+        },
+        response: paneOnly
+          ? { kind: "pane", address_id: responsible }
+          : source === "coordination"
+            ? { kind: "message", address_id: responsible }
+            : {
+                kind: "reply",
+                thread_id: "historical-thread",
+                message_id: "historical-message",
+                address_id: responsible,
+              },
+      },
+    ];
+    const { channel } = space(value);
+    const item = channel.attention[0];
+    assert.ok(item);
+    const markup = renderToStaticMarkup(
+      createElement(
+        PeekContext,
+        { value: { scope: channel.key, open() {} } },
+        createElement(AttentionActions, { item, channel, onFocus() {} }),
+      ),
+    );
+    assert.ok(markup.includes("Show message"), source);
+    assert.equal(markup.includes(">Respond<"), !paneOnly, source);
+    assert.equal(markup.includes(">Peek<"), paneOnly, source);
+    if (paneOnly) assert.ok(markup.includes("Respond in @codex"), markup);
+    assert.equal(channel.messages.size, 0);
+  }
+  value.frame.attention = [
+    {
+      source_kind: "integration_registration",
+      summary: { text: "Repair", truncated: false },
+      opened_at_ms: 1,
+      response: { kind: "local" },
+    },
+  ];
+  const { channel } = space(value);
+  const item = channel.attention[0];
+  assert.ok(item);
+  const local = renderToStaticMarkup(
+    createElement(AttentionActions, { item, channel, onFocus() {} }),
+  );
+  assert.ok(local.includes("Namedrop setup from the command palette"), local);
+  assert.equal(local.includes("Show message"), false);
+  assert.equal(local.includes(">Respond<"), false);
+  const missing = renderToStaticMarkup(
+    createElement(AttentionActions, {
+      item: { ...item, source: "coordination" },
+      channel,
+      onFocus() {},
+    }),
+  );
+  assert.ok(missing.includes("Namedrop Doctor"), missing);
+  assert.equal(missing.includes("repair the integration"), false);
+});
+
+test("Activity reuses the attention evidence and response controls", async () => {
+  const { ActivityView } = await load<typeof import("./ui/ActivityView.tsx")>(
+    "/src/ui/ActivityView.tsx",
+  );
+  const { activityOf } = await import("./activity.ts");
+  const { homesOf } = await import("./store.ts");
+  const value = JSON.parse((await fixtures())[0] ?? "null");
+  value.frame.participants[0].activity = "idle";
+  value.frame.attention = [
+    {
+      attention_id: "decision",
+      source_kind: "coordination",
+      subject_alias: null,
+      summary: { text: "Decision", truncated: false },
+      opened_at_ms: 1,
+      conversation: { thread_id: "old", message_id: "report" },
+      response: {
+        kind: "message",
+        address_id: value.frame.participants[0].address_id,
+      },
+    },
+  ];
+  const state = reduce(initialState(), space(value));
+  const markup = renderToStaticMarkup(
+    createElement(ActivityView, {
+      list: activityOf(state.channels),
+      homes: homesOf(state.channels.values(), undefined),
+      channels: state.channels,
+      open: null,
+      onFocus() {},
+      onJump() {},
+    }),
+  );
+  assert.ok(markup.includes("Show message"), markup);
+  assert.ok(markup.includes(">Respond<"), markup);
+});
+
+test("focused tracked evidence exposes the channel response path without a rejected thread composer", async () => {
+  const { ThreadPane } = await load<typeof import("./ui/ThreadPane.tsx")>(
+    "/src/ui/ThreadPane.tsx",
+  );
+  const event = space(JSON.parse((await fixtures())[0] ?? "null"));
+  const { channel } = event;
+  const directory = { members: channel.members, homes: new Map() };
+  const active = reduce(initialState(), event).channels.get(channel.key);
+  assert.ok(active);
+  const props = {
+    channel: active,
+    thread: {
+      id: "tracked",
+      parents: [
+        {
+          id: "tracked-message",
+          threadId: "tracked",
+          inReplyTo: null,
+          at: 1,
+          author: "human",
+          kind: "mention",
+          body: { text: "Request", truncated: false },
+          legs: [],
+        },
+      ],
+      replies: [],
+      knownCount: 1,
+    },
+    runs: new Map(),
+    directory,
+    completion: {
+      current: channel.key,
+      channels: [],
+      membersOf: () => [...channel.members.values()],
+    },
+    drafts: new Map(),
+    outbox: new Map(),
+    posted: new Set<string>(),
+    onEdit() {},
+    onSend() {},
+    onClose() {},
+    paneId: "tracked-pane",
+  } satisfies Parameters<typeof ThreadPane>[0];
+  const ordinary = renderToStaticMarkup(createElement(ThreadPane, props));
+  assert.ok(ordinary.includes("textarea"));
+  const markup = renderToStaticMarkup(
+    createElement(ThreadPane, {
+      ...props,
+      response: { kind: "message", prepare() {} },
+    }),
+  );
+  assert.ok(markup.includes("Respond in the channel"));
+  assert.ok(markup.includes("Prepare response"));
+  assert.equal(markup.includes("textarea"), false);
+  const pane = renderToStaticMarkup(
+    createElement(ThreadPane, {
+      ...props,
+      response: { kind: "pane", name: "@terminal" },
+    }),
+  );
+  assert.ok(pane.includes("Respond in @terminal in Herdr"));
+  assert.equal(pane.includes("textarea"), false);
 });

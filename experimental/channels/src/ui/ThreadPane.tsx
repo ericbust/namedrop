@@ -1,4 +1,9 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  attentionReplyTo,
+  type ReplyIntent,
+  replyPrefill,
+} from "../attention.ts";
 import type { CompletionContext } from "../complete.ts";
 import { replyLabel, replyPlaceholder } from "../copy.ts";
 import type {
@@ -10,6 +15,7 @@ import type {
   Outgoing,
 } from "../model.ts";
 import {
+  draftKey,
   exitFor,
   type RunIndex,
   recipients,
@@ -21,6 +27,11 @@ import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
 import { useEscape } from "./useEscape.ts";
+
+export type ThreadResponse =
+  | { kind: "reply"; intent: ReplyIntent }
+  | { kind: "message"; prepare: () => void }
+  | { kind: "pane"; name: string };
 
 export function ThreadPane({
   channel,
@@ -35,6 +46,9 @@ export function ThreadPane({
   onSend,
   onClose,
   paneId,
+  response = null,
+  target = null,
+  earlierOmitted = false,
 }: {
   channel: Channel;
   thread: ThreadGroup;
@@ -51,14 +65,14 @@ export function ThreadPane({
   ) => void;
   onClose: () => void;
   paneId: string;
+  response?: ThreadResponse | null;
+  target?: { messageId: string } | null;
+  earlierOmitted?: boolean;
 }) {
+  const replyIntent = response?.kind === "reply" ? response.intent : null;
   const pane = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
   const [openedAt] = useState(() => Date.now());
-  const to = useMemo(
-    () => replyRecipients(thread, directory),
-    [thread, directory],
-  );
   const latest = thread.replies.at(-1) ?? thread.parents.at(-1);
   const composer = useMemo<ComposerId>(
     () => ({ key: channel.key, thread: thread.id }),
@@ -71,6 +85,44 @@ export function ThreadPane({
       ),
     [outbox, composer],
   );
+  const [draftPreserved] = useState(
+    () =>
+      replyIntent !== null &&
+      ((drafts.get(draftKey(composer))?.text.length ?? 0) > 0 ||
+        pending.length > 0),
+  );
+  const activeReply = draftPreserved ? null : replyIntent;
+  const to = useMemo(
+    () =>
+      activeReply === null
+        ? replyRecipients(thread, directory)
+        : attentionReplyTo(activeReply, directory),
+    [thread, directory, activeReply],
+  );
+  const prefilled = useRef<ReplyIntent | null>(null);
+  useLayoutEffect(() => {
+    if (
+      activeReply === null ||
+      to === null ||
+      prefilled.current === activeReply
+    )
+      return;
+    prefilled.current = activeReply;
+    const prefill = replyPrefill(
+      drafts.get(draftKey(composer))?.text ?? "",
+      to,
+    );
+    if (!prefill.preserved) onEdit(composer, prefill.text);
+  }, [activeReply, to, drafts, composer, onEdit]);
+  useLayoutEffect(() => {
+    if (target === null) return;
+    const row = body.current?.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(target.messageId)}"]`,
+    );
+    row?.scrollIntoView({ block: "center" });
+    row?.setAttribute("tabindex", "-1");
+    row?.focus({ preventScroll: true });
+  }, [target]);
   const shownPending = useRef(pending);
   useLayoutEffect(() => {
     const earlier = new Set(
@@ -104,6 +156,11 @@ export function ThreadPane({
         </button>
       </header>
       <div className="thread-body" ref={body}>
+        {earlierOmitted && (
+          <p className="earlier-thread">
+            Earlier conversation context omitted.
+          </p>
+        )}
         {thread.parents.length === 0 && (
           <p className="earlier-thread">
             Earlier thread · the parent message is not loaded yet.
@@ -113,6 +170,7 @@ export function ThreadPane({
           <Message
             key={message.id}
             message={message}
+            located={message.id === target?.messageId}
             directory={directory}
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}
@@ -129,6 +187,7 @@ export function ThreadPane({
           <Message
             key={message.id}
             message={message}
+            located={message.id === target?.messageId}
             directory={directory}
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}
@@ -140,21 +199,60 @@ export function ThreadPane({
           <PendingMessage key={entry.requestId} entry={entry} />
         ))}
       </div>
-      {completion && latest && (
-        <Composer
-          context={completion}
-          composer={composer}
-          drafts={drafts}
-          outbox={outbox}
-          placeholder={replyPlaceholder(to?.names ?? [])}
-          label={replyLabel(to?.names ?? [])}
-          to={to}
-          onEdit={(text) => onEdit(composer, text)}
-          onSend={(source, startedAt) =>
-            onSend({ composer, source, inReplyTo: latest.id }, startedAt)
-          }
-        />
+      {replyIntent !== null && draftPreserved && (
+        <p className="earlier-thread" role="status">
+          Your existing draft was kept. Send or clear it before preparing this
+          reply.
+        </p>
       )}
+      {activeReply !== null && to === null && (
+        <p className="earlier-thread" role="status">
+          The responsible agent is no longer available. Use its pane in Herdr to
+          respond.
+        </p>
+      )}
+      {response?.kind === "pane" && (
+        <p className="earlier-thread" role="status">
+          Respond in {response.name} in Herdr.
+        </p>
+      )}
+      {response?.kind === "message" && (
+        <p className="earlier-thread" role="status">
+          Respond in the channel.{" "}
+          <button
+            type="button"
+            className="text-button"
+            onClick={response.prepare}
+          >
+            Prepare response
+          </button>
+        </p>
+      )}
+      {(response === null || response.kind === "reply") &&
+        completion &&
+        latest &&
+        (activeReply === null || to !== null) && (
+          <Composer
+            context={completion}
+            composer={composer}
+            drafts={drafts}
+            outbox={outbox}
+            placeholder={replyPlaceholder(to?.names ?? [])}
+            label={replyLabel(to?.names ?? [])}
+            to={to}
+            onEdit={(text) => onEdit(composer, text)}
+            onSend={(source, startedAt) =>
+              onSend(
+                {
+                  composer,
+                  source,
+                  inReplyTo: activeReply?.messageId ?? latest.id,
+                },
+                startedAt,
+              )
+            }
+          />
+        )}
     </aside>
   );
 }
