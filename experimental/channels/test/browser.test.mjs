@@ -1649,6 +1649,54 @@ test("design-b fix: terminal results show stdout, stderr and the exit code inste
   assert.equal(await pane.getByText("command finished").count(), 0);
 });
 
+test("design-b fix: the message hover keeps the hover token's hue in both themes", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = [message("row", "Hover me")];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  for (const colorScheme of ["light", "dark"]) {
+    await ui.page.emulateMedia({ colorScheme });
+    const row = ui.page.locator('[data-message-id="row"]');
+    await row.hover();
+    const { hovered, expected } = await row.evaluate((element) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 1;
+      canvas.height = 1;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      const paint = (...layers) => {
+        context.clearRect(0, 0, 1, 1);
+        for (const [color, alpha] of layers) {
+          context.globalAlpha = alpha;
+          context.fillStyle = color;
+          context.fillRect(0, 0, 1, 1);
+        }
+        return [...context.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+      };
+      let behind = element.parentElement;
+      while (getComputedStyle(behind).backgroundColor === "rgba(0, 0, 0, 0)")
+        behind = behind.parentElement;
+      const page = getComputedStyle(behind).backgroundColor;
+      const probe = document.createElement("div");
+      probe.style.background = "var(--bg-hover)";
+      document.body.append(probe);
+      const token = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return {
+        hovered: paint(
+          [page, 1],
+          [getComputedStyle(element).backgroundColor, 1],
+        ),
+        expected: paint([page, 1], [token, 0.5]),
+      };
+    });
+    for (const [index, channel] of hovered.entries())
+      assert.ok(
+        Math.abs(channel - expected[index]) <= 2,
+        `${colorScheme} hover ${hovered} should match ${expected}`,
+      );
+  }
+});
+
 test("design-b: loading, empty channel and history errors use the design copy", async (t) => {
   let fail = true;
   const loading = await open(t, () => {});

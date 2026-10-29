@@ -546,7 +546,7 @@ a:hover {
   padding-top: 1px;
 }
 .msg:hover {
-  background: color-mix(in oklch, var(--bg-hover) 55%, transparent);
+  background: color-mix(in srgb, var(--bg-hover) 55%, transparent);
 }
 .msg-gutter {
   font-size: var(--text-xs);
