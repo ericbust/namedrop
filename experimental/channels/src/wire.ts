@@ -11,6 +11,7 @@ import type {
   MessageKind,
   SafeText,
   SpaceKey,
+  TerminalResult,
   TerminalRun,
   ThreadChip,
   WireEvent,
@@ -239,6 +240,33 @@ function messages(value: unknown): Map<string, Message> {
     rows.set(row.id, row);
   }
   return rows;
+}
+const TERMINAL_HEADER =
+  /^@\S+ command finished with exit code (-?\d+)\.\nstdout:\n/;
+const STDERR = "\nstderr:\n";
+const EMPTY_STDERR = "\nstderr:";
+export function terminalResult({
+  text,
+  truncated,
+}: SafeText): TerminalResult | null {
+  const header = TERMINAL_HEADER.exec(text);
+  if (header === null) return null;
+  const exitCode = Number(header[1]);
+  if (!Number.isSafeInteger(exitCode)) return null;
+  const output = text.slice(header[0].length);
+  let split = output.lastIndexOf(STDERR);
+  let stderr = "";
+  if (output.endsWith(EMPTY_STDERR))
+    split = output.length - EMPTY_STDERR.length;
+  else if (split >= 0) stderr = output.slice(split + STDERR.length);
+  else if (truncated) split = output.length;
+  else return null;
+  const stdout = output.slice(0, split);
+  return {
+    exitCode,
+    stdout: stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout,
+    stderr,
+  };
 }
 export function pathKey(pathname: string): SpaceKey | null {
   const segment = /^\/w\/([0-9a-f]{20})\/?$/.exec(pathname)?.[1];

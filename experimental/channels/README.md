@@ -99,9 +99,13 @@ HTTPS URLs become links with `rel="noreferrer"`. Bodies over 480 characters have
 **Show more**. Preview boundaries preserve surrogate pairs. Links are recognized
 before shortening, so a shortened label retains its complete destination and the
 ellipsis stays outside the link. A server truncation note identifies text omitted
-before delivery. A message to a single terminal renders as a command, and a
-terminal's reply renders as monospace output. **Exit N** shows only when a terminal
-run's `message_id` matches the request. Receipts use the plain words in
+before delivery. A message to a single terminal renders as a command.
+`terminalResult` in `wire.ts` parses a terminal's reply into its exit code,
+stdout, and stderr, so the reply shows stdout as monospace output, a non-empty
+stderr under a **stderr** label, or **No output**. The reply preview shows the
+first two lines. **Exit N** uses a terminal run whose `message_id` matches the
+request, else the parsed exit code. A reply that does not parse renders as
+monospace text with no **Exit N**. Receipts use the plain words in
 `src/copy.ts` and hide once every recipient has replied.
 Unknown message kinds and delivery stages use neutral labels.
 

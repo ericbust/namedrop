@@ -5,8 +5,10 @@ import type {
   ChannelSnapshot,
   MemberKind,
   Message as MessageRow,
+  TerminalResult,
   TerminalRun,
 } from "../model.ts";
+import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 
@@ -87,13 +89,6 @@ function previewLimit(text: string, length = PREVIEW): number {
     ? limit - 1
     : limit;
 }
-const EMPTY_STDERR = "\n\nstderr:";
-function terminalOutput(text: string): string {
-  return text.endsWith(EMPTY_STDERR)
-    ? text.slice(0, -EMPTY_STDERR.length)
-    : text;
-}
-
 type Variant = "text" | "command" | "output";
 function Body({
   text,
@@ -145,13 +140,43 @@ function Body({
     </>
   );
 }
-function Exit({ run }: { run: TerminalRun | undefined }) {
-  if (run === undefined || run.exitCode === null) return null;
-  const failed = run.exitCode !== 0;
+function TerminalOutput({
+  result: { stdout, stderr },
+  truncated,
+}: {
+  result: TerminalResult;
+  truncated: boolean;
+}) {
+  return (
+    <>
+      {stdout === "" && stderr === "" && <p className="no-output">No output</p>}
+      {stdout !== "" && (
+        <Body text={stdout} truncated={false} variant="output" />
+      )}
+      {stderr !== "" && (
+        <>
+          <p className="stderr-label">stderr</p>
+          <Body text={stderr} truncated={false} variant="output" />
+        </>
+      )}
+      {truncated && <p className="truncation-note">Shortened by Namedrop.</p>}
+    </>
+  );
+}
+function Exit({
+  run,
+  result,
+}: {
+  run: TerminalRun | undefined;
+  result: TerminalResult | null;
+}) {
+  const code = run?.exitCode ?? result?.exitCode ?? null;
+  if (code === null) return null;
+  const failed = code !== 0;
   return (
     <span className="exit" data-failed={failed ? "" : undefined}>
       <Icon name={failed ? "alert" : "done"} className="icon-12" />
-      Exit {run.exitCode}
+      Exit {code}
     </span>
   );
 }
@@ -268,8 +293,10 @@ function ReplyPreview({
     const name = authorName(members, reply.author);
     const type = authorType(members, reply.author);
     const time = clock(reply.at);
-    const text =
-      type === "terminal" ? terminalOutput(reply.body.text) : reply.body.text;
+    const result = type === "terminal" ? terminalResult(reply.body) : null;
+    const text = result
+      ? (result.stdout || result.stderr).split("\n", 2).join("\n")
+      : reply.body.text;
     label = `${replies}${count === 1 ? "" : ", latest"} from ${name}${time ? ` at ${time.label}` : ""}. Open thread`;
     content = (
       <>
@@ -277,16 +304,20 @@ function ReplyPreview({
         <span className="rp-main">
           <span className="rp-head">
             <span className="rp-author">{name}</span>
-            <Exit run={exit} />
+            <Exit run={exit} result={result} />
             {time && (
               <time dateTime={time.iso} title={time.full}>
                 {time.label}
               </time>
             )}
           </span>
-          <span className={`rp-body${type === "terminal" ? " mono" : ""}`}>
-            {text.slice(0, previewLimit(text, 400))}
-          </span>
+          {result && text === "" ? (
+            <span className="rp-body no-output">No output</span>
+          ) : (
+            <span className={`rp-body${type === "terminal" ? " mono" : ""}`}>
+              {text.slice(0, previewLimit(text, 400))}
+            </span>
+          )}
         </span>
       </>
     );
@@ -338,6 +369,7 @@ export const Message = memo(
     const name = authorName(members, message.author);
     const time = clock(message.at);
     const variant = variantFor(message, members, recipients);
+    const result = variant === "output" ? terminalResult(message.body) : null;
     return (
       <article
         className={`msg ${grouped ? "grouped" : "group-start"}${arrive ? " arrive" : ""}`}
@@ -355,7 +387,7 @@ export const Message = memo(
           {(!grouped || showRecipients) && (
             <header className="msg-head">
               {!grouped && <span className="author">{name}</span>}
-              {!grouped && <Exit run={exit} />}
+              {!grouped && <Exit run={exit} result={result} />}
               {recipients.length > 0 && (
                 <span className="to">
                   <Icon name="arrow" />
@@ -385,13 +417,14 @@ export const Message = memo(
                 variant="text"
               />
             </div>
+          ) : result ? (
+            <TerminalOutput
+              result={result}
+              truncated={message.body.truncated}
+            />
           ) : (
             <Body
-              text={
-                variant === "output"
-                  ? terminalOutput(message.body.text)
-                  : message.body.text
-              }
+              text={message.body.text}
               truncated={message.body.truncated}
               variant={variant}
             />

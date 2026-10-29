@@ -1532,10 +1532,7 @@ test("design-b: requests show their latest reply inline, commands and output rea
     "echo hello",
   );
   const output = timeline.locator('[data-message-id="cmd"] .reply-preview');
-  assert.equal(
-    await output.locator(".rp-body.mono").textContent(),
-    "@shell command finished with exit code 0.\nstdout:\nhello",
-  );
+  assert.equal(await output.locator(".rp-body.mono").textContent(), "hello");
   assert.equal(await output.locator(".exit").textContent(), "Exit 0");
   assert.equal(
     await timeline.locator('[data-message-id="cmd2"] .exit').count(),
@@ -1551,12 +1548,105 @@ test("design-b: requests show their latest reply inline, commands and output rea
   await pane.locator('[data-message-id="out"] pre.output').waitFor();
   assert.equal(
     await pane.locator('[data-message-id="out"] pre.output').textContent(),
-    "@shell command finished with exit code 0.\nstdout:\nhello",
+    "hello",
   );
   assert.equal(
     await pane.locator('[data-message-id="out"] .msg-head .exit').textContent(),
     "Exit 0",
   );
+});
+
+test("design-b fix: terminal results show stdout, stderr and the exit code instead of the preamble", async (t) => {
+  const at = Date.now() - 10 * 60_000;
+  const value = frame(1, "alpha");
+  value.frame.participants = people();
+  const result = (code, output) =>
+    `@shell command finished with exit code ${code}.\nstdout:\n${output}`;
+  value.frame.messages = [
+    ["ls", result(0, "a\nb\nc\n\nstderr:\n")],
+    ["make", result(2, "partial\n\nstderr:\nboom: no rule\n")],
+    ["true", result(0, "\nstderr:")],
+    ["false", result(0, "x\n\nstderr:\n")],
+  ].flatMap(([command, body], n) => [
+    message(`c${n}`, command, {
+      thread_id: `t${n}`,
+      at_ms: at + n * 60_000,
+      legs: [{ to: "shell", stage: done() }],
+    }),
+    message(`o${n}`, body, {
+      thread_id: `t${n}`,
+      in_reply_to: `c${n}`,
+      kind: "reply",
+      author: "shell",
+      at_ms: at + n * 60_000 + 1000,
+      legs: [{ to: "human", stage: done("no_reply") }],
+    }),
+  ]);
+  value.frame.terminal_runs = [
+    {
+      terminal: "shell",
+      command: { text: "false", truncated: false },
+      started_at_ms: at + 3 * 60_000,
+      exit_code: 1,
+      message_id: "c3",
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const preview = (n) =>
+    timeline.locator(`[data-message-id="c${n}"] .reply-preview`);
+  const previews = [];
+  for (const n of [0, 1, 2, 3])
+    previews.push([
+      await preview(n).locator(".exit").textContent(),
+      await preview(n).locator(".rp-body").textContent(),
+      await preview(n).locator(".rp-body.mono").count(),
+    ]);
+  assert.deepEqual(previews, [
+    ["Exit 0", "a\nb", 1],
+    ["Exit 2", "partial", 1],
+    ["Exit 0", "No output", 0],
+    ["Exit 1", "x", 1],
+  ]);
+  assert.equal(await timeline.getByText("command finished").count(), 0);
+  const pane = ui.page.getByRole("complementary", { name: "Thread" });
+  const shown = async (n) => {
+    await preview(n).click();
+    const reply = pane.locator(`[data-message-id="o${n}"]`);
+    await reply.waitFor();
+    return {
+      exit: await reply.locator(".msg-head .exit").textContent(),
+      blocks: await reply.locator("pre.output").allTextContents(),
+      stderr: await reply.locator(".stderr-label").allTextContents(),
+      empty: await reply.locator(".no-output").allTextContents(),
+    };
+  };
+  assert.deepEqual(await shown(0), {
+    exit: "Exit 0",
+    blocks: ["a\nb\nc"],
+    stderr: [],
+    empty: [],
+  });
+  assert.deepEqual(await shown(1), {
+    exit: "Exit 2",
+    blocks: ["partial", "boom: no rule\n"],
+    stderr: ["stderr"],
+    empty: [],
+  });
+  assert.deepEqual(await shown(2), {
+    exit: "Exit 0",
+    blocks: [],
+    stderr: [],
+    empty: ["No output"],
+  });
+  assert.deepEqual(await shown(3), {
+    exit: "Exit 1",
+    blocks: ["x"],
+    stderr: [],
+    empty: [],
+  });
+  assert.equal(await pane.getByText("command finished").count(), 0);
 });
 
 test("design-b: loading, empty channel and history errors use the design copy", async (t) => {

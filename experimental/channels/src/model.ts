@@ -49,6 +49,11 @@ export type TerminalRun = {
   exitCode: number | null;
   messageId: string | null;
 };
+export type TerminalResult = {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+};
 export type MessageKind =
   | "mention"
   | "reply"
