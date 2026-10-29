@@ -1605,7 +1605,7 @@ test("history window: replay decides from the reader's position when ready arriv
   assert.equal(channel.messages.get("m456")?.legs[0]?.stage.stage, "held");
 });
 
-test("design-b: attention subject and message ids parse tolerantly and propagate", () => {
+test("design-b: attention subject and message ids parse from the server's shape and the alias gets one @", () => {
   const base = snapshot();
   function frame(extra: Record<string, unknown>) {
     return {
@@ -1624,29 +1624,39 @@ test("design-b: attention subject and message ids parse tolerantly and propagate
       },
     };
   }
-  const plain = apply(initialState(), frame({}));
-  const [missing] = activeChannel(plain).attention;
-  assert.equal(missing?.subjectAlias, null);
-  assert.equal(missing?.messageId, null);
-  for (const malformed of [
+  const plain = apply(
+    initialState(),
+    frame({ subject_alias: null, message_id: null }),
+  );
+  const [unnamed] = activeChannel(plain).attention;
+  assert.equal(unnamed?.subjectAlias, null);
+  assert.equal(unnamed?.messageId, null);
+  for (const other of [
+    {},
     { subject_alias: 7, message_id: { id: "m1" } },
     { subject_alias: " ", message_id: "" },
-    { subject_alias: null, message_id: null },
+    { subject_alias: "@", message_id: " " },
   ]) {
-    const [item] = parsed(frame(malformed)).attention;
+    const [item] = parsed(frame(other)).attention;
     assert.equal(item?.subjectAlias, null);
     assert.equal(item?.messageId, null);
   }
   const withSubject = apply(
     plain,
-    frame({ subject_alias: "@codex", message_id: "m1" }),
+    frame({ subject_alias: "codex", message_id: "m1" }),
   );
   assert.notEqual(withSubject, plain);
   const [item] = activeChannel(withSubject).attention;
   assert.equal(item?.subjectAlias, "@codex");
   assert.equal(item?.messageId, "m1");
+  for (const alias of ["@codex", "@@codex"])
+    assert.equal(
+      parsed(frame({ subject_alias: alias, message_id: "m1" })).attention[0]
+        ?.subjectAlias,
+      "@codex",
+    );
   assert.equal(
-    apply(withSubject, frame({ subject_alias: "@codex", message_id: "m1" })),
+    apply(withSubject, frame({ subject_alias: "codex", message_id: "m1" })),
     withSubject,
   );
 });
@@ -1674,6 +1684,7 @@ test("design-b: terminal runs parse tolerantly, keep identity and propagate exit
         { ...valid, command: "echo hi" },
         { ...valid, started_at_ms: -1 },
         "not a run",
+        { ...valid, exit_code: null, message_id: null },
         { ...valid, exit_code: null, message_id: undefined },
         { ...valid, exit_code: "1", message_id: 5 },
       ]),
@@ -1685,6 +1696,13 @@ test("design-b: terminal runs parse tolerantly, keep identity and propagate exit
         startedAt: 90,
         exitCode: 0,
         messageId: "m1",
+      },
+      {
+        terminal: "shell-1",
+        command: { text: "echo hi", truncated: false },
+        startedAt: 90,
+        exitCode: null,
+        messageId: null,
       },
       {
         terminal: "shell-1",

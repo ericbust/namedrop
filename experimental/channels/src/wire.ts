@@ -42,6 +42,10 @@ function addressId(value: unknown): AddressId {
 function optionalIdentity(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
+function optionalAlias(value: unknown): string | null {
+  const bare = typeof value === "string" ? value.replace(/^@+/, "") : "";
+  return bare.trim() ? `@${bare}` : null;
+}
 function nullableText(value: unknown): string | null {
   return value === null ? null : text(value);
 }
@@ -151,7 +155,7 @@ function attention(
     source,
     summary,
     openedAt,
-    subjectAlias: optionalIdentity(item.subject_alias),
+    subjectAlias: optionalAlias(item.subject_alias),
     messageId: optionalIdentity(item.message_id),
   };
 }

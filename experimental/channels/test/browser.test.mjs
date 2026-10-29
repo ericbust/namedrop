@@ -2271,7 +2271,7 @@ test("design-b: Needs you shows titles, hints and ages three at a time and annou
     card(
       "delivery_attempt",
       "ND-DELIVERY-003: The agent received this message and ended its turn without a reply or a no-reply. Its exact session can still answer it from delivery.inbox.",
-      { subject_alias: "@codex", message_id: "m1" },
+      { subject_alias: "codex", message_id: "m1" },
     ),
     card("agent_status", "@claude is waiting on an approval or question."),
     card("coordination", "Coordination ND-COORD-001 waits for close."),
