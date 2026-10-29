@@ -7,7 +7,9 @@ import {
   initialState,
   type MessageRow,
   reduce,
+  runsByMessage,
   sortedChannels,
+  type TimelineRow,
   threadGroups,
   timelineView,
 } from "./store.ts";
@@ -1866,4 +1868,47 @@ test("design-b: a gap row resets grouping and keeps the day", () => {
     summary(timelineView(activeChannel(state), undefined, now)),
     ["day:Today", "a to", "gap", "b to"],
   );
+});
+test("design-b fix: a frame keeps per-row props identical for unchanged messages", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  const ask = row("ask", now - 3 * MIN, { to: ["agent-2"] });
+  const value = snapshot();
+  value.frame.messages = [ask];
+  const state = apply(initialState(), value);
+  value.frame.messages = [ask, row("next", now - MIN, { to: ["agent-2"] })];
+  const next = apply(state, value);
+  const askRow = (rows: readonly TimelineRow[]) =>
+    rows.find(
+      (item): item is MessageRow =>
+        item.kind === "message" && item.message.id === "ask",
+    );
+  const first = askRow(timelineView(activeChannel(state), undefined, now));
+  const second = askRow(timelineView(activeChannel(next), undefined, now));
+  assert.ok(first && second);
+  assert.deepEqual(first.recipients, ["agent-2"]);
+  assert.equal(second.message, first.message);
+  assert.equal(second.recipients, first.recipients);
+});
+test("design-b fix: a new terminal run keeps unchanged runs identical", () => {
+  const run = (message_id: string, exit_code: number) => ({
+    terminal: "shell-1",
+    command: { text: "echo hi", truncated: false },
+    started_at_ms: 90,
+    exit_code,
+    message_id,
+  });
+  const value = snapshot();
+  const state = apply(initialState(), {
+    ...value,
+    frame: { ...value.frame, terminal_runs: [run("m1", 0)] },
+  });
+  const next = apply(state, {
+    ...value,
+    frame: { ...value.frame, terminal_runs: [run("m1", 0), run("m2", 1)] },
+  });
+  const before = runsByMessage(activeChannel(state).terminalRuns);
+  const after = runsByMessage(activeChannel(next).terminalRuns);
+  assert.equal(after.get("m2")?.exitCode, 1);
+  assert.ok(before.get("m1"));
+  assert.equal(after.get("m1"), before.get("m1"));
 });

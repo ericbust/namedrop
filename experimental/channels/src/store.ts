@@ -76,6 +76,15 @@ function reuseMap<K, V>(
     }),
   );
 }
+function reuseRows<T>(
+  previous: readonly T[] | undefined,
+  incoming: readonly T[],
+): readonly T[] {
+  if (!previous) return incoming;
+  if (sameValue(previous, incoming)) return previous;
+  const known = new Map(previous.map((row) => [JSON.stringify(row), row]));
+  return incoming.map((row) => known.get(JSON.stringify(row)) ?? row);
+}
 function sameRuns(a: Channel["runs"], b: Channel["runs"]): boolean {
   return (
     a.length === b.length &&
@@ -194,10 +203,7 @@ function mergeSnapshot(
         previous && sameValue(previous.attention, snapshot.attention)
           ? previous.attention
           : snapshot.attention,
-      terminalRuns:
-        previous && sameValue(previous.terminalRuns, snapshot.terminalRuns)
-          ? previous.terminalRuns
-          : snapshot.terminalRuns,
+      terminalRuns: reuseRows(previous?.terminalRuns, snapshot.terminalRuns),
       members: reuseMap(previous?.members, snapshot.members),
       threads: reuseMap(previous?.threads, snapshot.threads),
       messages,
