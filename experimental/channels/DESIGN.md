@@ -45,11 +45,12 @@ These are settled. Do not reopen them without a new decision here.
   stable order keeps channels findable.
 - **A channel is read after 1.5 seconds on screen.** Passing over it with the
   arrow keys keeps its unread mark. This changes UI-1's behavior on purpose.
-- **A plain post talks to the room.** A post that does not start with `@name` is
-  a channel post. Namedrop picks who answers it, and every reply in its thread
-  shows in the timeline as its own message, in time order, as in a group chat.
-  A post that starts with `@name` is a request, and it keeps the request and
-  answer unit above. Decided 2026-10-29 for the operator's channel-chat request.
+- **The channel is a room.** A post that does not start with `@name` goes to
+  the channel and reaches only the agents it mentions and means. Channel posts
+  and agent conversations show every reply as its own message in time order, as
+  in a group chat. A request the operator starts with `@name` keeps the request
+  and answer unit above. Decided 2026-10-29 for the operator's channel-chat
+  request and north star (preferences lines 21, 23 and 25).
 
 ## Tokens
 
@@ -122,8 +123,11 @@ neutral with a faint indigo cast (hue 278), as in `docs/assets/social-preview.pn
 
 A grid of `--sidebar-width`, then the main column, then the thread pane when a
 thread is open. The main column stacks the channel header, the member strip,
-the Needs-you banner when present, and the timeline. Only the timeline and the
-thread pane scroll.
+the Needs-you banner when present, and the timeline. The shell fills the window
+exactly, and the page itself never scrolls. Only the panes inside it scroll: the
+sidebar list, the Needs-you details, the timeline, the thread, the activity list,
+and the screen text. Each of them is the containing block of what it scrolls, so
+hidden text inside it never stretches the page.
 
 ### Landing and navigation
 
@@ -297,7 +301,8 @@ click.
   Use the receipt copy table below. Hide the line when every recipient replied
   and the reply preview shows, because the preview already says so.
 - **Reply preview**: when a request has replies, show the latest reply in a
-  box under the body. A channel post never gets one, as Channel chat says.
+  box under the body. A channel post or an agent conversation never
+  gets one, as Channel chat says.
   The box has a 1px `--line` border, `--radius-md`, 8px by 10px padding, and is
   at most `--measure` wide. It holds a 20px avatar, the author at 13px 600, the
   time, and the reply body clamped to two lines at 13px. Terminal output uses
@@ -451,9 +456,7 @@ main column, under the timeline, and at the bottom of the thread pane.
   open, Enter and Tab accept the highlighted suggestion instead.
 - **Hint**: while the box has focus, a 12px muted line under it says where Enter
   sends the text. In the thread pane it reads "Enter to send · Shift+Enter for
-  a new line". The channel composer follows Channel chat below: "Enter posts to
-  the channel · Start with @name to choose who gets it", or "Enter sends only to
-  @codex" once the text starts with mentions.
+  a new line". The channel composer's hints are in Channel chat below.
 - The Jump to latest pill floats 16px above the composer, not above the
   timeline's bottom edge.
 
@@ -476,13 +479,13 @@ main column, under the timeline, and at the bottom of the thread pane.
   long." For 401 it reads the same as 403. A server message shows with its first
   letter capitalized and a final period. Anything else reads "Namedrop couldn't
   send this. Try again." Editing the text clears the error.
-- A thread reply must start with a recipient. A channel post need not, as
-  Channel chat says. When a reply's text does not start with
-  `@name`, `#channel @name`, or `#all @name`, and the thread gives no recipients,
-  Enter does not send, and the Send button stays disabled. Only after Enter or
-  a click on Send does the hint line read "Start with @name to choose who gets
-  this." in `--text`. Typing clears it, so it never nags while a recipient is
-  still being typed.
+- A thread reply needs someone to get it: the thread's agents, or the members
+  its text starts with. When the thread has no agents and the text does not
+  start with `@name`, `#channel @name`, or `#all @name`, Enter does not send,
+  and the Send button stays disabled. Only after Enter or a click on Send does
+  the hint line read "Start with @name to choose who gets this." in `--text`.
+  Typing clears it, so it never nags while a recipient is still being typed. A
+  channel post always sends, as Channel chat says.
 - A refused draft remembers its latest attempt: the request id and the exact
   text and reply target it tried. Sending that same text again reuses the id,
   even after edits that end back at the same text, so retrying an attempt whose
@@ -502,35 +505,33 @@ main column, under the timeline, and at the bottom of the thread pane.
 
 ### Thread replies
 
-A follow-up in the thread pane must start with its recipients, and a reply goes
-to one workspace.
-Namedrop's grammar is one run of `#label` tokens, then one run of `@alias`
-mentions, and it looks every alias up in every named workspace, so mixing
-workspaces would reach agents who are not in the thread.
+A reply in the thread pane goes to the thread's agents, the way typing in an
+agent's pane reaches that agent.
 
-- The recipients are the agents who wrote in the thread from the workspace of
-  the latest agent message. With no agent message yet, they are the parent's
-  recipients from the workspace of its first recipient. Never the operator.
+- The recipients are every agent who wrote in the thread or was sent a message
+  in it, except terminals and retired members. Never the operator. The server
+  applies the same rule. The page only shows it.
 - The thread composer shows them as a muted label at the left of the box: "To
-  @codex", or "To @lead · #alpha" for another workspace, where the source starts
-  with that workspace's token, as in `#alpha @lead`.
-- When that workspace has no token, nobody can be addressed, and the box reads
-  "No one in this thread can be mentioned. Start with @name to choose someone."
-- When the text starts with its own mentions, those win and the label hides.
+  @codex, @claude", where an agent from another workspace reads "@lead ·
+  #alpha".
+- Text that does not start with mentions is sent exactly as typed. Text that
+  starts with its own mentions goes to those members instead, and the label
+  hides.
+- When the thread has no such agents, as when its only other member is a
+  terminal, the reply must start with `@name`, so a terminal never runs text by
+  accident. The box reads "Start with @name to choose who gets this."
 - The post carries `in_reply_to` with the latest message in the thread.
 
 ### Channel chat
 
-A post in the channel composer that does not start with `@name` goes to the
-channel. The server stores the text exactly as typed and asks a small model which
-agents should answer. The model only picks names from the channel's agents.
-Every reply in that post's thread shows in the timeline as its own message,
-in time order. An agent reply that mentions `@codex` anywhere in its text wakes
-@codex. The channel should read like a room you talk in, not a ticket queue.
+Talk in a channel the way you talk in a Herdr pane with Namedrop. Write
+normally. A post reaches an agent you mention when it is meant for them, agents
+bring each other in by name, and the whole conversation stays in view. It should
+read like a room you talk in, not a ticket queue.
 
 ```
 [Y]  You  11:02 PM
-     can someone check why the mac build fails?
+     can @claude check why the mac build fails on main?
      → @claude · build question
 
 [c]  @claude  11:02 PM
@@ -541,19 +542,47 @@ in time order. An agent reply that mentions `@codex` anywhere in its text wakes
      Yes. I cleared it, and the build passes now.
 
 [Y]  You  11:20 PM
-     the docs site is down again
-     ▢ No one picked this up · Send to @claude, @codex
+     heads up: I'm rotating the staging API keys at 3pm
 
-     ↩ You: can someone check why the mac build fails?
+[Y]  You  11:22 PM
+     nice catch by @codex on the cache
+     ▢ Mentioned @codex, not sent · Send anyway
+
+     ↩ @codex: Yes. I cleared it, and the build passes now.
 [c]  @claude  11:31 PM
-     The fix is in #812.
+     I added a CI check so a toolchain bump clears the cache.
 ```
 
-**Which messages are channel chat.** A channel post is a message whose wire row
-carries a `channel` object. Its thread is a channel thread. Every message in a
-channel thread is channel chat: the post, agent replies, and the operator's
-follow-ups from the thread pane. When the post itself is not loaded, its replies
-show as today's earlier-thread rows, because nothing marks them.
+**What the channel composer sends.**
+
+- Text that starts with `@name`, `#channel @name`, or `#all @name` goes only to
+  the people it names. It is a request, and it shows as one.
+- Any other text is a channel post. The server stores it exactly as typed.
+  When it mentions no agent, it is a message to the room: no one gets it and no
+  model runs. When it mentions agents, the server asks a small model which of
+  them the post is for, and only those agents get it. The model picks only among
+  the mentioned agents and never changes the text.
+- The agents a post mentions are the channel's agent members that are not
+  retired, in the order the text first names them. A mention is `@alias` at the
+  start of the text or after a character that is not a letter, digit, `_`, or
+  backslash. Terminals never count, because a terminal runs its text as a
+  command.
+
+**What reads as a conversation.** These threads show every message as its own
+row in the timeline, in time order. Nothing in them collapses into a reply
+preview.
+
+- A **channel thread**: the thread of a channel post, which is a message whose
+  wire row carries a `channel` object, whatever its state. Every message in it
+  is channel chat: the post, agent replies, and the operator's follow-ups.
+- An **agent conversation**: a thread whose first message an agent wrote, such
+  as one agent handing work to another. Its messages keep their header
+  recipients and receipt line, because an agent addressed them.
+- A thread whose first message is not loaded shows its replies as today's
+  earlier-thread rows, because nothing marks it.
+
+A request the operator starts with `@name` keeps the request and answer unit
+in Message above.
 
 **Route line.** Under the body of every channel-chat message, one 12px muted
 line says who got it and why. It replaces the receipt line and takes the
@@ -562,19 +591,21 @@ because the message went to the room. The line is a wrapping row of parts
 divided by "·", like the receipt line, and it starts with a 12px drawn icon.
 Names in it are peek buttons at 12px 600 in `--text`.
 
-| Message and state                         | Route line                                                     | Icon                     |
-| ----------------------------------------- | -------------------------------------------------------------- | ------------------------ |
-| Post, `routing`                           | "Finding who should answer…"                                   | clock                    |
-| Post, `routed`                            | "@claude · build question", where the words are the reason     | arrow                    |
-| Post, `routed` with an empty reason       | "@claude"                                                      | arrow                    |
-| Post, `unrouted`                          | "No one picked this up · Send to @claude, @codex"              | inbox                    |
-| Post, `router_failed`                     | "Couldn't pick who answers · Send to @claude, @codex"          | alert, `--failed-text`   |
-| Reply or follow-up that woke a member     | "@codex · pulled in"                                           | arrow                    |
-| Follow-up sent to a member by name        | "@codex"                                                       | arrow                    |
-| Reply to the operator only                | No line                                                        | none                     |
+| Message and state                                 | Route line                                                       | Icon                   |
+| ------------------------------------------------- | ---------------------------------------------------------------- | ---------------------- |
+| Post that mentions no agent                       | No line                                                          | none                   |
+| Post, `routing`                                   | "Checking who this is for…"                                      | clock                  |
+| Post, `routed`                                    | "@claude · build question", where the words are the reason       | arrow                  |
+| Post, `routed` with an empty reason               | "@claude"                                                        | arrow                  |
+| Post, `routed`, and a mentioned agent not sent    | "@claude · build question · Mentioned @codex, not sent · Send anyway" | arrow             |
+| Post, `unrouted`, mentioning agents               | "Mentioned @codex, not sent · Send anyway"                       | inbox                  |
+| Post, `router_failed`                             | "Couldn't check who this is for · Send to @codex"                | alert, `--failed-text` |
+| Reply or follow-up that woke a member             | "@codex · pulled in"                                             | arrow                  |
+| Follow-up sent to members                         | "@codex"                                                         | arrow                  |
+| Reply to the operator only                        | No line                                                          | none                   |
 
-- "pulled in" shows when the message's `woke` list is not empty. The names
-  are the message's recipients either way.
+- The names are the message's recipients: its legs, without the operator.
+  "pulled in" shows when the message's `woke` list is not empty.
 - The reason is the model's words. Show them as plain text, on one line, at
   most 60 characters. The line's tooltip reads "Picked by claude-haiku", with
   the server's router name, when the server sends one.
@@ -583,53 +614,55 @@ Names in it are peek buttons at 12px 600 in `--text`.
 - Receipts follow the names, with the receipt line's own rules and copy: the
   state alone for one recipient, as in "@claude · build question · Working on
   it", and "@claude Working on it · @codex Delivered" for several. They hide once
-  every named member has written in the thread.
+  every named member has written in the thread at or after the message, so a
+  follow-up keeps an honest "Working on it".
 - A post with replies ends its route line with "1 reply" or "3 replies", a text
   button in 12px 600 `--accent-text` that opens the thread pane. Its accessible
-  name is "3 replies. Open thread".
+  name is "3 replies. Open thread". A post with no line shows the count alone.
 - `router_failed` colors the icon and its words in `--failed-text`, because the
-  post reached no one and the operator should act. Its tooltip reads "Namedrop
-  couldn't reach its router. The post is saved, and no one got it."
+  post reached no one it named and the operator should act. Its tooltip reads
+  "Namedrop couldn't reach its router. The post is saved, and no one got it."
 
-**Send to.** A post that no one picked up, or that the router failed, offers
-its channel's agents after "Send to": every member whose kind is agent and who
-is not retired, in member-strip order, joined by commas. Terminals are left out,
-because a terminal runs its text as a command. Each name is a text button in
-12px 600 `--accent-text` with the accessible name "Send this to @codex".
-Activating one opens the post's thread in the thread pane and focuses its
-composer. When that thread's draft is empty, the box holds `@codex ` and the
+**Send anyway.** A post offers to send itself to each agent it mentions that
+did not get it. One such agent reads "Send anyway". Several read "Send to
+@codex, @claude", and `router_failed` always uses that form. Each offer is a
+text button in 12px 600 `--accent-text` with the accessible name "Send this to
+@codex". Activating one opens the post's thread in the thread pane and focuses
+its composer. When that thread's draft is empty, the box holds `@codex ` and the
 post's text, with the caret at the end, so Enter sends it and the text can still
-change first. A draft that has text stays as it is. A channel with no agents
-shows the state words alone.
+change first. A draft that has text stays as it is.
 
-**Replies in the timeline.** In a channel thread nothing collapses into a reply
-preview. Each reply is a full message row at its own time.
+**Replies in the timeline.**
 
-- **Reply reference**: a reply whose message row above is not the message it
-  answers shows one line above its header, aligned with the text column: a 12px
-  drawn reply icon, the parent's author at 600, ":", and the parent's first line,
-  in 12px `--text-muted`, clipped to one line at `--measure`. The line is a
-  button that opens the thread pane. Its accessible name is "Reply to @claude:
-  The arm64 link step fails. Open thread". When the parent is not loaded, it
-  reads "Reply to an earlier message". Hover turns its text `--text`.
-- A reply with a reference line starts a new group. Otherwise channel chat groups
-  like any message.
-- The thread pane shows a channel thread as it shows any thread, with route
-  lines and no reference lines. Its composer keeps the thread reply rule.
+- **Reply reference**: a reply in a conversation whose message row above is not
+  the message it answers shows one line above its header, aligned with the text
+  column: a 12px drawn reply icon, the parent's author at 600, ":", and the
+  parent's first line, in 12px `--text-muted`, clipped to one line at
+  `--measure`. The line is a button that opens the thread pane. Its accessible
+  name is "Reply to @claude: The arm64 link step fails. Open thread". When the
+  parent is not loaded, it reads "Reply to an earlier message". Hover turns its
+  text `--text`.
+- A reply with a reference line starts a new group. Otherwise a conversation
+  groups like any message.
+- The thread pane shows these threads as it shows any thread, with route lines
+  and no reference lines.
 
-**Composer.** The channel composer sends plain text. The Send button turns on
-for any text, and the "Start with @name" guard applies only in the thread pane.
-While the box has focus, the hint line says where Enter sends:
+**Channel composer hint.** While the box has focus, the hint line says where
+Enter sends:
 
-- Text that does not start with mentions, or no text: "Enter posts to the
-  channel · Start with @name to choose who gets it".
+- Text that mentions no agent, or no text: "Enter posts to the channel ·
+  Mention @name to bring someone in".
+- Text that mentions agents but does not start with them: "Enter posts to the
+  channel · Namedrop checks if it's for @codex", with at most two names, then
+  "+N".
 - Text that starts with mentions: "Enter sends only to @codex", "Enter sends
   only to @codex, @shell", or "Enter sends only to @codex, @shell +2". The
   names are the leading aliases as typed, without `#label` tokens.
 
-**Pending post.** While a channel post is sending, its pending row's receipt
-reads "Finding who should answer…" with the clock icon, because the server picks
-recipients before it answers. A post that starts with `@name` keeps "Sending…".
+**Pending post.** While a channel post that mentions agents is sending, its
+pending row's receipt reads "Checking who this is for…" with the clock icon,
+because the server asks the model before it answers. Every other post keeps
+"Sending…".
 
 ### Autocomplete
 
@@ -839,7 +872,7 @@ Motion shows state and nothing else.
 | First connection, under 400ms | Nothing new. Keep the shell blank to avoid a flash.                                                                                |
 | First connection, over 400ms  | Three skeleton sidebar rows and three skeleton messages, in `--bg-hover`, with no shimmer.                                         |
 | No workspaces                 | Title "No workspaces yet". Body "Open a workspace in Herdr and name an agent with `namedrop name`. It shows up here as a channel." |
-| Channel with no messages      | Title "No messages yet". Body "Post here to talk with the agents in this workspace. Start with @name to ask one directly."         |
+| Channel with no messages      | Title "No messages yet". Body "Post here to talk with the agents in this workspace. Mention @name to bring one in."               |
 | Loading older messages        | A 12px muted "Loading earlier messages…" line at the top of the timeline.                                                          |
 | History error                 | "Couldn't load earlier messages." and a **Try again** button, in the same line.                                                    |
 | Missing range                 | A hairline divider with "Some messages are missing here" and a **Load them** button.                                               |
