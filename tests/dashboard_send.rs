@@ -624,6 +624,128 @@ fn conflicting_reserved_identity_is_never_adopted_or_rewritten() {
     }
 }
 
+#[test]
+fn conflicting_operator_identity_keeps_home_and_envoy_projection_in_agent_lanes() {
+    let conflicts = [
+        "UPDATE pane_roles SET name='wrong' WHERE role_id='role-operator'",
+        "UPDATE pane_roles SET description='wrong' WHERE role_id='role-operator'",
+        "UPDATE pane_addresses SET role_id='role-w1-lead' WHERE address_id='operator:local'",
+        "UPDATE pane_addresses SET retired=1 WHERE address_id='operator:local'",
+        "UPDATE pane_addresses SET collaboration_disabled=1 WHERE address_id='operator:local'",
+        "UPDATE pane_addresses SET pane_type='terminal' WHERE address_id='operator:local'",
+        "UPDATE pane_addresses SET remote_commands_terminal_id='terminal' WHERE address_id='operator:local'",
+        "UPDATE pane_addresses SET persona='legacy' WHERE address_id='operator:local'",
+        "INSERT INTO pane_addresses (session_socket_id,worktree_id,address_id,role_id,retired,collaboration_disabled,created_at_ms) VALUES ('socket-a','w1','shared','role-operator',0,0,1)",
+        "INSERT INTO alias_claims (session_socket_id,worktree_id,alias,address_id,claim_state) VALUES ('socket-a','w1','legacy','operator:local','tombstone')",
+        "INSERT INTO pane_bindings (session_socket_id,worktree_id,binding_id,address_id,pane_id,active,bound_at_ms) VALUES ('socket-a','w1','legacy','operator:local','legacy',0,1)",
+        "INSERT INTO agent_session_observations (session_socket_id,worktree_id,observation_id,address_id,agent_session_id,status,observed_at_ms) VALUES ('socket-a','w1','legacy','operator:local','legacy','idle',1)",
+        "INSERT INTO integration_registrations (session_socket_id,worktree_id,registration_id,address_id,agent_session_id,runtime,protocol_version,capability_profile,active) SELECT session_socket_id,worktree_id,'legacy','operator:local',agent_session_id,runtime,protocol_version,capability_profile,0 FROM integration_registrations WHERE worktree_id='w1' AND address_id='address-w1-lead'",
+    ];
+    for conflict in conflicts {
+        let f = Fixture::new();
+        f.register_all();
+        f.sql("INSERT INTO pane_roles (session_socket_id,worktree_id,role_id,name,description) VALUES ('socket-a','w1','role-operator','operator','Paneless local operator.');
+            INSERT INTO pane_addresses (session_socket_id,worktree_id,address_id,role_id,retired,collaboration_disabled,created_at_ms) VALUES ('socket-a','w1','operator:local','role-operator',0,0,1);
+            INSERT INTO pane_addresses (session_socket_id,worktree_id,address_id,role_id,retired,collaboration_disabled,created_at_ms) VALUES ('socket-a','w2','legacy-envoy','role-w2-lead',0,0,1);
+            INSERT INTO space_envoys (session_socket_id,worktree_id,address_id,origin_space_id,origin_address_id,origin_alias,origin_label,host_label) VALUES ('socket-a','w2','legacy-envoy','w1','operator:local','operator','ws1','ws2');");
+        f.sql(conflict);
+        let runtime = f.runtime("w1", "unused");
+        assert!(
+            send_operator_message("conflict", "@planner inspect", None, &runtime)
+                .unwrap_err()
+                .contains("operator"),
+            "{conflict}"
+        );
+        assert_eq!(f.message_rows(), (0, 0), "{conflict}");
+        let mut store = StateStore::open(&f.state).unwrap();
+        let home = store
+            .dashboard_rows(&StateNamespace::for_space("socket-a", "w1"))
+            .unwrap();
+        assert_eq!(
+            home.addresses
+                .iter()
+                .filter(|row| row.address_id == "operator:local")
+                .count(),
+            1,
+            "conflicting home identity must remain an ordinary record: {conflict}"
+        );
+        for workspace in ["w1", "w2"] {
+            let frame = namedrop::dashboard::snapshot::build(
+                &store
+                    .dashboard_rows(&StateNamespace::for_space("socket-a", workspace))
+                    .unwrap(),
+                None,
+                42,
+            );
+            assert_eq!(
+                frame
+                    .participants
+                    .iter()
+                    .filter(|lane| lane.address_id == "human")
+                    .count(),
+                0,
+                "conflicting identity must not create a human lane in {workspace}: {conflict}"
+            );
+        }
+    }
+}
+
+#[test]
+fn conflicting_operator_pane_receives_ordinary_alias_send_without_silent_settlement() {
+    let f = Fixture::new();
+    f.register_all();
+    f.sql("INSERT INTO pane_roles (session_socket_id,worktree_id,role_id,name,description) VALUES ('socket-a','w1','role-operator','wrong','legacy pane');
+        INSERT INTO pane_addresses (session_socket_id,worktree_id,address_id,role_id,retired,collaboration_disabled,created_at_ms) VALUES ('socket-a','w1','operator:local','role-operator',0,0,1);
+        UPDATE alias_claims SET address_id='operator:local' WHERE worktree_id='w1' AND address_id='address-w1-lead';
+        UPDATE pane_bindings SET address_id='operator:local' WHERE worktree_id='w1' AND address_id='address-w1-lead';
+        UPDATE agent_session_observations SET address_id='operator:local' WHERE worktree_id='w1' AND address_id='address-w1-lead';
+        UPDATE integration_registrations SET address_id='operator:local' WHERE worktree_id='w1' AND address_id='address-w1-lead';");
+    assert!(
+        send_operator_message(
+            "conflict",
+            "@planner inspect",
+            None,
+            &f.runtime("w1", "unused")
+        )
+        .is_err()
+    );
+    f.herdr.prompts.lock().unwrap().clear();
+    let sent = f.agent_send("w1", "pane-1-planner", "legacy-send", "@lead inspect");
+    assert_eq!(
+        f.delivery_states("w1", &sent["message_id"]),
+        ["acknowledged"],
+        "the conflicting reserved address is an ordinary pane recipient"
+    );
+    assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 1);
+    let mut store = StateStore::open(&f.state).unwrap();
+    let namespace = StateNamespace::for_space("socket-a", "w1");
+    let frame =
+        namedrop::dashboard::snapshot::build(&store.dashboard_rows(&namespace).unwrap(), None, 42);
+    let message = frame
+        .messages
+        .iter()
+        .find(|row| row.message_id == sent["message_id"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(message.legs[0].to, "operator:local");
+    let history = store
+        .dashboard_history(&namespace, None, 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(history.legs[0].address_id, "operator:local");
+    assert!(
+        frame
+            .participants
+            .iter()
+            .any(|lane| lane.address_id == "operator:local")
+    );
+    assert!(
+        frame
+            .participants
+            .iter()
+            .all(|lane| lane.address_id != "human")
+    );
+}
+
 mod http {
     use super::*;
     use namedrop::HerdrCommandExecutor;
@@ -813,6 +935,53 @@ else:
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+
+    #[test]
+    fn concurrent_identical_posts_append_and_deliver_once() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let path = format!("/w/{}/messages", key.as_str());
+        let body = json!({"request_id":"http-concurrent", "source":"@planner inspect"}).to_string();
+        let barrier = std::sync::Barrier::new(2);
+        let responses = thread::scope(|scope| {
+            let post = || {
+                barrier.wait();
+                server.post(&path, &body, &[])
+            };
+            let first = scope.spawn(post);
+            let second = scope.spawn(post);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        let receipts = responses.map(|response| {
+            assert_eq!(response.status, 200, "{}", response.body);
+            serde_json::from_str::<Value>(&response.body).unwrap()
+        });
+        assert_eq!(receipts[0]["message_id"], receipts[1]["message_id"]);
+        assert_eq!(receipts[0]["thread_id"], receipts[1]["thread_id"]);
+        assert_eq!(receipts[0]["deliveries"], receipts[1]["deliveries"]);
+        assert_eq!(
+            receipts
+                .iter()
+                .filter(|receipt| receipt["idempotent_replay"] == true)
+                .count(),
+            1
+        );
+        assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 1);
+        assert_eq!(f.count("SELECT COUNT(*) FROM mailbox_deliveries"), 1);
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 1);
+        let invocations = fs::read_to_string(f.root.join("http-herdr-invocations.jsonl")).unwrap();
+        let prompts: Vec<Value> = invocations
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|call| call["args"][0] == "agent")
+            .collect();
+        assert_eq!(prompts.len(), 1);
+        let envelope: Value =
+            serde_json::from_str(prompts[0]["args"][3].as_str().unwrap()).unwrap();
+        assert_eq!(envelope["control"]["message_id"], receipts[0]["message_id"]);
     }
 
     #[test]

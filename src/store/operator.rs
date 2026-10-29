@@ -37,44 +37,6 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         attribution: &MutationAttribution,
     ) -> Result<RoutingAddressSnapshot, StoreError> {
-        let ns = params![
-            namespace.session_socket_id,
-            namespace.space_id.as_str(),
-            ROLE
-        ];
-        let role: Option<(String, String)> = self
-            .transaction
-            .query_row(
-                "SELECT name, description FROM pane_roles
-             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND role_id = ?3",
-                ns,
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()?;
-        if role
-            .as_ref()
-            .is_some_and(|(name, description)| name != "operator" || description != DESCRIPTION)
-        {
-            return Err(StoreError::invalid_input(
-                "the reserved operator role conflicts with existing state",
-            ));
-        }
-        let shared_role: bool = self.transaction.query_row(
-            "SELECT EXISTS (SELECT 1 FROM pane_addresses WHERE session_socket_id = ?1
-             AND worktree_id = ?2 AND role_id = ?3 AND address_id <> ?4)",
-            params![
-                namespace.session_socket_id,
-                namespace.space_id.as_str(),
-                ROLE,
-                ADDRESS
-            ],
-            |row| row.get(0),
-        )?;
-        if shared_role {
-            return Err(StoreError::invalid_input(
-                "the reserved operator role belongs to another address",
-            ));
-        }
         self.transaction.execute(
             "INSERT OR IGNORE INTO pane_roles (
                 session_socket_id, worktree_id, role_id, name, description
@@ -104,28 +66,6 @@ impl StateTransaction<'_> {
                 "the reserved operator address conflicts with existing state",
             ));
         }
-        let contaminated: bool = self.transaction.query_row(
-            "SELECT EXISTS (
-                SELECT 1 FROM pane_addresses WHERE session_socket_id = ?1 AND worktree_id = ?2
-                  AND address_id = ?3 AND (collaboration_disabled <> 0 OR pane_type <> 'agent'
-                    OR remote_commands_terminal_id IS NOT NULL OR persona IS NOT NULL)
-                UNION ALL
-                SELECT 1 FROM alias_claims WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
-                UNION ALL
-                SELECT 1 FROM pane_bindings WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
-                UNION ALL
-                SELECT 1 FROM agent_session_observations WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
-                UNION ALL
-                SELECT 1 FROM integration_registrations WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
-             )",
-            params![namespace.session_socket_id, namespace.space_id.as_str(), ADDRESS],
-            |row| row.get(0),
-        )?;
-        if contaminated {
-            return Err(StoreError::invalid_input(
-                "the operator must have no pane identity or configuration",
-            ));
-        }
         Ok(snapshot())
     }
 
@@ -139,14 +79,33 @@ impl StateTransaction<'_> {
         }
         self.transaction
             .query_row(
-                "SELECT EXISTS (SELECT 1 FROM pane_addresses
-             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
-               AND role_id = ?4 AND retired = 0)",
+                "SELECT EXISTS (
+                    SELECT 1 FROM pane_addresses a
+                    JOIN pane_roles r USING (session_socket_id, worktree_id, role_id)
+                    WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
+                      AND a.address_id = ?3 AND a.role_id = ?4 AND a.retired = 0
+                      AND r.name = 'operator' AND r.description = ?5
+                      AND a.collaboration_disabled = 0 AND a.pane_type = 'agent'
+                      AND a.remote_commands_terminal_id IS NULL AND a.persona IS NULL
+                      AND NOT EXISTS (
+                        SELECT 1 FROM pane_addresses WHERE session_socket_id = ?1
+                          AND worktree_id = ?2 AND role_id = ?4 AND address_id <> ?3
+                        UNION ALL
+                        SELECT 1 FROM alias_claims WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
+                        UNION ALL
+                        SELECT 1 FROM pane_bindings WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
+                        UNION ALL
+                        SELECT 1 FROM agent_session_observations WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
+                        UNION ALL
+                        SELECT 1 FROM integration_registrations WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3
+                      )
+                 )",
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
                     ADDRESS,
-                    ROLE
+                    ROLE,
+                    DESCRIPTION
                 ],
                 |row| row.get(0),
             )
@@ -157,27 +116,30 @@ impl StateTransaction<'_> {
         &self,
         namespace: &StateNamespace,
     ) -> Result<Vec<String>, StoreError> {
+        let operator = PaneAddressId::new(ADDRESS);
+        let mut addresses = Vec::new();
+        if self.is_operator_address(namespace, &operator)? {
+            addresses.push(ADDRESS.to_owned());
+        }
         let mut statement = self.transaction.prepare(
-            "SELECT address_id FROM pane_addresses
-             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND address_id = ?3 AND role_id = ?4 AND retired = 0
-             UNION
-             SELECT e.address_id FROM space_envoys e JOIN pane_addresses a
-               ON a.session_socket_id = e.session_socket_id AND a.worktree_id = e.origin_space_id
-              AND a.address_id = e.origin_address_id
-             WHERE e.session_socket_id = ?1 AND e.worktree_id = ?2
-               AND a.address_id = ?3 AND a.role_id = ?4 AND a.retired = 0"
+            "SELECT address_id, origin_space_id FROM space_envoys
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND origin_address_id = ?3",
         )?;
-        let addresses = statement
-            .query_map(
-                params![
-                    namespace.session_socket_id,
-                    namespace.space_id.as_str(),
-                    ADDRESS,
-                    ROLE
-                ],
-                |row| row.get(0),
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
+        let envoys = statement.query_map(
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                ADDRESS
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        for envoy in envoys {
+            let (address, origin_space) = envoy?;
+            let origin = StateNamespace::for_space(&namespace.session_socket_id, origin_space);
+            if self.is_operator_address(&origin, &operator)? {
+                addresses.push(address);
+            }
+        }
         Ok(addresses)
     }
 
