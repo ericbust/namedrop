@@ -338,7 +338,10 @@ export function Composer({
           onChange={onChange}
           onKeyDown={onKeyDown}
           onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
-          onFocus={() => setFocused(true)}
+          onFocus={(event) => {
+            setFocused(true);
+            setCaret(event.currentTarget.selectionStart);
+          }}
           onBlur={() => setFocused(false)}
         />
         <button

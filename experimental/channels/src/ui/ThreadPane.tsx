@@ -52,7 +52,7 @@ export function ThreadPane({
     outgoing: Pick<Outgoing, "composer" | "source" | "inReplyTo">,
     startedAt: number,
   ) => void;
-  onSendTo?: SendToHandler;
+  onSendTo: SendToHandler;
   onClose: () => void;
   paneId: string;
 }) {

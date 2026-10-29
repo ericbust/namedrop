@@ -80,7 +80,7 @@ export function Timeline({
   unsentReplies: ReadonlySet<string>;
   expandedThread: string | null;
   onThread: (threadId: string, button: HTMLButtonElement) => void;
-  onSendTo?: SendToHandler;
+  onSendTo: SendToHandler;
   paneId: string;
   onOlder: (key: SpaceKey) => void;
   onLatest: (key: SpaceKey) => void;

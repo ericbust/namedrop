@@ -514,16 +514,33 @@ export function App() {
     button: HTMLButtonElement;
     threadId: string;
   } | null>(null);
-  const focusIntent = useRef(false);
+  // Where focus goes once an opened pane renders.
+  const focusIntent = useRef<"pane" | "composer" | null>(null);
   const [, requestFocus] = useReducer((count: number) => count + 1, 0);
   const openThread = useCallback(
-    (threadId: string, button: HTMLButtonElement) => {
+    (
+      threadId: string,
+      button: HTMLButtonElement,
+      focus: "pane" | "composer" = "pane",
+    ) => {
       returnFocus.current = { button, threadId };
-      focusIntent.current = true;
+      focusIntent.current = focus;
       requestFocus();
       dispatch({ type: "thread", threadId });
     },
     [],
+  );
+  const sendTo = useCallback(
+    (post: Message, alias: string, button: HTMLButtonElement) => {
+      if (current === undefined) return;
+      dispatch({
+        type: "fill",
+        composer: { key: current, thread: post.threadId },
+        text: `${alias} ${post.body.text}`,
+      });
+      openThread(post.threadId, button, "composer");
+    },
+    [current, openThread],
   );
   const [located, locate] = useState<Located | null>(null);
   useEffect(() => {
@@ -559,7 +576,7 @@ export function App() {
   const openPeek = useCallback(
     (target: PeekTarget, element: HTMLElement, startedAt: number) => {
       opening.current = { element, key: peekKey(target), startedAt };
-      focusIntent.current = true;
+      focusIntent.current = "pane";
       requestFocus();
       dispatch({ type: "peek", target });
     },
@@ -587,16 +604,21 @@ export function App() {
   const view = viewOf(state.selection);
   const shownView = useRef(view);
   useLayoutEffect(() => {
-    if (pane !== null && focusIntent.current) {
-      document
-        .getElementById(paneId)
-        ?.querySelector<HTMLElement>(
-          pane === "thread"
-            ? 'button[aria-label="Close thread"]'
-            : ".peek-text",
-        )
-        ?.focus();
-      focusIntent.current = false;
+    if (pane !== null && focusIntent.current !== null) {
+      const opened = document.getElementById(paneId);
+      const box = opened?.querySelector("textarea");
+      if (pane === "thread" && focusIntent.current === "composer" && box) {
+        box.setSelectionRange(box.value.length, box.value.length);
+        box.focus();
+      } else
+        opened
+          ?.querySelector<HTMLElement>(
+            pane === "thread"
+              ? 'button[aria-label="Close thread"]'
+              : ".peek-text",
+          )
+          ?.focus();
+      focusIntent.current = null;
     }
     const unmounted =
       (pane === null && paneWasOpen.current) ||
@@ -660,6 +682,7 @@ export function App() {
                 unsentReplies={unsentReplies}
                 expandedThread={thread ? thread.id : null}
                 onThread={openThread}
+                onSendTo={sendTo}
                 paneId={paneId}
                 onOlder={(key) => dispatch({ type: "older", key })}
                 onLatest={(key) => dispatch({ type: "latest", key })}
@@ -738,6 +761,7 @@ export function App() {
             posted={posted.current}
             onEdit={edit}
             onSend={send}
+            onSendTo={sendTo}
             onClose={closeThread}
             paneId={paneId}
           />
