@@ -41,16 +41,30 @@ export type Completion = {
 const ALL = "#all";
 const WHITESPACE = /\s/;
 
+type Labelling = Pick<
+  ChannelSnapshot,
+  "displayName" | "addressableLabel" | "workspaceId"
+>;
+
 function disabledReason(
-  channel: Pick<ChannelSnapshot, "displayName" | "workspaceId">,
-  suffix: string | null,
+  channel: Labelling,
+  channels: readonly Labelling[],
 ): DisabledReason {
   // Stripped characters fold to separators, so a name that folds to nothing came from a label that does too.
   if (foldLabel(channel.displayName) === "") return "unusable-label";
   // The server shows the workspace id as the name only when Herdr has no label.
   if (channel.displayName === channel.workspaceId) return "no-label";
-  // The sidebar suffix appears exactly when another channel shows the same name.
-  if (suffix !== null) return "shared-name";
+  // Only labels can collide on the server, and a token proves this name did not.
+  const sameName = channels.filter(
+    (other) =>
+      other.displayName === channel.displayName &&
+      other.displayName !== other.workspaceId,
+  );
+  if (
+    sameName.length > 1 &&
+    sameName.every((other) => other.addressableLabel === null)
+  )
+    return "shared-name";
   return "unknown";
 }
 
@@ -74,9 +88,7 @@ export function channelOptions(
           ? null
           : `#${channel.addressableLabel}`,
       disabledReason:
-        channel.addressableLabel === null
-          ? disabledReason(channel, suffix)
-          : null,
+        channel.addressableLabel === null ? disabledReason(channel, all) : null,
     };
   });
 }
