@@ -327,30 +327,40 @@ impl StateTransaction<'_> {
                 })
             },
         )?;
-        // Order observations once, then find blocked runs in grouped passes.
-        // Correlated history lookups would rescan every observation per address.
+        // Materialize cutoffs to avoid per-observation binding lookups.
+        // CROSS JOIN avoids a history scan per address without an address/time index.
         let addresses = self.rows(
-            "WITH observations AS (
-                 SELECT o.address_id, o.agent_session_id, o.status, o.observed_at_ms,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY o.address_id
-                            ORDER BY o.observed_at_ms DESC, o.rowid DESC) AS recency
+            "WITH history_times AS (
+                 SELECT o.address_id,
+                        MAX(o.observed_at_ms) AS latest_at_ms,
+                        MAX(CASE WHEN o.status <> 'blocked' THEN o.observed_at_ms END) AS last_nonblocked_at_ms
                  FROM agent_session_observations o
-                 JOIN pane_bindings b
-                   ON b.session_socket_id = o.session_socket_id AND b.worktree_id = o.worktree_id
-                  AND b.address_id = o.address_id AND b.active = 1
                  WHERE o.session_socket_id = ?1 AND o.worktree_id = ?2
-                   AND o.observed_at_ms >= b.bound_at_ms),
-             boundaries AS (
-                 SELECT address_id, MIN(recency) AS last_nonblocked
-                 FROM observations WHERE status <> 'blocked'
-                 GROUP BY address_id),
-             blocked_runs AS (
-                 SELECT o.address_id, MIN(o.observed_at_ms) AS blocked_since_ms
-                 FROM observations o
-                 LEFT JOIN boundaries b ON b.address_id = o.address_id
-                 WHERE o.status = 'blocked'
-                   AND (b.last_nonblocked IS NULL OR o.recency < b.last_nonblocked)
+                 GROUP BY o.address_id),
+             observation_times AS MATERIALIZED (
+                 SELECT h.address_id, b.bound_at_ms, h.latest_at_ms,
+                        CASE WHEN h.last_nonblocked_at_ms >= b.bound_at_ms
+                             THEN h.last_nonblocked_at_ms END AS last_nonblocked_at_ms
+                 FROM history_times h
+                 JOIN pane_bindings b
+                   ON b.session_socket_id = ?1 AND b.worktree_id = ?2
+                  AND b.address_id = h.address_id AND b.active = 1),
+             observation_runs AS (
+                 SELECT o.address_id,
+                        MAX(CASE WHEN o.observed_at_ms = t.latest_at_ms THEN o.rowid END) AS latest_rowid,
+                        MAX(CASE WHEN o.observed_at_ms = t.last_nonblocked_at_ms AND o.status = 'blocked'
+                                 THEN o.rowid END) AS boundary_blocked_rowid,
+                        MAX(CASE WHEN o.observed_at_ms = t.last_nonblocked_at_ms AND o.status <> 'blocked'
+                                 THEN o.rowid END) AS boundary_nonblocked_rowid,
+                        MIN(CASE WHEN o.status = 'blocked'
+                                  AND (t.last_nonblocked_at_ms IS NULL OR o.observed_at_ms > t.last_nonblocked_at_ms)
+                                 THEN o.observed_at_ms END) AS later_blocked_at_ms
+                 FROM agent_session_observations o
+                 CROSS JOIN observation_times t ON t.address_id = o.address_id
+                 WHERE o.session_socket_id = ?1 AND o.worktree_id = ?2
+                   AND o.observed_at_ms >= (
+                       SELECT MIN(COALESCE(last_nonblocked_at_ms, bound_at_ms)) FROM observation_times)
+                   AND o.observed_at_ms >= COALESCE(t.last_nonblocked_at_ms, t.bound_at_ms)
                  GROUP BY o.address_id),
              released AS (
                  SELECT address_id, alias, MAX(history_order)
@@ -359,7 +369,9 @@ impl StateTransaction<'_> {
                  GROUP BY address_id)
              SELECT a.address_id, COALESCE(c.alias, h.alias, ltrim(r.name, '@')), r.name, a.persona, a.pane_type, a.retired,
                     b.pane_id IS NOT NULL,
-                    COALESCE(o.agent_session_id, '') <> '', o.status, br.blocked_since_ms
+                    COALESCE(o.agent_session_id, '') <> '', o.status,
+                    CASE WHEN br.boundary_blocked_rowid > br.boundary_nonblocked_rowid
+                         THEN t.last_nonblocked_at_ms ELSE br.later_blocked_at_ms END
              FROM pane_addresses a
              JOIN pane_roles r USING (session_socket_id, worktree_id, role_id)
              -- A retired agent's alias can be released for reuse; its lane keeps the last one.
@@ -370,8 +382,9 @@ impl StateTransaction<'_> {
              LEFT JOIN pane_bindings b
                ON b.session_socket_id = a.session_socket_id AND b.worktree_id = a.worktree_id
               AND b.address_id = a.address_id AND b.active = 1
-             LEFT JOIN observations o ON o.address_id = a.address_id AND o.recency = 1
-             LEFT JOIN blocked_runs br ON br.address_id = a.address_id
+             LEFT JOIN observation_times t ON t.address_id = a.address_id
+             LEFT JOIN observation_runs br ON br.address_id = a.address_id
+             LEFT JOIN agent_session_observations o ON o.rowid = br.latest_rowid
              WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
                -- An envoy stands in for an agent in another workspace, not a lane here.
                AND NOT EXISTS (
