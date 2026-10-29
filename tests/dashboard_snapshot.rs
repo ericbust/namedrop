@@ -1127,7 +1127,7 @@ fn a_rebound_agent_ignores_status_from_its_old_binding() {
 }
 
 #[test]
-fn an_unanswered_request_keeps_its_recipient_snapshot_and_message() {
+fn an_unanswered_request_uses_its_current_recipient_alias_and_message() {
     let directory = TestDirectory::new();
     let mut store = StateStore::open(directory.path()).unwrap();
     let ns = seed_space(&mut store, "w1", &["a", "b"]);
@@ -1150,7 +1150,7 @@ fn an_unanswered_request_keeps_its_recipient_snapshot_and_message() {
     let json = serde_json::to_value(snapshot(&mut store, &ns)).unwrap();
     assert_eq!(json["attention"].as_array().unwrap().len(), 1);
     assert_eq!(json["attention"][0]["source_kind"], "agent_disposition");
-    assert_eq!(json["attention"][0]["subject_alias"], "b");
+    assert_eq!(json["attention"][0]["subject_alias"], "reviewer");
     assert_eq!(json["attention"][0]["message_id"], "m1");
     assert_eq!(json["participants"][1]["alias"], "@reviewer");
 }
@@ -1545,4 +1545,251 @@ fn history_message_json_keeps_its_existing_keys_and_values() {
             "legs": [{"to": "address-w1-b", "stage": {"stage": "queued"}}]
         }])
     );
+}
+
+#[test]
+fn attention_tracks_current_recipient_after_rename_and_alias_reuse() {
+    for unanswered in [false, true] {
+        let directory = TestDirectory::new();
+        let mut store = StateStore::open(directory.path()).unwrap();
+        let ns = seed_space(&mut store, "w1", &["a", "b"]);
+        send(&mut store, &ns, "m1", "a", "b", "Review", None);
+        let attempt = submit(&mut store, &ns, "b");
+        store
+            .transaction(|tx| {
+                if unanswered {
+                    tx.acknowledge_delivery_attempt(
+                        &ns,
+                        &attempt,
+                        "ack-1",
+                        &AgentSessionId::new("session-w1-b"),
+                        &attribution(),
+                    )?;
+                    tx.transition_delivery_attempt(
+                        &ns,
+                        &attempt,
+                        DeliveryState::Settled,
+                        &attribution(),
+                    )?;
+                } else {
+                    tx.hold_delivery_attempt(&ns, &attempt, &attribution())?;
+                }
+                tx.replace_alias(&ns, &id(&ns, "b"), "reviewer", &attribution())?;
+                tx.release_alias(&ns, "b", &attribution())?;
+                tx.create_pane_address(&ns, &address("new-owner-of-b", "b"), &attribution())?;
+                Ok(())
+            })
+            .unwrap();
+        let frame = snapshot(&mut store, &ns);
+        assert_eq!(frame.attention.len(), 1);
+        assert_eq!(
+            frame.attention[0].subject_alias.as_deref(),
+            Some("reviewer"),
+            "unanswered={unanswered}"
+        );
+        assert_eq!(frame.attention[0].message_id.as_deref(), Some("m1"));
+    }
+}
+
+#[test]
+fn multiple_recipient_attention_keeps_one_card_per_recipient() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b", "c", "d"]);
+    let space = ns.space_id.as_str();
+    let message = "m1";
+    let from = "a";
+    let to = ["b", "c", "d"];
+    store
+        .transaction(|tx| {
+            tx.append_message(
+                &ns,
+                &MessageDraft {
+                    thread_id: ThreadId::new(format!("thread-{space}")),
+                    message_id: MessageId::new(message),
+                    in_reply_to: None,
+                    author_address_id: id(&ns, from),
+                    author_kind: ActorKind::AgentSession,
+                    author_alias_snapshot: from.to_owned(),
+                    author_agent_session_snapshot: Some(AgentSessionId::new(format!(
+                        "session-{space}-{from}"
+                    ))),
+                    request_id: format!("request-{message}"),
+                    authored_source: "multi".to_owned(),
+                    body: "multi".to_owned(),
+                    grammar_version: "mention/v1".to_owned(),
+                    recipients: to
+                        .iter()
+                        .map(|t| MessageRecipientDraft {
+                            address_id: id(&ns, t),
+                            alias_snapshot: (*t).to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new(format!(
+                                "session-{space}-{t}"
+                            ))),
+                            delivery_id: DeliveryId::new(format!("delivery-{message}-{t}")),
+                        })
+                        .collect(),
+                    context_references: Vec::new(),
+                },
+                &attribution(),
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+    let held_b = submit(&mut store, &ns, "b");
+    let held_c = submit(&mut store, &ns, "c");
+    let failed_d = lease(&mut store, &ns, "d");
+    store
+        .transaction(|tx| {
+            tx.hold_delivery_attempt(&ns, &held_c, &attribution())?;
+            tx.transition_delivery_attempt(&ns, &failed_d, DeliveryState::Failed, &attribution())?;
+            tx.hold_delivery_attempt(&ns, &held_b, &attribution())
+        })
+        .unwrap();
+    let frame = snapshot(&mut store, &ns);
+    let mut cards: Vec<_> = frame
+        .attention
+        .iter()
+        .map(|card| (card.subject_alias.as_deref(), card.message_id.as_deref()))
+        .collect();
+    cards.sort();
+    assert_eq!(
+        cards,
+        vec![
+            (Some("b"), Some("m1")),
+            (Some("c"), Some("m1")),
+            (Some("d"), Some("m1")),
+        ]
+    );
+
+    store
+        .transaction(|tx| {
+            tx.replace_alias(&ns, &id(&ns, "c"), "remote-c", &attribution())?;
+            tx.replace_alias(&ns, &id(&ns, "d"), "remote-d", &attribution())
+        })
+        .unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("namedrop.sqlite3")).unwrap();
+    for recipient in ["c", "d"] {
+        connection
+            .execute(
+                "INSERT INTO space_envoys (session_socket_id, worktree_id, address_id,
+                origin_space_id, origin_address_id, origin_alias, origin_label, host_label)
+             VALUES ('socket-a', 'w1', ?1, 'w2', ?1, ?2, 'remote', 'local')",
+                rusqlite::params![id(&ns, recipient).as_str(), recipient],
+            )
+            .unwrap();
+    }
+    let rows = store.dashboard_rows(&ns).unwrap();
+    assert_eq!(rows.addresses.len(), 2);
+    let frame = build(&rows, None, 0);
+    let mut cards: Vec<_> = frame
+        .attention
+        .iter()
+        .map(|card| (card.subject_alias.as_deref(), card.message_id.as_deref()))
+        .collect();
+    cards.sort();
+    assert_eq!(
+        cards,
+        vec![
+            (Some("b"), Some("m1")),
+            (Some("c"), Some("m1")),
+            (Some("d"), Some("m1")),
+        ]
+    );
+}
+
+#[test]
+fn terminal_runs_keep_their_own_request_messages() {
+    let fixture = xws::Fixture::with_activated(1);
+    fixture.register_all_activated(1);
+    fixture.add_shell("w1", "pane-shell");
+    namedrop::execute_lifecycle_operation(
+        "name",
+        serde_json::json!({"alias": "shell", "pane_type": "terminal"}),
+        &fixture.runtime("w1", "pane-shell"),
+    )
+    .unwrap();
+    let first = fixture.agent_send("w1", "pane-1-lead", "req-one", "@shell echo one");
+    assert_eq!(fixture.run_terminal("w1", "pane-shell").unwrap(), 0);
+    fixture.advance(1000);
+    let second = fixture.agent_send("w1", "pane-1-planner", "req-two", "@shell echo two");
+    fixture.drain("w1");
+    assert_eq!(fixture.run_terminal("w1", "pane-shell").unwrap(), 0);
+    let ns = StateNamespace::for_space("socket-a", "w1");
+    let mut store = StateStore::open(&fixture.state).unwrap();
+    let frame = snapshot(&mut store, &ns);
+    let runs: Vec<_> = frame
+        .terminal_runs
+        .iter()
+        .map(|run| (run.command.text.as_str(), run.message_id.as_deref()))
+        .collect();
+    assert_eq!(
+        runs,
+        vec![
+            ("echo two", second["message_id"].as_str()),
+            ("echo one", first["message_id"].as_str()),
+        ]
+    );
+}
+
+#[test]
+fn terminal_links_use_the_namespace_when_delivery_and_attempt_ids_repeat() {
+    let dir = TestDirectory::new();
+    let mut store = StateStore::open(dir.path()).unwrap();
+    let n1 = seed_space(&mut store, "w1", &["a", "b"]);
+    let n2 = seed_space_on_socket(&mut store, "socket-b", "w1", &["a", "b"]);
+    for (ns, msg) in [(&n1, "m-first"), (&n2, "m-second")] {
+        let space = ns.space_id.as_str();
+        store
+            .transaction(|tx| {
+                tx.append_message(
+                    ns,
+                    &MessageDraft {
+                        thread_id: ThreadId::new(format!("thread-{space}")),
+                        message_id: MessageId::new(msg),
+                        in_reply_to: None,
+                        author_address_id: id(ns, "a"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "a".to_owned(),
+                        author_agent_session_snapshot: Some(AgentSessionId::new(format!(
+                            "session-{space}-a"
+                        ))),
+                        request_id: format!("request-{msg}"),
+                        authored_source: "@b echo".to_owned(),
+                        body: "echo".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: id(ns, "b"),
+                            alias_snapshot: "b".to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new(format!(
+                                "session-{space}-b"
+                            ))),
+                            delivery_id: DeliveryId::new("delivery-shared"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &attribution(),
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        submit(&mut store, ns, "b");
+    }
+    drop(store);
+    let db = rusqlite::Connection::open(dir.path().join("namedrop.sqlite3")).unwrap();
+    db.execute_batch("INSERT INTO terminal_executions(session_socket_id, worktree_id, attempt_id, terminal_id, command, started_at_ms, completed_at_ms, exit_code, output)
+          VALUES ('socket-a','w1','attempt-w1-b','t1','echo first',50,60,0,'first'),
+                 ('socket-b','w1','attempt-w1-b','t1','echo second',55,65,3,'second');").unwrap();
+    let fk: i64 = db
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(fk, 0);
+    let mut store = StateStore::open(dir.path()).unwrap();
+    for (ns, want) in [(&n1, "m-first"), (&n2, "m-second")] {
+        let frame = snapshot(&mut store, ns);
+        assert_eq!(frame.terminal_runs.len(), 1);
+        assert_eq!(frame.terminal_runs[0].message_id.as_deref(), Some(want));
+    }
 }

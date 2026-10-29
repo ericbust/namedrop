@@ -583,57 +583,77 @@ impl StateTransaction<'_> {
                 .find(|address| address.address_id == id)
                 .map(|address| address.alias.clone())
         };
-        let mut attention = Vec::new();
-        for item in self.unresolved_attention_items(namespace)? {
-            let source = params![ns[0], ns[1], item.source_id];
-            let mut message_id = None;
-            let subject_alias = match item.source_kind {
-                crate::AttentionSourceKind::DeliveryAttempt
-                | crate::AttentionSourceKind::AgentDisposition => {
-                    let link = self.transaction.query_row(
-                        "SELECT r.alias_snapshot, d.message_id
-                         FROM delivery_attempts a
-                         JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
-                         JOIN message_recipients r USING (session_socket_id, worktree_id, message_id, address_id)
-                         WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.attempt_id = ?3",
-                        source,
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                    ).optional()?;
-                    link.map(|(alias, message)| {
-                        message_id = Some(message);
-                        alias
-                    })
-                }
-                crate::AttentionSourceKind::PaneBinding => alias_for_address(&item.source_id),
-                crate::AttentionSourceKind::IntegrationRegistration => self
-                    .transaction
-                    .query_row(
-                        "SELECT address_id FROM integration_registrations
-                         WHERE session_socket_id = ?1 AND worktree_id = ?2 AND registration_id = ?3",
-                        source,
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                    .and_then(|id| alias_for_address(&id)),
-                crate::AttentionSourceKind::ContextGrant => self
-                    .transaction
-                    .query_row(
-                        "SELECT grantee_address_id FROM context_grants
-                         WHERE session_socket_id = ?1 AND worktree_id = ?2 AND grant_id = ?3",
-                        source,
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?
-                    .and_then(|id| alias_for_address(&id)),
-                crate::AttentionSourceKind::AutomaticReplyLimit
-                | crate::AttentionSourceKind::Coordination => None,
-            };
-            attention.push(AttentionRow {
-                item,
-                subject_alias,
-                message_id,
-            });
-        }
+        let address_ids: Vec<_> = addresses
+            .iter()
+            .map(|address| &address.address_id)
+            .collect();
+        let mut attention = self.rows(
+            "SELECT i.attention_item_id, i.source_kind, i.source_id, i.summary,
+                    i.opened_at_ms, i.resolved_at_ms,
+                    d.address_id,
+                    CASE WHEN d.address_id NOT IN (SELECT value FROM json_each(?3))
+                         THEN (SELECT r.alias_snapshot FROM message_recipients r
+                               WHERE r.session_socket_id = d.session_socket_id AND r.worktree_id = d.worktree_id
+                                 AND r.message_id = d.message_id AND r.address_id = d.address_id)
+                    END,
+                    d.message_id,
+                    CASE i.source_kind
+                      WHEN 'integration_registration' THEN (
+                          SELECT address_id FROM integration_registrations registration
+                          WHERE registration.session_socket_id = i.session_socket_id
+                            AND registration.worktree_id = i.worktree_id
+                            AND registration.registration_id = i.source_id)
+                      WHEN 'context_grant' THEN (
+                          SELECT grantee_address_id FROM context_grants grant
+                          WHERE grant.session_socket_id = i.session_socket_id
+                            AND grant.worktree_id = i.worktree_id AND grant.grant_id = i.source_id)
+                    END
+             FROM attention_items i INDEXED BY one_attention_item_per_unresolved_source
+             LEFT JOIN delivery_attempts a
+               ON i.source_kind IN ('delivery_attempt', 'agent_disposition')
+              AND a.session_socket_id = i.session_socket_id AND a.worktree_id = i.worktree_id
+              AND a.attempt_id = i.source_id
+             LEFT JOIN mailbox_deliveries d
+               ON d.session_socket_id = a.session_socket_id AND d.worktree_id = a.worktree_id
+              AND d.delivery_id = a.delivery_id AND d.address_id = a.address_id
+             WHERE i.session_socket_id = ?1 AND i.worktree_id = ?2 AND i.resolved_at_ms IS NULL",
+            params![ns[0], ns[1], serde_json::json!(address_ids).to_string()],
+            |row| {
+                let item = crate::AttentionItemRecord {
+                    id: crate::AttentionItemId::new(row.get::<_, String>(0)?),
+                    source_kind: parse_attention_source_kind(row.get(1)?)?,
+                    source_id: row.get(2)?,
+                    summary: row.get(3)?,
+                    opened_at_ms: from_i64(row.get(4)?)?,
+                    resolved_at_ms: row.get::<_, Option<i64>>(5)?.map(from_i64).transpose()?,
+                };
+                let subject_alias = match item.source_kind {
+                    crate::AttentionSourceKind::DeliveryAttempt
+                    | crate::AttentionSourceKind::AgentDisposition => row
+                        .get_ref(6)?
+                        .as_str_or_null()?
+                        .and_then(alias_for_address)
+                        .or(row.get(7)?),
+                    crate::AttentionSourceKind::PaneBinding => alias_for_address(&item.source_id),
+                    crate::AttentionSourceKind::IntegrationRegistration
+                    | crate::AttentionSourceKind::ContextGrant => row
+                        .get_ref(9)?
+                        .as_str_or_null()?
+                        .and_then(alias_for_address),
+                    crate::AttentionSourceKind::AutomaticReplyLimit
+                    | crate::AttentionSourceKind::Coordination => None,
+                };
+                Ok(AttentionRow {
+                    item,
+                    subject_alias,
+                    message_id: row.get(8)?,
+                })
+            },
+        )?;
+        attention.sort_unstable_by(|left, right| {
+            (left.item.opened_at_ms, left.item.id.as_str())
+                .cmp(&(right.item.opened_at_ms, right.item.id.as_str()))
+        });
         Ok(DashboardRows {
             namespace: namespace.clone(),
             worktree: self.worktree_state(namespace)?,
