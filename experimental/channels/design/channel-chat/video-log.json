@@ -1,0 +1,77 @@
+{
+  "marks": [
+    {
+      "name": "focus",
+      "at": 2.321
+    },
+    {
+      "name": "mention-post",
+      "at": 6.995
+    },
+    {
+      "name": "codex-replied",
+      "at": 19.318
+    },
+    {
+      "name": "plain-post",
+      "at": 25.275
+    },
+    {
+      "name": "passing-mention",
+      "at": 31.524
+    },
+    {
+      "name": "send-anyway",
+      "at": 37.358
+    },
+    {
+      "name": "codex-answered-thread",
+      "at": 44.357
+    },
+    {
+      "name": "thread-no-mention",
+      "at": 47.762
+    },
+    {
+      "name": "leading-mention",
+      "at": 59.446
+    },
+    {
+      "name": "request-answered",
+      "at": 64.544
+    },
+    {
+      "name": "end",
+      "at": 68.044
+    }
+  ],
+  "errors": [],
+  "posts": [
+    {
+      "request_id": "d58996cf-851b-4aa7-bb90-3857782c8805",
+      "source": "can @claude check why the mac build fails on main?"
+    },
+    {
+      "request_id": "7a8d34c1-c8c9-4754-ae4c-34309cd4bfa8",
+      "source": "heads up: I'm rotating the staging API keys at 3pm"
+    },
+    {
+      "request_id": "e133c76c-d383-4a52-b539-f43dd929eb1f",
+      "source": "the deploy script from @codex is still failing on staging"
+    },
+    {
+      "request_id": "fbbe7b71-1666-46f0-87a4-69dcd1b00921",
+      "source": "@codex the deploy script from @codex is still failing on staging",
+      "in_reply_to": "p3"
+    },
+    {
+      "request_id": "6d2191d2-5fab-436d-a4e7-db9adb11d601",
+      "source": "thanks, ping me when it's green",
+      "in_reply_to": "p4r"
+    },
+    {
+      "request_id": "5eaf585f-5ca5-49c6-8e0b-db1245e14da3",
+      "source": "@codex can you pin the cache key to the toolchain hash?"
+    }
+  ]
+}
