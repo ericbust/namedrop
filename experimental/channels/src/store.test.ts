@@ -2209,9 +2209,9 @@ test("design-b fix: a new terminal run keeps unchanged runs identical", () => {
   });
   const before = runsByMessage(activeChannel(state).terminalRuns);
   const after = runsByMessage(activeChannel(next).terminalRuns);
-  assert.equal(after.get("m2")?.exitCode, 1);
-  assert.ok(before.get("m1"));
-  assert.equal(after.get("m1"), before.get("m1"));
+  assert.equal(after.get("m2")?.[0]?.exitCode, 1);
+  assert.ok(before.get("m1")?.[0]);
+  assert.equal(after.get("m1")?.[0], before.get("m1")?.[0]);
 });
 test("design-b: each terminal reply gets the latest run that started at or before it, whatever the list order", () => {
   const run = (

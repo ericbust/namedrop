@@ -1,6 +1,6 @@
 import { Fragment, useLayoutEffect, useRef, useState } from "react";
-import type { Channel, SpaceKey, TerminalRun } from "../model.ts";
-import { exitFor, type TimelineRow } from "../store.ts";
+import type { Channel, SpaceKey } from "../model.ts";
+import { exitFor, type RunIndex, type TimelineRow } from "../store.ts";
 import { Icon } from "./Icons.tsx";
 import { Message } from "./Message.tsx";
 
@@ -53,7 +53,7 @@ export function Timeline({
 }: {
   channel: Channel;
   rows: readonly TimelineRow[];
-  runs: ReadonlyMap<string, TerminalRun>;
+  runs: RunIndex;
   located: Located | null;
   expandedThread: string | null;
   onThread: (threadId: string, button: HTMLButtonElement) => void;

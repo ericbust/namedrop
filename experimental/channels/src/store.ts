@@ -812,19 +812,25 @@ export function timelineView(
   }
   return rows;
 }
-export function runsByMessage(
-  runs: readonly TerminalRun[],
-): ReadonlyMap<string, TerminalRun> {
-  const byMessage = new Map<string, TerminalRun>();
-  for (const run of runs)
-    if (run.messageId !== null) byMessage.set(run.messageId, run);
+export type RunIndex = ReadonlyMap<string, readonly TerminalRun[]>;
+export function runsByMessage(runs: readonly TerminalRun[]): RunIndex {
+  const byMessage = new Map<string, TerminalRun[]>();
+  for (const run of runs) {
+    if (run.messageId === null) continue;
+    const known = byMessage.get(run.messageId);
+    if (known) known.push(run);
+    else byMessage.set(run.messageId, [run]);
+  }
+  for (const list of byMessage.values())
+    list.sort((a, b) => b.startedAt - a.startedAt);
   return byMessage;
 }
 export function exitFor(
-  runs: ReadonlyMap<string, TerminalRun>,
+  runs: RunIndex,
   reply: Message | null,
 ): TerminalRun | undefined {
   if (reply === null || reply.inReplyTo === null) return undefined;
-  const run = runs.get(reply.inReplyTo);
-  return run?.terminal === reply.author ? run : undefined;
+  return runs
+    .get(reply.inReplyTo)
+    ?.find((run) => run.terminal === reply.author && run.startedAt <= reply.at);
 }
