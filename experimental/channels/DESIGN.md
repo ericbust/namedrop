@@ -127,12 +127,14 @@ thread pane scroll.
   latest message.
 - Landing runs only while channels are being discovered. Discovery ends when
   the server says `ready`. A server that never says `ready` ends it 2 seconds
-  after the first channel arrives. Any input from the reader ends it too: a
-  click, a key press, a scroll, or a channel pick. During discovery each newly
-  arrived channel re-runs this rule, so the app moves to the URL's channel or to
-  Needs you as soon as it appears. After discovery the app never moves by
-  itself. A workspace that opens later, or a reconnect that replays channels,
-  never changes the open channel or closes its thread.
+  after the first channel arrives. During discovery each newly arrived channel
+  re-runs this rule, so the app moves to Needs you as soon as it appears. The
+  URL's own channel is the exception: it is chosen whenever it arrives, even
+  after discovery, because the reader asked for it.
+- Any input from the reader stops all of this: a click, a key press, a scroll,
+  or a channel pick. From then on the app never moves by itself. A workspace
+  that opens later, or a reconnect that replays channels, never changes the open
+  channel or closes its thread.
 - When you pick a channel, its URL becomes `/w/<key>` with a new history entry,
   so reload and Back work. An automatic choice never rewrites the URL.
 - The tab title is "Namedrop" when nothing needs you, and "(2) Needs you ·
