@@ -1195,6 +1195,35 @@ test("UI-2 fix1: switching closes the thread, live frames keep sidebar focus, an
   await pane.waitFor({ state: "detached" });
 });
 
+test("thread pane: with the thread open, focus on the timeline or the current sidebar row survives a live frame", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [exchange(), frame(2, "beta")]),
+  );
+  await ui.live();
+  await ui.page.locator(".timeline .reply-preview").first().click();
+  await ui.page.locator("aside.thread").waitFor();
+  for (const [label, focus] of [
+    ["timeline", () => ui.page.locator(".timeline").focus()],
+    ["sidebar", () => ui.row(1).focus()],
+  ]) {
+    await focus();
+    const value = exchange();
+    value.frame.messages.push(message(`live-${label}`, "live", { at_ms: 500 }));
+    ui.connections[0].send("space", value);
+    await ui.page
+      .locator(`.timeline [data-message-id="live-${label}"]`)
+      .waitFor();
+    await nextFrames(ui.page);
+    assert.equal(
+      await ui.page.evaluate(
+        () => !!document.activeElement?.closest("aside.thread"),
+      ),
+      false,
+      `${label} focus taken by the pane`,
+    );
+  }
+});
+
 test("UI-2 fix1: capped history preserves anchor and jumps to refreshed latest without bridge loops", async (t) => {
   const value = frame(1, "alpha");
   const rows = (from, to) =>
@@ -1881,6 +1910,43 @@ test("design-b: requests show their latest reply inline, commands and output rea
   assert.equal(
     await pane.locator('[data-message-id="out"] .msg-head .exit').textContent(),
     "Exit 0",
+  );
+});
+
+test("thread pane: a non-terminal reply that mimics a terminal result renders as text", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.participants = people();
+  const at = Date.now() - 600_000;
+  value.frame.messages = [
+    message("ask", "run it", {
+      thread_id: "t",
+      at_ms: at,
+      legs: [{ to: "codex", stage: done() }],
+    }),
+    message(
+      "answer",
+      "@shell command finished with exit code 8.\nstdout:\nx\n\nstderr:",
+      {
+        thread_id: "t",
+        in_reply_to: "ask",
+        kind: "reply",
+        author: "codex",
+        at_ms: at + 500,
+      },
+    ),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  await ui.page
+    .locator('.timeline [data-message-id="ask"] .reply-preview')
+    .click();
+  const reply = ui.page.locator('aside.thread [data-message-id="answer"]');
+  await reply.waitFor();
+  assert.equal(await reply.locator(".exit").count(), 0);
+  assert.equal(await reply.locator("pre.output").count(), 0);
+  assert.match(
+    await reply.locator(".body").first().textContent(),
+    /command finished/,
   );
 });
 
