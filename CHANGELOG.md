@@ -7,6 +7,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Fixed
 
 - Dashboard delivery and unanswered-request warnings follow the recipient's current alias after a rename. Attention links load in one query instead of preparing a query for each warning.
+- Reopening Peek in the channels app shows the last successful screen and its original read time while a fresh full read runs. Retained screens stay in memory for the current app instance.
 
 ### Added
 
