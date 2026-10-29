@@ -2401,27 +2401,28 @@ test("drafts: each composer keeps its own text across switches, and an emptied d
   );
 });
 const attempt1 = { requestId: "r1", source: "@codex hi", inReplyTo: null };
-function refusedAlpha(): State {
+const refusal = {
+  type: "send-failed",
+  requestId: "r1",
+  status: 400,
+  message: "Nope",
+} as const;
+function sendingAlpha(): State {
   const ready = reduce(apply(initialState(), snapshot()), {
     type: "edit",
     composer: alphaBox,
     text: "@codex hi",
   });
-  const sending = reduce(ready, { type: "send", outgoing: outgoing() });
+  return reduce(ready, { type: "send", outgoing: outgoing() });
+}
+test("drafts: a refused send returns to its composer's draft with the error and its attempt, and leaves the outbox", () => {
+  const sending = sendingAlpha();
   assert.equal(
     sending.drafts.get(draftKey(alphaBox))?.text,
     "@codex hi",
     "the box keeps its text while sending",
   );
-  return reduce(sending, {
-    type: "send-failed",
-    requestId: "r1",
-    status: 400,
-    message: "Nope",
-  });
-}
-test("drafts: a refused send returns to its composer's draft with the error and its attempt, and leaves the outbox", () => {
-  const failed = refusedAlpha();
+  const failed = reduce(sending, refusal);
   assert.deepEqual(phases(failed), {}, "nothing lingers in the outbox");
   assert.deepEqual(failed.drafts.get(draftKey(alphaBox)), {
     key: alphaKey,
@@ -2474,7 +2475,7 @@ test("drafts: a refused send returns to its composer's draft with the error and 
   );
 });
 test("drafts: a refused draft keeps its attempt through edits that empty or restore the text, until a success", () => {
-  const failed = refusedAlpha();
+  const failed = reduce(sendingAlpha(), refusal);
   const edit = (state: State, text: string) =>
     reduce(state, { type: "edit", composer: alphaBox, text });
   const draft = (state: State) => state.drafts.get(draftKey(alphaBox));
