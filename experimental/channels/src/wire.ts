@@ -62,8 +62,6 @@ function notAddressableReason(value: unknown): NotAddressableReason | null {
   switch (value) {
     case null:
       return null;
-    case undefined:
-      return "unavailable";
     case "missing_label":
     case "empty_label":
     case "reserved_all":
@@ -74,7 +72,7 @@ function notAddressableReason(value: unknown): NotAddressableReason | null {
     case "unavailable":
       return value;
     default:
-      throw new Error("Invalid addressability reason");
+      return "unavailable";
   }
 }
 function integer(value: unknown): number {
@@ -435,6 +433,7 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
       alias: text(item.alias),
       kind: memberKind(item.kind),
       activity: activity(item.activity),
+      recentlyClosed: item.recently_closed === true,
       role: optionalSafeText(item.role),
       paneLabel: optionalSafeText(item.pane_label),
     });

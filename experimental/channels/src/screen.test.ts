@@ -11,6 +11,7 @@ const target = (member: string): PeekTarget => {
     alias: "@codex",
     kind: { type: "agent", runtime: "codex" },
     activity: "working",
+    recentlyClosed: false,
     role: null,
     paneLabel: null,
   });

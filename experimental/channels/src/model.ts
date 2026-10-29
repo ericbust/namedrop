@@ -22,6 +22,7 @@ export type Member = {
   alias: string;
   kind: MemberKind;
   activity: Activity;
+  recentlyClosed: boolean;
   role: SafeText | null;
   paneLabel: SafeText | null;
 };

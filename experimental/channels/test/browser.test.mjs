@@ -4036,10 +4036,11 @@ test("UI-3 fix: the thread box says Write a reply while the To label names the r
 });
 
 test("UI-3 fix: a disabled channel's tooltip names a reason only when the page can be sure of it", async (t) => {
-  const disabled = (n, name, reason = "unavailable") => {
+  const disabled = (n, name, reason = "unavailable", state = "active") => {
     const value = frame(n, name);
     value.frame.space.addressable_label = null;
     value.frame.space.not_addressable_reason = reason;
+    value.frame.space.state = state;
     return value;
   };
   const ui = await open(t, (client) =>
@@ -4047,13 +4048,13 @@ test("UI-3 fix: a disabled channel's tooltip names a reason only when the page c
       team(1, "alpha"),
       disabled(2, "w2", "missing_label"),
       disabled(3, "日本語", "empty_label"),
-      disabled(4, "All"),
+      disabled(4, "All", "reserved_all"),
       disabled(5, "Twin"),
       disabled(6, "twin"),
-      disabled(7, "Dormant"),
+      disabled(7, "Dormant", "not_activated", "not_activated"),
       frame(8, "foobar"),
-      disabled(9, "same"),
-      disabled(10, "same"),
+      disabled(9, "same", "shared_label"),
+      disabled(10, "same", "shared_label"),
       disabled(11, "foobar"),
       disabled(12, "w13"),
       disabled(13, "w13", "missing_label"),
@@ -4377,6 +4378,10 @@ test("UI-4: Enter on a member chip opens the drawer with focus on the screen, an
   assert.match(
     await drawer(ui).locator(".peek-where").textContent(),
     /^in #alpha · Read at \d/,
+  );
+  await ui.page.waitForFunction(
+    () =>
+      performance.getEntriesByName("namedrop:click-to-peek-text").length > 0,
   );
   await ui.page.keyboard.press("Escape");
   await drawer(ui).waitFor({ state: "detached" });
