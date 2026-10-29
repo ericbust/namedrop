@@ -448,8 +448,13 @@ main column, under the timeline, and at the bottom of the thread pane.
   drawn alert icon. For 400, 404 and 409 the error is the server's own message,
   such as "Unknown recipient @ghost". For 403 it reads "Your session expired.
   Reload the page to keep posting." For 413 it reads "This message is too
-  long." Anything else reads "Namedrop couldn't send this. Try again." Editing
-  the text clears the error.
+  long." For 401 it reads the same as 403. A server message shows with its first
+  letter capitalized and a final period. Anything else reads "Namedrop couldn't
+  send this. Try again." Editing the text clears the error.
+- A post must start with a recipient. When the text does not start with
+  `@name`, `#channel @name`, or `#all @name`, and the thread gives no recipients,
+  Enter does not send. The hint line instead reads "Start with @name to choose
+  who gets this." in `--text`, and the Send button stays disabled.
 - A retry with the same text reuses the same request id, so it can never post
   twice. Changed text gets a new id.
 
@@ -457,10 +462,15 @@ main column, under the timeline, and at the bottom of the thread pane.
 
 A follow-up must start with its recipients. The thread composer shows them as a
 muted "To @codex" label at the left of the box: every agent who wrote in the
-thread, else the parent's recipients, never the operator. The source sent is
-those mentions, then the text. When the text starts with its own mentions,
-those win and the label hides. The post carries `in_reply_to` with the latest
-message in the thread.
+thread, else the parent's recipients, never the operator. An agent from another
+workspace is addressed through its home channel's token, so the label reads "To
+@lead · #alpha" and the source starts `#alpha @lead`. Recipients in the current
+channel come first, then each other workspace's token with its agents. The
+source sent is those mentions, then the text. When the text starts with its own
+mentions, those win and the label hides. When an agent's home channel has no
+token, that agent is left out. When no recipient is left, the box reads "No one
+in this thread can be mentioned. Start with @name to choose someone." The post
+carries `in_reply_to` with the latest message in the thread.
 
 ### Autocomplete
 
