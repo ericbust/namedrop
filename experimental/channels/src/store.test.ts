@@ -1527,6 +1527,83 @@ test("UI-2 fix1: browsing keeps receipt updates from every staged replay window"
   assert.equal(after.messages.has("m900"), false);
 });
 
+function fullWindow() {
+  let state = apply(initialState(), withMessages(numbered(451, 600)));
+  for (let first = 401; first >= 1; first -= 50)
+    state = historyPage(state, numbered(first, first + 49));
+  assert.deepEqual(activeChannel(state).runs, [numbered(1, 600)]);
+  assert.equal(activeChannel(state).viewMode, "following");
+  return state;
+}
+function follow(state: State, atBottom: boolean): State {
+  return reduce(state, {
+    type: "follow",
+    key: activeChannel(state).key,
+    atBottom,
+  });
+}
+function withReceipt(value: ReturnType<typeof withMessages>, id: string) {
+  const row = value.frame.messages.find((row) => row.message_id === id);
+  assert.ok(row);
+  row.legs = [{ to: "agent-1", stage: { stage: "held" } }];
+  return value;
+}
+test("history window: a reader scrolled up keeps every loaded row when a live frame passes the cap", () => {
+  let state = follow(fullWindow(), false);
+  assert.equal(follow(state, false), state);
+  state = apply(state, withReceipt(withMessages(numbered(456, 605)), "m456"));
+  const channel = activeChannel(state);
+  assert.equal(channel.viewMode, "browsing");
+  assert.deepEqual(channel.runs, [numbered(1, 600)]);
+  assert.deepEqual(new Set(channel.messages.keys()), new Set(numbered(1, 600)));
+  assert.equal(channel.messages.get("m456")?.legs[0]?.stage.stage, "held");
+  assert.equal(channel.latestMessages.has("m605"), true);
+});
+test("history window: a reader at the bottom drops the oldest rows and keeps following", () => {
+  let state = follow(follow(fullWindow(), false), true);
+  state = apply(state, withMessages(numbered(456, 605)));
+  const channel = activeChannel(state);
+  assert.equal(channel.viewMode, "following");
+  assert.deepEqual(channel.runs, [numbered(6, 605)]);
+  assert.equal(channel.messages.size, 600);
+  assert.equal(channel.messages.has("m5"), false);
+});
+test("history window: browsing refreshes the rows it shows and stays put until the jump to latest", () => {
+  let state = apply(
+    follow(fullWindow(), false),
+    withMessages(numbered(456, 605)),
+  );
+  state = follow(state, true);
+  state = apply(state, withReceipt(withMessages(numbered(461, 610)), "m500"));
+  let channel = activeChannel(state);
+  assert.equal(channel.viewMode, "browsing");
+  assert.deepEqual(channel.runs, [numbered(1, 600)]);
+  assert.equal(channel.messages.get("m500")?.legs[0]?.stage.stage, "held");
+  assert.equal(channel.messages.has("m610"), false);
+  state = follow(state, false);
+  state = reduce(state, { type: "latest", key: channel.key });
+  channel = activeChannel(state);
+  assert.equal(channel.viewMode, "following");
+  assert.equal(channel.atBottom, true);
+  assert.deepEqual(channel.runs, [numbered(461, 610)]);
+});
+test("history window: replay decides from the reader's position when ready arrives", () => {
+  let state = follow(fullWindow(), false);
+  state = apply(
+    reduce(state, { type: "opened" }),
+    withReceipt(withMessages(numbered(456, 605)), "m456"),
+  );
+  let channel = activeChannel(ready(state, [keyA]));
+  assert.equal(channel.viewMode, "browsing");
+  assert.deepEqual(channel.runs, [numbered(1, 600)]);
+  assert.equal(channel.messages.get("m456")?.legs[0]?.stage.stage, "held");
+  state = follow(state, true);
+  channel = activeChannel(ready(state, [keyA]));
+  assert.equal(channel.viewMode, "following");
+  assert.deepEqual(channel.runs, [numbered(6, 605)]);
+  assert.equal(channel.messages.get("m456")?.legs[0]?.stage.stage, "held");
+});
+
 test("design-b: attention subject and message ids parse tolerantly and propagate", () => {
   const base = snapshot();
   function frame(extra: Record<string, unknown>) {

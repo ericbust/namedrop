@@ -125,6 +125,32 @@ function capWindow(channel: Channel, edge: "oldest" | "newest"): Channel {
         : channel.history,
   };
 }
+function refreshShown(
+  shown: ReadonlyMap<string, Message>,
+  fresh: ReadonlyMap<string, Message>,
+): ReadonlyMap<string, Message> {
+  let changed: Map<string, Message> | undefined;
+  for (const [id, row] of fresh) {
+    if (!shown.has(id) || shown.get(id) === row) continue;
+    changed ??= new Map(shown);
+    changed.set(id, row);
+  }
+  return changed ?? shown;
+}
+function fitLiveWindow(previous: Channel | undefined, next: Channel): Channel {
+  if (
+    next.messages.size > HISTORY_CAP &&
+    previous?.viewMode === "following" &&
+    !previous.atBottom
+  )
+    return {
+      ...next,
+      messages: refreshShown(previous.messages, next.messages),
+      runs: previous.runs,
+      viewMode: "browsing",
+    };
+  return capWindow(next, "oldest");
+}
 function mergeContiguousRuns(
   runs: Channel["runs"],
   incoming: readonly string[],
@@ -192,29 +218,27 @@ function mergeSnapshot(
       : mergeContiguousRuns(previous?.runs ?? [], [
           ...snapshot.messages.keys(),
         ]);
-  const channel: Channel = capWindow(
-    {
-      ...snapshot,
-      health:
-        previous && sameValue(previous.health, snapshot.health)
-          ? previous.health
-          : snapshot.health,
-      attention:
-        previous && sameValue(previous.attention, snapshot.attention)
-          ? previous.attention
-          : snapshot.attention,
-      terminalRuns: reuseRows(previous?.terminalRuns, snapshot.terminalRuns),
-      members: reuseMap(previous?.members, snapshot.members),
-      threads: reuseMap(previous?.threads, snapshot.threads),
-      messages,
-      latestMessages,
-      viewMode: previous?.viewMode ?? "following",
-      runs,
-      history: previous?.history ?? { kind: "idle" },
-      exhausted: previous?.exhausted ?? false,
-    },
-    "oldest",
-  );
+  const channel: Channel = fitLiveWindow(previous, {
+    ...snapshot,
+    health:
+      previous && sameValue(previous.health, snapshot.health)
+        ? previous.health
+        : snapshot.health,
+    attention:
+      previous && sameValue(previous.attention, snapshot.attention)
+        ? previous.attention
+        : snapshot.attention,
+    terminalRuns: reuseRows(previous?.terminalRuns, snapshot.terminalRuns),
+    members: reuseMap(previous?.members, snapshot.members),
+    threads: reuseMap(previous?.threads, snapshot.threads),
+    messages,
+    latestMessages,
+    viewMode: previous?.viewMode ?? "following",
+    atBottom: previous?.atBottom ?? true,
+    runs,
+    history: previous?.history ?? { kind: "idle" },
+    exhausted: previous?.exhausted ?? false,
+  });
   return previous &&
     Object.keys(channel).every(
       (key) => Reflect.get(previous, key) === Reflect.get(channel, key),
@@ -229,28 +253,25 @@ function reconcile(previous: Channel | undefined, pending: Channel): Channel {
     messages: pending.latestMessages,
   });
   if (merged.viewMode === "browsing") {
-    let changed: Map<string, Message> | undefined;
-    for (const [id, row] of pending.messages) {
-      if (!merged.messages.has(id) || merged.messages.get(id) === row) continue;
-      changed ??= new Map(merged.messages);
-      changed.set(id, row);
-    }
-    return changed ? { ...merged, messages: changed } : merged;
+    const messages = refreshShown(merged.messages, pending.messages);
+    return messages === merged.messages ? merged : { ...merged, messages };
   }
   let runs = previous.runs;
-  for (const run of pending.runs) runs = mergeContiguousRuns(runs, run);
+  for (const run of [...pending.runs, [...pending.latestMessages.keys()]])
+    runs = mergeContiguousRuns(runs, run);
   let messages = previous.messages;
   let changed: Map<string, Message> | undefined;
-  for (const [id, row] of pending.messages) {
-    if (messages.get(id) === row) continue;
-    changed ??= new Map(messages);
-    changed.set(id, row);
-  }
+  for (const rows of [pending.messages, pending.latestMessages])
+    for (const [id, row] of rows) {
+      if (messages.get(id) === row) continue;
+      changed ??= new Map(messages);
+      changed.set(id, row);
+    }
   if (changed) messages = changed;
   if (sameRuns(merged.runs, runs)) runs = merged.runs;
   return messages === merged.messages && runs === merged.runs
     ? merged
-    : capWindow({ ...merged, messages, runs }, "oldest");
+    : fitLiveWindow(previous, { ...merged, messages, runs });
 }
 function requestHistory(state: State, key: SpaceKey): State {
   const channel = state.channels.get(key);
@@ -345,6 +366,7 @@ function latestWindow(channel: Channel): Channel {
         ? [[...channel.latestMessages.keys()]]
         : [],
     viewMode: "following",
+    atBottom: true,
     history: { kind: "idle" },
     exhausted: false,
   };
@@ -423,6 +445,14 @@ function step(state: State, event: Event): State {
         }
       }
       return { ...state, channels, sync };
+    }
+    case "follow": {
+      const channel = state.channels.get(event.key);
+      if (channel === undefined || channel.atBottom === event.atBottom)
+        return state;
+      const channels = new Map(state.channels);
+      channels.set(event.key, { ...channel, atBottom: event.atBottom });
+      return { ...state, channels };
     }
     case "history": {
       const channel = state.channels.get(event.request.key);

@@ -111,6 +111,7 @@ export type ChannelSnapshot = {
 export type Channel = ChannelSnapshot & {
   latestMessages: ReadonlyMap<string, Message>;
   viewMode: "following" | "browsing";
+  atBottom: boolean;
   runs: readonly (readonly string[])[];
   history: HistoryState;
   exhausted: boolean;
@@ -123,6 +124,7 @@ export type Event =
   | WireEvent
   | { type: "older"; key: SpaceKey }
   | { type: "latest"; key: SpaceKey }
+  | { type: "follow"; key: SpaceKey; atBottom: boolean }
   | {
       type: "history";
       request: HistoryRequest;
