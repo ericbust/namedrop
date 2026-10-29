@@ -2466,11 +2466,10 @@ test("thread recipients: the agents who wrote, else the parent's recipients, nev
       runs: [[...channel.messages.keys()]],
     }).get("parent");
     assert.ok(group);
-    return replyRecipients(
-      group,
-      { members: channel.members, homes: new Map() },
-      "#alpha",
-    );
+    return replyRecipients(group, {
+      members: channel.members,
+      homes: new Map(),
+    });
   };
   assert.deepEqual(thread([parent]), {
     names: ["@claude"],
@@ -2517,11 +2516,7 @@ test("thread recipients: a reply goes to the workspace of the latest agent messa
     undefined,
   );
   const directory = { members: here.members, homes };
-  const thread = (
-    authors: string[],
-    token: string | null = "#testbed",
-    asked: string[] = [],
-  ) => {
+  const thread = (authors: string[], asked: string[] = []) => {
     const parent = {
       ...message("parent"),
       author: "human",
@@ -2545,7 +2540,7 @@ test("thread recipients: a reply goes to the workspace of the latest agent messa
       runs: [[...parsedChannel.messages.keys()]],
     }).get("parent");
     assert.ok(group);
-    return replyRecipients(group, directory, token);
+    return replyRecipients(group, directory);
   };
   assert.deepEqual(
     thread(["envoy:w2:pane-9"]),
@@ -2558,7 +2553,7 @@ test("thread recipients: a reply goes to the workspace of the latest agent messa
     "local only",
   );
   assert.deepEqual(
-    thread([], "#testbed", ["envoy:w2:pane-9"]),
+    thread([], ["envoy:w2:pane-9"]),
     { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
     "an envoy the parent asked",
   );
@@ -2573,12 +2568,12 @@ test("thread recipients: a reply goes to the workspace of the latest agent messa
     "mixed, latest an envoy: only that envoy's workspace",
   );
   assert.deepEqual(
-    thread([], "#testbed", ["envoy:w2:pane-9", "agent-1"]),
+    thread([], ["envoy:w2:pane-9", "agent-1"]),
     { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
     "no agent wrote: the parent's recipients from its first recipient's workspace",
   );
   assert.deepEqual(
-    thread([], "#testbed", ["agent-1", "envoy:w2:pane-9", "agent-2"]),
+    thread([], ["agent-1", "envoy:w2:pane-9", "agent-2"]),
     { names: ["@codex", "@claude"], mentions: "@codex @claude" },
     "no agent wrote, first recipient local",
   );

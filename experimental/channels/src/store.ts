@@ -954,12 +954,11 @@ export function participant(
     ? { kind: "member", member: agent, home }
     : { kind: "envoy", id, home: home ?? null };
 }
-// The server reads one run of `#label` tokens, then one run of `@alias` tokens, so a
-// reply that leaves this channel names every workspace first, its own included.
+// The server looks every `@alias` up in every workspace a post names, so a reply
+// names one workspace, or it would reach same-named agents outside the thread.
 export function replyRecipients(
   thread: ThreadGroup,
   directory: Directory,
-  here: string | null,
 ): ReplyTo | null {
   const agents = (ids: readonly (AddressId | "human")[]) =>
     ids.flatMap((id) => {
@@ -969,33 +968,22 @@ export function replyRecipients(
   const wrote = agents(
     [...thread.parents, ...thread.replies].map((message) => message.author),
   );
-  const local = new Set<string>();
-  const away = new Map<string, Set<string>>();
-  for (const { member, home } of wrote.length > 0
-    ? wrote
-    : agents(thread.parents.flatMap(recipients))) {
-    if (home === null) local.add(member.alias);
-    else if (home.token !== null)
-      away.set(
-        home.token,
-        (away.get(home.token) ?? new Set()).add(member.alias),
-      );
-  }
-  if (away.size === 0)
-    return local.size === 0
-      ? null
-      : { names: [...local], mentions: [...local].join(" ") };
-  const runs = [
-    ...(here === null || local.size === 0
-      ? []
-      : [{ token: here, aliases: local, suffix: false }]),
-    ...[...away].map(([token, aliases]) => ({ token, aliases, suffix: true })),
-  ];
-  const aliases = new Set(runs.flatMap(({ aliases }) => [...aliases]));
-  return {
-    names: runs.flatMap(({ token, aliases, suffix }) =>
-      [...aliases].map((alias) => (suffix ? `${alias} · ${token}` : alias)),
+  const pool =
+    wrote.length > 0 ? wrote : agents(thread.parents.flatMap(recipients));
+  const anchor = wrote.length > 0 ? wrote.at(-1) : pool[0];
+  if (anchor === undefined) return null;
+  const { home } = anchor;
+  const aliases = [
+    ...new Set(
+      pool.flatMap((who) => (who.home === home ? [who.member.alias] : [])),
     ),
-    mentions: `${runs.map(({ token }) => token).join(" ")} ${[...aliases].join(" ")}`,
-  };
+  ];
+  if (home === null) return { names: aliases, mentions: aliases.join(" ") };
+  const { token } = home;
+  return token === null
+    ? null
+    : {
+        names: aliases.map((alias) => `${alias} · ${token}`),
+        mentions: `${token} ${aliases.join(" ")}`,
+      };
 }

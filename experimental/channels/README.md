@@ -137,12 +137,13 @@ post by request ID. A post shows as a pending row with **Sending…**, then **Se
 after the server accepts it. The row that a later frame carries for that message ID
 replaces it. A refused post keeps its text and shows the error under the box. Sending
 the same text again reuses its request ID, so the server never writes it twice. A
-thread reply starts with the mentions of every agent who wrote in the thread, else the
-parent's recipients, unless its text starts with its own mentions. The server reads
-one run of `#label` tokens, then one run of `@alias` tokens. So a reply that reaches
-an agent in another workspace starts with every workspace's token, this channel's
-first when a local agent is in it, as in `#testbed #alpha @codex @lead`. An agent
-whose home channel has no token is left out. A post that names nobody does not send.
+thread reply goes to one workspace, because the server looks every `@alias` up in
+every workspace a post names. It starts with the mentions of the agents who wrote in
+the thread from the workspace of the latest agent message, else the parent's
+recipients from the workspace of its first recipient, unless its text starts with its
+own mentions. Local agents read `@codex @claude`. Another workspace's agents follow
+its token, as in `#alpha @lead`. When that workspace has no token, nobody is left. A
+post that names nobody does not send.
 `replyRecipients()` in `src/store.ts` and `postSource()` in `src/complete.ts` hold
 these rules.
 
