@@ -9,7 +9,7 @@ type Anchor = {
   bottom: boolean;
   top: number;
 };
-function capture(element: HTMLDivElement): Anchor {
+function capture(element: HTMLElement): Anchor {
   const top = element.getBoundingClientRect().top;
   const ids = [...element.querySelectorAll<HTMLElement>("[data-message-id]")]
     .filter((row) => row.getBoundingClientRect().bottom > top)
@@ -38,7 +38,7 @@ export function Timeline({
   channel: Channel;
   onOlder: (key: SpaceKey) => void;
 }) {
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLElement>(null);
   const anchors = useRef(new Map<SpaceKey, Anchor>());
   const [open, setOpen] = useState<{ key: SpaceKey; threadId: string } | null>(
     null,
@@ -78,10 +78,11 @@ export function Timeline({
   return (
     <div className={`conversation${thread ? " has-thread" : ""}`}>
       <section className="timeline" aria-label="Channel messages">
-        <div
+        <section
           className="timeline-scroll"
           ref={scroller}
-          // biome-ignore lint/a11y/noNoninteractiveTabindex: The scroll region supports keyboard scrolling.
+          aria-label="Message history"
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard scrolling requires focus. https://www.w3.org/WAI/standards-guidelines/act/rules/0ssw9k/
           tabIndex={0}
           onScroll={(event) => {
             anchors.current.set(channel.key, capture(event.currentTarget));
@@ -174,7 +175,7 @@ export function Timeline({
               </div>
             ),
           )}
-        </div>
+        </section>
       </section>
       {thread && (
         <ThreadPane channel={channel} thread={thread} onClose={close} />

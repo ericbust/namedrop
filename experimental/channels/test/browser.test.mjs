@@ -932,7 +932,7 @@ test("UI-2: paint entries wait for replay publication and do not repeat after un
   await ui.page.waitForFunction(
     () =>
       performance.getEntriesByName("namedrop:frame-to-message-paint").length ===
-      2,
+      1,
   );
   await ui.row(2).click();
   await ui.page.waitForTimeout(80);
@@ -941,7 +941,7 @@ test("UI-2: paint entries wait for replay publication and do not repeat after un
       () =>
         performance.getEntriesByName("namedrop:frame-to-message-paint").length,
     ),
-    2,
+    1,
   );
   for (let n = 0; n < 210; n++) {
     const update = structuredClone(beta);
@@ -955,4 +955,60 @@ test("UI-2: paint entries wait for replay publication and do not repeat after un
       performance.getEntriesByName("namedrop:frame-to-message-paint").length,
   );
   assert.ok(count > 0 && count <= 200, `unbounded paint measures: ${count}`);
+});
+
+test("UI-2: paint samples continue during an ongoing selected-channel stream", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = [message("a", "Initial message")];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  await ui.page.waitForFunction(
+    () =>
+      performance.getEntriesByName("namedrop:frame-to-message-paint").length >
+      0,
+  );
+  await ui.page.evaluate(() =>
+    performance.clearMeasures("namedrop:frame-to-message-paint"),
+  );
+  let tick = 0;
+  const updates = setInterval(() => {
+    value.frame.messages[0].body.text = `Streaming message ${++tick}`;
+    ui.connections[0].send("space", value);
+  }, 4);
+  try {
+    await ui.page.waitForFunction(
+      () =>
+        performance.getEntriesByName("namedrop:frame-to-message-paint").length >
+        0,
+      undefined,
+      { timeout: 1500 },
+    );
+    assert.ok(
+      tick > 1,
+      "the stream is still updating when a paint sample arrives",
+    );
+  } finally {
+    clearInterval(updates);
+  }
+});
+
+test("UI-2: message history is a named keyboard-scrollable region", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = Array.from({ length: 150 }, (_, n) =>
+    message(`m${n}`, `Message ${n}`),
+  );
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const history = ui.page.getByRole("region", {
+    name: "Message history",
+    exact: true,
+  });
+  await history.focus();
+  const before = await history.evaluate((element) => element.scrollTop);
+  assert.ok(before > 0);
+  await ui.page.keyboard.press("PageUp");
+  await ui.page.waitForFunction(
+    (top) => document.querySelector(".timeline-scroll").scrollTop < top,
+    before,
+  );
 });

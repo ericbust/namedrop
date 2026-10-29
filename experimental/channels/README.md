@@ -146,12 +146,14 @@ The browser's standard Performance API exposes these measures.
   The app clears this measure after 200 samples, then starts a new batch.
 - `namedrop:frame-to-message-paint` starts at `performance.now()` on each accepted
   `space` SSE callback, before parsing, and ends after two animation frames
-  following the React commit that renders the accumulated channel state. It
+  following the React commit that renders the selected channel state. It
   includes parsing, reducer work, React rendering, and the next paint opportunity.
-  Frames received during replay wait for the replay commit or fallback. Batched
-  frames each emit a sample with their own arrival time and a shared end time.
-  The pending arrivals and measure entries are bounded at 200. It emits no
-  per-message marks. Background tabs can delay animation frames.
+  Frames received during replay wait for the replay commit or fallback. Frames
+  for background channels do not emit samples. Later commits do not cancel a
+  scheduled sample. A sample is recorded only if the same channel is selected at
+  its paint opportunity. Batched frames share an end time and keep their own arrival times.
+  Pending arrivals, animation callbacks, and measure entries are each bounded at
+  200. It emits no per-message marks. Background tabs can delay animation frames.
 - `namedrop:load-to-sidebar-paint` starts at the navigation time origin, `0`, and
   ends after two animation frames following a committed sidebar with at least
   one channel. It emits once per page load. It includes loading and connection

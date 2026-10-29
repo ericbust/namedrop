@@ -41,8 +41,7 @@ function sameAttention(a: Channel, b: Channel): boolean {
   return JSON.stringify(a.attention) === JSON.stringify(b.attention);
 }
 
-// Runs are oldest first. Only a window that shares an ID proves continuity.
-function mergeRuns(
+function mergeContiguousRuns(
   runs: Channel["runs"],
   incoming: readonly string[],
 ): Channel["runs"] {
@@ -76,7 +75,9 @@ function mergeSnapshot(
   const channel: Channel = {
     ...snapshot,
     messages,
-    runs: mergeRuns(previous?.runs ?? [], [...snapshot.messages.keys()]),
+    runs: mergeContiguousRuns(previous?.runs ?? [], [
+      ...snapshot.messages.keys(),
+    ]),
     history: previous?.history ?? { kind: "idle" },
     exhausted: previous?.exhausted ?? false,
   };
@@ -85,7 +86,7 @@ function mergeSnapshot(
 function reconcile(previous: Channel | undefined, pending: Channel): Channel {
   if (!previous) return pending;
   let runs = previous.runs;
-  for (const run of pending.runs) runs = mergeRuns(runs, run);
+  for (const run of pending.runs) runs = mergeContiguousRuns(runs, run);
   const messages = new Map(previous.messages);
   for (const [id, row] of pending.messages) messages.set(id, row);
   const channel = {
@@ -244,7 +245,7 @@ export function reduce(state: State, event: Event): State {
         next = {
           ...channel,
           messages,
-          runs: mergeRuns(channel.runs, [
+          runs: mergeContiguousRuns(channel.runs, [
             ...event.result.messages.map((row) => row.id),
             event.request.before,
           ]),

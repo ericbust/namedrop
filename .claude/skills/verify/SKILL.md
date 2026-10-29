@@ -277,6 +277,30 @@ JS
 
 Use these selectors for later live lanes.
 
+For UI-2, send the CHECKLIST Claude-to-Codex mention in the isolated profile before
+opening the app. Wait for its reply in Namedrop's database, then open that channel.
+The parent has a **1 reply** button. Click it and confirm the reply appears in
+`getByRole('complementary', {name: 'Thread', exact: true})`. Send another reply
+while the pane is open and confirm its text and reply count update without a reload.
+Save `ui2-exchange.png` and `ui2-thread-live.png`. Run the coordination exchange in
+the plan's first lane and save its report card as `ui2-coordination.png`.
+
+Seed 400 rows through the profile's Namedrop commands. Scroll `.timeline-scroll`
+to the top to load older history. Before each page, record the first visible
+`article[data-message-id]` and its offset from the scroller's top. After the page,
+require that same row to stay at the same offset within two pixels. Keep scrolling
+until the first seeded row appears. Confirm each message ID appears once and that
+switching channels ten times never mixes their rows. Save `ui2-history.png` and
+`ui2-switch.png`, then repeat with the copied live database for `ui2-real.png`.
+
+Send fenced code, an HTTP URL, a long body, and the literal body
+`<img src=x onerror=alert(1)>`. Confirm code uses a monospace font, the URL has
+`rel="noreferrer"`, **Show more** reveals the available long text, and no image or
+dialog appears. A server-truncated body can reveal only the text the server sent.
+Pause the testbed space with a mention queued and confirm its receipt says
+**Held**. Save the format, long-message, hostile-text, and held-receipt screenshots
+named in the plan. Keep all commands inside the `tb` wrapper above.
+
 - `getByRole('navigation', {name: 'Channels', exact: true})` holds every channel.
   Channel buttons carry `data-channel-key` with the opaque key. Same-name buttons
   use `name (workspace_id · full-space-key)` as their display name. Each suffix
@@ -307,6 +331,14 @@ Use these selectors for later live lanes.
   measures navigation start to the first
   populated sidebar after two animation frames. The app retains at most 200
   reducer measures and one load measure per navigation.
+
+For UI-2's performance lane, read
+`performance.getEntriesByName('namedrop:frame-to-message-paint', 'measure')`.
+`experimental/channels/README.md` documents its start and end. Use 20 interleaved trials with UI-1's sidebar
+update as the baseline. Record a five-second scroll trace with 400 loaded rows.
+Frame-to-message-paint p95 must stay below 100 ms, and the scroll trace must contain
+no main-thread task longer than 50 ms. Record the exact app commit and database for
+both measurements. Passing browser tests does not establish these budgets.
 
 Save each lane's screenshots and measurements under `CHANNELS_OUTPUT_DIR`. Record the
 channel count, member presence transition, duplicate-name suffixes, keyboard focus,

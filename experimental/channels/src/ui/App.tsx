@@ -1,5 +1,5 @@
-import { useEffect, useReducer, useRef } from "react";
-import type { Event, State } from "../model.ts";
+import { useEffect, useLayoutEffect, useReducer, useRef } from "react";
+import type { Event, SpaceKey, State } from "../model.ts";
 import {
   channelName,
   connectionStatus,
@@ -39,7 +39,9 @@ export function App() {
     0,
   );
   const painted = useRef(false);
-  const arrivals = useRef<number[]>([]);
+  const arrivals = useRef<{ key: SpaceKey; at: number }[]>([]);
+  const paintCallbacks = useRef(new Set<number>());
+  const selectedForPaint = useRef<SpaceKey | null>(null);
   const requests = useRef(new Map<number, AbortController>());
   useEffect(() => {
     const active = new Set<number>();
@@ -95,19 +97,28 @@ export function App() {
       for (const controller of controllers.values()) controller.abort();
     };
   }, []);
-  useEffect(() => {
+  useLayoutEffect(() => {
+    selectedForPaint.current = state.selectedKey;
     if (
       frameVersion === 0 ||
       arrivals.current.length === 0 ||
-      state.channels.size === 0 ||
       state.sync.kind === "replaying"
     )
       return;
-    const starts = arrivals.current.splice(0);
-    let completed = false;
-    let second = 0;
+    const key = state.selectedKey;
+    const starts = arrivals.current
+      .splice(0)
+      .filter(
+        (arrival) =>
+          arrival.key === key && state.channels.get(arrival.key)?.messages.size,
+      );
+    if (starts.length === 0) return;
+    const callbacks = paintCallbacks.current;
     const first = requestAnimationFrame(() => {
-      second = requestAnimationFrame(() => {
+      callbacks.delete(first);
+      const second = requestAnimationFrame(() => {
+        callbacks.delete(second);
+        if (selectedForPaint.current !== key) return;
         const name = "namedrop:frame-to-message-paint";
         if (
           performance.getEntriesByName(name, "measure").length + starts.length >
@@ -115,17 +126,26 @@ export function App() {
         )
           performance.clearMeasures(name);
         const end = performance.now();
-        for (const start of starts) performance.measure(name, { start, end });
-        completed = true;
+        for (const { at: start } of starts)
+          performance.measure(name, { start, end });
       });
+      callbacks.add(second);
     });
-    return () => {
-      cancelAnimationFrame(first);
-      cancelAnimationFrame(second);
-      if (!completed)
-        arrivals.current = [...starts, ...arrivals.current].slice(-200);
-    };
+    callbacks.add(first);
+    if (callbacks.size > 200) {
+      const oldest = callbacks.values().next().value;
+      if (oldest !== undefined) {
+        cancelAnimationFrame(oldest);
+        callbacks.delete(oldest);
+      }
+    }
   }, [state, frameVersion]);
+  useEffect(() => {
+    const callbacks = paintCallbacks.current;
+    return () => {
+      for (const callback of callbacks) cancelAnimationFrame(callback);
+    };
+  }, []);
   useEffect(() => {
     let stream: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
@@ -168,7 +188,10 @@ export function App() {
           const event = parseEvent(name, message.data);
           if (event) {
             if (event.type === "space") {
-              arrivals.current = [...arrivals.current, arrivedAt].slice(-200);
+              arrivals.current = [
+                ...arrivals.current,
+                { key: event.channel.key, at: arrivedAt },
+              ].slice(-200);
               frameArrived();
             }
             if (event.type === "ready") cancelReplay();
