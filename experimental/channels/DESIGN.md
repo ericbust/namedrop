@@ -339,6 +339,14 @@ Never cut the server's summary mid-word into the visible line. When an
 `agent_status` summary is longer than 90 characters, use the `unknown` title and
 put the summary under **Details**.
 
+When the item names its agent (`subject_alias`), the title names it too. For an
+unanswered request that reads "@codex didn't answer a request", with the hint
+"It ended its turn without replying." When the item names a message
+(`message_id`) that is loaded in the timeline, a **Show message** text button
+follows the hint. It scrolls the message to the middle of the timeline, tints it
+with `--bg-selected` for 1.5 seconds, and opens its thread. When that message is
+not loaded, the button is absent.
+
 ### Thread pane
 
 400px wide, with a 1px `--line` left border. The header is 52px: "Thread" at 15px
