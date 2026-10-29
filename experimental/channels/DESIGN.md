@@ -122,13 +122,21 @@ thread pane scroll.
 
 ### Landing and navigation
 
-- With no channel in the URL, open the first channel that needs you. Else open
-  the channel with the latest message.
-- Keep the selected channel in the URL as `/w/<key>`, and push a history entry
-  on each selection, so reload and Back work.
+- Open the channel the URL names. With no channel in the URL, or one that has
+  not arrived, open the first channel that needs you, else the channel with the
+  latest message.
+- Channels arrive one by one, and an old server never says when discovery ends.
+  Until you pick a channel, each newly arrived channel re-runs this rule, so the
+  app moves to the URL's channel or to Needs you as soon as it appears. Once the
+  URL's channel is open, or you have picked one, the app never moves by itself.
+- When you pick a channel, its URL becomes `/w/<key>` with a new history entry,
+  so reload and Back work. An automatic choice never rewrites the URL.
 - The tab title is "Namedrop" when nothing needs you, and "(2) Needs you ·
   Namedrop" when two channels need you.
 - Switching channels closes the thread pane.
+- When none of an open thread's messages are loaded any more, for example after
+  Jump to latest, the thread closes for good. It does not reopen when history
+  loads it again. Focus moves to the timeline, never to the page body.
 - Arrow keys still move the selection, as UI-1 specified. A channel counts as
   read only after it has been shown for 1.5 seconds, so passing over it with the
   arrow keys keeps its unread mark.
