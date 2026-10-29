@@ -3389,6 +3389,112 @@ test("UI-3: a refused post keeps the text, shows the server's message, and retri
   assert.equal(new Set(requestIds(ui)).size, 2, "changed text gets a new id");
 });
 
+test("UI-3 fix2: a retry after an edit round trip, or after clearing and retyping, reuses the request id", async (t) => {
+  let busy = true;
+  const ui = await open(
+    t,
+    (client) => replay(client, [team(1, "alpha")]),
+    () => [],
+    { onPost: () => (busy ? { status: 503, error: "busy" } : { status: 200 }) },
+  );
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("@codex same text");
+  await box.press("Enter");
+  const error = ui.page.locator(".composer").getByRole("alert");
+  await error.waitFor();
+  await box.press("End");
+  await box.press("x");
+  await error.waitFor({ state: "detached" });
+  await box.press("Backspace");
+  assert.equal(await box.inputValue(), "@codex same text");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 2, "the round-trip retry");
+  await error.waitFor();
+  await box.press("Control+a");
+  await box.press("Backspace");
+  await error.waitFor({ state: "detached" });
+  assert.equal(await box.inputValue(), "");
+  await box.pressSequentially("@codex same text");
+  busy = false;
+  await box.press("Enter");
+  await ui.page.locator("article.pending").getByText("Sent").waitFor();
+  assert.deepEqual(
+    ui.posts.attempts.map(({ status }) => status),
+    [503, 503, 200],
+  );
+  assert.equal(
+    new Set(requestIds(ui)).size,
+    1,
+    "every attempt carried the first id",
+  );
+});
+
+test("UI-3 fix2: refused drafts in two channels and a thread each retry with their own request id", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, [askThread(), team(3, "gamma")]),
+    () => [],
+    { onPost: () => ({ status: 503, error: "busy" }) },
+  );
+  await ui.live();
+  const error = ui.page.locator("main .composer").getByRole("alert");
+  const roundTrip = async (box) => {
+    await box.press("End");
+    await box.press("x");
+    await box.press("Backspace");
+  };
+  await ui.row(1).click();
+  const alpha = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await alpha.click();
+  await alpha.pressSequentially("@codex same");
+  await alpha.press("Enter");
+  await error.waitFor();
+  await ui.row(3).click();
+  const gamma = ui.page.getByRole("combobox", { name: "Message #gamma" });
+  await gamma.click();
+  await gamma.pressSequentially("@codex same");
+  await gamma.press("Enter");
+  await error.waitFor();
+  await ui.row(1).click();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from @codex/ })
+    .click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  await reply.click();
+  await reply.pressSequentially("@codex same");
+  await reply.press("Enter");
+  await pane.locator(".composer").getByRole("alert").waitFor();
+  assert.equal(new Set(requestIds(ui)).size, 3, "three drafts, three ids");
+  await roundTrip(reply);
+  await reply.press("Enter");
+  await until(() => ui.posts.attempts.length === 4, "the thread retry");
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  await alpha.click();
+  await roundTrip(alpha);
+  await alpha.press("Enter");
+  await until(() => ui.posts.attempts.length === 5, "alpha's retry");
+  await ui.row(3).click();
+  await gamma.click();
+  await roundTrip(gamma);
+  await gamma.press("Enter");
+  await until(() => ui.posts.attempts.length === 6, "gamma's retry");
+  const ids = requestIds(ui);
+  assert.deepEqual(
+    ids.slice(3),
+    [ids[2], ids[0], ids[1]],
+    "each retry carried its own draft's id",
+  );
+  assert.equal(new Set(ids).size, 3);
+});
+
 test("UI-3: a 403 refreshes the CSRF token once and retries the same post", async (t) => {
   const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
   await ui.live();
@@ -3432,7 +3538,7 @@ test("UI-3: channels that share a label are listed disabled with a tooltip and c
     assert.equal(await option.getAttribute("aria-disabled"), "true");
     assert.equal(
       await option.getAttribute("title"),
-      "Two workspaces share this label. Rename one in Herdr to mention it.",
+      "Another workspace shows the same name. Give one a unique label in Herdr to mention it.",
     );
     assert.equal(
       await option.evaluate((element) => getComputedStyle(element).opacity),
@@ -3828,7 +3934,7 @@ test("UI-3 fix: the thread box says Write a reply while the To label names the r
   );
 });
 
-test("UI-3 fix: a disabled channel's tooltip names its own reason", async (t) => {
+test("UI-3 fix: a disabled channel's tooltip names a reason only when the page can be sure of it", async (t) => {
   const disabled = (n, name) => {
     const value = frame(n, name);
     value.frame.space.addressable_label = null;
@@ -3843,6 +3949,9 @@ test("UI-3 fix: a disabled channel's tooltip names its own reason", async (t) =>
       disabled(5, "Twin"),
       disabled(6, "twin"),
       disabled(7, "Dormant"),
+      disabled(8, "a\u200bll"),
+      disabled(9, "same"),
+      disabled(10, "same"),
     ]),
   );
   await ui.live();
@@ -3852,17 +3961,17 @@ test("UI-3 fix: a disabled channel's tooltip names its own reason", async (t) =>
   await box.pressSequentially("#");
   const list = ui.page.getByRole("listbox", { name: "Channels" });
   await list.waitFor();
-  const shared =
-    "Two workspaces share this label. Rename one in Herdr to mention it.";
+  const unsure =
+    "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.";
   const titles = {
-    w2: "This workspace has no label. Name it in Herdr to mention it.",
+    w2: "This workspace has no label in Herdr. Name it to mention it.",
     日本語:
-      "This label has no letters or digits Namedrop can use. Rename it in Herdr to mention it.",
-    All: "“all” means every workspace. Rename this one in Herdr to mention it.",
-    Twin: shared,
-    twin: shared,
-    Dormant:
-      "Namedrop isn't active in this workspace yet, so it can't be mentioned.",
+      "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr.",
+    All: unsure,
+    Twin: unsure,
+    twin: unsure,
+    Dormant: unsure,
+    "a\u200bll": unsure,
   };
   for (const [name, title] of Object.entries(titles)) {
     const option = list.getByRole("option").filter({
@@ -3872,6 +3981,15 @@ test("UI-3 fix: a disabled channel's tooltip names its own reason", async (t) =>
     assert.equal(await option.getAttribute("aria-disabled"), "true", name);
     assert.equal(await option.getAttribute("title"), title, name);
   }
+  const same = list.getByRole("option").filter({
+    has: ui.page.locator(".opt-name", { hasText: /^same ·/ }),
+  });
+  assert.equal(await same.count(), 2);
+  for (const option of await same.all())
+    assert.equal(
+      await option.getAttribute("title"),
+      "Another workspace shows the same name. Give one a unique label in Herdr to mention it.",
+    );
   const alpha = list.getByRole("option").filter({
     has: ui.page.locator(".opt-name", { hasText: /^alpha$/ }),
   });

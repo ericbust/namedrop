@@ -398,14 +398,13 @@ test("composer words name the channel, the thread's recipients and the reason a 
     "Start with @name to choose who gets this.",
   );
   assert.deepEqual(disabledChannelCopy, {
-    "no-label": "This workspace has no label. Name it in Herdr to mention it.",
     "unusable-label":
-      "This label has no letters or digits Namedrop can use. Rename it in Herdr to mention it.",
-    all: "“all” means every workspace. Rename this one in Herdr to mention it.",
-    "shared-label":
-      "Two workspaces share this label. Rename one in Herdr to mention it.",
-    inactive:
-      "Namedrop isn't active in this workspace yet, so it can't be mentioned.",
+      "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr.",
+    "no-label": "This workspace has no label in Herdr. Name it to mention it.",
+    "shared-name":
+      "Another workspace shows the same name. Give one a unique label in Herdr to mention it.",
+    unknown:
+      "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.",
   });
   assert.equal(composerCopy.replyNotSent, "Reply not sent · Open thread");
   assert.equal(composerCopy.postNotSent, "A post wasn't sent");

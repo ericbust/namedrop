@@ -274,7 +274,7 @@ test("complete: channel options name why a channel cannot be mentioned, in the t
     [
       ["beta", "#beta", null],
       ["alpha", "#alpha", null],
-      ["dormant", null, "inactive"],
+      ["dormant", null, "unknown"],
       ["w-d", null, "no-label"],
     ],
   );
@@ -287,16 +287,32 @@ test("complete: channel options name why a channel cannot be mentioned, in the t
     snapshot("7", "Gamma", "gamma"),
     snapshot("8", "gamma!", null),
     snapshot("9", "Dormant", null),
+    snapshot("a", "a\u200bll", null),
+    snapshot("b", "foo\u00adbar", null),
+    snapshot("c", "foobar", null),
+    snapshot("d", "same", null),
+    snapshot("e", "same", null),
+    snapshot("f", "日本語", null),
+    snapshot("1", "solo", "solo"),
+    snapshot("0", "solo", null),
   ]).map(({ name, disabledReason }) => [name, disabledReason]);
   assert.deepEqual(reasons, [
     ["w-2", "no-label"],
     ["日本語", "unusable-label"],
-    ["All", "all"],
-    ["Twin", "shared-label"],
-    ["twin", "shared-label"],
+    ["All", "unknown"],
+    ["Twin", "unknown"],
+    ["twin", "unknown"],
     ["Gamma", null],
-    ["gamma!", "shared-label"],
-    ["Dormant", "inactive"],
+    ["gamma!", "unknown"],
+    ["Dormant", "unknown"],
+    ["a\u200bll", "unknown"],
+    ["foo\u00adbar", "unknown"],
+    ["foobar", "unknown"],
+    ["same", "shared-name"],
+    ["same", "shared-name"],
+    ["日本語", "unusable-label"],
+    ["solo", null],
+    ["solo", "shared-name"],
   ]);
 });
 
@@ -315,14 +331,14 @@ test("complete: channel options that share a name carry the sidebar's workspace 
         key: e,
         name: "twin",
         token: null,
-        disabledReason: "shared-label",
+        disabledReason: "shared-name",
         suffix: `w-e · ${e}`,
       },
       {
         key: f,
         name: "twin",
         token: null,
-        disabledReason: "shared-label",
+        disabledReason: "shared-name",
         suffix: `w-f · ${f}`,
       },
       {

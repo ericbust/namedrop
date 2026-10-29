@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Activity, ChannelSnapshot, State } from "./model.ts";
+import type { Activity, ChannelSnapshot, ComposerId, State } from "./model.ts";
 import {
   channelSuffix,
   connectionStatus,
@@ -2361,8 +2361,20 @@ test("drafts: each composer keeps its own text across switches, and an emptied d
   assert.deepEqual(
     [...typed.drafts.values()],
     [
-      { key: alphaKey, thread: null, text: "hello", failure: null },
-      { key: alphaKey, thread: "t1", text: "half a reply", failure: null },
+      {
+        key: alphaKey,
+        thread: null,
+        text: "hello",
+        attempt: null,
+        failure: null,
+      },
+      {
+        key: alphaKey,
+        thread: "t1",
+        text: "half a reply",
+        attempt: null,
+        failure: null,
+      },
     ],
   );
   assert.equal(typed.drafts.get(draftKey(alphaBox))?.text, "hello");
@@ -2388,7 +2400,8 @@ test("drafts: each composer keeps its own text across switches, and an emptied d
     emptied,
   );
 });
-test("drafts: a refused send returns to its composer's draft with the error and its id, and leaves the outbox", () => {
+const attempt1 = { requestId: "r1", source: "@codex hi", inReplyTo: null };
+function refusedAlpha(): State {
   const ready = reduce(apply(initialState(), snapshot()), {
     type: "edit",
     composer: alphaBox,
@@ -2400,18 +2413,22 @@ test("drafts: a refused send returns to its composer's draft with the error and 
     "@codex hi",
     "the box keeps its text while sending",
   );
-  const failed = reduce(sending, {
+  return reduce(sending, {
     type: "send-failed",
     requestId: "r1",
     status: 400,
     message: "Nope",
   });
+}
+test("drafts: a refused send returns to its composer's draft with the error and its attempt, and leaves the outbox", () => {
+  const failed = refusedAlpha();
   assert.deepEqual(phases(failed), {}, "nothing lingers in the outbox");
   assert.deepEqual(failed.drafts.get(draftKey(alphaBox)), {
     key: alphaKey,
     thread: null,
     text: "@codex hi",
-    failure: { requestId: "r1", status: 400, message: "Nope" },
+    attempt: attempt1,
+    failure: { status: 400, message: "Nope" },
   });
   assert.equal(
     reduce(failed, { type: "sent", requestId: "r1", messageId: "late" }),
@@ -2426,8 +2443,14 @@ test("drafts: a refused send returns to its composer's draft with the error and 
   assert.equal(retried.outbox.get("r1")?.at, 2);
   assert.deepEqual(
     retried.drafts.get(draftKey(alphaBox)),
-    { key: alphaKey, thread: null, text: "@codex hi", failure: null },
-    "sending again hides the error and keeps the text",
+    {
+      key: alphaKey,
+      thread: null,
+      text: "@codex hi",
+      attempt: attempt1,
+      failure: null,
+    },
+    "sending again hides the error and keeps the text and the attempt",
   );
   assert.equal(
     reduce(retried, { type: "sent", requestId: "missing", messageId: "x" }),
@@ -2438,17 +2461,98 @@ test("drafts: a refused send returns to its composer's draft with the error and 
     composer: alphaBox,
     text: "@codex hi!",
   });
-  assert.equal(
-    edited.drafts.get(draftKey(alphaBox))?.failure,
-    null,
-    "editing clears the failure",
+  assert.deepEqual(
+    edited.drafts.get(draftKey(alphaBox)),
+    {
+      key: alphaKey,
+      thread: null,
+      text: "@codex hi!",
+      attempt: attempt1,
+      failure: null,
+    },
+    "editing clears the error and keeps the attempt",
   );
-  assert.equal(
-    reduce(failed, { type: "edit", composer: alphaBox, text: "" }).drafts.has(
-      draftKey(alphaBox),
-    ),
-    false,
+});
+test("drafts: a refused draft keeps its attempt through edits that empty or restore the text, until a success", () => {
+  const failed = refusedAlpha();
+  const edit = (state: State, text: string) =>
+    reduce(state, { type: "edit", composer: alphaBox, text });
+  const draft = (state: State) => state.drafts.get(draftKey(alphaBox));
+  const roundTrip = edit(edit(failed, "@codex hix"), "@codex hi");
+  assert.deepEqual(draft(roundTrip)?.attempt, attempt1, "a round trip");
+  assert.equal(draft(roundTrip)?.failure, null);
+  const emptied = edit(failed, "");
+  assert.deepEqual(
+    draft(emptied),
+    {
+      key: alphaKey,
+      thread: null,
+      text: "",
+      attempt: attempt1,
+      failure: null,
+    },
+    "an emptied refused draft stays, with its attempt",
   );
+  assert.equal(edit(emptied, ""), emptied, "emptying it again changes nothing");
+  assert.deepEqual(
+    draft(edit(emptied, "@codex hi"))?.attempt,
+    attempt1,
+    "pasting the text back",
+  );
+  const replaced = reduce(
+    reduce(edit(failed, "@codex hi!"), {
+      type: "send",
+      outgoing: outgoing("r2", "@codex hi!"),
+    }),
+    { type: "send-failed", requestId: "r2", status: 503, message: "" },
+  );
+  assert.deepEqual(
+    draft(replaced),
+    {
+      key: alphaKey,
+      thread: null,
+      text: "@codex hi!",
+      attempt: { requestId: "r2", source: "@codex hi!", inReplyTo: null },
+      failure: { status: 503, message: "" },
+    },
+    "a refusal of different text replaces the attempt",
+  );
+  const sent = reduce(
+    reduce(roundTrip, { type: "send", outgoing: { ...outgoing(), at: 3 } }),
+    { type: "sent", requestId: "r1", messageId: "posted" },
+  );
+  assert.equal(draft(sent), undefined, "a success forgets the attempt");
+});
+test("drafts: attempts never move between drafts, even with the same text", () => {
+  const same = (
+    composer: ComposerId,
+    requestId: string,
+    inReplyTo: string | null = null,
+  ) => [
+    { type: "edit", composer, text: "@codex same" } as const,
+    {
+      type: "send",
+      outgoing: { ...outgoing(requestId, "@codex same"), composer, inReplyTo },
+    } as const,
+    { type: "send-failed", requestId, status: 503, message: "" } as const,
+  ];
+  const betaBox = {
+    key: parsed(snapshot(keyB, "beta", "w2")).key,
+    thread: null,
+  };
+  const state = [
+    ...same(alphaBox, "r1"),
+    ...same(betaBox, "r2"),
+    ...same(threadBox, "r3", "m1"),
+  ].reduce(reduce, twoChannels());
+  const attempts = [alphaBox, betaBox, threadBox].map(
+    (composer) => state.drafts.get(draftKey(composer))?.attempt,
+  );
+  assert.deepEqual(attempts, [
+    { requestId: "r1", source: "@codex same", inReplyTo: null },
+    { requestId: "r2", source: "@codex same", inReplyTo: null },
+    { requestId: "r3", source: "@codex same", inReplyTo: "m1" },
+  ]);
 });
 test("drafts: an accepted send clears its composer's draft, and a refusal with no draft restores the sent text", () => {
   const sent = reduce(
@@ -2481,7 +2585,12 @@ test("drafts: an accepted send clears its composer's draft, and a refusal with n
     key: alphaKey,
     thread: "t1",
     text: "#alpha @codex thanks",
-    failure: { requestId: "r2", status: 0, message: "" },
+    attempt: {
+      requestId: "r2",
+      source: "#alpha @codex thanks",
+      inReplyTo: "m1",
+    },
+    failure: { status: 0, message: "" },
   });
 });
 test("participants: envoys resolve through their home channel, else read in plain words", () => {
