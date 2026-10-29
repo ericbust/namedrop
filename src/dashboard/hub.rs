@@ -477,21 +477,22 @@ impl Hub<'_> {
             ));
         }
         let runtime = self.files.state().join("runtime");
-        let wants_handoff =
-            if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
-                Some("an update is migrating state")
-            } else if runtime.join("namedrop").exists()
-                && fs::canonicalize(runtime.join("current/namedrop")).ok()
-                    != std::env::current_exe().and_then(fs::canonicalize).ok()
-            {
-                Some("a newer release is current")
-            } else if self.store.as_ref().is_some_and(|store| {
-                store.schema_version().ok() != Some(crate::store::SCHEMA_VERSION)
-            }) {
-                Some("the state schema changed")
-            } else {
-                None
-            };
+        let wants_handoff = if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
+            Some("an update is migrating state")
+        } else if runtime.join("namedrop").exists()
+            && fs::canonicalize(runtime.join("current/namedrop")).ok()
+                != std::env::current_exe().and_then(fs::canonicalize).ok()
+        {
+            Some("a newer release is current")
+        } else if self.store.as_ref().is_some_and(|store| {
+            store
+                .schema_version()
+                .is_ok_and(|version| version != crate::store::SCHEMA_VERSION)
+        }) {
+            Some("the state schema changed")
+        } else {
+            None
+        };
         if let Some(reason) = wants_handoff {
             return Some(if self.subscribers.is_empty() {
                 Verdict::Exit(reason)
