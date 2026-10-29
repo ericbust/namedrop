@@ -38,6 +38,7 @@ function frame(n, name, level = "calm") {
     workspace_id: `w${n}`,
     display_name: name,
     addressable_label: name,
+    not_addressable_reason: null,
   };
   value.frame.health = level === "needs_you" ? { level, items: 1 } : { level };
   return value;
@@ -3249,6 +3250,7 @@ test("UI-3: a thread reply to an agent in another workspace names it through its
   const now = Date.now();
   const testbed = team(1, "testbed");
   testbed.frame.space.addressable_label = null;
+  testbed.frame.space.not_addressable_reason = "unavailable";
   testbed.frame.messages = [
     message("ask", "#alpha @lead please reply", {
       thread_id: "t1",
@@ -3617,6 +3619,7 @@ test("UI-3: channels that share a label are listed disabled with a tooltip and c
   const twin = (n) => {
     const value = frame(n, "twin");
     value.frame.space.addressable_label = null;
+    value.frame.space.not_addressable_reason = "shared_label";
     return value;
   };
   const ui = await open(t, (client) =>
@@ -3654,6 +3657,7 @@ test("UI-3: channels that share a label carry the sidebar's workspace suffix in 
   const twin = (n) => {
     const value = frame(n, "twin");
     value.frame.space.addressable_label = null;
+    value.frame.space.not_addressable_reason = "shared_label";
     return value;
   };
   const ui = await open(t, (client) =>
@@ -4032,16 +4036,17 @@ test("UI-3 fix: the thread box says Write a reply while the To label names the r
 });
 
 test("UI-3 fix: a disabled channel's tooltip names a reason only when the page can be sure of it", async (t) => {
-  const disabled = (n, name) => {
+  const disabled = (n, name, reason = "unavailable") => {
     const value = frame(n, name);
     value.frame.space.addressable_label = null;
+    value.frame.space.not_addressable_reason = reason;
     return value;
   };
   const ui = await open(t, (client) =>
     replay(client, [
       team(1, "alpha"),
-      disabled(2, "w2"),
-      disabled(3, "日本語"),
+      disabled(2, "w2", "missing_label"),
+      disabled(3, "日本語", "empty_label"),
       disabled(4, "All"),
       disabled(5, "Twin"),
       disabled(6, "twin"),
@@ -4051,7 +4056,7 @@ test("UI-3 fix: a disabled channel's tooltip names a reason only when the page c
       disabled(10, "same"),
       disabled(11, "foobar"),
       disabled(12, "w13"),
-      disabled(13, "w13"),
+      disabled(13, "w13", "missing_label"),
     ]),
   );
   await ui.live();
@@ -4493,6 +4498,43 @@ test("UI-4: a slow first read shows nothing for 400 ms, then names the screen, t
   release();
   await screenText(ui).getByText("slow at last").waitFor();
   assert.equal(await note.count(), 0);
+});
+
+test("a recent retired member opens Pane closed, then leaves the strip after grace while its history author stays", async (t) => {
+  const value = team(1, "alpha");
+  const member = value.frame.participants.find(
+    ({ address_id }) => address_id === "codex",
+  );
+  assert.ok(member);
+  member.activity = "retired";
+  member.recently_closed = true;
+  value.frame.messages = [
+    message("old-author", "Saved before closing", { author: "codex" }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onScreen: () => ({
+      status: 410,
+      body: "This participant's pane is no longer available.\n",
+    }),
+  });
+  await ui.live();
+  const chip = ui.page.locator('.members li[data-address-id="codex"]');
+  await chip.getByText("Retired", { exact: true }).waitFor();
+  await chip.getByRole("button").click();
+  await drawer(ui).getByText("Pane closed", { exact: true }).waitFor();
+  assert.deepEqual(
+    ui.screens.requests.map(({ address }) => address),
+    ["codex"],
+  );
+  const expired = structuredClone(value);
+  expired.frame.participants.find(
+    ({ address_id }) => address_id === "codex",
+  ).recently_closed = false;
+  ui.connections[0].send("space", expired);
+  await chip.waitFor({ state: "detached" });
+  const history = ui.page.locator('[data-message-id="old-author"]');
+  await history.getByText("@codex", { exact: true }).waitFor();
+  await history.getByText("Saved before closing", { exact: true }).waitFor();
 });
 
 test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and failures over text become a bar", async (t) => {
