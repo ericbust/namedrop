@@ -423,6 +423,15 @@ test("attention actions show historical evidence and safe responses for every so
   assert.ok(local.includes("Namedrop setup from the command palette"), local);
   assert.equal(local.includes("Show message"), false);
   assert.equal(local.includes(">Respond<"), false);
+  const missing = renderToStaticMarkup(
+    createElement(AttentionActions, {
+      item: { ...item, source: "coordination" },
+      channel,
+      onFocus() {},
+    }),
+  );
+  assert.ok(missing.includes("Namedrop Doctor"), missing);
+  assert.equal(missing.includes("repair the integration"), false);
 });
 
 test("Activity reuses the attention evidence and response controls", async () => {

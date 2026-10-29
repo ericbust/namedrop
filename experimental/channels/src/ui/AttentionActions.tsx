@@ -70,8 +70,9 @@ export function AttentionActions({
       )}
       {response?.kind === "local" && (
         <span>
-          Open this workspace in Herdr and choose Namedrop setup from the
-          command palette to repair the integration.
+          {item.source === "integration_registration"
+            ? "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration."
+            : "Open this workspace in Herdr and choose Namedrop Doctor to review this item."}
         </span>
       )}
     </div>
