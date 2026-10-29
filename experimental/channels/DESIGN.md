@@ -487,7 +487,8 @@ workspaces would reach agents who are not in the thread.
   rows tall, then it scrolls. It uses `--bg`, a 1px `--line-strong` border,
   `--radius-md`, and `--shadow-pop`.
 - **Channel rows**, 32px: a muted `#` icon, the name, and its token in muted
-  text. `#all` comes last, as "#all · every workspace". A channel with no token
+  text. Channels that share a name add the sidebar's muted suffix with the
+  workspace id, so the operator can tell which one to rename. `#all` comes last, as "#all · every workspace". A channel with no token
   shows at 50 percent opacity and cannot be chosen. Its tooltip reads "Two
   workspaces share this label. Rename one in Herdr to mention it.", or "This
   workspace has no label. Name it in Herdr to mention it."
