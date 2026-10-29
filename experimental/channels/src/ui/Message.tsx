@@ -249,17 +249,19 @@ type MessageProps = {
   paneId?: string;
   threadExpanded?: boolean;
   arrive?: boolean;
+  located?: boolean;
 };
 function SystemRow({
   message,
   members,
   arrive,
-}: Pick<MessageProps, "message" | "members" | "arrive">) {
+  located,
+}: Pick<MessageProps, "message" | "members" | "arrive" | "located">) {
   const failed = message.legs.some((leg) => leg.stage.stage === "failed");
   const { text, truncated } = message.body;
   return (
     <article
-      className={`system${arrive ? " arrive" : ""}`}
+      className={`system${arrive ? " arrive" : ""}${located ? " located" : ""}`}
       data-message-id={message.id}
       data-kind={message.kind}
     >
@@ -373,16 +375,24 @@ export const Message = memo(
     paneId,
     threadExpanded = false,
     arrive = false,
+    located = false,
   }: MessageProps) {
     if (message.kind === "nudge" || message.kind === "hook")
-      return <SystemRow message={message} members={members} arrive={arrive} />;
+      return (
+        <SystemRow
+          message={message}
+          members={members}
+          arrive={arrive}
+          located={located}
+        />
+      );
     const name = authorName(members, message.author);
     const time = clock(message.at);
     const variant = variantFor(message, members, recipients);
     const result = variant === "output" ? terminalResult(message.body) : null;
     return (
       <article
-        className={`msg ${grouped ? "grouped" : "group-start"}${arrive ? " arrive" : ""}`}
+        className={`msg ${grouped ? "grouped" : "group-start"}${arrive ? " arrive" : ""}${located ? " located" : ""}`}
         data-message-id={message.id}
         data-kind={message.kind}
       >
@@ -472,6 +482,7 @@ export const Message = memo(
     before.paneId === after.paneId &&
     before.threadExpanded === after.threadExpanded &&
     before.arrive === after.arrive &&
+    before.located === after.located &&
     (before.members === after.members ||
       (sameMember(before.members, after.members, before.message.author) &&
         before.recipients.every((id) =>

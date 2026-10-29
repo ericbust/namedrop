@@ -2314,6 +2314,10 @@ test("design-b: Needs you shows titles, hints and ages three at a time and annou
       .textContent(),
     "@codex didn't answer a request · 3 more",
   );
+  assert.equal(
+    await banner.getByRole("button", { name: /^Show message/ }).count(),
+    0,
+  );
   assert.equal(await ui.page.locator(".channel-header .health").count(), 0);
   const live = ui.page.locator('[aria-live="polite"]');
   assert.equal(await live.textContent(), "");
@@ -2323,6 +2327,179 @@ test("design-b: Needs you shows titles, hints and ages three at a time and annou
     () =>
       document.querySelector('[aria-live="polite"]')?.textContent ===
       "Needs you: An agent's pane changed",
+  );
+});
+
+function locatedChannel() {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants = people();
+  const at = Date.now() - 60 * 60_000;
+  value.frame.messages = Array.from({ length: 60 }, (_, n) =>
+    message(`m${n}`, `Request ${n}`, {
+      at_ms: at + n * 60_000,
+      legs: [{ to: "codex", stage: { stage: "delivered" } }],
+    }),
+  );
+  const card = (source_kind, text, subject_alias, message_id) => ({
+    source_kind,
+    summary: { text, truncated: false },
+    opened_at_ms: at,
+    subject_alias,
+    message_id,
+  });
+  value.frame.attention = [
+    card("delivery_attempt", "No reply.", "codex", "m20"),
+    card("agent_status", "@claude is waiting.", "claude", "older"),
+    card("coordination", "Close it.", null, "m40"),
+  ];
+  return value;
+}
+async function centerOffset(timeline, id) {
+  return timeline.evaluate((element, id) => {
+    const row = element.querySelector(`[data-message-id="${id}"]`);
+    const port = element.getBoundingClientRect();
+    const box = row.getBoundingClientRect();
+    return Math.abs(
+      box.top +
+        box.height / 2 -
+        (port.top + element.clientTop + element.clientHeight / 2),
+    );
+  }, id);
+}
+async function tint(row) {
+  return row.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      located: element.classList.contains("located"),
+      animation: style.animationName,
+      background: style.backgroundColor,
+    };
+  });
+}
+
+test("Needs you: Show message centers the loaded request, tints it, opens its thread, and Escape returns to the button", async (t) => {
+  const ui = await open(t, (client) => replay(client, [locatedChannel()]));
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  await ui.live();
+  const banner = ui.page.getByRole("region", { name: "Attention needed" });
+  const items = banner.getByRole("listitem");
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.locator('[data-message-id="m59"]').waitFor();
+  const show = items
+    .nth(0)
+    .getByRole("button", { name: "Show message from @codex", exact: true });
+  assert.equal(await show.textContent(), "Show message");
+  assert.equal(
+    await items
+      .nth(1)
+      .getByRole("button", { name: /^Show message/ })
+      .count(),
+    0,
+  );
+  assert.equal(
+    await items
+      .nth(2)
+      .getByRole("button", { name: "Show message", exact: true })
+      .count(),
+    1,
+  );
+  const row = timeline.locator('[data-message-id="m20"]');
+  assert.ok((await centerOffset(timeline, "m20")) > 100, "starts far away");
+  await show.click();
+  const pane = ui.page.getByRole("complementary", { name: "Thread" });
+  await pane.locator('[data-message-id="m20"]').waitFor();
+  const offset = await centerOffset(timeline, "m20");
+  assert.ok(offset <= 4, `row center is ${offset}px from the middle`);
+  const tinted = await tint(row);
+  assert.equal(tinted.located, true);
+  assert.equal(tinted.animation, "located");
+  assert.equal(
+    await pane
+      .getByRole("button", { name: "Close thread" })
+      .evaluate((button) => button === document.activeElement),
+    true,
+  );
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  assert.equal(
+    await show.evaluate((button) => button === document.activeElement),
+    true,
+  );
+  await ui.page.waitForFunction(
+    () =>
+      !document
+        .querySelector('.timeline [data-message-id="m20"]')
+        .classList.contains("located"),
+  );
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await items
+    .nth(2)
+    .getByRole("button", { name: "Show message", exact: true })
+    .click();
+  await pane.locator('[data-message-id="m40"]').waitFor();
+  const still = await tint(timeline.locator('[data-message-id="m40"]'));
+  assert.deepEqual(still, {
+    located: true,
+    animation: "none",
+    background: await ui.page.evaluate(() => {
+      const probe = document.body.appendChild(document.createElement("div"));
+      probe.style.backgroundColor = "var(--bg-selected)";
+      const color = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return color;
+    }),
+  });
+  assert.ok((await centerOffset(timeline, "m40")) <= 4);
+});
+
+test("Needs you: Show message on a live arrival does not replay its arrival when the tint ends", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = [
+    message("old", "Old", { at_ms: Date.now() - 60_000 }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.locator('[data-message-id="old"]').waitFor();
+  const next = structuredClone(value);
+  next.frame.messages.push(message("new", "New", { at_ms: Date.now() + 1000 }));
+  next.frame.health = { level: "needs_you", items: 1 };
+  next.frame.attention = [
+    {
+      source_kind: "delivery_attempt",
+      summary: { text: "No reply.", truncated: false },
+      opened_at_ms: Date.now(),
+      subject_alias: "codex",
+      message_id: "new",
+    },
+  ];
+  ui.connections[0].send("space", next);
+  const row = timeline.locator('[data-message-id="new"]');
+  await ui.page.waitForFunction(
+    () =>
+      document
+        .querySelector('.timeline [data-message-id="new"]')
+        ?.getAnimations().length === 0,
+  );
+  await ui.page
+    .getByRole("button", { name: "Show message from @codex", exact: true })
+    .click();
+  assert.equal(
+    await row.evaluate((element) => element.classList.contains("located")),
+    true,
+  );
+  await ui.page.waitForFunction(
+    () =>
+      !document
+        .querySelector('.timeline [data-message-id="new"]')
+        .classList.contains("located"),
+  );
+  assert.deepEqual(
+    await row.evaluate((element) => [
+      element.classList.contains("arrive"),
+      element.getAnimations().map((animation) => animation.animationName),
+    ]),
+    [true, []],
   );
 });
 

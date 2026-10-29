@@ -1,9 +1,11 @@
-import { Fragment, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useLayoutEffect, useRef, useState } from "react";
 import type { Channel, SpaceKey, TerminalRun } from "../model.ts";
-import { exitFor, type ThreadGroup, timelineView } from "../store.ts";
+import { exitFor, type TimelineRow } from "../store.ts";
 import { Icon } from "./Icons.tsx";
 import { Message } from "./Message.tsx";
 
+// A new object per activation, so showing the same message again re-scrolls.
+export type Located = { messageId: string };
 type Anchor = {
   ids: readonly { id: string; offset: number }[];
   bottom: boolean;
@@ -39,8 +41,9 @@ function screensAbove(element: HTMLElement): boolean {
 }
 export function Timeline({
   channel,
-  groups,
+  rows,
   runs,
+  located,
   expandedThread,
   onThread,
   paneId,
@@ -49,8 +52,9 @@ export function Timeline({
   onFollow,
 }: {
   channel: Channel;
-  groups: ReadonlyMap<string, ThreadGroup>;
+  rows: readonly TimelineRow[];
   runs: ReadonlyMap<string, TerminalRun>;
+  located: Located | null;
   expandedThread: string | null;
   onThread: (threadId: string, button: HTMLButtonElement) => void;
   paneId: string;
@@ -65,11 +69,6 @@ export function Timeline({
   if (shown.current?.key !== channel.key)
     shown.current = { key: channel.key, at: Date.now() };
   const shownAt = shown.current.at;
-  const { messages, runs: windows, threads } = channel;
-  const rows = useMemo(
-    () => timelineView({ messages, runs: windows, threads }, groups),
-    [messages, windows, threads, groups],
-  );
   useLayoutEffect(() => {
     const element = scroller.current;
     if (!element) return;
@@ -93,6 +92,21 @@ export function Timeline({
     anchors.current.set(channel.key, capture(element));
     setFar(screensAbove(element));
   }, [channel]);
+  useLayoutEffect(() => {
+    const element = scroller.current;
+    if (!element || located === null) return;
+    const row = [
+      ...element.querySelectorAll<HTMLElement>("[data-message-id]"),
+    ].find((row) => row.dataset.messageId === located.messageId);
+    if (!row) return;
+    const port = element.getBoundingClientRect();
+    const box = row.getBoundingClientRect();
+    element.scrollTop +=
+      box.top +
+      box.height / 2 -
+      (port.top + element.clientTop + element.clientHeight / 2);
+    anchors.current.set(channel.key, capture(element));
+  }, [located]);
   const history = channel.history;
   const gap = channel.runs.length > 1;
   const browsing = channel.viewMode === "browsing";
@@ -220,6 +234,7 @@ export function Timeline({
                   paneId={paneId}
                   threadExpanded={expandedThread === thread.id}
                   arrive={message.at > shownAt}
+                  located={located?.messageId === message.id}
                 />
               </Fragment>
             );

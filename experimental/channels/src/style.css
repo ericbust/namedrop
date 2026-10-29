@@ -717,9 +717,11 @@ a:hover {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-.attention-item .text-button {
+.attention-actions {
   grid-column: 2;
-  justify-self: start;
+  display: flex;
+  flex-wrap: wrap;
+  column-gap: var(--space-4);
   margin-top: 2px;
 }
 .attention-more {
@@ -1034,6 +1036,21 @@ a:hover {
     transform: translateY(4px);
   }
 }
+.located {
+  animation: located 1.5s var(--ease-out);
+}
+/* Listing arrive keeps it from replaying when the tint ends. */
+.arrive.located {
+  animation:
+    arrive var(--duration) var(--ease-out),
+    located 1.5s var(--ease-out);
+}
+@keyframes located {
+  from,
+  70% {
+    background-color: var(--bg-selected);
+  }
+}
 .earlier-thread {
   margin-top: var(--space-3);
   font-size: var(--text-xs);
@@ -1291,5 +1308,11 @@ code.inline {
   .thread,
   .attention {
     animation: none;
+  }
+  .located,
+  .located:hover,
+  .arrive.located {
+    animation: none;
+    background-color: var(--bg-selected);
   }
 }

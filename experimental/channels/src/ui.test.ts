@@ -112,7 +112,11 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
       createElement(ChannelHeader, { channel: event.channel, suffix: null }),
     );
     const banner = renderToStaticMarkup(
-      createElement(NeedsYou, { channel: event.channel }),
+      createElement(NeedsYou, {
+        channel: event.channel,
+        inTimeline: new Map(),
+        onShow() {},
+      }),
     );
     const needsYou = level === "needs_you";
     assert.equal(sidebar.includes('aria-label="Needs you" class='), needsYou);

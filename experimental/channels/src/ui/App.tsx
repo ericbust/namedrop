@@ -6,8 +6,9 @@ import {
   useMemo,
   useReducer,
   useRef,
+  useState,
 } from "react";
-import type { Event, SpaceKey, State } from "../model.ts";
+import type { Event, Message, SpaceKey, State } from "../model.ts";
 import {
   channelSuffix,
   connectionStatus,
@@ -15,7 +16,9 @@ import {
   reduce,
   runsByMessage,
   type ThreadGroup,
+  type TimelineRow,
   threadGroups,
+  timelineView,
 } from "../store.ts";
 import { parseEvent, parseHistory, pathKey } from "../wire.ts";
 import { ChannelHeader } from "./ChannelHeader.tsx";
@@ -24,9 +27,11 @@ import { MemberStrip } from "./MemberStrip.tsx";
 import { NeedsYou } from "./NeedsYou.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { ThreadPane } from "./ThreadPane.tsx";
-import { Timeline } from "./Timeline.tsx";
+import { type Located, Timeline } from "./Timeline.tsx";
 
 const noGroups: ReadonlyMap<string, ThreadGroup> = new Map();
+const noRows: readonly TimelineRow[] = [];
+const noMessages: ReadonlyMap<string, Message> = new Map();
 function measuredReduce(state: State, event: Event): State {
   if (
     event.type !== "space" &&
@@ -299,13 +304,20 @@ export function App() {
   const messages = channel?.messages;
   const windows = channel?.runs;
   const threads = channel?.threads;
-  const groups = useMemo(
-    () =>
-      messages && windows && threads
-        ? threadGroups({ messages, runs: windows, threads })
-        : noGroups,
-    [messages, windows, threads],
-  );
+  const { groups, rows, inTimeline } = useMemo(() => {
+    if (!messages || !windows || !threads)
+      return { groups: noGroups, rows: noRows, inTimeline: noMessages };
+    const groups = threadGroups({ messages, runs: windows, threads });
+    const rows = timelineView({ messages, runs: windows, threads }, groups);
+    const inTimeline = new Map(
+      rows.flatMap((row): [string, Message][] =>
+        row.kind === "message" || row.kind === "orphan"
+          ? [[row.message.id, row.message]]
+          : [],
+      ),
+    );
+    return { groups, rows, inTimeline };
+  }, [messages, windows, threads]);
   const terminalRuns = channel?.terminalRuns;
   const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
   const thread =
@@ -325,6 +337,19 @@ export function App() {
       dispatch({ type: "thread", threadId });
     },
     [],
+  );
+  const [located, locate] = useState<Located | null>(null);
+  useEffect(() => {
+    if (located === null) return;
+    const done = setTimeout(() => locate(null), 1500);
+    return () => clearTimeout(done);
+  }, [located]);
+  const showMessage = useCallback(
+    (message: Message, button: HTMLButtonElement) => {
+      locate({ messageId: message.id });
+      openThread(message.threadId, button);
+    },
+    [openThread],
   );
   const closeThread = useCallback(() => {
     dispatch({ type: "thread", threadId: null });
@@ -379,11 +404,16 @@ export function App() {
               suffix={channelSuffix(channel, state.channels.values())}
             />
             <MemberStrip key={channel.key} members={channel.members} />
-            <NeedsYou channel={channel} />
+            <NeedsYou
+              channel={channel}
+              inTimeline={inTimeline}
+              onShow={showMessage}
+            />
             <Timeline
               channel={channel}
-              groups={groups}
+              rows={rows}
               runs={runs}
+              located={located}
               expandedThread={thread ? thread.id : null}
               onThread={openThread}
               paneId={paneId}
