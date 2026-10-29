@@ -80,11 +80,12 @@ preview opens the **Thread** pane, which updates when replies arrive. Opening a
 thread moves focus to **Close thread** once, and switching channels closes the
 pane. When none of the thread's messages are loaded any more, after Jump to
 latest or when the history cap evicts them, the pane closes for good and focus
-moves to the timeline. The preview exposes its expanded state and pane ID. **Close thread** restores
-focus to that preview. Escape does the same from inside the pane, or from the page body when no
-dialog is open; other focused controls keep their own Escape behavior. On narrow
-screens the pane sits below the timeline. Replies whose parent is not loaded remain visible as
-**Earlier thread** rows.
+moves to the timeline. The preview exposes its expanded state and pane ID.
+**Close thread** restores focus to that preview. Escape does the same from
+inside the pane, or from the page body when no dialog is open; other focused
+controls keep their own Escape behavior. On narrow screens the pane sits below
+the timeline. Replies whose parent is not loaded remain visible as **Earlier
+thread** rows.
 
 Scroll to the top or select **Load earlier messages** to fetch history. The first
 visible message keeps its position across prepends, live updates, and channel
