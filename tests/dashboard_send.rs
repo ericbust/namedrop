@@ -1192,6 +1192,94 @@ else:
     }
 
     #[test]
+    fn early_refusal_stops_draining_a_body_larger_than_two_mib() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let body = vec![b'x'; 16 * 1024 * 1024];
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "POST /w/{}/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            key.as_str(),
+            server.port,
+            server.cookie,
+            server.csrf,
+            body.len()
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 413 "), "{response}");
+        let error = stream
+            .write_all(&body)
+            .expect_err("the server must close instead of draining the entire oversized body");
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ),
+            "the drain must stop rather than wait for the write timeout: {error}"
+        );
+        assert_eq!(f.message_rows(), (0, 0));
+    }
+
+    #[test]
+    fn early_refusal_stops_draining_a_trickling_body() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            stream,
+            "POST /w/{}/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: 1048576\r\n\r\n",
+            key.as_str(),
+            server.port,
+            server.cookie,
+            server.csrf
+        )
+        .unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 413 "), "{response}");
+        let started = Instant::now();
+        let error = loop {
+            match stream.write_all(b"x") {
+                Ok(()) => {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(1),
+                        "the server kept draining a trickling body past its 250 ms deadline"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ),
+            "the drain must close the connection: {error}"
+        );
+        assert_eq!(f.message_rows(), (0, 0));
+    }
+
+    #[test]
     fn operator_input_errors_remain_useful_bad_requests() {
         let f = Fixture::new();
         f.register_all();
