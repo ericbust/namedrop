@@ -1100,6 +1100,89 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_schema_read_keeps_the_hub_running() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-hub-schema-busy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        StateStore::open(&state).unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let claim = files.claim().unwrap().unwrap();
+        files
+            .publish(
+                &claim,
+                &super::super::server_files::ServerInfo {
+                    pid: std::process::id(),
+                    port: 0,
+                    instance: "test".to_owned(),
+                    started_at_ms: now_ms(),
+                    ui: Default::default(),
+                },
+            )
+            .unwrap();
+        let mut hub = test_hub(&files);
+        assert!(hub.open_store());
+        hub.store
+            .as_ref()
+            .unwrap()
+            .set_busy_timeout(Duration::ZERO)
+            .unwrap();
+        let writer = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert_eq!(
+            hub.store
+                .as_ref()
+                .unwrap()
+                .schema_version()
+                .unwrap_err()
+                .kind(),
+            StoreErrorKind::Busy
+        );
+        assert_eq!(hub.verdict().map(|verdict| verdict.reason()), None);
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            hub.store.as_ref().unwrap().schema_version().unwrap(),
+            crate::store::SCHEMA_VERSION
+        );
+        assert_eq!(hub.verdict().map(|verdict| verdict.reason()), None);
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn a_changed_schema_exits_or_hands_off_to_connected_tabs() {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-hub-schema-changed-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state);
+        StateStore::open(&state).unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = test_hub(&files);
+        assert!(hub.open_store());
+        let writer = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+        writer
+            .pragma_update(None, "user_version", crate::store::SCHEMA_VERSION + 1)
+            .unwrap();
+        assert!(matches!(
+            hub.verdict(),
+            Some(Verdict::Exit("the state schema changed"))
+        ));
+        hub.subscribers.insert(
+            1,
+            Subscriber {
+                state: ConnectionState::PendingAll,
+                frames: sync_channel(1).0,
+                notify: std::sync::mpsc::channel().0,
+            },
+        );
+        assert!(matches!(
+            hub.verdict(),
+            Some(Verdict::Handoff("the state schema changed"))
+        ));
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
     fn a_failed_read_is_retried_on_the_next_tick() {
         let state = std::env::temp_dir().join(format!("namedrop-hub-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
