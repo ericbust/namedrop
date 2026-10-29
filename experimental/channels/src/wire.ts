@@ -240,6 +240,14 @@ function messages(value: unknown): Map<string, Message> {
   }
   return rows;
 }
+export function pathKey(pathname: string): SpaceKey | null {
+  const segment = /^\/w\/([^/]+)\/?$/.exec(pathname)?.[1];
+  try {
+    return segment === undefined ? null : spaceKey(segment);
+  } catch {
+    return null;
+  }
+}
 export function parseHistory(raw: unknown): readonly Message[] {
   return [...messages(raw).values()].reverse();
 }

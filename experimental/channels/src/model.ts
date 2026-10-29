@@ -126,6 +126,8 @@ export type Event =
         | { kind: "error"; reason: string };
     }
   | { type: "select"; key: SpaceKey }
+  | { type: "read"; key: SpaceKey }
+  | { type: "thread"; threadId: string | null }
   | { type: "opened" }
   | { type: "replay-timeout" }
   | { type: "disconnected" }
@@ -141,6 +143,8 @@ export type Sync =
 export type State = {
   channels: Map<SpaceKey, Channel>;
   selectedKey: SpaceKey | null;
+  requestedKey: SpaceKey | null;
+  openThread: string | null;
   unread: ReadonlySet<SpaceKey>;
   sync: Sync;
   visible: boolean;

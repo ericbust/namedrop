@@ -65,7 +65,7 @@ after(async () => {
   await browser?.close();
 });
 
-async function open(t, onConnect, history = () => []) {
+async function open(t, onConnect, history = () => [], { path = "/" } = {}) {
   const clients = new Set();
   const connections = [];
   const errors = [];
@@ -91,8 +91,8 @@ async function open(t, onConnect, history = () => []) {
       onConnect(client, connections.length);
       return;
     }
-    if (req.url?.startsWith("/w/")) {
-      const url = new URL(req.url, "http://localhost");
+    const url = new URL(req.url ?? "/", "http://localhost");
+    if (/^\/w\/[^/]+\/messages$/.test(url.pathname)) {
       historyRequests.push(url);
       try {
         const rows = await history(url);
@@ -104,8 +104,9 @@ async function open(t, onConnect, history = () => []) {
       return;
     }
     try {
+      const page = url.pathname === "/" || /^\/w\/[^/]+$/.test(url.pathname);
       const file = new URL(
-        `../dist${req.url === "/" ? "/index.html" : req.url}`,
+        `../dist${page ? "/index.html" : url.pathname}`,
         import.meta.url,
       );
       const body = await readFile(file);
@@ -125,6 +126,7 @@ async function open(t, onConnect, history = () => []) {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.addInitScript(() => {
     window.cspErrors = [];
+    window.initialHistoryLength = history.length;
     document.addEventListener("securitypolicyviolation", (event) =>
       window.cspErrors.push(event.violatedDirective),
     );
@@ -140,7 +142,7 @@ async function open(t, onConnect, history = () => []) {
       await new Promise((resolve) => server.close(resolve));
     }
   });
-  await page.goto(`http://127.0.0.1:${server.address().port}/`);
+  await page.goto(`http://127.0.0.1:${server.address().port}${path}`);
   const channels = page.getByRole("navigation", {
     name: "Channels",
     exact: true,
@@ -537,7 +539,7 @@ async function focused(ui, n) {
   );
 }
 
-test("fix3 item 1: lateReady prunes omitted selected gamma and restores sorted read fallback focus", async (t) => {
+test("fix3 item 1: lateReady prunes omitted selected gamma and restores sorted fallback focus, read after dwell", async (t) => {
   const ui = await open(t, (client, n) => {
     if (n === 1)
       replay(client, [frame(1, "zeta"), frame(2, "beta"), frame(3, "gamma")]);
@@ -554,10 +556,10 @@ test("fix3 item 1: lateReady prunes omitted selected gamma and restores sorted r
   ui.connections[1].send("ready", { keys: [key(1), key(2)] });
   await ui.row(3).waitFor({ state: "detached" });
   assert.equal(await ui.row(2).getAttribute("aria-current"), "page");
-  assert.equal(
-    await ui.row(2).getByRole("img", { name: "Unread activity" }).count(),
-    0,
-  );
+  await ui
+    .row(2)
+    .getByRole("img", { name: "Unread activity" })
+    .waitFor({ state: "detached" });
   await focused(ui, 2);
   await ui.page.keyboard.press("End");
   assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
@@ -1082,7 +1084,7 @@ test("UI-2 fix1: collapsed previews preserve full href and Unicode boundaries", 
   );
 });
 
-test("UI-2 fix1: thread remount preserves sidebar focus and ARIA with scoped Escape", async (t) => {
+test("UI-2 fix1: switching closes the thread, live frames keep sidebar focus, and Escape stays scoped", async (t) => {
   const ui = await open(t, (client) =>
     replay(client, [exchange(), frame(2, "beta")]),
   );
@@ -1117,9 +1119,17 @@ test("UI-2 fix1: thread remount preserves sidebar focus and ARIA with scoped Esc
   await ui.row(2).click();
   await pane.waitFor({ state: "detached" });
   await ui.row(1).click();
-  await pane.waitFor();
   await focused(ui, 1);
+  assert.equal(await pane.count(), 0);
   assert.equal(await button.getAttribute("aria-controls"), paneId);
+  assert.equal(await button.getAttribute("aria-expanded"), "false");
+  await button.click();
+  await pane.waitFor();
+  await ui.row(1).focus();
+  ui.connections[0].send("space", exchange());
+  await ui.row(1).click();
+  await focused(ui, 1);
+  assert.equal(await pane.count(), 1);
   assert.equal(await button.getAttribute("aria-expanded"), "true");
   await ui.page.keyboard.press("Escape");
   assert.equal(await pane.count(), 1);
@@ -1270,4 +1280,86 @@ test("UI-2 fix1: live frames format timestamps only for changed message rows", a
       ),
   );
   assert.equal(await ui.page.evaluate(() => window.timestampFormats), 0);
+});
+
+test("design-b: landing follows the URL, then Needs you, and selection keeps the URL, Back and the tab title", async (t) => {
+  const frames = () => [
+    frame(1, "alpha"),
+    frame(2, "beta"),
+    frame(3, "gamma", "needs_you"),
+  ];
+  const requested = await open(
+    t,
+    (client) => replay(client, frames()),
+    undefined,
+    {
+      path: `/w/${key(2)}`,
+    },
+  );
+  await requested.live();
+  assert.equal(await requested.row(2).getAttribute("aria-current"), "page");
+  assert.equal(
+    await requested.page.evaluate(() => location.pathname),
+    `/w/${key(2)}`,
+  );
+  await requested.page.waitForFunction(
+    () => document.title === "(1) Needs you · Namedrop",
+  );
+  const entries = await requested.page.evaluate(() => history.length);
+  await requested.row(1).click();
+  assert.equal(
+    await requested.page.evaluate(() => location.pathname),
+    `/w/${key(1)}`,
+  );
+  assert.equal(
+    await requested.page.evaluate(() => history.length),
+    entries + 1,
+  );
+  await requested.page.goBack();
+  await requested.page.waitForFunction(
+    (selected) =>
+      document
+        .querySelector(`.channels-navigation [data-channel-key="${selected}"]`)
+        ?.getAttribute("aria-current") === "page",
+    key(2),
+  );
+  requested.connections[0].send("space", frame(3, "gamma"));
+  await requested.page.waitForFunction(() => document.title === "Namedrop");
+
+  const landing = await open(t, (client) => replay(client, frames()));
+  await landing.live();
+  assert.equal(await landing.row(3).getAttribute("aria-current"), "page");
+  assert.equal(
+    await landing.page.evaluate(() => location.pathname),
+    `/w/${key(3)}`,
+  );
+  assert.equal(
+    await landing.page.evaluate(
+      () => history.length === window.initialHistoryLength,
+    ),
+    true,
+    "automatic landing replaces the URL instead of pushing",
+  );
+});
+
+test("design-b: a channel is read after 1.5 seconds on screen, and arrow keys passing over keep it unread", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [frame(1, "alpha"), frame(2, "beta"), frame(3, "gamma")]),
+  );
+  await ui.live();
+  ui.connections[0].send("space", activity(2, "beta"));
+  ui.connections[0].send("space", activity(3, "gamma"));
+  const unread = (n) => ui.row(n).getByRole("img", { name: "Unread activity" });
+  await unread(2).waitFor();
+  await unread(3).waitFor();
+  await ui.row(1).focus();
+  await ui.page.keyboard.press("ArrowDown");
+  await ui.page.keyboard.press("ArrowDown");
+  assert.equal(await ui.row(3).getAttribute("aria-current"), "page");
+  assert.equal(await unread(2).count(), 1);
+  assert.equal(await unread(3).count(), 1);
+  const selected = Date.now();
+  await unread(3).waitFor({ state: "detached" });
+  assert.ok(Date.now() - selected >= 1400, "read before the dwell elapsed");
+  assert.equal(await unread(2).count(), 1);
 });

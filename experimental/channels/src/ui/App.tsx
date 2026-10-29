@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useReducer, useRef } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useReducer,
+  useRef,
+} from "react";
 import type { Event, SpaceKey, State } from "../model.ts";
 import {
   channelName,
@@ -6,7 +12,7 @@ import {
   initialState,
   reduce,
 } from "../store.ts";
-import { parseEvent, parseHistory } from "../wire.ts";
+import { parseEvent, parseHistory, pathKey } from "../wire.ts";
 import { MemberList } from "./MemberList.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { Timeline } from "./Timeline.tsx";
@@ -32,7 +38,10 @@ function measuredReduce(state: State, event: Event): State {
 }
 export function App() {
   const [state, dispatch] = useReducer(measuredReduce, undefined, () =>
-    initialState(!document.hidden),
+    initialState({
+      visible: !document.hidden,
+      requestedKey: pathKey(location.pathname),
+    }),
   );
   const [frameVersion, frameArrived] = useReducer(
     (version: number) => version + 1,
@@ -246,6 +255,41 @@ export function App() {
       cancelAnimationFrame(second);
     };
   }, [state.channels.size]);
+  useEffect(() => {
+    if (state.selectedKey === null) return;
+    const path = `/w/${state.selectedKey}`;
+    if (location.pathname !== path) history.replaceState(null, "", path);
+  }, [state.selectedKey]);
+  useEffect(() => {
+    const back = () => {
+      const key = pathKey(location.pathname);
+      if (key !== null) dispatch({ type: "select", key });
+    };
+    addEventListener("popstate", back);
+    return () => removeEventListener("popstate", back);
+  }, []);
+  useEffect(() => {
+    const key = state.selectedKey;
+    if (key === null || !state.visible) return;
+    const dwell = setTimeout(() => dispatch({ type: "read", key }), 1500);
+    return () => clearTimeout(dwell);
+  }, [state.selectedKey, state.visible]);
+  let needsYou = 0;
+  for (const channel of state.channels.values())
+    if (channel.health.level === "needs_you") needsYou++;
+  useEffect(() => {
+    document.title =
+      needsYou > 0 ? `(${needsYou}) Needs you · Namedrop` : "Namedrop";
+  }, [needsYou]);
+  const select = useCallback((key: SpaceKey) => {
+    const path = `/w/${key}`;
+    if (location.pathname !== path) history.pushState(null, "", path);
+    dispatch({ type: "select", key });
+  }, []);
+  const onThread = useCallback(
+    (threadId: string | null) => dispatch({ type: "thread", threadId }),
+    [],
+  );
   const connection = connectionStatus(state);
   const channel =
     state.selectedKey === null
@@ -256,10 +300,7 @@ export function App() {
       <a className="skip-link" href="#main-content">
         Skip to messages
       </a>
-      <Sidebar
-        state={state}
-        onSelect={(key) => dispatch({ type: "select", key })}
-      />
+      <Sidebar state={state} onSelect={select} />
       <main id="main-content" tabIndex={-1}>
         {connection === "reconnecting" && (
           <div className="reconnect-banner" role="status">
@@ -275,6 +316,8 @@ export function App() {
             />
             <Timeline
               channel={channel}
+              openThread={state.openThread}
+              onThread={onThread}
               onOlder={(key) => dispatch({ type: "older", key })}
               onLatest={(key) => dispatch({ type: "latest", key })}
             />

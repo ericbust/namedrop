@@ -553,7 +553,7 @@ test("name, health, alias, role, and member ordering changes do not create unrea
     0,
   );
 });
-test("visible selected activity stays read, while hidden activity clears only after visibility returns", () => {
+test("visible selected activity stays read, while hidden activity stays unread until read after visibility returns", () => {
   const beta = parsed(snapshot(keyB, "beta", "w2"));
   const state = reduce(twoChannels(), { type: "select", key: beta.key });
   assert.equal(apply(state, changedChannel()).unread.size, 0);
@@ -563,22 +563,28 @@ test("visible selected activity stays read, while hidden activity clears only af
   assert.ok(
     reduce(unread, { type: "select", key: beta.key }).unread.has(beta.key),
   );
-  assert.equal(
-    reduce(unread, { type: "visibility", visible: true }).unread.size,
-    0,
-  );
+  const shown = reduce(unread, { type: "visibility", visible: true });
+  assert.ok(shown.unread.has(beta.key));
+  assert.equal(reduce(shown, { type: "read", key: beta.key }).unread.size, 0);
 });
-test("select clears background unread only for an existing channel", () => {
+test("design-b: select keeps unread, and read clears only the selected key", () => {
   const state = apply(twoChannels(), changedChannel());
   const key = parsed(snapshot(keyB, "beta", "w2")).key;
+  const alpha = parsed(snapshot()).key;
   const next = reduce(state, { type: "select", key });
-  assert.equal(next.unread.size, 0);
   assert.equal(next.selectedKey, key);
+  assert.ok(next.unread.has(key));
   assert.equal(
     reduce(initialState(), { type: "select", key }).selectedKey,
     null,
   );
   assert.equal(reduce(next, { type: "select", key }), next);
+  const elsewhere = reduce(next, { type: "select", key: alpha });
+  assert.equal(reduce(elsewhere, { type: "read", key }), elsewhere);
+  assert.ok(reduce(elsewhere, { type: "read", key }).unread.has(key));
+  const read = reduce(next, { type: "read", key });
+  assert.equal(read.unread.size, 0);
+  assert.equal(reduce(read, { type: "read", key }), read);
 });
 function ready(state: State, keys: string[]): State {
   const event = parseEvent("ready", JSON.stringify({ keys }));
@@ -820,7 +826,7 @@ test("fix3 item 1: timeout publishes first load and reconnect without pruning an
     "live beta",
   );
 });
-test("fix2 item 4: visible fallback selection clears its existing unread mark", () => {
+test("fix2 item 4: fallback selection keeps its unread mark until read on dwell", () => {
   const before = apply(twoChannels(), changedChannel());
   const beta = parsed(snapshot(keyB)).key;
   assert.ok(before.unread.has(beta));
@@ -829,7 +835,11 @@ test("fix2 item 4: visible fallback selection clears its existing unread mark", 
     [keyB],
   );
   assert.equal(next.selectedKey, beta);
-  assert.equal(next.unread.has(beta), false);
+  assert.ok(next.unread.has(beta));
+  assert.equal(
+    reduce(next, { type: "read", key: beta }).unread.has(beta),
+    false,
+  );
   const hidden = reduce(before, { type: "visibility", visible: false });
   assert.equal(
     ready(apply(reduce(hidden, { type: "opened" }), changedChannel()), [
@@ -901,7 +911,7 @@ test("fix3 item 1: late ready prunes the current map and retains gamma selection
   assert.equal(next.sync.kind, "live");
 });
 
-test("fix3 item 1: late ready removes selected gamma and selects the sorted visible fallback as read", () => {
+test("fix3 item 1: late ready removes selected gamma and selects the sorted fallback, unread until read", () => {
   const gamma = parsed(snapshot("c".repeat(20), "gamma", "w3"));
   const beta = parsed(snapshot(keyB, "beta", "w2"));
   const before = reduce(
@@ -917,7 +927,11 @@ test("fix3 item 1: late ready removes selected gamma and selects the sorted visi
   const next = ready(current, [keyA, keyB]);
   assert.equal(next.channels.has(gamma.key), false);
   assert.equal(next.selectedKey, beta.key);
-  assert.equal(next.unread.has(beta.key), false);
+  assert.ok(next.unread.has(beta.key));
+  assert.equal(
+    reduce(next, { type: "read", key: beta.key }).unread.has(beta.key),
+    false,
+  );
   const hidden = reduce(current, { type: "visibility", visible: false });
   assert.ok(ready(hidden, [keyA, keyB]).unread.has(beta.key));
 });
@@ -1612,4 +1626,95 @@ test("design-b: terminal runs parse tolerantly, keep identity and propagate exit
   assert.notEqual(failed, state);
   assert.equal(activeChannel(failed).terminalRuns[0]?.exitCode, 1);
   assert.equal(activeChannel(failed).messages, activeChannel(state).messages);
+});
+
+function landingFrame(
+  key: string,
+  name: string,
+  { needsYou = false, at = 100 }: { needsYou?: boolean; at?: number } = {},
+) {
+  const value = snapshot(key, name, `w-${name}`);
+  return {
+    ...value,
+    frame: {
+      ...value.frame,
+      health: needsYou ? { level: "needs_you", items: 1 } : value.frame.health,
+      messages: value.frame.messages.map((row) => ({ ...row, at_ms: at })),
+    },
+  };
+}
+function landed(
+  frames: ReturnType<typeof landingFrame>[],
+  requestedKey: string | null = null,
+  end: "ready" | "timeout" = "ready",
+) {
+  let state = reduce(
+    initialState({
+      requestedKey:
+        requestedKey === null ? null : parsed(snapshot(requestedKey)).key,
+    }),
+    { type: "opened" },
+  );
+  for (const frame of frames) state = apply(state, frame);
+  return end === "ready"
+    ? ready(
+        state,
+        frames.map((frame) => frame.key),
+      )
+    : reduce(state, { type: "replay-timeout" });
+}
+test("design-b: landing prefers the URL key, then needs you in sidebar order, then the latest message", () => {
+  const keyC = "c".repeat(20);
+  const keyD = "d".repeat(20);
+  const alpha = landingFrame(keyA, "alpha", { at: 300 });
+  const beta = landingFrame(keyD, "beta", { at: 900 });
+  const frames = [
+    alpha,
+    landingFrame(keyB, "zeta", { needsYou: true }),
+    landingFrame(keyC, "mu", { needsYou: true }),
+    beta,
+  ];
+  for (const end of ["ready", "timeout"] as const) {
+    assert.equal(landed(frames, keyA, end).selectedKey, keyA);
+    assert.equal(landed(frames, null, end).selectedKey, keyC);
+    assert.equal(landed(frames, "e".repeat(20), end).selectedKey, keyC);
+    assert.equal(landed([alpha, beta], null, end).selectedKey, keyD);
+    assert.equal(
+      landed(
+        [landingFrame(keyB, "zeta"), landingFrame(keyA, "alpha")],
+        null,
+        end,
+      ).selectedKey,
+      keyA,
+    );
+  }
+  const chosen = reduce(landed(frames), {
+    type: "select",
+    key: parsed(snapshot(keyD)).key,
+  });
+  const reconnect = ready(
+    frames.reduce(
+      (state, frame) => apply(state, frame),
+      reduce(chosen, { type: "opened" }),
+    ),
+    frames.map((frame) => frame.key),
+  );
+  assert.equal(reconnect.selectedKey, keyD);
+});
+test("design-b: switching channels closes the open thread", () => {
+  const state = twoChannels();
+  const alpha = parsed(snapshot()).key;
+  const beta = parsed(snapshot(keyB)).key;
+  assert.equal(state.selectedKey, alpha);
+  const open = reduce(state, { type: "thread", threadId: "m1" });
+  assert.equal(open.openThread, "m1");
+  assert.equal(reduce(open, { type: "thread", threadId: "m1" }), open);
+  assert.equal(reduce(open, { type: "select", key: alpha }).openThread, "m1");
+  assert.equal(reduce(open, { type: "select", key: beta }).openThread, null);
+  assert.equal(reduce(open, { type: "gone", key: alpha }).openThread, null);
+  assert.equal(
+    reduce(open, { type: "thread", threadId: null }).openThread,
+    null,
+  );
+  assert.equal(apply(open, changedChannel()).openThread, "m1");
 });

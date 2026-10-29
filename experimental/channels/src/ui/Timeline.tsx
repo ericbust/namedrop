@@ -3,8 +3,8 @@ import {
   useId,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
-  useState,
 } from "react";
 import type { Channel, SpaceKey } from "../model.ts";
 import { threadGroups, timelineView } from "../store.ts";
@@ -40,24 +40,26 @@ function capture(element: HTMLElement): Anchor {
 }
 export function Timeline({
   channel,
+  openThread: openThreadId,
+  onThread,
   onOlder,
   onLatest,
 }: {
   channel: Channel;
+  openThread: string | null;
+  onThread: (threadId: string | null) => void;
   onOlder: (key: SpaceKey) => void;
   onLatest: (key: SpaceKey) => void;
 }) {
   const scroller = useRef<HTMLElement>(null);
   const anchors = useRef(new Map<SpaceKey, Anchor>());
-  const [open, setOpen] = useState<{ key: SpaceKey; threadId: string } | null>(
-    null,
-  );
   const returnFocus = useRef<{
     button: HTMLButtonElement;
     threadId: string;
   } | null>(null);
   const paneId = useId();
   const focusIntent = useRef(false);
+  const [, requestFocus] = useReducer((count: number) => count + 1, 0);
   const { messages, runs, threads } = channel;
   const groups = useMemo(
     () => threadGroups({ messages, runs, threads }),
@@ -67,10 +69,9 @@ export function Timeline({
     () => timelineView({ messages, runs, threads }, groups),
     [messages, runs, threads, groups],
   );
-  const thread =
-    open?.key === channel.key ? groups.get(open.threadId) : undefined;
+  const thread = openThreadId === null ? undefined : groups.get(openThreadId);
   const close = useCallback(() => {
-    setOpen(null);
+    onThread(null);
     const saved = returnFocus.current;
     if (!saved) return;
     const button = saved.button.isConnected
@@ -81,14 +82,15 @@ export function Timeline({
           ) ?? []),
         ].find((button) => button.dataset.threadId === saved.threadId);
     button?.focus();
-  }, []);
+  }, [onThread]);
   const openThread = useCallback(
     (threadId: string, button: HTMLButtonElement) => {
       returnFocus.current = { button, threadId };
       focusIntent.current = true;
-      setOpen({ key: channel.key, threadId });
+      requestFocus();
+      onThread(threadId);
     },
-    [channel.key],
+    [onThread],
   );
   useLayoutEffect(() => {
     if (thread && focusIntent.current) {

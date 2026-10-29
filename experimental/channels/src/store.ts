@@ -10,10 +10,18 @@ import type {
 
 const channelCollator = new Intl.Collator();
 
-export function initialState(visible = true): State {
+export function initialState({
+  visible = true,
+  requestedKey = null,
+}: {
+  visible?: boolean;
+  requestedKey?: SpaceKey | null;
+} = {}): State {
   return {
     channels: new Map(),
     selectedKey: null,
+    requestedKey,
+    openThread: null,
     unread: new Set(),
     sync: { kind: "connecting" },
     visible,
@@ -296,13 +304,17 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     state.selectedKey !== null &&
     channels.has(state.selectedKey)
       ? state.selectedKey
-      : (sortedChannels({ ...state, channels })[0]?.key ?? null);
+      : landing(channels, state.requestedKey);
   const unread = new Set([...state.unread].filter((key) => channels.has(key)));
   for (const [key, channel] of channels) {
     const previous = state.channels.get(key);
-    if (previous && hasActivity(previous, channel)) unread.add(key);
+    if (
+      previous &&
+      hasActivity(previous, channel) &&
+      !(state.visible && key === state.selectedKey)
+    )
+      unread.add(key);
   }
-  if (state.visible && selectedKey !== null) unread.delete(selectedKey);
   return {
     ...state,
     channels,
@@ -328,7 +340,33 @@ function latestWindow(channel: Channel): Channel {
     exhausted: false,
   };
 }
+export function landing(
+  channels: ReadonlyMap<SpaceKey, Channel>,
+  requestedKey: SpaceKey | null,
+): SpaceKey | null {
+  if (requestedKey !== null && channels.has(requestedKey)) return requestedKey;
+  const sorted = sortedChannels({ channels });
+  const needsYou = sorted.find(
+    (channel) => channel.health.level === "needs_you",
+  );
+  if (needsYou) return needsYou.key;
+  let latest = sorted[0];
+  let latestAt = Number.NEGATIVE_INFINITY;
+  for (const channel of sorted)
+    for (const message of channel.latestMessages.values())
+      if (message.at > latestAt) {
+        latestAt = message.at;
+        latest = channel;
+      }
+  return latest?.key ?? null;
+}
 export function reduce(state: State, event: Event): State {
+  const next = step(state, event);
+  return next.openThread !== null && next.selectedKey !== state.selectedKey
+    ? { ...next, openThread: null }
+    : next;
+}
+function step(state: State, event: Event): State {
   switch (event.type) {
     case "space": {
       const { channel } = event;
@@ -470,21 +508,22 @@ export function reduce(state: State, event: Event): State {
     }
     case "select": {
       if (!state.channels.has(event.key)) return state;
-      const unread = state.visible
-        ? clearUnread(state.unread, event.key)
-        : state.unread;
       const sync =
         state.sync.kind === "fallback" && !state.sync.preserveSelection
           ? { ...state.sync, preserveSelection: true }
           : state.sync;
-      if (
-        state.selectedKey === event.key &&
-        unread === state.unread &&
-        sync === state.sync
-      )
-        return state;
-      return { ...state, selectedKey: event.key, unread, sync };
+      if (state.selectedKey === event.key && sync === state.sync) return state;
+      return { ...state, selectedKey: event.key, sync };
     }
+    case "read": {
+      if (state.selectedKey !== event.key) return state;
+      const unread = clearUnread(state.unread, event.key);
+      return unread === state.unread ? state : { ...state, unread };
+    }
+    case "thread":
+      return state.openThread === event.threadId
+        ? state
+        : { ...state, openThread: event.threadId };
     case "opened":
       return {
         ...state,
@@ -498,21 +537,19 @@ export function reduce(state: State, event: Event): State {
       return state.sync.kind === "reconnecting"
         ? state
         : { ...state, sync: { kind: "reconnecting" } };
-    case "visibility": {
-      const unread = event.visible
-        ? clearUnread(state.unread, state.selectedKey)
-        : state.unread;
-      return state.visible === event.visible && unread === state.unread
+    case "visibility":
+      return state.visible === event.visible
         ? state
-        : { ...state, visible: event.visible, unread };
-    }
+        : { ...state, visible: event.visible };
     default: {
       const exhaustive: never = event;
       return exhaustive;
     }
   }
 }
-export function sortedChannels(state: State): Channel[] {
+export function sortedChannels(state: {
+  channels: ReadonlyMap<SpaceKey, Channel>;
+}): Channel[] {
   return [...state.channels.values()].sort(
     (a, b) =>
       channelCollator.compare(a.displayName, b.displayName) ||
