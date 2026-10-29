@@ -44,10 +44,7 @@ export function sortedMembers(members: ChannelSnapshot["members"]): Member[] {
   const all = [...members.values()];
   return [
     ...all
-      .filter(
-        (member) =>
-          member.kind.type !== "human" && member.activity !== "retired",
-      )
+      .filter((member) => member.kind.type !== "human")
       .sort((a, b) => order[a.activity] - order[b.activity]),
     ...all.filter((member) => member.kind.type === "human"),
   ];
