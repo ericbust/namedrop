@@ -3196,12 +3196,126 @@ test("UI-3: a thread reply carries in_reply_to and keeps its recipients", async 
   assert.equal(second.in_reply_to, "answer");
 });
 
+test("UI-3: a thread reply to an agent in another workspace names it through its home channel", async (t) => {
+  const now = Date.now();
+  const testbed = team(1, "testbed");
+  testbed.frame.space.addressable_label = null;
+  testbed.frame.messages = [
+    message("ask", "#alpha @lead please reply", {
+      thread_id: "t1",
+      at_ms: now - 120_000,
+      legs: [{ to: "envoy:w2:pane-9", stage: done() }],
+    }),
+    message("answer", "Replying from alpha", {
+      thread_id: "t1",
+      in_reply_to: "ask",
+      kind: "reply",
+      author: "envoy:w2:pane-9",
+      at_ms: now - 60_000,
+    }),
+  ];
+  testbed.frame.threads = [
+    {
+      thread_id: "t1",
+      title: { text: "Please reply", truncated: false },
+      message_count: 2,
+    },
+  ];
+  const alpha = frame(2, "alpha");
+  alpha.frame.participants = [
+    { ...people()[0], address_id: "pane-9", alias: "@lead" },
+  ];
+  const ui = await open(t, (client) => replay(client, [testbed, alpha]));
+  await ui.live();
+  await ui.row(1).click();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.getByRole("button", { name: /^1 reply from @lead/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox");
+  await reply.waitFor();
+  assert.deepEqual(await pane.locator(".composer-to").allTextContents(), [
+    "To @lead · #alpha",
+  ]);
+  assert.equal(
+    await reply.getAttribute("aria-label"),
+    "Reply to @lead · #alpha",
+  );
+  await reply.click();
+  await reply.pressSequentially("thanks");
+  await reply.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the reply");
+  const [attempt] = ui.posts.attempts;
+  assert.equal(attempt.key, key(1));
+  const body = JSON.parse(attempt.raw);
+  assert.equal(body.source, "#alpha @lead thanks");
+  assert.equal(body.in_reply_to, "answer");
+});
+
+test("UI-3: a post that names nobody stays in the box and says how to choose someone", async (t) => {
+  const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const send = ui.page.getByRole("button", { name: "Send" });
+  const status = ui.page.locator(".composer-status");
+  await box.click();
+  assert.equal(
+    await status.textContent(),
+    "Enter to send · Shift+Enter for a new line",
+  );
+  await box.pressSequentially("hello");
+  await box.press("Enter");
+  assert.equal(
+    await status.textContent(),
+    "Start with @name to choose who gets this.",
+  );
+  assert.equal(await send.isDisabled(), true);
+  assert.equal(await box.inputValue(), "hello");
+  assert.equal(await ui.page.locator("article.pending").count(), 0);
+  assert.equal(
+    await status.evaluate((element) => getComputedStyle(element).color),
+    await box.evaluate((element) => getComputedStyle(element).color),
+    "the guard reads in --text, not muted",
+  );
+  await box.fill("@codex hello");
+  assert.equal(await send.isDisabled(), false);
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the addressed post");
+  assert.equal(
+    JSON.parse(ui.posts.attempts[0].raw).source,
+    "@codex hello",
+    "the unaddressed text never reached the server",
+  );
+});
+
+test("UI-3: a 401 reads as an expired session", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, [team(1, "alpha")]),
+    () => [],
+    { onPost: () => ({ status: 401, error: "No session." }) },
+  );
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("@codex hi");
+  await box.press("Enter");
+  const error = ui.page.locator(".composer").getByRole("alert");
+  await error.waitFor();
+  assert.equal(
+    await error.textContent(),
+    "Your session expired. Reload the page to keep posting.",
+  );
+});
+
 test("UI-3: a refused post keeps the text, shows the server's message, and retries with the same id", async (t) => {
   const ui = await open(
     t,
     (client) => replay(client, [team(1, "alpha")]),
     () => [],
-    { onPost: () => ({ status: 400, error: "Unknown recipient @ghost" }) },
+    { onPost: () => ({ status: 400, error: "unknown recipient @ghost" }) },
   );
   await ui.live();
   const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
@@ -3209,7 +3323,12 @@ test("UI-3: a refused post keeps the text, shows the server's message, and retri
   await box.pressSequentially("@ghost hi");
   await box.press("Enter");
   const error = ui.page.locator(".composer").getByRole("alert");
-  await error.getByText("Unknown recipient @ghost", { exact: true }).waitFor();
+  await error.waitFor();
+  assert.equal(
+    await error.textContent(),
+    "Unknown recipient @ghost.",
+    "the server's words as a sentence",
+  );
   assert.equal(await box.inputValue(), "@ghost hi");
   assert.equal(await box.getAttribute("readonly"), null);
   assert.equal(await ui.page.locator("article.pending").count(), 0);

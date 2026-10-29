@@ -246,9 +246,26 @@ test("complete: channel options mark shared and missing labels from the snapshot
   );
 });
 
-test("complete: a reply that starts with a mention keeps its own recipients", () => {
-  assert.equal(leadingMention("@codex hi"), true);
-  assert.equal(leadingMention("  #beta @codex hi"), true);
-  assert.equal(leadingMention("hi @codex"), false);
-  assert.equal(leadingMention("@ alone"), false);
+test("complete: a post names its recipients only the way the server's grammar reads them", () => {
+  const cases: [string, boolean][] = [
+    ["@codex hi", true],
+    ["  #beta @codex hi", true],
+    ["#all @codex hi", true],
+    ["#alpha #beta @lead @reviewer hi", true],
+    ["@codex\nhi", true],
+    ["@codex", true],
+    ["hello", false],
+    ["hi @codex", false],
+    ["@ alone", false],
+    ["#alpha hi", false],
+    ["#alpha", false],
+    ["#42 fix the build", false],
+    ["@Codex hi", false],
+    ["@codex, hi", false],
+    ["@-codex hi", false],
+    ["@co--dex hi", false],
+    ["#alpha hi @codex", false],
+  ];
+  for (const [text, named] of cases)
+    assert.equal(leadingMention(text), named, JSON.stringify(text));
 });

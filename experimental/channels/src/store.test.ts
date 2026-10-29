@@ -2466,11 +2466,124 @@ test("thread recipients: the agents who wrote, else the parent's recipients, nev
       runs: [[...channel.messages.keys()]],
     }).get("parent");
     assert.ok(group);
-    return replyRecipients(group, {
-      members: channel.members,
-      homes: new Map(),
+    return replyRecipients(
+      group,
+      { members: channel.members, homes: new Map() },
+      "#alpha",
+    );
+  };
+  assert.deepEqual(thread([parent]), {
+    names: ["@claude"],
+    mentions: "@claude",
+  });
+  assert.deepEqual(thread([parent, answer]), {
+    names: ["@codex"],
+    mentions: "@codex",
+  });
+});
+test("thread recipients: agents in other workspaces are named through their home channel's token, local agents first", () => {
+  const agent = (address_id: string, alias: string) => ({
+    ...participant(address_id),
+    alias,
+  });
+  const channel = (
+    key: string,
+    workspace: string,
+    label: string | null,
+    participants: unknown[],
+  ) => {
+    const value = snapshot(key, label ?? workspace, workspace);
+    return parsed({
+      ...value,
+      frame: {
+        ...value.frame,
+        space: { ...value.frame.space, addressable_label: label },
+        participants,
+        messages: [],
+      },
     });
   };
-  assert.deepEqual(thread([parent]), ["@claude"]);
-  assert.deepEqual(thread([parent, answer]), ["@codex"]);
+  const here = channel(keyA, "w1", "testbed", [agent("agent-1", "@codex")]);
+  const homes = homesOf(
+    [
+      here,
+      channel(keyB, "w2", "alpha", [agent("pane-9", "@lead")]),
+      channel("c".repeat(20), "w3", "beta", [agent("pane-4", "@reviewer")]),
+      channel("d".repeat(20), "w4", null, [agent("pane-5", "@ghost")]),
+    ],
+    undefined,
+  );
+  const directory = { members: here.members, homes };
+  const thread = (
+    authors: string[],
+    token: string | null = "#testbed",
+    asked: string[] = [],
+  ) => {
+    const parent = {
+      ...message("parent"),
+      author: "human",
+      legs: asked.map((to) => ({ to, stage: { stage: "queued" } })),
+    };
+    const replies = authors.map((author, n) => ({
+      ...message(`reply-${n}`),
+      thread_id: "parent",
+      in_reply_to: "parent",
+      kind: "reply",
+      at_ms: 200 + n,
+      author,
+    }));
+    const value = snapshot();
+    const parsedChannel = parsed({
+      ...value,
+      frame: { ...value.frame, messages: [parent, ...replies] },
+    });
+    const group = threadGroups({
+      ...parsedChannel,
+      runs: [[...parsedChannel.messages.keys()]],
+    }).get("parent");
+    assert.ok(group);
+    return replyRecipients(group, directory, token);
+  };
+  assert.deepEqual(
+    thread(["envoy:w2:pane-9"]),
+    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
+    "an envoy whose home channel has a token",
+  );
+  assert.deepEqual(
+    thread(["agent-1"]),
+    { names: ["@codex"], mentions: "@codex" },
+    "local only",
+  );
+  assert.deepEqual(
+    thread([], "#testbed", ["envoy:w2:pane-9"]),
+    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
+    "an envoy the parent asked",
+  );
+  assert.deepEqual(
+    thread(["envoy:w2:pane-9", "agent-1"]),
+    {
+      names: ["@codex", "@lead · #alpha"],
+      mentions: "#testbed #alpha @codex @lead",
+    },
+    "mixed: one #label run, then one @alias run, local first",
+  );
+  assert.deepEqual(
+    thread(["envoy:w3:pane-4", "envoy:w2:pane-9", "envoy:w3:pane-4"]),
+    {
+      names: ["@reviewer · #beta", "@lead · #alpha"],
+      mentions: "#beta #alpha @reviewer @lead",
+    },
+    "two other workspaces",
+  );
+  assert.deepEqual(
+    thread(["envoy:w4:pane-5", "agent-1"]),
+    { names: ["@codex"], mentions: "@codex" },
+    "an envoy whose home channel has no token is left out",
+  );
+  assert.deepEqual(
+    thread(["agent-1", "envoy:w2:pane-9"], null),
+    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
+    "a local agent is left out when the reply must name workspaces and this channel has no token",
+  );
+  assert.equal(thread(["envoy:w4:pane-5"]), null, "nobody left");
 });

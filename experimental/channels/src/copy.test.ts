@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   attentionCopy,
   avatarHue,
+  composerCopy,
   composerPlaceholder,
   dayBounds,
   dayLabel,
@@ -331,20 +332,23 @@ test("day labels say Today and Yesterday, then a date", () => {
   assert.match(dayLabel(new Date(2025, 9, 20).getTime(), now), /2025/);
 });
 
-test("send errors show the server's words for 400, 404 and 409 and fixed words otherwise", () => {
+test("send errors show the server's words as a sentence for 400, 404 and 409 and fixed words otherwise", () => {
   const generic = "Namedrop couldn't send this. Try again.";
+  const expired = "Your session expired. Reload the page to keep posting.";
   const cases: [number, string, string][] = [
-    [400, "Unknown recipient @ghost", "Unknown recipient @ghost"],
-    [404, "Not found.", "Not found."],
-    [409, "  Already posted differently \n", "Already posted differently"],
-    [400, "   ", generic],
     [
-      403,
-      "Forbidden.",
-      "Your session expired. Reload the page to keep posting.",
+      400,
+      "message must begin with one or more recipient Mentions",
+      "Message must begin with one or more recipient Mentions.",
     ],
+    [400, "Unknown recipient @ghost", "Unknown recipient @ghost."],
+    [400, "@ghost is not here", "@ghost is not here."],
+    [404, "Not found.", "Not found."],
+    [409, "  already posted differently? \n", "Already posted differently?"],
+    [400, "   ", generic],
+    [403, "Forbidden.", expired],
     [413, "Request body is too large.", "This message is too long."],
-    [401, "This dashboard needs its key.", generic],
+    [401, "This dashboard needs its key.", expired],
     [500, "internal detail", generic],
     [503, "", generic],
     [0, "", generic],
@@ -384,8 +388,16 @@ test("composer words name the channel, the thread's recipients and the reason a 
     "Message testbed ui2-live",
   );
   assert.equal(replyPlaceholder(["@codex"]), "Reply to @codex");
-  assert.equal(replyPlaceholder([]), "Reply in thread");
+  assert.equal(replyPlaceholder(["@lead · #alpha"]), "Reply to @lead · #alpha");
+  assert.equal(
+    replyPlaceholder([]),
+    "No one in this thread can be mentioned. Start with @name to choose someone.",
+  );
   assert.equal(recipientsLabel(["@codex", "@shell"]), "To @codex, @shell");
+  assert.equal(
+    composerCopy.needsRecipient,
+    "Start with @name to choose who gets this.",
+  );
   assert.deepEqual(disabledChannelCopy, {
     "shared-label":
       "Two workspaces share this label. Rename one in Herdr to mention it.",
