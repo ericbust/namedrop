@@ -15,7 +15,7 @@ import {
   type CompletionContext,
   complete,
   insertion,
-  leadingMention,
+  leadingMentions,
   postSource,
 } from "../complete.ts";
 import {
@@ -162,7 +162,7 @@ export function Composer({
   const text = draft?.text ?? "";
   const failure = draft?.failure ?? null;
   const sending = inFlight(outbox, composer);
-  const named = leadingMention(text);
+  const named = leadingMentions(text).length > 0;
   const source = postSource(text, to);
 
   const completion = useMemo(

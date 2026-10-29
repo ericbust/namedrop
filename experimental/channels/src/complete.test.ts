@@ -7,7 +7,8 @@ import {
   type CompletionContext,
   channelOptions,
   complete,
-  leadingMention,
+  leadingMentions,
+  mentionedAgents,
   postSource,
 } from "./complete.ts";
 import type { ChannelSnapshot, SpaceKey } from "./model.ts";
@@ -375,27 +376,52 @@ test("complete: channel options that share a name carry the sidebar's workspace 
 });
 
 test("complete: a post names its recipients only the way the server's grammar reads them", () => {
-  const cases: [string, boolean][] = [
-    ["@codex hi", true],
-    ["  #beta @codex hi", true],
-    ["#all @codex hi", true],
-    ["#alpha #beta @lead @reviewer hi", true],
-    ["@codex\nhi", true],
-    ["@codex", true],
-    ["hello", false],
-    ["hi @codex", false],
-    ["@ alone", false],
-    ["#alpha hi", false],
-    ["#alpha", false],
-    ["#42 fix the build", false],
-    ["@Codex hi", false],
-    ["@codex, hi", false],
-    ["@-codex hi", false],
-    ["@co--dex hi", false],
-    ["#alpha hi @codex", false],
+  const cases: [string, string[]][] = [
+    ["@codex hi", ["@codex"]],
+    ["  #beta @codex hi", ["@codex"]],
+    ["#all @codex hi", ["@codex"]],
+    ["#alpha #beta @lead @reviewer hi", ["@lead", "@reviewer"]],
+    [
+      "@codex  @shell\n@claude-2 run it @lead",
+      ["@codex", "@shell", "@claude-2"],
+    ],
+    ["@codex @Shell hi", ["@codex"]],
+    ["@codex\nhi", ["@codex"]],
+    ["@codex", ["@codex"]],
+    ["hello", []],
+    ["hi @codex", []],
+    ["@ alone", []],
+    ["#alpha hi", []],
+    ["#alpha", []],
+    ["#42 fix the build", []],
+    ["@Codex hi", []],
+    ["@codex, hi", []],
+    ["@-codex hi", []],
+    ["@co--dex hi", []],
+    ["#alpha hi @codex", []],
   ];
   for (const [text, named] of cases)
-    assert.equal(leadingMention(text), named, JSON.stringify(text));
+    assert.deepEqual(leadingMentions(text), named, JSON.stringify(text));
+});
+
+test("complete: a channel post mentions the agents it names anywhere, once each, in the order it names them", () => {
+  const { members } = alpha;
+  const named = (text: string) =>
+    mentionedAgents(text, members).map((member) => member.alias);
+  assert.deepEqual(named("can @claude ask @codex, then @claude again?"), [
+    "@claude",
+    "@codex",
+  ]);
+  assert.deepEqual(named("@codex: look"), ["@codex"]);
+  assert.deepEqual(named("(@codex) and @claude."), ["@codex", "@claude"]);
+  assert.deepEqual(named("mail me at ops@codex or x_@codex or 1@codex"), []);
+  assert.deepEqual(named("escaped \\@codex stays text"), []);
+  assert.deepEqual(named("@codex-2 and @codex- and @codexx"), []);
+  assert.deepEqual(named("@Codex and @CODEX"), []);
+  assert.deepEqual(named("@shell ls"), [], "a terminal never counts");
+  assert.deepEqual(named("@ghost come back"), [], "a retired agent");
+  assert.deepEqual(named("@you and @unknown"), [], "not agents");
+  assert.deepEqual(named("é@codex and ü @codex"), ["@codex"]);
 });
 
 test("complete: a post sends its own recipients, else the thread's, else nothing", () => {

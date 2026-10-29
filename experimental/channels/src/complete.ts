@@ -1,5 +1,6 @@
 import { foldLabel } from "./label.ts";
 import type {
+  AddressId,
   ChannelSnapshot,
   Member,
   ReplyTo,
@@ -244,15 +245,37 @@ export function accept(
 }
 
 // The server's send grammar: any `#label` tokens, then at least one valid `@alias`.
-const LEADING_MENTION = /^\s*(?:#[\w.-]+\s+)*@[a-z0-9]+(?:-[a-z0-9]+)*(?:\s|$)/;
+const LEADING = /^\s*(?:#[\w.-]+\s+)*((?:@[a-z0-9]+(?:-[a-z0-9]+)*(?:\s+|$))+)/;
 
-export function leadingMention(text: string): boolean {
-  return LEADING_MENTION.test(text);
+// The aliases a post starts with, as typed. A post that has some goes only to them.
+export function leadingMentions(text: string): readonly string[] {
+  const run = LEADING.exec(text)?.[1];
+  return run === undefined ? [] : run.trim().split(/\s+/);
+}
+
+// A mention anywhere: not inside a word or an email address, not escaped, and not the start of a longer alias.
+const MENTION = /(?<![\p{L}\p{N}_\\])@[a-z0-9]+(?:-[a-z0-9]+)*(?![a-z0-9-])/gu;
+
+// The agents a channel post mentions, in the order the text first names them.
+export function mentionedAgents(
+  text: string,
+  members: ReadonlyMap<AddressId, Member>,
+): readonly Member[] {
+  const agents = new Map<string, Member>();
+  for (const member of members.values())
+    if (member.kind.type === "agent" && member.activity !== "retired")
+      agents.set(member.alias, member);
+  const mentioned = new Set<Member>();
+  for (const [alias] of text.matchAll(MENTION)) {
+    const member = agents.get(alias);
+    if (member !== undefined) mentioned.add(member);
+  }
+  return [...mentioned];
 }
 
 export function postSource(text: string, to: ReplyTo | null): string | null {
   const body = text.trim();
   if (body === "") return null;
-  if (leadingMention(body)) return body;
+  if (leadingMentions(body).length > 0) return body;
   return to === null ? null : `${to.mentions} ${body}`;
 }
