@@ -1,0 +1,46 @@
+name: Channels experiment (optional)
+
+on:
+  pull_request:
+    paths:
+      - 'experimental/channels/**'
+      - '.github/workflows/channels.yml'
+  push:
+    paths:
+      - 'experimental/channels/**'
+      - '.github/workflows/channels.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  channels-experiment:
+    name: Experimental channels checks
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: experimental/channels
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '26.7.0'
+          cache: npm
+          cache-dependency-path: experimental/channels/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - name: Run browser regressions with the runner's browser
+        run: |
+          for browser in google-chrome google-chrome-stable chromium chromium-browser; do
+            if browser_path="$(command -v "$browser")"; then
+              export CHROME="$browser_path"
+              break
+            fi
+          done
+          if [ -z "${CHROME:-}" ]; then
+            echo "Chrome or Chromium is required for browser regressions" >&2
+            exit 1
+          fi
+          npm run test:browser

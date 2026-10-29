@@ -1,0 +1,27 @@
+{
+  "name": "namedrop-channels-experiment",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "lint": "biome check .",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test --test-isolation=none src/*.test.ts",
+    "test:browser": "npm run build && node --test test/browser.test.mjs",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.6.3",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "playwright-core": "1.63.0",
+    "typescript": "7.0.2",
+    "vite": "8.3.5"
+  }
+}
