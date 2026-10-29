@@ -121,6 +121,7 @@ fn zero_pick_and_opt_out_store_without_waking_members() {
         assert_eq!(receipt["channel"]["to"], json!([]));
         assert_eq!(receipt["deliveries"], json!([]));
         assert_eq!(calls(&f).len(), usize::from(!off));
+        assert_eq!(attempt_records(&f).len(), usize::from(!off));
         assert_eq!(history(&server)[0]["channel"]["state"], "unrouted");
     }
 }
@@ -169,6 +170,7 @@ fn leading_mentions_stay_explicit_and_plain_followup_reaches_thread_agents() {
     assert_eq!(followup["recipients"][0]["alias"], "planner");
     assert!(followup.get("channel").is_none());
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -691,6 +693,7 @@ fn implicit_followups_reach_all_agent_authors_and_recipients_without_a_model() {
         );
     }
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -802,6 +805,7 @@ fn terminal_only_and_empty_threads_refuse_implicit_followups_without_commands() 
         assert_eq!(before, after);
     }
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -835,6 +839,7 @@ fn implicit_followups_keep_envoy_forwarding_and_exclude_retired_origins() {
     assert_eq!(recipient_aliases(&after_retirement), ["planner"]);
     assert!(after_retirement.get("forwarded").is_none());
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -867,6 +872,7 @@ fn implicit_followup_excludes_terminal_and_retired_local_participants() {
         .unwrap();
     assert_eq!(before, after);
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -920,6 +926,7 @@ fn implicit_followup_does_not_resolve_a_reused_participant_alias() {
         "address-w1-planner"
     );
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -934,6 +941,7 @@ fn no_registered_host_stores_mentions_without_running_a_model() {
     assert_eq!(receipt["channel"]["state"], "unrouted");
     assert_eq!(receipt["channel"]["mentioned"], json!(["planner"]));
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -993,6 +1001,7 @@ fn remote_terminal_only_threads_refuse_implicit_followups_without_new_commands()
         .unwrap();
     assert_eq!(before, after);
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -1042,4 +1051,97 @@ fn a_captured_router_pick_does_not_follow_rebinding_or_session_changes() {
             assert_eq!(receipt["deliveries"], json!([]));
         });
     }
+}
+
+fn attempt_records(f: &Fixture) -> Vec<Value> {
+    fs::read_to_string(f.state.join("dashboard/channel-router-attempts.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn concurrent_replays_audit_both_calls_and_commit_one_post() {
+    let f = fixture();
+    let server = Server::start(&f, "delayed", false);
+    thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            post(
+                &server,
+                "audit-race",
+                "Please ask @planner to plan this.",
+                None,
+            )
+        });
+        let second = scope.spawn(|| {
+            post(
+                &server,
+                "audit-race",
+                "Please ask @planner to plan this.",
+                None,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while calls(&f).len() < 2 {
+            assert!(
+                Instant::now() < deadline,
+                "both actual workers must start before either commits"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        fs::write(f.root.join("router-release"), "continue").unwrap();
+        let (first_status, first) = first.join().unwrap();
+        let (second_status, second) = second.join().unwrap();
+        assert_eq!(first_status, 200, "{first}");
+        assert_eq!(second_status, 200, "{second}");
+        assert_eq!(first["message_id"], second["message_id"]);
+    });
+    let records = attempt_records(&f);
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0]["request_id"], records[1]["request_id"]);
+    assert_ne!(records[0]["call_id"], records[1]["call_id"]);
+    assert!(records.iter().all(|record| record["outcome"] == "routed"));
+    assert_eq!(history(&server).as_array().unwrap().len(), 1);
+    assert_eq!(
+        fs::read_to_string(f.state.join("dashboard/channel-routing.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn routing_cost_receipt_survives_a_later_message_commit_failure() {
+    let f = fixture();
+    let server = Server::start(&f, "delayed", false);
+    thread::scope(|scope| {
+        let pending = scope.spawn(|| {
+            post(
+                &server,
+                "audit-rollback",
+                "Please ask @planner to plan this.",
+                None,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while calls(&f).is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "worker must start before injecting the store failure"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        f.db().execute_batch("CREATE TRIGGER reject_audit_post BEFORE INSERT ON collaboration_messages BEGIN SELECT RAISE(ABORT, 'synthetic commit failure'); END;").unwrap();
+        fs::write(f.root.join("router-release"), "continue").unwrap();
+        let (status, _) = pending.join().unwrap();
+        assert_ne!(status, 200);
+    });
+    let records = attempt_records(&f);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["request_id"], "audit-rollback");
+    assert_eq!(records[0]["outcome"], "routed");
+    assert!(history(&server).as_array().unwrap().is_empty());
+    assert!(!f.state.join("dashboard/channel-routing.jsonl").exists());
 }

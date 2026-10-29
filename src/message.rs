@@ -1025,7 +1025,7 @@ where
                 transaction.preferred_router_host()?,
             ))
         })?;
-        let decision = crate::agent_status_model::channel_router::route(
+        let run = crate::agent_status_model::channel_router::route(
             crate::agent_status_model::channel_router::RouterRequest {
                 host,
                 rows: &rows,
@@ -1033,8 +1033,17 @@ where
                 candidates: &candidates,
             },
         );
+        if let Some(attempt) = run.attempt {
+            crate::dashboard::snapshot::channel_routing::record_attempt(
+                runtime.state_directory,
+                &namespace,
+                &request_id,
+                &runtime.ids.next_id("router-call"),
+                attempt,
+            );
+        }
         Some(PlainRouting {
-            decision,
+            decision: run.decision,
             candidates,
             participants: participants
                 .into_iter()

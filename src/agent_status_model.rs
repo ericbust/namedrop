@@ -650,7 +650,22 @@ impl WorkerPlan {
     }
 }
 
-fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String> {
+fn instructions_for_format(prompt: &WorkerPrompt, structured: bool) -> String {
+    if structured {
+        prompt.instructions.to_owned()
+    } else {
+        format!(
+            "{}\nOutput JSON schema: {}",
+            prompt.instructions, prompt.schema
+        )
+    }
+}
+
+fn codex_plan(
+    prompt: &WorkerPrompt,
+    payload: &str,
+    structured: bool,
+) -> Result<WorkerPlan, String> {
     let binary = resolve_executable(&codex_binary())?;
 
     let directory = reserve_worker_directory()?;
@@ -687,23 +702,30 @@ fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String
         // provider error rather than a faster call.
         .args(["-c", "model_reasoning_effort=\"low\""])
         .args(["--color", "never"])
-        .args(["-m", CODEX_MODEL])
-        .arg("--output-schema")
-        .arg(&schema_path)
-        .arg("-o")
-        .arg(&output_path);
+        .args(["-m", CODEX_MODEL]);
+    if structured {
+        command.arg("--output-schema").arg(&schema_path);
+    }
+    command.arg("-o").arg(&output_path);
 
     Ok(WorkerPlan {
         command,
         // Codex takes its whole prompt on stdin, so our instructions and our
         // payload travel together.
-        stdin: format!("{}\n\n<data>\n{payload}\n</data>\n", prompt.instructions),
+        stdin: format!(
+            "{}\n\n<data>\n{payload}\n</data>\n",
+            instructions_for_format(prompt, structured)
+        ),
         result_path: Some(output_path),
         directory,
     })
 }
 
-fn claude_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String> {
+fn claude_plan(
+    prompt: &WorkerPrompt,
+    payload: &str,
+    structured: bool,
+) -> Result<WorkerPlan, String> {
     let directory = reserve_worker_directory()?;
     let mut command = Command::new(claude_binary());
     command
@@ -718,9 +740,11 @@ fn claude_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, Strin
         .arg("--no-session-persistence")
         // Anything that would prompt is denied instead of waiting for a human.
         .args(["--permission-prompts", "none"])
-        .args(["--system-prompt", prompt.instructions])
+        .args([
+            "--system-prompt",
+            &instructions_for_format(prompt, structured),
+        ])
         .args(["--output-format", "json"])
-        .args(["--json-schema", &prompt.schema])
         .args(["--max-budget-usd", CLAUDE_BUDGET_USD])
         // Writing one short sentence per agent from text already supplied needs
         // no reasoning. Captured requests showed the CLI asking for a
@@ -730,6 +754,9 @@ fn claude_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, Strin
         .env("MAX_THINKING_TOKENS", "0")
         .current_dir(neutral_worker_directory());
 
+    if structured {
+        command.args(["--json-schema", &prompt.schema]);
+    }
     Ok(WorkerPlan {
         command,
         stdin: payload.to_owned(),
@@ -746,126 +773,166 @@ fn run_worker(
     payload: &str,
     cancelled: &AtomicBool,
 ) -> Result<String, String> {
-    run_worker_with_deadline(host, prompt, payload, cancelled, None).map(|output| output.response)
+    capture_worker(host, prompt, payload, cancelled, None, true).result
 }
 
-struct WorkerOutput {
-    response: String,
-    usage: Option<Value>,
+#[derive(Clone, Copy, Debug)]
+enum WorkerFailure {
+    PreparationFailed,
+    Failed,
+    Timeout,
+    Cancelled,
+    OutputLimit,
+    MissingOutput,
 }
 
-fn run_worker_with_deadline(
+struct WorkerCapture {
+    result: Result<String, String>,
+    raw_stdout: String,
+    failure: WorkerFailure,
+}
+
+fn capture_worker(
     host: &str,
     prompt: &WorkerPrompt,
     payload: &str,
     cancelled: &AtomicBool,
     deadline: Option<Instant>,
-) -> Result<WorkerOutput, String> {
-    let mut plan = match host {
-        "codex" => codex_plan(prompt, payload)?,
-        _ => claude_plan(prompt, payload)?,
-    };
-    let worker_directory = plan.directory.0.clone();
-    let command = &mut plan.command;
-    // The worker runs in its own private directory: no project configuration is
-    // reachable from it, and the sandbox need allow only this one path.
-    command.current_dir(&worker_directory).process_group(0);
+    structured: bool,
+) -> WorkerCapture {
+    let mut capture = None;
+    let mut failure = WorkerFailure::PreparationFailed;
+    let result = (|| {
+        let mut plan = match host {
+            "codex" => codex_plan(prompt, payload, structured)?,
+            _ => claude_plan(prompt, payload, structured)?,
+        };
+        let worker_directory = plan.directory.0.clone();
+        let command = &mut plan.command;
+        // The worker runs in its own private directory: no project configuration is
+        // reachable from it, and the sandbox need allow only this one path.
+        command.current_dir(&worker_directory).process_group(0);
 
-    for (key, _) in env::vars_os() {
-        let name = key.to_string_lossy();
-        if name.starts_with("HERDR_") || name.starts_with("NAMEDROP_") {
+        for (key, _) in env::vars_os() {
+            let name = key.to_string_lossy();
+            if name.starts_with("HERDR_") || name.starts_with("NAMEDROP_") {
+                command.env_remove(key);
+            }
+        }
+        for key in [
+            // The invoking agent's own session markers, observed in a live pane.
+            // Left in place they would mark the worker as that agent's child.
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_CHILD_SESSION",
+            "CLAUDE_CODE_SESSION_ATTENDED",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CODEX_SESSION_ID",
+            "CODEX_THREAD_ID",
+            "AI_AGENT",
+            // Live handles to the invoking session's own IPC. Measured harmless to
+            // latency, but an isolated worker has no business holding them.
+            "CLAUDE_CODE_MESSAGING_SOCKET",
+            "CLAUDE_CODE_MESSAGING_TOKEN",
+            "CLAUDE_CODE_EXECPATH",
+            "CLAUDE_PID",
+            "CLAUDECODE",
+            "CLAUDE_EFFORT",
+        ] {
             command.env_remove(key);
         }
-    }
-    for key in [
-        // The invoking agent's own session markers, observed in a live pane.
-        // Left in place they would mark the worker as that agent's child.
-        "CLAUDE_CODE_SESSION_ID",
-        "CLAUDE_CODE_CHILD_SESSION",
-        "CLAUDE_CODE_SESSION_ATTENDED",
-        "CLAUDE_CODE_ENTRYPOINT",
-        "CODEX_SESSION_ID",
-        "CODEX_THREAD_ID",
-        "AI_AGENT",
-        // Live handles to the invoking session's own IPC. Measured harmless to
-        // latency, but an isolated worker has no business holding them.
-        "CLAUDE_CODE_MESSAGING_SOCKET",
-        "CLAUDE_CODE_MESSAGING_TOKEN",
-        "CLAUDE_CODE_EXECPATH",
-        "CLAUDE_PID",
-        "CLAUDECODE",
-        "CLAUDE_EFFORT",
-    ] {
-        command.env_remove(key);
-    }
 
-    // The whole prompt is handed over as a file rather than written into a
-    // pipe. A pipe's capacity is not a portable guarantee, so a child that
-    // never reads its stdin could otherwise block this thread before the
-    // cancellation loop had started.
-    let input_file = capture_file()?;
-    write_capture(&input_file, plan.stdin.as_bytes())?;
+        // The whole prompt is handed over as a file rather than written into a
+        // pipe. A pipe's capacity is not a portable guarantee, so a child that
+        // never reads its stdin could otherwise block this thread before the
+        // cancellation loop had started.
+        let input_file = capture_file()?;
+        write_capture(&input_file, plan.stdin.as_bytes())?;
 
-    let stdout = capture_file()?;
-    let stderr = capture_file()?;
-    let mut child = command
-        .stdin(Stdio::from(input_file))
-        .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
-            format!("failed to capture worker stdout: {error}")
-        })?))
-        .stderr(Stdio::from(stderr.try_clone().map_err(|error| {
-            format!("failed to capture worker stderr: {error}")
-        })?))
-        .spawn()
-        .map_err(|error| format!("failed to run the model worker: {error}"))?;
+        let stdout = capture_file()?;
+        let stderr = capture_file()?;
+        capture = Some(stdout.try_clone().map_err(|error| error.to_string())?);
+        let mut child = command
+            .stdin(Stdio::from(input_file))
+            .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
+                format!("failed to capture worker stdout: {error}")
+            })?))
+            .stderr(Stdio::from(stderr.try_clone().map_err(|error| {
+                format!("failed to capture worker stderr: {error}")
+            })?))
+            .spawn()
+            .map_err(|error| format!("failed to run the model worker: {error}"))?;
 
-    loop {
-        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            stop_process_group(&mut child);
-            return Err("model worker deadline exceeded".to_owned());
-        }
-        if cancelled.load(Ordering::Relaxed) {
-            stop_process_group(&mut child);
-            return Err("agent status summary cancelled".to_owned());
-        }
-        // Stop an oversized worker while it is still running, so the caps end
-        // the work rather than only rejecting its output afterwards.
-        if oversized(&stdout) || oversized(&stderr) || plan.result_oversized() {
-            stop_process_group(&mut child);
-            return Err("model worker output exceeded its limit".to_owned());
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    let detail = read_capture(stderr).unwrap_or_default();
-                    let detail = sanitize_text(&detail);
-                    let detail = truncate_chars(&detail, 200);
-                    return Err(if detail.is_empty() {
-                        "the model worker failed".to_owned()
-                    } else {
-                        format!("the model worker failed: {detail}")
-                    });
-                }
-                break;
-            }
-            Ok(None) => {}
-            Err(error) => {
+        failure = WorkerFailure::Failed;
+        loop {
+            if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                 stop_process_group(&mut child);
-                return Err(format!("failed to wait for the model worker: {error}"));
+                failure = WorkerFailure::Timeout;
+                return Err("model worker deadline exceeded".to_owned());
             }
+            if cancelled.load(Ordering::Relaxed) {
+                stop_process_group(&mut child);
+                failure = WorkerFailure::Cancelled;
+                return Err("agent status summary cancelled".to_owned());
+            }
+            // Stop an oversized worker while it is still running, so the caps end
+            // the work rather than only rejecting its output afterwards.
+            if oversized(&stdout) || oversized(&stderr) || plan.result_oversized() {
+                stop_process_group(&mut child);
+                failure = WorkerFailure::OutputLimit;
+                return Err("model worker output exceeded its limit".to_owned());
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        let detail = read_capture(stderr).unwrap_or_default();
+                        let detail = sanitize_text(&detail);
+                        let detail = truncate_chars(&detail, 200);
+                        return Err(if detail.is_empty() {
+                            "the model worker failed".to_owned()
+                        } else {
+                            format!("the model worker failed: {detail}")
+                        });
+                    }
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    stop_process_group(&mut child);
+                    return Err(format!("failed to wait for the model worker: {error}"));
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
         }
-        thread::sleep(Duration::from_millis(10));
-    }
 
-    let raw_stdout = read_capture(stdout)?;
-    let usage = worker_usage(&raw_stdout);
-    let response = match &plan.result_path {
-        Some(result) => read_capture(
-            fs::File::open(result).map_err(|_| "the model worker returned nothing".to_owned())?,
-        )?,
-        None => raw_stdout,
-    };
-    Ok(WorkerOutput { response, usage })
+        failure = WorkerFailure::MissingOutput;
+        let raw_stdout = read_capture(stdout)?;
+        let response = match &plan.result_path {
+            Some(result) => read_capture(
+                fs::File::open(result)
+                    .map_err(|_| "the model worker returned nothing".to_owned())?,
+            )?,
+            None => raw_stdout,
+        };
+        if response.trim().is_empty() {
+            return Err("the model worker returned nothing".to_owned());
+        }
+        Ok(response)
+    })();
+    let raw_stdout = capture
+        .and_then(|mut file: fs::File| {
+            file.seek(SeekFrom::Start(0)).ok()?;
+            let mut bytes = Vec::new();
+            file.take(MAX_RAW_STDOUT_BYTES as u64)
+                .read_to_end(&mut bytes)
+                .ok()?;
+            Some(String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .unwrap_or_default();
+    WorkerCapture {
+        result,
+        raw_stdout,
+        failure,
+    }
 }
 
 fn worker_usage(raw: &str) -> Option<Value> {
