@@ -4733,7 +4733,7 @@ test("CH-2: the page fills the window and never scrolls, with a long channel and
         legs: [{ to: codex, stage: { stage: "delivered" } }],
       },
     ),
-  ).reverse();
+  );
   const ui = await open(t, (client) => replay(client, [busy]));
   await ui.page.locator('[data-message-id="long-79"]').waitFor();
   const page = () =>
@@ -5317,11 +5317,20 @@ test("CH-2: an agent conversation shows every message flat, with header recipien
     0,
     "@codex answered, so the ask's receipts hide",
   );
-  assert.equal(await timeline.locator(".route").count(), 0, "no route lines");
   assert.equal(
-    await timeline.locator(".reply-preview:not(.count-only)").count(),
+    await timeline.locator('[data-message-id="pong"] .route').count(),
     0,
-    "no reply preview",
+    "a reply in an agent conversation has no route line",
+  );
+  assert.equal(
+    await timeline.locator('[data-message-id="ask"] .route').textContent(),
+    "1 reply",
+    "the first message links its replies the way a channel post does",
+  );
+  assert.equal(
+    await timeline.locator(".reply-preview").count(),
+    0,
+    "no reply preview box",
   );
   await timeline.getByRole("button", { name: "1 reply. Open thread" }).click();
   await ui.page

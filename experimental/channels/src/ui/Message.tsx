@@ -765,7 +765,19 @@ export const Message = memo(
                   paused={paused}
                 />
               )}
-          {!channelChat && onThread && replyCount > 0 && (
+          {chat?.kind === "agents" && chat.route && (
+            <Route
+              line={chat.route}
+              message={message}
+              directory={directory}
+              paused={paused}
+              onThread={onThread}
+              onSendTo={onSendTo}
+              paneId={paneId}
+              expanded={threadExpanded}
+            />
+          )}
+          {chat == null && onThread && replyCount > 0 && (
             <ReplyPreview
               message={message}
               directory={directory}

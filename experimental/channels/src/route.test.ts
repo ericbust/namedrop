@@ -102,7 +102,7 @@ function room(...rows: Row[]) {
       assert.ok(message && thread?.room?.kind === "channel");
       return routeLine(message, thread.room, directory, replies);
     },
-    chat(id: string) {
+    chat(id: string, replies = 0) {
       const message = channel.messages.get(id);
       const thread = message && groups.get(message.threadId);
       assert.ok(message && thread);
@@ -111,7 +111,7 @@ function room(...rows: Row[]) {
         thread,
         reference: null,
         directory,
-        replies: 0,
+        replies,
       });
     },
   };
@@ -335,6 +335,20 @@ test("chat: only rooms carry one, an agent conversation has no route line, and c
     reference: null,
     route: null,
   });
+  assert.deepEqual(
+    agents.chat("post", 1),
+    {
+      kind: "agents",
+      reference: null,
+      route: {
+        icon: null,
+        tone: "muted",
+        tip: null,
+        parts: [{ kind: "replies", count: 1 }],
+      },
+    },
+    "an agent conversation's first message links its replies like a channel post",
+  );
   const channel = room(post("can @claude look?", routed(), ["claude"]));
   const a = channel.chat("post");
   const b = channel.chat("post");

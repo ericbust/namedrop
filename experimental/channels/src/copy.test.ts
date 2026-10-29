@@ -524,7 +524,7 @@ test("channel chat words: the route line, its offers and tooltips, reply counts 
   assert.equal(routeCopy.mentioned(["@codex"]), "Mentioned @codex, not sent");
   assert.equal(
     routeCopy.mentioned(["@codex", "@claude"]),
-    "Mentioned @codex, @claude, not sent",
+    "Mentioned 2 agents, not sent",
   );
   assert.deepEqual(routeCopy.send, { anyway: "Send anyway", to: "Send to" });
   assert.equal(routeCopy.sendThis("@codex"), "Send this to @codex");

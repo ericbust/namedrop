@@ -192,7 +192,7 @@ export function chatOf({
     route:
       room.kind === "channel"
         ? routeLine(message, room, directory, replies)
-        : null,
+        : repliesOnly(replies > 0 ? [{ kind: "replies", count: replies }] : []),
   };
 }
 

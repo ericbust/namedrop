@@ -336,7 +336,9 @@ export const routeCopy = {
   } satisfies Record<RouteState, string>,
   pulledIn: "pulled in",
   mentioned: (aliases: readonly string[]) =>
-    `Mentioned ${aliases.join(", ")}, not sent`,
+    aliases.length === 1
+      ? `Mentioned ${aliases[0]}, not sent`
+      : `Mentioned ${aliases.length} agents, not sent`,
   send: { anyway: "Send anyway", to: "Send to" } satisfies Record<
     SendForm,
     string
