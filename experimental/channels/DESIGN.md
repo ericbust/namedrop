@@ -458,11 +458,12 @@ main column, under the timeline, and at the bottom of the thread pane.
   a click on Send does the hint line read "Start with @name to choose who gets
   this." in `--text`. Typing clears it, so it never nags while a recipient is
   still being typed.
-- A refused draft remembers the request id and the exact text it tried to
-  send. Sending that same text again reuses the id, even after edits that end
-  back at the same text, so an attempt whose outcome is unknown can never post
-  twice. Different text gets a new id. The id is forgotten only after a success.
-  Ids never move between drafts.
+- A refused draft remembers its latest attempt: the request id and the exact
+  text and reply target it tried. Sending that same text again reuses the id,
+  even after edits that end back at the same text, so retrying an attempt whose
+  outcome is unknown can never post twice. Different text gets a new id, and a
+  new refusal replaces the remembered attempt. The attempt is forgotten only
+  after a success. Ids never move between drafts.
 - Every composer keeps its own draft for as long as the page is open: one per
   channel and one per thread. Switching channels or closing a thread keeps the
   text.
