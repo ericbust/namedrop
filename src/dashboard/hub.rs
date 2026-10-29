@@ -22,6 +22,7 @@ const TICK: Duration = Duration::from_millis(250);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(1);
 const UNAVAILABLE_LIMIT: u8 = 3;
 const RECOVERY_BACKOFF: Duration = Duration::from_secs(2);
+const SCHEMA_BUSY_LIMIT: Duration = Duration::from_secs(5);
 
 pub(crate) enum HubCommand {
     Subscribe {
@@ -346,6 +347,7 @@ struct Hub<'a> {
     metadata_dirty: bool,
     idle_since: Option<Instant>,
     unsupported_schema: bool,
+    schema_busy_since: Option<Instant>,
     last_error: Option<String>,
 }
 
@@ -374,6 +376,7 @@ pub(crate) fn run(
         metadata_dirty: false,
         idle_since: Some(Instant::now()),
         unsupported_schema: false,
+        schema_busy_since: None,
         last_error: None,
     };
     let verdict = loop {
@@ -488,11 +491,34 @@ impl Hub<'_> {
                 != std::env::current_exe().and_then(fs::canonicalize).ok()
         {
             Some("a newer release is current")
-        } else if self.store.as_ref().is_some_and(|store| {
-            store
-                .schema_version()
-                .is_ok_and(|version| version != crate::store::SCHEMA_VERSION)
-        }) {
+        } else if self
+            .store
+            .as_ref()
+            .is_some_and(|store| match store.schema_version() {
+                Ok(version) => {
+                    self.schema_busy_since = None;
+                    version != crate::store::SCHEMA_VERSION
+                }
+                Err(error) if error.kind() == StoreErrorKind::Busy => {
+                    let since = self.schema_busy_since.get_or_insert_with(|| {
+                        eprintln!(
+                            "dashboard: state schema read is busy; retrying for up to {} seconds",
+                            SCHEMA_BUSY_LIMIT.as_secs()
+                        );
+                        now
+                    });
+                    let expired = now.duration_since(*since) >= SCHEMA_BUSY_LIMIT;
+                    if expired {
+                        eprintln!(
+                            "dashboard: state schema read is still busy after {} seconds: {error}",
+                            SCHEMA_BUSY_LIMIT.as_secs()
+                        );
+                    }
+                    expired
+                }
+                Err(_) => true,
+            })
+        {
             Some("the state schema changed")
         } else {
             None
@@ -1081,6 +1107,7 @@ mod tests {
             metadata_dirty: false,
             idle_since: None,
             unsupported_schema: false,
+            schema_busy_since: None,
             last_error: None,
         }
     }
