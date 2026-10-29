@@ -278,6 +278,39 @@ fn mint_entry(state: &Path) -> String {
 }
 
 #[test]
+fn entry_redemption_keeps_raw_query_parameters_without_nonces() {
+    let directory = TestDirectory::new();
+    let ns = seed(&state(&directory), "w1", &["a"]);
+    let server = Server::start(&state(&directory), None);
+    for page in ["/".to_owned(), format!("/w/{}", SpaceKey::of(&ns).as_str())] {
+        for (query, remaining) in [
+            ("n={nonce}&view=activity", "?view=activity"),
+            ("view=activity&n={nonce}", "?view=activity"),
+            ("n={nonce}&view=activity&n=other", "?view=activity"),
+            ("n={nonce}&n=other", ""),
+            (
+                "q=a%20b&q=a+b&n={nonce}&encoded=%2f%2F&n&%6e=keep&nn=keep",
+                "?q=a%20b&q=a+b&encoded=%2f%2F&n&%6e=keep&nn=keep",
+            ),
+            ("n={nonce}&&view=activity&", "?&view=activity&"),
+        ] {
+            let nonce = mint_entry(&state(&directory));
+            let request = format!("{page}?{}", query.replace("{nonce}", &nonce));
+            let response = server.get(&request, &[]);
+            assert!(response.status.contains("303"), "{}", response.status);
+            assert!(
+                response
+                    .headers
+                    .contains(&format!("Location: {page}{remaining}\r\n")),
+                "{}",
+                response.headers
+            );
+            assert!(server.get(&request, &[]).status.contains("401"));
+        }
+    }
+}
+
+#[test]
 fn pages_require_the_token_and_a_loopback_host() {
     let directory = TestDirectory::new();
     let ns = seed(&state(&directory), "w1", &["a", "b"]);

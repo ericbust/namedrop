@@ -639,6 +639,13 @@ fn a_permission_blocked_agent_needs_the_human_until_its_status_changes() {
     assert_eq!(json["attention"][0]["opened_at_ms"], 20);
     assert_eq!(json["attention"][0]["subject_alias"], "a");
     assert_eq!(
+        json["attention"][0]["subject_summary"],
+        serde_json::json!({
+            "text": "Waiting on an approval or question.",
+            "truncated": false
+        })
+    );
+    assert_eq!(
         json["attention"][0].get("message_id"),
         Some(&serde_json::Value::Null)
     );
@@ -1232,6 +1239,11 @@ fn nonmessage_attention_uses_its_source_and_serializes_absent_links_as_null() {
     let cards = json["attention"].as_array().unwrap();
     assert_eq!(cards.len(), 11);
     for (number, card) in cards.iter().enumerate() {
+        assert_eq!(
+            card["summary"]["text"],
+            "@misleading mentions should not determine attribution"
+        );
+        assert!(card.get("subject_summary").is_none());
         let expected = match number {
             0 => serde_json::json!("a"),
             1 | 2 => serde_json::json!("reviewer"),

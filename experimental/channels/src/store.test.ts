@@ -264,6 +264,37 @@ for (const source of ["agent_status", "future_attention"]) {
     assert.equal(channel?.messages.size, 1);
   });
 }
+test("attention rejects malformed subject summaries", () => {
+  const base = snapshot();
+  for (const subject_summary of [
+    "Waiting",
+    { text: 7, truncated: false },
+    { text: "Waiting", truncated: 1 },
+    { text: "Waiting" },
+  ]) {
+    assert.equal(
+      parseEvent(
+        "space",
+        JSON.stringify({
+          ...base,
+          frame: {
+            ...base.frame,
+            attention: [
+              {
+                source_kind: "agent_status",
+                summary: { text: "@claude is waiting", truncated: false },
+                subject_summary,
+                opened_at_ms: 42,
+              },
+            ],
+          },
+        }),
+      ),
+      null,
+    );
+  }
+});
+
 test("fix5: attention row keys distinguish duplicate content and stay stable across distinct insertion and reorder", () => {
   const base = snapshot();
   function row(source_kind: string, text = "Same request", truncated = false) {
