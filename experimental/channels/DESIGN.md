@@ -125,10 +125,14 @@ thread pane scroll.
 - Open the channel the URL names. With no channel in the URL, or one that has
   not arrived, open the first channel that needs you, else the channel with the
   latest message.
-- Channels arrive one by one, and an old server never says when discovery ends.
-  Until you pick a channel, each newly arrived channel re-runs this rule, so the
-  app moves to the URL's channel or to Needs you as soon as it appears. Once the
-  URL's channel is open, or you have picked one, the app never moves by itself.
+- Landing runs only while channels are being discovered. Discovery ends when
+  the server says `ready`. A server that never says `ready` ends it 2 seconds
+  after the first channel arrives. Any input from the reader ends it too: a
+  click, a key press, a scroll, or a channel pick. During discovery each newly
+  arrived channel re-runs this rule, so the app moves to the URL's channel or to
+  Needs you as soon as it appears. After discovery the app never moves by
+  itself. A workspace that opens later, or a reconnect that replays channels,
+  never changes the open channel or closes its thread.
 - When you pick a channel, its URL becomes `/w/<key>` with a new history entry,
   so reload and Back work. An automatic choice never rewrites the URL.
 - The tab title is "Namedrop" when nothing needs you, and "(2) Needs you ·
@@ -253,9 +257,11 @@ click.
   "Exit 0" with a check-circle in `--working` (or "Exit 1" with an alert in
   `--failed-text`) after the author, then stdout as a code block, then stderr
   under a small "stderr" label only when it is not empty. With neither, show
-  "No output" in muted text. A body that does not parse renders as it is. A
-  `TerminalRun` whose `message_id` matches the request overrides the parsed
-  code.
+  "No output" in muted text. A body that does not parse renders as it is. Each
+  reply shows its own run: of the `TerminalRun`s whose `message_id` names the
+  request, the latest one that started at or before the reply. That run's code
+  overrides the parsed one. The request row shows the newest run. The server
+  sends runs newest first, so never let list order pick the run.
 - **Body**: 14px with 21px line height, at most `--measure` wide. Links use
   `--accent-text` with a 3px underline offset. Code blocks use `--bg-raised`, a 1px
   `--line` border, `--radius-md`, 10px by 12px padding, `--font-mono` at 13px, and
