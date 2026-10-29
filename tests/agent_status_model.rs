@@ -138,7 +138,7 @@ int main(int argc, char **argv) {
         fprintf(record, "DENIED<%s=%d>\n", denied[i], !file && errno == EACCES);
         if (file) fclose(file);
     }
-    FILE *project = fopen(getenv("NAMEDROP_TEST_PROJECT_CANARY"), "r");
+    FILE *project = fopen(getenv("TEST_PROJECT_CANARY"), "r");
     fprintf(record, "DENIED<project=%d>\n", !project && errno == EACCES);
     if (project) fclose(project);
     const char *output = NULL;
@@ -230,7 +230,7 @@ fn fixture() -> &'static PathBuf {
                 env::set_var("HOME", dir.join("home"));
                 env::set_var("CODEX_HOME", dir.join("codex-home"));
                 env::set_var(
-                    "NAMEDROP_TEST_PROJECT_CANARY",
+                    "TEST_PROJECT_CANARY",
                     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
                 );
             }

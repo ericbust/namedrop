@@ -500,6 +500,7 @@ pub struct MessageReceipt {
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryReplyMode {
     AgentThread,
+    Channel,
     ReturnToSource,
     ReportToHuman,
 }
@@ -508,6 +509,7 @@ impl DeliveryReplyMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AgentThread => "agent_thread",
+            Self::Channel => "channel",
             Self::ReturnToSource => "return_to_source",
             Self::ReportToHuman => "report_to_human",
         }
@@ -515,6 +517,7 @@ impl DeliveryReplyMode {
 
     pub(crate) fn for_message_grammar(grammar_version: &str) -> Self {
         match grammar_version {
+            "channel/v1" => Self::Channel,
             "mention-hook/v1" => Self::ReturnToSource,
             "coordination-report/v1"
             | "mention-return/v1"

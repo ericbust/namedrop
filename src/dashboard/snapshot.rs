@@ -8,6 +8,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
+#[path = "channel_routing.rs"]
+pub(crate) mod channel_routing;
+
 pub const WIRE_VERSION: u8 = 1;
 const BODY_CHARS: usize = 2000;
 const PREVIEW_CHARS: usize = 80;
@@ -452,6 +455,10 @@ pub struct MailboxItem {
 
 #[derive(Debug, Serialize)]
 pub struct MessageRow {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel: Option<ChannelRouting>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub woke: Vec<String>,
     pub message_id: String,
     pub thread_id: String,
     pub in_reply_to: Option<String>,
@@ -461,6 +468,26 @@ pub struct MessageRow {
     pub kind: MessageKind,
     pub body: SafeText,
     pub legs: Vec<DeliveryLeg>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChannelRoutingState {
+    Routed,
+    Unrouted,
+    RouterFailed,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelRouting {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned: Option<Vec<String>>,
+    pub state: ChannelRoutingState,
+    pub to: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub router: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -754,6 +781,18 @@ fn health(state: SpaceState, attention: usize, in_flight: usize, working: usize)
 
 pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageRow {
     MessageRow {
+        channel: row.channel_to.as_ref().map(|to| ChannelRouting {
+            mentioned: row.channel_mentioned.clone(),
+            state: if to.is_empty() {
+                ChannelRoutingState::Unrouted
+            } else {
+                ChannelRoutingState::Routed
+            },
+            to: to.clone(),
+            reason: None,
+            router: None,
+        }),
+        woke: row.woke.clone(),
         message_id: row.message_id.clone(),
         thread_id: row.thread_id.clone(),
         in_reply_to: row.in_reply_to.clone(),

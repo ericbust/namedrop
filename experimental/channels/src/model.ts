@@ -79,13 +79,15 @@ export type DeliveryStage =
 export type Alias = `@${string}`;
 // Where a channel post stands with the router. A message carries one exactly
 // when its wire row has a `channel` object, so a state a newer server invents
-// still marks the post as channel chat. Who got it comes from the legs.
-export type Routing =
+// still marks the post as channel chat. Who got it comes from the legs; the
+// agents the post names come from the server, which read them when it stored it.
+export type Routing = { mentioned: readonly Alias[] } & (
   | { state: "routing" }
   | { state: "routed"; reason: string | null; router: string | null }
   | { state: "unrouted" }
   | { state: "router_failed" }
-  | { state: "unknown" };
+  | { state: "unknown" }
+);
 export type Message = {
   id: string;
   threadId: string;

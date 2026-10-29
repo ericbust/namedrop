@@ -52,6 +52,9 @@ pub struct RegistrationRow {
 }
 
 pub struct MessageRow {
+    pub channel_to: Option<Vec<String>>,
+    pub channel_mentioned: Option<Vec<String>>,
+    pub woke: Vec<String>,
     pub message_id: String,
     pub thread_id: String,
     pub in_reply_to: Option<String>,
@@ -263,8 +266,11 @@ impl StateTransaction<'_> {
                 limit.into(),
             ],
         };
-        let messages = self.rows(&sql, rusqlite::params_from_iter(args), |row| {
+        let mut messages = self.rows(&sql, rusqlite::params_from_iter(args), |row| {
             Ok(MessageRow {
+                channel_to: None,
+                channel_mentioned: None,
+                woke: Vec::new(),
                 message_id: row.get(0)?,
                 thread_id: row.get(1)?,
                 in_reply_to: row.get(2)?,
@@ -326,10 +332,102 @@ impl StateTransaction<'_> {
             })
         })?;
         self.normalize_operator_legs(namespace, &mut legs)?;
+        self.channel_message_fields(namespace, &mut messages)?;
         Ok(Some(HistoryRows { messages, legs }))
     }
 
-    fn dashboard_rows(&self, namespace: &StateNamespace) -> Result<DashboardRows, StoreError> {
+    fn channel_message_fields(
+        &self,
+        namespace: &StateNamespace,
+        messages: &mut [MessageRow],
+    ) -> Result<(), StoreError> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let ids = serde_json::json!(
+            messages
+                .iter()
+                .map(|message| &message.message_id)
+                .collect::<Vec<_>>()
+        )
+        .to_string();
+        let ns = namespace_params(namespace);
+        let sources = self.rows(
+            "SELECT m.message_id, m.authored_source FROM collaboration_messages m
+             WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2
+               AND m.message_id IN (SELECT value FROM json_each(?3))
+               AND EXISTS (SELECT 1 FROM collaboration_messages root
+                   WHERE root.session_socket_id = m.session_socket_id AND root.worktree_id = m.worktree_id
+                     AND root.thread_id = m.thread_id AND root.in_reply_to IS NULL
+                     AND root.grammar_version = 'channel/v1')",
+            params![ns[0], ns[1], ids],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?.into_iter().collect::<std::collections::HashMap<_, _>>();
+        if sources.is_empty() {
+            return Ok(());
+        }
+        let ids = serde_json::json!(sources.keys().collect::<Vec<_>>()).to_string();
+        let legs = self.rows(
+            "SELECT r.message_id, r.address_id, r.alias_snapshot FROM message_recipients r
+             JOIN pane_addresses a USING (session_socket_id, worktree_id, address_id)
+             WHERE r.session_socket_id = ?1 AND r.worktree_id = ?2
+               AND r.message_id IN (SELECT value FROM json_each(?3)) AND a.pane_type = 'agent'
+             ORDER BY r.message_id, r.recipient_order",
+            params![ns[0], ns[1], ids],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        let operators = self.operator_projection_addresses(namespace)?;
+        let mut recipients = std::collections::HashMap::<String, Vec<String>>::new();
+        for (message, address, alias) in legs {
+            if operators.contains(&address) {
+                continue;
+            }
+            let to = recipients.entry(message).or_default();
+            if !to.contains(&alias) {
+                to.push(alias);
+            }
+        }
+        let members = self.channel_members(namespace)?;
+        for message in messages {
+            let Some(source) = sources.get(&message.message_id) else {
+                continue;
+            };
+            let mut to = recipients.remove(&message.message_id).unwrap_or_default();
+            if message.grammar_version == "channel/v1" && message.in_reply_to.is_none() {
+                message.channel_to = Some(to);
+                let mentions = crate::message::context_mentions(source);
+                message.channel_mentioned = Some(
+                    members
+                        .iter()
+                        .filter(|member| {
+                            mentions.iter().any(|mention| {
+                                mention.workspace.is_none() && mention.alias == member.alias
+                            })
+                        })
+                        .map(|member| member.alias.clone())
+                        .collect(),
+                );
+            } else if !message.author_is_human
+                && message.in_reply_to.is_some()
+                && let Ok(parsed) = crate::parse_mentions(source)
+            {
+                to.retain(|alias| !parsed.recipients.aliases.contains(alias));
+                message.woke = to;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn dashboard_rows(
+        &self,
+        namespace: &StateNamespace,
+    ) -> Result<DashboardRows, StoreError> {
         let ns = namespace_params(namespace);
         let windowed = params![ns[0], ns[1], MESSAGE_WINDOW];
         let mut messages = self.rows(
@@ -341,6 +439,9 @@ impl StateTransaction<'_> {
             windowed,
             |row| {
                 Ok(MessageRow {
+                    channel_to: None,
+                    channel_mentioned: None,
+                    woke: Vec::new(),
                     message_id: row.get(0)?,
                     thread_id: row.get(1)?,
                     in_reply_to: row.get(2)?,
@@ -353,6 +454,7 @@ impl StateTransaction<'_> {
             },
         )?;
         messages.reverse();
+        self.channel_message_fields(namespace, &mut messages)?;
         let legs = self.rows(
             &format!(
                 "SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,

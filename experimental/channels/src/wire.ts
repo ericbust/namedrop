@@ -311,30 +311,34 @@ function routing(value: unknown): Routing | null {
     typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : {};
+  const mentioned = aliases(item.mentioned);
   switch (item.state) {
     case "routing":
     case "unrouted":
     case "router_failed":
-      return { state: item.state };
+      return { state: item.state, mentioned };
     case "routed":
       return {
         state: item.state,
+        mentioned,
         reason: reasonText(item.reason),
         router: optionalIdentity(item.router),
       };
     default:
-      return { state: "unknown" };
+      return { state: "unknown", mentioned };
   }
 }
-const nobodyWoke: readonly Alias[] = [];
-function woke(value: unknown): readonly Alias[] {
-  if (!Array.isArray(value)) return nobodyWoke;
-  const aliases = new Set<Alias>();
+const noAliases: readonly Alias[] = [];
+// A list of aliases, bare or with "@", as `Member.alias` holds them. Anything
+// else in the list is dropped, so a malformed entry never drops the frame.
+function aliases(value: unknown): readonly Alias[] {
+  if (!Array.isArray(value)) return noAliases;
+  const found = new Set<Alias>();
   for (const raw of value) {
     const alias = optionalAlias(raw);
-    if (alias !== null) aliases.add(alias);
+    if (alias !== null) found.add(alias);
   }
-  return aliases.size === 0 ? nobodyWoke : [...aliases];
+  return found.size === 0 ? noAliases : [...found];
 }
 function message(value: unknown): Message {
   const item = record(value);
@@ -351,7 +355,7 @@ function message(value: unknown): Message {
       return { to: addressId(leg.to), stage: deliveryStage(leg.stage) };
     }),
     routing: routing(item.channel),
-    woke: woke(item.woke),
+    woke: aliases(item.woke),
   };
 }
 function messages(value: unknown): Map<string, Message> {

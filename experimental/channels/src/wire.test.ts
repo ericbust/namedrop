@@ -10,6 +10,84 @@ import {
   terminalResult,
 } from "./wire.ts";
 
+// CH-1's wire tests, kept with their inputs and read through the UI's domain
+// shape. Malformed optional metadata never drops the row, as every other
+// optional field in this parser behaves.
+const channelRow = {
+  message_id: "message-channel",
+  thread_id: "thread-channel",
+  in_reply_to: null,
+  at_ms: 42,
+  author: "human",
+  kind: "mention",
+  body: { text: "Can someone check this?", truncated: false },
+  legs: [],
+};
+
+test("channel history preserves optional routing and wake metadata", () => {
+  const channel = {
+    state: "routed",
+    to: ["claude"],
+    mentioned: ["claude", "codex"],
+    reason: "build question",
+    router: "claude-haiku",
+  };
+  const [message] = parseHistory([{ ...channelRow, channel, woke: ["codex"] }]);
+  assert.deepEqual(message?.routing, {
+    state: "routed",
+    mentioned: ["@claude", "@codex"],
+    reason: "build question",
+    router: "claude-haiku",
+  });
+  assert.deepEqual(message?.woke, ["@codex"]);
+});
+
+test("channel routing tolerates absent sidecar explanations and legacy rows", () => {
+  for (const state of ["routing", "routed", "unrouted", "router_failed"]) {
+    assert.deepEqual(
+      parseHistory([{ ...channelRow, channel: { state, to: [] } }])[0]?.routing,
+      state === "routed"
+        ? { state, mentioned: [], reason: null, router: null }
+        : { state, mentioned: [] },
+    );
+  }
+  const [legacy] = parseHistory([channelRow]);
+  assert.equal(legacy?.routing, null);
+  assert.deepEqual(legacy?.woke, []);
+});
+
+test("channel routing keeps the row when its optional metadata is malformed", () => {
+  const read = (channel: unknown) =>
+    parseHistory([{ ...channelRow, channel }])[0]?.routing;
+  assert.deepEqual(read({ state: "invented", to: [] }), {
+    state: "unknown",
+    mentioned: [],
+  });
+  assert.deepEqual(read({ state: "routed", to: [42] }), {
+    state: "routed",
+    mentioned: [],
+    reason: null,
+    router: null,
+  });
+  assert.deepEqual(read({ state: "routed", to: [], reason: 42 }), {
+    state: "routed",
+    mentioned: [],
+    reason: null,
+    router: null,
+  });
+  assert.deepEqual(read({ state: "routed", to: [], router: "" }), {
+    state: "routed",
+    mentioned: [],
+    reason: null,
+    router: null,
+  });
+  assert.deepEqual(read({ state: "unrouted", to: [], mentioned: [42] }), {
+    state: "unrouted",
+    mentioned: [],
+  });
+  assert.deepEqual(parseHistory([{ ...channelRow, woke: [42] }])[0]?.woke, []);
+});
+
 const result = (text: string, truncated = false) =>
   terminalResult({ text, truncated });
 const header = (code: string) =>
@@ -167,6 +245,7 @@ test("channel: absent is an ordinary message, and each state the server sends pa
   assert.equal(routingOf(null), null);
   assert.deepEqual(routingOf({ state: "routing", to: [] }), {
     state: "routing",
+    mentioned: [],
   });
   assert.deepEqual(
     routingOf({
@@ -175,13 +254,20 @@ test("channel: absent is an ordinary message, and each state the server sends pa
       reason: "build question",
       router: "claude-haiku",
     }),
-    { state: "routed", reason: "build question", router: "claude-haiku" },
+    {
+      state: "routed",
+      mentioned: [],
+      reason: "build question",
+      router: "claude-haiku",
+    },
   );
   assert.deepEqual(routingOf({ state: "unrouted", to: [] }), {
     state: "unrouted",
+    mentioned: [],
   });
   assert.deepEqual(routingOf({ state: "router_failed" }), {
     state: "router_failed",
+    mentioned: [],
   });
 });
 test("channel: an unknown, missing or malformed state stays a channel post, and the frame survives", () => {
@@ -195,7 +281,7 @@ test("channel: an unknown, missing or malformed state stays a channel post, and 
   ])
     assert.deepEqual(
       routingOf(channel),
-      { state: "unknown" },
+      { state: "unknown", mentioned: [] },
       JSON.stringify(channel),
     );
   const rows = framed(
@@ -209,6 +295,7 @@ test("channel: the reason is one line of at most 60 characters, and a blank reas
     routingOf({ state: "routed", reason, router });
   assert.deepEqual(routed("  build\n\tquestion  "), {
     state: "routed",
+    mentioned: [],
     reason: "build question",
     router: "claude-haiku",
   });
@@ -225,11 +312,13 @@ test("channel: the reason is one line of at most 60 characters, and a blank reas
   assert.equal(exact.reason, "x".repeat(60));
   assert.deepEqual(routed("   ", "  "), {
     state: "routed",
+    mentioned: [],
     reason: null,
     router: null,
   });
   assert.deepEqual(routed(42, { name: "x" }), {
     state: "routed",
+    mentioned: [],
     reason: null,
     router: null,
   });
@@ -253,6 +342,7 @@ test("history pages carry the channel state and woke", () => {
   ]);
   assert.deepEqual(page?.routing, {
     state: "routed",
+    mentioned: [],
     reason: "ci",
     router: "codex-luna",
   });

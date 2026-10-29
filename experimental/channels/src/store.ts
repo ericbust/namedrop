@@ -99,6 +99,7 @@ function sameValue(a: unknown, b: unknown): boolean {
 }
 function sameRouting(a: Routing | null, b: Routing | null): boolean {
   if (a === null || b === null) return a === b;
+  if (!sameList(a.mentioned, b.mentioned)) return false;
   if (a.state !== "routed" || b.state !== "routed") return a.state === b.state;
   return a.reason === b.reason && a.router === b.router;
 }
@@ -1188,13 +1189,11 @@ export function homesOf(
     ? previous
     : homes;
 }
-// The server's own address for the operator, if a leg ever arrives unnormalized.
-const OPERATOR = "operator:local";
 export function participant(
   { members, homes }: Directory,
   id: AddressId | "human",
 ): Participant {
-  if (id === "human" || id === OPERATOR) return { kind: "operator" };
+  if (id === "human") return { kind: "operator" };
   const member = members.get(id);
   if (member !== undefined)
     return member.kind.type === "human"

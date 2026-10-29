@@ -1,5 +1,10 @@
-import { mentionedAgents } from "./complete.ts";
-import type { AddressId, DeliveryStage, Directory, Message } from "./model.ts";
+import type {
+  AddressId,
+  DeliveryStage,
+  Directory,
+  Member,
+  Message,
+} from "./model.ts";
 import {
   participant,
   type ReplyReference,
@@ -98,12 +103,20 @@ export function routeLine(
         }));
   // An agent the thread already reached, by this post or a later message, or
   // who wrote in it, has the conversation, so it is not offered again.
-  const offers = () =>
-    mentionedAgents(message.body.text, directory.members)
-      .filter(
-        (member) => !room.heard.has(member.id) && !room.wrote.has(member.id),
-      )
-      .map((member) => member.alias);
+  const offers = () => {
+    const agents = new Map<string, Member>();
+    for (const member of directory.members.values())
+      if (member.kind.type === "agent" && member.activity !== "retired")
+        agents.set(member.alias, member);
+    return (message.routing?.mentioned ?? []).filter((alias) => {
+      const member = agents.get(alias);
+      return (
+        member !== undefined &&
+        !room.heard.has(member.id) &&
+        !room.wrote.has(member.id)
+      );
+    });
+  };
   // A post the router answered: who it reached, then the mentions it did not.
   const sent = (reason: string | null, router: string | null) => {
     const left = offers();

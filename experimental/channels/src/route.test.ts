@@ -49,9 +49,25 @@ function post(
       to: id,
       stage: { stage: "working", acked_at_ms: 1 },
     })),
-    channel,
+    // The server lists the agents a post names, as it read them when it stored the post.
+    channel:
+      typeof channel === "object" &&
+      channel !== null &&
+      !("mentioned" in channel)
+        ? { ...channel, mentioned: named(text) }
+        : channel,
     ...extra,
   };
+}
+function named(text: string): string[] {
+  return [
+    ...new Set(
+      Array.from(
+        text.matchAll(/(?<![\w\\])@([a-z0-9]+(?:-[a-z0-9]+)*)/g),
+        ([, alias]) => alias ?? "",
+      ),
+    ),
+  ];
 }
 function reply(id: string, author: string, at: number, extra: Row = {}): Row {
   return {
@@ -307,7 +323,7 @@ test("route line: replies and follow-ups name their recipients, and a reply that
       legs: [{ to: "claude", stage: { stage: "queued" } }],
     }),
     reply("to-you", "codex", 4_000, {
-      legs: [{ to: "operator:local", stage: { stage: "delivered" } }],
+      legs: [{ to: "human", stage: { stage: "delivered" } }],
     }),
   );
   assert.deepEqual(chat.line("woke")?.parts, [
@@ -326,7 +342,7 @@ test("route line: legs to the operator never show, and several recipients name t
       "operator",
       "claude",
       "codex",
-      "operator:local",
+      "human",
     ]),
   );
   assert.deepEqual(chat.line()?.parts, [
@@ -404,4 +420,23 @@ test("chat: only rooms carry one, an agent conversation has no route line, and c
   assert.equal(sameChat(a, null), false);
   assert.deepEqual(chatPeople(a), ["claude", "claude"]);
   assert.deepEqual(chatPeople(null), []);
+});
+test("route line: Send anyway offers the agents the server says the post names, not words that look like mentions", () => {
+  const unrouted = (mentioned: string[]) => ({
+    state: "unrouted",
+    to: [],
+    mentioned,
+  });
+  assert.equal(
+    room(post("thanks @codex", unrouted([]))).line(),
+    null,
+    "the server found no agent mention, so there is no offer",
+  );
+  assert.deepEqual(
+    room(post("thanks to our reviewer", unrouted(["claude"]))).line()?.parts,
+    [
+      { kind: "mentioned", aliases: ["@claude"] },
+      { kind: "send", aliases: ["@claude"], form: "anyway" },
+    ],
+  );
 });

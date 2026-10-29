@@ -3142,6 +3142,7 @@ test("channel chat: a routing change or a new woke list re-renders the row, and 
   assert.notEqual(after, before);
   assert.deepEqual(after?.routing, {
     state: "routed",
+    mentioned: [],
     reason: "build question",
     router: "haiku",
   });
@@ -3161,6 +3162,17 @@ test("channel chat: a routing change or a new woke list re-renders the row, and 
   const woke = activeChannel(apply(routed, value)).messages.get("post");
   assert.notEqual(woke, after);
   assert.deepEqual(woke?.woke, ["@codex"]);
+  value.frame.messages = [
+    post({
+      state: "routed",
+      reason: "build question",
+      router: "haiku",
+      mentioned: ["codex"],
+    }),
+  ];
+  const named = activeChannel(apply(routed, value)).messages.get("post");
+  assert.notEqual(named, after, "a new mentioned list re-renders");
+  assert.deepEqual(named?.routing?.mentioned, ["@codex"]);
 });
 
 function members(): unknown[] {
@@ -3438,13 +3450,4 @@ test("fill: writes a draft only when it is empty, keeps a remembered attempt, an
     attempt: { requestId: "r1", source: "my words", inReplyTo: "m1" },
     failure: null,
   });
-});
-test("participants: the server's own operator address reads as the operator", () => {
-  assert.deepEqual(
-    resolve(
-      { members: new Map(), homes: new Map() },
-      "operator:local" as AddressId,
-    ),
-    { kind: "operator" },
-  );
 });

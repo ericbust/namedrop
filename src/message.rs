@@ -418,6 +418,47 @@ struct MessageOperationInput {
     tracking: crate::coordination::TrackingInput,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MessageGrammar {
+    Mention,
+    MentionHook,
+    Channel,
+}
+
+impl MessageGrammar {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mention => "mention/v1",
+            Self::MentionHook => "mention-hook/v1",
+            Self::Channel => "channel/v1",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MessagePreparation {
+    Mention,
+    MentionHook,
+    OperatorPlain,
+}
+
+impl MessagePreparation {
+    fn grammar(self, in_reply_to: Option<&MessageId>) -> MessageGrammar {
+        match self {
+            Self::Mention => MessageGrammar::Mention,
+            Self::MentionHook => MessageGrammar::MentionHook,
+            Self::OperatorPlain if in_reply_to.is_none() => MessageGrammar::Channel,
+            Self::OperatorPlain => MessageGrammar::Mention,
+        }
+    }
+}
+
+struct PlainRouting {
+    decision: crate::agent_status_model::channel_router::RoutingDecision,
+    candidates: Vec<crate::RoutingAddressSnapshot>,
+    participants: Vec<crate::PaneAddressId>,
+}
+
 struct PreparedMessageOperation {
     request_id: String,
     authored_source: String,
@@ -429,7 +470,7 @@ struct PreparedMessageOperation {
     request_context: bool,
     decline_context_request: Option<ContextGrantId>,
     tracking: crate::coordination::TrackingInput,
-    grammar_version: &'static str,
+    preparation: MessagePreparation,
 }
 
 #[derive(Clone, Copy)]
@@ -508,6 +549,54 @@ where
         tracking: crate::coordination::TrackingInput::default(),
     })
     .map_err(SendError::Input)?;
+    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    dispatch_prepared_message(input, Author::Operator, runtime, &workspaces)
+        .map_err(OperatorSendError::from)
+}
+
+pub(crate) fn is_plain_channel_post(source: &str) -> bool {
+    parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
+}
+
+pub(crate) fn send_operator_channel_message<E, C, I>(
+    request_id: &str,
+    source: &str,
+    in_reply_to: Option<&MessageId>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Result<Value, OperatorSendError>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    if runtime.workspace_id.is_none() || !is_plain_channel_post(source) {
+        return Err(SendError::Input(
+            "a channel post requires a workspace and no leading recipients".to_owned(),
+        )
+        .into());
+    }
+    let input = PreparedMessageOperation {
+        request_id: required_nonempty(request_id.to_owned(), "request_id")
+            .map_err(SendError::Input)?,
+        authored_source: required_nonempty(source.to_owned(), "source")
+            .map_err(SendError::Input)?,
+        parsed: ParsedMessage {
+            recipients: RecipientRun {
+                scope: SpaceScope::Unqualified,
+                aliases: Vec::new(),
+            },
+            body: source.to_owned(),
+            context_mentions: context_mentions(source),
+        },
+        author_kind: ActorKind::Human,
+        in_reply_to: in_reply_to.cloned(),
+        disposition_attempt_id: None,
+        context: None,
+        request_context: false,
+        decline_context_request: None,
+        tracking: crate::coordination::TrackingInput::default(),
+        preparation: MessagePreparation::OperatorPlain,
+    };
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
     dispatch_prepared_message(input, Author::Operator, runtime, &workspaces)
         .map_err(OperatorSendError::from)
@@ -651,7 +740,7 @@ where
         request_context: false,
         decline_context_request: None,
         tracking: input.tracking,
-        grammar_version: "mention-hook/v1",
+        preparation: MessagePreparation::MentionHook,
     };
     persist_prepared_message_operation(prepared, pane_author(runtime)?, runtime, &workspaces)
         .map(|(_, forwarded)| forwarded)
@@ -835,9 +924,10 @@ where
         context,
         request_context,
         decline_context_request,
-        grammar_version,
+        preparation,
         tracking,
     } = input;
+    let grammar_version = preparation.grammar(in_reply_to.as_ref());
     if context.is_some() && author_kind != ActorKind::AgentSession {
         return Err(SendError::Input(
             "a context block requires an agent-authored message (author_kind agent_session)"
@@ -894,21 +984,80 @@ where
         Ok((author, replayed, tracked_home))
     })?;
     if let Some(committed) = replayed {
-        return present_committed(
+        let mut presented = present_committed(
             committed,
             &mut store,
             &namespace,
             &disposition_attempt_id,
             runtime,
-        );
+        )?;
+        if grammar_version == MessageGrammar::Channel {
+            channel_receipt(&mut presented.0, &mut store, &namespace, &authored_source)?;
+        }
+        return Ok(presented);
     }
-    let routing = crate::spaces::route(
-        &mut store,
-        workspaces,
-        &namespace,
-        (&author.address_id, in_reply_to.as_ref()),
-        &parsed.recipients,
-    )?;
+    let channel_routing = if preparation == MessagePreparation::OperatorPlain {
+        let (rows, candidates, participants, host) = store.transaction(|transaction| {
+            let participants = in_reply_to
+                .as_ref()
+                .map(|message| {
+                    let route = transaction.message_route(&namespace, message)?;
+                    transaction.thread_agent_participants(&namespace, &route.thread_id)
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let candidates = transaction
+                .channel_members(&namespace)?
+                .into_iter()
+                .filter(|member| {
+                    !participants
+                        .iter()
+                        .any(|participant| participant.address_id == member.address_id)
+                        && parsed.context_mentions.iter().any(|mention| {
+                            mention.workspace.is_none() && mention.alias == member.alias
+                        })
+                })
+                .collect::<Vec<_>>();
+            Ok((
+                transaction.dashboard_rows(&namespace)?,
+                candidates,
+                participants,
+                transaction.preferred_router_host()?,
+            ))
+        })?;
+        let decision = crate::agent_status_model::channel_router::route(
+            crate::agent_status_model::channel_router::RouterRequest {
+                host,
+                rows: &rows,
+                source: &authored_source,
+                candidates: &candidates,
+            },
+        );
+        Some(PlainRouting {
+            decision,
+            candidates,
+            participants: participants
+                .into_iter()
+                .map(|participant| participant.address_id)
+                .collect(),
+        })
+    } else {
+        None
+    };
+    let routing = if channel_routing.is_some() {
+        crate::spaces::RoutePlan {
+            sender_label: WorkspaceLabel::from_herdr(namespace.space_id.as_str()),
+            legs: Vec::new(),
+        }
+    } else {
+        crate::spaces::route(
+            &mut store,
+            workspaces,
+            &namespace,
+            (&author.address_id, in_reply_to.as_ref()),
+            &parsed.recipients,
+        )?
+    };
     // Context is refused before the context pin is written, so a refused
     // cross-workspace send leaves nothing behind.
     if routing.crosses(&namespace.space_id)
@@ -1001,19 +1150,50 @@ where
                 thread_id
             }
         };
-        let recipients = routing.resolve(
-            transaction,
-            &namespace,
-            &author.address_id,
-            runtime.clock.now_unix_ms(),
-        )?;
+        let mut recipients = if channel_routing.is_some() {
+            Vec::new()
+        } else {
+            routing.resolve(transaction, &namespace, &author.address_id, runtime.clock.now_unix_ms())?
+        };
+        let channel_reply = author_kind == ActorKind::AgentSession
+            && reply_route.as_ref().is_some_and(|route| route.reply_mode == crate::DeliveryReplyMode::Channel);
+        if let Some(plain) = &channel_routing {
+            if let Some(route) = &reply_route {
+                recipients.extend(transaction.thread_agent_participants(&namespace, &route.thread_id)?
+                    .into_iter().filter(|participant| plain.participants.contains(&participant.address_id)));
+            }
+            if let crate::agent_status_model::channel_router::RoutingDecision::Routed { to, .. } = &plain.decision {
+                let current = transaction.channel_members(&namespace)?;
+                for alias in to {
+                    if let Some(member) = current.iter().find(|member| &member.alias == alias && plain.candidates.contains(member))
+                        && !recipients.iter().any(|recipient| recipient.address_id == member.address_id) {
+                        recipients.push(member.clone());
+                    }
+                }
+            }
+            if in_reply_to.is_some() && recipients.is_empty() {
+                return Err(crate::StoreError::invalid_input(MISSING_RECIPIENTS));
+            }
+        }
+        if channel_reply {
+            for member in transaction.channel_members(&namespace)? {
+                if member.address_id != author.address_id && member.alias != "operator"
+                    && parsed.context_mentions.iter().any(|mention| mention.workspace.is_none() && mention.alias == member.alias)
+                    && !recipients.iter().any(|recipient| recipient.address_id == member.address_id) {
+                    recipients.push(member);
+                }
+            }
+        }
         if (in_reply_to.is_some() || context.is_some()) && recipients.iter().any(|r|
             transaction.pane_type(&namespace,&r.address_id).is_ok_and(|kind|kind==crate::PaneType::Terminal)) {
             return Err(crate::StoreError::invalid_input("terminal recipients accept new shell command requests without agent context attachments"));
         }
         let outlook = routed_recipient_outlooks(transaction, &namespace, &recipients)?;
-        let references =
-            resolve_aliases(transaction, &namespace, &reference_aliases)?;
+        let references = if channel_reply || preparation == MessagePreparation::OperatorPlain {
+            Vec::new()
+        } else {
+            resolve_aliases(transaction, &namespace, &reference_aliases)?
+        };
         let grammar_version = if disposition_attempt_id.is_some() && answers_relay_context_request {
             // Resume the suspended one-shot human relay. The requester gets
             // one return_to_source delivery, whose answer becomes the final
@@ -1027,14 +1207,14 @@ where
             "mention-return/v1"
         } else if author_kind == ActorKind::AgentSession
             && in_reply_to.is_none()
-            && grammar_version == "mention/v1"
+            && grammar_version == MessageGrammar::Mention
         {
             // This durable grammar is the explicit provenance for an
             // intent-shaped agent delegation. It prevents ordinary replies or
             // pre-feature messages from being inferred as delegated work.
             "delegated/v1"
         } else {
-            grammar_version
+            grammar_version.as_str()
         };
         let draft = MessageDraft {
             thread_id,
@@ -1135,10 +1315,12 @@ where
             })?;
             if !matches!(
                 route.reply_mode,
-                crate::DeliveryReplyMode::AgentThread | crate::DeliveryReplyMode::ReturnToSource
+                crate::DeliveryReplyMode::AgentThread
+                    | crate::DeliveryReplyMode::Channel
+                    | crate::DeliveryReplyMode::ReturnToSource
             ) {
                 return Err(crate::StoreError::invalid_input(
-                    "a context request rides an agent thread or one-shot human relay reply",
+                    "a context request rides an agent thread, channel, or one-shot human relay reply",
                 ));
             }
             let caller = route
@@ -1326,13 +1508,48 @@ where
         })
     });
     match routed {
-        Ok(committed) => present_committed(
-            committed,
-            &mut store,
-            &namespace,
-            &disposition_attempt_id,
-            runtime,
-        ),
+        Ok(committed) => {
+            let won = !committed.routed.receipt.idempotent_replay;
+            let mut presented = present_committed(
+                committed,
+                &mut store,
+                &namespace,
+                &disposition_attempt_id,
+                runtime,
+            )?;
+            if let Some(plain) = channel_routing {
+                if grammar_version == MessageGrammar::Channel {
+                    channel_receipt(&mut presented.0, &mut store, &namespace, &authored_source)?;
+                }
+                if won {
+                    use crate::agent_status_model::channel_router::RoutingDecision;
+                    let note = match plain.decision {
+                        RoutingDecision::Unrouted => None,
+                        RoutingDecision::Failed { router } => {
+                            Some(json!({"router": router, "router_failed": true}))
+                        }
+                        RoutingDecision::Routed {
+                            reason,
+                            router,
+                            usage,
+                            ..
+                        } => {
+                            if let Some(usage) = usage {
+                                presented.0["routing_usage"] = usage;
+                            }
+                            Some(
+                                json!({"reason": reason, "router": router, "router_failed": false}),
+                            )
+                        }
+                    };
+                    if let Some(note) = note.filter(|_| grammar_version == MessageGrammar::Channel)
+                    {
+                        presented.0["_channel_routing_note"] = note;
+                    }
+                }
+            }
+            Ok(presented)
+        }
         Err(error) => {
             record_snapshot_activation_failure(&fulfillment_grant_ids, &error.to_string(), runtime);
             Err(error.into())
@@ -1581,7 +1798,7 @@ fn prepare_source_message(
         request_context: input.request_context,
         decline_context_request: input.decline_context_request,
         tracking: input.tracking,
-        grammar_version: "mention/v1",
+        preparation: MessagePreparation::Mention,
     })
 }
 
@@ -1657,6 +1874,23 @@ fn resolve_aliases(
         .iter()
         .map(|alias| transaction.resolve_routing_alias(namespace, alias))
         .collect()
+}
+
+fn channel_receipt(
+    receipt: &mut Value,
+    store: &mut StateStore,
+    namespace: &StateNamespace,
+    source: &str,
+) -> Result<(), crate::StoreError> {
+    let to: Vec<_> = receipt["recipients"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|recipient| recipient["alias"].as_str())
+        .collect();
+    receipt["channel"] = json!({"state": if to.is_empty() { "unrouted" } else { "routed" }, "to": to,
+            "mentioned": store.transaction(|transaction| transaction.channel_mentioned(namespace, source))?});
+    Ok(())
 }
 
 fn receipt_json(routed: crate::RoutedMessageReceipt, outlook: Vec<RecipientOutlook>) -> Value {
@@ -1781,7 +2015,7 @@ fn mention_token_end(text: &str, at: usize) -> usize {
 /// Collects the Mentions of a body. An at-sign token is classified whole before any alias is
 /// looked up: a token that is not alias-shaped is not Mention-shaped, so it stays literal prose
 /// instead of rejecting the send, and no valid alias prefix is taken out of it.
-fn context_mentions(body: &str) -> Vec<BodyMention> {
+pub(crate) fn context_mentions(body: &str) -> Vec<BodyMention> {
     let mut mentions = Vec::new();
     let mut qualified_run: Option<(usize, WorkspaceLabel)> = None;
     for anchor in mention_anchors(body) {
