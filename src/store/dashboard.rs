@@ -26,6 +26,12 @@ pub struct DashboardRows {
     pub attention: Vec<crate::AttentionItemRecord>,
 }
 
+/// A history page and its recipient state from one database snapshot.
+pub struct HistoryRows {
+    pub messages: Vec<MessageRow>,
+    pub legs: Vec<LegRow>,
+}
+
 pub struct AddressRow {
     pub address_id: String,
     pub alias: String,
@@ -136,6 +142,17 @@ impl StateStore {
         self.transaction(|transaction| transaction.dashboard_spaces())
     }
 
+    pub fn dashboard_history(
+        &mut self,
+        namespace: &StateNamespace,
+        before: Option<&str>,
+        limit: i64,
+    ) -> Result<Option<HistoryRows>, StoreError> {
+        self.transaction(|transaction| {
+            transaction.dashboard_history(namespace, before, limit.clamp(1, 100))
+        })
+    }
+
     /// Changes whenever another connection commits; the dashboard's cheap
     /// "anything changed" gate.
     pub fn data_version(&self) -> Result<i64, StoreError> {
@@ -155,6 +172,110 @@ impl StateStore {
 }
 
 impl StateTransaction<'_> {
+    fn dashboard_history(
+        &self,
+        namespace: &StateNamespace,
+        before: Option<&str>,
+        limit: i64,
+    ) -> Result<Option<HistoryRows>, StoreError> {
+        let ns = namespace_params(namespace);
+        let cursor = match before {
+            Some(id) => {
+                let mut statement = self.transaction.prepare(
+                    "SELECT created_at_ms, rowid FROM collaboration_messages
+                     WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+                )?;
+                match statement
+                    .query_row(params![ns[0], ns[1], id], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                    })
+                    .optional()?
+                {
+                    Some(cursor) => Some(cursor),
+                    None => return Ok(None),
+                }
+            }
+            None => None,
+        };
+        let predicate = if cursor.is_some() {
+            "AND (created_at_ms, rowid) < (?3, ?4)"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "SELECT message_id, thread_id, in_reply_to, created_at_ms, author_address_id,
+                    author_kind, grammar_version, body
+             FROM collaboration_messages
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 {predicate}
+             ORDER BY created_at_ms DESC, rowid DESC LIMIT {}",
+            if cursor.is_some() { "?5" } else { "?3" }
+        );
+        let args: Vec<rusqlite::types::Value> = match cursor {
+            Some((at, rowid)) => vec![
+                ns[0].to_owned().into(),
+                ns[1].to_owned().into(),
+                at.into(),
+                rowid.into(),
+                limit.into(),
+            ],
+            None => vec![
+                ns[0].to_owned().into(),
+                ns[1].to_owned().into(),
+                limit.into(),
+            ],
+        };
+        let messages = self.rows(&sql, rusqlite::params_from_iter(args), |row| {
+            Ok(MessageRow {
+                message_id: row.get(0)?,
+                thread_id: row.get(1)?,
+                in_reply_to: row.get(2)?,
+                created_at_ms: row.get(3)?,
+                author_address_id: row.get(4)?,
+                author_is_human: row.get::<_, String>(5)? == "human",
+                grammar_version: row.get(6)?,
+                body: row.get(7)?,
+            })
+        })?;
+        if messages.is_empty() {
+            return Ok(Some(HistoryRows {
+                messages,
+                legs: Vec::new(),
+            }));
+        }
+        let placeholders = std::iter::repeat_n("?", messages.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
+                    p.disposition_kind, p.disposition_id
+             FROM message_recipients r
+             LEFT JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
+             LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
+             LEFT JOIN delivery_acknowledgements ack USING (session_socket_id, worktree_id, attempt_id)
+             LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id)
+             WHERE r.session_socket_id = ? AND r.worktree_id = ?
+               AND r.message_id IN ({placeholders})
+             ORDER BY r.message_id, r.recipient_order"
+        );
+        let values = std::iter::once(ns[0].to_owned())
+            .chain(std::iter::once(ns[1].to_owned()))
+            .chain(messages.iter().map(|message| message.message_id.clone()));
+        let legs = self.rows(&sql, rusqlite::params_from_iter(values), |row| {
+            Ok(LegRow {
+                message_id: row.get(0)?,
+                address_id: row.get(1)?,
+                state: row
+                    .get::<_, Option<String>>(2)?
+                    .map(parse_delivery_state)
+                    .transpose()?,
+                acknowledged_at_ms: row.get(3)?,
+                disposition_kind: row.get(4)?,
+                disposition_id: row.get(5)?,
+            })
+        })?;
+        Ok(Some(HistoryRows { messages, legs }))
+    }
+
     fn dashboard_rows(&self, namespace: &StateNamespace) -> Result<DashboardRows, StoreError> {
         let ns = namespace_params(namespace);
         let windowed = params![ns[0], ns[1], MESSAGE_WINDOW];
