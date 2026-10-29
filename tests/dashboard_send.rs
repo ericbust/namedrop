@@ -863,7 +863,7 @@ mod http {
     use serde_json::Value;
     use std::{
         fs,
-        io::{Read, Write},
+        io::{self, BufRead, BufReader, Read, Write},
         net::{Shutdown, TcpStream},
         os::unix::fs::PermissionsExt,
         path::Path,
@@ -883,6 +883,99 @@ mod http {
         status: u16,
         head: String,
         body: String,
+    }
+
+    fn assert_refusal_response(
+        reader: impl Read,
+        expected_status: &str,
+        expected_body: &str,
+    ) -> io::Result<()> {
+        let mut reader = BufReader::new(reader);
+        let mut head = String::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!("incomplete refusal headers: {head:?}"),
+                ));
+            }
+            if line == "\r\n" {
+                break;
+            }
+            head.push_str(&line);
+        }
+        assert_eq!(head.lines().next(), Some(expected_status), "{head}");
+        for expected in [
+            "Content-Type: text/plain; charset=utf-8".to_owned(),
+            "Connection: close".to_owned(),
+            format!("Content-Length: {}", expected_body.len()),
+        ] {
+            assert!(head.lines().any(|line| line == expected), "{head}");
+        }
+        let mut body = vec![0; expected_body.len()];
+        reader.read_exact(&mut body).map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("incomplete refusal body for {expected_status}: {error}"),
+            )
+        })?;
+        assert_eq!(body, expected_body.as_bytes());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn refusal_response_is_complete_before_connection_reset() {
+        use std::{net::TcpListener, os::fd::AsRawFd};
+
+        let response = b"HTTP/1.1 413 Payload Too Large\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 27\r\nConnection: close\r\n\r\nRequest body is too large.\n";
+        for length in [response.len(), response.len() - 1, 0] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let mut stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let (mut peer, _) = listener.accept().unwrap();
+            peer.write_all(&response[..length]).unwrap();
+            let linger = libc::linger {
+                l_onoff: 1,
+                l_linger: 0,
+            };
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        peer.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_LINGER,
+                        (&linger as *const libc::linger).cast(),
+                        std::mem::size_of_val(&linger) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+            drop(peer);
+            let result = assert_refusal_response(
+                &mut stream,
+                "HTTP/1.1 413 Payload Too Large",
+                "Request body is too large.\n",
+            );
+            if length == response.len() {
+                result.expect("read the complete refusal before the reset");
+                let error = stream.read(&mut [0]).expect_err("the peer sent a reset");
+                assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+            } else {
+                let error =
+                    result.expect_err("a reset must not hide a missing or truncated refusal");
+                assert!(
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::ConnectionReset | io::ErrorKind::UnexpectedEof
+                    ),
+                    "{error}"
+                );
+            }
+        }
     }
 
     impl Server {
@@ -1157,10 +1250,22 @@ else:
         let server = Server::start(&f, None);
         let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
         let body = "x".repeat(1024 * 1024);
-        for (extra, expected) in [
-            ("", 413),
-            ("Origin: http://foreign.example\r\n", 403),
-            ("Content-Length: 1\r\n", 400),
+        for (extra, expected_status, expected_body) in [
+            (
+                "",
+                "HTTP/1.1 413 Payload Too Large",
+                "Request body is too large.\n",
+            ),
+            (
+                "Origin: http://foreign.example\r\n",
+                "HTTP/1.1 403 Forbidden",
+                "Forbidden.\n",
+            ),
+            (
+                "Content-Length: 1\r\n",
+                "HTTP/1.1 400 Bad Request",
+                "Bad request.\n",
+            ),
         ] {
             let request = format!(
                 "POST /w/{}/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}\r\n{body}",
@@ -1170,24 +1275,28 @@ else:
                 server.csrf,
                 body.len()
             );
-            let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+            let stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
-            // An early refusal can close the socket before the whole body is sent.
-            let write_result = stream.write_all(request.as_bytes());
-            let mut response = Vec::new();
             stream
-                .read_to_end(&mut response)
-                .expect("read refusal without connection reset");
-            let response = String::from_utf8(response).unwrap();
-            assert!(
-                response.starts_with(&format!("HTTP/1.1 {expected} ")),
-                "{response}"
-            );
-            assert!(response.contains("Connection: close\r\n"));
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut writer = stream.try_clone().unwrap();
+            let write_result = thread::scope(|scope| {
+                let write = scope.spawn(move || writer.write_all(request.as_bytes()));
+                assert_refusal_response(stream, expected_status, expected_body)
+                    .expect("read the complete refusal response");
+                write.join().unwrap()
+            });
             if let Err(error) = write_result {
-                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+                assert!(
+                    matches!(
+                        error.kind(),
+                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                    ),
+                    "{error}"
+                );
             }
         }
         assert_eq!(f.message_rows(), (0, 0));
