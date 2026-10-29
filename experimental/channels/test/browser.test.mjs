@@ -4776,8 +4776,20 @@ const iconShape = {
   inbox: "M2.5 9.5h3l1 1.5h3l1-1.5h3M3.6 3.5h8.8l1.1 6v3.5h-11V9.5z",
   alert: "M8 5v3.5M8 11h.01",
 };
+// The server lists the agents a post names, bare, in the order the text names them.
+const named = (text) => [
+  ...new Set(
+    [...text.matchAll(/(?<![\w\\])@([a-z0-9]+(?:-[a-z0-9]+)*)/g)].map(
+      ([, alias]) => alias,
+    ),
+  ),
+];
 function channelPost(id, text, channel, extra = {}) {
-  return message(id, text, { channel, at_ms: Date.now() - 600_000, ...extra });
+  return message(id, text, {
+    channel: { mentioned: named(text), ...channel },
+    at_ms: Date.now() - 600_000,
+    ...extra,
+  });
 }
 function answer(id, parent, thread, author, text, extra = {}) {
   return message(id, text, {
