@@ -82,8 +82,10 @@ not airy.
 - Sidebar rows are 32px tall. Section gaps are 20px.
 - The channel header is 56px. The member strip under it is 36px per line, at
   most two lines.
-- A message group has 16px above it. Messages inside a group have 2px between
-  them.
+- A message group has 16px above it. Messages inside a group sit about 6px
+  apart, which keeps the hover padding.
+- The timeline scroller fades its top 12px with a `mask-image` gradient, so a
+  half-scrolled message never sits flush under the header or banner.
 - The timeline and thread pane have 24px side padding. The thread pane is
   `--thread-width` (400px) wide.
 - Message text never runs wider than `--measure` (72ch).
@@ -101,10 +103,13 @@ neutral with a faint indigo cast (hue 278), as in `docs/assets/social-preview.pn
 - **Attention** (`--attention-bg`, `--attention-line`, `--attention-text`): only
   on the Needs-you banner and failed receipts.
 - **Identity** (`--id-0` through `--id-5`, `--id-terminal`, `--id-operator`):
-  only on avatars. Pick the hue with `hash(alias) % 6`, where `hash` is the sum
-  of the alias's UTF-16 code units. Terminals always use `--id-terminal`. The
+  only on avatars. Pick the hue with `hash(name) % 6`, where `hash` is the sum
+  of the UTF-16 code units of the name as displayed, with its `@`, such as
+  "@claude". Terminals always use `--id-terminal`. The
   operator always uses `--id-operator`.
 - Never use color alone. Every dot has a word next to it or an accessible name.
+- Mix overlay colors in sRGB, as in `color-mix(in srgb, var(--bg-hover) 50%,
+  transparent)`. Mixing with `transparent` in OKLCH swings the hue toward red.
 
 ## Elements
 
@@ -143,8 +148,9 @@ thread pane scroll.
 - **Channels** section: one 32px row per channel. A muted `#` icon, the name in
   one line with an ellipsis, and a right slot. The right slot shows a red dot when
   the channel needs you, else a small accent dot when it has unread activity. The
-  `#token` does not appear in the row. Same-name channels add the workspace id as
-  a muted suffix, as in "namedrop · wB".
+  `#token` does not appear in the row. Same-name channels add a muted suffix with
+  the workspace id and the full key, because two spaces can share both a name
+  and a workspace id.
 - Only the Channels row of the selected channel gets the selected background.
   Its Needs-you row stays unselected.
 - **Footer**, 40px: the connection dot and "Live", "Connecting…", or
@@ -233,14 +239,22 @@ click.
 - **To a terminal**: a message whose only recipient is a terminal member shows
   its body as a command chip: `--bg-raised`, a 1px `--line` border,
   `--radius-sm`, `--font-mono` at 13px, and a drawn prompt icon.
-- **From a terminal**: a terminal's reply shows "Exit 0" with a check-circle in
-  `--working` (or "Exit 1" with an alert in `--failed-text`) after the author.
-  Its output renders as a code block. Omit the empty `stderr:` section.
+- **From a terminal**: Namedrop writes a terminal's reply as
+  `@shell command finished with exit code N.` followed by `stdout:` and
+  `stderr:` sections. Parse that once, for terminal authors only. The reply shows
+  "Exit 0" with a check-circle in `--working` (or "Exit 1" with an alert in
+  `--failed-text`) after the author, then stdout as a code block, then stderr
+  under a small "stderr" label only when it is not empty. With neither, show
+  "No output" in muted text. A body that does not parse renders as it is. A
+  `TerminalRun` whose `message_id` matches the request overrides the parsed
+  code.
 - **Body**: 14px with 21px line height, at most `--measure` wide. Links use
   `--accent-text` with a 3px underline offset. Code blocks use `--bg-raised`, a 1px
   `--line` border, `--radius-md`, 10px by 12px padding, `--font-mono` at 13px, and
-  `white-space: pre` with horizontal scroll. Bodies over 480 characters collapse
-  behind a **Show more** text button.
+  `white-space: pre` with horizontal scroll. Drop one newline right after a
+  closing fence and right before an opening fence, so no blank line sits next to
+  a code block. Bodies over 480 characters collapse behind a **Show more** text
+  button.
 - **Receipt line**: one 12px muted line under the body, with a 12px drawn icon per
   recipient. With one recipient, show only the state, because the header already
   names the recipient. With several, show "@codex Done · @shell Working on it".
@@ -252,7 +266,9 @@ click.
   time, and the reply body clamped to two lines at 13px. Terminal output uses
   `--font-mono` at 12.5px. "1 reply" or "3 replies" sits at the right in 12px 600
   `--accent-text`. The whole box is one button that opens the thread pane. Its
-  accessible name is "1 reply from @codex at 11:03 PM. Open thread". On hover it
+  accessible name is "1 reply from @codex at 11:03 PM. Open thread", or "3
+  replies, latest from @codex at 11:03 PM. Open thread". A terminal reply's
+  preview shows its Exit chip and the first two lines of stdout. On hover it
   gets `--bg-hover` and a `--line-strong` border.
 - **Hover**: the row background becomes `--bg-hover` at 50 percent.
 - **Arrival**: a message that arrives live fades in and rises 4px over
@@ -297,6 +313,7 @@ border, and `--radius-lg`. Each item is one row: a 16px drawn alert icon in
 `--blocked`, the title at 14px 600 in `--text`, the hint in 13px muted, and the
 age at the right, such as "4 min". A **Details** text button reveals the server's
 full summary in 13px muted text. Show three items, then a "Show N more" button.
+The banner takes at most 40 percent of the window height and scrolls inside.
 Announce new items through a polite live region.
 
 | `source`                                | Title                                                                                                | Hint                                                 |
@@ -321,7 +338,8 @@ put the summary under **Details**.
 right. Its accessible name is "Close thread", and Escape closes it. Below it come
 the parent message, a divider that reads "1 reply" with hairlines on both sides,
 and the replies. Replies use the message component without a reply preview. The
-pane slides in from 16px right with a fade over `--duration`.
+pane slides in from 16px right with a fade over `--duration`. Below 860px of
+window width, the pane stacks under the timeline instead of beside it.
 
 ## Motion
 
