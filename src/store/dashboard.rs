@@ -23,7 +23,7 @@ pub struct DashboardRows {
     pub coordinations: Vec<CoordinationRow>,
     pub assignments: Vec<AssignmentRow>,
     pub terminal_runs: Vec<TerminalRunRow>,
-    pub attention: Vec<crate::AttentionItemRecord>,
+    pub attention: Vec<AttentionRow>,
 }
 
 /// A history page and its recipient state from one database snapshot.
@@ -43,6 +43,7 @@ pub struct AddressRow {
     pub occupied: bool,
     pub agent_status: Option<String>,
     pub blocked_since_ms: Option<i64>,
+    pub blocked_message_id: Option<String>,
 }
 
 pub struct RegistrationRow {
@@ -113,6 +114,13 @@ pub struct TerminalRunRow {
     pub command: String,
     pub started_at_ms: i64,
     pub exit_code: Option<i32>,
+    pub message_id: Option<String>,
+}
+
+pub struct AttentionRow {
+    pub item: crate::AttentionItemRecord,
+    pub subject_alias: Option<String>,
+    pub message_id: Option<String>,
 }
 
 pub struct SpaceRow {
@@ -445,9 +453,10 @@ impl StateTransaction<'_> {
             },
         )?;
         let terminal_runs = self.rows(
-            "SELECT a.address_id, t.command, t.started_at_ms, t.exit_code
+            "SELECT a.address_id, t.command, t.started_at_ms, t.exit_code, d.message_id
              FROM terminal_executions t
              JOIN delivery_attempts a USING (session_socket_id, worktree_id, attempt_id)
+             LEFT JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
              WHERE t.session_socket_id = ?1 AND t.worktree_id = ?2
                AND t.started_at_ms IS NOT NULL
              ORDER BY t.started_at_ms DESC, t.rowid DESC LIMIT ?3",
@@ -458,6 +467,7 @@ impl StateTransaction<'_> {
                     command: row.get(1)?,
                     started_at_ms: row.get(2)?,
                     exit_code: row.get(3)?,
+                    message_id: row.get(4)?,
                 })
             },
         )?;
@@ -505,7 +515,16 @@ impl StateTransaction<'_> {
                     b.pane_id IS NOT NULL,
                     COALESCE(o.agent_session_id, '') <> '', o.status,
                     CASE WHEN br.boundary_blocked_rowid > br.boundary_nonblocked_rowid
-                         THEN t.last_nonblocked_at_ms ELSE br.later_blocked_at_ms END
+                         THEN t.last_nonblocked_at_ms ELSE br.later_blocked_at_ms END,
+                    (SELECT d.message_id
+                     FROM delivery_attempt_state s
+                     JOIN delivery_attempts attempt USING (session_socket_id, worktree_id, attempt_id, address_id)
+                     JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, delivery_id, address_id)
+                     WHERE s.session_socket_id = a.session_socket_id AND s.worktree_id = a.worktree_id
+                       AND s.address_id = a.address_id AND s.active = 1 AND s.state = 'acknowledged'
+                       AND attempt.binding_id = b.binding_id
+                       AND attempt.agent_session_id = o.agent_session_id
+                       AND o.agent_session_id <> '')
              FROM pane_addresses a
              JOIN pane_roles r USING (session_socket_id, worktree_id, role_id)
              -- A retired agent's alias can be released for reuse; its lane keeps the last one.
@@ -543,6 +562,7 @@ impl StateTransaction<'_> {
                     occupied: row.get(7)?,
                     agent_status: row.get(8)?,
                     blocked_since_ms: row.get(9)?,
+                    blocked_message_id: row.get(10)?,
                 })
             },
         )?;
@@ -557,6 +577,83 @@ impl StateTransaction<'_> {
                 })
             },
         )?;
+        let alias_for_address = |id: &str| {
+            addresses
+                .iter()
+                .find(|address| address.address_id == id)
+                .map(|address| address.alias.clone())
+        };
+        let address_ids: Vec<_> = addresses
+            .iter()
+            .map(|address| &address.address_id)
+            .collect();
+        let mut attention = self.rows(
+            "SELECT i.attention_item_id, i.source_kind, i.source_id, i.summary,
+                    i.opened_at_ms, i.resolved_at_ms,
+                    d.address_id,
+                    CASE WHEN d.address_id NOT IN (SELECT value FROM json_each(?3))
+                         THEN (SELECT r.alias_snapshot FROM message_recipients r
+                               WHERE r.session_socket_id = d.session_socket_id AND r.worktree_id = d.worktree_id
+                                 AND r.message_id = d.message_id AND r.address_id = d.address_id)
+                    END,
+                    d.message_id,
+                    CASE i.source_kind
+                      WHEN 'integration_registration' THEN (
+                          SELECT address_id FROM integration_registrations registration
+                          WHERE registration.session_socket_id = i.session_socket_id
+                            AND registration.worktree_id = i.worktree_id
+                            AND registration.registration_id = i.source_id)
+                      WHEN 'context_grant' THEN (
+                          SELECT grantee_address_id FROM context_grants grant
+                          WHERE grant.session_socket_id = i.session_socket_id
+                            AND grant.worktree_id = i.worktree_id AND grant.grant_id = i.source_id)
+                    END
+             FROM attention_items i INDEXED BY one_attention_item_per_unresolved_source
+             LEFT JOIN delivery_attempts a
+               ON i.source_kind IN ('delivery_attempt', 'agent_disposition')
+              AND a.session_socket_id = i.session_socket_id AND a.worktree_id = i.worktree_id
+              AND a.attempt_id = i.source_id
+             LEFT JOIN mailbox_deliveries d
+               ON d.session_socket_id = a.session_socket_id AND d.worktree_id = a.worktree_id
+              AND d.delivery_id = a.delivery_id AND d.address_id = a.address_id
+             WHERE i.session_socket_id = ?1 AND i.worktree_id = ?2 AND i.resolved_at_ms IS NULL",
+            params![ns[0], ns[1], serde_json::json!(address_ids).to_string()],
+            |row| {
+                let item = crate::AttentionItemRecord {
+                    id: crate::AttentionItemId::new(row.get::<_, String>(0)?),
+                    source_kind: parse_attention_source_kind(row.get(1)?)?,
+                    source_id: row.get(2)?,
+                    summary: row.get(3)?,
+                    opened_at_ms: from_i64(row.get(4)?)?,
+                    resolved_at_ms: row.get::<_, Option<i64>>(5)?.map(from_i64).transpose()?,
+                };
+                let subject_alias = match item.source_kind {
+                    crate::AttentionSourceKind::DeliveryAttempt
+                    | crate::AttentionSourceKind::AgentDisposition => row
+                        .get_ref(6)?
+                        .as_str_or_null()?
+                        .and_then(alias_for_address)
+                        .or(row.get(7)?),
+                    crate::AttentionSourceKind::PaneBinding => alias_for_address(&item.source_id),
+                    crate::AttentionSourceKind::IntegrationRegistration
+                    | crate::AttentionSourceKind::ContextGrant => row
+                        .get_ref(9)?
+                        .as_str_or_null()?
+                        .and_then(alias_for_address),
+                    crate::AttentionSourceKind::AutomaticReplyLimit
+                    | crate::AttentionSourceKind::Coordination => None,
+                };
+                Ok(AttentionRow {
+                    item,
+                    subject_alias,
+                    message_id: row.get(8)?,
+                })
+            },
+        )?;
+        attention.sort_unstable_by(|left, right| {
+            (left.item.opened_at_ms, left.item.id.as_str())
+                .cmp(&(right.item.opened_at_ms, right.item.id.as_str()))
+        });
         Ok(DashboardRows {
             namespace: namespace.clone(),
             worktree: self.worktree_state(namespace)?,
@@ -569,7 +666,7 @@ impl StateTransaction<'_> {
             coordinations,
             assignments,
             terminal_runs,
-            attention: self.unresolved_attention_items(namespace)?,
+            attention,
         })
     }
 

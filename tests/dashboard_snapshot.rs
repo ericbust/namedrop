@@ -1,5 +1,8 @@
 mod support;
 
+#[path = "support/xws.rs"]
+mod xws;
+
 use namedrop::dashboard::snapshot::{
     Activity, DashboardSnapshot, LegStage, Participant, SpaceHealth, SpaceKey, SpaceState, build,
 };
@@ -15,7 +18,16 @@ fn attribution() -> MutationAttribution {
 }
 
 fn seed_space(store: &mut StateStore, space: &str, aliases: &[&str]) -> StateNamespace {
-    let namespace = StateNamespace::for_space("socket-a", space);
+    seed_space_on_socket(store, "socket-a", space, aliases)
+}
+
+fn seed_space_on_socket(
+    store: &mut StateStore,
+    socket: &str,
+    space: &str,
+    aliases: &[&str],
+) -> StateNamespace {
+    let namespace = StateNamespace::for_space(socket, space);
     store
         .transaction(|tx| {
             tx.activate_worktree(&namespace, &attribution())?;
@@ -121,7 +133,7 @@ fn send_as(
         .unwrap();
 }
 
-fn submit(
+fn lease(
     store: &mut StateStore,
     namespace: &StateNamespace,
     to: &str,
@@ -147,15 +159,28 @@ fn submit(
                     &attribution(),
                 )?
                 .expect("a queued delivery to lease");
-            tx.transition_delivery_attempt(
-                namespace,
-                &leased.attempt_id,
-                DeliveryState::Submitted,
-                &attribution(),
-            )?;
             Ok(leased.attempt_id)
         })
         .unwrap()
+}
+
+fn submit(
+    store: &mut StateStore,
+    namespace: &StateNamespace,
+    to: &str,
+) -> namedrop::DeliveryAttemptId {
+    let attempt = lease(store, namespace, to);
+    store
+        .transaction(|tx| {
+            tx.transition_delivery_attempt(
+                namespace,
+                &attempt,
+                DeliveryState::Submitted,
+                &attribution(),
+            )
+        })
+        .unwrap();
+    attempt
 }
 
 fn snapshot(store: &mut StateStore, namespace: &StateNamespace) -> DashboardSnapshot {
@@ -343,6 +368,8 @@ fn a_held_delivery_needs_the_human_and_blocks_its_recipient() {
 
     assert_eq!(held.messages[0].legs[0].stage, LegStage::Held);
     assert_eq!(held.attention.len(), 1);
+    assert_eq!(held.attention[0].subject_alias.as_deref(), Some("b"));
+    assert_eq!(held.attention[0].message_id.as_deref(), Some("m1"));
     assert_eq!(held.health, SpaceHealth::NeedsYou { items: 1 });
     assert_eq!(lane(&held, "@b").activity, Activity::Blocked);
     assert_eq!(lane(&held, "@b").mailbox[0].state, DeliveryState::Held);
@@ -610,6 +637,11 @@ fn a_permission_blocked_agent_needs_the_human_until_its_status_changes() {
     assert_eq!(json["wire"], 1);
     assert_eq!(json["attention"][0]["source_kind"], "agent_status");
     assert_eq!(json["attention"][0]["opened_at_ms"], 20);
+    assert_eq!(json["attention"][0]["subject_alias"], "a");
+    assert_eq!(
+        json["attention"][0].get("message_id"),
+        Some(&serde_json::Value::Null)
+    );
     let rows = store.dashboard_rows(&ns).unwrap();
     for now_ms in [0, 2_000, 3_000] {
         let rebuilt = build(&rows, None, now_ms);
@@ -739,6 +771,8 @@ fn permission_blocking_outranks_acknowledged_work() {
     observe_status(&mut store, &ns, "b", "blocked", 20);
 
     let blocked = snapshot(&mut store, &ns);
+    assert_eq!(blocked.attention[0].subject_alias.as_deref(), Some("b"));
+    assert_eq!(blocked.attention[0].message_id.as_deref(), Some("m1"));
     assert_eq!(lane(&blocked, "@b").activity, Activity::Blocked);
     assert_eq!(blocked.health, SpaceHealth::NeedsYou { items: 1 });
     assert_eq!(
@@ -940,6 +974,8 @@ fn the_wire_json_matches_the_frozen_contract() {
     let json = serde_json::to_value(snapshot(&mut store, &ns)).unwrap();
 
     assert_eq!(json["wire"], 1);
+    assert_eq!(json["attention"], serde_json::json!([]));
+    assert_eq!(json["terminal_runs"], serde_json::json!([]));
     assert_eq!(json["space"]["key"], SpaceKey::of(&ns).as_str());
     assert_eq!(json["space"]["workspace_id"], "w1");
     assert_eq!(
@@ -1088,4 +1124,888 @@ fn a_rebound_agent_ignores_status_from_its_old_binding() {
         lane(&snapshot(&mut store, &ns), "@a").activity,
         Activity::Offline
     );
+}
+
+#[test]
+fn an_unanswered_request_uses_its_current_recipient_alias_and_message() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    send(&mut store, &ns, "m1", "a", "b", "Review", None);
+    let attempt = submit(&mut store, &ns, "b");
+    store
+        .transaction(|tx| {
+            tx.acknowledge_delivery_attempt(
+                &ns,
+                &attempt,
+                "ack-1",
+                &AgentSessionId::new("session-w1-b"),
+                &attribution(),
+            )?;
+            tx.transition_delivery_attempt(&ns, &attempt, DeliveryState::Settled, &attribution())?;
+            tx.replace_alias(&ns, &id(&ns, "b"), "reviewer", &attribution())
+        })
+        .unwrap();
+
+    let json = serde_json::to_value(snapshot(&mut store, &ns)).unwrap();
+    assert_eq!(json["attention"].as_array().unwrap().len(), 1);
+    assert_eq!(json["attention"][0]["source_kind"], "agent_disposition");
+    assert_eq!(json["attention"][0]["subject_alias"], "reviewer");
+    assert_eq!(json["attention"][0]["message_id"], "m1");
+    assert_eq!(json["participants"][1]["alias"], "@reviewer");
+}
+
+#[test]
+fn nonmessage_attention_uses_its_source_and_serializes_absent_links_as_null() {
+    use namedrop::{AttentionItemDraft, AttentionItemId, AttentionSourceKind};
+
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    send(&mut store, &ns, "m1", "a", "b", "Review", None);
+    store
+        .transaction(|tx| {
+            tx.issue_integration_challenge(
+                &ns,
+                "registration-1",
+                &id(&ns, "b"),
+                namedrop::AgentRuntime::Codex,
+                "nonce",
+                &attribution(),
+            )?;
+            tx.create_context_grant(
+                &ns,
+                &ContextGrantDraft {
+                    id: ContextGrantId::new("grant-1"),
+                    thread_id: ThreadId::new("thread-w1"),
+                    source_address_id: id(&ns, "a"),
+                    grantee_address_id: id(&ns, "b"),
+                    pane_binding_id: PaneBindingId::new("binding-w1-a"),
+                    agent_session_id: AgentSessionId::new("session-w1-a"),
+                },
+                &attribution(),
+            )?;
+            tx.replace_alias(&ns, &id(&ns, "b"), "reviewer", &attribution())?;
+            tx.retire_pane_address(&ns, &id(&ns, "a"), &attribution())?;
+            tx.release_alias(&ns, "a", &attribution())?;
+            for (number, kind, source) in [
+                (0, AttentionSourceKind::PaneBinding, "address-w1-a"),
+                (
+                    1,
+                    AttentionSourceKind::IntegrationRegistration,
+                    "registration-1",
+                ),
+                (2, AttentionSourceKind::ContextGrant, "grant-1"),
+                (3, AttentionSourceKind::AutomaticReplyLimit, "thread-w1"),
+                (4, AttentionSourceKind::Coordination, "address-w1-b"),
+                (
+                    5,
+                    AttentionSourceKind::IntegrationRegistration,
+                    "integration-package-codex",
+                ),
+                (6, AttentionSourceKind::DeliveryAttempt, "missing-attempt"),
+                (7, AttentionSourceKind::AgentDisposition, "missing-attempt"),
+                (8, AttentionSourceKind::PaneBinding, "missing-address"),
+                (
+                    9,
+                    AttentionSourceKind::IntegrationRegistration,
+                    "missing-registration",
+                ),
+                (10, AttentionSourceKind::ContextGrant, "missing-grant"),
+            ] {
+                tx.open_attention_item(
+                    &ns,
+                    &AttentionItemDraft {
+                        id: AttentionItemId::new(format!("attention-{number:02}")),
+                        source_kind: kind,
+                        source_id: source.to_owned(),
+                        summary: "@misleading mentions should not determine attribution".to_owned(),
+                    },
+                    &attribution(),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let json = serde_json::to_value(snapshot(&mut store, &ns)).unwrap();
+    let cards = json["attention"].as_array().unwrap();
+    assert_eq!(cards.len(), 11);
+    for (number, card) in cards.iter().enumerate() {
+        let expected = match number {
+            0 => serde_json::json!("a"),
+            1 | 2 => serde_json::json!("reviewer"),
+            _ => serde_json::Value::Null,
+        };
+        assert_eq!(card.get("subject_alias"), Some(&expected), "{card}");
+        assert_eq!(
+            card.get("message_id"),
+            Some(&serde_json::Value::Null),
+            "{card}"
+        );
+    }
+}
+
+#[test]
+fn attention_links_use_the_namespace_even_when_attempt_and_address_ids_repeat() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let first = seed_space(&mut store, "w1", &["a", "b"]);
+    let second = seed_space_on_socket(&mut store, "socket-b", "w1", &["a", "b"]);
+    for (ns, message) in [(&first, "first-message"), (&second, "second-message")] {
+        send(&mut store, ns, message, "a", "b", "Review", None);
+        let attempt = submit(&mut store, ns, "b");
+        store
+            .transaction(|tx| tx.hold_delivery_attempt(ns, &attempt, &attribution()))
+            .unwrap();
+    }
+    assert_eq!(
+        snapshot(&mut store, &first).attention[0]
+            .message_id
+            .as_deref(),
+        Some("first-message")
+    );
+    assert_eq!(
+        snapshot(&mut store, &second).attention[0]
+            .message_id
+            .as_deref(),
+        Some("second-message")
+    );
+}
+
+#[test]
+fn held_attention_uses_its_namespace_when_delivery_and_address_ids_repeat() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let first = seed_space(&mut store, "w1", &["a", "b"]);
+    let second = seed_space_on_socket(&mut store, "socket-b", "w1", &["a", "b"]);
+    let cases = [
+        (&first, "first-message", "first-reviewer"),
+        (&second, "second-message", "second-reviewer"),
+    ];
+    for (ns, message, alias) in cases {
+        store
+            .transaction(|tx| {
+                tx.append_message(
+                    ns,
+                    &MessageDraft {
+                        thread_id: ThreadId::new("thread-w1"),
+                        message_id: MessageId::new(message),
+                        in_reply_to: None,
+                        author_address_id: id(ns, "a"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "a".to_owned(),
+                        author_agent_session_snapshot: Some(AgentSessionId::new("session-w1-a")),
+                        request_id: format!("request-{message}"),
+                        authored_source: "@b Review".to_owned(),
+                        body: "Review".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: id(ns, "b"),
+                            alias_snapshot: "b".to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new("session-w1-b")),
+                            delivery_id: DeliveryId::new("shared-delivery"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &attribution(),
+                )?;
+                tx.replace_alias(ns, &id(ns, "b"), alias, &attribution())
+            })
+            .unwrap();
+        let attempt = submit(&mut store, ns, "b");
+        store
+            .transaction(|tx| tx.hold_delivery_attempt(ns, &attempt, &attribution()))
+            .unwrap();
+    }
+    for (ns, message, alias) in cases {
+        let json = serde_json::to_value(snapshot(&mut store, ns)).unwrap();
+        let cards = json["attention"].as_array().unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0]["source_kind"], "delivery_attempt");
+        assert_eq!(cards[0]["message_id"], message);
+        assert_eq!(cards[0]["subject_alias"], alias);
+    }
+}
+
+#[test]
+fn attention_fallback_uses_its_namespace_when_message_and_address_ids_repeat() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let first = seed_space(&mut store, "w1", &["a", "b"]);
+    let second = seed_space_on_socket(&mut store, "socket-b", "w1", &["a", "b"]);
+    let cases = [(&first, "first-reviewer"), (&second, "second-reviewer")];
+    for (ns, alias) in cases {
+        store
+            .transaction(|tx| {
+                tx.replace_alias(ns, &id(ns, "b"), alias, &attribution())?;
+                tx.append_message(
+                    ns,
+                    &MessageDraft {
+                        thread_id: ThreadId::new("thread-w1"),
+                        message_id: MessageId::new("shared-message"),
+                        in_reply_to: None,
+                        author_address_id: id(ns, "a"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "a".to_owned(),
+                        author_agent_session_snapshot: Some(AgentSessionId::new("session-w1-a")),
+                        request_id: "shared-request".to_owned(),
+                        authored_source: format!("@{alias} Review"),
+                        body: "Review".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: id(ns, "b"),
+                            alias_snapshot: alias.to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new("session-w1-b")),
+                            delivery_id: DeliveryId::new("shared-delivery"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &attribution(),
+                )?;
+                tx.replace_alias(ns, &id(ns, "b"), "renamed-reviewer", &attribution())
+            })
+            .unwrap();
+        let attempt = submit(&mut store, ns, "b");
+        store
+            .transaction(|tx| tx.hold_delivery_attempt(ns, &attempt, &attribution()))
+            .unwrap();
+    }
+    let connection = rusqlite::Connection::open(directory.path().join("namedrop.sqlite3")).unwrap();
+    for (ns, alias) in cases {
+        connection
+            .execute(
+                "INSERT INTO space_envoys (session_socket_id, worktree_id, address_id,
+                origin_space_id, origin_address_id, origin_alias, origin_label, host_label)
+             VALUES (?1, 'w1', ?2, 'w2', ?2, ?3, 'remote', 'local')",
+                rusqlite::params![ns.session_socket_id.as_str(), id(ns, "b").as_str(), alias],
+            )
+            .unwrap();
+    }
+    for (ns, alias) in cases {
+        let rows = store.dashboard_rows(ns).unwrap();
+        assert!(
+            rows.addresses
+                .iter()
+                .all(|address| address.address_id != id(ns, "b").as_str())
+        );
+        let json = serde_json::to_value(build(&rows, None, 0)).unwrap();
+        let cards = json["attention"].as_array().unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0]["source_kind"], "delivery_attempt");
+        assert_eq!(cards[0]["message_id"], "shared-message");
+        assert_eq!(cards[0]["subject_alias"], alias);
+    }
+}
+
+#[test]
+fn nonmessage_attention_uses_its_namespace_when_registration_and_grant_ids_repeat() {
+    use namedrop::{AttentionItemDraft, AttentionItemId, AttentionSourceKind};
+
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let first = seed_space(&mut store, "w1", &["a", "b", "c"]);
+    let second = seed_space_on_socket(&mut store, "socket-b", "w1", &["a", "b", "c"]);
+    let cases = [
+        (&first, "b", "c", "first-registration", "first-grantee"),
+        (&second, "c", "b", "second-registration", "second-grantee"),
+    ];
+    for (ns, registration_target, grantee, registration_alias, grant_alias) in cases {
+        send(
+            &mut store,
+            ns,
+            "grant-request",
+            "a",
+            grantee,
+            "Review",
+            None,
+        );
+        store
+            .transaction(|tx| {
+                tx.issue_integration_challenge(
+                    ns,
+                    "shared-registration",
+                    &id(ns, registration_target),
+                    namedrop::AgentRuntime::Codex,
+                    "nonce",
+                    &attribution(),
+                )?;
+                tx.create_context_grant(
+                    ns,
+                    &ContextGrantDraft {
+                        id: ContextGrantId::new("shared-grant"),
+                        thread_id: ThreadId::new("thread-w1"),
+                        source_address_id: id(ns, "a"),
+                        grantee_address_id: id(ns, grantee),
+                        pane_binding_id: PaneBindingId::new("binding-w1-a"),
+                        agent_session_id: AgentSessionId::new("session-w1-a"),
+                    },
+                    &attribution(),
+                )?;
+                tx.replace_alias(
+                    ns,
+                    &id(ns, registration_target),
+                    registration_alias,
+                    &attribution(),
+                )?;
+                tx.replace_alias(ns, &id(ns, grantee), grant_alias, &attribution())?;
+                for (source_kind, source_id) in [
+                    (
+                        AttentionSourceKind::IntegrationRegistration,
+                        "shared-registration",
+                    ),
+                    (AttentionSourceKind::ContextGrant, "shared-grant"),
+                ] {
+                    tx.open_attention_item(
+                        ns,
+                        &AttentionItemDraft {
+                            id: AttentionItemId::new(format!("attention-{source_id}")),
+                            source_kind,
+                            source_id: source_id.to_owned(),
+                            summary: "Needs attention".to_owned(),
+                        },
+                        &attribution(),
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+    for (ns, _, _, registration_alias, grant_alias) in cases {
+        let json = serde_json::to_value(snapshot(&mut store, ns)).unwrap();
+        let cards = json["attention"].as_array().unwrap();
+        assert_eq!(cards.len(), 2);
+        for (kind, alias) in [
+            ("integration_registration", registration_alias),
+            ("context_grant", grant_alias),
+        ] {
+            let card = cards
+                .iter()
+                .find(|card| card["source_kind"] == kind)
+                .unwrap();
+            assert_eq!(card["subject_alias"], alias, "{kind}");
+            assert_eq!(card.get("message_id"), Some(&serde_json::Value::Null));
+        }
+    }
+}
+
+#[test]
+fn attention_links_survive_a_message_falling_outside_the_frame() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    send(&mut store, &ns, "old-request", "a", "b", "Review", None);
+    let attempt = submit(&mut store, &ns, "b");
+    store
+        .transaction(|tx| {
+            tx.acknowledge_delivery_attempt(
+                &ns,
+                &attempt,
+                "ack-1",
+                &AgentSessionId::new("session-w1-b"),
+                &attribution(),
+            )
+        })
+        .unwrap();
+    observe_status(&mut store, &ns, "b", "blocked", 20);
+    for number in 0..150 {
+        send(
+            &mut store,
+            &ns,
+            &format!("new-{number}"),
+            "a",
+            "a",
+            "Newer message",
+            None,
+        );
+    }
+    let blocked = snapshot(&mut store, &ns);
+    assert_eq!(blocked.messages.len(), 150);
+    assert!(
+        blocked
+            .messages
+            .iter()
+            .all(|message| message.message_id != "old-request")
+    );
+    assert_eq!(
+        blocked.attention[0].message_id.as_deref(),
+        Some("old-request")
+    );
+    store
+        .transaction(|tx| tx.hold_delivery_attempt(&ns, &attempt, &attribution()))
+        .unwrap();
+    let held = snapshot(&mut store, &ns);
+    assert_eq!(held.attention[0].message_id.as_deref(), Some("old-request"));
+    assert_eq!(held.attention[0].subject_alias.as_deref(), Some("b"));
+    assert_eq!(held.attention[1].message_id, None);
+}
+
+#[test]
+fn blocked_status_does_not_link_queued_or_inactive_work() {
+    for state in [
+        None,
+        Some(DeliveryState::Dispatching),
+        Some(DeliveryState::Submitted),
+        Some(DeliveryState::Held),
+        Some(DeliveryState::Failed),
+        Some(DeliveryState::Cancelled),
+        Some(DeliveryState::Settled),
+    ] {
+        let directory = TestDirectory::new();
+        let mut store = StateStore::open(directory.path()).unwrap();
+        let ns = seed_space(&mut store, "w1", &["a", "b"]);
+        send(&mut store, &ns, "m1", "a", "b", "Review", None);
+        if let Some(state) = state {
+            let attempt = if matches!(state, DeliveryState::Dispatching | DeliveryState::Failed) {
+                lease(&mut store, &ns, "b")
+            } else {
+                submit(&mut store, &ns, "b")
+            };
+            store
+                .transaction(|tx| {
+                    if state == DeliveryState::Settled {
+                        tx.acknowledge_delivery_attempt(
+                            &ns,
+                            &attempt,
+                            "ack-1",
+                            &AgentSessionId::new("session-w1-b"),
+                            &attribution(),
+                        )?;
+                    }
+                    if !matches!(state, DeliveryState::Dispatching | DeliveryState::Submitted) {
+                        tx.transition_delivery_attempt(&ns, &attempt, state, &attribution())?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+        observe_status(&mut store, &ns, "b", "blocked", 20);
+        let frame = snapshot(&mut store, &ns);
+        let card = frame
+            .attention
+            .iter()
+            .find(|card| {
+                card.source_kind == namedrop::dashboard::snapshot::AttentionSourceKind::AgentStatus
+            })
+            .unwrap();
+        assert_eq!(card.subject_alias.as_deref(), Some("b"));
+        assert_eq!(card.message_id, None, "state: {state:?}");
+    }
+}
+
+#[test]
+fn blocked_status_does_not_link_an_attempt_from_a_previous_session_or_binding() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    send(&mut store, &ns, "m1", "a", "b", "Review", None);
+    let attempt = submit(&mut store, &ns, "b");
+    store
+        .transaction(|tx| {
+            tx.acknowledge_delivery_attempt(
+                &ns,
+                &attempt,
+                "ack-1",
+                &AgentSessionId::new("session-w1-b"),
+                &attribution(),
+            )
+        })
+        .unwrap();
+    store
+        .transaction(|tx| {
+            tx.observe_agent_session(
+                &ns,
+                "replacement-session",
+                &id(&ns, "b"),
+                &AgentSessionId::new("session-new"),
+                "blocked",
+                &MutationAttribution::new(ActorKind::Plugin, "test", 20),
+            )
+        })
+        .unwrap();
+    let replaced = snapshot(&mut store, &ns);
+    assert_eq!(replaced.attention[0].subject_alias.as_deref(), Some("b"));
+    assert_eq!(replaced.attention[0].message_id, None);
+
+    observe_status(&mut store, &ns, "b", "blocked", 30);
+    assert_eq!(
+        snapshot(&mut store, &ns).attention[0].message_id.as_deref(),
+        Some("m1")
+    );
+    store
+        .transaction(|tx| {
+            tx.rebind_pane(
+                &ns,
+                &PaneBindingId::new("binding-new"),
+                &id(&ns, "b"),
+                "pane-new",
+                &MutationAttribution::new(ActorKind::Plugin, "test", 40),
+            )?;
+            tx.observe_agent_session(
+                &ns,
+                "rebound-blocked",
+                &id(&ns, "b"),
+                &AgentSessionId::new("session-w1-b"),
+                "blocked",
+                &MutationAttribution::new(ActorKind::Plugin, "test", 50),
+            )
+        })
+        .unwrap();
+    let rebound = snapshot(&mut store, &ns);
+    let card = rebound
+        .attention
+        .iter()
+        .find(|card| {
+            card.source_kind == namedrop::dashboard::snapshot::AttentionSourceKind::AgentStatus
+        })
+        .unwrap();
+    assert_eq!(card.subject_alias.as_deref(), Some("b"));
+    assert_eq!(card.message_id, None);
+}
+
+#[test]
+fn a_terminal_mention_keeps_its_request_link_beyond_the_frame_window() {
+    let fixture = xws::Fixture::with_activated(1);
+    fixture.register_all_activated(1);
+    fixture.add_shell("w1", "pane-shell");
+    namedrop::execute_lifecycle_operation(
+        "name",
+        serde_json::json!({"alias": "shell", "pane_type": "terminal"}),
+        &fixture.runtime("w1", "pane-shell"),
+    )
+    .unwrap();
+    let sent = fixture.agent_send("w1", "pane-1-lead", "terminal-request", "@shell echo hi");
+    assert_eq!(fixture.run_terminal("w1", "pane-shell").unwrap(), 0);
+    let ns = StateNamespace::for_space("socket-a", "w1");
+    let mut store = StateStore::open(&fixture.state).unwrap();
+    let frame = snapshot(&mut store, &ns);
+    let json = serde_json::to_value(&frame).unwrap();
+    assert_eq!(frame.terminal_runs.len(), 1);
+    assert_eq!(json["terminal_runs"][0]["message_id"], sent["message_id"]);
+    assert_eq!(json["terminal_runs"][0]["exit_code"], 0);
+    assert_eq!(frame.terminal_runs[0].command.text, "echo hi");
+    let request = frame
+        .messages
+        .iter()
+        .find(|message| message.message_id == sent["message_id"].as_str().unwrap())
+        .unwrap();
+    let thread = request.thread_id.clone();
+    for number in 0..150 {
+        store
+            .transaction(|tx| {
+                tx.append_message(
+                    &ns,
+                    &MessageDraft {
+                        thread_id: ThreadId::new(&thread),
+                        message_id: MessageId::new(format!("new-{number}")),
+                        in_reply_to: None,
+                        author_address_id: PaneAddressId::new("address-w1-lead"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "lead".to_owned(),
+                        author_agent_session_snapshot: Some(AgentSessionId::new(
+                            "session-pane-1-lead",
+                        )),
+                        request_id: format!("new-request-{number}"),
+                        authored_source: "Newer message".to_owned(),
+                        body: "Newer message".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: PaneAddressId::new("address-w1-planner"),
+                            alias_snapshot: "planner".to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new(
+                                "session-pane-1-planner",
+                            )),
+                            delivery_id: DeliveryId::new(format!("new-delivery-{number}")),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &MutationAttribution::new(ActorKind::Plugin, "test", 100 + number),
+                )
+            })
+            .unwrap();
+    }
+    let old = snapshot(&mut store, &ns);
+    assert!(
+        old.messages
+            .iter()
+            .all(|message| message.message_id != sent["message_id"].as_str().unwrap())
+    );
+    assert_eq!(
+        serde_json::to_value(&old.terminal_runs).unwrap()[0]["message_id"],
+        sent["message_id"]
+    );
+}
+
+#[test]
+fn history_message_json_keeps_its_existing_keys_and_values() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    send(&mut store, &ns, "m1", "a", "b", "Review", None);
+    observe_status(&mut store, &ns, "b", "blocked", 20);
+    let history = store.dashboard_history(&ns, None, 50).unwrap().unwrap();
+    let mut rows = store.dashboard_rows(&ns).unwrap();
+    rows.messages = history.messages;
+    rows.legs = history.legs;
+    let json = serde_json::to_value(build(&rows, None, 0).messages).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!([{
+            "message_id": "m1",
+            "thread_id": "thread-w1",
+            "in_reply_to": null,
+            "at_ms": 10,
+            "author": "address-w1-a",
+            "kind": "mention",
+            "body": {"text": "Review", "truncated": false},
+            "legs": [{"to": "address-w1-b", "stage": {"stage": "queued"}}]
+        }])
+    );
+}
+
+#[test]
+fn attention_tracks_current_recipient_after_rename_and_alias_reuse() {
+    for unanswered in [false, true] {
+        let directory = TestDirectory::new();
+        let mut store = StateStore::open(directory.path()).unwrap();
+        let ns = seed_space(&mut store, "w1", &["a", "b"]);
+        send(&mut store, &ns, "m1", "a", "b", "Review", None);
+        let attempt = submit(&mut store, &ns, "b");
+        store
+            .transaction(|tx| {
+                if unanswered {
+                    tx.acknowledge_delivery_attempt(
+                        &ns,
+                        &attempt,
+                        "ack-1",
+                        &AgentSessionId::new("session-w1-b"),
+                        &attribution(),
+                    )?;
+                    tx.transition_delivery_attempt(
+                        &ns,
+                        &attempt,
+                        DeliveryState::Settled,
+                        &attribution(),
+                    )?;
+                } else {
+                    tx.hold_delivery_attempt(&ns, &attempt, &attribution())?;
+                }
+                tx.replace_alias(&ns, &id(&ns, "b"), "reviewer", &attribution())?;
+                tx.release_alias(&ns, "b", &attribution())?;
+                tx.create_pane_address(&ns, &address("new-owner-of-b", "b"), &attribution())?;
+                Ok(())
+            })
+            .unwrap();
+        let frame = snapshot(&mut store, &ns);
+        assert_eq!(frame.attention.len(), 1);
+        assert_eq!(
+            frame.attention[0].subject_alias.as_deref(),
+            Some("reviewer"),
+            "unanswered={unanswered}"
+        );
+        assert_eq!(frame.attention[0].message_id.as_deref(), Some("m1"));
+    }
+}
+
+#[test]
+fn multiple_recipient_attention_keeps_one_card_per_recipient() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b", "c", "d"]);
+    let space = ns.space_id.as_str();
+    let message = "m1";
+    let from = "a";
+    let to = ["b", "c", "d"];
+    store
+        .transaction(|tx| {
+            tx.append_message(
+                &ns,
+                &MessageDraft {
+                    thread_id: ThreadId::new(format!("thread-{space}")),
+                    message_id: MessageId::new(message),
+                    in_reply_to: None,
+                    author_address_id: id(&ns, from),
+                    author_kind: ActorKind::AgentSession,
+                    author_alias_snapshot: from.to_owned(),
+                    author_agent_session_snapshot: Some(AgentSessionId::new(format!(
+                        "session-{space}-{from}"
+                    ))),
+                    request_id: format!("request-{message}"),
+                    authored_source: "multi".to_owned(),
+                    body: "multi".to_owned(),
+                    grammar_version: "mention/v1".to_owned(),
+                    recipients: to
+                        .iter()
+                        .map(|t| MessageRecipientDraft {
+                            address_id: id(&ns, t),
+                            alias_snapshot: (*t).to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new(format!(
+                                "session-{space}-{t}"
+                            ))),
+                            delivery_id: DeliveryId::new(format!("delivery-{message}-{t}")),
+                        })
+                        .collect(),
+                    context_references: Vec::new(),
+                },
+                &attribution(),
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+    let held_b = submit(&mut store, &ns, "b");
+    let held_c = submit(&mut store, &ns, "c");
+    let failed_d = lease(&mut store, &ns, "d");
+    store
+        .transaction(|tx| {
+            tx.hold_delivery_attempt(&ns, &held_c, &attribution())?;
+            tx.transition_delivery_attempt(&ns, &failed_d, DeliveryState::Failed, &attribution())?;
+            tx.hold_delivery_attempt(&ns, &held_b, &attribution())
+        })
+        .unwrap();
+    let frame = snapshot(&mut store, &ns);
+    let mut cards: Vec<_> = frame
+        .attention
+        .iter()
+        .map(|card| (card.subject_alias.as_deref(), card.message_id.as_deref()))
+        .collect();
+    cards.sort();
+    assert_eq!(
+        cards,
+        vec![
+            (Some("b"), Some("m1")),
+            (Some("c"), Some("m1")),
+            (Some("d"), Some("m1")),
+        ]
+    );
+
+    store
+        .transaction(|tx| {
+            tx.replace_alias(&ns, &id(&ns, "c"), "remote-c", &attribution())?;
+            tx.replace_alias(&ns, &id(&ns, "d"), "remote-d", &attribution())
+        })
+        .unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("namedrop.sqlite3")).unwrap();
+    for recipient in ["c", "d"] {
+        connection
+            .execute(
+                "INSERT INTO space_envoys (session_socket_id, worktree_id, address_id,
+                origin_space_id, origin_address_id, origin_alias, origin_label, host_label)
+             VALUES ('socket-a', 'w1', ?1, 'w2', ?1, ?2, 'remote', 'local')",
+                rusqlite::params![id(&ns, recipient).as_str(), recipient],
+            )
+            .unwrap();
+    }
+    let rows = store.dashboard_rows(&ns).unwrap();
+    assert_eq!(rows.addresses.len(), 2);
+    let frame = build(&rows, None, 0);
+    let mut cards: Vec<_> = frame
+        .attention
+        .iter()
+        .map(|card| (card.subject_alias.as_deref(), card.message_id.as_deref()))
+        .collect();
+    cards.sort();
+    assert_eq!(
+        cards,
+        vec![
+            (Some("b"), Some("m1")),
+            (Some("c"), Some("m1")),
+            (Some("d"), Some("m1")),
+        ]
+    );
+}
+
+#[test]
+fn terminal_runs_keep_their_own_request_messages() {
+    let fixture = xws::Fixture::with_activated(1);
+    fixture.register_all_activated(1);
+    fixture.add_shell("w1", "pane-shell");
+    namedrop::execute_lifecycle_operation(
+        "name",
+        serde_json::json!({"alias": "shell", "pane_type": "terminal"}),
+        &fixture.runtime("w1", "pane-shell"),
+    )
+    .unwrap();
+    let first = fixture.agent_send("w1", "pane-1-lead", "req-one", "@shell echo one");
+    assert_eq!(fixture.run_terminal("w1", "pane-shell").unwrap(), 0);
+    fixture.advance(1000);
+    let second = fixture.agent_send("w1", "pane-1-planner", "req-two", "@shell echo two");
+    fixture.drain("w1");
+    assert_eq!(fixture.run_terminal("w1", "pane-shell").unwrap(), 0);
+    let ns = StateNamespace::for_space("socket-a", "w1");
+    let mut store = StateStore::open(&fixture.state).unwrap();
+    let frame = snapshot(&mut store, &ns);
+    let runs: Vec<_> = frame
+        .terminal_runs
+        .iter()
+        .map(|run| (run.command.text.as_str(), run.message_id.as_deref()))
+        .collect();
+    assert_eq!(
+        runs,
+        vec![
+            ("echo two", second["message_id"].as_str()),
+            ("echo one", first["message_id"].as_str()),
+        ]
+    );
+}
+
+#[test]
+fn terminal_links_use_the_namespace_when_delivery_and_attempt_ids_repeat() {
+    let dir = TestDirectory::new();
+    let mut store = StateStore::open(dir.path()).unwrap();
+    let n1 = seed_space(&mut store, "w1", &["a", "b"]);
+    let n2 = seed_space_on_socket(&mut store, "socket-b", "w1", &["a", "b"]);
+    for (ns, msg) in [(&n1, "m-first"), (&n2, "m-second")] {
+        let space = ns.space_id.as_str();
+        store
+            .transaction(|tx| {
+                tx.append_message(
+                    ns,
+                    &MessageDraft {
+                        thread_id: ThreadId::new(format!("thread-{space}")),
+                        message_id: MessageId::new(msg),
+                        in_reply_to: None,
+                        author_address_id: id(ns, "a"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "a".to_owned(),
+                        author_agent_session_snapshot: Some(AgentSessionId::new(format!(
+                            "session-{space}-a"
+                        ))),
+                        request_id: format!("request-{msg}"),
+                        authored_source: "@b echo".to_owned(),
+                        body: "echo".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: id(ns, "b"),
+                            alias_snapshot: "b".to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new(format!(
+                                "session-{space}-b"
+                            ))),
+                            delivery_id: DeliveryId::new("delivery-shared"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &attribution(),
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        submit(&mut store, ns, "b");
+    }
+    drop(store);
+    let db = rusqlite::Connection::open(dir.path().join("namedrop.sqlite3")).unwrap();
+    db.execute_batch("INSERT INTO terminal_executions(session_socket_id, worktree_id, attempt_id, terminal_id, command, started_at_ms, completed_at_ms, exit_code, output)
+          VALUES ('socket-a','w1','attempt-w1-b','t1','echo first',50,60,0,'first'),
+                 ('socket-b','w1','attempt-w1-b','t1','echo second',55,65,3,'second');").unwrap();
+    let fk: i64 = db
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(fk, 0);
+    let mut store = StateStore::open(dir.path()).unwrap();
+    for (ns, want) in [(&n1, "m-first"), (&n2, "m-second")] {
+        let frame = snapshot(&mut store, ns);
+        assert_eq!(frame.terminal_runs.len(), 1);
+        assert_eq!(frame.terminal_runs[0].message_id.as_deref(), Some(want));
+    }
 }
