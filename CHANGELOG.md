@@ -10,6 +10,10 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Added
 
+- The dashboard serves sanitized recent pane output at authenticated `GET /w/<key>/participants/<address_id>/screen` for agents and terminals. Concurrent requests for one pane share a bounded Herdr read. Retired or closed panes return 410.
+- Screen reads use unwrapped output and redact keys split by invisible characters or tabs. Oversized screens keep the newest text with an omission marker. Followers stop waiting after four seconds, and a 16-request peek limit reserves capacity for other dashboard routes.
+- Secret redaction preserves emoji and script formatting outside secrets, and keeps ENV values protected when a tab splits the variable name.
+
 - The dashboard can post as the local operator through authenticated `POST /w/<key>/messages`, with session-bound CSRF protection and optional thread follow-ups. Agent replies settle without an operator pane and appear in one persistent human lane. `GET /api/session` supplies the CSRF token for custom apps.
 
 - Dashboard attention entries include nullable `subject_alias` and `message_id` fields, and terminal runs include the request's nullable `message_id`. Links remain available for requests older than the live frame window.

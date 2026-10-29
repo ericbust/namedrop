@@ -1,10 +1,11 @@
 use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
 use super::server_files::{ServerFiles, Token, UiSource, open_directory};
 use super::snapshot::{self, SpaceKey};
-use crate::StateStore;
+use crate::{HerdrCommandExecutor, ProcessHerdr, StateStore, store::dashboard::ScreenPane};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     ffi::CString,
     fs::File,
     io::{self, BufRead, BufReader, Read, Write},
@@ -15,7 +16,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
     },
@@ -30,6 +31,8 @@ const BODY_LIMIT: usize = 64 * 1024;
 const HEADER_LIMIT: u64 = 8 * 1024;
 const PING_EVERY: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 64;
+// Followers occupy HTTP handlers too. Keep 48 connection slots for other routes.
+const MAX_SCREEN_REQUESTS: usize = 16;
 const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
 style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; \
 base-uri 'none'; form-action 'none'\r\nX-Frame-Options: DENY\r\n\
@@ -50,6 +53,7 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
     let next_id = Arc::new(AtomicU64::new(1));
     let open = Arc::new(AtomicUsize::new(0));
     let history_store = Arc::new(Mutex::new(HistoryStore::Unopened));
+    let screens = Arc::new(ScreenReads::default());
     for mut stream in listener.incoming().flatten() {
         if stop.load(Ordering::Acquire) {
             break;
@@ -70,9 +74,10 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
         let front = front.clone();
         let next_id = next_id.clone();
         let history_store = history_store.clone();
+        let screens = screens.clone();
         thread::spawn(move || {
             let _permit = permit;
-            let _ = serve_connection(stream, &front, &next_id, &history_store);
+            let _ = serve_connection(stream, &front, &next_id, &history_store, &screens);
         });
     }
 }
@@ -104,6 +109,250 @@ impl HistoryStore {
             Self::Failed => Err(Status::Unavailable),
         }
     }
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct ScreenTarget {
+    socket: String,
+    pane: String,
+}
+
+type ScreenResult = Result<Arc<str>, Status>;
+
+#[derive(Default)]
+struct ScreenReads {
+    active: AtomicUsize,
+    flights: Mutex<HashMap<ScreenTarget, Arc<ScreenFlight>>>,
+}
+
+#[derive(Default)]
+struct ScreenFlight {
+    result: Mutex<Option<ScreenResult>>,
+    ready: Condvar,
+}
+
+struct ScreenPermit<'a>(&'a AtomicUsize);
+
+impl Drop for ScreenPermit<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl ScreenReads {
+    fn try_admit(&self) -> Result<ScreenPermit<'_>, Status> {
+        self.active
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_SCREEN_REQUESTS).then_some(active + 1)
+            })
+            .map(|_| ScreenPermit(&self.active))
+            .map_err(|_| Status::Unavailable)
+    }
+
+    fn read(&self, target: ScreenTarget) -> ScreenResult {
+        let (flight, leader) = {
+            let mut flights = self.flights.lock().map_err(|_| Status::Unavailable)?;
+            match flights.get(&target) {
+                Some(flight) => (flight.clone(), false),
+                None => {
+                    let flight = Arc::new(ScreenFlight::default());
+                    flights.insert(target.clone(), flight.clone());
+                    (flight, true)
+                }
+            }
+        };
+        if leader {
+            let mut completion = ScreenCompletion {
+                reads: self,
+                target: &target,
+                flight: &flight,
+                pending: true,
+            };
+            let result = read_screen(&target);
+            completion.publish(result.clone());
+            result
+        } else {
+            let result = flight.result.lock().map_err(|_| Status::Unavailable)?;
+            let result = flight
+                .ready
+                .wait_timeout_while(result, Duration::from_secs(4), |result| result.is_none())
+                .map_err(|_| Status::Unavailable)?;
+            result
+                .0
+                .as_ref()
+                .cloned()
+                .unwrap_or(Err(Status::Unavailable))
+        }
+    }
+}
+
+struct ScreenCompletion<'a> {
+    reads: &'a ScreenReads,
+    target: &'a ScreenTarget,
+    flight: &'a Arc<ScreenFlight>,
+    pending: bool,
+}
+
+impl ScreenCompletion<'_> {
+    fn publish(&mut self, result: ScreenResult) {
+        let mut flights = self.reads.flights.lock().unwrap_or_else(|e| e.into_inner());
+        let mut outcome = self.flight.result.lock().unwrap_or_else(|e| e.into_inner());
+        *outcome = Some(result);
+        if flights
+            .get(self.target)
+            .is_some_and(|entry| Arc::ptr_eq(entry, self.flight))
+        {
+            flights.remove(self.target);
+        }
+        self.pending = false;
+        self.flight.ready.notify_all();
+    }
+}
+
+impl Drop for ScreenCompletion<'_> {
+    fn drop(&mut self) {
+        if self.pending {
+            self.publish(Err(Status::Unavailable));
+        }
+    }
+}
+
+fn resolve_screen(
+    history: &mut HistoryStore,
+    state: &Path,
+    key: &SpaceKey,
+    address_id: &str,
+) -> Result<ScreenTarget, Status> {
+    let store = history.store(state)?;
+    let namespace = store
+        .dashboard_spaces()
+        .map_err(|_| Status::Unavailable)?
+        .into_iter()
+        .find(|space| SpaceKey::of(&space.namespace) == *key)
+        .map(|space| space.namespace)
+        .ok_or(Status::NotFound)?;
+    match store
+        .dashboard_screen_pane(&namespace, address_id)
+        .map_err(|_| Status::Unavailable)?
+    {
+        ScreenPane::Missing => Err(Status::NotFound),
+        ScreenPane::Gone => Err(Status::Gone),
+        ScreenPane::Bound(pane) => Ok(ScreenTarget {
+            socket: namespace.session_socket_id,
+            pane,
+        }),
+    }
+}
+
+fn read_screen(target: &ScreenTarget) -> ScreenResult {
+    let output = ProcessHerdr::default()
+        .with_socket(Some(target.socket.clone()))
+        .execute_bounded(
+            &[
+                "pane",
+                "read",
+                &target.pane,
+                "--source",
+                "recent-unwrapped",
+                "--lines",
+                "200",
+            ],
+            Duration::from_secs(3),
+            &AtomicBool::new(false),
+            1024 * 1024,
+        )
+        .map_err(|error| {
+            if serde_json::from_str::<serde_json::Value>(&error)
+                .ok()
+                .is_some_and(|value| {
+                    value.pointer("/error/code").and_then(|code| code.as_str())
+                        == Some("pane_not_found")
+                })
+            {
+                Status::Gone
+            } else {
+                Status::Unavailable
+            }
+        })?;
+    let clean = strip_terminal_sequences(&output.stdout);
+    let safe = snapshot::SafeText::from_untrusted(&clean, usize::MAX).text;
+    Ok(newest_screen_text(&safe).into())
+}
+
+fn newest_screen_text(text: &str) -> String {
+    const MAX_CHARS: usize = 64 * 1024;
+    const MARKER: &str = "[Earlier screen text omitted]\n";
+    if text.chars().count() <= MAX_CHARS {
+        return text.to_owned();
+    }
+    let budget = MAX_CHARS - MARKER.chars().count();
+    let (start, _) = text.char_indices().rev().nth(budget - 1).unwrap();
+    let mut suffix = &text[start..];
+    if !text[..start].ends_with('\n')
+        && let Some((_, whole_lines)) = suffix.split_once('\n')
+        && !whole_lines.is_empty()
+    {
+        suffix = whole_lines;
+    }
+    format!("{MARKER}{suffix}")
+}
+
+fn strip_terminal_sequences(raw: &str) -> String {
+    enum State {
+        Ground,
+        Escape,
+        Csi,
+        ControlString { osc: bool },
+        StringEscape { osc: bool },
+    }
+    let mut state = State::Ground;
+    let mut text = String::with_capacity(raw.len());
+    for c in raw
+        .chars()
+        .filter(|c| !crate::domain::is_invisible_format(*c))
+    {
+        state = match state {
+            State::Ground => match c {
+                '\u{1b}' => State::Escape,
+                '\u{9b}' => State::Csi,
+                '\u{9d}' => State::ControlString { osc: true },
+                '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => State::ControlString { osc: false },
+                _ => {
+                    if c == '\n' || c == '\t' || !c.is_control() {
+                        text.push(c);
+                    }
+                    State::Ground
+                }
+            },
+            State::Escape => match c {
+                '\n' => State::Ground,
+                '[' => State::Csi,
+                ']' => State::ControlString { osc: true },
+                'P' | 'X' | '^' | '_' => State::ControlString { osc: false },
+                '\u{1b}' => State::Escape,
+                '\u{30}'..='\u{7e}' => State::Ground,
+                _ => State::Escape,
+            },
+            State::Csi => match c {
+                '\u{40}'..='\u{7e}' => State::Ground,
+                '\u{1b}' => State::Escape,
+                _ => State::Csi,
+            },
+            State::ControlString { osc } => match c {
+                '\u{9c}' => State::Ground,
+                '\u{7}' if osc => State::Ground,
+                '\u{1b}' => State::StringEscape { osc },
+                _ => State::ControlString { osc },
+            },
+            State::StringEscape { osc } => match c {
+                '\\' | '\u{9c}' => State::Ground,
+                '\u{7}' if osc => State::Ground,
+                '\u{1b}' => State::StringEscape { osc },
+                _ => State::ControlString { osc },
+            },
+        };
+    }
+    text
 }
 
 struct ConnectionPermit(Arc<AtomicUsize>);
@@ -149,6 +398,7 @@ enum Status {
     Unauthorized,
     Forbidden,
     NotFound,
+    Gone,
     MethodNotAllowed,
     Unavailable,
     PayloadTooLarge,
@@ -162,6 +412,7 @@ impl Status {
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
             Self::NotFound => "404 Not Found",
+            Self::Gone => "410 Gone",
             Self::MethodNotAllowed => "405 Method Not Allowed",
             Self::Unavailable => "503 Service Unavailable",
         }
@@ -176,6 +427,7 @@ impl Status {
             Self::BadRequest => "Bad request.\n",
             Self::Forbidden => "Forbidden.\n",
             Self::NotFound => "Not found.\n",
+            Self::Gone => "This participant's pane is no longer available.\n",
             Self::MethodNotAllowed => "Method not allowed.\n",
             Self::Unavailable => "History is temporarily unavailable.\n",
         }
@@ -368,6 +620,10 @@ enum Route {
     Page,
     Session,
     Send(SpaceKey),
+    Screen {
+        key: SpaceKey,
+        address_id: String,
+    },
     Events(SpaceKey),
     Messages {
         key: SpaceKey,
@@ -409,6 +665,22 @@ fn route(
             .and_then(SpaceKey::parse)
             .ok_or(Status::NotFound)?;
         return Ok(Route::Send(key));
+    }
+    if let Some(rest) = path.strip_prefix("/w/") {
+        let segments: Vec<_> = rest.split('/').collect();
+        if segments.get(1) == Some(&"participants") {
+            authenticate_session(request, port, session)?;
+            authenticate_provenance(request, host)?;
+            let [key, "participants", address, "screen"] = segments.as_slice() else {
+                return Err(Status::NotFound);
+            };
+            let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+            let address_id = decode_asset_path(address).ok_or(Status::NotFound)?;
+            if address_id.is_empty() || address_id.contains('/') {
+                return Err(Status::NotFound);
+            }
+            return Ok(Route::Screen { key, address_id });
+        }
     }
     match path {
         "/healthz" => {
@@ -507,6 +779,10 @@ fn authenticate_mutation(request: &Request, session: &Token, host: &str) -> Resu
     {
         return Err(Status::Forbidden);
     }
+    authenticate_provenance(request, host)
+}
+
+fn authenticate_provenance(request: &Request, host: &str) -> Result<(), Status> {
     if request
         .header("origin")
         .is_some_and(|origin| origin != format!("http://{host}"))
@@ -579,6 +855,7 @@ fn serve_connection(
     front: &Front,
     next_id: &AtomicU64,
     history_store: &Mutex<HistoryStore>,
+    screens: &ScreenReads,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
@@ -621,6 +898,44 @@ fn serve_connection(
                 Err(status) => return respond_status(&mut writer, status),
             };
             send_operator_post(&mut writer, front, key, post)
+        }
+        Ok(Route::Screen { key, address_id }) => {
+            let _permit = match screens.try_admit() {
+                Ok(permit) => permit,
+                Err(status) => {
+                    return respond(
+                        &mut writer,
+                        status.line(),
+                        "text/plain; charset=utf-8",
+                        "",
+                        b"Screen is temporarily unavailable.\n",
+                    );
+                }
+            };
+            let result = (|| {
+                let target = {
+                    let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
+                    resolve_screen(&mut guard, front.files.state(), &key, &address_id)?
+                };
+                screens.read(target)
+            })();
+            match result {
+                Ok(text) => respond(
+                    &mut writer,
+                    "200 OK",
+                    "text/plain; charset=utf-8",
+                    "",
+                    text.as_bytes(),
+                ),
+                Err(Status::Unavailable) => respond(
+                    &mut writer,
+                    Status::Unavailable.line(),
+                    "text/plain; charset=utf-8",
+                    "",
+                    b"Screen is temporarily unavailable.\n",
+                ),
+                Err(status) => respond_status(&mut writer, status),
+            }
         }
         Ok(Route::Page) => serve_asset(&mut writer, front, &request, "/index.html"),
         Ok(Route::Asset(path)) => serve_asset(&mut writer, front, &request, &path),
@@ -1028,5 +1343,172 @@ mod history_store_tests {
         );
         drop(cache);
         std::fs::remove_dir_all(state).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod screen_regression_tests {
+    use super::*;
+
+    #[test]
+    fn secret_splitters_are_removed_before_shared_and_screen_redaction() {
+        let ranges = [
+            (0x00ad, 0x00ad),
+            (0x034f, 0x034f),
+            (0x061c, 0x061c),
+            (0x115f, 0x1160),
+            (0x17b4, 0x17b5),
+            (0x180b, 0x180f),
+            (0x200b, 0x200f),
+            (0x2028, 0x202e),
+            (0x2060, 0x206f),
+            (0x3164, 0x3164),
+            (0xfe00, 0xfe0f),
+            (0xfeff, 0xfeff),
+            (0xffa0, 0xffa0),
+            (0xfff0, 0xfffb),
+            (0x1bca0, 0x1bca3),
+            (0x1d173, 0x1d17a),
+            (0xe0000, 0xe0fff),
+        ];
+        let mut failures = Vec::new();
+        for (first, last) in ranges {
+            for code in first..=last {
+                let splitter = char::from_u32(code).unwrap();
+                for raw in [
+                    format!("s{splitter}k-abcdefghijklmnopqrstuvwxyz123456"),
+                    format!("sk-abcdefghijklmnop{splitter}qrstuvwxyz123456"),
+                ] {
+                    for (surface, text) in [
+                        (
+                            "message",
+                            snapshot::SafeText::from_untrusted(&raw, usize::MAX).text,
+                        ),
+                        (
+                            "screen",
+                            snapshot::SafeText::from_untrusted(
+                                &strip_terminal_sequences(&raw),
+                                usize::MAX,
+                            )
+                            .text,
+                        ),
+                    ] {
+                        if text != "[REDACTED TOKEN]" && failures.len() < 20 {
+                            failures.push(format!("{surface} U+{code:04X} => {text:?}"));
+                        }
+                    }
+                }
+            }
+        }
+        for raw in [
+            "s\tk-abcdefghijklmnopqrstuvwxyz123456",
+            "sk-abcdefghijklmnop\tqrstuvwxyz123456",
+            "gh\tp_abcdefghijklmnopqrstuvwxyz123456",
+            "sk-abcdefghijklmnop\u{1b}\nqrstuvwxyz123456",
+            "s\u{1b}\nk-abcdefghijklmnopqrstuvwxyz123456",
+            "s\u{1b}\u{200d}\nk-abcdefghijklmnopqrstuvwxyz123456",
+            "s\u{1b}\u{fe0f}\nk-abcdefghijklmnopqrstuvwxyz123456",
+            "sk-abcdefghijklmnop\u{1b}\r\nqrstuvwxyz123456",
+        ] {
+            for text in [
+                snapshot::SafeText::from_untrusted(raw, usize::MAX).text,
+                snapshot::SafeText::from_untrusted(&strip_terminal_sequences(raw), usize::MAX).text,
+            ] {
+                if text != "[REDACTED TOKEN]" {
+                    failures.push(format!("{raw:?} => {text:?}"));
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "split secrets escaped redaction: {failures:#?}"
+        );
+    }
+
+    #[test]
+    fn sanitation_preserves_tabs_real_newlines_private_key_state_and_escape_sentinel() {
+        for raw in ["clean\tline\n\tname\tvalue", "one\ntwo", "\tplain\ttext"] {
+            assert_eq!(
+                snapshot::SafeText::from_untrusted(raw, usize::MAX).text,
+                raw
+            );
+            assert_eq!(strip_terminal_sequences(raw), raw);
+        }
+        let private = "before\n-----BE\tGIN PRIVATE KEY-----\nBODY\tPRIVATE\n-----END PRIVATE KEY-----\nafter";
+        assert_eq!(
+            snapshot::SafeText::from_untrusted(private, usize::MAX).text,
+            "before\n[REDACTED PRIVATE KEY]\nafter"
+        );
+        assert_eq!(strip_terminal_sequences("a\u{1b}\nZ"), "aZ");
+        assert_eq!(
+            snapshot::SafeText::from_untrusted(
+                "\u{2003}\ts\tk-abcdefghijklmnopqrstuvwxyz123456",
+                usize::MAX
+            )
+            .text,
+            "\u{2003}\t[REDACTED TOKEN]"
+        );
+        let wrapped = [
+            format!("sk-proj-{}", "a".repeat(111)),
+            format!("{}UNIQUE_SECRET_TAIL", "a".repeat(53)),
+        ];
+        let joined = wrapped.join("");
+        assert_eq!(
+            snapshot::SafeText::from_untrusted(&joined, usize::MAX).text,
+            "[REDACTED TOKEN]"
+        );
+    }
+
+    #[test]
+    fn persona_input_keeps_its_existing_emoji_and_script_formatting_contract() {
+        for persona in [
+            "Builds UI \u{2764}\u{fe0f} and \u{1f469}\u{200d}\u{1f4bb}",
+            "Mongolian variation \u{180b}",
+        ] {
+            assert_eq!(crate::domain::validate_persona(persona), Ok(()));
+        }
+    }
+
+    #[test]
+    fn orphan_follower_has_a_deadline_without_publishing_or_evicting() {
+        let reads = Arc::new(ScreenReads::default());
+        let target = ScreenTarget {
+            socket: "orphan-socket".into(),
+            pane: "orphan-pane".into(),
+        };
+        let flight = Arc::new(ScreenFlight::default());
+        reads
+            .flights
+            .lock()
+            .unwrap()
+            .insert(target.clone(), flight.clone());
+        let (sender, receiver) = mpsc::channel();
+        let started = Instant::now();
+        let follower = {
+            let reads = reads.clone();
+            let target = target.clone();
+            thread::spawn(move || sender.send(reads.read(target)).unwrap())
+        };
+        let outcome = receiver.recv_timeout(Duration::from_secs(5));
+        let elapsed = started.elapsed();
+        let pending = flight.result.lock().unwrap().is_none();
+        let retained = reads
+            .flights
+            .lock()
+            .unwrap()
+            .get(&target)
+            .is_some_and(|entry| Arc::ptr_eq(entry, &flight));
+        *flight.result.lock().unwrap() = Some(Ok(Arc::from("cleanup")));
+        flight.ready.notify_all();
+        follower.join().unwrap();
+        assert!(
+            matches!(outcome, Ok(Err(Status::Unavailable))),
+            "orphan follower did not return 503 within 5 seconds: {outcome:?}"
+        );
+        assert!(elapsed >= Duration::from_secs(3) && elapsed < Duration::from_secs(5));
+        assert!(
+            pending && retained,
+            "timed out follower changed the leader's flight"
+        );
     }
 }

@@ -158,15 +158,7 @@ pub fn validate_alias(alias: &str) -> Result<(), String> {
 
 pub const MAX_PERSONA_CHARS: usize = 1_000;
 
-/// Bounds a saved persona. The text is user-authored but is replayed into
-/// prompts, terminal output, and other agents' rosters, so it stays short and
-/// free of control sequences.
-/// Invisible formatting characters that can reorder or hide text on screen:
-/// bidirectional controls, zero-width spaces and word joiners, the byte-order
-/// mark, interlinear annotations and Unicode tag characters. ZWJ and ZWNJ
-/// stay allowed because emoji sequences and several scripts need them.
-// ponytail: an explicit list, not Unicode's whole Cf category; switch to a
-// general-category table if another invisible character needs covering.
+/// Formatting excluded from displayed text and saved personas.
 pub(crate) fn is_invisible_format(character: char) -> bool {
     matches!(
         character,
@@ -185,6 +177,7 @@ pub(crate) fn is_invisible_format(character: char) -> bool {
     )
 }
 
+/// Bounds a saved persona while allowing existing emoji and script formatting.
 pub fn validate_persona(description: &str) -> Result<(), String> {
     if description.chars().any(char::is_control) {
         return Err("persona cannot contain control characters".to_owned());

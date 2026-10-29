@@ -128,6 +128,12 @@ pub struct SpaceRow {
     pub state: crate::WorktreeState,
 }
 
+pub enum ScreenPane {
+    Missing,
+    Gone,
+    Bound(String),
+}
+
 const WINDOW_MESSAGE_IDS: &str = "SELECT message_id FROM collaboration_messages
      WHERE session_socket_id = ?1 AND worktree_id = ?2
      ORDER BY created_at_ms DESC, rowid DESC LIMIT ?3";
@@ -139,6 +145,31 @@ const LATEST_ATTEMPT: &str = "a.rowid = (
      ORDER BY latest.created_at_ms DESC, latest.rowid DESC LIMIT 1)";
 
 impl StateStore {
+    pub fn dashboard_screen_pane(
+        &mut self,
+        namespace: &StateNamespace,
+        address_id: &str,
+    ) -> Result<ScreenPane, StoreError> {
+        let ns = namespace_params(namespace);
+        let row = self
+            .connection
+            .query_row(
+                "SELECT a.retired, b.pane_id FROM pane_addresses a
+             LEFT JOIN pane_bindings b
+               ON b.session_socket_id = a.session_socket_id AND b.worktree_id = a.worktree_id
+              AND b.address_id = a.address_id AND b.active = 1
+             WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.address_id = ?3",
+                params![ns[0], ns[1], address_id],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            None => ScreenPane::Missing,
+            Some((false, Some(pane))) => ScreenPane::Bound(pane),
+            Some(_) => ScreenPane::Gone,
+        })
+    }
+
     pub fn dashboard_rows(
         &mut self,
         namespace: &StateNamespace,
