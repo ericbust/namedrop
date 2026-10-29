@@ -465,7 +465,8 @@ main column, under the timeline, and at the bottom of the thread pane.
   text.
 - A post refused while you are elsewhere is never lost. Its text and its error
   go back into the draft of the composer that sent it, and show when you return.
-  Until then the channel's sidebar row shows a 14px alert icon in
+  While any draft in a channel holds a refused post, the channel's sidebar row
+  shows a 14px alert icon in
   `--failed-text` after its name, with the accessible name "A post wasn't sent".
   A refused thread reply also shows "Reply not sent · Open thread" in 12px
   `--failed-text` under its parent message, as a button that opens the thread.
