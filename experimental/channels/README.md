@@ -52,47 +52,57 @@ in headless Chrome through the pinned `playwright-core` package. Vite's developm
 server can serve assets with `npm run dev`, but it does not provide the authenticated
 Namedrop API.
 
-The **Channels** and **Needs you** navigation regions expose buttons by workspace
-name. Display names have no mention prefix. Each row and channel header shows
-its exact `#token` separately, or **Not addressable**. Duplicate names include the
-full workspace ID and full 20-character space key. These suffixes stay fixed when
-more same-name channels arrive.
+[`DESIGN.md`](DESIGN.md) is the design contract, and `src/style.css` starts with
+its tokens. The **Channels** and **Needs you** navigation regions expose buttons
+by workspace name. Display names have no mention prefix, and sidebar rows do not
+repeat the `#token`. The channel header shows the exact `#token`, or **No mention
+label**. Duplicate names add a muted suffix with the workspace ID and the full
+20-character space key. These suffixes stay fixed when more same-name channels
+arrive. The **Needs you** section lists each channel that needs you with the
+reason, and it is hidden when nothing needs you.
 Arrow keys, Home, and End select and focus channel buttons inside each region. Tab
-moves between regions. The first channel in sidebar order opens when initial replay
-completes. Closing the selected workspace leaves **Choose a channel** when other
-channels remain. OS dark mode controls all
-surface and text tokens.
+moves between regions. When replay completes, the app opens the channel in the
+URL (`/w/<key>`), else the first channel that needs you in sidebar order, else the
+channel with the latest message. The URL follows the selection: a click pushes a
+history entry, an automatic selection replaces it, and Back selects the previous
+channel. The tab title reads **(N) Needs you · Namedrop** while channels need you.
+Closing the selected workspace leaves **Choose a channel** when other
+channels remain. OS dark mode switches every token to the indigo night theme.
 
 ## Read messages and threads
 
-The timeline shows parent messages with a reply button. The button opens the
-**Thread** pane, which updates when replies arrive. Opening a thread moves focus
-to **Close** once; returning to its channel keeps focus in the sidebar. The reply
-button exposes its expanded state and pane ID. **Close** restores focus to that
-button. Escape does the same from inside the pane, or from the page body when no
+The timeline groups consecutive messages by author within five minutes and
+inserts day dividers. Each request shows its latest reply in a preview box. The
+preview opens the **Thread** pane, which updates when replies arrive. Opening a
+thread moves focus to **Close thread** once, and switching channels closes the
+pane. The preview exposes its expanded state and pane ID. **Close thread** restores
+focus to that preview. Escape does the same from inside the pane, or from the page body when no
 dialog is open; other focused controls keep their own Escape behavior. On narrow
 screens the pane sits below the timeline. Replies whose parent is not loaded remain visible as
 **Earlier thread** rows.
 
-Scroll to the top or select **Load older messages** to fetch history. The first
+Scroll to the top or select **Load earlier messages** to fetch history. The first
 visible message keeps its position across prepends, live updates, and channel
 switches. Disjoint live windows show a gap and load missing pages automatically.
 The visible window holds at most 600 messages per channel: four live windows or
 twelve history pages, preserving the established 400-message history case. Live
-arrivals discard the oldest edge and keep it reachable through **Load older
+arrivals discard the oldest edge and keep it reachable through **Load earlier
 messages**. Paging past the cap discards the newest edge and enters browsing
 mode. While browsing, live frames refresh overlapping receipts and the latest
 reset source without restoring discarded rows or creating an artificial gap.
 **Jump to latest** resets to the latest snapshot and scrolls to the bottom.
-Failed history requests offer **Retry**. The member roster remains above the
-timeline and scrolls when it has many members.
+Failed history requests offer **Try again**. The member strip above the timeline
+wraps to two lines and folds the rest behind **+N more**.
 
 Message bodies render as text. Fenced code uses a monospace font, and HTTP and
 HTTPS URLs become links with `rel="noreferrer"`. Bodies over 480 characters have
 **Show more**. Preview boundaries preserve surrogate pairs. Links are recognized
 before shortening, so a shortened label retains its complete destination and the
 ellipsis stays outside the link. A server truncation note identifies text omitted
-before delivery.
+before delivery. A message to a single terminal renders as a command, and a
+terminal's reply renders as monospace output. **Exit N** shows only when a terminal
+run's `message_id` matches the request. Receipts use the plain words in
+`src/copy.ts` and hide once every recipient has replied.
 Unknown message kinds and delivery stages use neutral labels.
 
 ## State and connection behavior
@@ -102,7 +112,9 @@ Unknown message kinds and delivery stages use neutral labels.
 New nonblank activity, health, member-kind, and attention-source strings retain
 the snapshot as explicit unknown variants. Unknown status values use neutral labels.
 Attention summaries remain visible only for known `needs_you` health, including
-`agent_status` and future attention sources.
+`agent_status` and future attention sources. Optional attention `subject_alias`
+and `message_id` fields and the frame's `terminal_runs` parse tolerantly: a missing
+or malformed value becomes null or an empty list and never drops the frame.
 `store.ts` owns `channels: Map<SpaceKey, Channel>` and a pure reducer. Snapshots replace channel metadata atomically and accumulate full messages by ID.
 `Channel.latestMessages` retains only the newest 150 snapshot rows as the reset
 source, separate from the bounded visible `messages` and `runs`. `viewMode` is
@@ -128,7 +140,7 @@ including an empty list when no workspace is live. A validated `ready` merges pa
 snapshots into the visible collection and removes only omitted keys. A listed key
 with a rejected snapshot keeps its last good channel when one exists. Selection, unread
 flags, and focused channel buttons survive for retained keys. Omitted keys disappear,
-and a removed selection falls back to the first channel in sidebar order. An
+and a removed selection falls back to the landing rule above. An
 interrupted replay is discarded. Duplicate keys in `ready` are normalized. Subsets
 and supersets also end replay. `gone` removes committed and pending snapshots in
 stream order, and a later snapshot can recreate the channel.
@@ -139,22 +151,23 @@ This compatibility interval gives ordinary replay time to complete. It does not
 infer which channels an old server omitted. The first `ready` on that connection
 still removes omitted keys from the current collection after fallback. Later
 `ready` events on the same connection are ignored. On first load, that first
-`ready` selects the first channel in sidebar order unless you selected one during
-fallback.
+`ready` applies the landing rule unless you selected a channel during fallback.
 Ready, errors, restarting, a new open, and unmount cancel the current timer.
 
 Before any channel is committed or an authoritative `ready` arrives, the page keeps
-showing **Connecting to Namedrop** and **Waiting for workspaces**. An empty timeout
-cannot confirm that no workspaces exist. This loading state survives retries that
-discard staged snapshots. An empty `ready` or removal of the last committed channel
-shows **No live workspaces**. Reconnects preserve that knowledge.
+its loading state: skeleton rows after 400 ms under the heading **Connecting to
+Namedrop** for assistive technology. An empty timeout cannot confirm that no
+workspaces exist. This loading state survives retries that discard staged
+snapshots. An empty `ready` or removal of the last committed channel shows **No
+workspaces yet**. Reconnects preserve that knowledge.
 
 New channels establish a read baseline. New message IDs or changes to membership,
 activity, or attention mark a background channel unread. Messages leaving the live
 window stay loaded up to the visible cap without creating unread activity.
-Changes to names, roles, or health counts alone do not. A selected channel stays read while the document
-is visible. Returning to a visible document clears the selected channel's unread
-flag. **Needs you** follows the server's `health.level === "needs_you"`, so paused
+Changes to names, roles, or health counts alone do not. Selecting a channel keeps
+its unread mark. The app marks it read after it has been selected and the document
+visible for 1.5 seconds, so arrow keys can pass over channels without reading
+them. New activity in the selected, visible channel does not mark it unread. **Needs you** follows the server's `health.level === "needs_you"`, so paused
 and inactive channels do not show attention shortcuts or summaries.
 
 ## Performance entries

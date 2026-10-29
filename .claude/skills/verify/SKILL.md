@@ -253,7 +253,7 @@ try {
   await page.goto(process.env.CHANNELS_URL);
   const channels = page.getByRole('navigation', {name: 'Channels', exact: true});
   await channels.getByRole('button').first().waitFor();
-  const alpha = channels.getByRole('button').filter({has: page.locator('.channel-name', {hasText: /^alpha$/})});
+  const alpha = channels.getByRole('button').filter({has: page.locator('.row-name', {hasText: /^alpha$/})});
   await alpha.click();
   await page.getByRole('heading', {name: 'alpha', exact: true}).waitFor();
   await alpha.focus();
@@ -279,14 +279,16 @@ Use these selectors for later live lanes.
 
 For UI-2, send the CHECKLIST Claude-to-Codex mention in the isolated profile before
 opening the app. Wait for its reply in Namedrop's database, then open that channel.
-The parent has a **1 reply** button. Click it and confirm the reply appears in
+The parent shows the reply in a preview button named **1 reply from @codex at
+<time>. Open thread**. Click it and confirm the reply appears in
 `getByRole('complementary', {name: 'Thread', exact: true})`. Send another reply
-while the pane is open and confirm its text and reply count update without a reload.
+while the pane is open and confirm its text, the preview, and the reply count
+update without a reload.
 Save `ui2-exchange.png` and `ui2-thread-live.png`. Run the coordination exchange in
 the plan's first lane and save its report card as `ui2-coordination.png`.
 
-Seed 400 rows through the profile's Namedrop commands. Scroll `.timeline-scroll`
-to the top to load older history. Before each page, record the first visible
+Seed 400 rows through the profile's Namedrop commands. Scroll `.timeline`, the
+**Message history** region, to the top to load older history. Before each page, record the first visible
 `article[data-message-id]` and its offset from the scroller's top. After the page,
 require that same row to stay at the same offset within two pixels. Keep scrolling
 until the first seeded row appears. Confirm each message ID appears once and that
@@ -298,33 +300,38 @@ Send fenced code, an HTTP URL, a long body, and the literal body
 `rel="noreferrer"`, **Show more** reveals the available long text, and no image or
 dialog appears. A server-truncated body can reveal only the text the server sent.
 Pause the testbed space with a mention queued and confirm its receipt says
-**Held**. Save the format, long-message, hostile-text, and held-receipt screenshots
+**Held while paused** and the channel header says **Paused · deliveries held**. Save the format, long-message, hostile-text, and held-receipt screenshots
 named in the plan. Keep all commands inside the `tb` wrapper above.
 
 - `getByRole('navigation', {name: 'Channels', exact: true})` holds every channel.
-  Channel buttons carry `data-channel-key` with the opaque key. Same-name buttons
-  use `name (workspace_id · full-space-key)` as their display name. Each suffix
-  stays fixed when more same-name channels arrive. `.channel-name` holds only that
-  name;
-  `.channel-token` holds the separate `#token` or **Not addressable**.
+  Channel buttons carry `data-channel-key` with the opaque key. `.row-name` holds
+  the display name. Same-name buttons add `.row-suffix` with
+  ` · workspace_id · full-space-key`. Each suffix stays fixed when more same-name
+  channels arrive. The channel header's `.token` holds the `#token` or **No mention
+  label**. The selected channel's URL is `/w/<key>`.
 - `getByRole('navigation', {name: 'Needs you', exact: true})` holds channels with `health.level === "needs_you"`.
-  Their dots have `data-activity="blocked"` and the accessible name **Needs you**.
-- `getByRole('list', {name: 'Members'})` holds member rows. Rows carry
-  `data-address-id` and `data-activity`. Each dot also carries `data-activity`.
-  Activity values are `working`, `waiting`, `blocked`, `idle`, `offline`, and `retired`.
+  It is absent when no channel needs you. Each row shows `.row-reason`, and its dot
+  has the accessible name **Needs you**. `getByRole('region', {name: 'Attention
+  needed'})` is the banner in the selected channel.
+- `getByRole('list', {name: 'Members'})` holds member chips. Each `li` carries
+  `data-address-id`, and its `.presence` badge carries `data-activity`. Activity
+  values are `working`, `waiting`, `blocked`, `idle`, `offline`, and `unknown`.
+  Retired members are hidden. The operator chip reads **You** and has no badge.
 - `getByRole('status')` exposes the reconnect banner. Kill and restart only the
   profile's dashboard, then wait for this banner to disappear and the channel
   collection to reconcile at `ready` without reloading the page. A server without
   `ready` resumes live updates after a two-second fallback that keeps old channels.
   Delay `ready` past that interval and confirm it still removes omitted keys. Before
   first discovery, an empty fallback keeps the loading state until a channel commits
-  or `ready` confirms the empty view. A first late `ready` selects sidebar order unless
-  you selected a channel during fallback.
+  or `ready` confirms the empty view. A first late `ready` applies the landing rule
+  (URL key, first Needs-you channel, latest message) unless you selected a channel
+  during fallback.
   Select a channel,
   focus its canonical Channels button, and create unread activity elsewhere before
   dropping the stream. Delay replay to check that the sidebar stays populated.
   After `ready`, confirm selection, unread marks, and focus survive for retained
-  keys, then press an arrow key. Confirm omitted keys disappear and an empty ready
+  keys, then press an arrow key. A selected channel clears its unread mark only
+  after 1.5 seconds on screen. Confirm omitted keys disappear and an empty ready
   set clears the view. The app opens exactly one `/api/events` EventSource per tab.
 - `performance.getEntriesByName('namedrop:frame-apply', 'measure')` measures reducer
   calls, including replay timeout reconciliation. `namedrop:load-to-sidebar-paint`
