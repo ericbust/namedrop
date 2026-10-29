@@ -28,6 +28,24 @@ thing that needs you. Four rules shape every screen.
 Keep the current layout: sidebar, channel header with members, timeline, and a
 thread pane. Raise the craft inside it.
 
+## Decisions
+
+The operator delegated design decisions to the design owner on 2026-10-28.
+These are settled. Do not reopen them without a new decision here.
+
+- **Answers show inline.** Each request shows its latest reply under it. The
+  thread pane holds the full conversation. Slack-style collapsed threads are
+  rejected, because nearly every agent request gets exactly one reply.
+- **Members are a chip strip.** The facepile in the mockup's "Variant B" view is
+  rejected. It hides the status words the operator reads at a glance.
+- **The brand accent comes in.** The accent is Namedrop's periwinkle, and the
+  dark theme is the brand's indigo night. The accent stays reserved for
+  selection, links, and focus.
+- **The sidebar stays alphabetical.** The Needs-you section carries urgency, and a
+  stable order keeps channels findable.
+- **A channel is read after 1.5 seconds on screen.** Passing over it with the
+  arrow keys keeps its unread mark. This changes UI-1's behavior on purpose.
+
 ## Tokens
 
 Use only tokens from `tokens.css`. No raw hex, rgb, or pixel font sizes in
@@ -141,15 +159,28 @@ One 56px row: a muted `#` icon, the channel name at 18px 600, then the mention
 token as a muted 12px chip, such as `#alpha`. When the channel has no token, the
 chip reads "No mention label" and its tooltip says "Two workspaces share this
 label, or it has none. Rename one in Herdr to mention it." The right side shows
-the health summary in 12px muted text, such as "2 working" or "All quiet". When
-the channel needs you, the summary is hidden, because the banner says it.
+the health summary in 12px muted text from the table below. When the channel
+needs you, the summary is hidden, because the banner says it.
+
+| `health.level` | Summary                                                                                   |
+| -------------- | ----------------------------------------------------------------------------------------- |
+| `calm`         | All quiet                                                                                 |
+| `busy`         | "2 working · 3 pending", leaving out a part that is zero. "All quiet" when both are zero. |
+| `paused`       | A drawn pause icon and "Paused · deliveries held", in `--held-text`                       |
+| `inactive`     | Not active                                                                                |
+| `unknown`      | nothing                                                                                   |
+
+"In flight" never reaches the screen. A pending count is the number of messages
+that have not settled yet.
 
 ### Member strip
 
 Under the header, one wrapping line of member chips. Each chip is 28px tall: a
 20px avatar with its presence dot as a badge, the alias at 13px 500, and the
 status word at 12px muted. Order: needs you, working, waiting, idle, offline.
-The operator chip reads "You", shows no presence, and comes last. After two lines, end with a
+The operator chip reads "You", shows no presence, and comes last. The chip's
+tooltip names the runtime in words: "Claude Code", "Codex", "OpenCode", "Pi",
+or "Terminal". An unknown runtime id is shown with its first letter capitalized. After two lines, end with a
 "+N more" chip that expands the strip. Remove the "Members" and "Status"
 headings. In UI-4 a chip opens the peek drawer.
 
@@ -338,6 +369,22 @@ Motion shows state and nothing else.
 Draw icons as inline SVG in React, 1.5px stroke on a 16px grid, `currentColor`,
 round caps and joins. Do not use emoji or Unicode glyphs as icons. Do not add an
 icon package for the 15 icons this app needs.
+
+## Design review gate
+
+`@chn-design` reviews every UI PR for design before it merges. The operator does
+not review design. Send these with the PR head SHA:
+
+- Screenshots at 1440 by 900 and 1024 by 700, in light and dark, of every screen
+  and state the PR changes, with real testbed content.
+- A 20 to 60 second video of each changed interaction.
+- The output of `node design/contrast.mjs` when tokens changed, and of
+  `impeccable detect --json` on the changed `src/ui` files.
+
+The verdict is PASS, PASS with follow-ups, or CHANGES with a list of required
+edits. A follow-up never blocks a merge. A broken layout, unreadable text, a
+contrast failure, a database word on screen, or a state with no design blocks
+it.
 
 ## Coming next
 
