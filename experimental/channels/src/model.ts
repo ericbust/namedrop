@@ -40,8 +40,49 @@ export type Attention = {
   summary: SafeText;
   openedAt: number;
 };
-export type Message = { id: string };
-export type Channel = {
+export type MessageKind =
+  | "mention"
+  | "reply"
+  | "handoff"
+  | "result_set"
+  | "nudge"
+  | "hook"
+  | "unknown";
+export type DeliveryStage =
+  | {
+      stage:
+        | "queued"
+        | "delivered"
+        | "held"
+        | "failed"
+        | "cancelled"
+        | "unknown";
+    }
+  | { stage: "working"; ackedAt: number }
+  | { stage: "replied"; replyId: string }
+  | { stage: "completed"; kind: string };
+export type Message = {
+  id: string;
+  threadId: string;
+  inReplyTo: string | null;
+  at: number;
+  author: AddressId | "human";
+  kind: MessageKind;
+  body: SafeText;
+  legs: readonly { to: AddressId; stage: DeliveryStage }[];
+};
+export type ThreadChip = { id: string; title: SafeText; messageCount: number };
+export type HistoryRequest = {
+  id: number;
+  key: SpaceKey;
+  before: string;
+  purpose: "older" | "bridge";
+};
+export type HistoryState =
+  | { kind: "idle" }
+  | { kind: "loading"; request: HistoryRequest }
+  | { kind: "error"; request: HistoryRequest; reason: string };
+export type ChannelSnapshot = {
   key: SpaceKey;
   workspaceId: string;
   displayName: string;
@@ -50,13 +91,27 @@ export type Channel = {
   members: ReadonlyMap<AddressId, Member>;
   messages: ReadonlyMap<string, Message>;
   attention: readonly Attention[];
+  threads: ReadonlyMap<string, ThreadChip>;
+};
+export type Channel = ChannelSnapshot & {
+  runs: readonly (readonly string[])[];
+  history: HistoryState;
+  exhausted: boolean;
 };
 export type WireEvent =
-  | { type: "space"; channel: Channel }
+  | { type: "space"; channel: ChannelSnapshot }
   | { type: "gone"; key: SpaceKey }
   | { type: "ready"; keys: ReadonlySet<SpaceKey> };
 export type Event =
   | WireEvent
+  | { type: "older"; key: SpaceKey }
+  | {
+      type: "history";
+      request: HistoryRequest;
+      result:
+        | { kind: "page"; messages: readonly Message[] }
+        | { kind: "error"; reason: string };
+    }
   | { type: "select"; key: SpaceKey }
   | { type: "opened" }
   | { type: "replay-timeout" }
@@ -77,4 +132,5 @@ export type State = {
   sync: Sync;
   visible: boolean;
   viewKnown: boolean;
+  nextRequestId: number;
 };

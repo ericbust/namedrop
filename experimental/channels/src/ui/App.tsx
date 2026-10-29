@@ -6,9 +6,10 @@ import {
   initialState,
   reduce,
 } from "../store.ts";
-import { parseEvent } from "../wire.ts";
+import { parseEvent, parseHistory } from "../wire.ts";
 import { MemberList } from "./MemberList.tsx";
 import { Sidebar } from "./Sidebar.tsx";
+import { Timeline } from "./Timeline.tsx";
 
 function measuredReduce(state: State, event: Event): State {
   if (
@@ -33,7 +34,98 @@ export function App() {
   const [state, dispatch] = useReducer(measuredReduce, undefined, () =>
     initialState(!document.hidden),
   );
+  const [frameVersion, frameArrived] = useReducer(
+    (version: number) => version + 1,
+    0,
+  );
   const painted = useRef(false);
+  const arrivals = useRef<number[]>([]);
+  const requests = useRef(new Map<number, AbortController>());
+  useEffect(() => {
+    const active = new Set<number>();
+    for (const channel of state.channels.values()) {
+      if (channel.history.kind !== "loading") continue;
+      const { request } = channel.history;
+      active.add(request.id);
+      if (requests.current.has(request.id)) continue;
+      const controller = new AbortController();
+      requests.current.set(request.id, controller);
+      const params = new URLSearchParams({
+        before: request.before,
+        limit: "50",
+      });
+      fetch(`/w/${request.key}/messages?${params}`, {
+        signal: controller.signal,
+        credentials: "same-origin",
+      })
+        .then(async (response) => {
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const messages = parseHistory(await response.json());
+          dispatch({
+            type: "history",
+            request,
+            result: { kind: "page", messages },
+          });
+        })
+        .catch((error: unknown) => {
+          if (!controller.signal.aborted)
+            dispatch({
+              type: "history",
+              request,
+              result: {
+                kind: "error",
+                reason:
+                  error instanceof Error ? error.message : "Request failed",
+              },
+            });
+        });
+    }
+    for (const [id, controller] of requests.current)
+      if (!active.has(id)) {
+        controller.abort();
+        requests.current.delete(id);
+      }
+    for (const channel of state.channels.values())
+      if (channel.runs.length > 1 && channel.history.kind === "idle")
+        dispatch({ type: "older", key: channel.key });
+  }, [state.channels]);
+  useEffect(() => {
+    const controllers = requests.current;
+    return () => {
+      for (const controller of controllers.values()) controller.abort();
+    };
+  }, []);
+  useEffect(() => {
+    if (
+      frameVersion === 0 ||
+      arrivals.current.length === 0 ||
+      state.channels.size === 0 ||
+      state.sync.kind === "replaying"
+    )
+      return;
+    const starts = arrivals.current.splice(0);
+    let completed = false;
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => {
+        const name = "namedrop:frame-to-message-paint";
+        if (
+          performance.getEntriesByName(name, "measure").length + starts.length >
+          200
+        )
+          performance.clearMeasures(name);
+        const end = performance.now();
+        for (const start of starts) performance.measure(name, { start, end });
+        completed = true;
+      });
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      cancelAnimationFrame(second);
+      if (!completed)
+        arrivals.current = [...starts, ...arrivals.current].slice(-200);
+    };
+  }, [state, frameVersion]);
   useEffect(() => {
     let stream: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
@@ -53,6 +145,7 @@ export function App() {
       source.addEventListener("open", () => {
         if (disposed || stream !== source) return;
         cancelReplay();
+        arrivals.current = [];
         dispatch({ type: "opened" });
         const openedGeneration = generation;
         replayTimer = setTimeout(() => {
@@ -71,8 +164,13 @@ export function App() {
             typeof message.data !== "string"
           )
             return;
+          const arrivedAt = performance.now();
           const event = parseEvent(name, message.data);
           if (event) {
+            if (event.type === "space") {
+              arrivals.current = [...arrivals.current, arrivedAt].slice(-200);
+              frameArrived();
+            }
             if (event.type === "ready") cancelReplay();
             dispatch(event);
           }
@@ -81,6 +179,7 @@ export function App() {
       const disconnected = () => {
         if (disposed || stream !== source) return;
         cancelReplay();
+        arrivals.current = [];
         dispatch({ type: "disconnected" });
         if (source.readyState === EventSource.CLOSED && retry === undefined) {
           source.close();
@@ -132,7 +231,7 @@ export function App() {
   return (
     <div className="app-shell">
       <a className="skip-link" href="#main-content">
-        Skip to members
+        Skip to messages
       </a>
       <Sidebar
         state={state}
@@ -146,10 +245,16 @@ export function App() {
           </div>
         )}
         {channel ? (
-          <MemberList
-            channel={channel}
-            name={channelName(channel, [...state.channels.values()])}
-          />
+          <>
+            <MemberList
+              channel={channel}
+              name={channelName(channel, [...state.channels.values()])}
+            />
+            <Timeline
+              channel={channel}
+              onOlder={(key) => dispatch({ type: "older", key })}
+            />
+          </>
         ) : (
           <div className="empty-state">
             <h1>
@@ -163,7 +268,7 @@ export function App() {
             </h1>
             <p>
               {state.channels.size > 0
-                ? "Select a workspace to see its members and live status."
+                ? "Select a workspace to read its messages and live status."
                 : connection === "live"
                   ? "Open a Herdr workspace to see its channel here."
                   : "Your workspaces will appear when the live connection is ready."}

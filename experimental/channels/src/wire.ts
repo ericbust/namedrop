@@ -2,12 +2,16 @@ import type {
   Activity,
   AddressId,
   Attention,
-  Channel,
+  ChannelSnapshot,
+  DeliveryStage,
   Health,
   Member,
   MemberKind,
+  Message,
+  MessageKind,
   SafeText,
   SpaceKey,
+  ThreadChip,
   WireEvent,
 } from "./model.ts";
 
@@ -144,7 +148,73 @@ function attention(
     openedAt,
   };
 }
-function channel(value: unknown, key: SpaceKey): Channel {
+function messageKind(value: unknown): MessageKind {
+  switch (identity(value)) {
+    case "mention":
+      return "mention";
+    case "reply":
+      return "reply";
+    case "handoff":
+      return "handoff";
+    case "result_set":
+      return "result_set";
+    case "nudge":
+      return "nudge";
+    case "hook":
+      return "hook";
+    default:
+      return "unknown";
+  }
+}
+function deliveryStage(value: unknown): DeliveryStage {
+  const item = record(value);
+  const stage = identity(item.stage);
+  switch (stage) {
+    case "queued":
+    case "delivered":
+    case "held":
+    case "failed":
+    case "cancelled":
+      return { stage };
+    case "working":
+      return { stage, ackedAt: timestamp(item.acked_at_ms) };
+    case "replied":
+      return { stage, replyId: identity(item.reply_id) };
+    case "completed":
+      return { stage, kind: identity(item.kind) };
+    default:
+      return { stage: "unknown" };
+  }
+}
+function message(value: unknown): Message {
+  const item = record(value);
+  return {
+    id: identity(item.message_id),
+    threadId: identity(item.thread_id),
+    inReplyTo: item.in_reply_to === null ? null : identity(item.in_reply_to),
+    at: timestamp(item.at_ms),
+    author: item.author === "human" ? "human" : addressId(item.author),
+    kind: messageKind(item.kind),
+    body: safeText(item.body),
+    legs: array(item.legs).map((raw) => {
+      const leg = record(raw);
+      return { to: addressId(leg.to), stage: deliveryStage(leg.stage) };
+    }),
+  };
+}
+function messages(value: unknown): Map<string, Message> {
+  const rows = new Map<string, Message>();
+  for (const raw of array(value)) {
+    const row = message(raw);
+    if (rows.has(row.id)) throw new Error("Duplicate message");
+    rows.set(row.id, row);
+  }
+  return rows;
+}
+export function parseHistory(raw: unknown): readonly Message[] {
+  return [...messages(raw).values()].reverse();
+}
+function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
   const frame = record(value);
   if (frame.wire !== 1) throw new Error("Unknown wire version");
   const space = record(frame.space);
@@ -163,11 +233,16 @@ function channel(value: unknown, key: SpaceKey): Channel {
       paneLabel: optionalSafeText(item.pane_label),
     });
   }
-  const messages = new Map<string, { id: string }>();
-  for (const raw of array(frame.messages)) {
-    const id = identity(record(raw).message_id);
-    if (messages.has(id)) throw new Error("Duplicate message");
-    messages.set(id, { id });
+  const rows = messages(frame.messages);
+  const threads = new Map<string, ThreadChip>();
+  for (const raw of array(frame.threads)) {
+    const item = record(raw);
+    const id = identity(item.thread_id);
+    threads.set(id, {
+      id,
+      title: safeText(item.title),
+      messageCount: integer(item.message_count),
+    });
   }
   const attentionOccurrences = new Map<string, number>();
   return {
@@ -177,7 +252,8 @@ function channel(value: unknown, key: SpaceKey): Channel {
     addressableLabel: nullableText(space.addressable_label),
     health: health(frame.health),
     members,
-    messages,
+    messages: rows,
+    threads,
     attention: array(frame.attention).map((item) =>
       attention(item, attentionOccurrences),
     ),

@@ -433,3 +433,285 @@ h1 {
     padding: 40px 18px;
   }
 }
+
+.app-shell {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+}
+main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.channel-content {
+  flex: none;
+  width: 100%;
+  padding-bottom: 0;
+}
+.channel-header {
+  padding-top: 24px;
+  padding-bottom: 20px;
+}
+.members-heading {
+  margin-top: 15px;
+  padding-bottom: 7px;
+}
+.member-list {
+  display: flex;
+  flex-wrap: wrap;
+  max-height: 105px;
+  overflow-y: auto;
+}
+.member-row {
+  flex: 1 1 250px;
+  min-width: 0;
+  padding: 8px 12px 8px 0;
+}
+.empty-members {
+  padding: 12px 0;
+}
+.empty-members h3 {
+  font-size: 13px;
+}
+.empty-members p {
+  font-size: 12px;
+}
+.attention-summary {
+  margin: 16px 0 0;
+  max-height: 100px;
+  overflow-y: auto;
+}
+.conversation {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  margin-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.conversation.has-thread {
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 38%);
+}
+.timeline {
+  min-height: 0;
+  min-width: 0;
+}
+.timeline-scroll,
+.thread-messages {
+  height: 100%;
+  overflow-y: auto;
+  overflow-anchor: none;
+  padding: 16px 42px 32px;
+}
+.timeline-scroll:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+.history-control {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 32px;
+  margin-bottom: 12px;
+}
+.message {
+  padding: 13px 0;
+  overflow-wrap: anywhere;
+}
+.message:hover {
+  background: color-mix(in srgb, var(--hover) 25%, transparent);
+}
+.message-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 5px;
+}
+.message-header strong {
+  font-weight: 650;
+}
+.message-header time {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.message-body {
+  white-space: pre-wrap;
+  max-width: 72ch;
+}
+.message-body a,
+.text-button {
+  color: var(--selection-text);
+  text-underline-offset: 3px;
+}
+.message-body a:hover {
+  text-decoration-thickness: 2px;
+}
+.message-body pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sidebar);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin: 8px 0;
+}
+.message-body code {
+  font-family: ui-monospace, "Cascadia Code", "Source Code Pro", monospace;
+  font-size: 12px;
+}
+.text-button {
+  border: 0;
+  padding: 4px 0;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+.text-button:hover {
+  text-decoration: underline;
+}
+.text-button:disabled {
+  color: var(--muted);
+  cursor: wait;
+}
+.message-label,
+.truncation-note {
+  color: var(--muted);
+  font-size: 11px;
+}
+.receipts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 14px;
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.receipts [data-stage="held"],
+.receipts [data-stage="failed"] {
+  color: var(--alert-text);
+}
+.thread-button {
+  font-weight: 600;
+  margin-top: 3px;
+}
+.report-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 16px 18px;
+  max-width: 72ch;
+}
+.report-card h3 {
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.message-nudge,
+.message-hook {
+  color: var(--muted);
+  padding: 8px 0;
+  font-size: 12px;
+}
+.message-nudge .message-header,
+.message-hook .message-header {
+  display: inline-flex;
+  margin-right: 10px;
+}
+.system-body,
+.system-body .message-body {
+  display: inline;
+}
+.system-body .message-body {
+  white-space: normal;
+}
+.system-body .message-label {
+  margin-right: 8px;
+}
+.thread-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--line);
+}
+.thread-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--line);
+}
+.thread-heading h2 {
+  font-size: 15px;
+}
+.thread-messages {
+  padding: 6px 24px 24px;
+}
+.reply-divider {
+  color: var(--muted);
+  font-size: 12px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  margin-top: 12px;
+}
+.earlier-thread {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 10px;
+}
+.message-gap {
+  border-block: 1px solid var(--line);
+  padding: 12px 0;
+  margin: 16px 0;
+  color: var(--muted);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.empty-messages {
+  padding: 48px 0;
+  text-align: center;
+  color: var(--muted);
+}
+.empty-messages h2 {
+  font-size: 17px;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+@media (max-width: 1000px) {
+  .conversation.has-thread {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 45%);
+  }
+  .timeline-scroll {
+    padding-inline: 24px;
+  }
+}
+@media (max-width: 760px) {
+  .channel-content {
+    padding-inline: 20px;
+  }
+  .conversation.has-thread {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(100px, 1fr) minmax(240px, 60%);
+  }
+  .thread-pane {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+  .timeline-scroll,
+  .thread-messages {
+    padding-inline: 20px;
+  }
+  .member-list {
+    max-height: 75px;
+  }
+}

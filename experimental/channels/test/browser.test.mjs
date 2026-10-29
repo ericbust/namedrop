@@ -16,6 +16,19 @@ const fixture = JSON.parse(
     .trim()
     .split("\n")[0],
 );
+function message(message_id, text = message_id, extra = {}) {
+  return {
+    message_id,
+    thread_id: message_id,
+    in_reply_to: null,
+    at_ms: 100,
+    author: "human",
+    kind: "mention",
+    body: { text, truncated: false },
+    legs: [],
+    ...extra,
+  };
+}
 function frame(n, name, level = "calm") {
   const value = structuredClone(fixture);
   value.key = key(n);
@@ -52,10 +65,11 @@ after(async () => {
   await browser?.close();
 });
 
-async function open(t, onConnect) {
+async function open(t, onConnect, history = () => []) {
   const clients = new Set();
   const connections = [];
   const errors = [];
+  const historyRequests = [];
   const server = createServer(async (req, res) => {
     if (req.url === "/api/events") {
       res.writeHead(200, {
@@ -75,6 +89,18 @@ async function open(t, onConnect) {
       connections.push(client);
       req.on("close", () => clients.delete(client));
       onConnect(client, connections.length);
+      return;
+    }
+    if (req.url?.startsWith("/w/")) {
+      const url = new URL(req.url, "http://localhost");
+      historyRequests.push(url);
+      try {
+        const rows = await history(url);
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(rows));
+      } catch {
+        res.writeHead(404).end();
+      }
       return;
     }
     try {
@@ -121,7 +147,7 @@ async function open(t, onConnect) {
   });
   const row = (n) => channels.locator(`button[data-channel-key="${key(n)}"]`);
   const live = () => page.locator(".connection-dot.live").waitFor();
-  return { page, channels, row, connections, live };
+  return { page, channels, row, connections, live, historyRequests };
 }
 function replay(client, values, keys = values.map((value) => value.key)) {
   for (const value of values) client.send("space", value);
@@ -498,7 +524,7 @@ test("fix2 item 2: ready cancels the pending timeout measurement", async (t) => 
 
 function activity(n, name) {
   const value = frame(n, name);
-  value.frame.messages.push({ message_id: "new-background-activity" });
+  value.frame.messages.push(message("new-background-activity"));
   return value;
 }
 async function focused(ui, n) {
@@ -634,4 +660,299 @@ test("fix3 item 2: legacy fallback data followed by last gone keeps known empty 
     "Live updatesRead only",
   );
   assert.equal(ui.connections.length, 1);
+});
+
+function exchange() {
+  const value = frame(1, "alpha");
+  value.frame.messages = [
+    message("parent", "@codex please check this", {
+      thread_id: "exchange",
+      legs: [{ to: "codex", stage: { stage: "working", acked_at_ms: 100 } }],
+    }),
+    message("reply", "Checked and ready", {
+      thread_id: "exchange",
+      in_reply_to: "parent",
+      kind: "reply",
+    }),
+  ];
+  value.frame.threads = [
+    {
+      thread_id: "exchange",
+      title: { text: "Check", truncated: false },
+      message_count: 2,
+    },
+  ];
+  return value;
+}
+test("UI-2: parent opens a live thread, Escape returns focus, and channels remain isolated", async (t) => {
+  const initial = exchange();
+  const beta = frame(2, "beta");
+  beta.frame.messages = [message("beta-only", "Only beta")];
+  const ui = await open(t, (client) => replay(client, [initial, beta]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Channel messages" });
+  assert.equal(await timeline.locator("[data-message-id]").count(), 1);
+  const button = timeline.getByRole("button", { name: "1 reply", exact: true });
+  await button.click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await pane.getByText("Checked and ready", { exact: true }).waitFor();
+  const update = structuredClone(initial);
+  update.frame.messages.push(
+    message("reply-2", "Live second reply", {
+      thread_id: "exchange",
+      in_reply_to: "parent",
+      kind: "reply",
+    }),
+  );
+  update.frame.threads[0].message_count = 3;
+  ui.connections[0].send("space", update);
+  await pane.getByText("Live second reply", { exact: true }).waitFor();
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  assert.equal(
+    await timeline
+      .getByRole("button", { name: "2 replies", exact: true })
+      .evaluate((element) => element === document.activeElement),
+    true,
+  );
+  await ui.row(2).click();
+  await timeline.getByText("Only beta", { exact: true }).waitFor();
+  assert.equal(await timeline.locator('[data-message-id="parent"]').count(), 0);
+  assert.equal(await pane.count(), 0);
+  await ui.row(1).click();
+  await timeline.locator('[data-message-id="parent"]').waitFor();
+  await ui.page.waitForFunction(
+    () =>
+      performance.getEntriesByName("namedrop:frame-to-message-paint").length >
+      0,
+  );
+});
+
+test("UI-2: code, safe links, report cards, long bodies and unknown variants render as text under CSP", async (t) => {
+  const value = frame(1, "alpha");
+  const hostile =
+    '<img src=x onerror=alert(1)> <script>alert("bad")</script> javascript:alert(1)';
+  value.frame.messages = [
+    message("hostile", hostile),
+    message(
+      "format",
+      'Example:\n```js\nconst value = "<safe>";\n```\nRead https://example.com/docs.',
+    ),
+    message("long", `${"Long body ".repeat(90)}END OF BODY`, {
+      body: { text: `${"Long body ".repeat(90)}END OF BODY`, truncated: true },
+    }),
+    message("future", "Future messages survive", {
+      kind: "future_kind",
+      legs: [{ to: "agent", stage: { stage: "future_stage" } }],
+    }),
+    message("report", "Two tasks completed", { kind: "result_set" }),
+    message("nudge", "Please continue", { kind: "nudge" }),
+    message("hook", "Hook received", { kind: "hook" }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  let dialogs = 0;
+  ui.page.on("dialog", async (dialog) => {
+    dialogs++;
+    await dialog.dismiss();
+  });
+  await ui.live();
+  await ui.page.getByText(hostile, { exact: true }).waitFor();
+  assert.equal(
+    await ui.page.locator(".message img, .message script").count(),
+    0,
+  );
+  assert.equal(dialogs, 0);
+  const code = ui.page.locator(".message-body pre code");
+  assert.equal(await code.textContent(), 'const value = "<safe>";\n');
+  assert.match(
+    await code.evaluate((element) => getComputedStyle(element).fontFamily),
+    /monospace/,
+  );
+  const link = ui.page.getByRole("link", {
+    name: "https://example.com/docs",
+    exact: true,
+  });
+  assert.equal(await link.getAttribute("href"), "https://example.com/docs");
+  assert.equal(await link.getAttribute("rel"), "noreferrer");
+  assert.equal(
+    await ui.page.locator('.message a[href^="javascript:"]').count(),
+    0,
+  );
+  const long = ui.page.locator('[data-message-id="long"]');
+  assert.equal(
+    (await long.locator(".message-body").textContent()).includes("END OF BODY"),
+    false,
+  );
+  await long.getByRole("button", { name: "Show more", exact: true }).click();
+  assert.equal(
+    (await long.locator(".message-body").textContent()).includes("END OF BODY"),
+    true,
+  );
+  await long
+    .getByText(
+      "Message shortened by the server. Only the available text is shown.",
+      { exact: true },
+    )
+    .waitFor();
+  await ui.page.getByText("Future messages survive", { exact: true }).waitFor();
+  await ui.page.getByText("Status unavailable", { exact: false }).waitFor();
+  assert.equal(
+    await ui.page.getByRole("heading", { name: "Coordination report" }).count(),
+    1,
+  );
+  await ui.page.getByText("Please continue", { exact: true }).waitFor();
+  await ui.page.getByText("Hook received", { exact: true }).waitFor();
+});
+
+test("UI-2: scrolling to top loads history without shifting the first visible message, including live updates and switching", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = Array.from({ length: 100 }, (_, index) =>
+    message(
+      `m${index + 101}`,
+      `Message ${index + 101}\nA second line of conversation.`,
+    ),
+  );
+  const beta = frame(2, "beta");
+  beta.frame.messages = [message("beta-only", "Beta conversation")];
+  const ui = await open(
+    t,
+    (client) => replay(client, [value, beta]),
+    async (url) => {
+      assert.equal(url.pathname, `/w/${key(1)}/messages`);
+      assert.equal(url.searchParams.get("limit"), "50");
+      if (url.searchParams.get("before") !== "m101") return [];
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return Array.from({ length: 50 }, (_, index) =>
+        message(
+          `m${100 - index}`,
+          `Message ${100 - index}\nEarlier conversation.`,
+        ),
+      );
+    },
+  );
+  await ui.live();
+  const scroll = ui.page.locator(".timeline-scroll");
+  const first = ui.page.locator('[data-message-id="m101"]');
+  await scroll.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  await ui.page.getByText("Loading older messages…", { exact: true }).waitFor();
+  const before = await first.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+  const update = structuredClone(value);
+  update.frame.messages.push(message("m201", "A live arrival"));
+  ui.connections[0].send("space", update);
+  await ui.page.locator('[data-message-id="m51"]').waitFor();
+  const after = await first.evaluate(
+    (element) => element.getBoundingClientRect().top,
+  );
+  assert.ok(
+    Math.abs(after - before) <= 2,
+    `anchor shifted ${after - before}px`,
+  );
+  assert.equal(
+    await ui.page.locator(".timeline [data-message-id]").count(),
+    151,
+  );
+  assert.equal(ui.historyRequests.length, 1);
+  await ui.row(2).click();
+  await ui.page.getByText("Beta conversation", { exact: true }).waitFor();
+  assert.equal(await ui.page.locator('[data-message-id="m101"]').count(), 0);
+  await ui.row(1).click();
+  await first.waitFor();
+  assert.ok(
+    Math.abs(
+      (await first.evaluate((element) => element.getBoundingClientRect().top)) -
+        after,
+    ) <= 2,
+  );
+});
+
+test("UI-2: reconnect gaps repair through history and receipt-only live updates repaint", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = [message("a"), message("b")];
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    (url) => {
+      assert.equal(url.searchParams.get("before"), "f");
+      return [message("e"), message("d"), message("c"), message("b")];
+    },
+  );
+  await ui.live();
+  const live = structuredClone(value);
+  live.frame.messages = [
+    message("f", "Please wait", {
+      legs: [{ to: "agent", stage: { stage: "queued" } }],
+    }),
+    message("g"),
+  ];
+  ui.connections[0].send("space", live);
+  await ui.page.locator('[data-message-id="c"]').waitFor();
+  assert.deepEqual(
+    await ui.page
+      .locator(".timeline [data-message-id]")
+      .evaluateAll((rows) => rows.map((row) => row.dataset.messageId)),
+    ["a", "b", "c", "d", "e", "f", "g"],
+  );
+  assert.equal(await ui.page.locator(".message-gap").count(), 0);
+  live.frame.messages[0].legs[0].stage = { stage: "held" };
+  ui.connections[0].send("space", live);
+  await ui.page.locator('[data-message-id="f"] [data-stage="held"]').waitFor();
+});
+
+test("UI-2: paint entries wait for replay publication and do not repeat after unrelated renders", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = [message("a")];
+  const ui = await open(t, (client) => client.send("space", value));
+  await ui.page.waitForFunction(
+    () => performance.getEntriesByName("namedrop:frame-apply").length > 0,
+  );
+  assert.equal(
+    await ui.page.evaluate(
+      () =>
+        performance.getEntriesByName("namedrop:frame-to-message-paint").length,
+    ),
+    0,
+  );
+  ui.connections[0].send("ready", { keys: [key(1)] });
+  await ui.live();
+  await ui.page.waitForFunction(
+    () =>
+      performance.getEntriesByName("namedrop:frame-to-message-paint").length ===
+      1,
+  );
+  const beta = frame(2, "beta");
+  ui.connections[0].send("space", beta);
+  await ui.row(2).waitFor();
+  await ui.page.waitForFunction(
+    () =>
+      performance.getEntriesByName("namedrop:frame-to-message-paint").length ===
+      2,
+  );
+  await ui.row(2).click();
+  await ui.page.waitForTimeout(80);
+  assert.equal(
+    await ui.page.evaluate(
+      () =>
+        performance.getEntriesByName("namedrop:frame-to-message-paint").length,
+    ),
+    2,
+  );
+  for (let n = 0; n < 210; n++) {
+    const update = structuredClone(beta);
+    update.frame.messages = [message("batch", `Update ${n}`)];
+    ui.connections[0].send("space", update);
+  }
+  await ui.page.getByText("Update 209", { exact: true }).waitFor();
+  await ui.page.waitForTimeout(80);
+  const count = await ui.page.evaluate(
+    () =>
+      performance.getEntriesByName("namedrop:frame-to-message-paint").length,
+  );
+  assert.ok(count > 0 && count <= 200, `unbounded paint measures: ${count}`);
 });

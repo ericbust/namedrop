@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Activity, Channel, State } from "./model.ts";
+import type { Activity, ChannelSnapshot, State } from "./model.ts";
 import {
   channelName,
   connectionStatus,
   initialState,
   reduce,
   sortedChannels,
+  threadGroups,
+  timelineView,
 } from "./store.ts";
-import { parseEvent } from "./wire.ts";
+import { parseEvent, parseHistory } from "./wire.ts";
 
 const keyA = "a".repeat(20);
 const keyB = "b".repeat(20);
@@ -20,6 +22,27 @@ function participant(id = "agent-1", activity: Activity = "idle") {
     activity,
     role: null,
     pane_label: null,
+  };
+}
+function message(message_id = "m1"): {
+  message_id: string;
+  thread_id: string;
+  in_reply_to: string | null;
+  at_ms: number;
+  author: string;
+  kind: string;
+  body: { text: string; truncated: boolean };
+  legs: { to: string; stage: { stage: string } }[];
+} {
+  return {
+    message_id,
+    thread_id: message_id,
+    in_reply_to: null,
+    at_ms: 100,
+    author: "agent-1",
+    kind: "mention",
+    body: { text: message_id, truncated: false },
+    legs: [],
   };
 }
 function snapshot(key = keyA, name = "alpha", workspace = "w1") {
@@ -36,12 +59,13 @@ function snapshot(key = keyA, name = "alpha", workspace = "w1") {
       },
       health: { level: "calm" },
       participants: [participant()],
-      messages: [{ message_id: "m1" }],
+      messages: [message()],
+      threads: [],
       attention: [],
     },
   };
 }
-function parsed(value: unknown): Channel {
+function parsed(value: unknown): ChannelSnapshot {
   const event = parseEvent("space", JSON.stringify(value));
   assert.ok(
     event && event.type === "space",
@@ -65,14 +89,14 @@ test("space installs a complete channel, selects the first arrival, and leaves t
   const before = initialState();
   const channel = parsed(snapshot());
   const after = reduce(before, { type: "space", channel });
-  assert.equal(after.channels.get(channel.key), channel);
+  assert.deepEqual(after.channels.get(channel.key)?.messages, channel.messages);
   assert.equal(after.selectedKey, channel.key);
   assert.equal(after.unread.size, 0);
   assert.equal(before.channels.size, 0);
 });
-test("semantic replay is an identity no-op despite timestamps, unused fields, and message order", () => {
+test("semantic replay is an identity no-op despite timestamps and unused fields", () => {
   const value = snapshot();
-  value.frame.messages.push({ message_id: "m2" });
+  value.frame.messages.push(message("m2"));
   const state = apply(initialState(), value);
   const replay = {
     ...value,
@@ -80,19 +104,18 @@ test("semantic replay is an identity no-op despite timestamps, unused fields, an
     frame: {
       ...value.frame,
       generated_at_ms: 900,
-      messages: [...value.frame.messages].reverse(),
-      threads: ["unused"],
+      messages: [...value.frame.messages],
     },
   };
   assert.equal(apply(state, replay), state);
 });
-test("whole snapshots replace members and messages without retaining old IDs", () => {
+test("snapshots replace members while preserving accumulated messages", () => {
   const state = apply(initialState(), snapshot());
   const value = snapshot();
   value.frame.messages = [];
   value.frame.participants = [];
   const next = apply(state, value);
-  assert.equal([...next.channels.values()][0]?.messages.size, 0);
+  assert.equal([...next.channels.values()][0]?.messages.size, 1);
   assert.equal([...next.channels.values()][0]?.members.size, 0);
   assert.equal([...state.channels.values()][0]?.messages.size, 1);
 });
@@ -462,7 +485,7 @@ test("new channels establish a baseline while background message, member, and ac
   assert.equal(state.unread.size, 0);
   assert.ok(apply(state, changedChannel()).unread.has(beta.key));
   const messages = snapshot(keyB, "beta", "w2");
-  messages.frame.messages.push({ message_id: "m2" });
+  messages.frame.messages.push(message("m2"));
   assert.ok(apply(state, messages).unread.has(beta.key));
   const members = snapshot(keyB, "beta", "w2");
   members.frame.participants.push(participant("agent-2"));
@@ -649,15 +672,15 @@ test("item 2: ready rejects malformed and missing keys", () => {
     assert.equal(parseEvent("ready", JSON.stringify(value)), null);
 });
 
-test("messages leaving the live window replace retained IDs without marking background unread", () => {
+test("messages leaving the live window stay loaded without marking background unread", () => {
   const state = twoChannels();
   const beta = snapshot(keyB, "beta", "w2");
   beta.frame.messages = [];
   const next = apply(state, beta);
   const key = parsed(beta).key;
-  assert.notEqual(next, state);
+  assert.equal(next, state);
   assert.equal(next.unread.has(key), false);
-  assert.equal(next.channels.get(key)?.messages.size, 0);
+  assert.equal(next.channels.get(key)?.messages.size, 1);
   assert.equal(state.channels.get(key)?.messages.size, 1);
 });
 
@@ -859,7 +882,7 @@ test("fix3 item 1: late ready prunes the current map and retains gamma selection
     type: "replay-timeout",
   });
   const alpha = snapshot();
-  alpha.frame.messages.push({ message_id: "new-after-timeout" });
+  alpha.frame.messages.push(message("new-after-timeout"));
   const current = apply(
     apply(fallback, alpha),
     snapshot(gammaKey, "gamma-current", "w3"),
@@ -983,3 +1006,288 @@ for (const beforeTimeout of [false, true]) {
     assert.equal(ready(chosen, [keyA, keyB]).selectedKey, betaKey);
   });
 }
+
+function withMessages(ids: string[], key = keyA) {
+  const value = snapshot(key);
+  value.frame.messages = ids.map((id) => message(id));
+  return value;
+}
+function activeChannel(state: State) {
+  const channel = state.selectedKey && state.channels.get(state.selectedKey);
+  assert.ok(channel);
+  return channel;
+}
+function requesting(state: State) {
+  const next = reduce(state, { type: "older", key: activeChannel(state).key });
+  const history = activeChannel(next).history;
+  assert.ok(history.kind === "loading");
+  return { state: next, request: history.request };
+}
+function historyPage(state: State, ids: string[]) {
+  const pending = requesting(state);
+  return reduce(pending.state, {
+    type: "history",
+    request: pending.request,
+    result: {
+      kind: "page",
+      messages: [...parsed(withMessages(ids)).messages.values()],
+    },
+  });
+}
+test("UI-2: history preserves server order for tied timestamps and deduplicates live overlap", () => {
+  let state = apply(initialState(), withMessages(["z", "b", "c"]));
+  state = historyPage(state, ["x", "a", "z"]);
+  assert.deepEqual(activeChannel(state).runs, [["x", "a", "z", "b", "c"]]);
+  state = apply(state, withMessages(["b", "c", "d"]));
+  assert.deepEqual(activeChannel(state).runs, [["x", "a", "z", "b", "c", "d"]]);
+  assert.equal(activeChannel(state).messages.size, 6);
+});
+test("UI-2: receipt-only live changes apply and delayed history never regresses receipts", () => {
+  const value = withMessages(["m1", "m2"]);
+  value.frame.messages[0]?.legs.push({
+    to: "agent-1",
+    stage: { stage: "queued" },
+  });
+  const pending = requesting(apply(initialState(), value));
+  const update = structuredClone(value);
+  const leg = update.frame.messages[0]?.legs[0];
+  assert.ok(leg);
+  leg.stage.stage = "held";
+  const live = apply(pending.state, update);
+  assert.notEqual(live, pending.state);
+  const after = reduce(live, {
+    type: "history",
+    request: pending.request,
+    result: { kind: "page", messages: [...parsed(value).messages.values()] },
+  });
+  assert.equal(
+    activeChannel(after).messages.get("m1")?.legs[0]?.stage.stage,
+    "held",
+  );
+});
+test("UI-2: disjoint live windows show a gap and bridge backward until joining older coverage", () => {
+  let state = apply(
+    apply(initialState(), withMessages(["a", "b"])),
+    withMessages(["f", "g"]),
+  );
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b"],
+    ["f", "g"],
+  ]);
+  const first = requesting(state);
+  assert.equal(first.request.purpose, "bridge");
+  assert.equal(first.request.before, "f");
+  state = reduce(first.state, {
+    type: "history",
+    request: first.request,
+    result: {
+      kind: "page",
+      messages: [...parsed(withMessages(["d", "e"])).messages.values()],
+    },
+  });
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b"],
+    ["d", "e", "f", "g"],
+  ]);
+  state = historyPage(state, ["b", "c"]);
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b", "c", "d", "e", "f", "g"],
+  ]);
+});
+test("UI-2: every replay window survives ready and fallback, including history completed during replay", () => {
+  for (const finish of ["ready", "replay-timeout"] as const) {
+    const pending = requesting(apply(initialState(), withMessages(["d", "e"])));
+    let state = apply(
+      apply(
+        reduce(pending.state, { type: "opened" }),
+        withMessages(["e", "f"]),
+      ),
+      withMessages(["f", "g"]),
+    );
+    state = reduce(state, {
+      type: "history",
+      request: pending.request,
+      result: {
+        kind: "page",
+        messages: [...parsed(withMessages(["a", "b", "c"])).messages.values()],
+      },
+    });
+    state =
+      finish === "ready"
+        ? ready(state, [keyA])
+        : reduce(state, { type: "replay-timeout" });
+    assert.deepEqual(activeChannel(state).runs, [
+      ["a", "b", "c", "d", "e", "f", "g"],
+    ]);
+  }
+});
+test("UI-2: history errors retry, empty older pages exhaust, empty bridges remain explicit", () => {
+  const first = requesting(apply(initialState(), withMessages(["a"])));
+  const failed = reduce(first.state, {
+    type: "history",
+    request: first.request,
+    result: { kind: "error", reason: "HTTP 404" },
+  });
+  assert.equal(activeChannel(failed).history.kind, "error");
+  const retry = requesting(failed);
+  assert.notEqual(retry.request.id, first.request.id);
+  const empty = reduce(retry.state, {
+    type: "history",
+    request: retry.request,
+    result: { kind: "page", messages: [] },
+  });
+  assert.equal(activeChannel(empty).exhausted, true);
+  assert.equal(reduce(empty, { type: "older", key: first.request.key }), empty);
+  const bridge = requesting(apply(empty, withMessages(["c"])));
+  const missing = reduce(bridge.state, {
+    type: "history",
+    request: bridge.request,
+    result: { kind: "page", messages: [] },
+  });
+  assert.equal(activeChannel(missing).history.kind, "error");
+  assert.equal(activeChannel(missing).runs.length, 2);
+});
+test("UI-2: stale history cannot cross channels or a gone and recreated channel", () => {
+  const pending = requesting(twoChannels());
+  const beta = parsed(snapshot(keyB)).key;
+  const switched = reduce(pending.state, { type: "select", key: beta });
+  const completed = reduce(switched, {
+    type: "history",
+    request: pending.request,
+    result: {
+      kind: "page",
+      messages: [...parsed(withMessages(["older-alpha"])).messages.values()],
+    },
+  });
+  assert.equal(
+    completed.channels.get(beta)?.messages.has("older-alpha"),
+    false,
+  );
+  const recreated = apply(
+    reduce(pending.state, { type: "gone", key: pending.request.key }),
+    withMessages(["new"]),
+  );
+  const next = requesting(
+    reduce(recreated, { type: "select", key: pending.request.key }),
+  );
+  assert.notEqual(next.request.id, pending.request.id);
+  assert.equal(
+    reduce(next.state, {
+      type: "history",
+      request: pending.request,
+      result: { kind: "page", messages: [] },
+    }),
+    next.state,
+  );
+});
+test("UI-2: thread groups derive loaded replies, preserve orphans and reveal fetched parents", () => {
+  const value = withMessages(["reply"]);
+  const reply = value.frame.messages[0];
+  assert.ok(reply);
+  reply.thread_id = "thread";
+  reply.kind = "reply";
+  reply.in_reply_to = "parent";
+  let state = apply(initialState(), value);
+  assert.equal(timelineView(activeChannel(state))[0]?.kind, "orphan");
+  const parent = message("parent");
+  parent.thread_id = "thread";
+  const pending = requesting(state);
+  state = reduce(pending.state, {
+    type: "history",
+    request: pending.request,
+    result: {
+      kind: "page",
+      messages: [
+        ...parsed({
+          ...value,
+          frame: { ...value.frame, messages: [parent] },
+        }).messages.values(),
+      ],
+    },
+  });
+  const group = threadGroups(activeChannel(state)).get("thread");
+  assert.equal(group?.parents[0]?.id, "parent");
+  assert.deepEqual(
+    group?.replies.map((row) => row.id),
+    ["reply"],
+  );
+  assert.equal(timelineView(activeChannel(state)).length, 1);
+});
+test("UI-2: history boundary reverses newest-first once and future kinds and stages remain visible", () => {
+  const rows = [message("new"), message("old")];
+  rows[0]?.legs.push({ to: "agent-1", stage: { stage: "future-stage" } });
+  const row = rows[0];
+  assert.ok(row);
+  row.kind = "future-kind";
+  const parsed = parseHistory(rows);
+  assert.deepEqual(
+    parsed.map((row) => row.id),
+    ["old", "new"],
+  );
+  assert.equal(parsed[1]?.kind, "unknown");
+  assert.equal(parsed[1]?.legs[0]?.stage.stage, "unknown");
+  assert.throws(() =>
+    parseHistory([{ ...row, body: { text: 42, truncated: false } }]),
+  );
+});
+
+test("UI-2: replay retains disjoint windows as separate coverage until each bridge is fetched", () => {
+  const before = apply(initialState(), withMessages(["a", "b"]));
+  const replay = apply(
+    apply(reduce(before, { type: "opened" }), withMessages(["f", "g"])),
+    withMessages(["k", "l"]),
+  );
+  let state = ready(replay, [keyA]);
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b"],
+    ["f", "g"],
+    ["k", "l"],
+  ]);
+  state = historyPage(state, ["b", "c", "d", "e"]);
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b", "c", "d", "e", "f", "g"],
+    ["k", "l"],
+  ]);
+  state = historyPage(state, ["g", "h", "i", "j"]);
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"],
+  ]);
+});
+test("UI-2: every real delivery stage retains its payload and invalid known payloads reject the frame", () => {
+  const value = withMessages(["receipt"]);
+  const stages = [
+    { stage: "queued" },
+    { stage: "delivered" },
+    { stage: "working", acked_at_ms: 12 },
+    { stage: "replied", reply_id: "reply" },
+    { stage: "completed", kind: "settled" },
+    { stage: "held" },
+    { stage: "failed" },
+    { stage: "cancelled" },
+  ];
+  const row = value.frame.messages[0];
+  assert.ok(row);
+  row.legs = stages.map((stage, index) => ({ to: `agent-${index}`, stage }));
+  const result = parsed(value).messages.get("receipt");
+  assert.deepEqual(
+    result?.legs.map((leg) => leg.stage),
+    [
+      { stage: "queued" },
+      { stage: "delivered" },
+      { stage: "working", ackedAt: 12 },
+      { stage: "replied", replyId: "reply" },
+      { stage: "completed", kind: "settled" },
+      { stage: "held" },
+      { stage: "failed" },
+      { stage: "cancelled" },
+    ],
+  );
+  for (const stage of [
+    { stage: "working" },
+    { stage: "replied" },
+    { stage: "completed" },
+  ]) {
+    row.legs = [{ to: "agent", stage }];
+    assert.equal(parseEvent("space", JSON.stringify(value)), null);
+  }
+});

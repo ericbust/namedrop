@@ -1,6 +1,6 @@
 # Namedrop channels experiment
 
-This read-only app shows live Herdr workspaces as channels, with their members,
+This read-only app shows live Herdr workspaces as channels, with their messages, threads, members,
 presence, and attention requests. It needs the dashboard's all-workspace stream
 and `--ui` support. It does not send messages or change a workspace.
 
@@ -63,6 +63,25 @@ completes. Closing the selected workspace leaves **Choose a channel** when other
 channels remain. OS dark mode controls all
 surface and text tokens.
 
+## Read messages and threads
+
+The timeline shows parent messages with a reply button. The button opens the
+**Thread** pane, which updates when replies arrive. **Close** or Escape dismisses
+the pane and restores focus to its reply button. On narrow screens the pane sits
+below the timeline. Replies whose parent is not loaded remain visible as
+**Earlier thread** rows.
+
+Scroll to the top or select **Load older messages** to fetch history. The first
+visible message keeps its position across prepends, live updates, and channel
+switches. Disjoint live windows show a gap and load missing pages automatically.
+Failed history requests offer **Retry**. The member roster remains above the
+timeline and scrolls when it has many members.
+
+Message bodies render as text. Fenced code uses a monospace font, and HTTP and
+HTTPS URLs become links with `rel="noreferrer"`. Bodies over 480 characters have
+**Show more**. A server truncation note identifies text omitted before delivery.
+Unknown message kinds and delivery stages use neutral labels.
+
 ## State and connection behavior
 
 `wire.ts` validates retained fields before constructing branded `SpaceKey` and
@@ -71,10 +90,10 @@ New nonblank activity, health, member-kind, and attention-source strings retain
 the snapshot as explicit unknown variants. Unknown status values use neutral labels.
 Attention summaries remain visible only for known `needs_you` health, including
 `agent_status` and future attention sources.
-`store.ts` owns `channels: Map<SpaceKey, Channel>` and a pure reducer. Snapshots
-replace channels atomically. Equal retained content returns the same state.
-Message IDs are retained only for unread activity. Message bodies and history
-belong to a later unit.
+`store.ts` owns `channels: Map<SpaceKey, Channel>` and a pure reducer. Snapshots replace channel metadata atomically and accumulate full messages by ID.
+Equal retained content returns the same state. Live rows update receipts; older
+history fills only missing rows. Contiguous ordered runs preserve server ordering
+for equal timestamps and expose gaps between disjoint live windows.
 
 The app opens exactly one same-origin `EventSource('/api/events')` per tab. Native
 EventSource retry handles transient failures. A closed source is closed again
@@ -111,7 +130,7 @@ shows **No live workspaces**. Reconnects preserve that knowledge.
 
 New channels establish a read baseline. New message IDs or changes to membership,
 activity, or attention mark a background channel unread. Messages leaving the live
-window update retained IDs without creating unread activity. Changes to names, roles,
+window stay loaded without creating unread activity. Changes to names, roles,
 or health counts alone do not. A selected channel stays read while the document
 is visible. Returning to a visible document clears the selected channel's unread
 flag. **Needs you** follows the server's `health.level === "needs_you"`, so paused
@@ -125,6 +144,14 @@ The browser's standard Performance API exposes these measures.
   `space`, `gone`, `ready`, or replay timeout event, including the replay commit. Parsing and
   React rendering are outside this interval.
   The app clears this measure after 200 samples, then starts a new batch.
+- `namedrop:frame-to-message-paint` starts at `performance.now()` on each accepted
+  `space` SSE callback, before parsing, and ends after two animation frames
+  following the React commit that renders the accumulated channel state. It
+  includes parsing, reducer work, React rendering, and the next paint opportunity.
+  Frames received during replay wait for the replay commit or fallback. Batched
+  frames each emit a sample with their own arrival time and a shared end time.
+  The pending arrivals and measure entries are bounded at 200. It emits no
+  per-message marks. Background tabs can delay animation frames.
 - `namedrop:load-to-sidebar-paint` starts at the navigation time origin, `0`, and
   ends after two animation frames following a committed sidebar with at least
   one channel. It emits once per page load. It includes loading and connection
