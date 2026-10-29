@@ -3292,6 +3292,50 @@ test("UI-3: a post that names nobody stays in the box and says how to choose som
   );
 });
 
+test("UI-3: the recipient guard waits for a send attempt and the next keystroke clears it", async (t) => {
+  const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const send = ui.page.getByRole("button", { name: "Send" });
+  const status = ui.page.locator(".composer-status");
+  const hint = "Enter to send · Shift+Enter for a new line";
+  async function typeExpectingHint(text) {
+    for (const character of text) {
+      await box.pressSequentially(character);
+      assert.equal(
+        await status.textContent(),
+        hint,
+        `the hint with ${JSON.stringify(await box.inputValue())} in the box`,
+      );
+    }
+  }
+  await box.click();
+  await typeExpectingHint("#alpha @");
+  await ui.page.getByRole("listbox", { name: "Members" }).waitFor();
+  assert.equal(await status.textContent(), hint, "the hint beside the popup");
+  await box.fill("");
+  await typeExpectingHint("hello");
+  assert.equal(await send.isDisabled(), true);
+  await send.click({ force: true });
+  assert.equal(ui.posts.attempts.length, 0, "a disabled Send sends nothing");
+  await box.press("Enter");
+  assert.equal(
+    await status.textContent(),
+    "Start with @name to choose who gets this.",
+  );
+  assert.equal(await box.inputValue(), "hello");
+  assert.equal(await ui.page.locator("article.pending").count(), 0);
+  await typeExpectingHint("!");
+  await box.fill("@codex hello");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the addressed post");
+  assert.equal(
+    JSON.parse(ui.posts.attempts[0].raw).source,
+    "@codex hello",
+    "neither the click nor the unaddressed Enter reached the server",
+  );
+});
+
 test("UI-3: a 401 reads as an expired session", async (t) => {
   const ui = await open(
     t,
