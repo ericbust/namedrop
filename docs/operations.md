@@ -188,7 +188,11 @@ curl --silent --show-error --cookie "$cookie_jar" \
 rm "$cookie_jar"
 ```
 
-A successful post returns the existing send receipt, including `message_id` and `thread_id`. Repeating the same request ID, source, and reply target returns the original receipt without another delivery. Reusing an ID with changed content returns 400. Use a new request ID for each new message. To follow up in a thread, include `in_reply_to` with a message ID from that workspace and keep the leading recipient mentions in `source`.
+A successful post returns a committed send receipt, including `message_id` and `thread_id`, before agent delivery finishes. The message, recipient rows, and request ID are durable before the response. HTTP receipts omit the later `drain` and `drains` results.
+
+The connection handler continues delivery in the source and forwarded workspaces after sending response EOF, including when the client disconnects. It retains its connection slot until delivery finishes. If the process exits in between, queued messages remain in the ledger for existing lifecycle and mailbox-wake retries.
+
+Repeating the same request ID, source, and reply target returns the same message and delivery IDs without another delivery. Delivery state can advance between receipts. Reusing an ID with changed content returns 400. Use a new request ID for each new message. To follow up in a thread, include `in_reply_to` with a message ID from that workspace and keep the leading recipient mentions in `source`.
 
 Source text retains the send grammar, including `@alias`, `#label`, `#workspace-id`, and `#all`. A duplicate workspace label is refused. Dashboard hashes identify URL namespaces only and are not a source-target syntax. An unknown alias is refused with its name in the error, without a message or delivery row. The first refused send can initialize the operator identity before routing. Known input and routing errors return 400 with a useful message. Store, Herdr, and internal failures return 500 or 503 with a fixed message that omits internal diagnostics.
 

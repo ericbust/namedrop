@@ -906,9 +906,21 @@ mod http {
             fs::write(
                 &shim,
                 r#"#!/usr/bin/python3
-import json, os, sys
+import json, os, sys, time
 args = sys.argv[1:]
 root = os.path.dirname(__file__)
+def wait_for_gate(name):
+    gate = os.path.join(root, name + '-gate')
+    if os.path.exists(gate):
+        open(os.path.join(root, name + '-started'), 'w').close()
+        deadline = time.monotonic() + 15
+        while os.path.exists(gate):
+            if time.monotonic() >= deadline:
+                sys.stderr.write('HTTP test gate timed out: ' + name)
+                sys.exit(1)
+            time.sleep(0.01)
+if args == ['workspace', 'list']:
+    wait_for_gate('http-discovery')
 with open(os.path.join(root, 'http-herdr-responses.json')) as source:
     responses = json.load(source)
 key = ' '.join(args)
@@ -918,6 +930,8 @@ elif args[:2] == ['worktree', 'list']:
     sys.stderr.write('{"error":{"code":"not_git_worktree"}}')
     sys.exit(1)
 elif args[:2] in [['agent', 'prompt'], ['pane', 'report-metadata'], ['notification', 'show']]:
+    if args[:2] == ['agent', 'prompt']:
+        wait_for_gate('http-prompt')
     with open(os.path.join(root, 'http-herdr-invocations.jsonl'), 'a') as log:
         log.write(json.dumps({'args': args, 'socket': os.environ.get('HERDR_SOCKET_PATH')}) + '\n')
     print('{}')
@@ -1281,6 +1295,211 @@ else:
         assert_eq!(f.message_rows(), (0, 0));
     }
 
+    struct Gate(std::path::PathBuf);
+
+    impl Gate {
+        fn new(f: &Fixture, name: &str) -> Self {
+            let path = f.root.join(format!("{name}-gate"));
+            fs::write(&path, b"").unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn wait_until(description: &str, ready: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn prompts(f: &Fixture) -> Vec<Value> {
+        fs::read_to_string(f.root.join("http-herdr-invocations.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|call| call["args"][0] == "agent")
+            .collect()
+    }
+
+    fn wait_for_submitted(f: &Fixture, count: i64) {
+        wait_until("recorded prompt submission", || {
+            prompts(f).len() == count as usize
+                && f.count("SELECT COUNT(*) FROM delivery_attempt_state WHERE state IN ('submitted','acknowledged')") == count
+        });
+    }
+
+    fn delivery_ids(receipt: &Value) -> Vec<&Value> {
+        receipt["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|delivery| &delivery["delivery_id"])
+            .collect()
+    }
+
+    fn post_returns_before_prompt(source: &str, workspace: &str, pane: &str) {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let gate = Gate::new(&f, "http-prompt");
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let path = format!("/w/{}/messages", key.as_str());
+        let body = json!({"request_id":"http-gated", "source":source}).to_string();
+        let expected_rows = if workspace == "w1" { 1 } else { 2 };
+        let receipt = thread::scope(|scope| {
+            let (send, receive) = std::sync::mpsc::channel();
+            let (server, path, body) = (&server, &path, &body);
+            scope.spawn(move || send.send(server.post(path, body, &[])).unwrap());
+            wait_until("blocked Herdr prompt", || {
+                f.root.join("http-prompt-started").exists()
+            });
+            let response = receive.recv_timeout(Duration::from_secs(1));
+            if response.is_err() {
+                drop(gate);
+                let _ = receive.recv_timeout(Duration::from_secs(5));
+                panic!("POST did not reach EOF while the Herdr prompt gate stayed shut");
+            }
+            let response = response.unwrap();
+            assert_eq!(response.status, 200, "{}", response.body);
+            let receipt: Value = serde_json::from_str(&response.body).unwrap();
+            assert!(receipt.get("drain").is_none());
+            assert!(receipt.get("drains").is_none());
+            let message_id = receipt["message_id"].as_str().unwrap();
+            let stored: String = f.db().query_row(
+                "SELECT m.message_id FROM collaboration_messages m JOIN idempotency_records i
+                 ON i.session_socket_id=m.session_socket_id AND i.worktree_id=m.worktree_id
+                 AND i.message_id=m.message_id WHERE i.request_id='http-gated' AND i.worktree_id='w1'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(stored, message_id);
+            assert_eq!(
+                f.count("SELECT COUNT(*) FROM mailbox_deliveries"),
+                expected_rows
+            );
+            assert!(prompts(&f).is_empty());
+            let replay = server.post(&path, &body, &[]);
+            assert_eq!(replay.status, 200, "{}", replay.body);
+            let replay: Value = serde_json::from_str(&replay.body).unwrap();
+            assert_eq!(replay["message_id"], receipt["message_id"]);
+            assert_eq!(replay["thread_id"], receipt["thread_id"]);
+            assert_eq!(delivery_ids(&replay), delivery_ids(&receipt));
+            assert_eq!(replay["forwarded"], receipt["forwarded"]);
+            assert_eq!(replay["idempotent_replay"], true);
+            assert!(f.root.join("http-prompt-gate").exists());
+            assert!(prompts(&f).is_empty());
+            drop(gate);
+            receipt
+        });
+        wait_for_submitted(&f, 1);
+        let prompts = prompts(&f);
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0]["args"][2], pane);
+        assert_eq!(prompts[0]["socket"], "socket-a");
+        let envelope: Value =
+            serde_json::from_str(prompts[0]["args"][3].as_str().unwrap()).unwrap();
+        assert_eq!(
+            &envelope["control"]["message_id"],
+            if workspace == "w1" {
+                &receipt["message_id"]
+            } else {
+                &receipt["forwarded"][0]["message_id"]
+            }
+        );
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 1);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM mailbox_deliveries"),
+            expected_rows
+        );
+        let stored_workspace: String = f
+            .db()
+            .query_row(
+                "SELECT worktree_id FROM mailbox_deliveries WHERE state IN ('submitted','acknowledged')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_workspace, workspace);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM collaboration_messages"),
+            expected_rows
+        );
+    }
+
+    #[test]
+    fn post_reaches_eof_before_local_prompt_returns() {
+        post_returns_before_prompt("@planner inspect", "w1", "pane-1-planner");
+    }
+
+    #[test]
+    fn post_reaches_eof_before_forwarded_prompt_returns() {
+        post_returns_before_prompt("#ws2 @tester inspect", "w2", "pane-2-tester");
+    }
+
+    #[test]
+    fn disconnected_post_still_drains_home_and_forwarded_workspaces() {
+        use std::os::fd::AsRawFd;
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let gate = Gate::new(&f, "http-discovery");
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let body =
+            json!({"request_id":"http-reset", "source":"#ws1 #ws2 @planner @tester inspect"})
+                .to_string();
+        let request = format!(
+            "POST /w/{}/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            key.as_str(),
+            server.port,
+            server.cookie,
+            server.csrf,
+            body.len(),
+        );
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        wait_until("Herdr discovery before commit", || {
+            f.root.join("http-discovery-started").exists()
+        });
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    (&linger as *const libc::linger).cast(),
+                    std::mem::size_of_val(&linger) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        drop(stream);
+        drop(gate);
+        wait_for_submitted(&f, 2);
+        let calls = prompts(&f);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["args"][2], "pane-1-planner");
+        assert_eq!(calls[1]["args"][2], "pane-2-tester");
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 2);
+        assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 2);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM idempotency_records WHERE request_id='http-reset'"),
+            1
+        );
+    }
+
     #[test]
     fn concurrent_identical_posts_append_and_deliver_once() {
         let f = Fixture::new();
@@ -1305,7 +1524,7 @@ else:
         });
         assert_eq!(receipts[0]["message_id"], receipts[1]["message_id"]);
         assert_eq!(receipts[0]["thread_id"], receipts[1]["thread_id"]);
-        assert_eq!(receipts[0]["deliveries"], receipts[1]["deliveries"]);
+        assert_eq!(delivery_ids(&receipts[0]), delivery_ids(&receipts[1]));
         assert_eq!(
             receipts
                 .iter()
@@ -1315,6 +1534,7 @@ else:
         );
         assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 1);
         assert_eq!(f.count("SELECT COUNT(*) FROM mailbox_deliveries"), 1);
+        wait_for_submitted(&f, 1);
         assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 1);
         let invocations = fs::read_to_string(f.root.join("http-herdr-invocations.jsonl")).unwrap();
         let prompts: Vec<Value> = invocations
@@ -1366,6 +1586,7 @@ else:
             [first["message_id"].as_str().unwrap()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
         ).unwrap();
         assert_eq!(stored, ("w1".to_owned(), "human".to_owned(), None));
+        wait_for_submitted(&f, 1);
         let invocations = fs::read_to_string(f.root.join("http-herdr-invocations.jsonl")).unwrap();
         let prompts: Vec<Value> = invocations
             .lines()

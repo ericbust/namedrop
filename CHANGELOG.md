@@ -6,6 +6,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Fixed
 
+- Operator dashboard posts return after the message and request ID commit, before agent delivery finishes. Delivery continues in the source and forwarded workspaces even if the client disconnects.
 - Dashboard delivery and unanswered-request warnings follow the recipient's current alias after a rename. Attention links load in one query instead of preparing a query for each warning.
 
 ### Added

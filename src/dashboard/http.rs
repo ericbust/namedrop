@@ -1039,14 +1039,23 @@ fn send_operator_post(
         ids: &ids,
     };
     let target = post.in_reply_to.map(crate::MessageId::new);
-    match crate::send_operator_message(&post.request_id, &post.source, target.as_ref(), &runtime) {
-        Ok(receipt) => respond(
-            writer,
-            "200 OK",
-            "application/json",
-            "",
-            receipt.to_string().as_bytes(),
-        ),
+    writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+    match crate::message::send_operator_message_observing_commit(
+        &post.request_id,
+        &post.source,
+        target.as_ref(),
+        &runtime,
+        |receipt| {
+            respond(
+                writer,
+                "200 OK",
+                "application/json",
+                "",
+                receipt.to_string().as_bytes(),
+            )
+        },
+    ) {
+        Ok((_, response)) => response,
         Err(error) => respond(
             writer,
             match error.kind() {
