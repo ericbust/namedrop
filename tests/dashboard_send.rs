@@ -1904,3 +1904,127 @@ else:
         );
     }
 }
+
+#[test]
+fn tracked_attention_offers_a_new_message_without_operator_tracking_authority() {
+    use namedrop::{
+        AttentionItemDraft, AttentionItemId, AttentionSourceKind, MessageId,
+        execute_handoff_operation,
+    };
+
+    for (workspace, pane, mention) in [
+        ("w1", "pane-1-planner", "@planner"),
+        ("w2", "pane-2-tester", "#ws2 @tester"),
+    ] {
+        let f = Fixture::new();
+        f.register_all();
+        let lead = f.runtime("w1", "pane-1-lead");
+        let coordination = execute_handoff_operation(
+            "handoff.begin",
+            json!({"request_id":"begin", "deliverable":"Review the result"}),
+            &lead,
+        )
+        .unwrap()["coordination_id"]
+            .clone();
+        let assignment = f
+            .try_send(
+                "w1",
+                "pane-1-lead",
+                json!({
+                    "request_id":"assignment", "source":format!("{mention} Review the result"),
+                    "author_kind":"agent_session", "coordination_id":coordination,
+                }),
+            )
+            .unwrap();
+        f.drain(workspace);
+        let envelope = f.herdr.last_envelope(pane);
+        let mut store = StateStore::open(&f.state).unwrap();
+        let attention = |store: &mut StateStore, space: &str, thread: &str| {
+            let ns = StateNamespace::for_space("socket-a", space);
+            store
+                .transaction(|tx| {
+                    tx.open_attention_item(
+                        &ns,
+                        &AttentionItemDraft {
+                            id: AttentionItemId::new("tracked-anchor"),
+                            source_kind: AttentionSourceKind::AutomaticReplyLimit,
+                            source_id: thread.to_owned(),
+                            summary: "Tracked thread needs a response".into(),
+                        },
+                        &MutationAttribution::new(ActorKind::Human, "test", 42),
+                    )
+                })
+                .unwrap();
+            let rows = store.dashboard_rows(&ns).unwrap();
+            serde_json::to_value(namedrop::dashboard::snapshot::build(&rows, None, 42)).unwrap()["attention"]
+                .as_array().unwrap().iter().find(|item| item["attention_id"] == "tracked-anchor").unwrap().clone()
+        };
+        for (space, thread, message) in [
+            ("w1", &assignment["thread_id"], &assignment["message_id"]),
+            (
+                workspace,
+                &envelope["control"]["thread_id"],
+                &envelope["control"]["message_id"],
+            ),
+        ] {
+            let card = attention(&mut store, space, thread.as_str().unwrap());
+            assert_eq!(card["conversation"]["message_id"], *message);
+            assert_eq!(card["response"]["kind"], "message", "request in {space}");
+        }
+        let reply = execute_message_operation("reply", json!({
+            "request_id":"completed", "source":"@lead Reviewed", "author_kind":"agent_session",
+            "in_reply_to":envelope["control"]["message_id"], "attempt_id":envelope["control"]["attempt_id"],
+            "work_outcome":"completed",
+        }), &f.runtime(workspace, pane)).unwrap();
+        for space in ["w1", workspace] {
+            let (thread, message): (String, String) = f.db().query_row(
+                "SELECT m.thread_id,m.message_id FROM collaboration_messages m
+                 WHERE m.session_socket_id='socket-a' AND m.worktree_id=?1
+                   AND (m.message_id=?2 OR EXISTS (
+                     SELECT 1 FROM bridged_messages copy WHERE copy.session_socket_id=m.session_socket_id
+                       AND copy.worktree_id=m.worktree_id AND copy.message_id=m.message_id
+                       AND copy.origin_space_id=?3 AND copy.origin_message_id=?2))",
+                rusqlite::params![space,reply["message_id"].as_str().unwrap(),workspace],
+                |row| Ok((row.get(0)?,row.get(1)?)),
+            ).unwrap();
+            let card = attention(&mut store, space, &thread);
+            assert_eq!(card["conversation"]["message_id"], message);
+            assert_eq!(card["response"]["kind"], "message", "reply in {space}");
+        }
+        let mut operator = f.runtime("w1", "unused");
+        operator.current_pane_id = None;
+        let before = f.message_rows();
+        let error = send_operator_message(
+            "tracked-reply",
+            "@lead Decide",
+            Some(&MessageId::new(assignment["message_id"].as_str().unwrap())),
+            &operator,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("tracked work requires an agent-authored message")
+        );
+        assert_eq!(f.message_rows(), before);
+        let source = format!(
+            "@lead Review coordination {}",
+            coordination.as_str().unwrap()
+        );
+        let sent = send_operator_message("safe-response", &source, None, &operator).unwrap();
+        let stored: (String, Option<String>, String) = f.db().query_row(
+            "SELECT author_kind,in_reply_to,authored_source FROM collaboration_messages WHERE worktree_id='w1' AND message_id=?1",
+            [sent["message_id"].as_str().unwrap()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(stored, ("human".to_owned(), None, source));
+        let results = execute_handoff_operation(
+            "handoff.results",
+            json!({"coordination_id":coordination}),
+            &lead,
+        )
+        .unwrap();
+        assert_eq!(results["outcome"], "open");
+        assert_eq!(results["assignments"][0]["work_outcome"], "completed");
+        assert!(reply["message_id"].is_string());
+    }
+}

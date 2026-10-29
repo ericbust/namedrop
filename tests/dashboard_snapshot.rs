@@ -1159,6 +1159,16 @@ fn an_unanswered_request_uses_its_current_recipient_alias_and_message() {
     assert_eq!(json["attention"][0]["source_kind"], "agent_disposition");
     assert_eq!(json["attention"][0]["subject_alias"], "reviewer");
     assert_eq!(json["attention"][0]["message_id"], "m1");
+    assert_eq!(
+        json["attention"][0]["conversation"],
+        serde_json::json!({"thread_id":"thread-w1", "message_id":"m1"})
+    );
+    assert_eq!(
+        json["attention"][0]["response"],
+        serde_json::json!({"kind":"reply", "thread_id":"thread-w1", "message_id":"m1", "address_id":"address-w1-b"})
+    );
+    assert_eq!(json["attention"][0]["source_id"], attempt.as_str());
+    assert!(json["attention"][0]["attention_id"].as_str().is_some());
     assert_eq!(json["participants"][1]["alias"], "@reviewer");
 }
 
@@ -1250,6 +1260,24 @@ fn nonmessage_attention_uses_its_source_and_serializes_absent_links_as_null() {
             _ => serde_json::Value::Null,
         };
         assert_eq!(card.get("subject_alias"), Some(&expected), "{card}");
+        assert_eq!(card["attention_id"], format!("attention-{number:02}"));
+        let response = match number {
+            0 => serde_json::json!({"kind":"pane", "address_id":"address-w1-a"}),
+            1 | 2 => serde_json::json!({"kind":"pane", "address_id":"address-w1-b"}),
+            3 => {
+                serde_json::json!({"kind":"reply", "thread_id":"thread-w1", "message_id":"m1", "address_id":"address-w1-a"})
+            }
+            _ => serde_json::json!({"kind":"local"}),
+        };
+        assert_eq!(card["response"], response, "{card}");
+        if number == 2 || number == 3 {
+            assert_eq!(
+                card["conversation"],
+                serde_json::json!({"thread_id":"thread-w1", "message_id":"m1"})
+            );
+        } else {
+            assert_eq!(card["conversation"], serde_json::Value::Null);
+        }
         assert_eq!(
             card.get("message_id"),
             Some(&serde_json::Value::Null),
@@ -1337,6 +1365,14 @@ fn held_attention_uses_its_namespace_when_delivery_and_address_ids_repeat() {
         assert_eq!(cards[0]["source_kind"], "delivery_attempt");
         assert_eq!(cards[0]["message_id"], message);
         assert_eq!(cards[0]["subject_alias"], alias);
+        assert_eq!(
+            cards[0]["conversation"],
+            serde_json::json!({"thread_id":"thread-w1", "message_id":message})
+        );
+        assert_eq!(
+            cards[0]["response"],
+            serde_json::json!({"kind":"reply", "thread_id":"thread-w1", "message_id":message, "address_id":"address-w1-b"})
+        );
     }
 }
 
@@ -1542,6 +1578,17 @@ fn attention_links_survive_a_message_falling_outside_the_frame() {
     assert_eq!(
         blocked.attention[0].message_id.as_deref(),
         Some("old-request")
+    );
+    let card = serde_json::to_value(&blocked.attention[0]).unwrap();
+    assert_eq!(card["attention_id"], "agent-status-address-w1-b");
+    assert_eq!(card["source_id"], "address-w1-b");
+    assert_eq!(
+        card["conversation"],
+        serde_json::json!({"thread_id":"thread-w1", "message_id":"old-request"})
+    );
+    assert_eq!(
+        card["response"],
+        serde_json::json!({"kind":"pane", "address_id":"address-w1-b"})
     );
     store
         .transaction(|tx| tx.hold_delivery_attempt(&ns, &attempt, &attribution()))
@@ -2093,4 +2140,184 @@ fn recently_closed_members_expire_at_five_minutes_but_references_keep_them() {
         serde_json::to_value(lane(&build(&rows, None, 300_999), "you")).unwrap()["recently_closed"],
         false
     );
+}
+
+#[test]
+fn coordination_attention_prefers_report_then_latest_worker_then_wake_then_request() {
+    use namedrop::{AttentionItemDraft, AttentionItemId, AttentionSourceKind};
+    use rusqlite::params;
+
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let first = seed_space(&mut store, "w1", &["a", "b", "c"]);
+    let second = seed_space_on_socket(&mut store, "socket-b", "w1", &["a", "b", "c"]);
+    let third = seed_space(&mut store, "w2", &["a", "b", "c"]);
+    let db = rusqlite::Connection::open(directory.path().join("namedrop.sqlite3")).unwrap();
+    for (index, ns) in [&first, &second, &third].into_iter().enumerate() {
+        let report = format!("report-{index}");
+        for (message, from, to, reply) in [
+            ("request", "a", "b", None),
+            ("worker-earlier", "b", "a", Some("request")),
+            ("worker-latest", "c", "a", Some("request")),
+            (report.as_str(), "a", "b", Some("request")),
+            ("wake", "a", "b", Some("request")),
+        ] {
+            send(
+                &mut store,
+                ns,
+                message,
+                from,
+                to,
+                "Synthetic coordination evidence",
+                reply,
+            );
+        }
+        db.execute(
+            "INSERT INTO coordinations (session_socket_id,worktree_id,coordination_id,request_id,owner_address_id,owner_session_id,deliverable,report_message_id,wake_message_id,created_at_ms,updated_at_ms)
+             VALUES (?1,?2,'coordination-shared','begin',?3,'session-owner','Review the worker report',?4,'wake',10,10)",
+            params![ns.session_socket_id, ns.space_id.as_str(), id(ns, "a").as_str(), report],
+        ).unwrap();
+        for (assignment, worker, message) in [
+            ("first", "b", "worker-earlier"),
+            ("second", "c", "worker-latest"),
+        ] {
+            db.execute(
+                "INSERT INTO coordination_assignments (session_socket_id,worktree_id,assignment_id,coordination_id,recipient_address_id,recipient_session_id,original_message_id,current_message_id,revision,work_outcome,last_reply_message_id)
+                 VALUES (?1,?2,?3,'coordination-shared',?4,'session-worker','request','request',1,'completed',?5)",
+                params![ns.session_socket_id, ns.space_id.as_str(), assignment, id(ns, worker).as_str(), message],
+            ).unwrap();
+        }
+        store
+            .transaction(|tx| {
+                tx.open_attention_item(
+                    ns,
+                    &AttentionItemDraft {
+                        id: AttentionItemId::new("attention-coordination-shared"),
+                        source_kind: AttentionSourceKind::Coordination,
+                        source_id: "coordination-shared".into(),
+                        summary: "Coordination needs a decision".into(),
+                    },
+                    &attribution(),
+                )
+            })
+            .unwrap();
+    }
+    send(
+        &mut store,
+        &second,
+        "foreign-only-report",
+        "a",
+        "b",
+        "Other namespace report",
+        Some("request"),
+    );
+    for (stage, expected) in [
+        ("report", None),
+        ("worker", Some("worker-latest")),
+        ("wake", Some("wake")),
+        ("request", Some("request")),
+    ] {
+        for (index, ns) in [&first, &second, &third].into_iter().enumerate() {
+            let json = serde_json::to_value(snapshot(&mut store, ns)).unwrap();
+            let card = &json["attention"][0];
+            let expected = expected
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("report-{index}"));
+            assert_eq!(card["attention_id"], "attention-coordination-shared");
+            assert_eq!(card["source_id"], "coordination-shared");
+            assert_eq!(card["coordination_id"], "coordination-shared");
+            assert_eq!(
+                card["conversation"],
+                serde_json::json!({"thread_id":format!("thread-{}",ns.space_id.as_str()), "message_id":expected})
+            );
+            assert_eq!(
+                card["response"],
+                serde_json::json!({"kind":"message", "address_id":id(ns,"a").as_str()})
+            );
+        }
+        match stage {
+            // A report id found only in another namespace must not mask worker evidence.
+            "report" => {
+                db.execute(
+                    "UPDATE coordinations SET report_message_id=CASE WHEN session_socket_id='socket-b' THEN NULL ELSE 'foreign-only-report' END",
+                    [],
+                )
+                .unwrap();
+            }
+            "worker" => {
+                db.execute(
+                    "UPDATE coordination_assignments SET last_reply_message_id=NULL",
+                    [],
+                )
+                .unwrap();
+            }
+            "wake" => {
+                db.execute("UPDATE coordinations SET wake_message_id=NULL", [])
+                    .unwrap();
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn attention_responses_respect_thread_controls_and_terminal_recipients_in_their_namespace() {
+    use namedrop::{AttentionItemDraft, AttentionItemId, AttentionSourceKind};
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let spaces = [
+        seed_space(&mut store, "w1", &["a", "b"]),
+        seed_space_on_socket(&mut store, "socket-b", "w1", &["a", "b"]),
+        seed_space(&mut store, "w2", &["a", "b"]),
+    ];
+    for ns in &spaces {
+        send(&mut store, ns, "request", "a", "b", "Review", None);
+        let attempt = submit(&mut store, ns, "b");
+        store
+            .transaction(|tx| {
+                for (number, source, source_id) in [
+                    (0, AttentionSourceKind::DeliveryAttempt, attempt.as_str()),
+                    (1, AttentionSourceKind::AgentDisposition, attempt.as_str()),
+                    (
+                        2,
+                        AttentionSourceKind::AutomaticReplyLimit,
+                        &format!("thread-{}", ns.space_id.as_str()),
+                    ),
+                ] {
+                    tx.open_attention_item(
+                        ns,
+                        &AttentionItemDraft {
+                            id: AttentionItemId::new(format!("source-{number}")),
+                            source_kind: source,
+                            source_id: source_id.into(),
+                            summary: "Needs a response".into(),
+                        },
+                        &attribution(),
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+    let db = rusqlite::Connection::open(directory.path().join("namedrop.sqlite3")).unwrap();
+    for (paused, stopped, terminal, expected) in [
+        (0, 0, 0, "reply"),
+        (1, 0, 0, "message"),
+        (0, 1, 0, "message"),
+        (0, 0, 1, "pane"),
+    ] {
+        db.execute("INSERT INTO thread_controls (session_socket_id,worktree_id,thread_id,paused,stopped,reply_allowance) VALUES ('socket-a','w1','thread-w1',?1,?2,0) ON CONFLICT DO UPDATE SET paused=excluded.paused,stopped=excluded.stopped", rusqlite::params![paused,stopped]).unwrap();
+        db.execute("UPDATE pane_addresses SET pane_type=CASE WHEN ?1 THEN 'terminal' ELSE 'agent' END WHERE session_socket_id='socket-a' AND worktree_id='w1'", [terminal]).unwrap();
+        for ns in &spaces {
+            let frame = serde_json::to_value(snapshot(&mut store, ns)).unwrap();
+            for card in frame["attention"].as_array().unwrap() {
+                assert_eq!(card["conversation"]["message_id"], "request");
+                assert_eq!(
+                    card["response"]["kind"],
+                    if ns == &spaces[0] { expected } else { "reply" },
+                    "{ns:?} {card}"
+                );
+            }
+        }
+    }
 }

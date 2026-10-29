@@ -11,6 +11,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Added
 
+- Channels attention items link to their conversations and offer a prefilled response or a named pane to inspect. Historical conversation links load their target directly, including requests outside the live message window.
 - The dashboard serves sanitized recent pane output at authenticated `GET /w/<key>/participants/<address_id>/screen` for agents and terminals. Concurrent requests for one pane share a bounded Herdr read. Retired or closed panes return 410.
 - Screen reads use unwrapped output and redact keys split by invisible characters or tabs. Oversized screens keep the newest text with an omission marker. Followers stop waiting after four seconds, and a 16-request peek limit reserves capacity for other dashboard routes.
 - Secret redaction preserves emoji and script formatting outside secrets, and keeps ENV values protected when a tab splits the variable name.

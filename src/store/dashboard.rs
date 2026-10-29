@@ -32,6 +32,18 @@ pub struct HistoryRows {
     pub legs: Vec<LegRow>,
 }
 
+pub struct ThreadContextRows {
+    pub thread_id: String,
+    pub message_count: i64,
+    pub earlier_omitted: bool,
+    pub history: HistoryRows,
+}
+
+pub struct ConversationRow {
+    pub thread_id: String,
+    pub message_id: String,
+}
+
 pub struct AddressRow {
     pub address_id: String,
     pub alias: String,
@@ -45,6 +57,7 @@ pub struct AddressRow {
     pub agent_status: Option<String>,
     pub blocked_since_ms: Option<i64>,
     pub blocked_message_id: Option<String>,
+    pub blocked_conversation: Option<ConversationRow>,
 }
 
 pub struct RegistrationRow {
@@ -119,6 +132,10 @@ pub struct TerminalRunRow {
 }
 
 pub struct AttentionRow {
+    pub conversation: Option<ConversationRow>,
+    pub response_address_id: Option<String>,
+    pub reply_requires_message: bool,
+    pub response_is_terminal: bool,
     pub item: crate::AttentionItemRecord,
     pub subject_alias: Option<String>,
     pub message_id: Option<String>,
@@ -191,6 +208,14 @@ impl StateStore {
         self.transaction(|transaction| {
             transaction.dashboard_history(namespace, before, limit.clamp(1, 100))
         })
+    }
+
+    pub fn dashboard_thread_context(
+        &mut self,
+        namespace: &StateNamespace,
+        message_id: &str,
+    ) -> Result<Option<ThreadContextRows>, StoreError> {
+        self.transaction(|transaction| transaction.dashboard_thread_context(namespace, message_id))
     }
 
     /// Changes whenever another connection commits; the dashboard's cheap
@@ -276,12 +301,19 @@ impl StateTransaction<'_> {
                 body: row.get(7)?,
             })
         })?;
+        let legs = self.dashboard_message_legs(namespace, &messages)?;
+        Ok(Some(HistoryRows { messages, legs }))
+    }
+
+    fn dashboard_message_legs(
+        &self,
+        namespace: &StateNamespace,
+        messages: &[MessageRow],
+    ) -> Result<Vec<LegRow>, StoreError> {
         if messages.is_empty() {
-            return Ok(Some(HistoryRows {
-                messages,
-                legs: Vec::new(),
-            }));
+            return Ok(Vec::new());
         }
+        let ns = namespace_params(namespace);
         let placeholders = (3..messages.len() + 3)
             .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
@@ -327,7 +359,78 @@ impl StateTransaction<'_> {
             })
         })?;
         self.normalize_operator_legs(namespace, &mut legs)?;
-        Ok(Some(HistoryRows { messages, legs }))
+        Ok(legs)
+    }
+
+    fn dashboard_thread_context(
+        &self,
+        namespace: &StateNamespace,
+        message_id: &str,
+    ) -> Result<Option<ThreadContextRows>, StoreError> {
+        let Some(conversation) = self.dashboard_conversation(namespace, message_id)? else {
+            return Ok(None);
+        };
+        let ns = namespace_params(namespace);
+        let thread_id = conversation.thread_id;
+        let message_count: i64 = self.transaction.query_row(
+            "SELECT COUNT(*) FROM collaboration_messages
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3",
+            params![ns[0], ns[1], thread_id],
+            |row| row.get(0),
+        )?;
+        let messages = self.rows(
+            "WITH scoped AS MATERIALIZED (
+                 SELECT rowid AS message_order, message_id, created_at_ms
+                 FROM collaboration_messages
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
+             ), selected AS (
+                 SELECT message_id FROM (SELECT message_id FROM scoped ORDER BY created_at_ms DESC, message_order DESC LIMIT 100)
+                 UNION SELECT message_id FROM (SELECT message_id FROM scoped ORDER BY created_at_ms, message_order LIMIT 1)
+                 UNION SELECT message_id FROM scoped WHERE message_id = ?4
+             )
+             SELECT m.message_id, m.thread_id, m.in_reply_to, m.created_at_ms, m.author_address_id,
+                    m.author_kind, m.grammar_version, m.body
+             FROM collaboration_messages m
+             WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.thread_id = ?3
+               AND m.message_id IN (SELECT message_id FROM selected)
+             ORDER BY m.created_at_ms, m.rowid",
+            params![ns[0], ns[1], thread_id, message_id],
+            |row| Ok(MessageRow {
+                message_id: row.get(0)?, thread_id: row.get(1)?, in_reply_to: row.get(2)?,
+                created_at_ms: row.get(3)?, author_address_id: row.get(4)?,
+                author_is_human: row.get::<_, String>(5)? == "human",
+                grammar_version: row.get(6)?, body: row.get(7)?,
+            }),
+        )?;
+        let legs = self.dashboard_message_legs(namespace, &messages)?;
+        Ok(Some(ThreadContextRows {
+            thread_id,
+            message_count,
+            earlier_omitted: message_count > messages.len() as i64,
+            history: HistoryRows { messages, legs },
+        }))
+    }
+
+    fn dashboard_conversation(
+        &self,
+        namespace: &StateNamespace,
+        message_id: &str,
+    ) -> Result<Option<ConversationRow>, StoreError> {
+        let ns = namespace_params(namespace);
+        Ok(self
+            .transaction
+            .query_row(
+                "SELECT thread_id, message_id FROM collaboration_messages
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+                params![ns[0], ns[1], message_id],
+                |row| {
+                    Ok(ConversationRow {
+                        thread_id: row.get(0)?,
+                        message_id: row.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
     }
 
     fn dashboard_rows(&self, namespace: &StateNamespace) -> Result<DashboardRows, StoreError> {
@@ -543,7 +646,8 @@ impl StateTransaction<'_> {
                  SELECT address_id, alias, MAX(history_order)
                  FROM alias_history
                  WHERE session_socket_id = ?1 AND worktree_id = ?2
-                 GROUP BY address_id)
+                 GROUP BY address_id),
+             address_rows AS (
              SELECT a.address_id, COALESCE(c.alias, h.alias, ltrim(r.name, '@')), r.name, a.persona, a.pane_type, a.retired,
                     b.pane_id IS NOT NULL,
                     COALESCE(o.agent_session_id, '') <> '', o.status,
@@ -557,11 +661,11 @@ impl StateTransaction<'_> {
                        AND s.address_id = a.address_id AND s.active = 1 AND s.state = 'acknowledged'
                        AND attempt.binding_id = b.binding_id
                        AND attempt.agent_session_id = o.agent_session_id
-                       AND o.agent_session_id <> ''),
+                       AND o.agent_session_id <> '') AS blocked_message_id,
                     (SELECT MAX(closed.unbound_at_ms) FROM pane_bindings closed
                      WHERE closed.session_socket_id = a.session_socket_id
                        AND closed.worktree_id = a.worktree_id
-                       AND closed.address_id = a.address_id)
+                       AND closed.address_id = a.address_id) AS closed_at_ms
              FROM pane_addresses a
              JOIN pane_roles r USING (session_socket_id, worktree_id, role_id)
              -- A retired agent's alias can be released for reuse; its lane keeps the last one.
@@ -581,6 +685,10 @@ impl StateTransaction<'_> {
                    SELECT 1 FROM space_envoys e
                    WHERE e.session_socket_id = a.session_socket_id
                      AND e.worktree_id = a.worktree_id AND e.address_id = a.address_id)
+             ORDER BY a.address_id)
+             SELECT a.*, m.thread_id FROM address_rows a
+             LEFT JOIN collaboration_messages m ON m.session_socket_id = ?1 AND m.worktree_id = ?2
+               AND m.message_id = a.blocked_message_id
              ORDER BY a.address_id",
             ns,
             |row| {
@@ -601,6 +709,10 @@ impl StateTransaction<'_> {
                     agent_status: row.get(8)?,
                     blocked_since_ms: row.get(9)?,
                     blocked_message_id: row.get(10)?,
+                    blocked_conversation: match row.get::<_, Option<String>>(12)? {
+                        Some(thread_id) => Some(ConversationRow { thread_id, message_id: row.get(10)? }),
+                        None => None,
+                    },
                 })
             },
         )?;
@@ -630,7 +742,11 @@ impl StateTransaction<'_> {
             .map(|address| &address.address_id)
             .collect();
         let mut attention = self.rows(
-            "SELECT i.attention_item_id, i.source_kind, i.source_id, i.summary,
+            "WITH targets (
+                 attention_item_id, source_kind, source_id, summary, opened_at_ms, resolved_at_ms,
+                 delivery_address_id, delivery_alias, legacy_message_id, pane_address_id,
+                 target_message_id, response_address_id
+             ) AS (SELECT i.attention_item_id, i.source_kind, i.source_id, i.summary,
                     i.opened_at_ms, i.resolved_at_ms,
                     d.address_id,
                     CASE WHEN d.address_id NOT IN (SELECT value FROM json_each(?3))
@@ -649,6 +765,60 @@ impl StateTransaction<'_> {
                           SELECT grantee_address_id FROM context_grants grant
                           WHERE grant.session_socket_id = i.session_socket_id
                             AND grant.worktree_id = i.worktree_id AND grant.grant_id = i.source_id)
+                    END,
+                    CASE i.source_kind
+                      WHEN 'coordination' THEN COALESCE(
+                          (SELECT m.message_id FROM collaboration_messages m
+                           WHERE m.session_socket_id = i.session_socket_id AND m.worktree_id = i.worktree_id
+                             AND m.message_id = c.report_message_id),
+                          (SELECT m.message_id FROM coordination_assignments assignment
+                           JOIN collaboration_messages m ON m.session_socket_id = assignment.session_socket_id
+                             AND m.worktree_id = assignment.worktree_id AND m.message_id = assignment.last_reply_message_id
+                           WHERE assignment.session_socket_id = i.session_socket_id AND assignment.worktree_id = i.worktree_id
+                             AND assignment.coordination_id = c.coordination_id
+                           ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 1),
+                          (SELECT m.message_id FROM collaboration_messages m
+                           WHERE m.session_socket_id = i.session_socket_id AND m.worktree_id = i.worktree_id
+                             AND m.message_id = c.wake_message_id),
+                          (SELECT assignment.current_message_id FROM coordination_assignments assignment
+                           WHERE assignment.session_socket_id = i.session_socket_id AND assignment.worktree_id = i.worktree_id
+                             AND assignment.coordination_id = c.coordination_id ORDER BY assignment.rowid DESC LIMIT 1))
+                      WHEN 'automatic_reply_limit' THEN (
+                          SELECT m.message_id FROM collaboration_messages m
+                          WHERE m.session_socket_id = i.session_socket_id AND m.worktree_id = i.worktree_id
+                            AND m.thread_id = i.source_id ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 1)
+                      WHEN 'context_grant' THEN (
+                          SELECT m.message_id FROM context_grants g
+                          JOIN collaboration_messages m ON m.session_socket_id = g.session_socket_id
+                            AND m.worktree_id = g.worktree_id AND m.thread_id = g.thread_id
+                          WHERE g.session_socket_id = i.session_socket_id AND g.worktree_id = i.worktree_id
+                            AND g.grant_id = i.source_id ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 1)
+                      ELSE d.message_id
+                    END,
+                    CASE i.source_kind
+                      WHEN 'coordination' THEN c.owner_address_id
+                      WHEN 'automatic_reply_limit' THEN (
+                          SELECT COALESCE(
+                              CASE WHEN m.author_kind <> 'human' THEN m.author_address_id END,
+                              (SELECT r.address_id FROM message_recipients r
+                               WHERE r.session_socket_id = m.session_socket_id AND r.worktree_id = m.worktree_id
+                                 AND r.message_id = m.message_id AND r.address_id NOT IN (SELECT value FROM json_each(?4))
+                               ORDER BY r.recipient_order LIMIT 1))
+                          FROM collaboration_messages m
+                          WHERE m.session_socket_id = i.session_socket_id AND m.worktree_id = i.worktree_id
+                            AND m.thread_id = i.source_id ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 1)
+                      WHEN 'pane_binding' THEN (
+                          SELECT address_id FROM pane_addresses address
+                          WHERE address.session_socket_id = i.session_socket_id AND address.worktree_id = i.worktree_id
+                            AND address.address_id = i.source_id)
+                      WHEN 'integration_registration' THEN (
+                          SELECT address_id FROM integration_registrations registration
+                          WHERE registration.session_socket_id = i.session_socket_id AND registration.worktree_id = i.worktree_id
+                            AND registration.registration_id = i.source_id)
+                      WHEN 'context_grant' THEN (
+                          SELECT grantee_address_id FROM context_grants g
+                          WHERE g.session_socket_id = i.session_socket_id AND g.worktree_id = i.worktree_id AND g.grant_id = i.source_id)
+                      ELSE d.address_id
                     END
              FROM attention_items i INDEXED BY one_attention_item_per_unresolved_source
              LEFT JOIN delivery_attempts a
@@ -658,8 +828,33 @@ impl StateTransaction<'_> {
              LEFT JOIN mailbox_deliveries d
                ON d.session_socket_id = a.session_socket_id AND d.worktree_id = a.worktree_id
               AND d.delivery_id = a.delivery_id AND d.address_id = a.address_id
-             WHERE i.session_socket_id = ?1 AND i.worktree_id = ?2 AND i.resolved_at_ms IS NULL",
-            params![ns[0], ns[1], serde_json::json!(address_ids).to_string()],
+             LEFT JOIN coordinations c ON i.source_kind = 'coordination'
+               AND c.session_socket_id = i.session_socket_id AND c.worktree_id = i.worktree_id AND c.coordination_id = i.source_id
+             WHERE i.session_socket_id = ?1 AND i.worktree_id = ?2 AND i.resolved_at_ms IS NULL)
+             SELECT targets.*, m.thread_id, m.message_id,
+               EXISTS (SELECT 1 FROM coordination_links links
+                       WHERE links.session_socket_id = m.session_socket_id
+                         AND links.worktree_id = m.worktree_id AND links.message_id = m.message_id)
+               OR EXISTS (SELECT 1 FROM bridged_messages copy
+                          JOIN coordination_links links ON links.session_socket_id = copy.session_socket_id
+                            AND links.worktree_id = copy.origin_space_id AND links.message_id = copy.origin_message_id
+                          WHERE copy.session_socket_id = m.session_socket_id
+                            AND copy.worktree_id = m.worktree_id AND copy.message_id = m.message_id)
+               OR EXISTS (SELECT 1 FROM bridged_messages copy
+                          JOIN coordination_links links ON links.session_socket_id = copy.session_socket_id
+                            AND links.worktree_id = copy.worktree_id AND links.message_id = copy.message_id
+                          WHERE copy.session_socket_id = m.session_socket_id
+                            AND copy.origin_space_id = m.worktree_id AND copy.origin_message_id = m.message_id)
+               OR COALESCE(controls.paused OR controls.stopped, 0),
+               COALESCE(responder.pane_type = 'terminal', 0)
+             FROM targets
+             LEFT JOIN collaboration_messages m ON m.session_socket_id = ?1 AND m.worktree_id = ?2
+               AND m.message_id = targets.target_message_id
+             LEFT JOIN thread_controls controls ON controls.session_socket_id = m.session_socket_id
+               AND controls.worktree_id = m.worktree_id AND controls.thread_id = m.thread_id
+             LEFT JOIN pane_addresses responder ON responder.session_socket_id = ?1 AND responder.worktree_id = ?2
+               AND responder.address_id = targets.response_address_id",
+            params![ns[0], ns[1], serde_json::json!(address_ids).to_string(), serde_json::json!(operators).to_string()],
             |row| {
                 let item = crate::AttentionItemRecord {
                     id: crate::AttentionItemId::new(row.get::<_, String>(0)?),
@@ -686,6 +881,13 @@ impl StateTransaction<'_> {
                     | crate::AttentionSourceKind::Coordination => None,
                 };
                 Ok(AttentionRow {
+                    conversation: match row.get::<_, Option<String>>(12)? {
+                        Some(thread_id) => Some(ConversationRow { thread_id, message_id: row.get(13)? }),
+                        None => None,
+                    },
+                    response_address_id: row.get(11)?,
+                    reply_requires_message: row.get(14)?,
+                    response_is_terminal: row.get(15)?,
                     item,
                     subject_alias,
                     message_id: row.get(8)?,
@@ -778,6 +980,7 @@ impl StateTransaction<'_> {
             agent_status: None,
             blocked_since_ms: None,
             blocked_message_id: None,
+            blocked_conversation: None,
         });
     }
 
