@@ -480,6 +480,8 @@ pub enum ChannelRoutingState {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelRouting {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mentioned: Option<Vec<String>>,
     pub state: ChannelRoutingState,
     pub to: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -780,6 +782,7 @@ fn health(state: SpaceState, attention: usize, in_flight: usize, working: usize)
 pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageRow {
     MessageRow {
         channel: row.channel_to.as_ref().map(|to| ChannelRouting {
+            mentioned: row.channel_mentioned.clone(),
             state: if to.is_empty() {
                 ChannelRoutingState::Unrouted
             } else {

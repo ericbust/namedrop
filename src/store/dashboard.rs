@@ -53,6 +53,7 @@ pub struct RegistrationRow {
 
 pub struct MessageRow {
     pub channel_to: Option<Vec<String>>,
+    pub channel_mentioned: Option<Vec<String>>,
     pub woke: Vec<String>,
     pub message_id: String,
     pub thread_id: String,
@@ -268,6 +269,7 @@ impl StateTransaction<'_> {
         let mut messages = self.rows(&sql, rusqlite::params_from_iter(args), |row| {
             Ok(MessageRow {
                 channel_to: None,
+                channel_mentioned: None,
                 woke: Vec::new(),
                 message_id: row.get(0)?,
                 thread_id: row.get(1)?,
@@ -391,6 +393,7 @@ impl StateTransaction<'_> {
                 to.push(alias);
             }
         }
+        let members = self.channel_members(namespace)?;
         for message in messages {
             let Some(source) = sources.get(&message.message_id) else {
                 continue;
@@ -398,6 +401,18 @@ impl StateTransaction<'_> {
             let mut to = recipients.remove(&message.message_id).unwrap_or_default();
             if message.grammar_version == "channel/v1" && message.in_reply_to.is_none() {
                 message.channel_to = Some(to);
+                let mentions = crate::message::context_mentions(source);
+                message.channel_mentioned = Some(
+                    members
+                        .iter()
+                        .filter(|member| {
+                            mentions.iter().any(|mention| {
+                                mention.workspace.is_none() && mention.alias == member.alias
+                            })
+                        })
+                        .map(|member| member.alias.clone())
+                        .collect(),
+                );
             } else if !message.author_is_human
                 && message.in_reply_to.is_some()
                 && let Ok(parsed) = crate::parse_mentions(source)
@@ -425,6 +440,7 @@ impl StateTransaction<'_> {
             |row| {
                 Ok(MessageRow {
                     channel_to: None,
+                    channel_mentioned: None,
                     woke: Vec::new(),
                     message_id: row.get(0)?,
                     thread_id: row.get(1)?,

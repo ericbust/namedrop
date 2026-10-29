@@ -1,4 +1,3 @@
-//! Optional dashboard explanations; routing authority stays in SQLite.
 use super::{ChannelRoutingState, MessageRow, SafeText, SpaceKey};
 use crate::StateNamespace;
 use serde::{Deserialize, Serialize};
@@ -7,7 +6,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -115,7 +114,13 @@ fn append(state: &Path, note: Note) -> io::Result<()> {
         return Ok(());
     }
     let mut file = open_owned(&path(state), true)?;
-    if file.metadata()?.len() + line.len() as u64 > MAX_BYTES {
+    let length = file.metadata()?.len();
+    let mut tail = *b"\n";
+    if length > 0 {
+        file.read_exact_at(&mut tail, length - 1)?;
+    }
+    let needs_newline = tail[0] != b'\n';
+    if length + line.len() as u64 + u64::from(needs_newline) > MAX_BYTES {
         let mut retained = read_notes(state).unwrap_or_default();
         retained.push(note);
         let start = retained.len().saturating_sub(MAX_RECORDS / 2);
@@ -133,6 +138,9 @@ fn append(state: &Path, note: Note) -> io::Result<()> {
     } else {
         use std::io::Seek;
         file.seek(io::SeekFrom::End(0))?;
+        if needs_newline {
+            file.write_all(b"\n")?;
+        }
         file.write_all(&line)?;
     }
     Ok(())

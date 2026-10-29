@@ -2420,31 +2420,111 @@ impl StateTransaction<'_> {
         )?)
     }
 
+    pub(crate) fn preferred_router_host(&self) -> Result<Option<crate::AgentRuntime>, StoreError> {
+        let runtime = self
+            .transaction
+            .query_row(
+                "SELECT runtime FROM integration_registrations
+             WHERE active = 1 AND runtime IN ('claude-code', 'codex')
+             ORDER BY CASE runtime WHEN 'claude-code' THEN 0 ELSE 1 END LIMIT 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(runtime.map(|runtime| {
+            if runtime == "claude-code" {
+                crate::AgentRuntime::ClaudeCode
+            } else {
+                crate::AgentRuntime::Codex
+            }
+        }))
+    }
+
+    pub(crate) fn thread_agent_participants(
+        &self,
+        namespace: &StateNamespace,
+        thread: &ThreadId,
+    ) -> Result<Vec<RoutingAddressSnapshot>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT p.address_id FROM thread_participants p
+             JOIN pane_addresses a USING (session_socket_id, worktree_id, address_id)
+             LEFT JOIN space_envoys e USING (session_socket_id, worktree_id, address_id)
+             WHERE p.session_socket_id = ?1 AND p.worktree_id = ?2 AND p.thread_id = ?3
+               AND a.retired = 0 AND a.pane_type = 'agent'
+               AND (e.address_id IS NULL OR EXISTS (
+                   SELECT 1 FROM pane_addresses origin
+                   WHERE origin.session_socket_id = p.session_socket_id
+                     AND origin.worktree_id = e.origin_space_id
+                     AND origin.address_id = e.origin_address_id
+                     AND origin.retired = 0 AND origin.pane_type = 'agent'))
+             ORDER BY p.participant_order",
+        )?;
+        let ids = statement
+            .query_map(
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    thread.as_str()
+                ],
+                |row| row.get::<_, String>(0).map(PaneAddressId::new),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut participants = Vec::new();
+        for id in ids {
+            if self.is_operator_address(namespace, &id)? {
+                continue;
+            }
+            if let Some(origin) = self.envoy_origin(namespace, &id)? {
+                let home = StateNamespace::new(&namespace.session_socket_id, origin.space);
+                if self.is_operator_address(&home, &origin.address_id)? {
+                    continue;
+                }
+            }
+            if let Some(participant) = self.optional_routing_address_by_id(namespace, &id)? {
+                participants.push(participant);
+            }
+        }
+        Ok(participants)
+    }
+
+    pub(crate) fn channel_mentioned(
+        &self,
+        namespace: &StateNamespace,
+        source: &str,
+    ) -> Result<Vec<String>, StoreError> {
+        let mentions = crate::message::context_mentions(source);
+        Ok(self
+            .channel_members(namespace)?
+            .into_iter()
+            .filter(|member| {
+                mentions
+                    .iter()
+                    .any(|mention| mention.workspace.is_none() && mention.alias == member.alias)
+            })
+            .map(|member| member.alias)
+            .collect())
+    }
+
     pub(crate) fn channel_members(
         &self,
         namespace: &StateNamespace,
     ) -> Result<Vec<RoutingAddressSnapshot>, StoreError> {
         let mut statement = self.transaction.prepare(
-            "WITH live AS MATERIALIZED (
-                 SELECT a.address_id, c.alias, b.binding_id,
-                        (SELECT o.agent_session_id FROM agent_session_observations o
-                         WHERE o.session_socket_id = a.session_socket_id AND o.worktree_id = a.worktree_id
-                           AND o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
-                         ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1) AS agent_session_id
-                 FROM pane_addresses a
-                 JOIN alias_claims c USING (session_socket_id, worktree_id, address_id)
-                 JOIN pane_bindings b USING (session_socket_id, worktree_id, address_id)
-                 WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
-                   AND a.retired = 0 AND a.collaboration_disabled = 0 AND a.pane_type = 'agent'
-                   AND c.claim_state = 'active' AND c.alias <> 'operator' AND b.active = 1
-             )
-             SELECT address_id, alias, binding_id, agent_session_id FROM live
-             WHERE agent_session_id <> '' AND EXISTS (
-                 SELECT 1 FROM integration_registrations r
-                 WHERE r.session_socket_id = ?1 AND r.worktree_id = ?2
-                   AND r.address_id = live.address_id AND r.agent_session_id = live.agent_session_id
-                   AND r.active = 1 AND r.runtime IN ('claude-code', 'codex'))
-             ORDER BY address_id")?;
+            "SELECT a.address_id, c.alias, b.binding_id,
+                    (SELECT o.agent_session_id FROM agent_session_observations o
+                     WHERE o.session_socket_id = a.session_socket_id AND o.worktree_id = a.worktree_id
+                       AND o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
+                     ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1)
+             FROM pane_addresses a
+             JOIN alias_claims c USING (session_socket_id, worktree_id, address_id)
+             LEFT JOIN pane_bindings b ON b.session_socket_id = a.session_socket_id
+               AND b.worktree_id = a.worktree_id AND b.address_id = a.address_id AND b.active = 1
+             WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
+               AND a.retired = 0 AND a.collaboration_disabled = 0 AND a.pane_type = 'agent'
+               AND a.address_id <> 'operator:local' AND c.claim_state = 'active' AND c.alias <> 'operator'
+               AND NOT EXISTS (SELECT 1 FROM space_envoys e WHERE e.session_socket_id = a.session_socket_id
+                   AND e.worktree_id = a.worktree_id AND e.address_id = a.address_id)
+             ORDER BY a.address_id")?;
         Ok(statement
             .query_map(
                 params![namespace.session_socket_id, namespace.space_id.as_str()],
@@ -2452,10 +2532,13 @@ impl StateTransaction<'_> {
                     Ok(RoutingAddressSnapshot {
                         address_id: PaneAddressId::new(row.get::<_, String>(0)?),
                         alias: row.get(1)?,
-                        pane_binding_id: Some(crate::PaneBindingId::new(row.get::<_, String>(2)?)),
-                        agent_session_id: Some(crate::AgentSessionId::new(
-                            row.get::<_, String>(3)?,
-                        )),
+                        pane_binding_id: row
+                            .get::<_, Option<String>>(2)?
+                            .map(crate::PaneBindingId::new),
+                        agent_session_id: row
+                            .get::<_, Option<String>>(3)?
+                            .filter(|id| !id.is_empty())
+                            .map(crate::AgentSessionId::new),
                     })
                 },
             )?

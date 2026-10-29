@@ -1045,8 +1045,13 @@ fn send_operator_post(
         ids: &ids,
     };
     let target = post.in_reply_to.map(crate::MessageId::new);
-    let sent = if target.is_none() && crate::message::is_plain_channel_post(&post.source) {
-        crate::message::send_operator_channel_message(&post.request_id, &post.source, &runtime)
+    let sent = if crate::message::is_plain_channel_post(&post.source) {
+        crate::message::send_operator_channel_message(
+            &post.request_id,
+            &post.source,
+            target.as_ref(),
+            &runtime,
+        )
     } else {
         crate::send_operator_message(&post.request_id, &post.source, target.as_ref(), &runtime)
     };
