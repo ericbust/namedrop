@@ -9,8 +9,11 @@ import type {
   MemberKind,
   OutgoingPhase,
   Participant,
+  ScreenFailure,
   SendFailure,
 } from "./model.ts";
+import type { PeekNotice } from "./peek.ts";
+import type { PeekWho } from "./store.ts";
 
 export type IconName =
   | "alert"
@@ -374,3 +377,44 @@ export const activityCopy = {
   counted: Record<ActivityGroupKind, string>;
   [copy: string]: unknown;
 };
+export const peekCopy = {
+  label: (alias: string) => `Screen of ${alias}`,
+  where: (channel: string) => `in ${channel}`,
+  readAt: (ms: number) => `Read at ${timeOfDay(ms)}`,
+  reading: "Reading…",
+  readingScreen: (alias: string) => `Reading ${alias}'s screen…`,
+  busy: "Busy panes can take a few seconds.",
+  empty: "The screen is empty.",
+  omitted: "Earlier lines not shown",
+  text: "Screen text",
+  refresh: "Refresh",
+  close: "Close screen",
+  tryAgain: "Try again",
+};
+export const peekFailureCopy = {
+  closed: (who) => ({
+    title: "Pane closed",
+    body: `${who.alias} no longer has a pane Namedrop can read.`,
+    retry: false,
+  }),
+  missing: (who) => ({
+    title: `Not in ${who.channel.label} any more`,
+    body: `Namedrop can't find ${who.alias} in this workspace.`,
+    retry: false,
+  }),
+  busy: () => ({
+    title: "Couldn't read the screen",
+    body: "Herdr was busy or didn't answer in time.",
+    retry: true,
+  }),
+  session: () => ({
+    title: "Session ended",
+    body: "Open Namedrop's dashboard link again to keep reading.",
+    retry: false,
+  }),
+  unreachable: () => ({
+    title: "Couldn't reach Namedrop",
+    body: "Check that Namedrop is still running.",
+    retry: true,
+  }),
+} satisfies Record<ScreenFailure, (who: PeekWho) => PeekNotice>;

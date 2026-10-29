@@ -15,6 +15,8 @@ import type {
   MessageKind,
   Route,
   SafeText,
+  Screen,
+  ScreenFailure,
   SpaceKey,
   SpaceState,
   TerminalResult,
@@ -370,6 +372,27 @@ export function routePath(route: Route): string {
 }
 export function sameRoute(a: Route, b: Route): boolean {
   return routePath(a) === routePath(b);
+}
+const OMITTED = "[Earlier screen text omitted]\n";
+export function parseScreen(body: string): Screen {
+  return body.startsWith(OMITTED)
+    ? { earlierOmitted: true, text: body.slice(OMITTED.length) }
+    : { earlierOmitted: false, text: body };
+}
+export function screenFailure(status: number): ScreenFailure {
+  switch (status) {
+    case 410:
+      return "closed";
+    case 404:
+      return "missing";
+    case 503:
+      return "busy";
+    case 401:
+    case 403:
+      return "session";
+    default:
+      return "unreachable";
+  }
 }
 export function parseHistory(raw: unknown): readonly Message[] {
   return [...messages(raw).values()].reverse();
