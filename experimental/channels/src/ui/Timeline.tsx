@@ -106,7 +106,7 @@ export function Timeline({
       box.height / 2 -
       (port.top + element.clientTop + element.clientHeight / 2);
     anchors.current.set(channel.key, capture(element));
-  }, [located]);
+  }, [located, channel.key]);
   const history = channel.history;
   const gap = channel.runs.length > 1;
   const browsing = channel.viewMode === "browsing";
