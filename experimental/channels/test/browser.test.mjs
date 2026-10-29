@@ -2562,7 +2562,7 @@ test("design-b: loading, empty channel and history errors use the design copy", 
     .waitFor();
   await ui.page
     .getByText(
-      "When agents in this workspace mention each other, the conversation shows up here.",
+      "Post here to talk with the agents in this workspace. Mention @name to bring one in.",
       { exact: true },
     )
     .waitFor();
@@ -3193,7 +3193,7 @@ test("UI-3: pressing Enter twice writes one post", async (t) => {
   assert.equal(await timeline.locator("[data-message-id]").count(), 2);
 });
 
-test("UI-3: a thread reply carries in_reply_to and keeps its recipients", async (t) => {
+test("UI-3: a thread reply carries in_reply_to and goes as typed to the thread's agents", async (t) => {
   const now = Date.now();
   const value = team(1, "alpha");
   value.frame.messages = [
@@ -3232,7 +3232,7 @@ test("UI-3: a thread reply carries in_reply_to and keeps its recipients", async 
   await reply.press("Enter");
   await until(() => ui.posts.attempts.length === 1, "the reply");
   const first = JSON.parse(ui.posts.attempts[0].raw);
-  assert.equal(first.source, "@codex thanks");
+  assert.equal(first.source, "thanks", "the server delivers it to @codex");
   assert.equal(first.in_reply_to, "answer");
   await pane.locator("article.pending").getByText("Sent").waitFor();
   assert.equal(await timeline.locator("article.pending").count(), 0);
@@ -3299,21 +3299,61 @@ test("UI-3: a thread reply to an agent in another workspace names it through its
   const [attempt] = ui.posts.attempts;
   assert.equal(attempt.key, key(1));
   const body = JSON.parse(attempt.raw);
-  assert.equal(body.source, "#alpha @lead thanks");
+  assert.equal(body.source, "thanks", "the server delivers it to @lead");
   assert.equal(body.in_reply_to, "answer");
 });
 
-test("UI-3: a post that names nobody stays in the box and says how to choose someone", async (t) => {
-  const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
+// A thread whose only other member is a terminal, so a reply must name someone.
+async function terminalThread(t) {
+  const now = Date.now();
+  const value = team(1, "alpha");
+  value.frame.messages = [
+    message("ls", "@shell ls", {
+      thread_id: "t1",
+      at_ms: now - 120_000,
+      legs: [{ to: "shell", stage: { stage: "replied", reply_id: "out" } }],
+    }),
+    message(
+      "out",
+      "@shell command finished with exit code 0.\nstdout:\nREADME.md\n\nstderr:",
+      {
+        thread_id: "t1",
+        in_reply_to: "ls",
+        kind: "reply",
+        author: "shell",
+        at_ms: now - 60_000,
+      },
+    ),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
   await ui.live();
-  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
-  const send = ui.page.getByRole("button", { name: "Send" });
-  const status = ui.page.locator(".composer-status");
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from @shell/ })
+    .click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  return {
+    ui,
+    pane,
+    box: pane.getByRole("combobox", {
+      name: "Start with @name to choose who gets this.",
+    }),
+    send: pane.getByRole("button", { name: "Send" }),
+    status: pane.locator(".composer-status"),
+  };
+}
+
+test("UI-3: a reply in a thread with no agents stays in the box and says how to choose someone", async (t) => {
+  const { ui, pane, box, send, status } = await terminalThread(t);
   await box.click();
   assert.equal(
     await status.textContent(),
     "Enter to send · Shift+Enter for a new line",
   );
+  assert.equal(await pane.locator(".composer-to").count(), 0, "no To label");
   await box.pressSequentially("hello");
   await box.press("Enter");
   assert.equal(
@@ -3330,23 +3370,21 @@ test("UI-3: a post that names nobody stays in the box and says how to choose som
     await box.evaluate((element) => getComputedStyle(element).color),
     "the guard reads in --text, not muted",
   );
-  await box.fill("@codex hello");
+  await box.fill("@shell hello");
   assert.equal(await send.isDisabled(), false);
   await box.press("Enter");
   await until(() => ui.posts.attempts.length === 1, "the addressed post");
+  const posted = JSON.parse(ui.posts.attempts[0].raw);
   assert.equal(
-    JSON.parse(ui.posts.attempts[0].raw).source,
-    "@codex hello",
+    posted.source,
+    "@shell hello",
     "the unaddressed text never reached the server",
   );
+  assert.equal(posted.in_reply_to, "out");
 });
 
 test("UI-3: the recipient guard waits for a send attempt and the next keystroke clears it", async (t) => {
-  const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
-  await ui.live();
-  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
-  const send = ui.page.getByRole("button", { name: "Send" });
-  const status = ui.page.locator(".composer-status");
+  const { ui, box, send, status } = await terminalThread(t);
   const hint = "Enter to send · Shift+Enter for a new line";
   async function typeExpectingHint(text) {
     for (const character of text) {
@@ -3375,12 +3413,12 @@ test("UI-3: the recipient guard waits for a send attempt and the next keystroke 
   assert.equal(await box.inputValue(), "hello");
   assert.equal(await ui.page.locator("article.pending").count(), 0);
   await typeExpectingHint("!");
-  await box.fill("@codex hello");
+  await box.fill("@shell hello");
   await box.press("Enter");
   await until(() => ui.posts.attempts.length === 1, "the addressed post");
   assert.equal(
     JSON.parse(ui.posts.attempts[0].raw).source,
-    "@codex hello",
+    "@shell hello",
     "neither the click nor the unaddressed Enter reached the server",
   );
 });
@@ -3966,7 +4004,7 @@ test("UI-3 fix: a thread reply refused after the pane closed marks its parent, a
   await reply.press("Enter");
   await until(() => ui.posts.attempts.length === 2, "the retry");
   assert.equal(new Set(requestIds(ui)).size, 1, "the retry reused its id");
-  assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "@codex thanks");
+  assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "thanks");
 });
 
 test("UI-3 fix: switching channels and closing a thread keep unsent text", async (t) => {
@@ -4724,4 +4762,551 @@ test("CH-2: the page fills the window and never scrolls, with a long channel and
   await ui.page.setViewportSize({ width: 1440, height: 900 });
   await ui.page.locator('[data-message-id="long-79"]').hover();
   assert.deepEqual(await page(), { overflow: 0, scrolled: 0 });
+});
+
+const routed = (reason = "build question", router = "claude-haiku") => ({
+  state: "routed",
+  to: ["claude"],
+  reason,
+  router,
+});
+const iconShape = {
+  clock: "M8 5v3l2 1.5",
+  arrow: "M3 8h10M9 4l4 4-4 4",
+  inbox: "M2.5 9.5h3l1 1.5h3l1-1.5h3M3.6 3.5h8.8l1.1 6v3.5h-11V9.5z",
+  alert: "M8 5v3.5M8 11h.01",
+};
+function channelPost(id, text, channel, extra = {}) {
+  return message(id, text, { channel, at_ms: Date.now() - 600_000, ...extra });
+}
+function answer(id, parent, thread, author, text, extra = {}) {
+  return message(id, text, {
+    thread_id: thread,
+    in_reply_to: parent,
+    kind: "reply",
+    author,
+    ...extra,
+  });
+}
+async function chatRoom(t, messages, options) {
+  const value = team(1, "alpha");
+  value.frame.messages = messages;
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    undefined,
+    options,
+  );
+  await ui.live();
+  return { ui, value };
+}
+function routeOf(ui, id) {
+  const route = ui.page.locator(`main [data-message-id="${id}"] .route`);
+  return {
+    route,
+    parts: () => route.locator(".route-parts > li").allTextContents(),
+    icon: () =>
+      route
+        .locator("svg.route-icon path")
+        .evaluateAll((paths) => paths.map((path) => path.getAttribute("d"))),
+  };
+}
+async function tokenColor(page, token) {
+  return page.evaluate((token) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(${token})`;
+    document.body.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }, token);
+}
+
+test("CH-2: a post that mentions no agent has no route line and its header names no one", async (t) => {
+  const { ui } = await chatRoom(t, [
+    channelPost("quiet", "heads up: rotating the staging keys at 3pm", {
+      state: "unrouted",
+      to: [],
+    }),
+  ]);
+  const row = ui.page.locator('main [data-message-id="quiet"]');
+  await row.waitFor();
+  assert.equal(await row.locator(".route").count(), 0);
+  assert.equal(await row.locator(".msg-head .to").count(), 0);
+  assert.equal(await row.locator(".receipt").count(), 0);
+});
+
+test("CH-2: routing reads Checking who this is for, then a live routed frame fills in the same row", async (t) => {
+  const post = (channel, legs = []) =>
+    channelPost(
+      "p1",
+      "can @claude check why the mac build fails on main?",
+      channel,
+      {
+        legs,
+      },
+    );
+  const value = team(1, "alpha");
+  value.frame.messages = [post({ state: "routing" })];
+  let client;
+  const ui = await open(t, (connected) => {
+    client = connected;
+    replay(connected, [value]);
+  });
+  await ui.live();
+  const { route, parts, icon } = routeOf(ui, "p1");
+  await route.waitFor();
+  assert.deepEqual(await parts(), ["Checking who this is for…"]);
+  assert.deepEqual(await icon(), [iconShape.clock]);
+  await ui.page.locator('main [data-message-id="p1"]').evaluate((row) => {
+    row.dataset.seen = "yes";
+  });
+  value.frame.messages = [
+    post(routed(), [
+      { to: "claude", stage: { stage: "working", acked_at_ms: 1 } },
+    ]),
+  ];
+  client.send("space", value);
+  await ui.page.getByText("build question", { exact: true }).waitFor();
+  assert.deepEqual(await parts(), [
+    "@claude",
+    "build question",
+    "Working on it",
+  ]);
+  assert.deepEqual(await icon(), [iconShape.arrow]);
+  assert.equal(await route.getAttribute("title"), "Picked by claude-haiku");
+  assert.equal(
+    await ui.page
+      .locator('main [data-message-id="p1"]')
+      .getAttribute("data-seen"),
+    "yes",
+    "the row updated in place",
+  );
+  const name = route.getByRole("button", { name: "@claude", exact: true });
+  assert.equal(
+    await name.evaluate((element) => getComputedStyle(element).fontWeight),
+    "600",
+  );
+  assert.equal(
+    await name.evaluate((element) => getComputedStyle(element).color),
+    await tokenColor(ui.page, "--text"),
+    "names read in --text",
+  );
+  assert.equal(
+    await route.evaluate((element) => getComputedStyle(element).fontSize),
+    "12px",
+  );
+});
+
+test("CH-2: a routed post offers Send anyway for the mentioned agent it did not reach", async (t) => {
+  const { ui } = await chatRoom(t, [
+    channelPost(
+      "p1",
+      "thanks @codex, can @claude check the mac build?",
+      routed(),
+      {
+        legs: [{ to: "claude", stage: { stage: "delivered" } }],
+      },
+    ),
+  ]);
+  const { route, parts, icon } = routeOf(ui, "p1");
+  await route.waitFor();
+  assert.deepEqual(await parts(), [
+    "@claude",
+    "build question",
+    "Delivered",
+    "Mentioned @codex, not sent",
+    "Send anyway",
+  ]);
+  assert.deepEqual(await icon(), [iconShape.arrow]);
+  const offer = route.getByRole("button", { name: "Send this to @codex" });
+  assert.equal(await offer.textContent(), "Send anyway");
+  assert.equal(
+    await offer.evaluate((element) => getComputedStyle(element).color),
+    await tokenColor(ui.page, "--accent-text"),
+  );
+});
+
+test("CH-2: an unrouted post that mentions an agent says it was not sent, with the inbox and Send anyway", async (t) => {
+  const { ui } = await chatRoom(t, [
+    channelPost("p1", "nice catch by @codex on the cache", {
+      state: "unrouted",
+      to: [],
+    }),
+  ]);
+  const { route, parts, icon } = routeOf(ui, "p1");
+  await route.waitFor();
+  assert.deepEqual(await parts(), [
+    "Mentioned @codex, not sent",
+    "Send anyway",
+  ]);
+  assert.deepEqual(await icon(), [iconShape.inbox]);
+  assert.equal(await route.getAttribute("title"), null);
+  await route.getByRole("button", { name: "Send this to @codex" }).waitFor();
+});
+
+test("CH-2: router_failed reads in --failed-text, explains itself, and offers Send to each agent", async (t) => {
+  const { ui } = await chatRoom(t, [
+    channelPost("p1", "can @codex and @claude look at the flaky test?", {
+      state: "router_failed",
+    }),
+  ]);
+  const { route, parts, icon } = routeOf(ui, "p1");
+  await route.waitFor();
+  assert.deepEqual(await parts(), [
+    "Couldn't check who this is for",
+    "Send to @codex, @claude",
+  ]);
+  assert.deepEqual(await icon(), [iconShape.alert]);
+  assert.equal(
+    await route.getAttribute("title"),
+    "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+  );
+  const failed = await tokenColor(ui.page, "--failed-text");
+  assert.equal(
+    await route
+      .locator(".route-state")
+      .evaluate((element) => getComputedStyle(element).color),
+    failed,
+  );
+  assert.equal(
+    await route
+      .locator(".route-icon")
+      .evaluate((element) => getComputedStyle(element).color),
+    failed,
+  );
+  for (const alias of ["@codex", "@claude"])
+    assert.equal(
+      await route
+        .getByRole("button", { name: `Send this to ${alias}` })
+        .textContent(),
+      alias,
+    );
+});
+
+test("CH-2: replies read as their own rows in time order, with a reference above a reply whose parent is not just above it", async (t) => {
+  const at = Date.now() - 600_000;
+  const { ui } = await chatRoom(t, [
+    channelPost(
+      "p",
+      "can @claude check why the mac build fails on main?",
+      routed(),
+      {
+        at_ms: at,
+        legs: [{ to: "claude", stage: { stage: "working", acked_at_ms: 1 } }],
+      },
+    ),
+    answer(
+      "r1",
+      "p",
+      "p",
+      "claude",
+      "The arm64 link step fails. @codex, is the CI cache stale?\nMore detail here.",
+      {
+        at_ms: at + 60_000,
+        legs: [
+          { to: "human", stage: { stage: "delivered" } },
+          { to: "codex", stage: { stage: "working", acked_at_ms: 1 } },
+        ],
+        woke: ["codex"],
+      },
+    ),
+    message("other", "@shell ls", {
+      thread_id: "t-other",
+      at_ms: at + 90_000,
+      legs: [{ to: "shell", stage: { stage: "queued" } }],
+    }),
+    answer(
+      "r2",
+      "r1",
+      "p",
+      "codex",
+      "Yes. I cleared it, and the build passes now.",
+      {
+        at_ms: at + 120_000,
+        legs: [{ to: "human", stage: { stage: "delivered" } }],
+      },
+    ),
+    answer("r3", "gone", "p", "claude", "Following up on an older point.", {
+      at_ms: at + 150_000,
+    }),
+  ]);
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.locator('[data-message-id="r3"]').waitFor();
+  assert.deepEqual(
+    await timeline
+      .locator("article[data-message-id]")
+      .evaluateAll((rows) => rows.map((row) => row.dataset.messageId)),
+    ["p", "r1", "other", "r2", "r3"],
+  );
+  assert.equal(
+    await timeline.locator(".reply-preview").count(),
+    0,
+    "no reply preview",
+  );
+  assert.deepEqual(await routeOf(ui, "p").parts(), [
+    "@claude",
+    "build question",
+    "3 replies",
+  ]);
+  assert.deepEqual(await routeOf(ui, "r1").parts(), ["@codex", "pulled in"]);
+  assert.equal(
+    await timeline.locator('[data-message-id="r1"] .msg-head .to').count(),
+    0,
+  );
+  assert.equal(
+    await timeline.locator('[data-message-id="r1"] .reply-ref').count(),
+    0,
+  );
+  assert.equal(
+    await routeOf(ui, "r2").route.count(),
+    0,
+    "a reply to the operator only",
+  );
+  const reference = timeline.getByRole("button", {
+    name: "Reply to @claude: The arm64 link step fails. @codex, is the CI cache stale? Open thread",
+  });
+  assert.equal(
+    await reference.textContent(),
+    "@claude:The arm64 link step fails. @codex, is the CI cache stale?",
+  );
+  const [referenceBox, headBox] = await Promise.all([
+    reference.boundingBox(),
+    timeline.locator('[data-message-id="r2"] .msg-head').boundingBox(),
+  ]);
+  assert.ok(referenceBox.y < headBox.y, "the reference sits above the header");
+  assert.ok(
+    Math.abs(referenceBox.x - headBox.x) < 1,
+    "aligned with the text column",
+  );
+  await timeline
+    .getByRole("button", { name: "Reply to an earlier message. Open thread" })
+    .waitFor();
+  await timeline
+    .getByRole("button", { name: "3 replies. Open thread" })
+    .waitFor();
+  await reference.click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await pane.locator('[data-message-id="p"] .route').waitFor();
+  assert.equal(
+    await pane.locator(".reply-ref").count(),
+    0,
+    "no references in the pane",
+  );
+  assert.equal(
+    await pane.locator(".composer-to").textContent(),
+    "To @claude, @codex",
+  );
+  const box = pane.getByRole("combobox", { name: "Reply to @claude, @codex" });
+  await box.pressSequentially("thanks both");
+  assert.equal(
+    await pane.locator(".composer-status").textContent(),
+    "Enter to send · Shift+Enter for a new line",
+  );
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the reply");
+  const posted = JSON.parse(ui.posts.attempts[0].raw);
+  assert.equal(posted.source, "thanks both", "sent as typed");
+  assert.equal(posted.in_reply_to, "r3");
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  assert.equal(
+    await ui.page.evaluate(() =>
+      document.activeElement?.getAttribute("aria-label"),
+    ),
+    "Reply to @claude: The arm64 link step fails. @codex, is the CI cache stale? Open thread",
+    "focus returns to the reference",
+  );
+});
+
+test("CH-2: Send anyway opens the thread with the post addressed and the caret at the end, and keeps a draft that has text", async (t) => {
+  const { ui } = await chatRoom(t, [
+    channelPost("p1", "nice catch by @codex on the cache", {
+      state: "unrouted",
+      to: [],
+    }),
+  ]);
+  const offer = ui.page
+    .locator("main")
+    .getByRole("button", { name: "Send this to @codex" });
+  await offer.click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const box = pane.getByRole("combobox");
+  await box.waitFor();
+  const filled = "@codex nice catch by @codex on the cache";
+  assert.deepEqual(
+    await box.evaluate((element) => [
+      element.value,
+      element.selectionStart,
+      element.selectionEnd,
+      document.activeElement === element,
+    ]),
+    [filled, filled.length, filled.length, true],
+  );
+  assert.equal(await ui.page.getByRole("listbox").count(), 0, "no member list");
+  assert.equal(
+    await pane.locator(".composer-to").count(),
+    0,
+    "the leading mention replaces the To label",
+  );
+  assert.equal(
+    await pane.locator(".composer-status").textContent(),
+    "Enter to send · Shift+Enter for a new line",
+  );
+  await box.press("!");
+  assert.equal(await box.inputValue(), `${filled}!`, "typed at the end");
+  assert.equal(
+    await ui.page.getByRole("listbox").count(),
+    0,
+    "still no member list",
+  );
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  assert.equal(
+    await offer.evaluate((element) => document.activeElement === element),
+    true,
+    "focus returns to the offer",
+  );
+  await offer.click();
+  await box.waitFor();
+  assert.equal(await box.inputValue(), `${filled}!`, "a draft with text stays");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the sent post");
+  assert.deepEqual(JSON.parse(ui.posts.attempts[0].raw), {
+    request_id: JSON.parse(ui.posts.attempts[0].raw).request_id,
+    source: `${filled}!`,
+    in_reply_to: "p1",
+  });
+  await pane.locator("article.pending").getByText("Sent").waitFor();
+  await box.pressSequentially("@c ");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 2, "the short reply");
+  await ui.page.waitForFunction(
+    () => document.querySelector("aside textarea")?.value === "",
+  );
+  await offer.click();
+  await ui.page.waitForFunction(
+    (text) => document.querySelector("aside textarea")?.value === text,
+    filled,
+  );
+  assert.equal(
+    await ui.page.getByRole("listbox").count(),
+    0,
+    "the caret moved to the end, so no member list opens on the leading mention",
+  );
+});
+
+test("CH-2: the channel composer says where Enter sends, posts plain text, and a post that mentions agents waits on Checking who this is for", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const { ui } = await chatRoom(t, [], {
+    onPost: async () => {
+      await gate;
+      return { status: 200 };
+    },
+  });
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const hints = [
+    ["", "Enter posts to the channel · Mention @name to bring someone in"],
+    [
+      "hello room",
+      "Enter posts to the channel · Mention @name to bring someone in",
+    ],
+    [
+      "ask @shell",
+      "Enter posts to the channel · Mention @name to bring someone in",
+    ],
+    [
+      "can @codex look",
+      "Enter posts to the channel · Namedrop checks if it's for @codex",
+    ],
+    [
+      "can @codex and @claude look",
+      "Enter posts to the channel · Namedrop checks if it's for @codex, @claude",
+    ],
+    ["@codex hi", "Enter sends only to @codex"],
+    ["#alpha @codex @shell hi", "Enter sends only to @codex, @shell"],
+  ];
+  for (const [text, hint] of hints) {
+    await box.fill(text);
+    assert.equal(await status.textContent(), hint, JSON.stringify(text));
+  }
+  await box.fill("can @codex look at the build?");
+  await box.press("Enter");
+  const pending = ui.page.locator("main article.pending");
+  await pending.waitFor();
+  assert.equal(
+    await pending.locator(".receipt").textContent(),
+    "Checking who this is for…",
+  );
+  assert.deepEqual(
+    await pending
+      .locator(".receipt svg path")
+      .evaluateAll((paths) => paths.map((path) => path.getAttribute("d"))),
+    [iconShape.clock],
+  );
+  release();
+  await pending.locator(".receipt").getByText("Sent").waitFor();
+  const first = JSON.parse(ui.posts.attempts[0].raw);
+  assert.equal(first.source, "can @codex look at the build?");
+  assert.equal("in_reply_to" in first, false);
+  await box.fill("hello room");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 2, "the plain post");
+  assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "hello room");
+});
+
+test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {
+  const at = Date.now() - 600_000;
+  const { ui } = await chatRoom(t, [
+    message("ask", "please reply with the single word pong.", {
+      thread_id: "t1",
+      kind: "handoff",
+      author: "claude",
+      at_ms: at,
+      legs: [{ to: "codex", stage: done() }],
+    }),
+    answer("pong", "ask", "t1", "codex", "pong", {
+      at_ms: at + 60_000,
+      legs: [{ to: "claude", stage: { stage: "delivered" } }],
+    }),
+  ]);
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.locator('[data-message-id="pong"]').waitFor();
+  assert.equal(
+    await timeline
+      .locator('[data-message-id="pong"] .msg-head .to')
+      .textContent(),
+    " to @claude",
+  );
+  assert.equal(
+    await timeline.locator('[data-message-id="pong"] .receipt').textContent(),
+    "Delivered",
+  );
+  assert.equal(
+    await timeline.locator('[data-message-id="ask"] .receipt').count(),
+    0,
+    "@codex answered, so the ask's receipts hide",
+  );
+  assert.equal(await timeline.locator(".route").count(), 0, "no route lines");
+  assert.equal(
+    await timeline.locator(".reply-preview:not(.count-only)").count(),
+    0,
+    "no reply preview",
+  );
+  await timeline.getByRole("button", { name: "1 reply. Open thread" }).click();
+  await ui.page
+    .getByRole("complementary", { name: "Thread", exact: true })
+    .getByRole("combobox", { name: "Reply to @claude, @codex" })
+    .waitFor();
 });
