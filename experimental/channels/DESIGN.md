@@ -453,8 +453,10 @@ main column, under the timeline, and at the bottom of the thread pane.
   send this. Try again." Editing the text clears the error.
 - A post must start with a recipient. When the text does not start with
   `@name`, `#channel @name`, or `#all @name`, and the thread gives no recipients,
-  Enter does not send. The hint line instead reads "Start with @name to choose
-  who gets this." in `--text`, and the Send button stays disabled.
+  Enter does not send, and the Send button stays disabled. Only after Enter or
+  a click on Send does the hint line read "Start with @name to choose who gets
+  this." in `--text`. Typing clears it, so it never nags while a recipient is
+  still being typed.
 - A retry with the same text reuses the same request id, so it can never post
   twice. Changed text gets a new id.
 
