@@ -371,6 +371,7 @@ test("a queued leg in a paused channel reads Held while paused, other stages kee
   assert.equal(receiptCopy({ stage: "delivered" }, true).label, "Delivered");
   assert.deepEqual(pendingCopy, {
     sending: { label: "Sending…", icon: "clock" },
+    checking: { label: "Checking who this is for…", icon: "clock" },
     sent: { label: "Sent", icon: "check" },
   });
 });
@@ -391,14 +392,35 @@ test("composer words name the channel, the thread's recipients and the reason a 
   assert.equal(replyPlaceholder(["@lead · #alpha"]), "Write a reply");
   assert.equal(replyLabel(["@codex"]), "Reply to @codex");
   assert.equal(replyLabel(["@lead · #alpha"]), "Reply to @lead · #alpha");
-  const noOne =
-    "No one in this thread can be mentioned. Start with @name to choose someone.";
+  const noOne = "Start with @name to choose who gets this.";
   assert.equal(replyPlaceholder([]), noOne);
   assert.equal(replyLabel([]), noOne);
   assert.equal(recipientsLabel(["@codex", "@shell"]), "To @codex, @shell");
+  assert.equal(composerCopy.needsRecipient, noOne);
+  assert.equal(composerCopy.hint, "Enter to send · Shift+Enter for a new line");
   assert.equal(
-    composerCopy.needsRecipient,
-    "Start with @name to choose who gets this.",
+    composerCopy.toRoom,
+    "Enter posts to the channel · Mention @name to bring someone in",
+  );
+  assert.equal(
+    composerCopy.checks(["@codex"]),
+    "Enter posts to the channel · Namedrop checks if it's for @codex",
+  );
+  assert.equal(
+    composerCopy.checks(["@codex", "@claude", "@lead"]),
+    "Enter posts to the channel · Namedrop checks if it's for @codex, @claude +1",
+  );
+  assert.equal(
+    composerCopy.sendsOnlyTo(["@codex"]),
+    "Enter sends only to @codex",
+  );
+  assert.equal(
+    composerCopy.sendsOnlyTo(["@codex", "@shell"]),
+    "Enter sends only to @codex, @shell",
+  );
+  assert.equal(
+    composerCopy.sendsOnlyTo(["@codex", "@shell", "@a", "@b"]),
+    "Enter sends only to @codex, @shell +2",
   );
   assert.deepEqual(disabledChannelCopy, {
     "unusable-label":

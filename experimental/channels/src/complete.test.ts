@@ -7,8 +7,10 @@ import {
   type CompletionContext,
   channelOptions,
   complete,
+  composerHint,
   leadingMentions,
   mentionedAgents,
+  pendingStage,
   postSource,
 } from "./complete.ts";
 import type { ChannelSnapshot, SpaceKey } from "./model.ts";
@@ -424,11 +426,73 @@ test("complete: a channel post mentions the agents it names anywhere, once each,
   assert.deepEqual(named("é@codex and ü @codex"), ["@codex"]);
 });
 
-test("complete: a post sends its own recipients, else the thread's, else nothing", () => {
-  const to = { names: ["@lead · #alpha"], mentions: "#alpha @lead" };
-  assert.equal(postSource("  @codex hi ", to), "@codex hi");
-  assert.equal(postSource("thanks", to), "#alpha @lead thanks");
-  assert.equal(postSource("#alpha hi", to), "#alpha @lead #alpha hi");
-  assert.equal(postSource("hello", null), null);
-  assert.equal(postSource("   ", to), null);
+test("complete: a channel post sends as typed, a thread reply needs agents or its own mentions", () => {
+  const channel = { kind: "channel", agents: alpha.members } as const;
+  assert.equal(postSource("  hello room ", channel), "hello room");
+  assert.equal(postSource("can @codex look?", channel), "can @codex look?");
+  assert.equal(postSource("@codex hi", channel), "@codex hi");
+  assert.equal(postSource("  \n ", channel), null);
+  const agents = { kind: "thread", to: ["@lead · #alpha"] } as const;
+  assert.equal(postSource(" thanks ", agents), "thanks", "never prefixed");
+  assert.equal(postSource("#alpha hi", agents), "#alpha hi");
+  assert.equal(postSource("@codex hi", agents), "@codex hi");
+  const nobody = { kind: "thread", to: [] } as const;
+  assert.equal(postSource("ls -la", nobody), null);
+  assert.equal(postSource("hi @shell", nobody), null);
+  assert.equal(postSource("@shell ls -la", nobody), "@shell ls -la");
+  assert.equal(postSource("#alpha @shell ls", nobody), "#alpha @shell ls");
+  assert.equal(postSource("   ", agents), null);
+});
+
+test("complete: the hint says where Enter sends the text", () => {
+  const channel = { kind: "channel", agents: alpha.members } as const;
+  const hint = (text: string) => composerHint(channel, text);
+  const room = "Enter posts to the channel · Mention @name to bring someone in";
+  assert.equal(hint(""), room);
+  assert.equal(hint("heads up, keys rotate at 3pm"), room);
+  assert.equal(hint("ask @shell and @ghost"), room, "no agent mentioned");
+  assert.equal(
+    hint("can @codex look?"),
+    "Enter posts to the channel · Namedrop checks if it's for @codex",
+  );
+  assert.equal(
+    hint("@ @claude, @codex and @claude"),
+    "Enter posts to the channel · Namedrop checks if it's for @claude, @codex",
+  );
+  assert.equal(hint("@codex hi"), "Enter sends only to @codex");
+  assert.equal(
+    hint("#alpha @codex @shell hi"),
+    "Enter sends only to @codex, @shell",
+  );
+  assert.equal(
+    hint("@codex @shell @lead @claude hi"),
+    "Enter sends only to @codex, @shell +2",
+  );
+  for (const to of [[], ["@codex"]])
+    assert.equal(
+      composerHint({ kind: "thread", to }, "@codex hi"),
+      "Enter to send · Shift+Enter for a new line",
+    );
+});
+
+test("complete: a pending channel post that mentions agents reads as checking until the server answers", () => {
+  const entry = (
+    source: string,
+    thread: string | null = null,
+    sent = false,
+  ) => ({
+    composer: { key: alphaKey, thread },
+    source,
+    phase: sent
+      ? ({ kind: "sent", messageId: "m1" } as const)
+      : ({ kind: "sending" } as const),
+  });
+  const stage = (...args: Parameters<typeof entry>) =>
+    pendingStage(entry(...args), alpha.members);
+  assert.equal(stage("can @codex look?"), "checking");
+  assert.equal(stage("can @codex look?", null, true), "sent");
+  assert.equal(stage("hello room"), "sending");
+  assert.equal(stage("@codex look"), "sending", "a request skips the router");
+  assert.equal(stage("ask @shell"), "sending", "a terminal is never routed");
+  assert.equal(stage("can @codex look?", "t1"), "sending", "a thread reply");
 });

@@ -1,5 +1,5 @@
 import type { ActivityGroupKind } from "./activity.ts";
-import type { DisabledReason } from "./complete.ts";
+import type { DisabledReason, PendingStage } from "./complete.ts";
 import type {
   Activity,
   Attention,
@@ -7,7 +7,6 @@ import type {
   DeliveryStage,
   Health,
   MemberKind,
-  OutgoingPhase,
   Participant,
   ScreenFailure,
   SendFailure,
@@ -239,8 +238,9 @@ export function dayBounds(ms: number): { start: number; end: number } {
 
 export const pendingCopy = {
   sending: { label: "Sending…", icon: "clock" },
+  checking: { label: "Checking who this is for…", icon: "clock" },
   sent: { label: "Sent", icon: "check" },
-} satisfies Record<OutgoingPhase["kind"], { label: string; icon: IconName }>;
+} satisfies Record<PendingStage, { label: string; icon: IconName }>;
 
 const couldNotSend = "Namedrop couldn't send this. Try again.";
 const sessionExpired = () =>
@@ -263,8 +263,20 @@ export function sendErrorCopy({ status, message }: SendFailure): string {
   return (sendErrors.get(status) ?? (() => couldNotSend))(message);
 }
 
+// At most two names, then "+N".
+function shortList(names: readonly string[]): string {
+  const shown = names.slice(0, SHOWN_RECIPIENTS).join(", ");
+  return names.length > SHOWN_RECIPIENTS
+    ? `${shown} ${overflowCopy(names.length - SHOWN_RECIPIENTS)}`
+    : shown;
+}
 export const composerCopy = {
   hint: "Enter to send · Shift+Enter for a new line",
+  toRoom: "Enter posts to the channel · Mention @name to bring someone in",
+  checks: (names: readonly string[]) =>
+    `Enter posts to the channel · Namedrop checks if it's for ${shortList(names)}`,
+  sendsOnlyTo: (names: readonly string[]) =>
+    `Enter sends only to ${shortList(names)}`,
   sending: "Sending…",
   send: "Send",
   everyWorkspace: "every workspace",
@@ -289,15 +301,15 @@ export function composerPlaceholder(
 ): string {
   return `Message ${channelMention(channel)}`;
 }
-const noOneToReplyTo =
-  "No one in this thread can be mentioned. Start with @name to choose someone.";
 // The "To" label above the box already names the recipients.
 export function replyPlaceholder(recipients: readonly string[]): string {
-  return recipients.length === 0 ? noOneToReplyTo : "Write a reply";
+  return recipients.length === 0
+    ? composerCopy.needsRecipient
+    : "Write a reply";
 }
 export function replyLabel(recipients: readonly string[]): string {
   return recipients.length === 0
-    ? noOneToReplyTo
+    ? composerCopy.needsRecipient
     : `Reply to ${recipients.join(", ")}`;
 }
 export function recipientsLabel(recipients: readonly string[]): string {

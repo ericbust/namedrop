@@ -1,6 +1,6 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CompletionContext } from "../complete.ts";
-import { replyLabel, replyPlaceholder } from "../copy.ts";
+import { repliesCopy, replyLabel, replyPlaceholder } from "../copy.ts";
 import type {
   Channel,
   ComposerId,
@@ -8,14 +8,15 @@ import type {
   Draft,
   DraftKey,
   Outgoing,
+  SendRule,
 } from "../model.ts";
 import {
   exitFor,
   type RunIndex,
   recipients,
-  replyRecipients,
   sameComposer,
   type ThreadGroup,
+  threadAgents,
 } from "../store.ts";
 import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
@@ -55,8 +56,8 @@ export function ThreadPane({
   const pane = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
   const [openedAt] = useState(() => Date.now());
-  const to = useMemo(
-    () => replyRecipients(thread, directory),
+  const rule = useMemo<Extract<SendRule, { kind: "thread" }>>(
+    () => ({ kind: "thread", to: threadAgents(thread, directory) }),
     [thread, directory],
   );
   const latest = thread.replies.at(-1) ?? thread.parents.at(-1);
@@ -120,9 +121,7 @@ export function ThreadPane({
           />
         ))}
         <p className="divider">
-          {count === 0 && !unloaded
-            ? "No replies yet"
-            : `${count} ${count === 1 ? "reply" : "replies"}`}
+          {count === 0 && !unloaded ? "No replies yet" : repliesCopy(count)}
           {unloaded ? " · earlier replies not loaded" : ""}
         </p>
         {thread.replies.map((message) => (
@@ -137,7 +136,11 @@ export function ThreadPane({
           />
         ))}
         {pending.map((entry) => (
-          <PendingMessage key={entry.requestId} entry={entry} />
+          <PendingMessage
+            key={entry.requestId}
+            entry={entry}
+            members={channel.members}
+          />
         ))}
       </div>
       {completion && latest && (
@@ -146,9 +149,9 @@ export function ThreadPane({
           composer={composer}
           drafts={drafts}
           outbox={outbox}
-          placeholder={replyPlaceholder(to?.names ?? [])}
-          label={replyLabel(to?.names ?? [])}
-          to={to}
+          placeholder={replyPlaceholder(rule.to)}
+          label={replyLabel(rule.to)}
+          rule={rule}
           onEdit={(text) => onEdit(composer, text)}
           onSend={(source, startedAt) =>
             onSend({ composer, source, inReplyTo: latest.id }, startedAt)

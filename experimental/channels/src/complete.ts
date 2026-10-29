@@ -1,9 +1,11 @@
+import { composerCopy } from "./copy.ts";
 import { foldLabel } from "./label.ts";
 import type {
   AddressId,
   ChannelSnapshot,
   Member,
-  ReplyTo,
+  Outgoing,
+  SendRule,
   SpaceKey,
   SpaceState,
 } from "./model.ts";
@@ -273,9 +275,38 @@ export function mentionedAgents(
   return [...mentioned];
 }
 
-export function postSource(text: string, to: ReplyTo | null): string | null {
+// The text Enter sends, or null when it must stay in the box.
+export function postSource(text: string, rule: SendRule): string | null {
   const body = text.trim();
   if (body === "") return null;
-  if (leadingMentions(body).length > 0) return body;
-  return to === null ? null : `${to.mentions} ${body}`;
+  return rule.kind === "thread" &&
+    rule.to.length === 0 &&
+    leadingMentions(body).length === 0
+    ? null
+    : body;
+}
+
+// Where Enter sends the text, in the words of the hint under the box.
+export function composerHint(rule: SendRule, text: string): string {
+  if (rule.kind === "thread") return composerCopy.hint;
+  const leading = leadingMentions(text);
+  if (leading.length > 0) return composerCopy.sendsOnlyTo(leading);
+  const mentioned = mentionedAgents(text, rule.agents);
+  return mentioned.length > 0
+    ? composerCopy.checks(mentioned.map((member) => member.alias))
+    : composerCopy.toRoom;
+}
+
+export type PendingStage = "sending" | "checking" | "sent";
+// A channel post that mentions agents waits on the router before the server answers.
+export function pendingStage(
+  entry: Pick<Outgoing, "composer" | "source" | "phase">,
+  members: ReadonlyMap<AddressId, Member>,
+): PendingStage {
+  if (entry.phase.kind === "sent") return "sent";
+  return entry.composer.thread === null &&
+    leadingMentions(entry.source).length === 0 &&
+    mentionedAgents(entry.source, members).length > 0
+    ? "checking"
+    : "sending";
 }

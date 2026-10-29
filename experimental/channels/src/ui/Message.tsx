@@ -1,4 +1,5 @@
 import { Fragment, memo, type ReactNode, useState } from "react";
+import { pendingStage } from "../complete.ts";
 import {
   overflowCopy,
   type ParticipantCopy,
@@ -10,6 +11,7 @@ import {
 import type {
   AddressId,
   Directory,
+  Member,
   Message as MessageRow,
   Outgoing,
   TerminalResult,
@@ -575,13 +577,16 @@ export const Message = memo(
 
 export function PendingMessage({
   entry,
+  members,
   grouped = false,
 }: {
   entry: Outgoing;
+  members: ReadonlyMap<AddressId, Member>;
   grouped?: boolean;
 }) {
   const time = clock(entry.at);
-  const copy = pendingCopy[entry.phase.kind === "sent" ? "sent" : "sending"];
+  const stage = pendingStage(entry, members);
+  const copy = pendingCopy[stage];
   return (
     <article
       className={`msg pending ${grouped ? "grouped" : "group-start"}`}
@@ -607,7 +612,7 @@ export function PendingMessage({
         )}
         <Body text={entry.source} truncated={false} variant="text" />
         <ul className="receipt" aria-label="Delivery">
-          <li data-stage={entry.phase.kind}>
+          <li data-stage={stage}>
             <Icon name={copy.icon} className="icon-12" />
             {copy.label}
           </li>

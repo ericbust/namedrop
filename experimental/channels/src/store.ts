@@ -1,4 +1,10 @@
-import { channelMention, channelToken, dayBounds, dayLabel } from "./copy.ts";
+import {
+  channelMention,
+  channelToken,
+  dayBounds,
+  dayLabel,
+  participantCopy,
+} from "./copy.ts";
 import type {
   Activity,
   AddressId,
@@ -17,7 +23,6 @@ import type {
   Participant,
   PeekableKind,
   PeekTarget,
-  ReplyTo,
   Route,
   Routing,
   Selection,
@@ -1190,38 +1195,27 @@ export function participant(
     ? { kind: "member", member: agent, home }
     : { kind: "envoy", id, home: home ?? null };
 }
-// The server looks every `@alias` up in every workspace a post names, so a reply
-// names one workspace, or it would reach same-named agents outside the thread.
-export function replyRecipients(
+// Who a thread reply goes to when its text names no one: every agent who wrote
+// in the thread or was sent a message in it, as the server reads the thread.
+export function threadAgents(
   thread: ThreadGroup,
   directory: Directory,
-): ReplyTo | null {
-  const agents = (ids: readonly (AddressId | "human")[]) =>
-    ids.flatMap((id) => {
+): readonly string[] {
+  const names = new Map<AddressId | "human", string>();
+  for (const message of [...thread.parents, ...thread.replies])
+    for (const id of [message.author, ...recipients(message)]) {
+      if (names.has(id)) continue;
       const who = participant(directory, id);
-      return who.kind === "member" ? [who] : [];
-    });
-  const wrote = agents(
-    [...thread.parents, ...thread.replies].map((message) => message.author),
-  );
-  const pool =
-    wrote.length > 0 ? wrote : agents(thread.parents.flatMap(recipients));
-  const anchor = wrote.length > 0 ? wrote.at(-1) : pool[0];
-  if (anchor === undefined) return null;
-  const { home } = anchor;
-  const aliases = [
-    ...new Set(
-      pool.flatMap((who) => (who.home === home ? [who.member.alias] : [])),
-    ),
-  ];
-  if (home === null) return { names: aliases, mentions: aliases.join(" ") };
-  const { token } = home;
-  return token === null
-    ? null
-    : {
-        names: aliases.map((alias) => `${alias} · ${token}`),
-        mentions: `${token} ${aliases.join(" ")}`,
-      };
+      const agent =
+        who.kind === "envoy" ||
+        (who.kind === "member" &&
+          who.member.kind.type !== "terminal" &&
+          who.member.activity !== "retired");
+      if (!agent) continue;
+      const { name, suffix } = participantCopy(who);
+      names.set(id, suffix === null ? name : `${name} · ${suffix}`);
+    }
+  return [...names.values()];
 }
 
 export type PeekWho = Readonly<{

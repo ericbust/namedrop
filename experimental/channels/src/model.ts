@@ -198,7 +198,12 @@ export type Participant =
   | { kind: "member"; member: Member; home: Home | null }
   | { kind: "envoy"; id: AddressId; home: Home | null }
   | { kind: "unknown"; id: AddressId };
-export type ReplyTo = { names: readonly string[]; mentions: string };
+// What a composer needs before Enter sends. A channel post always sends. A
+// thread reply goes to `to`, the thread's agents as display names; with none,
+// the text must start with the members it is for.
+export type SendRule =
+  | { kind: "channel"; agents: ReadonlyMap<AddressId, Member> }
+  | { kind: "thread"; to: readonly string[] };
 export type WireEvent =
   | { type: "space"; channel: ChannelSnapshot }
   | { type: "gone"; key: SpaceKey }

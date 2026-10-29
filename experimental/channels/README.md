@@ -153,18 +153,22 @@ At startup the app reads its CSRF token from `GET /api/session`. A send posts
 `POST /w/<key>/messages` with the `X-Namedrop-Csrf` header. After a 403 the app reads
 the token again and retries the same request once. The store's `outbox` holds each
 post by request ID. A post shows as a pending row with **Sending…**, then **Sent**
-after the server accepts it. The row that a later frame carries for that message ID
-replaces it. A refused post keeps its text and shows the error under the box. Sending
-the same text again reuses its request ID, so the server never writes it twice. A
-thread reply goes to one workspace, because the server looks every `@alias` up in
-every workspace a post names. It starts with the mentions of the agents who wrote in
-the thread from the workspace of the latest agent message, else the parent's
-recipients from the workspace of its first recipient, unless its text starts with its
-own mentions. Local agents read `@codex @claude`. Another workspace's agents follow
-its token, as in `#alpha @lead`. When that workspace has no token, nobody is left. A
-post that names nobody does not send.
-`replyRecipients()` in `src/store.ts` and `postSource()` in `src/complete.ts` hold
-these rules.
+after the server accepts it. A channel post that mentions agents reads **Checking who
+this is for…** while it sends, because the server asks its router before it answers.
+The row that a later frame carries for that message ID replaces it. A refused post keeps its text and shows the error under the box. Sending
+the same text again reuses its request ID, so the server never writes it twice.
+
+Text that starts with `@name`, `#channel @name`, or `#all @name` goes only to the
+members it names. Any other text in the channel composer is a channel post, stored
+exactly as typed. A post that mentions no agent reaches no one. A post that mentions
+agents goes to the ones the server's router decides it is for, and only among them.
+The hint under the box says which of these Enter does. A thread reply that does not
+start with mentions goes, as typed, to the thread's agents: every agent who wrote in
+the thread or was sent a message in it, except terminals, retired members, and the
+operator. The "To" label names them. A thread with no such agents, as when its only
+other member is a terminal, needs a reply that starts with `@name`, so a terminal
+never runs text by accident. `postSource()` and `composerHint()` in `src/complete.ts`
+and `threadAgents()` in `src/store.ts` hold these rules.
 
 ## State and connection behavior
 

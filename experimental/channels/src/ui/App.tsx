@@ -20,6 +20,7 @@ import type {
   Outgoing,
   PeekTarget,
   Route,
+  SendRule,
   SpaceKey,
   State,
 } from "../model.ts";
@@ -458,6 +459,10 @@ export function App() {
     measure("namedrop:activity-derive", start);
     return activitySeen.current;
   }, [state.channels]);
+  const channelRule = useMemo<SendRule>(
+    () => ({ kind: "channel", agents: members }),
+    [members],
+  );
   const directory = useMemo<Directory>(
     () => ({ members, homes }),
     [members, homes],
@@ -671,7 +676,7 @@ export function App() {
                   outbox={state.outbox}
                   placeholder={composerPlaceholder(channel)}
                   label={composerPlaceholder(channel)}
-                  to={null}
+                  rule={channelRule}
                   onEdit={(text) => edit(composerId, text)}
                   onSend={(source, startedAt) => {
                     if (channel.viewMode === "browsing")

@@ -20,12 +20,12 @@ import {
   type MessageRow,
   peekWho,
   reduce,
-  replyRecipients,
   participant as resolve,
   routeEvent,
   runsByMessage,
   sortedChannels,
   type TimelineRow,
+  threadAgents,
   threadGroups,
   timelineView,
 } from "./store.ts";
@@ -2662,61 +2662,11 @@ test("participants: envoys resolve through their home channel, else read in plai
     id: "stranger",
   });
 });
-test("thread recipients: the agents who wrote, else the parent's recipients, never the operator", () => {
-  const operator: unknown = {
-    ...participant("human"),
-    alias: "you",
-    kind: { type: "human" },
-  };
-  const parent = {
-    ...message("parent"),
-    author: "human",
-    legs: [{ to: "agent-2", stage: { stage: "queued" } }],
-  };
-  const answer = {
-    ...message("answer"),
-    thread_id: "parent",
-    in_reply_to: "parent",
-    kind: "reply",
-    author: "agent-1",
-  };
-  const thread = (messages: unknown[]) => {
-    const value = snapshot();
-    const channel = parsed({
-      ...value,
-      frame: {
-        ...value.frame,
-        participants: [
-          participant("agent-1"),
-          { ...participant("agent-2"), alias: "@claude" },
-          operator,
-        ],
-        messages,
-      },
-    });
-    const group = threadGroups({
-      ...channel,
-      runs: [[...channel.messages.keys()]],
-    }).get("parent");
-    assert.ok(group);
-    return replyRecipients(group, {
-      members: channel.members,
-      homes: new Map(),
-    });
-  };
-  assert.deepEqual(thread([parent]), {
-    names: ["@claude"],
-    mentions: "@claude",
-  });
-  assert.deepEqual(thread([parent, answer]), {
-    names: ["@codex"],
-    mentions: "@codex",
-  });
-});
-test("thread recipients: a reply goes to the workspace of the latest agent message, named through its home channel's token", () => {
-  const agent = (address_id: string, alias: string) => ({
+test("thread agents: every agent who wrote or was sent a message in the thread, never the operator, a terminal or a retired agent", () => {
+  const agent = (address_id: string, alias: string, activity = "idle") => ({
     ...participant(address_id),
     alias,
+    activity,
   });
   const channel = (
     key: string,
@@ -2738,84 +2688,62 @@ test("thread recipients: a reply goes to the workspace of the latest agent messa
   const here = channel(keyA, "w1", "testbed", [
     agent("agent-1", "@codex"),
     agent("agent-2", "@claude"),
+    agent("old", "@old", "retired"),
+    { ...agent("shell", "@shell"), kind: { type: "terminal" } },
+    { ...agent("operator", "you"), kind: { type: "human" } },
   ]);
   const homes = homesOf(
-    [
-      here,
-      channel(keyB, "w2", "alpha", [agent("pane-9", "@lead")]),
-      channel("c".repeat(20), "w3", "beta", [agent("pane-4", "@reviewer")]),
-      channel("d".repeat(20), "w4", null, [agent("pane-5", "@ghost")]),
-    ],
+    [here, channel(keyB, "w2", "alpha", [agent("pane-9", "@lead")])],
     undefined,
   );
   const directory = { members: here.members, homes };
-  const thread = (authors: string[], asked: string[] = []) => {
-    const parent = {
-      ...message("parent"),
-      author: "human",
-      legs: asked.map((to) => ({ to, stage: { stage: "queued" } })),
-    };
-    const replies = authors.map((author, n) => ({
-      ...message(`reply-${n}`),
-      thread_id: "parent",
-      in_reply_to: "parent",
-      kind: "reply",
-      at_ms: 200 + n,
-      author,
-    }));
+  const agents = (asked: string[], ...replies: [string, string[]][]) => {
     const value = snapshot();
     const parsedChannel = parsed({
       ...value,
-      frame: { ...value.frame, messages: [parent, ...replies] },
+      frame: {
+        ...value.frame,
+        messages: [
+          {
+            ...message("parent"),
+            author: "human",
+            legs: asked.map((to) => ({ to, stage: { stage: "queued" } })),
+          },
+          ...replies.map(([author, to], n) => ({
+            ...message(`reply-${n}`),
+            thread_id: "parent",
+            in_reply_to: "parent",
+            kind: "reply",
+            at_ms: 200 + n,
+            author,
+            legs: to.map((id) => ({ to: id, stage: { stage: "queued" } })),
+          })),
+        ],
+      },
     });
     const group = threadGroups({
       ...parsedChannel,
       runs: [[...parsedChannel.messages.keys()]],
     }).get("parent");
     assert.ok(group);
-    return replyRecipients(group, directory);
+    return threadAgents(group, directory);
   };
+  assert.deepEqual(agents(["agent-2"]), ["@claude"], "the parent's recipient");
   assert.deepEqual(
-    thread(["envoy:w2:pane-9"]),
-    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
-    "an envoy whose home channel has a token",
-  );
-  assert.deepEqual(
-    thread(["agent-1"]),
-    { names: ["@codex"], mentions: "@codex" },
-    "local only",
+    agents(["agent-2"], ["agent-1", ["operator"]], ["agent-2", ["agent-1"]]),
+    ["@claude", "@codex"],
+    "authors and recipients in first-seen order, each once",
   );
   assert.deepEqual(
-    thread([], ["envoy:w2:pane-9"]),
-    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
-    "an envoy the parent asked",
+    agents(["shell", "operator", "old"], ["shell", ["operator"]]),
+    [],
+    "a terminal, the operator and a retired agent never count",
   );
   assert.deepEqual(
-    thread(["agent-1", "envoy:w2:pane-9", "agent-2"]),
-    { names: ["@codex", "@claude"], mentions: "@codex @claude" },
-    "mixed, latest local: every local agent who wrote, and no envoy",
+    agents(["agent-1"], ["envoy:w2:pane-9", ["agent-1"]], ["envoy:w9:x", []]),
+    ["@codex", "@lead · #alpha", "an agent in another workspace"],
+    "agents from other workspaces read with their home",
   );
-  assert.deepEqual(
-    thread(["agent-1", "envoy:w3:pane-4", "envoy:w2:pane-9"]),
-    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
-    "mixed, latest an envoy: only that envoy's workspace",
-  );
-  assert.deepEqual(
-    thread([], ["envoy:w2:pane-9", "agent-1"]),
-    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
-    "no agent wrote: the parent's recipients from its first recipient's workspace",
-  );
-  assert.deepEqual(
-    thread([], ["agent-1", "envoy:w2:pane-9", "agent-2"]),
-    { names: ["@codex", "@claude"], mentions: "@codex @claude" },
-    "no agent wrote, first recipient local",
-  );
-  assert.equal(
-    thread(["agent-1", "envoy:w4:pane-5"]),
-    null,
-    "latest agent's workspace has no token: nobody left",
-  );
-  assert.equal(thread(["envoy:w4:pane-5"]), null, "nobody left");
 });
 
 function mail(from: unknown, state = "submitted", since = 500) {
