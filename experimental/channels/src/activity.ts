@@ -87,7 +87,11 @@ function lineFor(
     group === "needs_you"
       ? newestAbout(channel.attention, member.alias)
       : undefined;
-  if (about !== undefined) return { kind: "attention", summary: about.summary };
+  if (about !== undefined)
+    return {
+      kind: "attention",
+      summary: about.subjectSummary ?? about.summary,
+    };
   const work = channel.work.get(member.id);
   if (work !== undefined && work.waitingOn.length > 0)
     return { kind: "waiting", on: work.waitingOn };

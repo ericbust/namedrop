@@ -582,6 +582,8 @@ pub struct TerminalRun {
 pub struct AttentionCard {
     pub source_kind: AttentionSourceKind,
     pub summary: SafeText,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_summary: Option<SafeText>,
     pub opened_at_ms: i64,
     pub subject_alias: Option<String>,
     pub message_id: Option<String>,
@@ -662,6 +664,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .map(|item| AttentionCard {
             source_kind: AttentionSourceKind::Stored(item.item.source_kind),
             summary: SafeText::from_untrusted(&item.item.summary, SHORT_CHARS),
+            subject_summary: None,
             opened_at_ms: i64::try_from(item.item.opened_at_ms).unwrap_or(i64::MAX),
             subject_alias: item.subject_alias.clone(),
             message_id: item.message_id.clone(),
@@ -674,6 +677,10 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
                 &format!("@{} is waiting on an approval or question.", address.alias),
                 SHORT_CHARS,
             ),
+            subject_summary: Some(SafeText::from_untrusted(
+                "Waiting on an approval or question.",
+                SHORT_CHARS,
+            )),
             opened_at_ms,
             subject_alias: Some(address.alias.clone()),
             message_id: address.blocked_message_id.clone(),

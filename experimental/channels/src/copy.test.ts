@@ -100,6 +100,7 @@ function attention(
     rowKey: "row",
     source,
     summary: { text, truncated: false },
+    subjectSummary: null,
     openedAt: 0,
     subjectAlias: null,
     messageId: null,

@@ -288,6 +288,8 @@ fn entry_redemption_keeps_raw_query_parameters_without_nonces() {
             ("view=activity&n={nonce}", "?view=activity"),
             ("n={nonce}&view=activity&n=other", "?view=activity"),
             ("n={nonce}&n=other", ""),
+            ("n={nonce}&", "?"),
+            ("n={nonce}&&", "?&"),
             (
                 "q=a%20b&q=a+b&n={nonce}&encoded=%2f%2F&n&%6e=keep&nn=keep",
                 "?q=a%20b&q=a+b&encoded=%2f%2F&n&%6e=keep&nn=keep",

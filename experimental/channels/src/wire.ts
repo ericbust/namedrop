@@ -162,6 +162,7 @@ function attention(
     rowKey: JSON.stringify([fingerprint, occurrence]),
     source,
     summary,
+    subjectSummary: optionalSafeText(item.subject_summary ?? null),
     openedAt,
     subjectAlias: optionalAlias(item.subject_alias),
     messageId: optionalIdentity(item.message_id),

@@ -38,6 +38,7 @@ export type Attention = {
     | "agent_status"
     | "unknown";
   summary: SafeText;
+  subjectSummary: SafeText | null;
   openedAt: number;
   subjectAlias: string | null;
   messageId: string | null;
