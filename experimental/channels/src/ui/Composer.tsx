@@ -2,6 +2,7 @@ import {
   type ChangeEvent,
   type KeyboardEvent,
   type ReactNode,
+  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
@@ -130,6 +131,7 @@ export function Composer({
   const [dismissed, setDismissed] = useState(false);
   const [highlight, setHighlight] = useState({ token: "", index: 0 });
   const [attempt, setAttempt] = useState<string | null>(null);
+  const [width, setWidth] = useState(0);
   const box = useRef<HTMLTextAreaElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const placedCaret = useRef<number | null>(null);
@@ -175,11 +177,21 @@ export function Composer({
     box.current?.setSelectionRange(placedCaret.current, placedCaret.current);
     placedCaret.current = null;
   });
+  useEffect(() => {
+    const element = box.current;
+    if (!element) return;
+    // Fitting in the callback resizes the observed box during delivery, a ResizeObserver loop error.
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) setWidth(entry.contentRect.width);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   useLayoutEffect(() => {
     const element = box.current;
     if (!element) return;
-    // Chromium sizes an empty box to its wrapped placeholder, so both decide the height.
-    const shown = `${element.placeholder}\n${element.value}`;
+    // Chromium sizes an empty box to its wrapped placeholder, so the width, placeholder and text decide the height.
+    const shown = `${width}\n${element.placeholder}\n${element.value}`;
     if (fitted.current === shown) return;
     fitted.current = shown;
     element.style.height = "auto";
