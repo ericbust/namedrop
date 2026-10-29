@@ -133,6 +133,8 @@ pub struct TerminalRunRow {
 pub struct AttentionRow {
     pub conversation: Option<ConversationRow>,
     pub response_address_id: Option<String>,
+    pub reply_requires_message: bool,
+    pub response_is_terminal: bool,
     pub item: crate::AttentionItemRecord,
     pub subject_alias: Option<String>,
     pub message_id: Option<String>,
@@ -823,9 +825,29 @@ impl StateTransaction<'_> {
              LEFT JOIN coordinations c ON i.source_kind = 'coordination'
                AND c.session_socket_id = i.session_socket_id AND c.worktree_id = i.worktree_id AND c.coordination_id = i.source_id
              WHERE i.session_socket_id = ?1 AND i.worktree_id = ?2 AND i.resolved_at_ms IS NULL)
-             SELECT targets.*, m.thread_id, m.message_id FROM targets
+             SELECT targets.*, m.thread_id, m.message_id,
+               EXISTS (SELECT 1 FROM coordination_links links
+                       WHERE links.session_socket_id = m.session_socket_id
+                         AND links.worktree_id = m.worktree_id AND links.message_id = m.message_id)
+               OR EXISTS (SELECT 1 FROM bridged_messages copy
+                          JOIN coordination_links links ON links.session_socket_id = copy.session_socket_id
+                            AND links.worktree_id = copy.origin_space_id AND links.message_id = copy.origin_message_id
+                          WHERE copy.session_socket_id = m.session_socket_id
+                            AND copy.worktree_id = m.worktree_id AND copy.message_id = m.message_id)
+               OR EXISTS (SELECT 1 FROM bridged_messages copy
+                          JOIN coordination_links links ON links.session_socket_id = copy.session_socket_id
+                            AND links.worktree_id = copy.worktree_id AND links.message_id = copy.message_id
+                          WHERE copy.session_socket_id = m.session_socket_id
+                            AND copy.origin_space_id = m.worktree_id AND copy.origin_message_id = m.message_id)
+               OR COALESCE(controls.paused OR controls.stopped, 0),
+               COALESCE(responder.pane_type = 'terminal', 0)
+             FROM targets
              LEFT JOIN collaboration_messages m ON m.session_socket_id = ?1 AND m.worktree_id = ?2
-               AND m.message_id = targets.target_message_id",
+               AND m.message_id = targets.target_message_id
+             LEFT JOIN thread_controls controls ON controls.session_socket_id = m.session_socket_id
+               AND controls.worktree_id = m.worktree_id AND controls.thread_id = m.thread_id
+             LEFT JOIN pane_addresses responder ON responder.session_socket_id = ?1 AND responder.worktree_id = ?2
+               AND responder.address_id = targets.response_address_id",
             params![ns[0], ns[1], serde_json::json!(address_ids).to_string(), serde_json::json!(operators).to_string()],
             |row| {
                 let item = crate::AttentionItemRecord {
@@ -858,6 +880,8 @@ impl StateTransaction<'_> {
                         None => None,
                     },
                     response_address_id: row.get(11)?,
+                    reply_requires_message: row.get(14)?,
+                    response_is_terminal: row.get(15)?,
                     item,
                     subject_alias,
                     message_id: row.get(8)?,

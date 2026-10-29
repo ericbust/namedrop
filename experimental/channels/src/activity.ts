@@ -72,7 +72,9 @@ function newestAbout(
   let newest: Attention | undefined;
   for (const item of attention)
     if (
-      (item.response?.kind === "reply" || item.response?.kind === "pane"
+      (item.response?.kind === "reply" ||
+      item.response?.kind === "message" ||
+      item.response?.kind === "pane"
         ? item.response.addressId === member.id
         : item.subjectAlias === member.alias) &&
       (newest === undefined || item.openedAt > newest.openedAt)

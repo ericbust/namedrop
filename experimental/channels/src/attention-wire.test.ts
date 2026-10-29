@@ -39,12 +39,14 @@ for (const source of sources) {
         conversation: { thread_id: "old-thread", message_id: "old-message" },
         response: paneOnly
           ? { kind: "pane", address_id: "responsible" }
-          : {
-              kind: "reply",
-              thread_id: "old-thread",
-              message_id: "old-message",
-              address_id: "responsible",
-            },
+          : source === "coordination"
+            ? { kind: "message", address_id: "responsible" }
+            : {
+                kind: "reply",
+                thread_id: "old-thread",
+                message_id: "old-message",
+                address_id: "responsible",
+              },
       },
     ];
     const event = parseEvent("space", JSON.stringify(value));
@@ -56,7 +58,10 @@ for (const source of sources) {
     });
     assert.equal(item?.rowKey, `attention-${source}`);
     assert.equal(item?.sourceId, `source-${source}`);
-    assert.equal(item?.response?.kind, paneOnly ? "pane" : "reply");
+    assert.equal(
+      item?.response?.kind,
+      paneOnly ? "pane" : source === "coordination" ? "message" : "reply",
+    );
     assert.equal(
       item?.coordinationId,
       source === "coordination" ? "coordination-1" : null,
@@ -101,4 +106,30 @@ test("local integration response carries no invented target", () => {
   assert.ok(event?.type === "space");
   assert.deepEqual(event.channel.attention[0]?.response, { kind: "local" });
   assert.equal(event.channel.attention[0]?.conversation, null);
+});
+
+test("message response validates its stable owner and requires scoped evidence", () => {
+  const value = structuredClone(fixture);
+  value.frame.attention = [
+    {
+      source_kind: "delivery_attempt",
+      summary: { text: "Tracked request", truncated: false },
+      opened_at_ms: 1,
+      conversation: { thread_id: "thread", message_id: "request" },
+      response: { kind: "message", address_id: "owner" },
+    },
+  ];
+  const event = parseEvent("space", JSON.stringify(value));
+  assert.ok(event?.type === "space");
+  assert.deepEqual(event.channel.attention[0]?.response, {
+    kind: "message",
+    addressId: "owner",
+  });
+  for (const address_id of [null, "", 42]) {
+    const malformed = structuredClone(value);
+    malformed.frame.attention[0].response.address_id = address_id;
+    assert.equal(parseEvent("space", JSON.stringify(malformed)), null);
+  }
+  value.frame.attention[0].conversation = null;
+  assert.equal(parseEvent("space", JSON.stringify(value)), null);
 });

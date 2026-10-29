@@ -615,6 +615,9 @@ pub enum AttentionResponse {
         message_id: String,
         address_id: String,
     },
+    Message {
+        address_id: String,
+    },
     Pane {
         address_id: String,
     },
@@ -626,12 +629,24 @@ fn attention_response(item: &rows::AttentionRow) -> AttentionResponse {
     let Some(address_id) = &item.response_address_id else {
         return AttentionResponse::Local;
     };
+    if item.response_is_terminal {
+        return AttentionResponse::Pane {
+            address_id: address_id.clone(),
+        };
+    }
     match item.item.source_kind {
         AttentionSourceKind::DeliveryAttempt
         | AttentionSourceKind::AgentDisposition
         | AttentionSourceKind::Coordination
         | AttentionSourceKind::AutomaticReplyLimit => {
             if let Some(conversation) = &item.conversation {
+                if item.reply_requires_message
+                    || item.item.source_kind == AttentionSourceKind::Coordination
+                {
+                    return AttentionResponse::Message {
+                        address_id: address_id.clone(),
+                    };
+                }
                 return AttentionResponse::Reply {
                     thread_id: conversation.thread_id.clone(),
                     message_id: conversation.message_id.clone(),
@@ -639,7 +654,9 @@ fn attention_response(item: &rows::AttentionRow) -> AttentionResponse {
                 };
             }
         }
-        _ => {}
+        AttentionSourceKind::ContextGrant
+        | AttentionSourceKind::PaneBinding
+        | AttentionSourceKind::IntegrationRegistration => {}
     }
     AttentionResponse::Pane {
         address_id: address_id.clone(),

@@ -12,10 +12,18 @@ import type {
 import { participant, type ThreadGroup } from "./store.ts";
 
 export type ReplyIntent = Extract<AttentionResponse, { kind: "reply" }>;
+export type MessageIntent = Extract<AttentionResponse, { kind: "message" }> & {
+  reference: { kind: "coordination" | "message"; id: string };
+  preparation: "idle" | "requested" | "prepared" | "preserved" | "unavailable";
+};
+export type EvidenceResponse =
+  | ReplyIntent
+  | MessageIntent
+  | Extract<AttentionResponse, { kind: "pane" }>;
 export type EvidenceRequest = {
   key: SpaceKey;
   target: Conversation;
-  reply: ReplyIntent | null;
+  response: EvidenceResponse | null;
 };
 export type FocusedEvidence =
   | { kind: "closed"; version: number }
@@ -30,6 +38,12 @@ export type FocusedEvidence =
 export type EvidenceEvent =
   | { type: "open"; request: EvidenceRequest }
   | { type: "retry" }
+  | { type: "prepare-message" }
+  | {
+      type: "message-prepared";
+      version: number;
+      result: "prepared" | "preserved" | "unavailable";
+    }
   | { type: "close" }
   | { type: "sent"; key: SpaceKey; messageId: string | null }
   | { type: "loaded"; version: number; context: MessageContext }
@@ -55,12 +69,49 @@ export function evidenceReduce(
         : state;
     case "close":
       return { kind: "closed", version: state.version + 1 };
-    case "sent":
+    case "prepare-message":
       return state.kind === "ready" &&
-        state.request.key === event.key &&
-        state.request.reply?.messageId === event.messageId
-        ? { ...state, request: { ...state.request, reply: null } }
+        state.request.response?.kind === "message"
+        ? {
+            ...state,
+            request: {
+              ...state.request,
+              response: { ...state.request.response, preparation: "requested" },
+            },
+          }
         : state;
+    case "message-prepared":
+      return state.kind === "ready" &&
+        state.version === event.version &&
+        state.request.response?.kind === "message" &&
+        state.request.response.preparation === "requested"
+        ? {
+            ...state,
+            request: {
+              ...state.request,
+              response: {
+                ...state.request.response,
+                preparation: event.result,
+              },
+            },
+          }
+        : state;
+    case "sent": {
+      if (state.kind !== "ready" || state.request.key !== event.key)
+        return state;
+      const response = state.request.response;
+      if (response?.kind === "reply" && response.messageId === event.messageId)
+        return { ...state, request: { ...state.request, response: null } };
+      if (response?.kind === "message" && event.messageId === null)
+        return {
+          ...state,
+          request: {
+            ...state.request,
+            response: { ...response, preparation: "idle" },
+          },
+        };
+      return state;
+    }
     case "loaded":
       return state.kind === "loading" && state.version === event.version
         ? { ...state, kind: "ready", context: event.context }
@@ -108,13 +159,13 @@ export function evidenceThread(
   };
 }
 export function attentionReplyTo(
-  intent: ReplyIntent,
+  intent: Pick<ReplyIntent, "addressId">,
   directory: Directory,
 ): ReplyTo | null {
   const who = participant(directory, intent.addressId);
   if (
     who.kind !== "member" ||
-    who.member.kind.type === "human" ||
+    who.member.kind.type !== "agent" ||
     who.member.activity === "retired"
   )
     return null;
@@ -135,4 +186,35 @@ export function replyPrefill(
   return draft.length === 0
     ? { text: `${to.mentions} `, preserved: false }
     : { text: draft, preserved: true };
+}
+
+export function messageIntent(
+  item: Attention,
+  target: Conversation,
+  prepare: boolean,
+): MessageIntent | null {
+  return item.response?.kind === "message"
+    ? {
+        ...item.response,
+        reference: item.coordinationId
+          ? { kind: "coordination", id: item.coordinationId }
+          : { kind: "message", id: target.messageId },
+        preparation: prepare ? "requested" : "idle",
+      }
+    : null;
+}
+export function prepareChannelMessage(
+  intent: MessageIntent,
+  directory: Directory,
+  draft: string,
+  pending: boolean,
+): { kind: "prepared"; text: string } | { kind: "preserved" | "unavailable" } {
+  if (draft.length > 0 || pending) return { kind: "preserved" };
+  const to = attentionReplyTo(intent, directory);
+  return to === null
+    ? { kind: "unavailable" }
+    : {
+        kind: "prepared",
+        text: `${to.mentions} Regarding ${intent.reference.kind} ${intent.reference.id}: `,
+      };
 }

@@ -382,12 +382,14 @@ test("attention actions show historical evidence and safe responses for every so
         },
         response: paneOnly
           ? { kind: "pane", address_id: responsible }
-          : {
-              kind: "reply",
-              thread_id: "historical-thread",
-              message_id: "historical-message",
-              address_id: responsible,
-            },
+          : source === "coordination"
+            ? { kind: "message", address_id: responsible }
+            : {
+                kind: "reply",
+                thread_id: "historical-thread",
+                message_id: "historical-message",
+                address_id: responsible,
+              },
       },
     ];
     const { channel } = space(value);
@@ -451,9 +453,7 @@ test("Activity reuses the attention evidence and response controls", async () =>
       opened_at_ms: 1,
       conversation: { thread_id: "old", message_id: "report" },
       response: {
-        kind: "reply",
-        thread_id: "old",
-        message_id: "report",
+        kind: "message",
         address_id: value.frame.participants[0].address_id,
       },
     },
@@ -471,4 +471,68 @@ test("Activity reuses the attention evidence and response controls", async () =>
   );
   assert.ok(markup.includes("Show message"), markup);
   assert.ok(markup.includes(">Respond<"), markup);
+});
+
+test("focused tracked evidence exposes the channel response path without a rejected thread composer", async () => {
+  const { ThreadPane } = await load<typeof import("./ui/ThreadPane.tsx")>(
+    "/src/ui/ThreadPane.tsx",
+  );
+  const event = space(JSON.parse((await fixtures())[0] ?? "null"));
+  const { channel } = event;
+  const directory = { members: channel.members, homes: new Map() };
+  const active = reduce(initialState(), event).channels.get(channel.key);
+  assert.ok(active);
+  const props = {
+    channel: active,
+    thread: {
+      id: "tracked",
+      parents: [
+        {
+          id: "tracked-message",
+          threadId: "tracked",
+          inReplyTo: null,
+          at: 1,
+          author: "human",
+          kind: "mention",
+          body: { text: "Request", truncated: false },
+          legs: [],
+        },
+      ],
+      replies: [],
+      knownCount: 1,
+    },
+    runs: new Map(),
+    directory,
+    completion: {
+      current: channel.key,
+      channels: [],
+      membersOf: () => [...channel.members.values()],
+    },
+    drafts: new Map(),
+    outbox: new Map(),
+    posted: new Set<string>(),
+    onEdit() {},
+    onSend() {},
+    onClose() {},
+    paneId: "tracked-pane",
+  } satisfies Parameters<typeof ThreadPane>[0];
+  const ordinary = renderToStaticMarkup(createElement(ThreadPane, props));
+  assert.ok(ordinary.includes("textarea"));
+  const markup = renderToStaticMarkup(
+    createElement(ThreadPane, {
+      ...props,
+      response: { kind: "message", prepare() {} },
+    }),
+  );
+  assert.ok(markup.includes("Respond in the channel"));
+  assert.ok(markup.includes("Prepare response"));
+  assert.equal(markup.includes("textarea"), false);
+  const pane = renderToStaticMarkup(
+    createElement(ThreadPane, {
+      ...props,
+      response: { kind: "pane", name: "@terminal" },
+    }),
+  );
+  assert.ok(pane.includes("Respond in @terminal in Herdr"));
+  assert.equal(pane.includes("textarea"), false);
 });

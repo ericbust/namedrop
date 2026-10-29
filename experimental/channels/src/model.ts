@@ -28,6 +28,7 @@ export type Member = {
 export type Conversation = { threadId: string; messageId: string };
 export type AttentionResponse =
   | ({ kind: "reply"; addressId: AddressId } & Conversation)
+  | { kind: "message"; addressId: AddressId }
   | { kind: "pane"; addressId: AddressId }
   | { kind: "local" };
 export type MessageContext = {

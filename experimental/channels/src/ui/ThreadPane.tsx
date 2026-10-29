@@ -28,6 +28,11 @@ import { Icon } from "./Icons.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
 import { useEscape } from "./useEscape.ts";
 
+export type ThreadResponse =
+  | { kind: "reply"; intent: ReplyIntent }
+  | { kind: "message"; prepare: () => void }
+  | { kind: "pane"; name: string };
+
 export function ThreadPane({
   channel,
   thread,
@@ -41,7 +46,7 @@ export function ThreadPane({
   onSend,
   onClose,
   paneId,
-  replyIntent = null,
+  response = null,
   target = null,
   earlierOmitted = false,
 }: {
@@ -60,10 +65,11 @@ export function ThreadPane({
   ) => void;
   onClose: () => void;
   paneId: string;
-  replyIntent?: ReplyIntent | null;
+  response?: ThreadResponse | null;
   target?: { messageId: string } | null;
   earlierOmitted?: boolean;
 }) {
+  const replyIntent = response?.kind === "reply" ? response.intent : null;
   const pane = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
   const [openedAt] = useState(() => Date.now());
@@ -205,28 +211,48 @@ export function ThreadPane({
           respond.
         </p>
       )}
-      {completion && latest && (activeReply === null || to !== null) && (
-        <Composer
-          context={completion}
-          composer={composer}
-          drafts={drafts}
-          outbox={outbox}
-          placeholder={replyPlaceholder(to?.names ?? [])}
-          label={replyLabel(to?.names ?? [])}
-          to={to}
-          onEdit={(text) => onEdit(composer, text)}
-          onSend={(source, startedAt) =>
-            onSend(
-              {
-                composer,
-                source,
-                inReplyTo: activeReply?.messageId ?? latest.id,
-              },
-              startedAt,
-            )
-          }
-        />
+      {response?.kind === "pane" && (
+        <p className="earlier-thread" role="status">
+          Respond in {response.name} in Herdr.
+        </p>
       )}
+      {response?.kind === "message" && (
+        <p className="earlier-thread" role="status">
+          Respond in the channel.{" "}
+          <button
+            type="button"
+            className="text-button"
+            onClick={response.prepare}
+          >
+            Prepare response
+          </button>
+        </p>
+      )}
+      {(response === null || response.kind === "reply") &&
+        completion &&
+        latest &&
+        (activeReply === null || to !== null) && (
+          <Composer
+            context={completion}
+            composer={composer}
+            drafts={drafts}
+            outbox={outbox}
+            placeholder={replyPlaceholder(to?.names ?? [])}
+            label={replyLabel(to?.names ?? [])}
+            to={to}
+            onEdit={(text) => onEdit(composer, text)}
+            onSend={(source, startedAt) =>
+              onSend(
+                {
+                  composer,
+                  source,
+                  inReplyTo: activeReply?.messageId ?? latest.id,
+                },
+                startedAt,
+              )
+            }
+          />
+        )}
     </aside>
   );
 }

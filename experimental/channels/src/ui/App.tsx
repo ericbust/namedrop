@@ -9,7 +9,11 @@ import {
   useState,
 } from "react";
 import { type ActivityList, activityOf } from "../activity.ts";
-import { evidenceReduce, evidenceThread } from "../attention.ts";
+import {
+  evidenceReduce,
+  evidenceThread,
+  prepareChannelMessage,
+} from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
 import { composerPlaceholder } from "../copy.ts";
 import type {
@@ -62,7 +66,7 @@ import { NeedsYou } from "./NeedsYou.tsx";
 import { type PeekAccess, PeekContext } from "./PeekContext.tsx";
 import { PeekDrawer } from "./PeekDrawer.tsx";
 import { Sidebar } from "./Sidebar.tsx";
-import { ThreadPane } from "./ThreadPane.tsx";
+import { ThreadPane, type ThreadResponse } from "./ThreadPane.tsx";
 import { type Located, Timeline } from "./Timeline.tsx";
 
 const noGroups: ReadonlyMap<string, ThreadGroup> = new Map();
@@ -108,6 +112,7 @@ export function App() {
   const selectedForPaint = useRef<SpaceKey | null>(null);
   const requests = useRef(new Map<number, AbortController>());
   const lastUpdate = useRef<number | null>(null);
+  const main = useRef<HTMLElement>(null);
   const [evidence, focusEvidence] = useReducer(evidenceReduce, {
     kind: "closed",
     version: 0,
@@ -554,6 +559,41 @@ export function App() {
           : undefined,
     [focused, channel, state.slot, groups],
   );
+  const channelResponse =
+    focused?.kind === "ready" && focused.request.response?.kind === "message"
+      ? focused.request.response
+      : null;
+  useLayoutEffect(() => {
+    if (
+      focused?.kind !== "ready" ||
+      channelResponse?.preparation !== "requested" ||
+      composerId === null
+    )
+      return;
+    const result = prepareChannelMessage(
+      channelResponse,
+      directory,
+      state.drafts.get(draftKey(composerId))?.text ?? "",
+      pending.length > 0,
+    );
+    focusEvidence({
+      type: "message-prepared",
+      version: focused.version,
+      result: result.kind,
+    });
+    if (result.kind === "prepared") {
+      edit(composerId, result.text);
+      main.current?.querySelector("textarea")?.focus();
+    }
+  }, [
+    focused,
+    channelResponse,
+    composerId,
+    directory,
+    state.drafts,
+    pending,
+    edit,
+  ]);
   const peeking = state.slot.kind === "peek" ? state.slot.target : null;
   const who = peeking === null ? null : peekWho(state.channels, peeking);
   const pane = thread || focused ? "thread" : who ? "peek" : null;
@@ -581,13 +621,13 @@ export function App() {
     return () => clearTimeout(done);
   }, [located]);
   const showAttention = useCallback<FocusAttention>(
-    (key, target, reply, button) => {
+    (key, target, response, button) => {
       returnFocus.current = { button, threadId: target.threadId };
       focusIntent.current = false;
       go({ kind: "channel", key });
       dispatch({ type: "jump", key });
       dispatch({ type: "thread", threadId: target.threadId });
-      focusEvidence({ type: "open", request: { key, target, reply } });
+      focusEvidence({ type: "open", request: { key, target, response } });
       locate({ messageId: target.messageId });
     },
     [],
@@ -662,6 +702,33 @@ export function App() {
     paneWasOpen.current = pane !== null;
     shownView.current = view;
   });
+  let threadResponse: ThreadResponse | null = null;
+  if (focused?.kind === "ready") {
+    const response = focused.request.response;
+    switch (response?.kind) {
+      case "reply":
+        threadResponse = { kind: "reply", intent: response };
+        break;
+      case "message":
+        threadResponse = {
+          kind: "message",
+          prepare: () => focusEvidence({ type: "prepare-message" }),
+        };
+        break;
+      case "pane":
+        threadResponse = {
+          kind: "pane",
+          name: members.get(response.addressId)?.alias ?? response.addressId,
+        };
+        break;
+      case undefined:
+        break;
+      default: {
+        const exhaustive: never = response;
+        return exhaustive;
+      }
+    }
+  }
   const updatedAt = lastUpdate.current;
   return (
     <PeekContext value={peekAccess}>
@@ -677,7 +744,7 @@ export function App() {
           onSelect={select}
           onActivity={showActivity}
         />
-        <main className="main" id="main-content" tabIndex={-1}>
+        <main className="main" id="main-content" tabIndex={-1} ref={main}>
           {connection === "reconnecting" && (
             <div className="reconnect" role="status">
               <Icon name="refresh" />
@@ -721,6 +788,25 @@ export function App() {
                   dispatch({ type: "follow", key, atBottom })
                 }
               />
+              {channelResponse?.preparation === "preserved" && (
+                <p className="earlier-thread" role="status">
+                  Your channel draft or pending send was kept. Send or clear it,
+                  then retry.{" "}
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => focusEvidence({ type: "prepare-message" })}
+                  >
+                    Prepare response
+                  </button>
+                </p>
+              )}
+              {channelResponse?.preparation === "unavailable" && (
+                <p className="earlier-thread" role="status">
+                  The responsible agent is no longer available. Use its pane in
+                  Herdr to respond.
+                </p>
+              )}
               {completion && composerId && (
                 <Composer
                   key={`composer:${channel.key}`}
@@ -783,7 +869,9 @@ export function App() {
           thread &&
           (focused === null || focused.kind === "ready") && (
             <ThreadPane
-              key={thread.id}
+              key={
+                focused === null ? thread.id : `${thread.id}:${focused.version}`
+              }
               channel={channel}
               thread={thread}
               runs={runs}
@@ -796,9 +884,7 @@ export function App() {
               onSend={send}
               onClose={closeThread}
               paneId={paneId}
-              replyIntent={
-                focused?.kind === "ready" ? focused.request.reply : null
-              }
+              response={threadResponse}
               target={focused?.kind === "ready" ? focused.request.target : null}
               earlierOmitted={
                 focused?.kind === "ready" && focused.context.earlierOmitted

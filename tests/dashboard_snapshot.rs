@@ -2147,7 +2147,7 @@ fn coordination_attention_prefers_report_then_latest_worker_then_wake_then_reque
             );
             assert_eq!(
                 card["response"],
-                serde_json::json!({"kind":"reply", "thread_id":format!("thread-{}",ns.space_id.as_str()), "message_id":expected,"address_id":id(ns,"a").as_str()})
+                serde_json::json!({"kind":"message", "address_id":id(ns,"a").as_str()})
             );
         }
         match stage {
@@ -2171,6 +2171,68 @@ fn coordination_attention_prefers_report_then_latest_worker_then_wake_then_reque
                     .unwrap();
             }
             _ => {}
+        }
+    }
+}
+
+#[test]
+fn attention_responses_respect_thread_controls_and_terminal_recipients_in_their_namespace() {
+    use namedrop::{AttentionItemDraft, AttentionItemId, AttentionSourceKind};
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let spaces = [
+        seed_space(&mut store, "w1", &["a", "b"]),
+        seed_space_on_socket(&mut store, "socket-b", "w1", &["a", "b"]),
+        seed_space(&mut store, "w2", &["a", "b"]),
+    ];
+    for ns in &spaces {
+        send(&mut store, ns, "request", "a", "b", "Review", None);
+        let attempt = submit(&mut store, ns, "b");
+        store
+            .transaction(|tx| {
+                for (number, source, source_id) in [
+                    (0, AttentionSourceKind::DeliveryAttempt, attempt.as_str()),
+                    (1, AttentionSourceKind::AgentDisposition, attempt.as_str()),
+                    (
+                        2,
+                        AttentionSourceKind::AutomaticReplyLimit,
+                        &format!("thread-{}", ns.space_id.as_str()),
+                    ),
+                ] {
+                    tx.open_attention_item(
+                        ns,
+                        &AttentionItemDraft {
+                            id: AttentionItemId::new(format!("source-{number}")),
+                            source_kind: source,
+                            source_id: source_id.into(),
+                            summary: "Needs a response".into(),
+                        },
+                        &attribution(),
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+    let db = rusqlite::Connection::open(directory.path().join("namedrop.sqlite3")).unwrap();
+    for (paused, stopped, terminal, expected) in [
+        (0, 0, 0, "reply"),
+        (1, 0, 0, "message"),
+        (0, 1, 0, "message"),
+        (0, 0, 1, "pane"),
+    ] {
+        db.execute("INSERT INTO thread_controls (session_socket_id,worktree_id,thread_id,paused,stopped,reply_allowance) VALUES ('socket-a','w1','thread-w1',?1,?2,0) ON CONFLICT DO UPDATE SET paused=excluded.paused,stopped=excluded.stopped", rusqlite::params![paused,stopped]).unwrap();
+        db.execute("UPDATE pane_addresses SET pane_type=CASE WHEN ?1 THEN 'terminal' ELSE 'agent' END WHERE session_socket_id='socket-a' AND worktree_id='w1'", [terminal]).unwrap();
+        for ns in &spaces {
+            let frame = serde_json::to_value(snapshot(&mut store, ns)).unwrap();
+            for card in frame["attention"].as_array().unwrap() {
+                assert_eq!(card["conversation"]["message_id"], "request");
+                assert_eq!(
+                    card["response"]["kind"],
+                    if ns == &spaces[0] { expected } else { "reply" },
+                    "{ns:?} {card}"
+                );
+            }
         }
     }
 }

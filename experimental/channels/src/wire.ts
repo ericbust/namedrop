@@ -162,6 +162,10 @@ function attentionResponse(
         addressId: addressId(item.address_id),
       };
     }
+    case "message":
+      if (anchor === null)
+        throw new Error("Message response needs attention evidence");
+      return { kind: "message", addressId: addressId(item.address_id) };
     case "pane":
       return { kind: "pane", addressId: addressId(item.address_id) };
     case "local":

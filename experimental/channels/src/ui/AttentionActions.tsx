@@ -1,4 +1,8 @@
-import { attentionConversation, type ReplyIntent } from "../attention.ts";
+import {
+  attentionConversation,
+  type EvidenceResponse,
+  messageIntent,
+} from "../attention.ts";
 import type {
   Attention,
   ChannelSnapshot,
@@ -11,7 +15,7 @@ import { PeekControl } from "./PeekContext.tsx";
 export type FocusAttention = (
   key: SpaceKey,
   target: Conversation,
-  reply: ReplyIntent | null,
+  response: EvidenceResponse | null,
   button: HTMLButtonElement,
 ) => void;
 export function AttentionActions({
@@ -37,18 +41,34 @@ export function AttentionActions({
           type="button"
           className="text-button"
           onClick={(event) =>
-            onFocus(channel.key, target, null, event.currentTarget)
+            onFocus(
+              channel.key,
+              target,
+              response?.kind === "pane"
+                ? response
+                : messageIntent(item, target, false),
+              event.currentTarget,
+            )
           }
         >
           Show message
         </button>
       )}
-      {response?.kind === "reply" && (
+      {(response?.kind === "reply" ||
+        (response?.kind === "message" && target !== null)) && (
         <button
           type="button"
           className="text-button"
           onClick={(event) =>
-            onFocus(channel.key, response, response, event.currentTarget)
+            response.kind === "reply"
+              ? onFocus(channel.key, response, response, event.currentTarget)
+              : target !== null &&
+                onFocus(
+                  channel.key,
+                  target,
+                  messageIntent(item, target, true),
+                  event.currentTarget,
+                )
           }
         >
           Respond
