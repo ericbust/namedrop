@@ -138,7 +138,13 @@ after the server accepts it. The row that a later frame carries for that message
 replaces it. A refused post keeps its text and shows the error under the box. Sending
 the same text again reuses its request ID, so the server never writes it twice. A
 thread reply starts with the mentions of every agent who wrote in the thread, else the
-parent's recipients, unless its text starts with its own mentions.
+parent's recipients, unless its text starts with its own mentions. The server reads
+one run of `#label` tokens, then one run of `@alias` tokens. So a reply that reaches
+an agent in another workspace starts with every workspace's token, this channel's
+first when a local agent is in it, as in `#testbed #alpha @codex @lead`. An agent
+whose home channel has no token is left out. A post that names nobody does not send.
+`replyRecipients()` in `src/store.ts` and `postSource()` in `src/complete.ts` hold
+these rules.
 
 ## State and connection behavior
 

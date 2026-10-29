@@ -1347,6 +1347,9 @@ code.inline {
   line-height: 16px;
   color: var(--text-muted);
 }
+.composer-guard {
+  color: var(--text);
+}
 .composer-error {
   display: flex;
   align-items: center;

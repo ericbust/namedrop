@@ -1,4 +1,4 @@
-import { channelMention, dayBounds, dayLabel } from "./copy.ts";
+import { channelMention, channelToken, dayBounds, dayLabel } from "./copy.ts";
 import type {
   AddressId,
   Channel,
@@ -12,6 +12,7 @@ import type {
   Message,
   Outgoing,
   Participant,
+  ReplyTo,
   Selection,
   SpaceKey,
   State,
@@ -916,12 +917,15 @@ export function homesOf(
   for (const channel of channels) {
     if (homes.has(channel.workspaceId)) continue;
     const name = channelMention(channel);
+    const token = channelToken(channel);
     const old = previous?.get(channel.workspaceId);
     homes.set(
       channel.workspaceId,
-      old?.name === name && old.members === channel.members
+      old?.name === name &&
+        old.token === token &&
+        old.members === channel.members
         ? old
-        : { name, members: channel.members },
+        : { name, token, members: channel.members },
     );
   }
   return previous !== undefined &&
@@ -947,24 +951,51 @@ export function participant(
   const home = homes.get(workspace);
   const agent = home?.members.get(origin);
   return home !== undefined && agent !== undefined
-    ? { kind: "member", member: agent, home: home.name }
-    : { kind: "envoy", id, home: home?.name ?? null };
+    ? { kind: "member", member: agent, home }
+    : { kind: "envoy", id, home: home ?? null };
 }
+// The server reads one run of `#label` tokens, then one run of `@alias` tokens, so a
+// reply that leaves this channel names every workspace first, its own included.
 export function replyRecipients(
   thread: ThreadGroup,
   directory: Directory,
-): readonly string[] {
-  const aliases = (ids: readonly (AddressId | "human")[]) => {
-    const found = new Set<string>();
-    for (const id of ids) {
+  here: string | null,
+): ReplyTo | null {
+  const agents = (ids: readonly (AddressId | "human")[]) =>
+    ids.flatMap((id) => {
       const who = participant(directory, id);
-      if (who.kind === "member" && who.home === null)
-        found.add(who.member.alias);
-    }
-    return [...found];
-  };
-  const wrote = aliases(
+      return who.kind === "member" ? [who] : [];
+    });
+  const wrote = agents(
     [...thread.parents, ...thread.replies].map((message) => message.author),
   );
-  return wrote.length > 0 ? wrote : aliases(thread.parents.flatMap(recipients));
+  const local = new Set<string>();
+  const away = new Map<string, Set<string>>();
+  for (const { member, home } of wrote.length > 0
+    ? wrote
+    : agents(thread.parents.flatMap(recipients))) {
+    if (home === null) local.add(member.alias);
+    else if (home.token !== null)
+      away.set(
+        home.token,
+        (away.get(home.token) ?? new Set()).add(member.alias),
+      );
+  }
+  if (away.size === 0)
+    return local.size === 0
+      ? null
+      : { names: [...local], mentions: [...local].join(" ") };
+  const runs = [
+    ...(here === null || local.size === 0
+      ? []
+      : [{ token: here, aliases: local, suffix: false }]),
+    ...[...away].map(([token, aliases]) => ({ token, aliases, suffix: true })),
+  ];
+  const aliases = new Set(runs.flatMap(({ aliases }) => [...aliases]));
+  return {
+    names: runs.flatMap(({ token, aliases, suffix }) =>
+      [...aliases].map((alias) => (suffix ? `${alias} · ${token}` : alias)),
+    ),
+    mentions: `${runs.map(({ token }) => token).join(" ")} ${[...aliases].join(" ")}`,
+  };
 }

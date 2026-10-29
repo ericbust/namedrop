@@ -2413,11 +2413,11 @@ test("participants: envoys resolve through their home channel, else read in plai
   const remote = resolve(directory, id("envoy:w2:pane-9"));
   assert.ok(remote.kind === "member");
   assert.equal(remote.member.alias, "@reviewer");
-  assert.equal(remote.home, "#beta");
+  assert.equal(remote.home?.name, "#beta");
   assert.deepEqual(resolve(directory, id("envoy:w2:pane-gone")), {
     kind: "envoy",
     id: "envoy:w2:pane-gone",
-    home: "#beta",
+    home: homes.get("w2"),
   });
   assert.deepEqual(resolve(directory, id("envoy:w7:pane-9")), {
     kind: "envoy",

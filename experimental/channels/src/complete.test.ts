@@ -8,6 +8,7 @@ import {
   channelOptions,
   complete,
   leadingMention,
+  postSource,
 } from "./complete.ts";
 import type { ChannelSnapshot, SpaceKey } from "./model.ts";
 import { parseEvent } from "./wire.ts";
@@ -268,4 +269,13 @@ test("complete: a post names its recipients only the way the server's grammar re
   ];
   for (const [text, named] of cases)
     assert.equal(leadingMention(text), named, JSON.stringify(text));
+});
+
+test("complete: a post sends its own recipients, else the thread's, else nothing", () => {
+  const to = { names: ["@lead · #alpha"], mentions: "#alpha @lead" };
+  assert.equal(postSource("  @codex hi ", to), "@codex hi");
+  assert.equal(postSource("thanks", to), "#alpha @lead thanks");
+  assert.equal(postSource("#alpha hi", to), "#alpha @lead #alpha hi");
+  assert.equal(postSource("hello", null), null);
+  assert.equal(postSource("   ", to), null);
 });

@@ -3112,14 +3112,14 @@ test("UI-3: pressing Enter twice writes one post", async (t) => {
   await ui.live();
   const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
   await box.click();
-  await box.pressSequentially("once");
+  await box.pressSequentially("@codex once");
   await box.press("Enter");
   await box.press("Enter");
   await box.pressSequentially("ignored while sending");
-  assert.equal(await box.inputValue(), "once");
+  assert.equal(await box.inputValue(), "@codex once");
   release();
   await ui.page.getByText("Sent", { exact: true }).waitFor();
-  await box.pressSequentially("twice in one task");
+  await box.pressSequentially("@codex twice in one task");
   await box.evaluate((element) => {
     for (let n = 0; n < 2; n++)
       element.dispatchEvent(
@@ -3275,7 +3275,9 @@ test("UI-3: a post that names nobody stays in the box and says how to choose som
   assert.equal(await box.inputValue(), "hello");
   assert.equal(await ui.page.locator("article.pending").count(), 0);
   assert.equal(
-    await status.evaluate((element) => getComputedStyle(element).color),
+    await status
+      .locator("p")
+      .evaluate((element) => getComputedStyle(element).color),
     await box.evaluate((element) => getComputedStyle(element).color),
     "the guard reads in --text, not muted",
   );

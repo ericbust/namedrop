@@ -15,6 +15,7 @@ import {
   complete,
   insertion,
   leadingMention,
+  postSource,
 } from "../complete.ts";
 import {
   composerCopy,
@@ -23,12 +24,11 @@ import {
   recipientsLabel,
   sendErrorCopy,
 } from "../copy.ts";
-import type { Outgoing } from "../model.ts";
+import type { Outgoing, ReplyTo } from "../model.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
 
-const noRecipients: readonly string[] = [];
 const optionId = (list: string, index: number) => `${list}-${index}`;
 
 function Option({
@@ -115,13 +115,13 @@ export function Composer({
   context,
   outbox,
   placeholder,
-  recipients = noRecipients,
+  to,
   onSend,
 }: {
   context: CompletionContext;
   outbox: ReadonlyMap<string, Outgoing>;
   placeholder: string;
-  recipients?: readonly string[];
+  to: ReplyTo | null;
   onSend: (source: string, startedAt: number) => string;
 }) {
   const [text, setText] = useState("");
@@ -142,6 +142,8 @@ export function Composer({
   const failure = phase?.kind === "failed" ? phase : null;
   // A post leaves the outbox only after its row arrives, so a missing entry was accepted too.
   const accepted = attempt !== null && !sending && failure === null;
+  const named = leadingMention(text);
+  const source = postSource(text, to);
   useLayoutEffect(() => {
     if (!accepted) return;
     setText("");
@@ -220,16 +222,8 @@ export function Composer({
     edit(next.text, next.caret);
   }
   function submit(startedAt: number) {
-    const body = text.trim();
-    if (sending || !body) return;
-    setAttempt(
-      onSend(
-        recipients.length > 0 && !leadingMention(body)
-          ? `${recipients.join(" ")} ${body}`
-          : body,
-        startedAt,
-      ),
-    );
+    if (sending || source === null) return;
+    setAttempt(onSend(source, startedAt));
   }
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing) return;
@@ -265,7 +259,6 @@ export function Composer({
     edit(event.target.value, event.target.selectionStart);
   }
 
-  const showRecipients = recipients.length > 0 && !leadingMention(text);
   return (
     <div className="composer">
       <div className="composer-box">
@@ -296,8 +289,8 @@ export function Composer({
             ))}
           </div>
         )}
-        {showRecipients && (
-          <span className="composer-to">{recipientsLabel(recipients)}</span>
+        {to && !named && (
+          <span className="composer-to">{recipientsLabel(to.names)}</span>
         )}
         <textarea
           ref={box}
@@ -323,7 +316,7 @@ export function Composer({
           type="button"
           className="send"
           aria-label={composerCopy.send}
-          disabled={sending || !text.trim()}
+          disabled={sending || source === null}
           onMouseDown={(event) => event.preventDefault()}
           onClick={(event) => submit(event.timeStamp)}
         >
@@ -338,6 +331,8 @@ export function Composer({
           </p>
         ) : sending ? (
           <p>{composerCopy.sending}</p>
+        ) : source === null && text.trim() !== "" ? (
+          <p className="composer-guard">{composerCopy.needsRecipient}</p>
         ) : focused ? (
           <p>{composerCopy.hint}</p>
         ) : null}

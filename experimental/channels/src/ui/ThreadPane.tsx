@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CompletionContext } from "../complete.ts";
-import { replyPlaceholder } from "../copy.ts";
+import { channelToken, replyPlaceholder } from "../copy.ts";
 import type { Channel, Directory, Draft, Outgoing } from "../model.ts";
 import {
   exitFor,
@@ -39,9 +39,10 @@ export function ThreadPane({
   const pane = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
   const [openedAt] = useState(() => Date.now());
+  const here = channelToken(channel);
   const to = useMemo(
-    () => replyRecipients(thread, directory),
-    [thread, directory],
+    () => replyRecipients(thread, directory, here),
+    [thread, directory, here],
   );
   const latest = thread.replies.at(-1) ?? thread.parents.at(-1);
   const pending = useMemo(() => {
@@ -150,8 +151,8 @@ export function ThreadPane({
         <Composer
           context={completion}
           outbox={outbox}
-          placeholder={replyPlaceholder(to)}
-          recipients={to}
+          placeholder={replyPlaceholder(to?.names ?? [])}
+          to={to}
           onSend={(source, startedAt) =>
             onSend(
               { key: channel.key, source, inReplyTo: latest.id },

@@ -546,6 +546,7 @@ export function App() {
                 context={completion}
                 outbox={state.outbox}
                 placeholder={composerPlaceholder(channel)}
+                to={null}
                 onSend={(source, startedAt) => {
                   if (channel.viewMode === "browsing")
                     dispatch({ type: "latest", key: channel.key });

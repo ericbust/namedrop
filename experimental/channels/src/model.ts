@@ -129,16 +129,21 @@ export type Outgoing = {
   phase: OutgoingPhase;
 };
 export type Draft = Pick<Outgoing, "key" | "source" | "inReplyTo">;
-export type Home = { name: string; members: ReadonlyMap<string, Member> };
+export type Home = {
+  name: string;
+  token: string | null;
+  members: ReadonlyMap<string, Member>;
+};
 export type Directory = {
   members: ReadonlyMap<AddressId, Member>;
   homes: ReadonlyMap<string, Home>;
 };
 export type Participant =
   | { kind: "operator" }
-  | { kind: "member"; member: Member; home: string | null }
-  | { kind: "envoy"; id: AddressId; home: string | null }
+  | { kind: "member"; member: Member; home: Home | null }
+  | { kind: "envoy"; id: AddressId; home: Home | null }
   | { kind: "unknown"; id: AddressId };
+export type ReplyTo = { names: readonly string[]; mentions: string };
 export type WireEvent =
   | { type: "space"; channel: ChannelSnapshot }
   | { type: "gone"; key: SpaceKey }

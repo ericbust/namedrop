@@ -305,7 +305,10 @@ named in the plan. Keep all commands inside the `tb` wrapper above.
 
 For UI-3, post through the composer only. Its box is
 `getByRole('combobox', {name: 'Message #alpha'})`, or `Message <display name>` for a
-channel without a mention label. In the thread pane it is named `Reply to @codex`.
+channel without a mention label. In the thread pane it is named `Reply to @codex`, or
+`Reply to @lead · #alpha` when the agent lives in another workspace, and `.composer-to`
+shows the same recipients after "To". A post that names nobody stays in the box with
+`.composer-guard` under it and never reaches the server.
 Type with `pressSequentially` so each key fires an input event. `#` and `@` open
 `getByRole('listbox', {name: 'Channels'})` or `{name: 'Members'}`. The combobox's
 `aria-activedescendant` names the highlighted option. A disabled option carries

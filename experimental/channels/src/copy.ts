@@ -239,12 +239,20 @@ export const pendingCopy = {
 >;
 
 const couldNotSend = "Namedrop couldn't send this. Try again.";
-const serverSays = (message: string) => message.trim() || couldNotSend;
+const sessionExpired = () =>
+  "Your session expired. Reload the page to keep posting.";
+function serverSays(message: string): string {
+  const text = message.trim();
+  if (!text) return couldNotSend;
+  const sentence = `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
 const sendErrors: ReadonlyMap<number, (message: string) => string> = new Map([
   [400, serverSays],
   [404, serverSays],
   [409, serverSays],
-  [403, () => "Your session expired. Reload the page to keep posting."],
+  [401, sessionExpired],
+  [403, sessionExpired],
   [413, () => "This message is too long."],
 ]);
 export function sendErrorCopy({
@@ -259,13 +267,19 @@ export const composerCopy = {
   sending: "Sending…",
   send: "Send",
   everyWorkspace: "every workspace",
+  needsRecipient: "Start with @name to choose who gets this.",
 };
+export function channelToken(
+  channel: Pick<ChannelSnapshot, "addressableLabel">,
+): string | null {
+  return channel.addressableLabel === null
+    ? null
+    : `#${channel.addressableLabel}`;
+}
 export function channelMention(
   channel: Pick<ChannelSnapshot, "addressableLabel" | "displayName">,
 ): string {
-  return channel.addressableLabel === null
-    ? channel.displayName
-    : `#${channel.addressableLabel}`;
+  return channelToken(channel) ?? channel.displayName;
 }
 export function composerPlaceholder(
   channel: Pick<ChannelSnapshot, "addressableLabel" | "displayName">,
@@ -274,7 +288,7 @@ export function composerPlaceholder(
 }
 export function replyPlaceholder(recipients: readonly string[]): string {
   return recipients.length === 0
-    ? "Reply in thread"
+    ? "No one in this thread can be mentioned. Start with @name to choose someone."
     : `Reply to ${recipients.join(", ")}`;
 }
 export function recipientsLabel(recipients: readonly string[]): string {
@@ -304,7 +318,7 @@ export function participantCopy(who: Participant): ParticipantCopy {
     case "member":
       return {
         name: who.member.alias,
-        suffix: who.home,
+        suffix: who.home?.name ?? null,
         title: null,
         avatar: who.member.kind.type,
       };
@@ -313,7 +327,7 @@ export function participantCopy(who: Participant): ParticipantCopy {
         name:
           who.home === null
             ? "an agent in another workspace"
-            : `an agent in ${who.home}`,
+            : `an agent in ${who.home.name}`,
         suffix: null,
         title: who.id,
         avatar: "unresolved",

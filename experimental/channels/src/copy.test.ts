@@ -451,6 +451,7 @@ test("participant names: remote agents carry their home, envoys and unknown ids 
   const codex: Member | undefined = event.channel.members.values().next().value;
   const envoy = event.channel.messages.get("m1")?.author;
   assert.ok(codex && envoy !== undefined && envoy !== "human");
+  const alpha = { name: "#alpha", token: "#alpha", members: new Map() };
   assert.deepEqual(participantCopy({ kind: "operator" }), {
     name: "You",
     suffix: null,
@@ -458,18 +459,15 @@ test("participant names: remote agents carry their home, envoys and unknown ids 
     avatar: "human",
   });
   assert.deepEqual(
-    participantCopy({ kind: "member", member: codex, home: "#alpha" }),
+    participantCopy({ kind: "member", member: codex, home: alpha }),
     { name: "@codex", suffix: "#alpha", title: null, avatar: "agent" },
   );
-  assert.deepEqual(
-    participantCopy({ kind: "envoy", id: envoy, home: "#alpha" }),
-    {
-      name: "an agent in #alpha",
-      suffix: null,
-      title: "envoy:w2:pane-7",
-      avatar: "unresolved",
-    },
-  );
+  assert.deepEqual(participantCopy({ kind: "envoy", id: envoy, home: alpha }), {
+    name: "an agent in #alpha",
+    suffix: null,
+    title: "envoy:w2:pane-7",
+    avatar: "unresolved",
+  });
   assert.equal(
     participantCopy({ kind: "envoy", id: envoy, home: null }).name,
     "an agent in another workspace",

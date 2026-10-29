@@ -1,4 +1,4 @@
-import type { ChannelSnapshot, Member, SpaceKey } from "./model.ts";
+import type { ChannelSnapshot, Member, ReplyTo, SpaceKey } from "./model.ts";
 
 export type ChannelOption = {
   key: SpaceKey;
@@ -174,6 +174,16 @@ export function accept(
   };
 }
 
+// The server's send grammar: any `#label` tokens, then at least one valid `@alias`.
+const LEADING_MENTION = /^\s*(?:#[\w.-]+\s+)*@[a-z0-9]+(?:-[a-z0-9]+)*(?:\s|$)/;
+
 export function leadingMention(text: string): boolean {
-  return /^\s*[@#]\S/.test(text);
+  return LEADING_MENTION.test(text);
+}
+
+export function postSource(text: string, to: ReplyTo | null): string | null {
+  const body = text.trim();
+  if (body === "") return null;
+  if (leadingMention(body)) return body;
+  return to === null ? null : `${to.mentions} ${body}`;
 }
