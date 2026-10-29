@@ -469,6 +469,14 @@ test("parser validates every retained participant, health, attention, and identi
     { ...base.frame, space: { ...base.frame.space, addressable_label: 8 } },
     {
       ...base.frame,
+      space: { ...base.frame.space, not_addressable_reason: "guessed" },
+    },
+    {
+      ...base.frame,
+      space: { ...base.frame.space, not_addressable_reason: 8 },
+    },
+    {
+      ...base.frame,
       attention: [
         {
           source_kind: [],
@@ -528,6 +536,22 @@ test("parser accepts opaque human IDs, all activities, safe text, null addressab
     "<script>alert(1)</script>",
   );
   assert.equal(parsed(snapshot()).addressableLabel, "alpha");
+  assert.equal(parsed(snapshot()).notAddressableReason, "unavailable");
+  const reasonFrame = snapshot();
+  assert.equal(
+    parsed({
+      ...reasonFrame,
+      frame: {
+        ...reasonFrame.frame,
+        space: {
+          ...reasonFrame.frame.space,
+          addressable_label: null,
+          not_addressable_reason: "shared_label",
+        },
+      },
+    }).notAddressableReason,
+    "shared_label",
+  );
 });
 test("new channels establish a baseline while background message, member, and activity changes mark unread", () => {
   const state = twoChannels();

@@ -353,7 +353,21 @@ pub struct SpaceHeader {
     pub label: Option<SafeText>,
     pub display_name: String,
     pub addressable_label: Option<String>,
+    pub not_addressable_reason: Option<NotAddressableReason>,
     pub state: SpaceState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotAddressableReason {
+    MissingLabel,
+    EmptyLabel,
+    ReservedAll,
+    SharedLabel,
+    IdCollision,
+    NotActivated,
+    NotActive,
+    Unavailable,
 }
 
 impl SpaceHeader {
@@ -361,12 +375,14 @@ impl SpaceHeader {
         &mut self,
         workspace_id: &str,
         label: Option<&str>,
-        addressable_label: Option<String>,
+        addressability: Result<String, NotAddressableReason>,
     ) {
         let label = SafeText::optional(label, SHORT_CHARS).map(|label| label.text);
         self.display_name = label.unwrap_or_else(|| workspace_id.to_owned());
-        self.addressable_label = addressable_label
-            .filter(|token| SafeText::from_untrusted(token, SHORT_CHARS).text == *token);
+        (self.addressable_label, self.not_addressable_reason) = match addressability {
+            Ok(token) => (Some(token), None),
+            Err(reason) => (None, Some(reason)),
+        };
     }
 }
 
@@ -628,6 +644,7 @@ impl DashboardSnapshot {
                 label: SafeText::optional(label, SHORT_CHARS),
                 display_name: String::new(),
                 addressable_label: None,
+                not_addressable_reason: Some(NotAddressableReason::Unavailable),
                 state: SpaceState::Unknown,
             },
             health: SpaceHealth::Inactive,
@@ -648,7 +665,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .iter()
         .map(|m| message(m, &rows.legs))
         .collect();
-    let participants = participants(rows, &messages);
+    let participants = participants(rows, &messages, now_ms);
     let in_flight = rows
         .mailbox
         .iter()
@@ -695,6 +712,11 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             label: SafeText::optional(label, SHORT_CHARS),
             display_name: rows.namespace.space_id.as_str().to_owned(),
             addressable_label: None,
+            not_addressable_reason: Some(match state {
+                SpaceState::NotActivated => NotAddressableReason::NotActivated,
+                SpaceState::Deactivated => NotAddressableReason::NotActive,
+                _ => NotAddressableReason::Unavailable,
+            }),
             state,
         },
         health: health(state, attention.len(), in_flight, working),
@@ -797,7 +819,17 @@ fn threads(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<ThreadChip> {
         .collect()
 }
 
-fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participant> {
+const CLOSED_MEMBER_RETENTION_MS: i64 = 5 * 60 * 1_000;
+
+pub(crate) fn closed_member_expires_at(address: &rows::AddressRow) -> Option<i64> {
+    address
+        .retired
+        .then_some(address.closed_at_ms)
+        .flatten()
+        .map(|closed_at| closed_at.saturating_add(CLOSED_MEMBER_RETENTION_MS))
+}
+
+fn participants(rows: &DashboardRows, messages: &[MessageRow], now_ms: i64) -> Vec<Participant> {
     let alias_of: HashMap<&str, &str> = rows
         .addresses
         .iter()
@@ -842,7 +874,10 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
         .addresses
         .iter()
         .filter(|a| {
-            a.address_id != HUMAN && (!a.retired || referenced.contains(a.address_id.as_str()))
+            a.address_id != HUMAN
+                && (!a.retired
+                    || referenced.contains(a.address_id.as_str())
+                    || closed_member_expires_at(a).is_some_and(|expiry| now_ms < expiry))
         })
         .collect();
     addresses.sort_by_key(|a| {

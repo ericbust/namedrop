@@ -75,7 +75,7 @@ const snapshots = [
     participant("@shell", { type: "terminal" }),
   ]),
   snapshot("c", "dormant", null),
-  snapshot("d", "w-d", null),
+  snapshot("d", "w-d", null, [], "w-d", "active", "missing_label"),
 ];
 const [beta, alpha] = snapshots;
 assert.ok(alpha && beta);
@@ -282,63 +282,39 @@ test("complete: channel options name why a channel cannot be mentioned, in the t
       ["w-d", null, "no-label"],
     ],
   );
-  const reasons = channelOptions([
-    snapshot("2", "w-2", null),
-    snapshot("3", "日本語", null),
-    snapshot("4", "All", null),
-    snapshot("5", "Twin", null),
-    snapshot("6", "twin", null),
-    snapshot("7", "Gamma", "gamma"),
-    snapshot("8", "gamma!", null),
-    snapshot("9", "Dormant", null),
-    snapshot("a", "w-2", null),
-    snapshot("b", "foobar", "foobar"),
-    snapshot("c", "foobar", null),
-    snapshot("d", "same", null),
-    snapshot("e", "same", null),
-    snapshot("f", "日本語", null),
-    snapshot("1", "solo", "solo"),
-    snapshot("0", "solo", null),
-  ]).map(({ name, disabledReason }) => [name, disabledReason]);
-  assert.deepEqual(reasons, [
-    ["w-2", "no-label"],
-    ["日本語", "unusable-label"],
-    ["All", "unknown"],
-    ["Twin", "unknown"],
-    ["twin", "unknown"],
-    ["Gamma", null],
-    ["gamma!", "unknown"],
-    ["Dormant", "unknown"],
-    ["w-2", "unknown"],
-    ["foobar", null],
-    ["foobar", "unknown"],
-    ["same", "shared-name"],
-    ["same", "shared-name"],
-    ["日本語", "unusable-label"],
-    ["solo", null],
-    ["solo", "unknown"],
-  ]);
+  const cases = [
+    ["missing_label", "no-label"],
+    ["empty_label", "unusable-label"],
+    ["shared_label", "shared-name"],
+    ["reserved_all", "unknown"],
+    ["id_collision", "unknown"],
+    ["not_activated", "unknown"],
+    ["not_active", "unknown"],
+    ["unavailable", "unknown"],
+  ];
+  for (const [reason, expected] of cases) {
+    assert.ok(reason && expected);
+    const channel = snapshot(
+      "1",
+      "any display",
+      null,
+      [],
+      "w1",
+      "active",
+      reason,
+    );
+    assert.equal(channelOptions([channel])[0]?.disabledReason, expected);
+  }
 });
 
-test("complete: twins named all read the general line, and a shared name counts only while every twin is active", () => {
-  const reasons = (...channels: ChannelSnapshot[]) =>
-    channelOptions(channels).map(({ disabledReason }) => disabledReason);
-  const twin = (letter: string, name: string, state: string | null) =>
-    snapshot(letter, name, null, [], `w-${letter}`, state);
+test("complete: old frames without a reason use the existing general copy", () => {
   assert.deepEqual(
-    reasons(twin("1", "all", "active"), twin("2", "all", "active")),
+    channelOptions([
+      snapshot("1", "same", null),
+      snapshot("2", "same", null),
+    ]).map((option) => option.disabledReason),
     ["unknown", "unknown"],
   );
-  assert.deepEqual(
-    reasons(twin("1", "twin", "paused"), twin("2", "twin", "active")),
-    ["shared-name", "shared-name"],
-  );
-  for (const state of ["deactivated", "not_activated", "unknown", null])
-    assert.deepEqual(
-      reasons(twin("1", "twin", "active"), twin("2", "twin", state)),
-      ["unknown", "unknown"],
-      `a twin whose state is ${state}`,
-    );
 });
 test("complete: channel options that share a name carry the sidebar's workspace suffix", () => {
   const e = "e".repeat(20);
@@ -346,8 +322,8 @@ test("complete: channel options that share a name carry the sidebar's workspace 
   const nine = "9".repeat(20);
   assert.deepEqual(
     channelOptions([
-      snapshot("e", "twin", null),
-      snapshot("f", "twin", null),
+      snapshot("e", "twin", null, [], "w-e", "active", "shared_label"),
+      snapshot("f", "twin", null, [], "w-f", "active", "shared_label"),
       snapshot("9", "solo", "solo"),
     ]),
     [
@@ -411,14 +387,40 @@ test("complete: a post sends its own recipients, else the thread's, else nothing
 
 test("complete: disabled copy follows the server reason despite sanitized or identical names", () => {
   const channels = [
-    snapshot("1", "same name", null, [], "w-1", "not_activated", "shared_label"),
-    snapshot("2", "same name", null, [], "w-2", "not_activated", "shared_label"),
+    snapshot(
+      "1",
+      "same name",
+      null,
+      [],
+      "w-1",
+      "not_activated",
+      "shared_label",
+    ),
+    snapshot(
+      "2",
+      "same name",
+      null,
+      [],
+      "w-2",
+      "not_activated",
+      "shared_label",
+    ),
     snapshot("3", "all", null, [], "w-3", "active", "reserved_all"),
     snapshot("4", "all", null, [], "w-4", "active", "reserved_all"),
     snapshot("5", "w-5", null, [], "w-5", "active", "id_collision"),
     snapshot("6", "日本語", null, [], "w-6", "active", "empty_label"),
     snapshot("7", "anything", null, [], "w-7", "active", "missing_label"),
   ];
-  assert.deepEqual(channelOptions(channels).map((option) => option.disabledReason),
-    ["shared-name", "shared-name", "unknown", "unknown", "unknown", "unusable-label", "no-label"]);
+  assert.deepEqual(
+    channelOptions(channels).map((option) => option.disabledReason),
+    [
+      "shared-name",
+      "shared-name",
+      "unknown",
+      "unknown",
+      "unknown",
+      "unusable-label",
+      "no-label",
+    ],
+  );
 });

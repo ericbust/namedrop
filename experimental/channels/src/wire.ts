@@ -13,6 +13,7 @@ import type {
   Mention,
   Message,
   MessageKind,
+  NotAddressableReason,
   Route,
   SafeText,
   Screen,
@@ -56,6 +57,25 @@ function optionalAlias(value: unknown): string | null {
 }
 function nullableText(value: unknown): string | null {
   return value === null ? null : text(value);
+}
+function notAddressableReason(value: unknown): NotAddressableReason | null {
+  switch (value) {
+    case null:
+      return null;
+    case undefined:
+      return "unavailable";
+    case "missing_label":
+    case "empty_label":
+    case "reserved_all":
+    case "shared_label":
+    case "id_collision":
+    case "not_activated":
+    case "not_active":
+    case "unavailable":
+      return value;
+    default:
+      throw new Error("Invalid addressability reason");
+  }
 }
 function integer(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
@@ -436,6 +456,7 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
     workspaceId: identity(space.workspace_id),
     displayName: identity(space.display_name),
     addressableLabel: nullableText(space.addressable_label),
+    notAddressableReason: notAddressableReason(space.not_addressable_reason),
     state: spaceState(space.state),
     health: health(frame.health),
     members,

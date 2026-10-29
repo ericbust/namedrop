@@ -427,6 +427,10 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
     let mut all = server.events("/api/events");
     all.space();
     all.space();
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "missing_label"
+    );
 
     let mut unknown = server.events(&format!("/w/{}/events", key("unknown")));
     let (event, mut actual) = unknown.next(WAIT).unwrap();
@@ -435,6 +439,7 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
     let header = actual["space"].as_object_mut().unwrap();
     header.remove("display_name");
     header.remove("addressable_label");
+    header.remove("not_addressable_reason");
     actual["generated_at_ms"] = json!(0);
     let mut expected =
         serde_json::to_value(namedrop::dashboard::snapshot::DashboardSnapshot::unknown(
@@ -446,6 +451,7 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
     let header = expected["space"].as_object_mut().unwrap();
     header.remove("display_name");
     header.remove("addressable_label");
+    header.remove("not_addressable_reason");
     expected["space"]["workspace_id"] = json!("unknown");
     assert_eq!(actual, expected);
 
@@ -454,9 +460,16 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
         all.next(WAIT).unwrap(),
         ("gone".to_owned(), json!({"key": key("a")}))
     );
-    assert!(legacy.next(Duration::from_millis(350)).is_none());
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "unavailable"
+    );
     server.set_workspaces(&[("a", None), ("unknown", None)]);
     assert_eq!(all.space()["key"], key("a"));
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "missing_label"
+    );
     assert!(legacy.next(Duration::from_millis(350)).is_none());
 }
 
@@ -552,6 +565,10 @@ fn discovery_runs_only_for_all_space_subscribers_and_stops_with_the_last_one() {
     );
     let mut all = server.events("/api/events");
     all.space();
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "missing_label"
+    );
     assert!(!calls(directory.path()).is_empty());
     drop(all);
     thread::sleep(Duration::from_millis(1400));
@@ -561,6 +578,10 @@ fn discovery_runs_only_for_all_space_subscribers_and_stops_with_the_last_one() {
         calls(directory.path()).len(),
         before,
         "discovery continued after the last all-space tab closed"
+    );
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "unavailable"
     );
     assert!(legacy.next(Duration::from_millis(50)).is_none());
 }

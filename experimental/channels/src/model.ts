@@ -124,11 +124,21 @@ export type MemberWork = Readonly<{
   mailbox: readonly MailItem[];
   waitingOn: readonly Mention[];
 }>;
+export type NotAddressableReason =
+  | "missing_label"
+  | "empty_label"
+  | "reserved_all"
+  | "shared_label"
+  | "id_collision"
+  | "not_activated"
+  | "not_active"
+  | "unavailable";
 export type ChannelSnapshot = {
   key: SpaceKey;
   workspaceId: string;
   displayName: string;
   addressableLabel: string | null;
+  notAddressableReason: NotAddressableReason | null;
   state: SpaceState;
   health: Health;
   members: ReadonlyMap<AddressId, Member>;
