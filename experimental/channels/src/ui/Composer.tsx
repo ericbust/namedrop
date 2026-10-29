@@ -181,7 +181,7 @@ export function Composer({
   useLayoutEffect(() => {
     const element = list.current;
     const option =
-      active < 0 ? null : document.getElementById(`${listId}-${active}`);
+      active < 0 ? null : document.getElementById(optionId(active));
     if (!element || !option) return;
     if (option.offsetTop < element.scrollTop)
       element.scrollTop = option.offsetTop;

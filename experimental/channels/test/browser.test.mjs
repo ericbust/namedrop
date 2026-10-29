@@ -169,8 +169,7 @@ function postRoute(onPost) {
       receipts.set(post.request_id, { post, receipt });
       reply(200, receipt);
     },
-    // The row a later frame carries for an accepted post.
-    row(requestId, at = Date.now()) {
+    postedRow(requestId, at = Date.now()) {
       const { post, receipt } = receipts.get(requestId);
       return message(receipt.message_id, post.source, {
         thread_id: receipt.thread_id,
@@ -2912,8 +2911,18 @@ const measures = (page, name) =>
   );
 
 test("UI-3: the # and @ popup moves with Up and Down, accepts with Tab and Enter, and closes with Escape", async (t) => {
+  const beta = team(2, "beta");
+  beta.frame.participants = [
+    ...beta.frame.participants.filter(({ alias }) => alias !== "@claude"),
+    {
+      ...people()[0],
+      address_id: "coder",
+      alias: "@coder",
+      activity: "waiting",
+    },
+  ];
   const ui = await open(t, (client) =>
-    replay(client, [team(1, "alpha"), team(2, "beta")]),
+    replay(client, [team(1, "alpha"), beta]),
   );
   await ui.live();
   const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
@@ -2954,13 +2963,13 @@ test("UI-3: the # and @ popup moves with Up and Down, accepts with Tab and Enter
   await box.pressSequentially("@");
   const members = ui.page.getByRole("listbox", { name: "Members" });
   await members.waitFor();
-  assert.deepEqual(await members.locator(".opt-name").allTextContents(), [
-    "@claude",
-    "@codex",
-    "@shell",
-  ]);
+  assert.deepEqual(
+    await members.locator(".opt-name").allTextContents(),
+    ["@coder", "@codex", "@shell"],
+    "the members of #beta, not of the open channel",
+  );
   assert.deepEqual(await members.locator(".opt-presence").allTextContents(), [
-    "Working",
+    "Waiting",
     "Idle",
     "Idle",
   ]);
@@ -3063,7 +3072,7 @@ test("UI-3: a post shows Sending…, then Sent, and its real row replaces the pe
   assert.equal((await measures(ui.page, "namedrop:enter-to-sent")).length, 1);
   const before = await pending.boundingBox();
   const update = structuredClone(value);
-  update.frame.messages.push(ui.posts.row(requestIds(ui)[0]));
+  update.frame.messages.push(ui.posts.postedRow(requestIds(ui)[0]));
   ui.connections[0].send("space", update);
   const real = timeline.locator('[data-message-id="posted-1"]');
   await real.waitFor();
@@ -3126,7 +3135,7 @@ test("UI-3: pressing Enter twice writes one post", async (t) => {
   assert.equal(new Set(requestIds(ui)).size, 2);
   const update = structuredClone(value);
   update.frame.messages = requestIds(ui).map((id, n) =>
-    ui.posts.row(id, Date.now() + n),
+    ui.posts.postedRow(id, Date.now() + n),
   );
   ui.connections[0].send("space", update);
   const timeline = ui.page.getByRole("region", { name: "Message history" });
@@ -3172,11 +3181,12 @@ test("UI-3: a thread reply carries in_reply_to and keeps its recipients", async 
   await reply.click();
   await reply.pressSequentially("thanks");
   await reply.press("Enter");
-  await pane.locator("article.pending").getByText("Sent").waitFor();
-  assert.equal(await timeline.locator("article.pending").count(), 0);
+  await until(() => ui.posts.attempts.length === 1, "the reply");
   const first = JSON.parse(ui.posts.attempts[0].raw);
   assert.equal(first.source, "@codex thanks");
   assert.equal(first.in_reply_to, "answer");
+  await pane.locator("article.pending").getByText("Sent").waitFor();
+  assert.equal(await timeline.locator("article.pending").count(), 0);
   await reply.pressSequentially("@claude look too");
   assert.equal(await pane.locator(".composer-to").count(), 0);
   await reply.press("Enter");

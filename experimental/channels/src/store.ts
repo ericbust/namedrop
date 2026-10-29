@@ -1,4 +1,4 @@
-import { dayBounds, dayLabel } from "./copy.ts";
+import { channelMention, dayBounds, dayLabel } from "./copy.ts";
 import type {
   AddressId,
   Channel,
@@ -915,10 +915,7 @@ export function homesOf(
   const homes = new Map<string, Home>();
   for (const channel of channels) {
     if (homes.has(channel.workspaceId)) continue;
-    const name =
-      channel.addressableLabel === null
-        ? channel.displayName
-        : `#${channel.addressableLabel}`;
+    const name = channelMention(channel);
     const old = previous?.get(channel.workspaceId);
     homes.set(
       channel.workspaceId,
