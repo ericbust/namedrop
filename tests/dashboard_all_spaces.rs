@@ -1535,8 +1535,8 @@ fn addressability_reasons_come_from_raw_labels_and_routing_state() {
     for (id, reason) in [
         ("all-a", "reserved_all"),
         ("all-b", "reserved_all"),
-        ("invisible-a", "shared_label"),
-        ("invisible-b", "shared_label"),
+        ("invisible-a", "not_activated"),
+        ("invisible-b", "not_activated"),
         ("missing", "missing_label"),
         ("empty", "empty_label"),
         ("collision", "id_collision"),
@@ -1556,6 +1556,45 @@ fn addressability_reasons_come_from_raw_labels_and_routing_state() {
         .unwrap();
     assert_eq!(good["frame"]["space"]["addressable_label"], "good-label");
     assert!(good["frame"]["space"]["not_addressable_reason"].is_null());
+}
+
+#[test]
+fn inactive_twins_report_activation_before_name_collisions() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    for id in ["active-a", "active-b", "deactivated"] {
+        activate(&state, id);
+    }
+    StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| tx.deactivate_worktree(&namespace("deactivated"), &attribution()))
+        .unwrap();
+    let live = [
+        ("inactive-a", Some("same name")),
+        ("inactive-b", Some("same\u{200b}name")),
+        ("active-a", Some("active twin")),
+        ("active-b", Some("active\u{200b}twin")),
+        ("deactivated", Some("same name")),
+        ("id-collision", Some("active-a")),
+    ];
+    let server = Server::start(directory.path(), &live);
+    let mut all = server.events("/api/events");
+    let frames: Vec<_> = (0..live.len()).map(|_| all.space()).collect();
+    for (id, reason) in [
+        ("inactive-a", "not_activated"),
+        ("inactive-b", "not_activated"),
+        ("active-a", "shared_label"),
+        ("active-b", "shared_label"),
+        ("deactivated", "not_active"),
+        ("id-collision", "not_activated"),
+    ] {
+        let frame = frames.iter().find(|frame| frame["key"] == key(id)).unwrap();
+        assert_eq!(
+            frame["frame"]["space"]["not_addressable_reason"], reason,
+            "{id}"
+        );
+        assert!(frame["frame"]["space"]["addressable_label"].is_null());
+    }
 }
 
 #[test]

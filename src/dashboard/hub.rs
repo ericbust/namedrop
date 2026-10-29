@@ -1157,6 +1157,39 @@ mod tests {
             .transaction(|tx| tx.activate_worktree(&namespace, &at))
             .unwrap();
         add_address(&state, &namespace, "closed");
+        add_address(&state, &namespace, "reader");
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                let thread = crate::ThreadId::new("history-thread");
+                tx.create_thread(&namespace, &thread, "History", &at)?;
+                tx.append_message(
+                    &namespace,
+                    &crate::MessageDraft {
+                        thread_id: thread,
+                        message_id: crate::MessageId::new("history-message"),
+                        in_reply_to: None,
+                        author_address_id: PaneAddressId::new("address-closed"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "closed".to_owned(),
+                        author_agent_session_snapshot: None,
+                        request_id: "history-request".to_owned(),
+                        authored_source: "History".to_owned(),
+                        body: "History".to_owned(),
+                        grammar_version: "note/v1".to_owned(),
+                        recipients: vec![crate::MessageRecipientDraft {
+                            address_id: PaneAddressId::new("address-reader"),
+                            alias_snapshot: "reader".to_owned(),
+                            agent_session_snapshot: None,
+                            delivery_id: crate::DeliveryId::new("history-delivery"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &at,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
         let closed_at = u64::try_from(now_ms() - 300_000 + 1_500).unwrap();
         StateStore::open(&state)
             .unwrap()
@@ -1196,7 +1229,19 @@ mod tests {
                 .iter()
                 .any(|member| member["alias"] == "@closed")
         );
+        let referenced = |frame: &serde_json::Value| {
+            frame["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|member| member["alias"] == "@closed")
+                .cloned()
+                .expect("history must keep its retired author")
+        };
+        assert_eq!(referenced(&initial)["activity"], "retired");
+        assert_eq!(referenced(&initial)["recently_closed"], true);
         let version = hub.data_version;
+        freeze_discovery(&mut hub);
         let deadline = Instant::now() + Duration::from_secs(4);
         let expired = loop {
             hub.refresh(None);
@@ -1208,13 +1253,9 @@ mod tests {
         };
         assert_eq!(hub.data_version, version);
         let expired: serde_json::Value = serde_json::from_str(&expired).unwrap();
-        assert!(
-            !expired["participants"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|member| member["alias"] == "@closed")
-        );
+        assert_eq!(referenced(&expired)["activity"], "retired");
+        assert_eq!(referenced(&expired)["recently_closed"], false);
+        assert_eq!(expired["messages"][0]["author"], "address-closed");
         fs::remove_dir_all(state).unwrap();
     }
 

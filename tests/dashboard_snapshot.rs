@@ -2039,6 +2039,14 @@ fn recently_closed_members_expire_at_five_minutes_but_references_keep_them() {
     let rows = store.dashboard_rows(&ns).unwrap();
     let before = build(&rows, None, 300_999);
     assert_eq!(lane(&before, "@b").activity, Activity::Retired);
+    assert_eq!(
+        serde_json::to_value(lane(&before, "@b")).unwrap()["recently_closed"],
+        true
+    );
+    assert_eq!(
+        serde_json::to_value(lane(&before, "@a")).unwrap()["recently_closed"],
+        false
+    );
     let expired = build(&rows, None, 301_000);
     assert!(
         !expired
@@ -2049,8 +2057,40 @@ fn recently_closed_members_expire_at_five_minutes_but_references_keep_them() {
     send(&mut store, &ns, "reference", "a", "a", "history", None);
     let mut rows = store.dashboard_rows(&ns).unwrap();
     rows.messages[0].author_address_id = id(&ns, "b").as_str().to_owned();
+    for (now, recently_closed) in [(300_999, true), (301_000, false), (301_001, false)] {
+        let frame = build(&rows, None, now);
+        let member = lane(&frame, "@b");
+        assert_eq!(member.activity, Activity::Retired);
+        assert_eq!(
+            serde_json::to_value(member).unwrap()["recently_closed"],
+            recently_closed,
+            "at {now}"
+        );
+        assert_eq!(frame.messages[0].author, id(&ns, "b").as_str());
+    }
+
+    rows.addresses
+        .iter_mut()
+        .find(|a| a.address_id == id(&ns, "a").as_str())
+        .unwrap()
+        .closed_at_ms = Some(1_000);
     assert_eq!(
-        lane(&build(&rows, None, 301_001), "@b").activity,
-        Activity::Retired
+        serde_json::to_value(lane(&build(&rows, None, 300_999), "@a")).unwrap()["recently_closed"],
+        false
+    );
+    rows.addresses
+        .iter_mut()
+        .find(|a| a.address_id == id(&ns, "b").as_str())
+        .unwrap()
+        .closed_at_ms = None;
+    assert_eq!(
+        serde_json::to_value(lane(&build(&rows, None, 300_999), "@b")).unwrap()["recently_closed"],
+        false
+    );
+
+    rows.addresses[0].address_id = namedrop::dashboard::snapshot::HUMAN.to_owned();
+    assert_eq!(
+        serde_json::to_value(lane(&build(&rows, None, 300_999), "you")).unwrap()["recently_closed"],
+        false
     );
 }
