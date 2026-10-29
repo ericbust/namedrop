@@ -533,10 +533,12 @@ export function App() {
   const sendTo = useCallback(
     (post: Message, alias: string, button: HTMLButtonElement) => {
       if (current === undefined) return;
+      // The trailing space keeps the caret off a mention the post ends with,
+      // so the member list stays closed and Enter sends.
       dispatch({
         type: "fill",
         composer: { key: current, thread: post.threadId },
-        text: `${alias} ${post.body.text}`,
+        text: `${alias} ${post.body.text} `,
       });
       openThread(post.threadId, button, "composer");
     },

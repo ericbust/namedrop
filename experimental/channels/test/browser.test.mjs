@@ -5139,7 +5139,7 @@ test("CH-2: Send anyway opens the thread with the post addressed and the caret a
   });
   const box = pane.getByRole("combobox");
   await box.waitFor();
-  const filled = "@codex nice catch by @codex on the cache";
+  const filled = "@codex nice catch by @codex on the cache ";
   assert.deepEqual(
     await box.evaluate((element) => [
       element.value,
@@ -5180,7 +5180,7 @@ test("CH-2: Send anyway opens the thread with the post addressed and the caret a
   await until(() => ui.posts.attempts.length === 1, "the sent post");
   assert.deepEqual(JSON.parse(ui.posts.attempts[0].raw), {
     request_id: JSON.parse(ui.posts.attempts[0].raw).request_id,
-    source: `${filled}!`,
+    source: `${filled}!`.trim(),
     in_reply_to: "p1",
   });
   await pane.locator("article.pending").getByText("Sent").waitFor();
@@ -5200,6 +5200,25 @@ test("CH-2: Send anyway opens the thread with the post addressed and the caret a
     0,
     "the caret moved to the end, so no member list opens on the leading mention",
   );
+});
+
+test("CH-2: Send anyway on a post that ends with a mention still sends on Enter", async (t) => {
+  const { ui } = await chatRoom(t, [
+    channelPost("p1", "nice work by @codex", { state: "unrouted", to: [] }),
+  ]);
+  await ui.page
+    .locator("main")
+    .getByRole("button", { name: "Send this to @codex" })
+    .click();
+  await ui.page.waitForFunction(
+    () => document.activeElement?.matches("aside textarea") === true,
+  );
+  assert.equal(await ui.page.getByRole("listbox").count(), 0, "no member list");
+  await ui.page.keyboard.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the sent post");
+  const posted = JSON.parse(ui.posts.attempts[0].raw);
+  assert.equal(posted.source, "@codex nice work by @codex");
+  assert.equal(posted.in_reply_to, "p1");
 });
 
 test("CH-2: the channel composer says where Enter sends, posts plain text, and a post that mentions agents waits on Checking who this is for", async (t) => {
