@@ -359,7 +359,7 @@ fn observe_status(
         .transaction(|tx| {
             tx.observe_agent_session(
                 namespace,
-                &format!("observation-{alias}-{status}"),
+                &format!("observation-{alias}-{status}-{observed_at_ms}"),
                 &id(namespace, alias),
                 &AgentSessionId::new(format!("session-{}-{alias}", namespace.space_id.as_str())),
                 status,
@@ -367,6 +367,181 @@ fn observe_status(
             )
         })
         .unwrap();
+}
+
+struct ReconcileIds(std::cell::Cell<u32>);
+
+impl namedrop::IdGenerator for ReconcileIds {
+    fn next_id(&self, kind: &str) -> String {
+        self.0.set(self.0.get() + 1);
+        format!("{kind}-{}", self.0.get())
+    }
+}
+
+fn discovered_pane(
+    namespace: &StateNamespace,
+    alias: &str,
+    status: &str,
+) -> namedrop::DiscoveredPane {
+    let space = namespace.space_id.as_str();
+    namedrop::DiscoveredPane {
+        pane_id: format!("pane-{space}-{alias}"),
+        terminal_id: format!("term-{alias}"),
+        tab_id: "tab".into(),
+        workspace_id: space.into(),
+        cwd: None,
+        pane_label: None,
+        agent_session_id: Some(AgentSessionId::new(format!("session-{space}-{alias}"))),
+        agent: Some("claude".into()),
+        occupant_label: None,
+        agent_status: Some(status.into()),
+        idle_state_label: None,
+    }
+}
+
+#[test]
+fn another_panes_status_event_preserves_the_blocked_agents_frame() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    let ids = ReconcileIds(std::cell::Cell::new(0));
+    let mut first = None;
+    for (at, status) in [(1_000, "working"), (2_000, "idle"), (3_000, "working")] {
+        store
+            .transaction(|tx| {
+                namedrop::reconcile_discovered_panes(
+                    tx,
+                    &ns,
+                    &[
+                        discovered_pane(&ns, "a", "blocked"),
+                        discovered_pane(&ns, "b", status),
+                    ],
+                    &ids,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", at),
+                )
+            })
+            .unwrap();
+        let frame = build(&store.dashboard_rows(&ns).unwrap(), None, 0);
+        if at == 1_000 {
+            assert_eq!(frame.attention[0].opened_at_ms, 1_000);
+            first = Some(serde_json::to_value(&frame).unwrap());
+        } else if at == 3_000 {
+            assert_eq!(
+                &serde_json::to_value(&frame).unwrap(),
+                first.as_ref().unwrap(),
+                "an uninterrupted permission dialog contributes the same hub frame"
+            );
+        }
+    }
+}
+
+#[test]
+fn permission_blocking_keeps_its_run_start_and_restarts_after_clearing() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a"]);
+    for at in [20, 30, 40] {
+        observe_status(&mut store, &ns, "a", "blocked", at);
+        assert_eq!(snapshot(&mut store, &ns).attention[0].opened_at_ms, 20);
+    }
+    observe_status(&mut store, &ns, "a", "working", 50);
+    assert!(snapshot(&mut store, &ns).attention.is_empty());
+    for at in [60, 70] {
+        observe_status(&mut store, &ns, "a", "blocked", at);
+        assert_eq!(snapshot(&mut store, &ns).attention[0].opened_at_ms, 60);
+    }
+}
+
+#[test]
+fn permission_blocking_starts_with_the_current_binding() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a"]);
+    observe_status(&mut store, &ns, "a", "blocked", 20);
+    store
+        .transaction(|tx| {
+            tx.unbind_pane(
+                &ns,
+                &id(&ns, "a"),
+                &MutationAttribution::new(ActorKind::Plugin, "test", 30),
+            )?;
+            tx.bind_pane(
+                &ns,
+                &PaneBindingId::new("binding-replacement"),
+                &id(&ns, "a"),
+                "pane-w1-a",
+                &MutationAttribution::new(ActorKind::Plugin, "test", 40),
+            )
+        })
+        .unwrap();
+    let rebound = snapshot(&mut store, &ns);
+    assert_eq!(lane(&rebound, "@a").activity, Activity::Offline);
+    assert!(rebound.attention.is_empty());
+    for at in [40, 50] {
+        observe_status(&mut store, &ns, "a", "blocked", at);
+        assert_eq!(snapshot(&mut store, &ns).attention[0].opened_at_ms, 40);
+    }
+}
+
+#[test]
+fn permission_blocking_orders_equal_timestamp_observations_by_insertion() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a"]);
+    for (index, (at, status, expected_since)) in [
+        (20, "blocked", Some(20)),
+        (20, "idle", None),
+        (20, "blocked", Some(20)),
+        (30, "blocked", Some(20)),
+        (30, "idle", None),
+        (40, "blocked", Some(40)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .transaction(|tx| {
+                tx.observe_agent_session(
+                    &ns,
+                    &format!("tied-observation-{index}"),
+                    &id(&ns, "a"),
+                    &AgentSessionId::new("session-w1-a"),
+                    status,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", at),
+                )
+            })
+            .unwrap();
+        let current = snapshot(&mut store, &ns);
+        if let Some(since) = expected_since {
+            assert_eq!(current.attention[0].opened_at_ms, since);
+        } else {
+            assert!(current.attention.is_empty());
+            assert_eq!(lane(&current, "@a").activity, Activity::Idle);
+        }
+    }
+}
+
+#[test]
+fn retiring_a_permission_blocked_agent_clears_its_attention() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    send(&mut store, &ns, "m1", "a", "b", "Review the diff", None);
+    observe_status(&mut store, &ns, "a", "blocked", 20);
+    assert_eq!(snapshot(&mut store, &ns).attention.len(), 1);
+    store
+        .transaction(|tx| {
+            tx.retire_pane_address(
+                &ns,
+                &id(&ns, "a"),
+                &MutationAttribution::new(ActorKind::Plugin, "test", 30),
+            )
+        })
+        .unwrap();
+    let retired = snapshot(&mut store, &ns);
+    assert_eq!(lane(&retired, "@a").activity, Activity::Retired);
+    assert!(retired.attention.is_empty());
+    assert!(!matches!(retired.health, SpaceHealth::NeedsYou { .. }));
 }
 
 #[test]
@@ -466,9 +641,11 @@ fn permission_blocking_keeps_retired_offline_and_terminal_precedence() {
     let mut store = StateStore::open(directory.path()).unwrap();
     let ns = seed_space(&mut store, "w1", &["a", "b", "c", "d", "e"]);
     send(&mut store, &ns, "m1", "b", "a", "Old message", None);
+    for alias in ["a", "b", "c", "d", "e"] {
+        observe_status(&mut store, &ns, alias, "blocked", 20);
+    }
     let mut rows = store.dashboard_rows(&ns).unwrap();
     for address in &mut rows.addresses {
-        address.agent_status = Some("blocked".to_owned());
         match address.alias.as_str() {
             "b" => address.retired = true,
             "c" => address.bound = false,

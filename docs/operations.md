@@ -147,7 +147,7 @@ The server reads state read-only through one connection, a short transaction at 
 
 An online agent waiting on an approval or question in Herdr shows as blocked and adds an attention entry. The workspace needs you until that agent leaves the dialog. Each blocked agent has its own entry, alongside any delivery or handoff warnings. These entries come from the current agent status and clear on the next view after that status changes. Retired and offline agents keep their existing status.
 
-In snapshot JSON, these entries use `source_kind` `agent_status` and set `opened_at_ms` to the latest status observation time. Rebuilding the view keeps that time until the status observation changes.
+In snapshot JSON, these entries use `source_kind` `agent_status`. Their `opened_at_ms` is the first blocked observation in the current uninterrupted blocked run since the current binding. Repeated blocked observations keep that time. Leaving blocked status and blocking again starts a new time.
 
 The server stops 10 minutes after the last tab closes. Set `NAMEDROP_DASHBOARD_IDLE_MS` to change this. The server does not hold the update lock that commands hold, so it never delays an update. When the update migrates state or a new release becomes current, open tabs show "Updating Namedrop…". A new server then starts on the same port, and the tabs reconnect without a reload. Its log is `<state>/dashboard/server.log`. If a tab stays disconnected, run `namedrop dashboard` again.
 

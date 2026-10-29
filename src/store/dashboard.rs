@@ -36,7 +36,7 @@ pub struct AddressRow {
     pub bound: bool,
     pub occupied: bool,
     pub agent_status: Option<String>,
-    pub observed_at_ms: Option<i64>,
+    pub blocked_since_ms: Option<i64>,
 }
 
 pub struct RegistrationRow {
@@ -327,16 +327,31 @@ impl StateTransaction<'_> {
                 })
             },
         )?;
-        // One grouped pass over observations. The per-address correlated
-        // lookup in `list_pane_address_records` rescans every observation per
-        // address, which costs tens of milliseconds on a long-lived space.
-        // SQLite returns the bare columns from the row holding the MAX.
+        // Order observations once, then find blocked runs in grouped passes.
+        // Correlated history lookups would rescan every observation per address.
         let addresses = self.rows(
-            "WITH latest AS (
-                 SELECT address_id, agent_session_id, status, MAX(observed_at_ms) AS observed_at_ms
-                 FROM agent_session_observations
-                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+            "WITH observations AS (
+                 SELECT o.address_id, o.agent_session_id, o.status, o.observed_at_ms,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY o.address_id
+                            ORDER BY o.observed_at_ms DESC, o.rowid DESC) AS recency
+                 FROM agent_session_observations o
+                 JOIN pane_bindings b
+                   ON b.session_socket_id = o.session_socket_id AND b.worktree_id = o.worktree_id
+                  AND b.address_id = o.address_id AND b.active = 1
+                 WHERE o.session_socket_id = ?1 AND o.worktree_id = ?2
+                   AND o.observed_at_ms >= b.bound_at_ms),
+             boundaries AS (
+                 SELECT address_id, MIN(recency) AS last_nonblocked
+                 FROM observations WHERE status <> 'blocked'
                  GROUP BY address_id),
+             blocked_runs AS (
+                 SELECT o.address_id, MIN(o.observed_at_ms) AS blocked_since_ms
+                 FROM observations o
+                 LEFT JOIN boundaries b ON b.address_id = o.address_id
+                 WHERE o.status = 'blocked'
+                   AND (b.last_nonblocked IS NULL OR o.recency < b.last_nonblocked)
+                 GROUP BY o.address_id),
              released AS (
                  SELECT address_id, alias, MAX(history_order)
                  FROM alias_history
@@ -344,7 +359,7 @@ impl StateTransaction<'_> {
                  GROUP BY address_id)
              SELECT a.address_id, COALESCE(c.alias, h.alias, ltrim(r.name, '@')), r.name, a.persona, a.pane_type, a.retired,
                     b.pane_id IS NOT NULL,
-                    COALESCE(o.agent_session_id, '') <> '', o.status, o.observed_at_ms
+                    COALESCE(o.agent_session_id, '') <> '', o.status, br.blocked_since_ms
              FROM pane_addresses a
              JOIN pane_roles r USING (session_socket_id, worktree_id, role_id)
              -- A retired agent's alias can be released for reuse; its lane keeps the last one.
@@ -355,8 +370,8 @@ impl StateTransaction<'_> {
              LEFT JOIN pane_bindings b
                ON b.session_socket_id = a.session_socket_id AND b.worktree_id = a.worktree_id
               AND b.address_id = a.address_id AND b.active = 1
-             LEFT JOIN latest o
-               ON o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
+             LEFT JOIN observations o ON o.address_id = a.address_id AND o.recency = 1
+             LEFT JOIN blocked_runs br ON br.address_id = a.address_id
              WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
                -- An envoy stands in for an agent in another workspace, not a lane here.
                AND NOT EXISTS (
@@ -380,7 +395,7 @@ impl StateTransaction<'_> {
                     bound: row.get(6)?,
                     occupied: row.get(7)?,
                     agent_status: row.get(8)?,
-                    observed_at_ms: row.get(9)?,
+                    blocked_since_ms: row.get(9)?,
                 })
             },
         )?;

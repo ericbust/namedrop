@@ -656,7 +656,7 @@ fn blocked_on_user_at(address: &rows::AddressRow) -> Option<i64> {
         && address.occupied
         && address.agent_status.as_deref() == Some("blocked")
     {
-        address.observed_at_ms
+        address.blocked_since_ms
     } else {
         None
     }
