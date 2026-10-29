@@ -146,8 +146,6 @@ function sameRows(a: readonly ActivityRow[], b: readonly ActivityRow[]) {
   return a.length === b.length && a.every((row, index) => row === b[index]);
 }
 
-// A rebuilt row equal to the previous one is replaced by it, so rows keep their
-// identity across frames and a frame that changes nothing returns `previous`.
 export function activityOf(
   channels: ReadonlyMap<SpaceKey, Channel>,
   previous?: ActivityList,
@@ -228,7 +226,6 @@ function mentionText(mention: Mention, homes: ReadonlyMap<string, Home>) {
 function shortened({ text, truncated }: SafeText): string {
   return truncated ? `${text}…` : text;
 }
-// Names resolve at render, so a change to any workspace's home never rebuilds rows.
 export function lineText(
   line: ActivityLine,
   homes: ReadonlyMap<string, Home>,

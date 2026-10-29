@@ -45,14 +45,14 @@ export type Completion = {
 };
 
 const ALL = "#all";
+const RESERVED_LABEL = "all";
 const WHITESPACE = /\s/;
 
 type Labelling = Pick<
   ChannelSnapshot,
   "displayName" | "addressableLabel" | "workspaceId" | "state"
 >;
-// The server counts a paused workspace as active, and a frame without a state as not.
-function active(state: SpaceState): boolean {
+function activated(state: SpaceState): boolean {
   return state === "active" || state === "paused";
 }
 
@@ -65,10 +65,8 @@ function disabledReason(
   if (folded === "") return "unusable-label";
   // The server shows the workspace id as the name only when Herdr has no label.
   if (channel.displayName === channel.workspaceId) return "no-label";
-  // "all" is reserved, so renaming a twin would not help, and the general line names the word.
-  if (folded === "all") return "unknown";
+  if (folded === RESERVED_LABEL) return "unknown";
   // Only labels can collide on the server, and a token proves this name did not.
-  // Renaming helps only when every twin is active, since an inactive one stays unmentionable.
   const sameName = channels.filter(
     (other) =>
       other.displayName === channel.displayName &&
@@ -77,7 +75,7 @@ function disabledReason(
   if (
     sameName.length > 1 &&
     sameName.every(
-      (other) => other.addressableLabel === null && active(other.state),
+      (other) => other.addressableLabel === null && activated(other.state),
     )
   )
     return "shared-name";

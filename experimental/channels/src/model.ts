@@ -113,7 +113,6 @@ export type MailState =
   | "acknowledged"
   | "held"
   | "unknown";
-// `since` is the item's latest state time as the server sends it, not its arrival.
 export type MailItem = Readonly<{
   from: Mention;
   preview: SafeText;
@@ -132,7 +131,6 @@ export type ChannelSnapshot = {
   state: SpaceState;
   health: Health;
   members: ReadonlyMap<AddressId, Member>;
-  // Mail churns every delivery tick, so it lives beside Member to keep Member identity stable.
   work: ReadonlyMap<AddressId, MemberWork>;
   messages: ReadonlyMap<string, Message>;
   attention: readonly Attention[];
@@ -228,7 +226,6 @@ export type Sync =
       status: "connecting" | "reconnecting";
       pending: Map<SpaceKey, Channel>;
     };
-// All activity shows no channel, so its key is null and every "seen" rule treats it as no channel shown.
 export type Selection =
   | { kind: "none"; key: null }
   | { kind: "automatic"; key: SpaceKey }
@@ -253,8 +250,6 @@ export type State = {
   drafts: ReadonlyMap<DraftKey, Draft>;
 };
 export type PeekableKind = Exclude<MemberKind["type"], "human">;
-// Only `peekTarget()` builds one, and it refuses the operator. Alias and kind
-// are kept so the drawer can still name a member that left the frame.
 export type PeekTarget = Readonly<{
   channel: SpaceKey;
   member: AddressId;

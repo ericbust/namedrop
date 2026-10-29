@@ -214,7 +214,6 @@ function mailState(value: unknown): MailState {
   }
 }
 export const ENVOY = /^envoy:([^:]+):(.+)$/;
-// The server writes "you" for the operator and "@" plus an alias, or plus a raw id it could not name.
 function mention(value: unknown): Mention | null {
   if (value === "you") return { kind: "operator" };
   const alias = optionalAlias(value);

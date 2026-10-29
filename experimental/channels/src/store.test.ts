@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { activityOf } from "./activity.ts";
-import type { Activity, ChannelSnapshot, ComposerId, State } from "./model.ts";
+import type {
+  Activity,
+  AddressId,
+  ChannelSnapshot,
+  ComposerId,
+  State,
+} from "./model.ts";
 import { peekTarget, peekTargetOf } from "./peek.ts";
 import {
   bootState,
@@ -2856,9 +2862,7 @@ test("work: mailbox and waiting_on parse leniently beside members, and space.sta
       waiting_on: ["@codex", "you", 7, " ", "@envoy:w3:pane-1"],
     }),
   );
-  const work = channel.work.get(
-    channel.members.keys().next().value ?? ("" as never),
-  );
+  const [work] = channel.work.values();
   assert.deepEqual(work, {
     mailbox: [
       {
@@ -2899,8 +2903,11 @@ test("work: mailbox and waiting_on parse leniently beside members, and space.sta
     [7, "unknown"],
   ] as const) {
     const value = busy();
-    value.frame.space = { ...value.frame.space, state } as never;
-    assert.equal(parsed(value).state, expected);
+    const space = { ...value.frame.space, state };
+    assert.equal(
+      parsed({ ...value, frame: { ...value.frame, space } }).state,
+      expected,
+    );
   }
   assert.equal(parsed(snapshot()).state, "unknown", "a frame without a state");
   assert.equal(parsed(snapshot()).work.size, 0);
@@ -3091,7 +3098,10 @@ test("peek targets: never the operator, a local member reads in the channel show
   const homes = homesOf([alpha, beta], undefined);
   assert.equal(homes.get("w2")?.key, beta.key);
   const directory = { members: alpha.members, homes };
-  const local = peekTargetOf(resolve(directory, "agent-1" as never), alpha.key);
+  const local = peekTargetOf(
+    resolve(directory, "agent-1" as AddressId),
+    alpha.key,
+  );
   assert.deepEqual(
     local && {
       channel: local.channel,
@@ -3102,11 +3112,11 @@ test("peek targets: never the operator, a local member reads in the channel show
     { channel: alpha.key, member: "agent-1", alias: "@codex", kind: "agent" },
   );
   assert.equal(
-    peekTargetOf(resolve(directory, "agent-1" as never), null),
+    peekTargetOf(resolve(directory, "agent-1" as AddressId), null),
     null,
   );
   const remote = peekTargetOf(
-    resolve(directory, "envoy:w2:pane-9" as never),
+    resolve(directory, "envoy:w2:pane-9" as AddressId),
     alpha.key,
   );
   assert.deepEqual(
@@ -3118,24 +3128,26 @@ test("peek targets: never the operator, a local member reads in the channel show
     { channel: beta.key, member: "pane-9", kind: "terminal" },
   );
   assert.equal(
-    peekTargetOf(resolve(directory, "envoy:w2:pane-gone" as never), alpha.key),
+    peekTargetOf(
+      resolve(directory, "envoy:w2:pane-gone" as AddressId),
+      alpha.key,
+    ),
     null,
   );
   assert.equal(
-    peekTargetOf(resolve(directory, "stranger" as never), alpha.key),
+    peekTargetOf(resolve(directory, "stranger" as AddressId), alpha.key),
     null,
   );
   assert.equal(peekTargetOf(resolve(directory, "human"), alpha.key), null);
-  const operator = beta.members.get("human" as never);
+  const operator = beta.members.get("human" as AddressId);
   assert.ok(operator);
   assert.equal(peekTarget(beta.key, operator), null);
   const renamed = snapshot(keyB, "beta", "w2");
   renamed.frame.participants = [
     { ...participant("pane-9"), alias: "@critic", activity: "working" },
   ];
-  const channels = new Map([[beta.key, { ...beta, ...parsed(renamed) }]]);
   assert.ok(remote);
-  const who = peekWho(channels as never, remote);
+  const who = peekWho(apply(initialState(), renamed).channels, remote);
   assert.equal(
     who?.alias,
     "@critic",

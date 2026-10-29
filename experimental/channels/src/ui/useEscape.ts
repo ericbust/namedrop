@@ -1,7 +1,5 @@
 import { type RefObject, useEffect } from "react";
 
-// Escape closes the pane only from inside it, or from the page body when no
-// dialog shows, and leaves Escape to anything that already handled it.
 export function useEscape(
   pane: RefObject<HTMLElement | null>,
   onClose: () => void,

@@ -10,8 +10,6 @@ export const PeekContext = createContext<PeekAccess | null>(null);
 export function usePeek(): PeekAccess | null {
   return useContext(PeekContext);
 }
-// Without a provider or a target the children render as before, so a bare
-// render of a chip or a name keeps its markup.
 export function PeekControl({
   target,
   className,

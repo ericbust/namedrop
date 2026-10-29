@@ -490,9 +490,6 @@ export function reduce(state: State, event: Event): State {
 export function viewOf(selection: Selection): SpaceKey | "activity" | null {
   return selection.kind === "activity" ? "activity" : selection.key;
 }
-// Changing the view closes either pane. A thread also closes for good once none
-// of its messages are loaded. A peek outlives its member, whose 404 copy needs
-// the drawer, and closes only with its channel.
 function settleSlot(before: State, after: State): State {
   const { slot } = after;
   if (slot.kind === "closed") return after;
@@ -1146,8 +1143,6 @@ export type PeekWho = Readonly<{
   activity: Activity | null;
   channel: { label: string; suffix: string | null };
 }>;
-// The live member wins. The identity captured at open names a member that has
-// left the frame, and activity is then unknown.
 export function peekWho(
   channels: ReadonlyMap<SpaceKey, Channel>,
   target: PeekTarget,

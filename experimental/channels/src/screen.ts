@@ -5,8 +5,6 @@ export type ScreenReader = (
   target: PeekTarget,
   signal: AbortSignal,
 ) => Promise<ScreenResult>;
-// Never rejects, so an aborted read can't surface as an unhandled rejection.
-// Every read goes to the server: a cached answer would make Refresh a no-op.
 export function createScreenReader(
   fetcher: typeof fetch = fetch,
 ): ScreenReader {

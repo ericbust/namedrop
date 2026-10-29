@@ -32,9 +32,6 @@ type Props = {
   paneId: string;
   onClose: () => void;
 };
-// The aside stays while the slot holds any peek, so moving between targets
-// does not replay the entrance. The screen inside is keyed by target, so a new
-// target unmounts the old read and its cleanup aborts it.
 export function PeekDrawer({ target, who, paneId, onClose, ...rest }: Props) {
   const pane = useRef<HTMLElement>(null);
   useEscape(pane, onClose);
@@ -56,8 +53,6 @@ export function PeekDrawer({ target, who, paneId, onClose, ...rest }: Props) {
   );
 }
 
-// The display timers only advance what is painted. Nothing but this effect
-// calls the reader, so the drawer never reads on a timer.
 function usePeekRead(target: PeekTarget, reader: ScreenReader) {
   const [read, send] = useReducer(peekReduce, undefined, firstRead);
   const request = read.phase === "reading" ? read.request : null;
