@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Activity, Channel, State } from "./model.ts";
+import type { Activity, ChannelSnapshot, State } from "./model.ts";
 import {
-  channelName,
+  channelSuffix,
   connectionStatus,
   initialState,
+  type MessageRow,
   reduce,
+  runsByMessage,
   sortedChannels,
+  type TimelineRow,
+  threadGroups,
+  timelineView,
 } from "./store.ts";
-import { parseEvent } from "./wire.ts";
+import { parseEvent, parseHistory } from "./wire.ts";
 
 const keyA = "a".repeat(20);
 const keyB = "b".repeat(20);
@@ -20,6 +25,27 @@ function participant(id = "agent-1", activity: Activity = "idle") {
     activity,
     role: null,
     pane_label: null,
+  };
+}
+function message(message_id = "m1"): {
+  message_id: string;
+  thread_id: string;
+  in_reply_to: string | null;
+  at_ms: number;
+  author: string;
+  kind: string;
+  body: { text: string; truncated: boolean };
+  legs: { to: string; stage: { stage: string } }[];
+} {
+  return {
+    message_id,
+    thread_id: message_id,
+    in_reply_to: null,
+    at_ms: 100,
+    author: "agent-1",
+    kind: "mention",
+    body: { text: message_id, truncated: false },
+    legs: [],
   };
 }
 function snapshot(key = keyA, name = "alpha", workspace = "w1") {
@@ -36,12 +62,13 @@ function snapshot(key = keyA, name = "alpha", workspace = "w1") {
       },
       health: { level: "calm" },
       participants: [participant()],
-      messages: [{ message_id: "m1" }],
+      messages: [message()],
+      threads: [],
       attention: [],
     },
   };
 }
-function parsed(value: unknown): Channel {
+function parsed(value: unknown): ChannelSnapshot {
   const event = parseEvent("space", JSON.stringify(value));
   assert.ok(
     event && event.type === "space",
@@ -65,14 +92,14 @@ test("space installs a complete channel, selects the first arrival, and leaves t
   const before = initialState();
   const channel = parsed(snapshot());
   const after = reduce(before, { type: "space", channel });
-  assert.equal(after.channels.get(channel.key), channel);
+  assert.deepEqual(after.channels.get(channel.key)?.messages, channel.messages);
   assert.equal(after.selectedKey, channel.key);
   assert.equal(after.unread.size, 0);
   assert.equal(before.channels.size, 0);
 });
-test("semantic replay is an identity no-op despite timestamps, unused fields, and message order", () => {
+test("semantic replay is an identity no-op despite timestamps and unused fields", () => {
   const value = snapshot();
-  value.frame.messages.push({ message_id: "m2" });
+  value.frame.messages.push(message("m2"));
   const state = apply(initialState(), value);
   const replay = {
     ...value,
@@ -80,19 +107,18 @@ test("semantic replay is an identity no-op despite timestamps, unused fields, an
     frame: {
       ...value.frame,
       generated_at_ms: 900,
-      messages: [...value.frame.messages].reverse(),
-      threads: ["unused"],
+      messages: [...value.frame.messages],
     },
   };
   assert.equal(apply(state, replay), state);
 });
-test("whole snapshots replace members and messages without retaining old IDs", () => {
+test("snapshots replace members while preserving accumulated messages", () => {
   const state = apply(initialState(), snapshot());
   const value = snapshot();
   value.frame.messages = [];
   value.frame.participants = [];
   const next = apply(state, value);
-  assert.equal([...next.channels.values()][0]?.messages.size, 0);
+  assert.equal([...next.channels.values()][0]?.messages.size, 1);
   assert.equal([...next.channels.values()][0]?.members.size, 0);
   assert.equal([...state.channels.values()][0]?.messages.size, 1);
 });
@@ -118,10 +144,10 @@ test("same-name channels keep separate keys and each shows its full workspace su
   const channels = sortedChannels(state);
   assert.equal(state.channels.size, 2);
   assert.deepEqual(
-    channels.map((channel) => channelName(channel, channels)),
-    [`shared (w11 · ${keyA})`, `shared (w22 · ${keyB})`],
+    channels.map((channel) => channelSuffix(channel, channels)),
+    [`w11 · ${keyA}`, `w22 · ${keyB}`],
   );
-  assert.equal(channelName(parsed(snapshot()), channels), "alpha");
+  assert.equal(channelSuffix(parsed(snapshot()), channels), null);
 });
 test("channel ordering uses display name, then workspace id, then key", () => {
   const state = apply(
@@ -462,7 +488,7 @@ test("new channels establish a baseline while background message, member, and ac
   assert.equal(state.unread.size, 0);
   assert.ok(apply(state, changedChannel()).unread.has(beta.key));
   const messages = snapshot(keyB, "beta", "w2");
-  messages.frame.messages.push({ message_id: "m2" });
+  messages.frame.messages.push(message("m2"));
   assert.ok(apply(state, messages).unread.has(beta.key));
   const members = snapshot(keyB, "beta", "w2");
   members.frame.participants.push(participant("agent-2"));
@@ -530,7 +556,7 @@ test("name, health, alias, role, and member ordering changes do not create unrea
     0,
   );
 });
-test("visible selected activity stays read, while hidden activity clears only after visibility returns", () => {
+test("visible selected activity stays read, while hidden activity stays unread until read after visibility returns", () => {
   const beta = parsed(snapshot(keyB, "beta", "w2"));
   const state = reduce(twoChannels(), { type: "select", key: beta.key });
   assert.equal(apply(state, changedChannel()).unread.size, 0);
@@ -540,22 +566,28 @@ test("visible selected activity stays read, while hidden activity clears only af
   assert.ok(
     reduce(unread, { type: "select", key: beta.key }).unread.has(beta.key),
   );
-  assert.equal(
-    reduce(unread, { type: "visibility", visible: true }).unread.size,
-    0,
-  );
+  const shown = reduce(unread, { type: "visibility", visible: true });
+  assert.ok(shown.unread.has(beta.key));
+  assert.equal(reduce(shown, { type: "read", key: beta.key }).unread.size, 0);
 });
-test("select clears background unread only for an existing channel", () => {
+test("design-b: select keeps unread, and read clears only the selected key", () => {
   const state = apply(twoChannels(), changedChannel());
   const key = parsed(snapshot(keyB, "beta", "w2")).key;
+  const alpha = parsed(snapshot()).key;
   const next = reduce(state, { type: "select", key });
-  assert.equal(next.unread.size, 0);
   assert.equal(next.selectedKey, key);
+  assert.ok(next.unread.has(key));
   assert.equal(
     reduce(initialState(), { type: "select", key }).selectedKey,
     null,
   );
   assert.equal(reduce(next, { type: "select", key }), next);
+  const elsewhere = reduce(next, { type: "select", key: alpha });
+  assert.equal(reduce(elsewhere, { type: "read", key }), elsewhere);
+  assert.ok(reduce(elsewhere, { type: "read", key }).unread.has(key));
+  const read = reduce(next, { type: "read", key });
+  assert.equal(read.unread.size, 0);
+  assert.equal(reduce(read, { type: "read", key }), read);
 });
 function ready(state: State, keys: string[]): State {
   const event = parseEvent("ready", JSON.stringify({ keys }));
@@ -649,15 +681,17 @@ test("item 2: ready rejects malformed and missing keys", () => {
     assert.equal(parseEvent("ready", JSON.stringify(value)), null);
 });
 
-test("messages leaving the live window replace retained IDs without marking background unread", () => {
+test("messages leaving the live window stay loaded without marking background unread", () => {
   const state = twoChannels();
   const beta = snapshot(keyB, "beta", "w2");
   beta.frame.messages = [];
   const next = apply(state, beta);
   const key = parsed(beta).key;
-  assert.notEqual(next, state);
+  assert.equal(activeChannel(next).messages, activeChannel(state).messages);
+  assert.equal(activeChannel(next).runs, activeChannel(state).runs);
+  assert.equal(next.unread, state.unread);
   assert.equal(next.unread.has(key), false);
-  assert.equal(next.channels.get(key)?.messages.size, 0);
+  assert.equal(next.channels.get(key)?.messages.size, 1);
   assert.equal(state.channels.get(key)?.messages.size, 1);
 });
 
@@ -672,19 +706,18 @@ test("repeated workspace IDs have unique full-key suffixes", () => {
     initialState(),
   );
   const channels = sortedChannels(state);
-  const names = channels.map((channel) => channelName(channel, channels));
+  const names = channels.map((channel) => channelSuffix(channel, channels));
   assert.equal(new Set(names).size, 3);
   for (const [index, name] of names.entries()) {
-    assert.ok(name.startsWith("shared (w1 · "));
-    assert.ok(name.endsWith(")"));
-    const suffix = name.slice("shared (w1 · ".length, -1);
+    assert.ok(name !== null && name.startsWith("w1 · "));
+    const suffix = name.slice("w1 · ".length);
     assert.equal(suffix.length, 20);
     assert.ok(channels[index]?.key.startsWith(suffix));
   }
   assert.deepEqual(
     [...channels]
       .reverse()
-      .map((channel) => channelName(channel, channels))
+      .map((channel) => channelSuffix(channel, channels))
       .reverse(),
     names,
   );
@@ -795,7 +828,7 @@ test("fix3 item 1: timeout publishes first load and reconnect without pruning an
     "live beta",
   );
 });
-test("fix2 item 4: visible fallback selection clears its existing unread mark", () => {
+test("fix2 item 4: fallback selection keeps its unread mark until read on dwell", () => {
   const before = apply(twoChannels(), changedChannel());
   const beta = parsed(snapshot(keyB)).key;
   assert.ok(before.unread.has(beta));
@@ -804,7 +837,11 @@ test("fix2 item 4: visible fallback selection clears its existing unread mark", 
     [keyB],
   );
   assert.equal(next.selectedKey, beta);
-  assert.equal(next.unread.has(beta), false);
+  assert.ok(next.unread.has(beta));
+  assert.equal(
+    reduce(next, { type: "read", key: beta }).unread.has(beta),
+    false,
+  );
   const hidden = reduce(before, { type: "visibility", visible: false });
   assert.equal(
     ready(apply(reduce(hidden, { type: "opened" }), changedChannel()), [
@@ -817,12 +854,12 @@ test("fix2 item 5: duplicate display suffix stays fixed across new peers with di
   const first = parsed(snapshot("abcdef11111111111111", "shared", "w1"));
   const second = parsed(snapshot("abcdef22222222222222", "shared", "w2"));
   const third = parsed(snapshot("abcdef11111111111112", "shared", "w1"));
-  const label = channelName(first, [first, second]);
-  assert.equal(label, `shared (w1 · ${first.key})`);
-  assert.equal(channelName(first, [first, second, third]), label);
+  const label = channelSuffix(first, [first, second]);
+  assert.equal(label, `w1 · ${first.key}`);
+  assert.equal(channelSuffix(first, [first, second, third]), label);
   assert.equal(
-    channelName(third, [first, second, third]),
-    `shared (w1 · ${third.key})`,
+    channelSuffix(third, [first, second, third]),
+    `w1 · ${third.key}`,
   );
 });
 test("fix2 item 6: gone removes committed and pending snapshots during replay and later space may recreate", () => {
@@ -859,7 +896,7 @@ test("fix3 item 1: late ready prunes the current map and retains gamma selection
     type: "replay-timeout",
   });
   const alpha = snapshot();
-  alpha.frame.messages.push({ message_id: "new-after-timeout" });
+  alpha.frame.messages.push(message("new-after-timeout"));
   const current = apply(
     apply(fallback, alpha),
     snapshot(gammaKey, "gamma-current", "w3"),
@@ -876,7 +913,7 @@ test("fix3 item 1: late ready prunes the current map and retains gamma selection
   assert.equal(next.sync.kind, "live");
 });
 
-test("fix3 item 1: late ready removes selected gamma and selects the sorted visible fallback as read", () => {
+test("fix3 item 1: late ready removes selected gamma and selects the sorted fallback, unread until read", () => {
   const gamma = parsed(snapshot("c".repeat(20), "gamma", "w3"));
   const beta = parsed(snapshot(keyB, "beta", "w2"));
   const before = reduce(
@@ -892,7 +929,11 @@ test("fix3 item 1: late ready removes selected gamma and selects the sorted visi
   const next = ready(current, [keyA, keyB]);
   assert.equal(next.channels.has(gamma.key), false);
   assert.equal(next.selectedKey, beta.key);
-  assert.equal(next.unread.has(beta.key), false);
+  assert.ok(next.unread.has(beta.key));
+  assert.equal(
+    reduce(next, { type: "read", key: beta.key }).unread.has(beta.key),
+    false,
+  );
   const hidden = reduce(current, { type: "visibility", visible: false });
   assert.ok(ready(hidden, [keyA, keyB]).unread.has(beta.key));
 });
@@ -983,3 +1024,968 @@ for (const beforeTimeout of [false, true]) {
     assert.equal(ready(chosen, [keyA, keyB]).selectedKey, betaKey);
   });
 }
+
+function withMessages(ids: string[], key = keyA) {
+  const value = snapshot(key);
+  value.frame.messages = ids.map((id) => message(id));
+  return value;
+}
+function activeChannel(state: State) {
+  const channel = state.selectedKey && state.channels.get(state.selectedKey);
+  assert.ok(channel);
+  return channel;
+}
+function requesting(state: State) {
+  const next = reduce(state, { type: "older", key: activeChannel(state).key });
+  const history = activeChannel(next).history;
+  assert.ok(history.kind === "loading");
+  return { state: next, request: history.request };
+}
+function historyPage(state: State, ids: string[]) {
+  const pending = requesting(state);
+  return reduce(pending.state, {
+    type: "history",
+    request: pending.request,
+    result: {
+      kind: "page",
+      messages: [...parsed(withMessages(ids)).messages.values()],
+    },
+  });
+}
+test("UI-2: history preserves server order for tied timestamps and deduplicates live overlap", () => {
+  let state = apply(initialState(), withMessages(["z", "b", "c"]));
+  state = historyPage(state, ["x", "a", "z"]);
+  assert.deepEqual(activeChannel(state).runs, [["x", "a", "z", "b", "c"]]);
+  state = apply(state, withMessages(["b", "c", "d"]));
+  assert.deepEqual(activeChannel(state).runs, [["x", "a", "z", "b", "c", "d"]]);
+  assert.equal(activeChannel(state).messages.size, 6);
+});
+test("UI-2: receipt-only live changes apply and delayed history never regresses receipts", () => {
+  const value = withMessages(["m1", "m2"]);
+  value.frame.messages[0]?.legs.push({
+    to: "agent-1",
+    stage: { stage: "queued" },
+  });
+  const pending = requesting(apply(initialState(), value));
+  const update = structuredClone(value);
+  const leg = update.frame.messages[0]?.legs[0];
+  assert.ok(leg);
+  leg.stage.stage = "held";
+  const live = apply(pending.state, update);
+  assert.notEqual(live, pending.state);
+  const after = reduce(live, {
+    type: "history",
+    request: pending.request,
+    result: { kind: "page", messages: [...parsed(value).messages.values()] },
+  });
+  assert.equal(
+    activeChannel(after).messages.get("m1")?.legs[0]?.stage.stage,
+    "held",
+  );
+});
+test("UI-2: disjoint live windows show a gap and bridge backward until joining older coverage", () => {
+  let state = apply(
+    apply(initialState(), withMessages(["a", "b"])),
+    withMessages(["f", "g"]),
+  );
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b"],
+    ["f", "g"],
+  ]);
+  const first = requesting(state);
+  assert.equal(first.request.purpose, "bridge");
+  assert.equal(first.request.before, "f");
+  state = reduce(first.state, {
+    type: "history",
+    request: first.request,
+    result: {
+      kind: "page",
+      messages: [...parsed(withMessages(["d", "e"])).messages.values()],
+    },
+  });
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b"],
+    ["d", "e", "f", "g"],
+  ]);
+  state = historyPage(state, ["b", "c"]);
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b", "c", "d", "e", "f", "g"],
+  ]);
+});
+test("UI-2: every replay window survives ready and fallback, including history completed during replay", () => {
+  for (const finish of ["ready", "replay-timeout"] as const) {
+    const pending = requesting(apply(initialState(), withMessages(["d", "e"])));
+    let state = apply(
+      apply(
+        reduce(pending.state, { type: "opened" }),
+        withMessages(["e", "f"]),
+      ),
+      withMessages(["f", "g"]),
+    );
+    state = reduce(state, {
+      type: "history",
+      request: pending.request,
+      result: {
+        kind: "page",
+        messages: [...parsed(withMessages(["a", "b", "c"])).messages.values()],
+      },
+    });
+    state =
+      finish === "ready"
+        ? ready(state, [keyA])
+        : reduce(state, { type: "replay-timeout" });
+    assert.deepEqual(activeChannel(state).runs, [
+      ["a", "b", "c", "d", "e", "f", "g"],
+    ]);
+  }
+});
+test("UI-2: history errors retry, empty older pages exhaust, empty bridges remain explicit", () => {
+  const first = requesting(apply(initialState(), withMessages(["a"])));
+  const failed = reduce(first.state, {
+    type: "history",
+    request: first.request,
+    result: { kind: "error", reason: "HTTP 404" },
+  });
+  assert.equal(activeChannel(failed).history.kind, "error");
+  const retry = requesting(failed);
+  assert.notEqual(retry.request.id, first.request.id);
+  const empty = reduce(retry.state, {
+    type: "history",
+    request: retry.request,
+    result: { kind: "page", messages: [] },
+  });
+  assert.equal(activeChannel(empty).exhausted, true);
+  assert.equal(reduce(empty, { type: "older", key: first.request.key }), empty);
+  const bridge = requesting(apply(empty, withMessages(["c"])));
+  const missing = reduce(bridge.state, {
+    type: "history",
+    request: bridge.request,
+    result: { kind: "page", messages: [] },
+  });
+  assert.equal(activeChannel(missing).history.kind, "error");
+  assert.equal(activeChannel(missing).runs.length, 2);
+});
+test("UI-2: stale history cannot cross channels or a gone and recreated channel", () => {
+  const pending = requesting(twoChannels());
+  const beta = parsed(snapshot(keyB)).key;
+  const switched = reduce(pending.state, { type: "select", key: beta });
+  const completed = reduce(switched, {
+    type: "history",
+    request: pending.request,
+    result: {
+      kind: "page",
+      messages: [...parsed(withMessages(["older-alpha"])).messages.values()],
+    },
+  });
+  assert.equal(
+    completed.channels.get(beta)?.messages.has("older-alpha"),
+    false,
+  );
+  const recreated = apply(
+    reduce(pending.state, { type: "gone", key: pending.request.key }),
+    withMessages(["new"]),
+  );
+  const next = requesting(
+    reduce(recreated, { type: "select", key: pending.request.key }),
+  );
+  assert.notEqual(next.request.id, pending.request.id);
+  assert.equal(
+    reduce(next.state, {
+      type: "history",
+      request: pending.request,
+      result: { kind: "page", messages: [] },
+    }),
+    next.state,
+  );
+});
+test("UI-2: thread groups derive loaded replies, preserve orphans and reveal fetched parents", () => {
+  const value = withMessages(["reply"]);
+  const reply = value.frame.messages[0];
+  assert.ok(reply);
+  reply.thread_id = "thread";
+  reply.kind = "reply";
+  reply.in_reply_to = "parent";
+  let state = apply(initialState(), value);
+  const rows = (state: State) =>
+    timelineView(activeChannel(state)).filter((row) => row.kind !== "day");
+  assert.equal(rows(state)[0]?.kind, "orphan");
+  const parent = message("parent");
+  parent.thread_id = "thread";
+  const pending = requesting(state);
+  state = reduce(pending.state, {
+    type: "history",
+    request: pending.request,
+    result: {
+      kind: "page",
+      messages: [
+        ...parsed({
+          ...value,
+          frame: { ...value.frame, messages: [parent] },
+        }).messages.values(),
+      ],
+    },
+  });
+  const group = threadGroups(activeChannel(state)).get("thread");
+  assert.equal(group?.parents[0]?.id, "parent");
+  assert.deepEqual(
+    group?.replies.map((row) => row.id),
+    ["reply"],
+  );
+  assert.equal(rows(state).length, 1);
+});
+test("UI-2: history boundary reverses newest-first once and future kinds and stages remain visible", () => {
+  const rows = [message("new"), message("old")];
+  rows[0]?.legs.push({ to: "agent-1", stage: { stage: "future-stage" } });
+  const row = rows[0];
+  assert.ok(row);
+  row.kind = "future-kind";
+  const parsed = parseHistory(rows);
+  assert.deepEqual(
+    parsed.map((row) => row.id),
+    ["old", "new"],
+  );
+  assert.equal(parsed[1]?.kind, "unknown");
+  assert.equal(parsed[1]?.legs[0]?.stage.stage, "unknown");
+  assert.throws(() =>
+    parseHistory([{ ...row, body: { text: 42, truncated: false } }]),
+  );
+});
+
+test("UI-2: replay retains disjoint windows as separate coverage until each bridge is fetched", () => {
+  const before = apply(initialState(), withMessages(["a", "b"]));
+  const replay = apply(
+    apply(reduce(before, { type: "opened" }), withMessages(["f", "g"])),
+    withMessages(["k", "l"]),
+  );
+  let state = ready(replay, [keyA]);
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b"],
+    ["f", "g"],
+    ["k", "l"],
+  ]);
+  state = historyPage(state, ["b", "c", "d", "e"]);
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b", "c", "d", "e", "f", "g"],
+    ["k", "l"],
+  ]);
+  state = historyPage(state, ["g", "h", "i", "j"]);
+  assert.deepEqual(activeChannel(state).runs, [
+    ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"],
+  ]);
+});
+test("UI-2: every real delivery stage retains its payload and invalid known payloads reject the frame", () => {
+  const value = withMessages(["receipt"]);
+  const stages = [
+    { stage: "queued" },
+    { stage: "delivered" },
+    { stage: "working", acked_at_ms: 12 },
+    { stage: "replied", reply_id: "reply" },
+    { stage: "completed", kind: "settled" },
+    { stage: "held" },
+    { stage: "failed" },
+    { stage: "cancelled" },
+  ];
+  const row = value.frame.messages[0];
+  assert.ok(row);
+  row.legs = stages.map((stage, index) => ({ to: `agent-${index}`, stage }));
+  const result = parsed(value).messages.get("receipt");
+  assert.deepEqual(
+    result?.legs.map((leg) => leg.stage),
+    [
+      { stage: "queued" },
+      { stage: "delivered" },
+      { stage: "working", ackedAt: 12 },
+      { stage: "replied", replyId: "reply" },
+      { stage: "completed", kind: "settled" },
+      { stage: "held" },
+      { stage: "failed" },
+      { stage: "cancelled" },
+    ],
+  );
+  for (const stage of [
+    { stage: "working" },
+    { stage: "replied" },
+    { stage: "completed" },
+  ]) {
+    row.legs = [{ to: "agent", stage }];
+    assert.equal(parseEvent("space", JSON.stringify(value)), null);
+  }
+});
+
+test("UI-2 fix1: no-op frames retain maps and touched rows reuse unchanged objects", () => {
+  const value = withMessages(Array.from({ length: 150 }, (_, n) => `row${n}`));
+  const state = apply(initialState(), value);
+  const before = activeChannel(state);
+  assert.equal(apply(state, structuredClone(value)), state);
+  const metadata = structuredClone(value);
+  metadata.frame.space.display_name = "Renamed";
+  const renamed = activeChannel(apply(state, metadata));
+  assert.equal(renamed.messages, before.messages);
+  assert.equal(renamed.runs, before.runs);
+  assert.equal(renamed.members, before.members);
+  const touched = value.frame.messages[70];
+  assert.ok(touched);
+  touched.legs = [{ to: "agent-1", stage: { stage: "held" } }];
+  const after = activeChannel(apply(state, value));
+  assert.notEqual(after.messages.get("row70"), before.messages.get("row70"));
+  assert.equal(after.runs, before.runs);
+  assert.equal(after.members, before.members);
+  for (const [id, row] of before.messages)
+    if (id !== "row70") assert.equal(after.messages.get(id), row);
+});
+function numbered(from: number, to: number) {
+  return Array.from({ length: to - from + 1 }, (_, n) => `m${n + from}`);
+}
+function loadedWindow() {
+  let state = apply(initialState(), withMessages(numbered(1, 150)));
+  for (let last = 250; last <= 750; last += 100)
+    state = apply(state, withMessages(numbered(last - 149, last)));
+  return state;
+}
+test("UI-2 fix1: following caps at 600, clears exhaustion and keeps evicted history reachable", () => {
+  let state = apply(initialState(), withMessages(numbered(1, 150)));
+  state = historyPage(state, []);
+  assert.equal(activeChannel(state).exhausted, true);
+  for (let last = 250; last <= 750; last += 100)
+    state = apply(state, withMessages(numbered(last - 149, last)));
+  const channel = activeChannel(state);
+  assert.equal(channel.messages.size, 600);
+  assert.deepEqual(channel.runs, [numbered(151, 750)]);
+  assert.equal(channel.latestMessages.size, 150);
+  assert.equal(channel.exhausted, false);
+  assert.equal(channel.viewMode, "following");
+  const pending = requesting(state);
+  assert.equal(pending.request.before, "m151");
+  assert.equal(pending.request.purpose, "older");
+});
+test("UI-2 fix1: capped older pages keep their anchor and walk older while live frames refresh overlap", () => {
+  let state = historyPage(loadedWindow(), numbered(101, 150));
+  assert.deepEqual(activeChannel(state).runs, [numbered(101, 700)]);
+  assert.equal(activeChannel(state).viewMode, "browsing");
+  const pending = requesting(state);
+  assert.equal(pending.request.before, "m101");
+  const live = withMessages(numbered(651, 800));
+  const overlap = live.frame.messages.find((row) => row.message_id === "m675");
+  assert.ok(overlap);
+  overlap.legs = [{ to: "agent-1", stage: { stage: "held" } }];
+  state = apply(pending.state, live);
+  assert.equal(activeChannel(state).messages.has("m800"), false);
+  assert.equal(
+    activeChannel(state).messages.get("m675")?.legs[0]?.stage.stage,
+    "held",
+  );
+  assert.equal(activeChannel(state).runs.length, 1);
+  state = reduce(state, {
+    type: "history",
+    request: pending.request,
+    result: {
+      kind: "page",
+      messages: [...parsed(withMessages(numbered(51, 100))).messages.values()],
+    },
+  });
+  assert.deepEqual(activeChannel(state).runs, [numbered(51, 650)]);
+  state = historyPage(state, numbered(1, 50));
+  state = historyPage(state, []);
+  assert.equal(activeChannel(state).exhausted, true);
+  const stale = requesting(
+    reduce(state, { type: "latest", key: activeChannel(state).key }),
+  );
+  state = reduce(stale.state, {
+    type: "latest",
+    key: activeChannel(state).key,
+  });
+  assert.deepEqual(activeChannel(state).runs, [numbered(651, 800)]);
+  assert.equal(activeChannel(state).viewMode, "following");
+  assert.equal(activeChannel(state).exhausted, false);
+  assert.equal(
+    reduce(state, {
+      type: "history",
+      request: stale.request,
+      result: { kind: "page", messages: [] },
+    }),
+    state,
+  );
+});
+test("UI-2 fix1: replay stays capped without restoring an intentionally evicted newest edge", () => {
+  let state = historyPage(loadedWindow(), numbered(101, 150));
+  state = apply(
+    reduce(state, { type: "opened" }),
+    withMessages(numbered(751, 900)),
+  );
+  assert.equal(state.sync.kind, "replaying");
+  if (state.sync.kind === "replaying")
+    assert.equal(
+      state.sync.pending.get(activeChannel(state).key)?.messages.size,
+      600,
+    );
+  state = ready(state, [keyA]);
+  assert.deepEqual(activeChannel(state).runs, [numbered(101, 700)]);
+  assert.equal(activeChannel(state).latestMessages.has("m900"), true);
+  assert.equal(activeChannel(state).viewMode, "browsing");
+  let following = loadedWindow();
+  following = apply(
+    reduce(following, { type: "opened" }),
+    withMessages(numbered(701, 850)),
+  );
+  following = apply(following, withMessages(numbered(801, 950)));
+  following = ready(following, [keyA]);
+  assert.deepEqual(activeChannel(following).runs, [numbered(351, 950)]);
+  assert.equal(activeChannel(following).messages.size, 600);
+});
+
+test("UI-2 fix1: an overlapping frame can join coverage without adding rows", () => {
+  let state = apply(initialState(), withMessages(["a", "b"]));
+  state = apply(state, withMessages(["c", "d"]));
+  assert.equal(activeChannel(state).runs.length, 2);
+  state = apply(state, withMessages(["b", "c"]));
+  assert.deepEqual(activeChannel(state).runs, [["a", "b", "c", "d"]]);
+});
+test("UI-2 fix1: oversized snapshots keep only the newest 150 rows as latest source", () => {
+  const channel = activeChannel(
+    apply(initialState(), withMessages(numbered(1, 900))),
+  );
+  assert.equal(channel.latestMessages.size, 150);
+  assert.deepEqual([...channel.latestMessages.keys()], numbered(751, 900));
+  assert.equal(channel.messages.size, 600);
+  assert.deepEqual(channel.runs, [numbered(301, 900)]);
+  const belowCap = activeChannel(
+    apply(initialState(), withMessages(numbered(1, 400))),
+  );
+  assert.equal(belowCap.messages.size, 400);
+  assert.equal(belowCap.latestMessages.size, 150);
+});
+
+test("UI-2 fix1: one replay window caps both runs and rows at the same boundary", () => {
+  let state = loadedWindow();
+  state = apply(
+    reduce(state, { type: "opened" }),
+    withMessages(numbered(701, 850)),
+  );
+  state = ready(state, [keyA]);
+  const channel = activeChannel(state);
+  assert.equal(channel.messages.size, 600);
+  assert.deepEqual(channel.runs, [numbered(251, 850)]);
+  assert.deepEqual(
+    new Set(channel.runs.flat()),
+    new Set(channel.messages.keys()),
+  );
+});
+
+test("UI-2 fix1: evicting a pending history cursor invalidates its stale response", () => {
+  const pending = requesting(loadedWindow());
+  let state = apply(pending.state, withMessages(numbered(701, 850)));
+  assert.equal(activeChannel(state).history.kind, "idle");
+  assert.equal(
+    reduce(state, {
+      type: "history",
+      request: pending.request,
+      result: {
+        kind: "page",
+        messages: [
+          ...parsed(withMessages(numbered(101, 150))).messages.values(),
+        ],
+      },
+    }),
+    state,
+  );
+  const retry = requesting(state);
+  assert.equal(retry.request.before, "m251");
+  assert.notEqual(retry.request.id, pending.request.id);
+  state = historyPage(state, numbered(201, 250));
+  assert.deepEqual(activeChannel(state).runs, [numbered(201, 800)]);
+});
+
+test("UI-2 fix1: jumping during replay does not restore discarded browsing history", () => {
+  let state = historyPage(loadedWindow(), numbered(101, 150));
+  state = apply(
+    reduce(state, { type: "opened" }),
+    withMessages(numbered(651, 800)),
+  );
+  state = reduce(state, { type: "latest", key: activeChannel(state).key });
+  state = ready(state, [keyA]);
+  const channel = activeChannel(state);
+  assert.equal(channel.viewMode, "following");
+  assert.deepEqual(channel.runs, [numbered(601, 800)]);
+  assert.equal(channel.messages.has("m101"), false);
+});
+
+test("UI-2 fix1: browsing keeps receipt updates from every staged replay window", () => {
+  let state = historyPage(loadedWindow(), numbered(101, 150));
+  const before = activeChannel(state);
+  state = reduce(state, { type: "opened" });
+  const first = withMessages(numbered(651, 800));
+  const receipt = first.frame.messages.find((row) => row.message_id === "m675");
+  assert.ok(receipt);
+  receipt.legs = [{ to: "agent-1", stage: { stage: "held" } }];
+  state = apply(state, first);
+  state = apply(state, withMessages(numbered(751, 900)));
+  state = ready(state, [keyA]);
+  const after = activeChannel(state);
+  assert.equal(after.messages.get("m675")?.legs[0]?.stage.stage, "held");
+  assert.deepEqual(after.runs, before.runs);
+  assert.equal(after.messages.size, 600);
+  assert.equal(after.messages.has("m900"), false);
+});
+
+function fullWindow() {
+  let state = apply(initialState(), withMessages(numbered(451, 600)));
+  for (let first = 401; first >= 1; first -= 50)
+    state = historyPage(state, numbered(first, first + 49));
+  assert.deepEqual(activeChannel(state).runs, [numbered(1, 600)]);
+  assert.equal(activeChannel(state).viewMode, "following");
+  return state;
+}
+function follow(state: State, atBottom: boolean): State {
+  return reduce(state, {
+    type: "follow",
+    key: activeChannel(state).key,
+    atBottom,
+  });
+}
+function withReceipt(value: ReturnType<typeof withMessages>, id: string) {
+  const row = value.frame.messages.find((row) => row.message_id === id);
+  assert.ok(row);
+  row.legs = [{ to: "agent-1", stage: { stage: "held" } }];
+  return value;
+}
+test("history window: a reader scrolled up keeps every loaded row when a live frame passes the cap", () => {
+  let state = follow(fullWindow(), false);
+  assert.equal(follow(state, false), state);
+  state = apply(state, withReceipt(withMessages(numbered(456, 605)), "m456"));
+  const channel = activeChannel(state);
+  assert.equal(channel.viewMode, "browsing");
+  assert.deepEqual(channel.runs, [numbered(1, 600)]);
+  assert.deepEqual(new Set(channel.messages.keys()), new Set(numbered(1, 600)));
+  assert.equal(channel.messages.get("m456")?.legs[0]?.stage.stage, "held");
+  assert.equal(channel.latestMessages.has("m605"), true);
+});
+test("history window: a reader at the bottom drops the oldest rows and keeps following", () => {
+  let state = follow(follow(fullWindow(), false), true);
+  state = apply(state, withMessages(numbered(456, 605)));
+  const channel = activeChannel(state);
+  assert.equal(channel.viewMode, "following");
+  assert.deepEqual(channel.runs, [numbered(6, 605)]);
+  assert.equal(channel.messages.size, 600);
+  assert.equal(channel.messages.has("m5"), false);
+});
+test("history window: browsing refreshes the rows it shows and stays put until the jump to latest", () => {
+  let state = apply(
+    follow(fullWindow(), false),
+    withMessages(numbered(456, 605)),
+  );
+  state = follow(state, true);
+  state = apply(state, withReceipt(withMessages(numbered(461, 610)), "m500"));
+  let channel = activeChannel(state);
+  assert.equal(channel.viewMode, "browsing");
+  assert.deepEqual(channel.runs, [numbered(1, 600)]);
+  assert.equal(channel.messages.get("m500")?.legs[0]?.stage.stage, "held");
+  assert.equal(channel.messages.has("m610"), false);
+  state = follow(state, false);
+  state = reduce(state, { type: "latest", key: channel.key });
+  channel = activeChannel(state);
+  assert.equal(channel.viewMode, "following");
+  assert.equal(channel.atBottom, true);
+  assert.deepEqual(channel.runs, [numbered(461, 610)]);
+});
+test("history window: replay decides from the reader's position when ready arrives", () => {
+  let state = follow(fullWindow(), false);
+  state = apply(
+    reduce(state, { type: "opened" }),
+    withReceipt(withMessages(numbered(456, 605)), "m456"),
+  );
+  let channel = activeChannel(ready(state, [keyA]));
+  assert.equal(channel.viewMode, "browsing");
+  assert.deepEqual(channel.runs, [numbered(1, 600)]);
+  assert.equal(channel.messages.get("m456")?.legs[0]?.stage.stage, "held");
+  state = follow(state, true);
+  channel = activeChannel(ready(state, [keyA]));
+  assert.equal(channel.viewMode, "following");
+  assert.deepEqual(channel.runs, [numbered(6, 605)]);
+  assert.equal(channel.messages.get("m456")?.legs[0]?.stage.stage, "held");
+});
+
+test("design-b: attention subject and message ids parse tolerantly and propagate", () => {
+  const base = snapshot();
+  function frame(extra: Record<string, unknown>) {
+    return {
+      ...base,
+      frame: {
+        ...base.frame,
+        health: { level: "needs_you", items: 1 },
+        attention: [
+          {
+            source_kind: "delivery_attempt",
+            summary: { text: "No reply", truncated: false },
+            opened_at_ms: 42,
+            ...extra,
+          },
+        ],
+      },
+    };
+  }
+  const plain = apply(initialState(), frame({}));
+  const [missing] = activeChannel(plain).attention;
+  assert.equal(missing?.subjectAlias, null);
+  assert.equal(missing?.messageId, null);
+  for (const malformed of [
+    { subject_alias: 7, message_id: { id: "m1" } },
+    { subject_alias: " ", message_id: "" },
+    { subject_alias: null, message_id: null },
+  ]) {
+    const [item] = parsed(frame(malformed)).attention;
+    assert.equal(item?.subjectAlias, null);
+    assert.equal(item?.messageId, null);
+  }
+  const withSubject = apply(
+    plain,
+    frame({ subject_alias: "@codex", message_id: "m1" }),
+  );
+  assert.notEqual(withSubject, plain);
+  const [item] = activeChannel(withSubject).attention;
+  assert.equal(item?.subjectAlias, "@codex");
+  assert.equal(item?.messageId, "m1");
+  assert.equal(
+    apply(withSubject, frame({ subject_alias: "@codex", message_id: "m1" })),
+    withSubject,
+  );
+});
+
+test("design-b: terminal runs parse tolerantly, keep identity and propagate exit codes", () => {
+  const base = snapshot();
+  function frame(terminal_runs: unknown) {
+    return { ...base, frame: { ...base.frame, terminal_runs } };
+  }
+  const valid = {
+    terminal: "shell-1",
+    command: { text: "echo hi", truncated: false },
+    started_at_ms: 90,
+    exit_code: 0,
+    message_id: "m1",
+  };
+  assert.deepEqual(parsed(base).terminalRuns, []);
+  for (const malformed of [null, { runs: [] }, "runs", 4])
+    assert.deepEqual(parsed(frame(malformed)).terminalRuns, []);
+  assert.deepEqual(
+    parsed(
+      frame([
+        valid,
+        { ...valid, terminal: "" },
+        { ...valid, command: "echo hi" },
+        { ...valid, started_at_ms: -1 },
+        "not a run",
+        { ...valid, exit_code: null, message_id: undefined },
+        { ...valid, exit_code: "1", message_id: 5 },
+      ]),
+    ).terminalRuns,
+    [
+      {
+        terminal: "shell-1",
+        command: { text: "echo hi", truncated: false },
+        startedAt: 90,
+        exitCode: 0,
+        messageId: "m1",
+      },
+      {
+        terminal: "shell-1",
+        command: { text: "echo hi", truncated: false },
+        startedAt: 90,
+        exitCode: null,
+        messageId: null,
+      },
+      {
+        terminal: "shell-1",
+        command: { text: "echo hi", truncated: false },
+        startedAt: 90,
+        exitCode: null,
+        messageId: null,
+      },
+    ],
+  );
+  const state = apply(initialState(), frame([valid]));
+  assert.equal(apply(state, frame([structuredClone(valid)])), state);
+  const failed = apply(state, frame([{ ...valid, exit_code: 1 }]));
+  assert.notEqual(failed, state);
+  assert.equal(activeChannel(failed).terminalRuns[0]?.exitCode, 1);
+  assert.equal(activeChannel(failed).messages, activeChannel(state).messages);
+});
+
+function landingFrame(
+  key: string,
+  name: string,
+  { needsYou = false, at = 100 }: { needsYou?: boolean; at?: number } = {},
+) {
+  const value = snapshot(key, name, `w-${name}`);
+  return {
+    ...value,
+    frame: {
+      ...value.frame,
+      health: needsYou ? { level: "needs_you", items: 1 } : value.frame.health,
+      messages: value.frame.messages.map((row) => ({ ...row, at_ms: at })),
+    },
+  };
+}
+function landed(
+  frames: ReturnType<typeof landingFrame>[],
+  requestedKey: string | null = null,
+  end: "ready" | "timeout" = "ready",
+) {
+  let state = reduce(
+    initialState({
+      requestedKey:
+        requestedKey === null ? null : parsed(snapshot(requestedKey)).key,
+    }),
+    { type: "opened" },
+  );
+  for (const frame of frames) state = apply(state, frame);
+  return end === "ready"
+    ? ready(
+        state,
+        frames.map((frame) => frame.key),
+      )
+    : reduce(state, { type: "replay-timeout" });
+}
+test("design-b: landing prefers the URL key, then needs you in sidebar order, then the latest message", () => {
+  const keyC = "c".repeat(20);
+  const keyD = "d".repeat(20);
+  const alpha = landingFrame(keyA, "alpha", { at: 300 });
+  const beta = landingFrame(keyD, "beta", { at: 900 });
+  const frames = [
+    alpha,
+    landingFrame(keyB, "zeta", { needsYou: true }),
+    landingFrame(keyC, "mu", { needsYou: true }),
+    beta,
+  ];
+  for (const end of ["ready", "timeout"] as const) {
+    assert.equal(landed(frames, keyA, end).selectedKey, keyA);
+    assert.equal(landed(frames, null, end).selectedKey, keyC);
+    assert.equal(landed(frames, "e".repeat(20), end).selectedKey, keyC);
+    assert.equal(landed([alpha, beta], null, end).selectedKey, keyD);
+    assert.equal(
+      landed(
+        [landingFrame(keyB, "zeta"), landingFrame(keyA, "alpha")],
+        null,
+        end,
+      ).selectedKey,
+      keyA,
+    );
+  }
+  const chosen = reduce(landed(frames), {
+    type: "select",
+    key: parsed(snapshot(keyD)).key,
+  });
+  const reconnect = ready(
+    frames.reduce(
+      (state, frame) => apply(state, frame),
+      reduce(chosen, { type: "opened" }),
+    ),
+    frames.map((frame) => frame.key),
+  );
+  assert.equal(reconnect.selectedKey, keyD);
+});
+test("design-b: switching channels closes the open thread", () => {
+  const state = twoChannels();
+  const alpha = parsed(snapshot()).key;
+  const beta = parsed(snapshot(keyB)).key;
+  assert.equal(state.selectedKey, alpha);
+  const open = reduce(state, { type: "thread", threadId: "m1" });
+  assert.equal(open.openThread, "m1");
+  assert.equal(reduce(open, { type: "thread", threadId: "m1" }), open);
+  assert.equal(reduce(open, { type: "select", key: alpha }).openThread, "m1");
+  assert.equal(reduce(open, { type: "select", key: beta }).openThread, null);
+  assert.equal(reduce(open, { type: "gone", key: alpha }).openThread, null);
+  assert.equal(
+    reduce(open, { type: "thread", threadId: null }).openThread,
+    null,
+  );
+  assert.equal(apply(open, changedChannel()).openThread, "m1");
+});
+
+const MIN = 60_000;
+type RowOptions = {
+  author?: string;
+  to?: string[];
+  kind?: string;
+  thread?: string;
+  inReplyTo?: string | null;
+};
+function row(
+  id: string,
+  at: number,
+  {
+    author = "agent-1",
+    to = [],
+    kind = "mention",
+    thread = id,
+    inReplyTo = null,
+  }: RowOptions = {},
+) {
+  return {
+    ...message(id),
+    thread_id: thread,
+    in_reply_to: inReplyTo,
+    at_ms: at,
+    author,
+    kind,
+    legs: to.map((address) => ({ to: address, stage: { stage: "queued" } })),
+  };
+}
+function view(rows: ReturnType<typeof row>[], now: number) {
+  const value = snapshot();
+  value.frame.messages = rows;
+  return timelineView(
+    activeChannel(apply(initialState(), value)),
+    undefined,
+    now,
+  );
+}
+function summary(rows: ReturnType<typeof view>) {
+  return rows.map((item) =>
+    item.kind === "day" || item.kind === "gap"
+      ? item.kind === "day"
+        ? `day:${item.label}`
+        : "gap"
+      : `${item.message.id}${item.grouped ? " grouped" : ""}${item.showRecipients ? " to" : ""}`,
+  );
+}
+test("design-b: timeline groups by author within five minutes and never across a day", () => {
+  const today = new Date(2026, 9, 28, 0, 1).getTime();
+  const yesterday = new Date(2026, 9, 27, 23, 58).getTime();
+  const rows = view(
+    [
+      row("y1", yesterday, { to: ["agent-2"] }),
+      row("t1", today, { to: ["agent-2"] }),
+      row("t2", today + 4 * MIN, { to: ["agent-2"] }),
+      row("t3", today + 9 * MIN + 1, { to: ["agent-2"] }),
+      row("t4", today + 10 * MIN, { to: ["agent-2", "agent-2"] }),
+      row("t5", today + 11 * MIN, { to: ["shell"] }),
+      row("t6", today + 12 * MIN, { to: ["shell"], kind: "handoff" }),
+      row("t7", today + 13 * MIN, { author: "human", to: ["shell"] }),
+      row("t7b", today + 13 * MIN + 30_000, { author: "human" }),
+      row("t8", today + 14 * MIN, { author: "human", kind: "nudge" }),
+      row("t9", today + 15 * MIN, { author: "human" }),
+    ],
+    today + 20 * MIN,
+  );
+  assert.deepEqual(summary(rows), [
+    "day:Yesterday",
+    "y1 to",
+    "day:Today",
+    "t1 to",
+    "t2 grouped",
+    "t3 to",
+    "t4 grouped",
+    "t5 grouped to",
+    "t6 grouped to",
+    "t7 to",
+    "t7b grouped",
+    "t8 to",
+    "t9 to",
+  ]);
+  const t4 = rows.find(
+    (item) => item.kind === "message" && item.message.id === "t4",
+  );
+  assert.ok(t4?.kind === "message");
+  assert.deepEqual(t4.recipients, ["agent-2"]);
+  const again = view([row("t4", today, { to: ["agent-2", "agent-2"] })], today);
+  assert.ok(again[1]?.kind === "message");
+  assert.deepEqual(again[1].recipients, ["agent-2"]);
+});
+test("design-b: request rows carry their latest reply and count, and replies stay in the thread", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  const rows = view(
+    [
+      row("ask", now - 10 * MIN, { to: ["agent-2"], thread: "t" }),
+      row("first", now - 9 * MIN, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "t",
+        inReplyTo: "ask",
+      }),
+      row("lone", now - 8 * MIN),
+      row("second", now - 7 * MIN, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "t",
+        inReplyTo: "ask",
+      }),
+    ],
+    now,
+  );
+  const messages = rows.filter(
+    (item): item is MessageRow => item.kind === "message",
+  );
+  assert.deepEqual(
+    messages.map((item) => [
+      item.message.id,
+      item.latestReply?.id ?? null,
+      item.replyCount,
+    ]),
+    [
+      ["ask", "second", 2],
+      ["lone", null, 0],
+    ],
+  );
+  assert.equal(
+    messages[1]?.grouped,
+    true,
+    "hidden replies do not break the author's group",
+  );
+});
+test("design-b: a gap row resets grouping and keeps the day", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  let state = apply(initialState(), {
+    ...snapshot(),
+    frame: { ...snapshot().frame, messages: [row("a", now - 3 * MIN)] },
+  });
+  state = apply(state, {
+    ...snapshot(),
+    frame: { ...snapshot().frame, messages: [row("b", now - 2 * MIN)] },
+  });
+  assert.deepEqual(
+    summary(timelineView(activeChannel(state), undefined, now)),
+    ["day:Today", "a to", "gap", "b to"],
+  );
+});
+test("design-b fix: a frame keeps per-row props identical for unchanged messages", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  const ask = row("ask", now - 3 * MIN, { to: ["agent-2"] });
+  const value = snapshot();
+  value.frame.messages = [ask];
+  const state = apply(initialState(), value);
+  value.frame.messages = [ask, row("next", now - MIN, { to: ["agent-2"] })];
+  const next = apply(state, value);
+  const askRow = (rows: readonly TimelineRow[]) =>
+    rows.find(
+      (item): item is MessageRow =>
+        item.kind === "message" && item.message.id === "ask",
+    );
+  const first = askRow(timelineView(activeChannel(state), undefined, now));
+  const second = askRow(timelineView(activeChannel(next), undefined, now));
+  assert.ok(first && second);
+  assert.deepEqual(first.recipients, ["agent-2"]);
+  assert.equal(second.message, first.message);
+  assert.equal(second.recipients, first.recipients);
+});
+test("design-b fix: a new terminal run keeps unchanged runs identical", () => {
+  const run = (message_id: string, exit_code: number) => ({
+    terminal: "shell-1",
+    command: { text: "echo hi", truncated: false },
+    started_at_ms: 90,
+    exit_code,
+    message_id,
+  });
+  const value = snapshot();
+  const state = apply(initialState(), {
+    ...value,
+    frame: { ...value.frame, terminal_runs: [run("m1", 0)] },
+  });
+  const next = apply(state, {
+    ...value,
+    frame: { ...value.frame, terminal_runs: [run("m1", 0), run("m2", 1)] },
+  });
+  const before = runsByMessage(activeChannel(state).terminalRuns);
+  const after = runsByMessage(activeChannel(next).terminalRuns);
+  assert.equal(after.get("m2")?.exitCode, 1);
+  assert.ok(before.get("m1"));
+  assert.equal(after.get("m1"), before.get("m1"));
+});

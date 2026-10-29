@@ -1,173 +1,220 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { test } from "node:test";
+import { after, before, test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { createServer } from "vite";
+import { createServer, type ViteDevServer } from "vite";
 import { initialState, reduce } from "./store.ts";
 import { parseEvent } from "./wire.ts";
 
-test("item 1: rendered display names never invent mentions and exact tokens stay separate", async () => {
-  const vite = await createServer({
+let vite: ViteDevServer;
+before(async () => {
+  vite = await createServer({
     server: { middlewareMode: true, hmr: false, ws: false },
   });
-  try {
-    const { Sidebar } = await vite.ssrLoadModule("/src/ui/Sidebar.tsx");
-    const { MemberList } = await vite.ssrLoadModule("/src/ui/MemberList.tsx");
-    const lines = (
-      await readFile(
-        new URL("./fixtures/real-frames.jsonl", import.meta.url),
-        "utf8",
-      )
+});
+after(async () => {
+  await vite.close();
+});
+function load<T>(file: string): Promise<T> {
+  return vite.ssrLoadModule(file) as Promise<T>;
+}
+async function fixtures() {
+  return (
+    await readFile(
+      new URL("./fixtures/real-frames.jsonl", import.meta.url),
+      "utf8",
     )
-      .trim()
-      .split("\n");
-    for (const line of lines) assert.ok(parseEvent("space", line));
-    const fixture = JSON.parse(lines[2] ?? "null");
-    for (const [name, token] of [
-      ["all", "actual-token"],
-      ["My Project", null],
-      ["testbed link-channels-nd1", "testbed-link-channels-nd1"],
-    ] satisfies [string, string | null][]) {
-      fixture.frame.space.display_name = name;
-      fixture.frame.space.addressable_label = token;
-      const event = parseEvent("space", JSON.stringify(fixture));
-      assert.ok(event?.type === "space");
-      const state = reduce(initialState(), event);
-      const header = renderToStaticMarkup(
-        createElement(MemberList, { channel: event.channel, name }),
-      );
-      assert.equal(
-        header.match(/<h1[^>]*>(.*?)<\/h1>/)?.[1]?.replace(/<[^>]*>/g, ""),
-        name,
-      );
-      const sidebar = renderToStaticMarkup(
-        createElement(Sidebar, { state, onSelect() {} }),
-      );
-      assert.equal(
-        sidebar
-          .match(/<button[^>]*>(.*?)<\/button>/)?.[1]
-          ?.replace(/<[^>]*>/g, ""),
-        `${name}${token === null ? "Not addressable" : `#${token}`}`,
-      );
-      for (const markup of [header, sidebar])
-        assert.ok(
-          markup.includes(token === null ? "Not addressable" : `#${token}`),
-          markup,
-        );
-    }
-  } finally {
-    await vite.close();
-  }
-});
+  )
+    .trim()
+    .split("\n");
+}
+function text(markup: string): string {
+  return markup.replace(/<[^>]*>/g, "");
+}
+function space(value: unknown) {
+  const event = parseEvent("space", JSON.stringify(value));
+  assert.ok(event?.type === "space");
+  return event;
+}
 
-test("item 6: paused and inactive channels with attention have no Needs you shortcuts, dots or summary", async () => {
-  const vite = await createServer({
-    server: { middlewareMode: true, hmr: false, ws: false },
-  });
-  try {
-    const { Sidebar } = await vite.ssrLoadModule("/src/ui/Sidebar.tsx");
-    const { MemberList } = await vite.ssrLoadModule("/src/ui/MemberList.tsx");
-    const fixture = JSON.parse(
-      (
-        await readFile(
-          new URL("./fixtures/real-frames.jsonl", import.meta.url),
-          "utf8",
-        )
-      )
-        .trim()
-        .split("\n")[0] ?? "null",
+test("item 1: rendered display names never invent mentions and exact tokens stay separate", async () => {
+  const { Sidebar } = await load<typeof import("./ui/Sidebar.tsx")>(
+    "/src/ui/Sidebar.tsx",
+  );
+  const { ChannelHeader } = await load<typeof import("./ui/ChannelHeader.tsx")>(
+    "/src/ui/ChannelHeader.tsx",
+  );
+  const lines = await fixtures();
+  for (const line of lines) assert.ok(parseEvent("space", line));
+  const fixture = JSON.parse(lines[2] ?? "null");
+  for (const [name, token] of [
+    ["all", "actual-token"],
+    ["My Project", null],
+    ["testbed link-channels-nd1", "testbed-link-channels-nd1"],
+  ] satisfies [string, string | null][]) {
+    fixture.frame.space.display_name = name;
+    fixture.frame.space.addressable_label = token;
+    const event = space(fixture);
+    const state = reduce(initialState(), event);
+    const header = renderToStaticMarkup(
+      createElement(ChannelHeader, { channel: event.channel, suffix: null }),
     );
-    fixture.frame.attention = [
-      {
-        source_kind: "coordination",
-        summary: { text: "Approve this", truncated: false },
-        opened_at_ms: 1,
-      },
-    ];
-    for (const level of ["paused", "inactive", "future_health", "needs_you"]) {
-      fixture.frame.health =
-        level === "needs_you" ? { level, items: 1 } : { level };
-      const event = parseEvent("space", JSON.stringify(fixture));
-      assert.ok(event?.type === "space");
-      const state = reduce(initialState(), event);
-      const sidebar = renderToStaticMarkup(
-        createElement(Sidebar, { state, onSelect() {} }),
-      );
-      const header = renderToStaticMarkup(
-        createElement(MemberList, { channel: event.channel, name: "alpha" }),
-      );
-      const needsYou = level === "needs_you";
-      assert.equal(
-        sidebar.includes(
-          'aria-label="Needs you" class="sidebar-section attention-navigation"><h2>Needs you<span class="section-count">1',
-        ),
-        needsYou,
-      );
-      assert.equal(
-        sidebar.includes('aria-label="Needs you"></span>'),
-        needsYou,
-      );
-      assert.equal(header.includes('class="attention-summary"'), needsYou);
-      assert.equal(header.includes("Approve this"), needsYou);
-      if (level === "future_health")
-        assert.ok(header.includes("Status unavailable"));
-    }
-  } finally {
-    await vite.close();
-  }
-});
-
-test("fix5: future member values show neutral labels and retain role and pane descriptions", async () => {
-  const vite = await createServer({
-    server: { middlewareMode: true, hmr: false, ws: false },
-  });
-  try {
-    const { MemberList } = await vite.ssrLoadModule("/src/ui/MemberList.tsx");
-    const fixture = JSON.parse(
-      (
-        await readFile(
-          new URL("./fixtures/real-frames.jsonl", import.meta.url),
-          "utf8",
-        )
-      )
-        .trim()
-        .split("\n")[0] ?? "null",
-    );
-    const member = fixture.frame.participants[0];
-    fixture.frame.participants = [
-      {
-        ...member,
-        address_id: "future-member",
-        alias: "Future",
-        activity: "future_activity",
-        kind: { type: "future_kind" },
-        role: null,
-        pane_label: null,
-      },
-      {
-        ...member,
-        address_id: "role-member",
-        alias: "Role",
-        activity: "future_activity",
-        kind: { type: "future_kind" },
-        role: { text: "Builder", truncated: true },
-        pane_label: { text: "pane 2", truncated: true },
-      },
-    ];
-    const event = parseEvent("space", JSON.stringify(fixture));
+    assert.equal(text(header.match(/<h1[^>]*>(.*?)<\/h1>/)?.[1] ?? ""), name);
     assert.ok(
-      event?.type === "space",
-      "future member values must retain the snapshot",
+      header.includes(token === null ? ">No mention label<" : `>#${token}<`),
+      header,
     );
-    const markup = renderToStaticMarkup(
-      createElement(MemberList, { channel: event.channel, name: "alpha" }),
+    const sidebar = renderToStaticMarkup(
+      createElement(Sidebar, { state, onSelect() {} }),
     );
-    assert.equal((markup.match(/Unknown status/g) ?? []).length, 2);
-    assert.ok(markup.includes('class="member-description">Member</span>'));
-    assert.ok(markup.includes("Builder… · pane 2…"));
-    assert.ok(markup.includes('class="presence-dot" data-activity="unknown"'));
-  } finally {
-    await vite.close();
+    assert.equal(
+      text(sidebar.match(/<button[^>]*>(.*?)<\/button>/)?.[1] ?? ""),
+      name,
+    );
+    assert.equal(sidebar.includes("#"), false, "the sidebar row has no token");
   }
+});
+
+test("item 6: paused and inactive channels with attention have no Needs you shortcuts, dots or banner", async () => {
+  const { Sidebar } = await load<typeof import("./ui/Sidebar.tsx")>(
+    "/src/ui/Sidebar.tsx",
+  );
+  const { ChannelHeader } = await load<typeof import("./ui/ChannelHeader.tsx")>(
+    "/src/ui/ChannelHeader.tsx",
+  );
+  const { NeedsYou } = await load<typeof import("./ui/NeedsYou.tsx")>(
+    "/src/ui/NeedsYou.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[0] ?? "null");
+  fixture.frame.attention = [
+    {
+      source_kind: "coordination",
+      summary: { text: "Approve this", truncated: false },
+      opened_at_ms: 1,
+    },
+  ];
+  const health = {
+    paused: "Paused · deliveries held",
+    inactive: "Not active",
+    future_health: null,
+    needs_you: null,
+  };
+  for (const [level, summary] of Object.entries(health)) {
+    fixture.frame.health =
+      level === "needs_you" ? { level, items: 1 } : { level };
+    const event = space(fixture);
+    const state = reduce(initialState(), event);
+    const sidebar = renderToStaticMarkup(
+      createElement(Sidebar, { state, onSelect() {} }),
+    );
+    const header = renderToStaticMarkup(
+      createElement(ChannelHeader, { channel: event.channel, suffix: null }),
+    );
+    const banner = renderToStaticMarkup(
+      createElement(NeedsYou, { channel: event.channel }),
+    );
+    const needsYou = level === "needs_you";
+    assert.equal(sidebar.includes('aria-label="Needs you" class='), needsYou);
+    assert.equal(
+      sidebar.includes('role="img" aria-label="Needs you"'),
+      needsYou,
+    );
+    assert.equal(sidebar.includes("Coordination needs a decision"), needsYou);
+    assert.equal(banner.includes('aria-label="Attention needed"'), needsYou);
+    assert.equal(banner.includes("Coordination needs a decision"), needsYou);
+    assert.equal(banner.includes("Approve this"), false, "details stay closed");
+    const shown = header.match(/class="health"[^>]*>(.*?)<\/span>/)?.[1];
+    assert.equal(shown === undefined ? null : text(shown), summary);
+    assert.equal(header.includes('data-tone="held"'), level === "paused");
+  }
+});
+
+test("fix5: future member values show neutral labels and keep role and pane in the tooltip", async () => {
+  const { MemberStrip } = await load<typeof import("./ui/MemberStrip.tsx")>(
+    "/src/ui/MemberStrip.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[0] ?? "null");
+  const member = fixture.frame.participants[0];
+  fixture.frame.participants = [
+    {
+      ...member,
+      address_id: "future-member",
+      alias: "Future",
+      activity: "future_activity",
+      kind: { type: "future_kind" },
+      role: null,
+      pane_label: null,
+    },
+    {
+      ...member,
+      address_id: "role-member",
+      alias: "Role",
+      activity: "future_activity",
+      kind: { type: "future_kind" },
+      role: { text: "Builder", truncated: true },
+      pane_label: { text: "pane 2", truncated: true },
+    },
+  ];
+  const event = space(fixture);
+  const markup = renderToStaticMarkup(
+    createElement(MemberStrip, { members: event.channel.members }),
+  );
+  assert.equal((markup.match(/>Unknown</g) ?? []).length, 2);
+  assert.ok(markup.includes('title="Member"'));
+  assert.ok(markup.includes('title="Member · Builder… · pane 2…"'));
+  assert.equal(
+    (markup.match(/class="presence" data-activity="unknown"/g) ?? []).length,
+    2,
+  );
+});
+
+test("design-b: member chips order by state, end with the operator as You without presence, and name the runtime", async () => {
+  const { MemberStrip } = await load<typeof import("./ui/MemberStrip.tsx")>(
+    "/src/ui/MemberStrip.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  const base = fixture.frame.participants[1];
+  const agent = (
+    id: string,
+    alias: string,
+    activity: string,
+    kind: unknown = { type: "agent", runtime: "codex" },
+  ) => ({ ...base, address_id: id, alias, activity, kind });
+  fixture.frame.participants = [
+    { ...fixture.frame.participants[0], activity: "working" },
+    agent("a", "@idle", "idle", { type: "agent", runtime: "claude-code" }),
+    agent("b", "@off", "offline", { type: "agent", runtime: null }),
+    agent("c", "@busy", "working", { type: "agent", runtime: "gemini" }),
+    agent("d", "@gone", "retired"),
+    agent("e", "@ask", "blocked"),
+    agent("f", "@wait", "waiting"),
+    agent("g", "@shell", "idle", { type: "terminal" }),
+  ];
+  const event = space(fixture);
+  const markup = renderToStaticMarkup(
+    createElement(MemberStrip, { members: event.channel.members }),
+  );
+  const chips = [
+    ...markup.matchAll(/<li data-address-id="([^"]+)">(.*?)<\/li>/g),
+  ];
+  assert.deepEqual(
+    chips.map(([, id]) => id),
+    ["e", "c", "f", "a", "g", "b", "human"],
+  );
+  const chip = (id: string) =>
+    chips.find(([, chipId]) => chipId === id)?.[2] ?? "";
+  assert.equal(text(chip("human")), "YYou");
+  assert.equal(chip("human").includes("presence"), false);
+  assert.equal(chip("human").includes("Waiting"), false);
+  assert.equal(text(chip("e")), "A@askNeeds you");
+  assert.ok(chip("e").includes("member is-blocked"));
+  assert.ok(chip("a").includes('title="Claude Code"'));
+  assert.ok(chip("c").includes('title="Gemini"'));
+  assert.ok(chip("b").includes('title="Agent"'));
+  assert.ok(chip("f").includes('title="Codex"'));
+  assert.ok(chip("g").includes('title="Terminal"'));
+  assert.ok(chip("g").includes("avatar sm id-terminal"));
+  assert.equal(markup.includes("@gone"), false);
+  assert.equal(markup.includes("claude-code"), false);
 });

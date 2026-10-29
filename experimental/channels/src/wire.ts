@@ -2,12 +2,18 @@ import type {
   Activity,
   AddressId,
   Attention,
-  Channel,
+  ChannelSnapshot,
+  DeliveryStage,
   Health,
   Member,
   MemberKind,
+  Message,
+  MessageKind,
   SafeText,
   SpaceKey,
+  TerminalResult,
+  TerminalRun,
+  ThreadChip,
   WireEvent,
 } from "./model.ts";
 
@@ -32,6 +38,9 @@ function spaceKey(value: unknown): SpaceKey {
 }
 function addressId(value: unknown): AddressId {
   return identity(value) as AddressId;
+}
+function optionalIdentity(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 function nullableText(value: unknown): string | null {
   return value === null ? null : text(value);
@@ -142,9 +151,131 @@ function attention(
     source,
     summary,
     openedAt,
+    subjectAlias: optionalIdentity(item.subject_alias),
+    messageId: optionalIdentity(item.message_id),
   };
 }
-function channel(value: unknown, key: SpaceKey): Channel {
+function terminalRuns(value: unknown): TerminalRun[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw): TerminalRun[] => {
+    try {
+      const item = record(raw);
+      const exitCode = item.exit_code;
+      return [
+        {
+          terminal: addressId(item.terminal),
+          command: safeText(item.command),
+          startedAt: timestamp(item.started_at_ms),
+          exitCode:
+            typeof exitCode === "number" && Number.isSafeInteger(exitCode)
+              ? exitCode
+              : null,
+          messageId: optionalIdentity(item.message_id),
+        },
+      ];
+    } catch {
+      return [];
+    }
+  });
+}
+function messageKind(value: unknown): MessageKind {
+  switch (identity(value)) {
+    case "mention":
+      return "mention";
+    case "reply":
+      return "reply";
+    case "handoff":
+      return "handoff";
+    case "result_set":
+      return "result_set";
+    case "nudge":
+      return "nudge";
+    case "hook":
+      return "hook";
+    default:
+      return "unknown";
+  }
+}
+function deliveryStage(value: unknown): DeliveryStage {
+  const item = record(value);
+  const stage = identity(item.stage);
+  switch (stage) {
+    case "queued":
+    case "delivered":
+    case "held":
+    case "failed":
+    case "cancelled":
+      return { stage };
+    case "working":
+      return { stage, ackedAt: timestamp(item.acked_at_ms) };
+    case "replied":
+      return { stage, replyId: identity(item.reply_id) };
+    case "completed":
+      return { stage, kind: identity(item.kind) };
+    default:
+      return { stage: "unknown" };
+  }
+}
+function message(value: unknown): Message {
+  const item = record(value);
+  return {
+    id: identity(item.message_id),
+    threadId: identity(item.thread_id),
+    inReplyTo: item.in_reply_to === null ? null : identity(item.in_reply_to),
+    at: timestamp(item.at_ms),
+    author: item.author === "human" ? "human" : addressId(item.author),
+    kind: messageKind(item.kind),
+    body: safeText(item.body),
+    legs: array(item.legs).map((raw) => {
+      const leg = record(raw);
+      return { to: addressId(leg.to), stage: deliveryStage(leg.stage) };
+    }),
+  };
+}
+function messages(value: unknown): Map<string, Message> {
+  const rows = new Map<string, Message>();
+  for (const raw of array(value)) {
+    const row = message(raw);
+    if (rows.has(row.id)) throw new Error("Duplicate message");
+    rows.set(row.id, row);
+  }
+  return rows;
+}
+const TERMINAL_HEADER =
+  /^@\S+ command finished with exit code (-?\d+)\.\nstdout:\n/;
+const STDERR = "\nstderr:\n";
+const EMPTY_STDERR = "\nstderr:";
+export function terminalResult({
+  text,
+  truncated,
+}: SafeText): TerminalResult | null {
+  const header = TERMINAL_HEADER.exec(text);
+  if (header === null) return null;
+  const exitCode = Number(header[1]);
+  if (!Number.isSafeInteger(exitCode)) return null;
+  const output = text.slice(header[0].length);
+  let split = output.lastIndexOf(STDERR);
+  let stderr = "";
+  if (output.endsWith(EMPTY_STDERR))
+    split = output.length - EMPTY_STDERR.length;
+  else if (split >= 0) stderr = output.slice(split + STDERR.length);
+  else if (truncated) split = output.length;
+  else return null;
+  const stdout = output.slice(0, split);
+  return {
+    exitCode,
+    stdout: stdout.endsWith("\n") ? stdout.slice(0, -1) : stdout,
+    stderr,
+  };
+}
+export function pathKey(pathname: string): SpaceKey | null {
+  const segment = /^\/w\/([0-9a-f]{20})\/?$/.exec(pathname)?.[1];
+  return segment === undefined ? null : spaceKey(segment);
+}
+export function parseHistory(raw: unknown): readonly Message[] {
+  return [...messages(raw).values()].reverse();
+}
+function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
   const frame = record(value);
   if (frame.wire !== 1) throw new Error("Unknown wire version");
   const space = record(frame.space);
@@ -163,11 +294,16 @@ function channel(value: unknown, key: SpaceKey): Channel {
       paneLabel: optionalSafeText(item.pane_label),
     });
   }
-  const messages = new Map<string, { id: string }>();
-  for (const raw of array(frame.messages)) {
-    const id = identity(record(raw).message_id);
-    if (messages.has(id)) throw new Error("Duplicate message");
-    messages.set(id, { id });
+  const rows = messages(frame.messages);
+  const threads = new Map<string, ThreadChip>();
+  for (const raw of array(frame.threads)) {
+    const item = record(raw);
+    const id = identity(item.thread_id);
+    threads.set(id, {
+      id,
+      title: safeText(item.title),
+      messageCount: integer(item.message_count),
+    });
   }
   const attentionOccurrences = new Map<string, number>();
   return {
@@ -177,10 +313,12 @@ function channel(value: unknown, key: SpaceKey): Channel {
     addressableLabel: nullableText(space.addressable_label),
     health: health(frame.health),
     members,
-    messages,
+    messages: rows,
+    threads,
     attention: array(frame.attention).map((item) =>
       attention(item, attentionOccurrences),
     ),
+    terminalRuns: terminalRuns(frame.terminal_runs),
   };
 }
 export function parseEvent(name: string, rawJson: string): WireEvent | null {
