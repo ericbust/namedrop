@@ -54,10 +54,17 @@ pub struct SafeText {
 
 impl SafeText {
     pub fn from_untrusted(raw: &str, max_chars: usize) -> Self {
-        let redacted = crate::context::redact_disclosure_text(raw);
-        let mut chars = redacted.chars().filter(|c| {
-            (*c == '\n' || *c == '\t' || !c.is_control()) && !crate::domain::is_invisible_format(*c)
-        });
+        let clean: String = raw
+            .chars()
+            .filter(|c| {
+                (matches!(*c, '\u{1b}' | '\n' | '\t') || !c.is_control())
+                    && !crate::domain::is_invisible_format(*c)
+            })
+            .collect();
+        let clean = clean.replace("\u{1b}\n", "").replace('\u{1b}', "");
+        let normalized = normalize_secret_tabs(&clean);
+        let redacted = crate::context::redact_disclosure_text(&normalized);
+        let mut chars = redacted.chars();
         let text: String = chars.by_ref().take(max_chars).collect();
         Self {
             text,
@@ -69,6 +76,25 @@ impl SafeText {
         raw.filter(|raw| !raw.trim().is_empty())
             .map(|raw| Self::from_untrusted(raw, max_chars))
     }
+}
+
+fn normalize_secret_tabs(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            if !line.contains('\t') {
+                return line.to_owned();
+            }
+            let body = line.trim_start_matches(char::is_whitespace);
+            let indentation = &line[..line.len() - body.len()];
+            let candidate = format!("{indentation}{}", body.replace('\t', ""));
+            if crate::context::redact_disclosure_text(&candidate) != candidate {
+                candidate
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[derive(Debug, Serialize)]

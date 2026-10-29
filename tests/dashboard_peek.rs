@@ -97,6 +97,9 @@ if args[:2] == ['pane', 'read']:
     descriptor = os.open(os.path.join(root, 'reads.jsonl'), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     os.write(descriptor, record.encode())
     os.close(descriptor)
+    if config.get('require_unwrapped') and args[3:5] != ['--source', 'recent-unwrapped']:
+        sys.stderr.write('screen source must preserve soft-wrapped secrets')
+        sys.exit(1)
     if config.get('spawn_child'):
         child = subprocess.Popen([sys.executable, '-c', "import time,sys; f=open(sys.argv[1],'a',buffering=1)\nwhile True: f.write('alive\\n'); time.sleep(0.02)", os.path.join(root, 'heartbeat')])
         with open(os.path.join(root, 'child-pid'), 'w') as output:
@@ -234,7 +237,15 @@ fn reads_recent_200_lines_as_plain_text_including_terminal_participants() {
         assert_eq!(read["socket"], "socket-a");
         assert_eq!(
             read["args"],
-            json!(["pane", "read", pane, "--source", "recent", "--lines", "200"])
+            json!([
+                "pane",
+                "read",
+                pane,
+                "--source",
+                "recent-unwrapped",
+                "--lines",
+                "200"
+            ])
         );
     }
 }
@@ -404,7 +415,11 @@ fn caps_unicode_after_redaction_and_refuses_oversized_or_invalid_output() {
     configure(&f, json!({"stdout": "🦀".repeat(70_000)}));
     let response = server.get(&path);
     assert_eq!(response.status, 200);
-    assert_eq!(response.body, "🦀".repeat(65_536));
+    let marker = "[Earlier screen text omitted]\n";
+    assert_eq!(
+        response.body,
+        format!("{marker}{}", "🦀".repeat(65_536 - marker.chars().count()))
+    );
     let prefix = "x".repeat(65_530);
     configure(
         &f,
@@ -613,4 +628,135 @@ fn blocked_read_does_not_block_other_panes_or_the_same_pane_id_on_another_socket
     let reads = invocations(&f);
     assert_eq!(reads[2]["socket"], "socket-b");
     assert_eq!(reads[2]["args"][2], "pane-1-lead");
+}
+
+#[test]
+fn long_key_uses_unwrapped_source_and_hides_the_entire_tail() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let key = format!("sk-proj-{}UNIQUE_SECRET_TAIL", "a".repeat(164));
+    configure(
+        &f,
+        json!({"stdout": format!("KEY={key}\n"), "require_unwrapped": true}),
+    );
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    assert_eq!(response.status, 200, "unwrapped source must be requested");
+    assert_eq!(response.body, "KEY=[REDACTED TOKEN]");
+    assert_eq!(invocations(&f)[0]["args"][4], "recent-unwrapped");
+}
+
+#[test]
+fn newest_unicode_lines_survive_the_cap_with_an_in_budget_marker() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let path = path("socket-a", "w1", "lead");
+    let marker = "[Earlier screen text omitted]\n";
+    configure(
+        &f,
+        json!({"stdout": format!("{}NEWEST 🦀\n", "OLD 🦀 line\n".repeat(8000))}),
+    );
+    let response = server.get(&path);
+    assert_eq!(response.status, 200);
+    assert!(response.body.starts_with(marker), "missing omission marker");
+    assert!(response.body.ends_with("NEWEST 🦀"), "newest line was lost");
+    assert!(response.body.chars().count() <= 65_536);
+    assert!(response.body[marker.len()..].starts_with("OLD 🦀 line\n"));
+
+    configure(
+        &f,
+        json!({"stdout": format!("old\n{}NEWEST", "🦀".repeat(70_000))}),
+    );
+    let response = server.get(&path);
+    assert_eq!(response.body.chars().count(), 65_536);
+    assert!(response.body.starts_with(marker));
+    assert!(response.body.ends_with("NEWEST"));
+
+    configure(
+        &f,
+        json!({"stdout": format!("-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\nnewest", "SECRET BODY\n".repeat(7000))}),
+    );
+    let response = server.get(&path);
+    assert_eq!(response.body, "[REDACTED PRIVATE KEY]\nnewest");
+    configure(
+        &f,
+        json!({"stdout": format!("{} sk-proj-{}UNIQUE_SECRET_TAIL\nnewest", "old\n".repeat(17_000), "a".repeat(164))}),
+    );
+    let response = server.get(&path);
+    assert!(response.body.starts_with(marker));
+    assert!(response.body.ends_with("[REDACTED TOKEN]\nnewest"));
+    assert!(!response.body.contains("UNIQUE_SECRET_TAIL"));
+    configure(
+        &f,
+        json!({"stdout": format!("old\nsk-proj-{}UNIQUE_SECRET_TAIL\nnewest", "a".repeat(70_000))}),
+    );
+    assert_eq!(server.get(&path).body, "old\n[REDACTED TOKEN]\nnewest");
+}
+
+#[test]
+fn sixteen_pending_peeks_include_followers_and_leave_other_routes_available() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let target = path("socket-a", "w1", "lead");
+    configure(
+        &f,
+        json!({"stdout": "independent", "targets": {
+            "socket-a|pane-1-lead": {"gate": "release", "stdout": "shared"}
+        }}),
+    );
+    let barrier = Barrier::new(17);
+    thread::scope(|scope| {
+        let (sender, receiver) = mpsc::channel();
+        for _ in 0..16 {
+            let barrier = &barrier;
+            let sender = sender.clone();
+            let server = &server;
+            let target = &target;
+            scope.spawn(move || {
+                let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                write!(
+                    stream,
+                    "GET {target} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\n\r\n",
+                    server.port, server.cookie
+                )
+                .unwrap();
+                stream.shutdown(Shutdown::Write).unwrap();
+                barrier.wait();
+                sender.send(read_response(stream)).unwrap();
+            });
+        }
+        barrier.wait();
+        wait_for(|| invocations(&f).len() == 1);
+        thread::sleep(Duration::from_millis(250));
+        let started = Instant::now();
+        let excess = server.get(&path("socket-a", "w1", "planner"));
+        let elapsed = started.elapsed();
+        let ordinary = server.get("/api/session");
+        fs::write(f.root.join("release"), "").unwrap();
+        let responses: Vec<_> = (0..16)
+            .map(|_| receiver.recv_timeout(Duration::from_secs(5)).unwrap())
+            .collect();
+        assert_eq!(
+            excess.status, 503,
+            "seventeenth peek must be refused, including followers"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "admission must not wait for a read"
+        );
+        assert_eq!(ordinary.status, 200);
+        assert!(
+            responses
+                .iter()
+                .all(|response| response.status == 200 && response.body == "shared")
+        );
+    });
+    configure(&f, json!({"exit": 1}));
+    for _ in 0..17 {
+        assert_eq!(server.get(&target).status, 503);
+    }
+    configure(&f, json!({"stdout": "recovered"}));
+    assert_eq!(server.get(&target).body, "recovered");
 }
