@@ -121,11 +121,18 @@ export type OutgoingPhase =
   | { kind: "sent"; messageId: string };
 export type ComposerId = { key: SpaceKey; thread: string | null };
 export type DraftKey = `channel:${SpaceKey}` | `thread:${string}`;
-export type SendFailure = { status: number; message: string };
-export type Draft = ComposerId & {
-  text: string;
-  failure: (SendFailure & { requestId: string }) | null;
+export type SendAttempt = {
+  requestId: string;
+  source: string;
+  inReplyTo: string | null;
 };
+export type SendFailure = { status: number; message: string };
+// A refused draft keeps its attempt until a success, so the same post reuses
+// its id. The failure shows only until the next edit, and never without an attempt.
+export type Draft = ComposerId & { text: string } & (
+    | { attempt: null; failure: null }
+    | { attempt: SendAttempt; failure: SendFailure | null }
+  );
 export type Outgoing = {
   requestId: string;
   composer: ComposerId;

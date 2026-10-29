@@ -347,9 +347,12 @@ export function App() {
       // A second Enter can land before the render that locks the box.
       for (const composer of inFlightPosts.current.values())
         if (sameComposer(composer, outgoing.composer)) return;
+      const tried = state.drafts.get(draftKey(outgoing.composer))?.attempt;
       const requestId =
-        state.drafts.get(draftKey(outgoing.composer))?.failure?.requestId ??
-        crypto.randomUUID();
+        tried?.source === outgoing.source &&
+        tried.inReplyTo === outgoing.inReplyTo
+          ? tried.requestId
+          : crypto.randomUUID();
       inFlightPosts.current.set(requestId, outgoing.composer);
       dispatch({
         type: "send",

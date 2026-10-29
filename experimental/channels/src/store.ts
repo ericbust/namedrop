@@ -674,15 +674,21 @@ function step(state: State, event: Event): State {
       const at = draftKey(event.composer);
       const known = state.drafts.get(at);
       if (
-        event.text === ""
-          ? known === undefined
-          : known?.text === event.text && known.failure === null
+        known === undefined
+          ? event.text === ""
+          : known.text === event.text && known.failure === null
       )
         return state;
       const drafts = new Map(state.drafts);
-      if (event.text === "") drafts.delete(at);
+      const attempt = known?.attempt ?? null;
+      if (event.text === "" && attempt === null) drafts.delete(at);
       else
-        drafts.set(at, { ...event.composer, text: event.text, failure: null });
+        drafts.set(at, {
+          ...event.composer,
+          text: event.text,
+          attempt,
+          failure: null,
+        });
       return { ...state, drafts };
     }
     case "send": {
@@ -729,11 +735,12 @@ function step(state: State, event: Event): State {
       drafts.set(at, {
         ...known.composer,
         text: state.drafts.get(at)?.text ?? known.source,
-        failure: {
+        attempt: {
           requestId: event.requestId,
-          status: event.status,
-          message: event.message,
+          source: known.source,
+          inReplyTo: known.inReplyTo,
         },
+        failure: { status: event.status, message: event.message },
       });
       return { ...state, outbox, drafts };
     }
