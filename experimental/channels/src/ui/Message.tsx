@@ -59,22 +59,32 @@ function linkedText(text: string, limit: number): ReactNode {
 function formattedText(text: string, limit: number): ReactNode {
   const parts = text.split(/(```[^\n]*\n[\s\S]*?(?:```|$))/g);
   let offset = 0;
-  return parts.flatMap((part) => {
+  return parts.flatMap((part, index) => {
     const key = offset;
     offset += part.length;
     const available = Math.min(part.length, limit - key);
     if (available <= 0) return [];
-    return part.startsWith("```") ? (
-      <pre key={key}>
-        <code>
-          {part
-            .slice(0, available)
-            .replace(/^```[^\n]*\n/, "")
-            .replace(/```$/, "")}
-        </code>
-      </pre>
-    ) : (
-      <Fragment key={key}>{linkedText(part, available)}</Fragment>
+    if (part.startsWith("```"))
+      return (
+        <pre key={key}>
+          <code>
+            {part
+              .slice(0, available)
+              .replace(/^```[^\n]*\n/, "")
+              .replace(/```$/, "")}
+          </code>
+        </pre>
+      );
+    // The pre is a block, so a newline beside a fence would render as an empty line.
+    const start = index > 0 && part.startsWith("\n") ? 1 : 0;
+    const end =
+      index < parts.length - 1 && part.endsWith("\n")
+        ? part.length - 1
+        : part.length;
+    return (
+      <Fragment key={key}>
+        {linkedText(part.slice(start, end), available - start)}
+      </Fragment>
     );
   });
 }

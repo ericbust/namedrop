@@ -1697,6 +1697,43 @@ test("design-b fix: the message hover keeps the hover token's hue in both themes
   }
 });
 
+test("design-b fix: fenced code sits between its lines without blank lines", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = [
+    message("code", "files:\n```\na\nb\n```\nReference one\n\nParagraph two"),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const body = ui.page.locator('[data-message-id="code"] .body');
+  const layout = await body.evaluate((element) => {
+    const top = (word) => {
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const at = walker.currentNode.textContent.indexOf(word);
+        if (at < 0) continue;
+        const range = document.createRange();
+        range.setStart(walker.currentNode, at);
+        range.setEnd(walker.currentNode, at + 1);
+        return range.getBoundingClientRect();
+      }
+    };
+    const pre = element.querySelector("pre").getBoundingClientRect();
+    const line = Number.parseFloat(getComputedStyle(element).lineHeight);
+    return {
+      line,
+      above: pre.top - top("files").bottom,
+      below: top("Reference").top - pre.bottom,
+      paragraph: top("Paragraph").top - top("Reference").top,
+    };
+  });
+  assert.ok(layout.above < layout.line, `blank line above: ${layout.above}`);
+  assert.ok(layout.below < layout.line, `blank line below: ${layout.below}`);
+  assert.ok(
+    layout.paragraph >= 2 * layout.line,
+    `the author's own blank line stays: ${layout.paragraph}`,
+  );
+});
+
 test("design-b: loading, empty channel and history errors use the design copy", async (t) => {
   let fail = true;
   const loading = await open(t, () => {});
