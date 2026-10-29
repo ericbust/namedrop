@@ -453,6 +453,51 @@ fn permission_blocking_keeps_its_run_start_and_restarts_after_clearing() {
 }
 
 #[test]
+fn permission_blocking_keeps_its_run_start_with_ten_thousand_observations() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let aliases: Vec<_> = (0..20).map(|index| format!("agent-{index}")).collect();
+    let alias_refs: Vec<_> = aliases.iter().map(String::as_str).collect();
+    let ns = seed_space(&mut store, "w1", &alias_refs);
+    store
+        .transaction(|tx| {
+            for round in 0..500 {
+                let status = if (100..200).contains(&round) || round >= 400 {
+                    "blocked"
+                } else {
+                    "idle"
+                };
+                for alias in &aliases {
+                    tx.observe_agent_session(
+                        &ns,
+                        &format!("history-{alias}-{round}"),
+                        &id(&ns, alias),
+                        &AgentSessionId::new(format!("session-w1-{alias}")),
+                        status,
+                        &MutationAttribution::new(ActorKind::Plugin, "test", 100 + round),
+                    )?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    let rows = store.dashboard_rows(&ns).unwrap();
+    assert_eq!(rows.addresses.len(), aliases.len());
+    for address in &rows.addresses {
+        assert_eq!(address.agent_status.as_deref(), Some("blocked"));
+        assert_eq!(address.blocked_since_ms, Some(500));
+    }
+    let current = build(&rows, None, 0);
+    assert_eq!(current.attention.len(), aliases.len());
+    let json = serde_json::to_value(&current).unwrap();
+    for attention in json["attention"].as_array().unwrap() {
+        assert_eq!(attention["source_kind"], "agent_status");
+        assert_eq!(attention["opened_at_ms"], 500);
+    }
+}
+
+#[test]
 fn permission_blocking_starts_with_the_current_binding() {
     let directory = TestDirectory::new();
     let mut store = StateStore::open(directory.path()).unwrap();
