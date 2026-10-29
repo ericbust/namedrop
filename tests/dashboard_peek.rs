@@ -408,6 +408,30 @@ fn strips_terminal_sequences_and_invisible_characters_before_secret_redaction() 
 }
 
 #[test]
+fn screen_preserves_legitimate_unicode_beside_redacted_secrets() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let raw = concat!(
+        "👨‍👩‍👧 ❤️ می‌خواهم क्‍ष क्‌ष 안녕하세요 ㅤ\n",
+        "foo\u{200d}bar_sk-abcdefghijklmnopqrstuvwxyz123456\n",
+        "API\tKEY=hunter2-plain-secret ghp_\tabcdefghijklmnopqrstuvwxyz123456\n",
+        "ghp_abcdefghijklmnopqrstuvwxyz123456=visible",
+    );
+    configure(&f, json!({"stdout": raw}));
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.body,
+        concat!(
+            "👨‍👩‍👧 ❤️ می‌خواهم क्‍ष क्‌ष 안녕하세요 ㅤ\n",
+            "foo\u{200d}bar_[REDACTED TOKEN]\n",
+            "API\tKEY=[REDACTED ENV VALUE]\n",
+            "[REDACTED TOKEN]=visible",
+        )
+    );
+}
+
+#[test]
 fn caps_unicode_after_redaction_and_refuses_oversized_or_invalid_output() {
     let f = Fixture::new();
     let server = Server::start(&f);

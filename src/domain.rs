@@ -158,33 +158,8 @@ pub fn validate_alias(alias: &str) -> Result<(), String> {
 
 pub const MAX_PERSONA_CHARS: usize = 1_000;
 
-/// Unicode 18 Default_Ignorable_Code_Point, plus line/paragraph separators
-/// and the interlinear annotations already excluded by the wire policy.
-/// Source: https://www.unicode.org/Public/18.0.0/ucd/DerivedCoreProperties.txt
+/// Formatting excluded from displayed text and saved personas.
 pub(crate) fn is_invisible_format(character: char) -> bool {
-    matches!(
-        character,
-        '\u{00AD}'
-            | '\u{034F}'
-            | '\u{061C}'
-            | '\u{115F}'..='\u{1160}'
-            | '\u{17B4}'..='\u{17B5}'
-            | '\u{180B}'..='\u{180F}'
-            | '\u{200B}'..='\u{200F}'
-            | '\u{2028}'..='\u{202E}'
-            | '\u{2060}'..='\u{206F}'
-            | '\u{3164}'
-            | '\u{FE00}'..='\u{FE0F}'
-            | '\u{FEFF}'
-            | '\u{FFA0}'
-            | '\u{FFF0}'..='\u{FFFB}'
-            | '\u{1BCA0}'..='\u{1BCA3}'
-            | '\u{1D173}'..='\u{1D17A}'
-            | '\u{E0000}'..='\u{E0FFF}'
-    )
-}
-
-fn is_rejected_persona_format(character: char) -> bool {
     matches!(
         character,
         '\u{00AD}'
@@ -207,7 +182,7 @@ pub fn validate_persona(description: &str) -> Result<(), String> {
     if description.chars().any(char::is_control) {
         return Err("persona cannot contain control characters".to_owned());
     }
-    if description.chars().any(is_rejected_persona_format) {
+    if description.chars().any(is_invisible_format) {
         return Err(
             "persona cannot contain invisible formatting characters such as bidirectional overrides"
                 .to_owned(),
