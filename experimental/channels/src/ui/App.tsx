@@ -339,6 +339,7 @@ export function App() {
         ].find((button) => button.dataset.threadId === saved.threadId);
     button?.focus();
   }, []);
+  const paneWasOpen = useRef(false);
   useLayoutEffect(() => {
     if (thread && focusIntent.current) {
       document
@@ -347,6 +348,13 @@ export function App() {
         ?.focus();
       focusIntent.current = false;
     }
+    if (
+      !thread &&
+      paneWasOpen.current &&
+      document.activeElement === document.body
+    )
+      document.querySelector<HTMLElement>("section.timeline")?.focus();
+    paneWasOpen.current = thread !== undefined;
   });
   const updatedAt = lastUpdate.current;
   return (

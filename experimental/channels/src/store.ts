@@ -407,9 +407,25 @@ export function landing(
 }
 export function reduce(state: State, event: Event): State {
   const next = step(state, event);
-  return next.openThread !== null && next.selection.key !== state.selection.key
-    ? { ...next, openThread: null }
-    : next;
+  const { openThread } = next;
+  if (openThread === null) return next;
+  const key = next.selection.key;
+  if (key !== state.selection.key) return { ...next, openThread: null };
+  if (key === null) return next;
+  const channel = next.channels.get(key);
+  if (
+    channel === undefined ||
+    channel.messages === state.channels.get(key)?.messages ||
+    threadLoaded(channel, openThread)
+  )
+    return next;
+  return { ...next, openThread: null };
+}
+function threadLoaded(channel: Channel, threadId: string): boolean {
+  for (const run of channel.runs)
+    for (const id of run)
+      if (channel.messages.get(id)?.threadId === threadId) return true;
+  return false;
 }
 function step(state: State, event: Event): State {
   switch (event.type) {

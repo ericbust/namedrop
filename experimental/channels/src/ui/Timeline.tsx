@@ -97,6 +97,7 @@ export function Timeline({
   const gap = channel.runs.length > 1;
   const browsing = channel.viewMode === "browsing";
   const jumpToLatest = () => {
+    scroller.current?.focus({ preventScroll: true });
     if (browsing) {
       anchors.current.delete(channel.key);
       onLatest(channel.key);
