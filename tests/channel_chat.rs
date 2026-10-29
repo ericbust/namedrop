@@ -57,6 +57,33 @@ fn plain_post_routes_verbatim_and_replay_does_not_call_router_again() {
 }
 
 #[test]
+fn failed_routing_attempt_keeps_provider_receipt_before_post_commit() {
+    let f = fixture();
+    let server = Server::start(&f, r#"{"result":"not json","num_turns":2,"usage":{"input_tokens":137,"output_tokens":19},"total_cost_usd":0.0012}"#, false);
+    let (status, receipt) = post(&server, "failed-audit", "Please ask @planner to inspect this.", None);
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["channel"]["state"], "router_failed");
+    let journal = fs::read_to_string(f.state.join("dashboard/channel-router-attempts.jsonl"))
+        .expect("every actual routing call must leave an independent cost receipt");
+    let records: Vec<Value> = journal.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["request_id"], "failed-audit");
+    assert_eq!(records[0]["host"], "claude");
+    assert_eq!(records[0]["model"], "claude-haiku-4-5");
+    assert_eq!(records[0]["outcome"], "invalid_response");
+    assert_eq!(records[0]["num_turns"], 2);
+    assert_eq!(records[0]["input_tokens"], 137);
+    assert_eq!(records[0]["output_tokens"], 19);
+    assert_eq!(records[0]["provider_usd"], 0.0012);
+    assert_eq!(records[0]["usage_complete"], true);
+    assert!(records[0]["duration_ms"].is_u64());
+    assert!(!journal.contains("not json"));
+    assert!(!journal.contains("Please ask"));
+    post(&server, "failed-audit", "Please ask @planner to inspect this.", None);
+    assert_eq!(fs::read_to_string(f.state.join("dashboard/channel-router-attempts.jsonl")).unwrap(), journal);
+}
+
+#[test]
 fn zero_pick_and_opt_out_store_without_waking_members() {
     for off in [false, true] {
         let f = fixture();
