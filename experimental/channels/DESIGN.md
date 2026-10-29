@@ -577,7 +577,9 @@ preview.
   is channel chat: the post, agent replies, and the operator's follow-ups.
 - An **agent conversation**: a thread whose first message an agent wrote, such
   as one agent handing work to another. Its messages keep their header
-  recipients and receipt line, because an agent addressed them.
+  recipients and receipt line, because an agent addressed them. Its first
+  message ends with the same 12px "1 reply" link a channel post's route line
+  carries, in place of the reply preview box.
 - A thread whose first message is not loaded shows its replies as today's
   earlier-thread rows, because nothing marks it.
 
@@ -591,21 +593,22 @@ because the message went to the room. The line is a wrapping row of parts
 divided by "·", like the receipt line, and it starts with a 12px drawn icon.
 Names in it are peek buttons at 12px 600 in `--text`.
 
-| Message and state                                 | Route line                                                       | Icon                   |
-| ------------------------------------------------- | ---------------------------------------------------------------- | ---------------------- |
-| Post that mentions no agent                       | No line                                                          | none                   |
-| Post, `routing`                                   | "Checking who this is for…"                                      | clock                  |
-| Post, `routed`                                    | "@claude · build question", where the words are the reason       | arrow                  |
-| Post, `routed` with an empty reason               | "@claude"                                                        | arrow                  |
-| Post, `routed`, and a mentioned agent not sent    | "@claude · build question · Mentioned @codex, not sent · Send anyway" | arrow             |
-| Post, `unrouted`, mentioning agents               | "Mentioned @codex, not sent · Send anyway"                       | inbox                  |
-| Post, `router_failed`                             | "Couldn't check who this is for · Send to @codex"                | alert, `--failed-text` |
-| Reply or follow-up that woke a member             | "@codex · pulled in"                                             | arrow                  |
-| Follow-up sent to members                         | "@codex"                                                         | arrow                  |
-| Reply to the operator only                        | No line                                                          | none                   |
-
-- The names are the message's recipients: its legs, without the operator.
-  "pulled in" shows when the message's `woke` list is not empty.
+| Message and state                              | Route line                                                            | Icon                   |
+| ---------------------------------------------- | --------------------------------------------------------------------- | ---------------------- |
+| Post that mentions no agent                    | No line                                                               | none                   |
+| Post, `routing`                                | "Checking who this is for…"                                           | clock                  |
+| Post, `routed`                                 | "@claude · build question", where the words are the reason            | arrow                  |
+| Post, `routed` with an empty reason            | "@claude"                                                             | arrow                  |
+| Post, `routed`, and a mentioned agent not sent | "@claude · build question · Mentioned @codex, not sent · Send anyway" | arrow                  |
+| Post, `unrouted`, mentioning agents            | "Mentioned @codex, not sent · Send anyway"                            | inbox                  |
+| Post, `router_failed`                          | "Couldn't check who this is for · Send to @codex"                     | alert, `--failed-text` |
+| Reply or follow-up that woke a member          | "@codex · pulled in"                                                  | arrow                  |
+| Follow-up sent to members                      | "@codex"                                                              | arrow                  |
+| Reply to the operator only                     | No line                                                               | none                   |
+- The names are the message's recipients: its legs, without the operator, all
+  of them, with no "+N". "pulled in" shows when the message's `woke` list is
+  not empty. An `unrouted` post that still has recipients reads like a routed
+  one with no reason. The line's accessible name is "Who got this".
 - The reason is the model's words. Show them as plain text, on one line, at
   most 60 characters. The line's tooltip reads "Picked by claude-haiku", with
   the server's router name, when the server sends one.
@@ -624,13 +627,16 @@ Names in it are peek buttons at 12px 600 in `--text`.
   "Namedrop couldn't reach its router. The post is saved, and no one got it."
 
 **Send anyway.** A post offers to send itself to each agent it mentions that
-did not get it. One such agent reads "Send anyway". Several read "Send to
-@codex, @claude", and `router_failed` always uses that form. Each offer is a
+did not get it. One such agent reads "Mentioned @codex, not sent · Send
+anyway". Several read "Mentioned 2 agents, not sent · Send to @codex, @lead", so
+each name shows once, as its button. `router_failed` always uses the "Send to"
+form. Each offer is a
 text button in 12px 600 `--accent-text` with the accessible name "Send this to
 @codex". Activating one opens the post's thread in the thread pane and focuses
-its composer. When that thread's draft is empty, the box holds `@codex ` and the
-post's text, with the caret at the end, so Enter sends it and the text can still
-change first. A draft that has text stays as it is.
+its composer. When that thread's draft is empty, the box holds `@codex `, the
+post's text, and one space, with the caret at the end. The space keeps the caret
+out of a mention the post ends with, so the member list stays closed and Enter
+sends. The text can still change first. A draft that has text stays as it is.
 
 **Replies in the timeline.**
 
@@ -639,9 +645,10 @@ change first. A draft that has text stays as it is.
   column: a 12px drawn reply icon, the parent's author at 600, ":", and the
   parent's first line, in 12px `--text-muted`, clipped to one line at
   `--measure`. The line is a button that opens the thread pane. Its accessible
-  name is "Reply to @claude: The arm64 link step fails. Open thread". When the
-  parent is not loaded, it reads "Reply to an earlier message". Hover turns its
-  text `--text`.
+  name is "Reply to @claude: The arm64 link step fails. Open thread", with the
+  first line clipped at 80 characters and no second period after one it already
+  ends with. When the parent is not loaded, it reads "Reply to an earlier
+  message". Hover turns its text `--text`.
 - A reply with a reference line starts a new group. Otherwise a conversation
   groups like any message.
 - The thread pane shows these threads as it shows any thread, with route lines
@@ -872,7 +879,7 @@ Motion shows state and nothing else.
 | First connection, under 400ms | Nothing new. Keep the shell blank to avoid a flash.                                                                                |
 | First connection, over 400ms  | Three skeleton sidebar rows and three skeleton messages, in `--bg-hover`, with no shimmer.                                         |
 | No workspaces                 | Title "No workspaces yet". Body "Open a workspace in Herdr and name an agent with `namedrop name`. It shows up here as a channel." |
-| Channel with no messages      | Title "No messages yet". Body "Post here to talk with the agents in this workspace. Mention @name to bring one in."               |
+| Channel with no messages      | Title "No messages yet". Body "Post here to talk with the agents in this workspace. Mention @name to bring one in."                |
 | Loading older messages        | A 12px muted "Loading earlier messages…" line at the top of the timeline.                                                          |
 | History error                 | "Couldn't load earlier messages." and a **Try again** button, in the same line.                                                    |
 | Missing range                 | A hairline divider with "Some messages are missing here" and a **Load them** button.                                               |
