@@ -1324,11 +1324,9 @@ button.member:not(.more):hover {
   margin-top: var(--space-2);
 }
 .peek-omitted {
-  padding: var(--space-2) var(--space-4) 0;
-  background: var(--bg-raised);
+  margin: 0 0 var(--space-2);
   font-size: var(--text-xs);
   color: var(--text-muted);
-  flex: none;
 }
 .peek-text {
   flex: 1;
@@ -1350,6 +1348,12 @@ button.member:not(.more):hover {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.screen-line {
+  display: block;
+  min-height: 1lh;
+  padding-left: 2ch;
+  text-indent: -2ch;
+}
 
 .activity-list {
   flex: 1;
@@ -1360,6 +1364,9 @@ button.member:not(.more):hover {
 }
 .activity-list:focus-visible {
   outline-offset: -2px;
+}
+.activity-group {
+  max-width: 880px;
 }
 .activity-group + .activity-group {
   margin-top: var(--space-5);
@@ -1467,6 +1474,9 @@ button.member:not(.more):hover {
   white-space: nowrap;
   font-size: var(--text-sm);
   color: var(--text-muted);
+}
+.activity-row.is-single ~ .activity-channel {
+  grid-row: 2 / 4;
 }
 .activity-channel:hover {
   color: var(--text);

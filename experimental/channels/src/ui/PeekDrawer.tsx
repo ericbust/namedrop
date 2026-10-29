@@ -199,9 +199,6 @@ function PeekScreen({
       {body.kind === "failure" && (
         <Notice notice={body.notice} again={again} className="peek-failure" />
       )}
-      {body.kind === "text" && body.earlierOmitted && (
-        <p className="peek-omitted">{peekCopy.omitted}</p>
-      )}
       <section
         className={`peek-text${text === null ? "" : " has-text"}`}
         aria-label={peekCopy.text}
@@ -215,8 +212,27 @@ function PeekScreen({
             4;
         }}
       >
-        <pre>{text}</pre>
+        {body.kind === "text" && body.earlierOmitted && (
+          <p className="peek-omitted">{peekCopy.omitted}</p>
+        )}
+        {text !== null && <ScreenLines text={text} />}
       </section>
     </>
+  );
+}
+
+// Each line is its own block so a wrapped line hangs under its start. The
+// newlines stay in the text, so copying and textContent read like the screen.
+function ScreenLines({ text }: { text: string }) {
+  const lines = text.split("\n");
+  return (
+    <pre>
+      {lines.map((line, index) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: A read's lines never reorder; the whole block re-renders per read.
+        <span key={index} className="screen-line">
+          {index < lines.length - 1 ? `${line}\n` : line}
+        </span>
+      ))}
+    </pre>
   );
 }
