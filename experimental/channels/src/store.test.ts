@@ -1722,16 +1722,23 @@ test("design-b: switching channels closes the open thread", () => {
 });
 
 const MIN = 60_000;
+type RowOptions = {
+  author?: string;
+  to?: string[];
+  kind?: string;
+  thread?: string;
+  inReplyTo?: string | null;
+};
 function row(
   id: string,
   at: number,
   {
     author = "agent-1",
-    to = [] as string[],
+    to = [],
     kind = "mention",
     thread = id,
-    inReplyTo = null as string | null,
-  } = {},
+    inReplyTo = null,
+  }: RowOptions = {},
 ) {
   return {
     ...message(id),

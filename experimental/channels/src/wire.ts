@@ -241,12 +241,8 @@ function messages(value: unknown): Map<string, Message> {
   return rows;
 }
 export function pathKey(pathname: string): SpaceKey | null {
-  const segment = /^\/w\/([^/]+)\/?$/.exec(pathname)?.[1];
-  try {
-    return segment === undefined ? null : spaceKey(segment);
-  } catch {
-    return null;
-  }
+  const segment = /^\/w\/([0-9a-f]{20})\/?$/.exec(pathname)?.[1];
+  return segment === undefined ? null : spaceKey(segment);
 }
 export function parseHistory(raw: unknown): readonly Message[] {
   return [...messages(raw).values()].reverse();
