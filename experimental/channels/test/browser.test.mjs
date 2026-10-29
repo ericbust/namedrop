@@ -1613,6 +1613,19 @@ test("landing: late frames select the URL's channel when it arrives, and an auto
   await root.row(4).waitFor();
   assert.equal(await root.row(1).getAttribute("aria-current"), "page");
   assert.equal(await path(root), `/w/${key(1)}`);
+  await root.page.goBack();
+  await root.page.waitForFunction(() => location.pathname === "/");
+  await nextFrames(root.page);
+  assert.equal(
+    await root.channels
+      .locator('[aria-current="page"]')
+      .getAttribute("data-channel-key"),
+    key(4),
+    "Back to the root lands again on the first channel that needs you",
+  );
+  await root.page.goForward();
+  await selected(root, 1);
+  assert.equal(await path(root), `/w/${key(1)}`);
 });
 
 test("design-b: a channel is read after 1.5 seconds on screen, and arrow keys passing over keep it unread", async (t) => {
