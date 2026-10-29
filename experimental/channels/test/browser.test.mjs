@@ -1734,6 +1734,68 @@ test("design-b fix: fenced code sits between its lines without blank lines", asy
   );
 });
 
+async function pixelColumn(page, clip) {
+  const png = await page.screenshot({ clip: { ...clip, width: 1 } });
+  return page.evaluate(async (data) => {
+    const image = new Image();
+    image.src = `data:image/png;base64,${data}`;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = image.height;
+    const context = canvas.getContext("2d");
+    context.drawImage(image, 0, 0);
+    const pixels = context.getImageData(0, 0, 1, image.height).data;
+    return Array.from({ length: image.height }, (_, row) => [
+      ...pixels.slice(row * 4, row * 4 + 3),
+    ]);
+  }, png.toString("base64"));
+}
+test("design-b fix: the timeline fades content over its top 12px and keeps a full focus ring", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = [
+    message("tall", `\x60\x60\x60\n${"a\n".repeat(60)}\x60\x60\x60`),
+    ...Array.from({ length: 20 }, (_, n) => message(`after${n}`)),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.setViewportSize({ width: 1024, height: 700 });
+  await ui.live();
+  const { x, y } = await ui.page.evaluate(() => {
+    const timeline = document.querySelector(".timeline");
+    const pre = document.querySelector('[data-message-id="tall"] pre');
+    timeline.scrollTop +=
+      pre.getBoundingClientRect().top -
+      timeline.getBoundingClientRect().top +
+      80;
+    return {
+      x: Math.round(pre.getBoundingClientRect().right - 8),
+      y: Math.round(timeline.getBoundingClientRect().top),
+    };
+  });
+  const sum = (color) => color.reduce((total, channel) => total + channel, 0);
+  const column = await pixelColumn(ui.page, { x, y, height: 30 });
+  assert.ok(
+    sum(column[0]) > sum(column[29]) + 9,
+    `the top edge fades to the page: ${column[0]} over ${column[29]}`,
+  );
+  const ring = await ui.page.evaluate(() => {
+    const timeline = document.querySelector(".timeline");
+    timeline.focus({ focusVisible: true });
+    const canvas = document.createElement("canvas");
+    canvas.width = 1;
+    canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    context.fillStyle = getComputedStyle(timeline).outlineColor;
+    context.fillRect(0, 0, 1, 1);
+    return [...context.getImageData(0, 0, 1, 1).data.slice(0, 3)];
+  });
+  const [edge] = await pixelColumn(ui.page, { x, y, height: 1 });
+  assert.ok(
+    edge.every((channel, index) => Math.abs(channel - ring[index]) <= 2),
+    `the focus ring's top edge ${edge} matches ${ring}`,
+  );
+});
+
 test("design-b: loading, empty channel and history errors use the design copy", async (t) => {
   let fail = true;
   const loading = await open(t, () => {});

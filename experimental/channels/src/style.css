@@ -732,9 +732,13 @@ a:hover {
   overflow-y: auto;
   overflow-anchor: none;
   padding: var(--space-2) var(--space-6) var(--space-6);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px);
+  mask-image: linear-gradient(to bottom, transparent, #000 12px);
 }
 .timeline:focus-visible {
   outline-offset: -2px;
+  -webkit-mask-image: none;
+  mask-image: none;
 }
 .history-edge {
   display: flex;
