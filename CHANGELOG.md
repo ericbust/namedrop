@@ -6,6 +6,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Fixed
 
+- Dashboard entry links keep their query parameters and browser fragments after redemption. Channels use server-provided addressability reasons and alias-free member attention text. Recently closed members remain available for Peek for five minutes, with existing history references retaining them afterward.
 - Dashboard delivery and unanswered-request warnings follow the recipient's current alias after a rename. Attention links load in one query instead of preparing a query for each warning.
 
 ### Added
