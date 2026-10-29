@@ -630,8 +630,6 @@ where
         }
     }
 
-    let final_discovery = discover(runtime)?;
-    let final_live = live.with_here(final_discovery.clone());
     (report.terminal_running, report.terminal_waiting) = store
         .transaction(|tx| {
             let running = tx
@@ -651,11 +649,11 @@ where
                     continue;
                 };
                 if candidate.pane_type == crate::PaneType::Terminal
-                    && live_candidate_matches(&candidate, &final_discovery)
+                    && live_candidate_matches(&candidate, &first_discovery)
                     && tx.coordination_wake_message_eligible(
                         &namespace,
                         &candidate.message_id,
-                        &final_live,
+                        &live,
                     )?
                 {
                     waiting.push(address);
@@ -664,7 +662,7 @@ where
             Ok((running, waiting))
         })
         .map_err(|e| e.to_string())?;
-    publish_status_metadata(runtime, &final_discovery)?;
+    publish_status_metadata(runtime, &first_discovery)?;
     Ok(report)
 }
 
