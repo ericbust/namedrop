@@ -101,6 +101,11 @@ const ND_DELIVERY =
 test("Needs-you copy gives every source a title and a hint and keeps the server text in details", () => {
   const table: [Attention["source"], string, string][] = [
     [
+      "agent_status",
+      "Something needs you",
+      "Open its pane in Herdr to answer.",
+    ],
+    [
       "agent_disposition",
       "Unanswered request",
       "An agent ended its turn without replying.",
@@ -153,45 +158,98 @@ test("Needs-you copy gives every source a title and a hint and keeps the server 
   );
 });
 
-test("Needs-you copy names the subject agent when the server sends one", () => {
-  for (const source of ["delivery_attempt", "agent_disposition"] as const)
+test("Needs-you copy names the subject agent for every source when the server sends one", () => {
+  const table: [Attention["source"], string, string, string][] = [
+    [
+      "agent_status",
+      "@claude",
+      "@claude needs you",
+      "Open its pane in Herdr to answer.",
+    ],
+    [
+      "agent_disposition",
+      "@codex",
+      "@codex didn't answer a request",
+      "It ended its turn without replying.",
+    ],
+    [
+      "delivery_attempt",
+      "@codex",
+      "@codex didn't answer a request",
+      "It ended its turn without replying.",
+    ],
+    [
+      "automatic_reply_limit",
+      "@codex",
+      "@codex hit the reply limit",
+      "Continue or stop this thread from its pane.",
+    ],
+    [
+      "coordination",
+      "@claude",
+      "@claude's coordination needs a decision",
+      "Review the report and close it from the lead's pane.",
+    ],
+    [
+      "context_grant",
+      "@codex",
+      "@codex is asking for context",
+      "Approve or decline it from the pane.",
+    ],
+    [
+      "pane_binding",
+      "@codex",
+      "@codex's pane changed",
+      "Name the pane again to reconnect it.",
+    ],
+    [
+      "integration_registration",
+      "@codex",
+      "@codex isn't set up yet",
+      "Start a new session in that pane.",
+    ],
+    [
+      "unknown",
+      "@codex",
+      "@codex needs you",
+      "Open Details for the full message.",
+    ],
+  ];
+  for (const [source, subjectAlias, title, hint] of table)
     assert.deepEqual(
-      attentionCopy(attention(source, ND_DELIVERY, { subjectAlias: "@codex" })),
-      {
-        title: "@codex didn't answer a request",
-        hint: "It ended its turn without replying.",
-        details: ND_DELIVERY,
-      },
+      attentionCopy(attention(source, ND_DELIVERY, { subjectAlias })),
+      { title, hint, details: ND_DELIVERY },
     );
 });
 
-test("agent status shows a short summary as the title and moves a long one to details", () => {
+test("agent status keeps a summary of 90 characters or fewer as the title and moves a longer one to details", () => {
+  const hint = "Open its pane in Herdr to answer.";
   const short = "@claude is waiting on an approval or question.";
-  assert.deepEqual(attentionCopy(attention("agent_status", short)), {
-    title: short,
-    hint: "Open its pane in Herdr to answer.",
-    details: null,
-  });
   const exact = "x".repeat(90);
-  assert.equal(attentionCopy(attention("agent_status", exact)).title, exact);
   const long = "y".repeat(91);
-  assert.deepEqual(attentionCopy(attention("agent_status", long)), {
-    title: "Something needs you",
-    hint: "Open its pane in Herdr to answer.",
-    details: long,
-  });
-  assert.deepEqual(
-    attentionCopy(
-      attention("agent_status", short, {
-        summary: { text: short, truncated: true },
-      }),
-    ),
-    {
-      title: "Something needs you",
-      hint: "Open its pane in Herdr to answer.",
-      details: `${short}…`,
-    },
-  );
+  for (const [subjectAlias, needsYou] of [
+    [null, "Something needs you"],
+    ["@claude", "@claude needs you"],
+  ] as const) {
+    for (const kept of [short, exact])
+      assert.deepEqual(
+        attentionCopy(attention("agent_status", kept, { subjectAlias })),
+        { title: kept, hint, details: null },
+      );
+    assert.deepEqual(
+      attentionCopy(attention("agent_status", long, { subjectAlias })),
+      { title: needsYou, hint, details: long },
+    );
+    assert.deepEqual(
+      attentionCopy(
+        attention("agent_status", short, {
+          subjectAlias,
+          summary: { text: short, truncated: true },
+        }),
+      ),
+      { title: needsYou, hint, details: `${short}…` },
+    );
+  }
 });
 
 test("health copy reads as words, leaves out zero parts, and never says in flight", () => {
