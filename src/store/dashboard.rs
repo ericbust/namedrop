@@ -578,7 +578,11 @@ impl StateTransaction<'_> {
                 })
             },
         )?;
+        let operators = self.operator_projection_addresses(namespace)?;
         let alias_for_address = |id: &str| {
+            if operators.iter().any(|operator| operator == id) {
+                return Some("you".to_owned());
+            }
             addresses
                 .iter()
                 .find(|address| address.address_id == id)
@@ -669,7 +673,7 @@ impl StateTransaction<'_> {
             terminal_runs,
             attention,
         };
-        self.normalize_operator_rows(&mut rows)?;
+        Self::normalize_operator_rows(&mut rows, &operators);
         Ok(rows)
     }
 
@@ -687,10 +691,9 @@ impl StateTransaction<'_> {
         Ok(())
     }
 
-    fn normalize_operator_rows(&self, rows: &mut DashboardRows) -> Result<(), StoreError> {
-        let operators = self.operator_projection_addresses(&rows.namespace)?;
+    fn normalize_operator_rows(rows: &mut DashboardRows, operators: &[String]) {
         if operators.is_empty() {
-            return Ok(());
+            return;
         }
         let human = crate::dashboard::snapshot::HUMAN;
         let normalize = |id: &mut String| {
@@ -738,7 +741,6 @@ impl StateTransaction<'_> {
             blocked_since_ms: None,
             blocked_message_id: None,
         });
-        Ok(())
     }
 
     fn dashboard_spaces(&self) -> Result<Vec<SpaceRow>, StoreError> {

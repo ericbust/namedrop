@@ -9,6 +9,108 @@ use serde_json::json;
 use xws::Fixture;
 
 #[test]
+fn operator_attention_uses_human_alias_without_capturing_a_pane_named_operator() {
+    use namedrop::{AttentionItemDraft, AttentionItemId, AttentionSourceKind};
+    let f = Fixture::new();
+    f.register_all();
+    f.rename("w1", "lead", "operator");
+    let mut runtime = f.runtime("w1", "unused");
+    runtime.current_pane_id = None;
+    send_operator_message("attention-human", "@planner inspect", None, &runtime).unwrap();
+    let pane_address: String = f
+        .db()
+        .query_row(
+            "SELECT address_id FROM alias_claims WHERE session_socket_id='socket-a'
+         AND worktree_id='w1' AND alias='operator' AND claim_state='active'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let ns = StateNamespace::for_space("socket-a", "w1");
+    let mut store = StateStore::open(&f.state).unwrap();
+    store
+        .transaction(|tx| {
+            for (id, source) in [("human", "operator:local"), ("pane", pane_address.as_str())] {
+                tx.open_attention_item(
+                    &ns,
+                    &AttentionItemDraft {
+                        id: AttentionItemId::new(id),
+                        source_kind: AttentionSourceKind::PaneBinding,
+                        source_id: source.to_owned(),
+                        summary: id.to_owned(),
+                    },
+                    &MutationAttribution::new(ActorKind::Human, "test", 42),
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let rows = store.dashboard_rows(&ns).unwrap();
+    let alias = |id: &str| {
+        rows.attention
+            .iter()
+            .find(|row| row.item.id.as_str() == id)
+            .unwrap()
+            .subject_alias
+            .as_deref()
+    };
+    assert_eq!(alias("pane"), Some("operator"));
+    assert_eq!(alias("human"), Some("you"));
+    let frame = namedrop::dashboard::snapshot::build(&rows, None, 42);
+    let human = frame
+        .attention
+        .iter()
+        .find(|item| item.summary.text == "human")
+        .unwrap();
+    assert_eq!(human.subject_alias.as_deref(), Some("you"));
+    assert_eq!(human.message_id, None);
+}
+
+#[test]
+fn operator_attention_normalizes_an_exact_remote_operator_envoy() {
+    use namedrop::{AttentionItemDraft, AttentionItemId, AttentionSourceKind};
+    let f = Fixture::new();
+    f.register_all();
+    let mut runtime = f.runtime("w1", "unused");
+    runtime.current_pane_id = None;
+    send_operator_message("attention-remote", "#ws2 @tester inspect", None, &runtime).unwrap();
+    let envoy: String = f
+        .db()
+        .query_row(
+            "SELECT address_id FROM space_envoys WHERE session_socket_id='socket-a'
+         AND worktree_id='w2' AND origin_space_id='w1' AND origin_address_id='operator:local'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let ns = StateNamespace::for_space("socket-a", "w2");
+    let mut store = StateStore::open(&f.state).unwrap();
+    store
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &ns,
+                &AttentionItemDraft {
+                    id: AttentionItemId::new("remote-human"),
+                    source_kind: AttentionSourceKind::PaneBinding,
+                    source_id: envoy.clone(),
+                    summary: "Remote operator".to_owned(),
+                },
+                &MutationAttribution::new(ActorKind::Human, "test", 42),
+            )
+        })
+        .unwrap();
+    let rows = store.dashboard_rows(&ns).unwrap();
+    let attention = rows
+        .attention
+        .iter()
+        .find(|row| row.item.id.as_str() == "remote-human")
+        .unwrap();
+    assert_eq!(attention.subject_alias.as_deref(), Some("you"));
+    let frame = namedrop::dashboard::snapshot::build(&rows, None, 42);
+    assert_eq!(frame.attention[0].subject_alias.as_deref(), Some("you"));
+}
+
+#[test]
 fn paneless_operator_round_trip_uses_the_ledger_without_an_operator_pane() {
     let f = Fixture::new();
     f.register_all();
