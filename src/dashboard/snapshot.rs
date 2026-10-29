@@ -430,6 +430,7 @@ pub struct Participant {
     pub persona: Option<SafeText>,
     pub pane_label: Option<SafeText>,
     pub activity: Activity,
+    pub recently_closed: bool,
     /// Inbound work not yet finished, oldest first.
     pub mailbox: Vec<MailboxItem>,
     /// Aliases whose answer this participant is waiting for.
@@ -930,6 +931,7 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow], now_ms: i64) -> V
             } else {
                 Activity::Waiting
             },
+            recently_closed: false,
             mailbox: Vec::new(),
             waiting_on,
         });
@@ -971,6 +973,8 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow], now_ms: i64) -> V
                 blocked_assignment,
                 !waiting_on.is_empty(),
             ),
+            recently_closed: closed_member_expires_at(address)
+                .is_some_and(|expiry| now_ms < expiry),
             mailbox: inbound
                 .iter()
                 .take(MAILBOX_LIMIT)

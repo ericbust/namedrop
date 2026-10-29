@@ -961,6 +961,12 @@ impl Hub<'_> {
         if label.as_str() == "all" {
             return Err(Reason::ReservedAll);
         }
+        if !self.spaces.get(key).is_some_and(|space| space.activated) {
+            return Err(match state {
+                snapshot::SpaceState::Deactivated => Reason::NotActive,
+                _ => Reason::NotActivated,
+            });
+        }
         let entries: Vec<_> = self
             .live_spaces
             .values()
