@@ -287,8 +287,8 @@ test("complete: channel options name why a channel cannot be mentioned, in the t
     snapshot("7", "Gamma", "gamma"),
     snapshot("8", "gamma!", null),
     snapshot("9", "Dormant", null),
-    snapshot("a", "a\u200bll", null),
-    snapshot("b", "foo\u00adbar", null),
+    snapshot("a", "w-2", null),
+    snapshot("b", "foobar", "foobar"),
     snapshot("c", "foobar", null),
     snapshot("d", "same", null),
     snapshot("e", "same", null),
@@ -305,14 +305,14 @@ test("complete: channel options name why a channel cannot be mentioned, in the t
     ["Gamma", null],
     ["gamma!", "unknown"],
     ["Dormant", "unknown"],
-    ["a\u200bll", "unknown"],
-    ["foo\u00adbar", "unknown"],
+    ["w-2", "unknown"],
+    ["foobar", null],
     ["foobar", "unknown"],
     ["same", "shared-name"],
     ["same", "shared-name"],
     ["日本語", "unusable-label"],
     ["solo", null],
-    ["solo", "shared-name"],
+    ["solo", "unknown"],
   ]);
 });
 

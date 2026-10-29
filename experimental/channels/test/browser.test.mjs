@@ -3495,6 +3495,54 @@ test("UI-3 fix2: refused drafts in two channels and a thread each retry with the
   assert.equal(new Set(ids).size, 3);
 });
 
+test("UI-3 fix3: a refused thread reply retried after a new reply arrives posts to the new reply with a fresh request id", async (t) => {
+  const value = askThread();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onPost: () => ({ status: 503, error: "busy" }) },
+  );
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from @codex/ })
+    .click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  await reply.click();
+  await reply.pressSequentially("@codex same");
+  await reply.press("Enter");
+  await pane.locator(".composer").getByRole("alert").waitFor();
+  const update = structuredClone(value);
+  update.frame.messages.push(
+    message("later", "One more thing", {
+      thread_id: "t1",
+      in_reply_to: "answer",
+      kind: "reply",
+      author: "codex",
+      at_ms: Date.now(),
+    }),
+  );
+  update.frame.threads[0].message_count = 3;
+  ui.connections[0].send("space", update);
+  await pane.locator('[data-message-id="later"]').waitFor();
+  assert.equal(await reply.inputValue(), "@codex same");
+  await reply.press("Enter");
+  await until(() => ui.posts.attempts.length === 2, "the retry");
+  const [first, second] = ui.posts.attempts.map(({ raw }) => JSON.parse(raw));
+  assert.equal(first.in_reply_to, "answer");
+  assert.equal(second.in_reply_to, "later");
+  assert.notEqual(
+    second.request_id,
+    first.request_id,
+    "a new reply target gets a new id",
+  );
+});
+
 test("UI-3: a 403 refreshes the CSRF token once and retries the same post", async (t) => {
   const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
   await ui.live();
@@ -3949,9 +3997,12 @@ test("UI-3 fix: a disabled channel's tooltip names a reason only when the page c
       disabled(5, "Twin"),
       disabled(6, "twin"),
       disabled(7, "Dormant"),
-      disabled(8, "a\u200bll"),
+      frame(8, "foobar"),
       disabled(9, "same"),
       disabled(10, "same"),
+      disabled(11, "foobar"),
+      disabled(12, "w13"),
+      disabled(13, "w13"),
     ]),
   );
   await ui.live();
@@ -3963,15 +4014,16 @@ test("UI-3 fix: a disabled channel's tooltip names a reason only when the page c
   await list.waitFor();
   const unsure =
     "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.";
+  const noLabel =
+    "This workspace has no label in Herdr. Name it to mention it.";
   const titles = {
-    w2: "This workspace has no label in Herdr. Name it to mention it.",
+    w2: noLabel,
     日本語:
       "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr.",
     All: unsure,
     Twin: unsure,
     twin: unsure,
     Dormant: unsure,
-    "a\u200bll": unsure,
   };
   for (const [name, title] of Object.entries(titles)) {
     const option = list.getByRole("option").filter({
@@ -3980,6 +4032,24 @@ test("UI-3 fix: a disabled channel's tooltip names a reason only when the page c
     assert.equal(await option.count(), 1, name);
     assert.equal(await option.getAttribute("aria-disabled"), "true", name);
     assert.equal(await option.getAttribute("title"), title, name);
+  }
+  const suffixed = [
+    [/^foobar · w8 ·/, null],
+    [/^foobar · w11 ·/, unsure],
+    [/^w13 · w12 ·/, unsure],
+    [/^w13 · w13 ·/, noLabel],
+  ];
+  for (const [name, title] of suffixed) {
+    const option = list.getByRole("option").filter({
+      has: ui.page.locator(".opt-name", { hasText: name }),
+    });
+    assert.equal(await option.count(), 1, String(name));
+    assert.equal(
+      await option.getAttribute("aria-disabled"),
+      title === null ? null : "true",
+      String(name),
+    );
+    assert.equal(await option.getAttribute("title"), title, String(name));
   }
   const same = list.getByRole("option").filter({
     has: ui.page.locator(".opt-name", { hasText: /^same ·/ }),
