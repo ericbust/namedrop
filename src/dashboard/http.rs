@@ -1,10 +1,11 @@
 use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
 use super::server_files::{ServerFiles, Token, UiSource, open_directory};
 use super::snapshot::{self, SpaceKey};
-use crate::StateStore;
+use crate::{HerdrCommandExecutor, ProcessHerdr, StateStore, store::dashboard::ScreenPane};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    collections::HashMap,
     ffi::CString,
     fs::File,
     io::{self, BufRead, BufReader, Read, Write},
@@ -15,7 +16,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
     },
@@ -50,6 +51,7 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
     let next_id = Arc::new(AtomicU64::new(1));
     let open = Arc::new(AtomicUsize::new(0));
     let history_store = Arc::new(Mutex::new(HistoryStore::Unopened));
+    let screens = Arc::new(ScreenReads::default());
     for mut stream in listener.incoming().flatten() {
         if stop.load(Ordering::Acquire) {
             break;
@@ -70,9 +72,10 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
         let front = front.clone();
         let next_id = next_id.clone();
         let history_store = history_store.clone();
+        let screens = screens.clone();
         thread::spawn(move || {
             let _permit = permit;
-            let _ = serve_connection(stream, &front, &next_id, &history_store);
+            let _ = serve_connection(stream, &front, &next_id, &history_store, &screens);
         });
     }
 }
@@ -104,6 +107,210 @@ impl HistoryStore {
             Self::Failed => Err(Status::Unavailable),
         }
     }
+}
+
+#[derive(Clone, Eq, PartialEq, Hash)]
+struct ScreenTarget {
+    socket: String,
+    pane: String,
+}
+
+type ScreenResult = Result<Arc<str>, Status>;
+
+#[derive(Default)]
+struct ScreenReads {
+    flights: Mutex<HashMap<ScreenTarget, Arc<ScreenFlight>>>,
+}
+
+#[derive(Default)]
+struct ScreenFlight {
+    result: Mutex<Option<ScreenResult>>,
+    ready: Condvar,
+}
+
+impl ScreenReads {
+    fn read(&self, target: ScreenTarget) -> ScreenResult {
+        let (flight, leader) = {
+            let mut flights = self.flights.lock().map_err(|_| Status::Unavailable)?;
+            match flights.get(&target) {
+                Some(flight) => (flight.clone(), false),
+                None => {
+                    let flight = Arc::new(ScreenFlight::default());
+                    flights.insert(target.clone(), flight.clone());
+                    (flight, true)
+                }
+            }
+        };
+        if leader {
+            let mut completion = ScreenCompletion {
+                reads: self,
+                target: &target,
+                flight: &flight,
+                pending: true,
+            };
+            let result = read_screen(&target);
+            completion.publish(result.clone());
+            result
+        } else {
+            let result = flight.result.lock().map_err(|_| Status::Unavailable)?;
+            let result = flight
+                .ready
+                .wait_while(result, |result| result.is_none())
+                .map_err(|_| Status::Unavailable)?;
+            result.as_ref().expect("completed screen flight").clone()
+        }
+    }
+}
+
+struct ScreenCompletion<'a> {
+    reads: &'a ScreenReads,
+    target: &'a ScreenTarget,
+    flight: &'a Arc<ScreenFlight>,
+    pending: bool,
+}
+
+impl ScreenCompletion<'_> {
+    fn publish(&mut self, result: ScreenResult) {
+        let mut flights = self.reads.flights.lock().unwrap_or_else(|e| e.into_inner());
+        let mut outcome = self.flight.result.lock().unwrap_or_else(|e| e.into_inner());
+        *outcome = Some(result);
+        if flights
+            .get(self.target)
+            .is_some_and(|entry| Arc::ptr_eq(entry, self.flight))
+        {
+            flights.remove(self.target);
+        }
+        self.pending = false;
+        self.flight.ready.notify_all();
+    }
+}
+
+impl Drop for ScreenCompletion<'_> {
+    fn drop(&mut self) {
+        if self.pending {
+            self.publish(Err(Status::Unavailable));
+        }
+    }
+}
+
+fn resolve_screen(
+    history: &mut HistoryStore,
+    state: &Path,
+    key: &SpaceKey,
+    address_id: &str,
+) -> Result<ScreenTarget, Status> {
+    let store = history.store(state)?;
+    let namespace = store
+        .dashboard_spaces()
+        .map_err(|_| Status::Unavailable)?
+        .into_iter()
+        .find(|space| SpaceKey::of(&space.namespace) == *key)
+        .map(|space| space.namespace)
+        .ok_or(Status::NotFound)?;
+    match store
+        .dashboard_screen_pane(&namespace, address_id)
+        .map_err(|_| Status::Unavailable)?
+    {
+        ScreenPane::Missing => Err(Status::NotFound),
+        ScreenPane::Gone => Err(Status::Gone),
+        ScreenPane::Bound(pane) => Ok(ScreenTarget {
+            socket: namespace.session_socket_id,
+            pane,
+        }),
+    }
+}
+
+fn read_screen(target: &ScreenTarget) -> ScreenResult {
+    let output = ProcessHerdr::default()
+        .with_socket(Some(target.socket.clone()))
+        .execute_bounded(
+            &[
+                "pane",
+                "read",
+                &target.pane,
+                "--source",
+                "recent",
+                "--lines",
+                "200",
+            ],
+            Duration::from_secs(3),
+            &AtomicBool::new(false),
+            1024 * 1024,
+        )
+        .map_err(|error| {
+            if serde_json::from_str::<serde_json::Value>(&error)
+                .ok()
+                .is_some_and(|value| {
+                    value.pointer("/error/code").and_then(|code| code.as_str())
+                        == Some("pane_not_found")
+                })
+            {
+                Status::Gone
+            } else {
+                Status::Unavailable
+            }
+        })?;
+    let clean = strip_terminal_sequences(&output.stdout);
+    Ok(snapshot::SafeText::from_untrusted(&clean, 64 * 1024)
+        .text
+        .into())
+}
+
+fn strip_terminal_sequences(raw: &str) -> String {
+    enum State {
+        Ground,
+        Escape,
+        Csi,
+        ControlString { osc: bool },
+        StringEscape { osc: bool },
+    }
+    let mut state = State::Ground;
+    let mut text = String::with_capacity(raw.len());
+    for c in raw
+        .chars()
+        .filter(|c| !crate::domain::is_invisible_format(*c))
+    {
+        state = match state {
+            State::Ground => match c {
+                '\u{1b}' => State::Escape,
+                '\u{9b}' => State::Csi,
+                '\u{9d}' => State::ControlString { osc: true },
+                '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => State::ControlString { osc: false },
+                _ => {
+                    if c == '\n' || c == '\t' || !c.is_control() {
+                        text.push(c);
+                    }
+                    State::Ground
+                }
+            },
+            State::Escape => match c {
+                '[' => State::Csi,
+                ']' => State::ControlString { osc: true },
+                'P' | 'X' | '^' | '_' => State::ControlString { osc: false },
+                '\u{1b}' => State::Escape,
+                '\u{30}'..='\u{7e}' => State::Ground,
+                _ => State::Escape,
+            },
+            State::Csi => match c {
+                '\u{40}'..='\u{7e}' => State::Ground,
+                '\u{1b}' => State::Escape,
+                _ => State::Csi,
+            },
+            State::ControlString { osc } => match c {
+                '\u{9c}' => State::Ground,
+                '\u{7}' if osc => State::Ground,
+                '\u{1b}' => State::StringEscape { osc },
+                _ => State::ControlString { osc },
+            },
+            State::StringEscape { osc } => match c {
+                '\\' | '\u{9c}' => State::Ground,
+                '\u{7}' if osc => State::Ground,
+                '\u{1b}' => State::StringEscape { osc },
+                _ => State::ControlString { osc },
+            },
+        };
+    }
+    text
 }
 
 struct ConnectionPermit(Arc<AtomicUsize>);
@@ -149,6 +356,7 @@ enum Status {
     Unauthorized,
     Forbidden,
     NotFound,
+    Gone,
     MethodNotAllowed,
     Unavailable,
     PayloadTooLarge,
@@ -162,6 +370,7 @@ impl Status {
             Self::Unauthorized => "401 Unauthorized",
             Self::Forbidden => "403 Forbidden",
             Self::NotFound => "404 Not Found",
+            Self::Gone => "410 Gone",
             Self::MethodNotAllowed => "405 Method Not Allowed",
             Self::Unavailable => "503 Service Unavailable",
         }
@@ -176,6 +385,7 @@ impl Status {
             Self::BadRequest => "Bad request.\n",
             Self::Forbidden => "Forbidden.\n",
             Self::NotFound => "Not found.\n",
+            Self::Gone => "This participant's pane is no longer available.\n",
             Self::MethodNotAllowed => "Method not allowed.\n",
             Self::Unavailable => "History is temporarily unavailable.\n",
         }
@@ -368,6 +578,10 @@ enum Route {
     Page,
     Session,
     Send(SpaceKey),
+    Screen {
+        key: SpaceKey,
+        address_id: String,
+    },
     Events(SpaceKey),
     Messages {
         key: SpaceKey,
@@ -409,6 +623,22 @@ fn route(
             .and_then(SpaceKey::parse)
             .ok_or(Status::NotFound)?;
         return Ok(Route::Send(key));
+    }
+    if let Some(rest) = path.strip_prefix("/w/") {
+        let segments: Vec<_> = rest.split('/').collect();
+        if segments.get(1) == Some(&"participants") {
+            authenticate_session(request, port, session)?;
+            authenticate_provenance(request, host)?;
+            let [key, "participants", address, "screen"] = segments.as_slice() else {
+                return Err(Status::NotFound);
+            };
+            let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+            let address_id = decode_asset_path(address).ok_or(Status::NotFound)?;
+            if address_id.is_empty() || address_id.contains('/') {
+                return Err(Status::NotFound);
+            }
+            return Ok(Route::Screen { key, address_id });
+        }
     }
     match path {
         "/healthz" => {
@@ -507,6 +737,10 @@ fn authenticate_mutation(request: &Request, session: &Token, host: &str) -> Resu
     {
         return Err(Status::Forbidden);
     }
+    authenticate_provenance(request, host)
+}
+
+fn authenticate_provenance(request: &Request, host: &str) -> Result<(), Status> {
     if request
         .header("origin")
         .is_some_and(|origin| origin != format!("http://{host}"))
@@ -579,6 +813,7 @@ fn serve_connection(
     front: &Front,
     next_id: &AtomicU64,
     history_store: &Mutex<HistoryStore>,
+    screens: &ScreenReads,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
@@ -621,6 +856,32 @@ fn serve_connection(
                 Err(status) => return respond_status(&mut writer, status),
             };
             send_operator_post(&mut writer, front, key, post)
+        }
+        Ok(Route::Screen { key, address_id }) => {
+            let result = (|| {
+                let target = {
+                    let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
+                    resolve_screen(&mut guard, front.files.state(), &key, &address_id)?
+                };
+                screens.read(target)
+            })();
+            match result {
+                Ok(text) => respond(
+                    &mut writer,
+                    "200 OK",
+                    "text/plain; charset=utf-8",
+                    "",
+                    text.as_bytes(),
+                ),
+                Err(Status::Unavailable) => respond(
+                    &mut writer,
+                    Status::Unavailable.line(),
+                    "text/plain; charset=utf-8",
+                    "",
+                    b"Screen is temporarily unavailable.\n",
+                ),
+                Err(status) => respond_status(&mut writer, status),
+            }
         }
         Ok(Route::Page) => serve_asset(&mut writer, front, &request, "/index.html"),
         Ok(Route::Asset(path)) => serve_asset(&mut writer, front, &request, &path),
