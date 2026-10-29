@@ -1305,34 +1305,50 @@ test("UI-2 fix1: live frames format timestamps only for changed message rows", a
   assert.equal(await ui.page.evaluate(() => window.timestampFormats), 0);
 });
 
-function numberedRows(from, to) {
+function numberedRows(from, to, extra = () => ({})) {
   return Array.from({ length: to - from + 1 }, (_, n) =>
-    message(`m${from + n}`, `Message ${from + n}`),
+    message(`m${from + n}`, `Message ${from + n}`, extra(from + n)),
   );
 }
-async function pagedChannel(t, pages) {
+async function loadPages(ui, pages) {
+  for (let page = 1; page <= pages; page++) {
+    await ui.scroll.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await ui.scroll
+      .locator(`[data-message-id="m${1851 - page * 50}"]`)
+      .waitFor();
+  }
+  await nextFrames(ui.page);
+}
+async function pagedChannel(t, pages, extra) {
   const value = frame(1, "alpha");
-  value.frame.messages = numberedRows(1851, 2000);
+  value.frame.messages = numberedRows(1851, 2000, extra);
   const ui = await open(
     t,
     (client) => replay(client, [value]),
     async (url) => {
       const before = Number(url.searchParams.get("before").slice(1));
-      return numberedRows(before - 50, before - 1).reverse();
+      return numberedRows(before - 50, before - 1, extra).reverse();
     },
   );
   await ui.page.setViewportSize({ width: 1440, height: 900 });
   await ui.live();
-  const scroll = ui.page.locator(".timeline");
-  for (let page = 1; page <= pages; page++) {
-    await scroll.evaluate((el) => {
-      el.scrollTop = 0;
-    });
-    await ui.page.locator(`[data-message-id="m${1851 - page * 50}"]`).waitFor();
-  }
-  await nextFrames(ui.page);
-  return { ...ui, value, scroll };
+  const paged = { ...ui, value, scroll: ui.page.locator(".timeline") };
+  await loadPages(paged, pages);
+  return paged;
 }
+const threadAt = (parent) => (n) =>
+  n === parent
+    ? { thread_id: `m${parent}` }
+    : n === parent + 1
+      ? {
+          thread_id: `m${parent}`,
+          in_reply_to: `m${parent}`,
+          kind: "reply",
+          author: "codex",
+        }
+      : {};
 function nextFrames(page) {
   return page.evaluate(
     () =>
@@ -1494,6 +1510,55 @@ test("history window: a screen above the newest message, the pill scrolls back t
   await ui.page.locator('[data-message-id="m2005"]').waitFor();
   await nextFrames(ui.page);
   assert.equal(await atBottom(ui.scroll), true);
+});
+
+test("thread pane: a thread that Jump to latest unloads closes for good, and focus lands on the timeline", async (t) => {
+  const ui = await pagedChannel(t, 12, threadAt(1300));
+  const pane = ui.page.locator("aside.thread");
+  const preview = ui.page.locator(
+    '.timeline [data-message-id="m1300"] .reply-preview',
+  );
+  await preview.click();
+  await pane.waitFor();
+  await ui.page
+    .getByRole("button", { name: "Jump to latest messages" })
+    .click();
+  await pane.waitFor({ state: "detached" });
+  const focus = await ui.page.evaluate(() =>
+    document.activeElement?.matches("section.timeline")
+      ? "timeline"
+      : document.activeElement?.tagName,
+  );
+  await loadPages(ui, 12);
+  await preview.waitFor();
+  await nextFrames(ui.page);
+  assert.equal(await pane.count(), 0, "closed pane reopened by itself");
+  assert.equal(await preview.getAttribute("aria-expanded"), "false");
+  assert.equal(focus, "timeline");
+});
+
+test("thread pane: a thread the history cap evicts closes and moves focus from the pane to the timeline", async (t) => {
+  const ui = await pagedChannel(t, 0, threadAt(1999));
+  const pane = ui.page.locator("aside.thread");
+  await ui.page
+    .locator('.timeline [data-message-id="m1999"] .reply-preview')
+    .click();
+  await pane.waitFor();
+  assert.equal(
+    await pane
+      .getByRole("button", { name: "Close thread" })
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
+  await loadPages(ui, 10);
+  await pane.waitFor({ state: "detached" });
+  assert.equal(
+    await ui.page.evaluate(() =>
+      document.activeElement?.matches("section.timeline"),
+    ),
+    true,
+    "focus moved to the timeline, not the body",
+  );
 });
 
 test("design-b: landing follows the URL, then Needs you, and selection keeps the URL, Back and the tab title", async (t) => {

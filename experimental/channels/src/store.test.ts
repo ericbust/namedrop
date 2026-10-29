@@ -1800,6 +1800,25 @@ test("design-b: switching channels closes the open thread", () => {
   );
   assert.equal(apply(open, changedChannel()).openThread, "m1");
 });
+test("a thread whose messages all left the window closes for good, one still loaded stays open", () => {
+  const paged = historyPage(apply(initialState(), withMessages(["a", "b"])), [
+    "h1",
+    "h2",
+  ]);
+  assert.equal(activeChannel(paged).messages.size, 4);
+  const key = activeChannel(paged).key;
+  const open = reduce(paged, { type: "thread", threadId: "h1" });
+  assert.equal(open.openThread, "h1");
+  const jumped = reduce(open, { type: "latest", key });
+  assert.equal(activeChannel(jumped).messages.has("h1"), false);
+  assert.equal(jumped.openThread, null);
+  assert.equal(historyPage(jumped, ["h1", "h2"]).openThread, null);
+  const kept = reduce(reduce(paged, { type: "thread", threadId: "a" }), {
+    type: "latest",
+    key,
+  });
+  assert.equal(kept.openThread, "a");
+});
 test("landing: a late URL key is selected when it arrives, and from then on nothing moves by itself", () => {
   const keyC = "c".repeat(20);
   const fallback = reduce(
