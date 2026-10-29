@@ -341,6 +341,35 @@ and the replies. Replies use the message component without a reply preview. The
 pane slides in from 16px right with a fade over `--duration`. Below 860px of
 window width, the pane stacks under the timeline instead of beside it.
 
+### History window
+
+The timeline keeps at most 600 loaded rows. A channel is in one of two modes.
+
+- **Following**: the window ends at the newest message, and live messages
+  append to it. When a live message would push the window past 600 rows, the
+  oldest rows drop only while the reader is at the bottom, within 24px. If the
+  reader has scrolled up, the channel switches to browsing instead. No row in or
+  near the viewport ever disappears, and the view never jumps.
+- **Browsing**: the window stays where the reader left it. Live updates still
+  refresh rows already shown. New messages wait outside the window.
+
+The way back is always at the bottom.
+
+- While the channel is browsing, or the reader is more than one screen above the
+  newest message, a pill floats 16px above the bottom edge of the timeline,
+  centered. It holds a drawn arrow-down icon and "Jump to latest" at 13px 500 in
+  `--accent-text`, on `--bg` with a 1px `--line-strong` border, a full radius,
+  `--shadow-pop`, and a 32px height. Its accessible name is "Jump to latest
+  messages". Activating it returns to the newest window and scrolls to the
+  bottom.
+- While browsing, the last row of the timeline is a hairline divider that reads
+  "Newer messages aren't loaded", with a **Jump to latest** text button, so
+  keyboard and screen reader users meet the gap at the end of the list.
+- The top history control only loads older messages. It never holds Jump to
+  latest, because auto-load fires there first.
+- Scrolling down does not load newer pages. The history route only pages
+  backward.
+
 ## Motion
 
 Motion shows state and nothing else.
