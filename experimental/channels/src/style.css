@@ -234,6 +234,17 @@ a:hover {
   width: 12px;
   height: 12px;
 }
+/* Each scroller is the containing block of what scrolls in it. Without this,
+   an absolutely positioned child such as .sr-only text keeps its offset in the
+   page and stretches the document past the window. */
+.nav,
+.attention,
+.timeline,
+.thread-body,
+.peek-text,
+.activity-list {
+  position: relative;
+}
 .sr-only {
   position: absolute;
   width: 1px;
