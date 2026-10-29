@@ -54,18 +54,37 @@ fn plain_post_routes_verbatim_and_replay_does_not_call_router_again() {
             .all(|key| !key.starts_with("HERDR_") && !key.starts_with("NAMEDROP_"))
     );
     assert!(call["env"].get("CLAUDE_CODE_SESSION_ID").is_none());
+    let args = call["args"].as_array().unwrap();
+    let schema_index = args.iter().position(|arg| arg == "--json-schema").unwrap() + 1;
+    let schema: Value = serde_json::from_str(args[schema_index].as_str().unwrap()).unwrap();
+    assert!(
+        schema["properties"]["to"].get("uniqueItems").is_none(),
+        "Codex strict output schemas reject uniqueItems; server validation deduplicates picks"
+    );
 }
 
 #[test]
 fn failed_routing_attempt_keeps_provider_receipt_before_post_commit() {
     let f = fixture();
-    let server = Server::start(&f, r#"{"result":"not json","num_turns":2,"usage":{"input_tokens":137,"output_tokens":19},"total_cost_usd":0.0012}"#, false);
-    let (status, receipt) = post(&server, "failed-audit", "Please ask @planner to inspect this.", None);
+    let server = Server::start(
+        &f,
+        r#"{"result":"not json","num_turns":2,"usage":{"input_tokens":137,"output_tokens":19},"total_cost_usd":0.0012}"#,
+        false,
+    );
+    let (status, receipt) = post(
+        &server,
+        "failed-audit",
+        "Please ask @planner to inspect this.",
+        None,
+    );
     assert_eq!(status, 200, "{receipt}");
     assert_eq!(receipt["channel"]["state"], "router_failed");
     let journal = fs::read_to_string(f.state.join("dashboard/channel-router-attempts.jsonl"))
         .expect("every actual routing call must leave an independent cost receipt");
-    let records: Vec<Value> = journal.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let records: Vec<Value> = journal
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["request_id"], "failed-audit");
     assert_eq!(records[0]["host"], "claude");
@@ -79,8 +98,16 @@ fn failed_routing_attempt_keeps_provider_receipt_before_post_commit() {
     assert!(records[0]["duration_ms"].is_u64());
     assert!(!journal.contains("not json"));
     assert!(!journal.contains("Please ask"));
-    post(&server, "failed-audit", "Please ask @planner to inspect this.", None);
-    assert_eq!(fs::read_to_string(f.state.join("dashboard/channel-router-attempts.jsonl")).unwrap(), journal);
+    post(
+        &server,
+        "failed-audit",
+        "Please ask @planner to inspect this.",
+        None,
+    );
+    assert_eq!(
+        fs::read_to_string(f.state.join("dashboard/channel-router-attempts.jsonl")).unwrap(),
+        journal
+    );
 }
 
 #[test]
