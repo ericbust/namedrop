@@ -116,6 +116,29 @@ export type Channel = ChannelSnapshot & {
   history: HistoryState;
   exhausted: boolean;
 };
+export type OutgoingPhase =
+  | { kind: "sending" }
+  | { kind: "sent"; messageId: string }
+  | { kind: "failed"; status: number; message: string };
+export type Outgoing = {
+  requestId: string;
+  key: SpaceKey;
+  source: string;
+  inReplyTo: string | null;
+  at: number;
+  phase: OutgoingPhase;
+};
+export type Draft = Pick<Outgoing, "key" | "source" | "inReplyTo">;
+export type Home = { name: string; members: ReadonlyMap<string, Member> };
+export type Directory = {
+  members: ReadonlyMap<AddressId, Member>;
+  homes: ReadonlyMap<string, Home>;
+};
+export type Participant =
+  | { kind: "operator" }
+  | { kind: "member"; member: Member; home: string | null }
+  | { kind: "envoy"; id: AddressId; home: string | null }
+  | { kind: "unknown"; id: AddressId };
 export type WireEvent =
   | { type: "space"; channel: ChannelSnapshot }
   | { type: "gone"; key: SpaceKey }
@@ -141,7 +164,10 @@ export type Event =
   | { type: "discovery-timeout" }
   | { type: "input" }
   | { type: "disconnected" }
-  | { type: "visibility"; visible: boolean };
+  | { type: "visibility"; visible: boolean }
+  | { type: "send"; outgoing: Omit<Outgoing, "phase"> }
+  | { type: "sent"; requestId: string; messageId: string }
+  | { type: "send-failed"; requestId: string; status: number; message: string };
 export type Sync =
   | { kind: "connecting" | "reconnecting" | "live" | "fallback" }
   | {
@@ -168,4 +194,5 @@ export type State = {
   visible: boolean;
   viewKnown: boolean;
   nextRequestId: number;
+  outbox: ReadonlyMap<string, Outgoing>;
 };

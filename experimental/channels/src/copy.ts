@@ -1,9 +1,20 @@
-import type { Activity, Attention, DeliveryStage, Health } from "./model.ts";
+import type { ChannelOption } from "./complete.ts";
+import type {
+  Activity,
+  Attention,
+  ChannelSnapshot,
+  DeliveryStage,
+  Health,
+  MemberKind,
+  OutgoingPhase,
+  Participant,
+} from "./model.ts";
 
 export type IconName =
   | "alert"
   | "arrow"
   | "arrowDown"
+  | "arrowUp"
   | "bell"
   | "cancelled"
   | "check"
@@ -42,7 +53,8 @@ const completedCopy: ReadonlyMap<string, ReceiptCopy> = new Map([
   ["settled", done],
   ["no_reply", { ...done, label: "Done, no reply needed" }],
 ]);
-export function receiptCopy(stage: DeliveryStage): ReceiptCopy {
+export function receiptCopy(stage: DeliveryStage, paused = false): ReceiptCopy {
+  if (paused && stage.stage === "queued") return stageCopy.held;
   if (stage.stage !== "completed") return stageCopy[stage.stage];
   return completedCopy.get(stage.kind) ?? { ...done, title: stage.kind };
 }
@@ -216,4 +228,106 @@ export function dayBounds(ms: number): { start: number; end: number } {
   const start = date.getTime();
   date.setDate(date.getDate() + 1);
   return { start, end: date.getTime() };
+}
+
+export const pendingCopy = {
+  sending: { label: "Sending…", icon: "clock" },
+  sent: { label: "Sent", icon: "check" },
+} satisfies Record<
+  Exclude<OutgoingPhase["kind"], "failed">,
+  { label: string; icon: IconName }
+>;
+
+const couldNotSend = "Namedrop couldn't send this. Try again.";
+const serverSays = (message: string) => message.trim() || couldNotSend;
+const sendErrors: ReadonlyMap<number, (message: string) => string> = new Map([
+  [400, serverSays],
+  [404, serverSays],
+  [409, serverSays],
+  [403, () => "Your session expired. Reload the page to keep posting."],
+  [413, () => "This message is too long."],
+]);
+export function sendErrorCopy({
+  status,
+  message,
+}: Extract<OutgoingPhase, { kind: "failed" }>): string {
+  return (sendErrors.get(status) ?? (() => couldNotSend))(message);
+}
+
+export const composerCopy = {
+  hint: "Enter to send · Shift+Enter for a new line",
+  sending: "Sending…",
+  send: "Send",
+  everyWorkspace: "every workspace",
+};
+export function channelMention(
+  channel: Pick<ChannelSnapshot, "addressableLabel" | "displayName">,
+): string {
+  return channel.addressableLabel === null
+    ? channel.displayName
+    : `#${channel.addressableLabel}`;
+}
+export function composerPlaceholder(
+  channel: Pick<ChannelSnapshot, "addressableLabel" | "displayName">,
+): string {
+  return `Message ${channelMention(channel)}`;
+}
+export function replyPlaceholder(recipients: readonly string[]): string {
+  return recipients.length === 0
+    ? "Reply in thread"
+    : `Reply to ${recipients.join(", ")}`;
+}
+export function recipientsLabel(recipients: readonly string[]): string {
+  return `To ${recipients.join(", ")}`;
+}
+export const disabledChannelCopy = {
+  "shared-label":
+    "Two workspaces share this label. Rename one in Herdr to mention it.",
+  "no-label": "This workspace has no label. Name it in Herdr to mention it.",
+} satisfies Record<NonNullable<ChannelOption["disabledReason"]>, string>;
+
+export const SHOWN_RECIPIENTS = 2;
+export function overflowCopy(hidden: number): string {
+  return `+${hidden}`;
+}
+
+export type ParticipantCopy = {
+  name: string;
+  suffix: string | null;
+  title: string | null;
+  avatar: MemberKind["type"] | "unresolved";
+};
+export function participantCopy(who: Participant): ParticipantCopy {
+  switch (who.kind) {
+    case "operator":
+      return { name: "You", suffix: null, title: null, avatar: "human" };
+    case "member":
+      return {
+        name: who.member.alias,
+        suffix: who.home,
+        title: null,
+        avatar: who.member.kind.type,
+      };
+    case "envoy":
+      return {
+        name:
+          who.home === null
+            ? "an agent in another workspace"
+            : `an agent in ${who.home}`,
+        suffix: null,
+        title: who.id,
+        avatar: "unresolved",
+      };
+    case "unknown":
+      return {
+        name: "an unknown agent",
+        suffix: null,
+        title: who.id,
+        avatar: "unresolved",
+      };
+    default: {
+      const exhaustive: never = who;
+      return exhaustive;
+    }
+  }
 }

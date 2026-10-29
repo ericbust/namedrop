@@ -3,10 +3,15 @@ import type {
   AddressId,
   Channel,
   ChannelSnapshot,
+  Directory,
+  Draft,
   Event,
   HistoryRequest,
+  Home,
   Landing,
   Message,
+  Outgoing,
+  Participant,
   Selection,
   SpaceKey,
   State,
@@ -36,6 +41,7 @@ export function initialState({
     visible,
     viewKnown: false,
     nextRequestId: 1,
+    outbox: new Map(),
   };
 }
 export const HISTORY_CAP = 600;
@@ -350,6 +356,7 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     channels,
     selection,
     unread,
+    outbox: settleOutbox(state.outbox, [...channels.values()]),
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
     sync: { kind: keys === null ? "fallback" : "live" },
     landing:
@@ -475,7 +482,14 @@ function step(state: State, event: Event): State {
         !(selection.key === channel.key && state.visible)
       )
         unread = new Set([...unread, channel.key]);
-      return { ...state, channels, selection, unread, viewKnown: true };
+      return {
+        ...state,
+        channels,
+        selection,
+        unread,
+        outbox: settleOutbox(state.outbox, [accumulated]),
+        viewKnown: true,
+      };
     }
     case "older":
       return requestHistory(state, event.key);
@@ -653,11 +667,71 @@ function step(state: State, event: Event): State {
       return state.visible === event.visible
         ? state
         : { ...state, visible: event.visible };
+    case "send": {
+      const { outgoing } = event;
+      const known = state.outbox.get(outgoing.requestId);
+      if (known !== undefined && known.phase.kind !== "failed") return state;
+      const outbox = new Map(state.outbox);
+      outbox.set(outgoing.requestId, {
+        ...outgoing,
+        phase: { kind: "sending" },
+      });
+      return { ...state, outbox };
+    }
+    case "sent":
+    case "send-failed": {
+      const known = state.outbox.get(event.requestId);
+      if (known?.phase.kind !== "sending") return state;
+      const outbox = new Map(state.outbox);
+      outbox.set(event.requestId, {
+        ...known,
+        phase:
+          event.type === "sent"
+            ? { kind: "sent", messageId: event.messageId }
+            : { kind: "failed", status: event.status, message: event.message },
+      });
+      return {
+        ...state,
+        outbox: settleOutbox(outbox, [...state.channels.values()]),
+      };
+    }
     default: {
       const exhaustive: never = event;
       return exhaustive;
     }
   }
+}
+function settleOutbox(
+  outbox: ReadonlyMap<string, Outgoing>,
+  channels: readonly Channel[],
+): ReadonlyMap<string, Outgoing> {
+  let settled: Map<string, Outgoing> | undefined;
+  for (const [requestId, { phase }] of outbox) {
+    if (phase.kind !== "sent") continue;
+    const arrived = channels.some(
+      (channel) =>
+        channel.messages.has(phase.messageId) ||
+        channel.latestMessages.has(phase.messageId),
+    );
+    if (!arrived) continue;
+    settled ??= new Map(outbox);
+    settled.delete(requestId);
+  }
+  return settled ?? outbox;
+}
+function sameDraft(a: Draft, b: Draft): boolean {
+  return (
+    a.key === b.key && a.source === b.source && a.inReplyTo === b.inReplyTo
+  );
+}
+export function retryId(
+  outbox: ReadonlyMap<string, Outgoing>,
+  draft: Draft,
+): string | null {
+  for (const entry of outbox.values())
+    if (entry.phase.kind === "failed" && sameDraft(entry, draft))
+      return entry.requestId;
+  return null;
 }
 export function sortedChannels(state: {
   channels: ReadonlyMap<SpaceKey, Channel>;
@@ -833,4 +907,67 @@ export function exitFor(
   return runs
     .get(reply.inReplyTo)
     ?.find((run) => run.terminal === reply.author && run.startedAt <= reply.at);
+}
+export function homesOf(
+  channels: Iterable<ChannelSnapshot>,
+  previous: ReadonlyMap<string, Home> | undefined,
+): ReadonlyMap<string, Home> {
+  const homes = new Map<string, Home>();
+  for (const channel of channels) {
+    if (homes.has(channel.workspaceId)) continue;
+    const name =
+      channel.addressableLabel === null
+        ? channel.displayName
+        : `#${channel.addressableLabel}`;
+    const old = previous?.get(channel.workspaceId);
+    homes.set(
+      channel.workspaceId,
+      old?.name === name && old.members === channel.members
+        ? old
+        : { name, members: channel.members },
+    );
+  }
+  return previous !== undefined &&
+    previous.size === homes.size &&
+    [...homes].every(([id, home]) => previous.get(id) === home)
+    ? previous
+    : homes;
+}
+const ENVOY = /^envoy:([^:]+):(.+)$/;
+export function participant(
+  { members, homes }: Directory,
+  id: AddressId | "human",
+): Participant {
+  if (id === "human") return { kind: "operator" };
+  const member = members.get(id);
+  if (member !== undefined)
+    return member.kind.type === "human"
+      ? { kind: "operator" }
+      : { kind: "member", member, home: null };
+  const [, workspace, origin] = ENVOY.exec(id) ?? [];
+  if (workspace === undefined || origin === undefined)
+    return { kind: "unknown", id };
+  const home = homes.get(workspace);
+  const agent = home?.members.get(origin);
+  return home !== undefined && agent !== undefined
+    ? { kind: "member", member: agent, home: home.name }
+    : { kind: "envoy", id, home: home?.name ?? null };
+}
+export function replyRecipients(
+  thread: ThreadGroup,
+  directory: Directory,
+): readonly string[] {
+  const aliases = (ids: readonly (AddressId | "human")[]) => {
+    const found = new Set<string>();
+    for (const id of ids) {
+      const who = participant(directory, id);
+      if (who.kind === "member" && who.home === null)
+        found.add(who.member.alias);
+    }
+    return [...found];
+  };
+  const wrote = aliases(
+    [...thread.parents, ...thread.replies].map((message) => message.author),
+  );
+  return wrote.length > 0 ? wrote : aliases(thread.parents.flatMap(recipients));
 }

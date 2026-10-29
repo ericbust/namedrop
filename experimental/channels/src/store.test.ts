@@ -5,9 +5,13 @@ import {
   channelSuffix,
   connectionStatus,
   exitFor,
+  homesOf,
   initialState,
   type MessageRow,
   reduce,
+  replyRecipients,
+  participant as resolve,
+  retryId,
   runsByMessage,
   sortedChannels,
   type TimelineRow,
@@ -2259,4 +2263,214 @@ test("design-b: each terminal reply gets the latest run that started at or befor
   assert.equal(exit("r2"), 0);
   assert.equal(exit("r0"), undefined);
   assert.equal(exit("m1"), undefined);
+});
+
+function outgoing(requestId = "r1", source = "@codex hi") {
+  return {
+    requestId,
+    key: parsed(snapshot()).key,
+    source,
+    inReplyTo: null,
+    at: 1,
+  };
+}
+function phases(state: State): Record<string, string> {
+  return Object.fromEntries(
+    [...state.outbox].map(([id, entry]) => [id, entry.phase.kind]),
+  );
+}
+test("outbox: a send is pending until accepted, then a frame carrying its row drops it", () => {
+  const ready = apply(initialState(), snapshot());
+  const sending = reduce(ready, { type: "send", outgoing: outgoing() });
+  assert.deepEqual(phases(sending), { r1: "sending" });
+  assert.equal(
+    reduce(sending, { type: "send", outgoing: outgoing() }),
+    sending,
+    "a second send with the same id while sending changes nothing",
+  );
+  const sent = reduce(sending, {
+    type: "sent",
+    requestId: "r1",
+    messageId: "posted",
+  });
+  assert.deepEqual(phases(sent), { r1: "sent" });
+  const unrelated = snapshot();
+  unrelated.frame.messages.push(message("other"));
+  assert.deepEqual(phases(apply(sent, unrelated)), { r1: "sent" });
+  const arrived = snapshot();
+  arrived.frame.messages.push({ ...message("posted"), author: "human" });
+  const settled = apply(sent, arrived);
+  assert.deepEqual(phases(settled), {});
+  assert.ok(settled.channels.get(parsed(arrived).key)?.messages.has("posted"));
+});
+test("outbox: a row that lands in another channel still settles the send", () => {
+  const state = reduce(twoChannels(), { type: "send", outgoing: outgoing() });
+  const sent = reduce(state, {
+    type: "sent",
+    requestId: "r1",
+    messageId: "cross",
+  });
+  const beta = snapshot(keyB, "beta", "w2");
+  beta.frame.messages.push(message("cross"));
+  assert.deepEqual(phases(apply(sent, beta)), {});
+});
+test("outbox: an acceptance that arrives after its row settles at once", () => {
+  const arrived = snapshot();
+  arrived.frame.messages.push(message("early"));
+  const state = reduce(apply(initialState(), snapshot()), {
+    type: "send",
+    outgoing: outgoing(),
+  });
+  const withRow = apply(state, arrived);
+  assert.deepEqual(phases(withRow), { r1: "sending" });
+  assert.deepEqual(
+    phases(
+      reduce(withRow, { type: "sent", requestId: "r1", messageId: "early" }),
+    ),
+    {},
+  );
+});
+test("outbox: replayed rows settle a send only when the replay commits", () => {
+  const sent = reduce(
+    reduce(apply(initialState(), snapshot()), {
+      type: "send",
+      outgoing: outgoing(),
+    }),
+    { type: "sent", requestId: "r1", messageId: "replayed" },
+  );
+  const replaying = reduce(sent, { type: "opened" });
+  const arrived = snapshot();
+  arrived.frame.messages.push(message("replayed"));
+  const staged = apply(replaying, arrived);
+  assert.deepEqual(phases(staged), { r1: "sent" });
+  const committed = reduce(staged, {
+    type: "ready",
+    keys: new Set([parsed(arrived).key]),
+  });
+  assert.deepEqual(phases(committed), {});
+});
+test("outbox: a refused send keeps its id for an identical retry and only then", () => {
+  const failed = reduce(
+    reduce(apply(initialState(), snapshot()), {
+      type: "send",
+      outgoing: outgoing(),
+    }),
+    { type: "send-failed", requestId: "r1", status: 400, message: "Nope" },
+  );
+  assert.deepEqual(failed.outbox.get("r1")?.phase, {
+    kind: "failed",
+    status: 400,
+    message: "Nope",
+  });
+  const draft = outgoing();
+  assert.equal(retryId(failed.outbox, draft), "r1");
+  assert.equal(retryId(failed.outbox, { ...draft, source: "changed" }), null);
+  assert.equal(retryId(failed.outbox, { ...draft, inReplyTo: "m1" }), null);
+  assert.equal(
+    retryId(failed.outbox, { ...draft, key: parsed(snapshot(keyB)).key }),
+    null,
+  );
+  assert.equal(
+    reduce(failed, { type: "sent", requestId: "r1", messageId: "late" }),
+    failed,
+    "a late result for a refused send changes nothing",
+  );
+  const retried = reduce(failed, {
+    type: "send",
+    outgoing: { ...draft, at: 2 },
+  });
+  assert.deepEqual(phases(retried), { r1: "sending" });
+  assert.equal(retried.outbox.get("r1")?.at, 2);
+  assert.equal(
+    reduce(retried, { type: "sent", requestId: "missing", messageId: "x" }),
+    retried,
+  );
+});
+test("participants: envoys resolve through their home channel, else read in plain words", () => {
+  const alpha = parsed(snapshot(keyA, "alpha", "w1"));
+  const home = snapshot(keyB, "beta", "w2");
+  home.frame.participants = [{ ...participant("pane-9"), alias: "@reviewer" }];
+  const beta = parsed(home);
+  const homes = homesOf([alpha, beta], undefined);
+  assert.equal(homesOf([alpha, beta], homes), homes, "unchanged homes reuse");
+  const directory = { members: alpha.members, homes };
+  const id = (raw: string) => {
+    const [leg] =
+      parsed({
+        ...snapshot(),
+        frame: {
+          ...snapshot().frame,
+          messages: [
+            { ...message(), legs: [{ to: raw, stage: { stage: "queued" } }] },
+          ],
+        },
+      }).messages.get("m1")?.legs ?? [];
+    assert.ok(leg);
+    return leg.to;
+  };
+  assert.deepEqual(resolve(directory, "human"), { kind: "operator" });
+  assert.equal(resolve(directory, id("agent-1")).kind, "member");
+  const remote = resolve(directory, id("envoy:w2:pane-9"));
+  assert.ok(remote.kind === "member");
+  assert.equal(remote.member.alias, "@reviewer");
+  assert.equal(remote.home, "#beta");
+  assert.deepEqual(resolve(directory, id("envoy:w2:pane-gone")), {
+    kind: "envoy",
+    id: "envoy:w2:pane-gone",
+    home: "#beta",
+  });
+  assert.deepEqual(resolve(directory, id("envoy:w7:pane-9")), {
+    kind: "envoy",
+    id: "envoy:w7:pane-9",
+    home: null,
+  });
+  assert.deepEqual(resolve(directory, id("stranger")), {
+    kind: "unknown",
+    id: "stranger",
+  });
+});
+test("thread recipients: the agents who wrote, else the parent's recipients, never the operator", () => {
+  const operator: unknown = {
+    ...participant("human"),
+    alias: "you",
+    kind: { type: "human" },
+  };
+  const parent = {
+    ...message("parent"),
+    author: "human",
+    legs: [{ to: "agent-2", stage: { stage: "queued" } }],
+  };
+  const answer = {
+    ...message("answer"),
+    thread_id: "parent",
+    in_reply_to: "parent",
+    kind: "reply",
+    author: "agent-1",
+  };
+  const thread = (messages: unknown[]) => {
+    const value = snapshot();
+    const channel = parsed({
+      ...value,
+      frame: {
+        ...value.frame,
+        participants: [
+          participant("agent-1"),
+          { ...participant("agent-2"), alias: "@claude" },
+          operator,
+        ],
+        messages,
+      },
+    });
+    const group = threadGroups({
+      ...channel,
+      runs: [[...channel.messages.keys()]],
+    }).get("parent");
+    assert.ok(group);
+    return replyRecipients(group, {
+      members: channel.members,
+      homes: new Map(),
+    });
+  };
+  assert.deepEqual(thread([parent]), ["@claude"]);
+  assert.deepEqual(thread([parent, answer]), ["@codex"]);
 });
