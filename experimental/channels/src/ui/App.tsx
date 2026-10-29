@@ -278,6 +278,30 @@ export function App() {
     addEventListener("popstate", back);
     return () => removeEventListener("popstate", back);
   }, []);
+  const discovering =
+    state.landing.kind === "discovering" &&
+    (state.channels.size > 0 ||
+      (state.sync.kind === "replaying" && state.sync.pending.size > 0));
+  useEffect(() => {
+    if (!discovering) return;
+    const timer = setTimeout(
+      () => dispatch({ type: "discovery-timeout" }),
+      2000,
+    );
+    return () => clearTimeout(timer);
+  }, [discovering]);
+  useEffect(() => {
+    const names = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
+    const input = () => {
+      dispatch({ type: "input" });
+      for (const name of names) removeEventListener(name, input, true);
+    };
+    for (const name of names)
+      addEventListener(name, input, { capture: true, passive: true });
+    return () => {
+      for (const name of names) removeEventListener(name, input, true);
+    };
+  }, []);
   useEffect(() => {
     const key = state.selection.key;
     if (key === null || !state.visible) return;

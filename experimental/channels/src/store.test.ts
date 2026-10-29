@@ -1972,6 +1972,57 @@ test("select: the pick replaces the URL's key, so a lost pick lands by Needs you
     keyC,
   );
 });
+test("landing: reader input ends discovery, so a channel that needs you no longer moves the selection", () => {
+  const keyC = "c".repeat(20);
+  const fallback = reduce(reduce(initialState(), { type: "opened" }), {
+    type: "replay-timeout",
+  });
+  const touched = reduce(apply(fallback, landingFrame(keyA, "alpha")), {
+    type: "input",
+  });
+  assert.equal(touched.selection.key, keyA);
+  const gamma = apply(touched, landingFrame(keyC, "gamma", { needsYou: true }));
+  assert.equal(gamma.selection.key, keyA);
+  assert.equal(ready(gamma, [keyA, keyC]).selection.key, keyA);
+  assert.equal(reduce(gamma, { type: "input" }), gamma);
+});
+test("landing: a server without ready ends discovery on the timeout, after which only the URL's channel is chosen", () => {
+  const keyC = "c".repeat(20);
+  const fallback = reduce(
+    reduce(initialState({ requestedKey: parsed(snapshot(keyB)).key }), {
+      type: "opened",
+    }),
+    { type: "replay-timeout" },
+  );
+  const timedOut = reduce(apply(fallback, landingFrame(keyA, "alpha")), {
+    type: "discovery-timeout",
+  });
+  assert.equal(timedOut.selection.key, keyA);
+  assert.equal(reduce(timedOut, { type: "discovery-timeout" }), timedOut);
+  const gamma = apply(
+    timedOut,
+    landingFrame(keyC, "gamma", { needsYou: true }),
+  );
+  assert.equal(gamma.selection.key, keyA);
+  assert.deepEqual(apply(gamma, landingFrame(keyB, "beta")).selection, {
+    kind: "chosen",
+    key: keyB,
+  });
+});
+test("landing: after ready the URL's channel is chosen when it arrives, unless the reader acted first", () => {
+  const start = reduce(
+    initialState({ requestedKey: parsed(snapshot(keyB)).key }),
+    { type: "opened" },
+  );
+  const state = ready(apply(start, landingFrame(keyA, "alpha")), [keyA]);
+  assert.equal(state.selection.key, keyA);
+  assert.deepEqual(apply(state, landingFrame(keyB, "beta")).selection, {
+    kind: "chosen",
+    key: keyB,
+  });
+  const touched = reduce(state, { type: "input" });
+  assert.equal(apply(touched, landingFrame(keyB, "beta")).selection.key, keyA);
+});
 
 const MIN = 60_000;
 type RowOptions = {

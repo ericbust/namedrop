@@ -1773,7 +1773,14 @@ test("landing: reader input ends discovery, and after ready the URL's channel is
   await touched.page.waitForTimeout(2300);
   touched.connections[0].send("space", frame(1, "alpha"));
   await selected(touched, 1);
+  await touched.page.evaluate(() => {
+    window.wheeled = new Promise((resolve) =>
+      addEventListener("wheel", resolve, { once: true }),
+    );
+  });
+  await touched.page.mouse.move(300, 300);
   await touched.page.mouse.wheel(0, 40);
+  await touched.page.evaluate(() => window.wheeled);
   touched.connections[0].send("space", frame(3, "gamma", "needs_you"));
   await touched.row(3).waitFor();
   await nextFrames(touched.page);

@@ -5,6 +5,7 @@ import type {
   ChannelSnapshot,
   Event,
   HistoryRequest,
+  Landing,
   Message,
   Selection,
   SpaceKey,
@@ -14,6 +15,8 @@ import type {
 
 const channelCollator = new Intl.Collator();
 const noSelection: Selection = { kind: "none", key: null };
+const discovered: Landing = { kind: "awaiting-url" };
+const settled: Landing = { kind: "settled" };
 
 export function initialState({
   visible = true,
@@ -25,6 +28,7 @@ export function initialState({
   return {
     channels: new Map(),
     selection: noSelection,
+    landing: { kind: "discovering" },
     requestedKey,
     openThread: null,
     unread: new Set(),
@@ -348,6 +352,10 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     unread,
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
     sync: { kind: keys === null ? "fallback" : "live" },
+    landing:
+      keys !== null && state.landing.kind === "discovering"
+        ? discovered
+        : state.landing,
   };
 }
 function settle(
@@ -355,13 +363,25 @@ function settle(
   channels: ReadonlyMap<SpaceKey, Channel>,
   arrived: boolean,
 ): Selection {
-  const { selection } = state;
-  const keep =
-    selection.kind === "none"
-      ? !arrived
-      : channels.has(selection.key) &&
-        (selection.kind === "chosen" || !arrived);
-  return keep ? selection : land(channels, state.requestedKey);
+  const { selection, landing, requestedKey } = state;
+  if (selection.kind !== "none" && !channels.has(selection.key))
+    return land(channels, requestedKey);
+  if (!arrived || selection.kind === "chosen") return selection;
+  if (selection.kind === "none") return land(channels, requestedKey);
+  switch (landing.kind) {
+    case "discovering":
+      return land(channels, requestedKey);
+    case "awaiting-url":
+      return requestedKey !== null && channels.has(requestedKey)
+        ? { kind: "chosen", key: requestedKey }
+        : selection;
+    case "settled":
+      return selection;
+    default: {
+      const exhaustive: never = landing;
+      return exhaustive;
+    }
+  }
 }
 function land(
   channels: ReadonlyMap<SpaceKey, Channel>,
@@ -552,6 +572,14 @@ function step(state: State, event: Event): State {
       return state.sync.kind === "replaying"
         ? finishReplay(state, null)
         : state;
+    case "discovery-timeout":
+      return state.landing.kind === "discovering"
+        ? { ...state, landing: discovered }
+        : state;
+    case "input":
+      return state.landing.kind === "settled"
+        ? state
+        : { ...state, landing: settled };
     case "gone": {
       if (
         !state.channels.has(event.key) &&
@@ -578,12 +606,17 @@ function step(state: State, event: Event): State {
     case "select": {
       if (!state.channels.has(event.key)) return state;
       const { selection } = state;
-      if (selection.kind === "chosen" && selection.key === event.key)
+      if (
+        selection.kind === "chosen" &&
+        selection.key === event.key &&
+        state.landing.kind === "settled"
+      )
         return state;
       return {
         ...state,
         requestedKey: event.key,
         selection: { kind: "chosen", key: event.key },
+        landing: settled,
       };
     }
     case "navigate": {
