@@ -39,6 +39,15 @@ export type Attention = {
     | "unknown";
   summary: SafeText;
   openedAt: number;
+  subjectAlias: string | null;
+  messageId: string | null;
+};
+export type TerminalRun = {
+  terminal: AddressId;
+  command: SafeText;
+  startedAt: number;
+  exitCode: number | null;
+  messageId: string | null;
 };
 export type MessageKind =
   | "mention"
@@ -92,6 +101,7 @@ export type ChannelSnapshot = {
   messages: ReadonlyMap<string, Message>;
   attention: readonly Attention[];
   threads: ReadonlyMap<string, ThreadChip>;
+  terminalRuns: readonly TerminalRun[];
 };
 export type Channel = ChannelSnapshot & {
   latestMessages: ReadonlyMap<string, Message>;

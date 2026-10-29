@@ -11,6 +11,7 @@ import type {
   MessageKind,
   SafeText,
   SpaceKey,
+  TerminalRun,
   ThreadChip,
   WireEvent,
 } from "./model.ts";
@@ -36,6 +37,9 @@ function spaceKey(value: unknown): SpaceKey {
 }
 function addressId(value: unknown): AddressId {
   return identity(value) as AddressId;
+}
+function optionalIdentity(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }
 function nullableText(value: unknown): string | null {
   return value === null ? null : text(value);
@@ -146,7 +150,32 @@ function attention(
     source,
     summary,
     openedAt,
+    subjectAlias: optionalIdentity(item.subject_alias),
+    messageId: optionalIdentity(item.message_id),
   };
+}
+function terminalRuns(value: unknown): TerminalRun[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((raw): TerminalRun[] => {
+    try {
+      const item = record(raw);
+      const exitCode = item.exit_code;
+      return [
+        {
+          terminal: addressId(item.terminal),
+          command: safeText(item.command),
+          startedAt: timestamp(item.started_at_ms),
+          exitCode:
+            typeof exitCode === "number" && Number.isSafeInteger(exitCode)
+              ? exitCode
+              : null,
+          messageId: optionalIdentity(item.message_id),
+        },
+      ];
+    } catch {
+      return [];
+    }
+  });
 }
 function messageKind(value: unknown): MessageKind {
   switch (identity(value)) {
@@ -257,6 +286,7 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
     attention: array(frame.attention).map((item) =>
       attention(item, attentionOccurrences),
     ),
+    terminalRuns: terminalRuns(frame.terminal_runs),
   };
 }
 export function parseEvent(name: string, rawJson: string): WireEvent | null {

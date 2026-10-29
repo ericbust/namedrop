@@ -183,6 +183,10 @@ function mergeSnapshot(
         previous && sameValue(previous.attention, snapshot.attention)
           ? previous.attention
           : snapshot.attention,
+      terminalRuns:
+        previous && sameValue(previous.terminalRuns, snapshot.terminalRuns)
+          ? previous.terminalRuns
+          : snapshot.terminalRuns,
       members: reuseMap(previous?.members, snapshot.members),
       threads: reuseMap(previous?.threads, snapshot.threads),
       messages,

@@ -1508,3 +1508,108 @@ test("UI-2 fix1: browsing keeps receipt updates from every staged replay window"
   assert.equal(after.messages.size, 600);
   assert.equal(after.messages.has("m900"), false);
 });
+
+test("design-b: attention subject and message ids parse tolerantly and propagate", () => {
+  const base = snapshot();
+  function frame(extra: Record<string, unknown>) {
+    return {
+      ...base,
+      frame: {
+        ...base.frame,
+        health: { level: "needs_you", items: 1 },
+        attention: [
+          {
+            source_kind: "delivery_attempt",
+            summary: { text: "No reply", truncated: false },
+            opened_at_ms: 42,
+            ...extra,
+          },
+        ],
+      },
+    };
+  }
+  const plain = apply(initialState(), frame({}));
+  const [missing] = activeChannel(plain).attention;
+  assert.equal(missing?.subjectAlias, null);
+  assert.equal(missing?.messageId, null);
+  for (const malformed of [
+    { subject_alias: 7, message_id: { id: "m1" } },
+    { subject_alias: " ", message_id: "" },
+    { subject_alias: null, message_id: null },
+  ]) {
+    const [item] = parsed(frame(malformed)).attention;
+    assert.equal(item?.subjectAlias, null);
+    assert.equal(item?.messageId, null);
+  }
+  const withSubject = apply(
+    plain,
+    frame({ subject_alias: "@codex", message_id: "m1" }),
+  );
+  assert.notEqual(withSubject, plain);
+  const [item] = activeChannel(withSubject).attention;
+  assert.equal(item?.subjectAlias, "@codex");
+  assert.equal(item?.messageId, "m1");
+  assert.equal(
+    apply(withSubject, frame({ subject_alias: "@codex", message_id: "m1" })),
+    withSubject,
+  );
+});
+
+test("design-b: terminal runs parse tolerantly, keep identity and propagate exit codes", () => {
+  const base = snapshot();
+  function frame(terminal_runs: unknown) {
+    return { ...base, frame: { ...base.frame, terminal_runs } };
+  }
+  const valid = {
+    terminal: "shell-1",
+    command: { text: "echo hi", truncated: false },
+    started_at_ms: 90,
+    exit_code: 0,
+    message_id: "m1",
+  };
+  assert.deepEqual(parsed(base).terminalRuns, []);
+  for (const malformed of [null, { runs: [] }, "runs", 4])
+    assert.deepEqual(parsed(frame(malformed)).terminalRuns, []);
+  assert.deepEqual(
+    parsed(
+      frame([
+        valid,
+        { ...valid, terminal: "" },
+        { ...valid, command: "echo hi" },
+        { ...valid, started_at_ms: -1 },
+        "not a run",
+        { ...valid, exit_code: null, message_id: undefined },
+        { ...valid, exit_code: "1", message_id: 5 },
+      ]),
+    ).terminalRuns,
+    [
+      {
+        terminal: "shell-1",
+        command: { text: "echo hi", truncated: false },
+        startedAt: 90,
+        exitCode: 0,
+        messageId: "m1",
+      },
+      {
+        terminal: "shell-1",
+        command: { text: "echo hi", truncated: false },
+        startedAt: 90,
+        exitCode: null,
+        messageId: null,
+      },
+      {
+        terminal: "shell-1",
+        command: { text: "echo hi", truncated: false },
+        startedAt: 90,
+        exitCode: null,
+        messageId: null,
+      },
+    ],
+  );
+  const state = apply(initialState(), frame([valid]));
+  assert.equal(apply(state, frame([structuredClone(valid)])), state);
+  const failed = apply(state, frame([{ ...valid, exit_code: 1 }]));
+  assert.notEqual(failed, state);
+  assert.equal(activeChannel(failed).terminalRuns[0]?.exitCode, 1);
+  assert.equal(activeChannel(failed).messages, activeChannel(state).messages);
+});
