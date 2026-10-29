@@ -3346,3 +3346,31 @@ test("UI-3: headers show two recipients then +N, envoys read as words, and a pau
       .evaluate((avatar) => avatar.classList.contains("id-terminal")),
   );
 });
+
+test("UI-3: the box grows a line at a time up to eight lines, then scrolls, and shrinks when it clears", async (t) => {
+  const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const height = () =>
+    box.evaluate((element) => element.getBoundingClientRect().height);
+  await box.click();
+  assert.equal(await height(), 32, "one line");
+  await box.pressSequentially("@codex line 1");
+  await box.press("Shift+Enter");
+  await box.pressSequentially("line 2");
+  assert.equal(await height(), 32 + 21, "two lines");
+  for (let line = 3; line <= 10; line++) {
+    await box.press("Shift+Enter");
+    await box.pressSequentially(`line ${line}`);
+  }
+  assert.equal(await height(), 32 + 7 * 21, "eight lines at most");
+  assert.ok(
+    await box.evaluate(
+      (element) => element.scrollHeight > element.clientHeight,
+    ),
+    "the ninth and tenth lines scroll",
+  );
+  await box.press("Enter");
+  await ui.page.locator("article.pending").getByText("Sent").waitFor();
+  assert.equal(await height(), 32, "back to one line");
+});

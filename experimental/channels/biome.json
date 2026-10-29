@@ -4,6 +4,10 @@
     "includes": ["**", "!dist", "!node_modules", "!package-lock.json"]
   },
   "formatter": { "indentStyle": "space", "indentWidth": 2 },
-  "linter": { "enabled": true, "rules": { "preset": "recommended" } },
+  "linter": {
+    "enabled": true,
+    "rules": { "preset": "recommended" },
+    "domains": { "react": "recommended" }
+  },
   "javascript": { "formatter": { "quoteStyle": "double" } }
 }
