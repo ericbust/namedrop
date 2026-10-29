@@ -909,7 +909,7 @@ a:hover {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 2px var(--space-3);
+  gap: 2px var(--space-2);
   margin-top: 3px;
   font-size: var(--text-xs);
   color: var(--text-muted);
@@ -930,6 +930,10 @@ a:hover {
 }
 .receipt [data-tone="failed"] {
   color: var(--failed-text);
+}
+.receipt li + li::before {
+  content: "·" / "";
+  margin-right: var(--space-2);
 }
 .receipt-to {
   margin-right: 2px;
