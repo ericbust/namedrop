@@ -2,8 +2,9 @@ mod support;
 
 use namedrop::dashboard::snapshot::SpaceKey;
 use namedrop::{
-    ActorKind, AgentSessionId, DeliveryId, MessageDraft, MessageId, MessageRecipientDraft,
-    MutationAttribution, PaneAddressId, PaneBindingId, StateNamespace, StateStore, ThreadId,
+    ActorKind, AgentSessionId, DeliveryAttemptId, DeliveryId, DeliveryState, LeaseDraft,
+    MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressId,
+    PaneBindingId, StateNamespace, StateStore, ThreadId,
 };
 use serde_json::Value;
 use std::{
@@ -368,6 +369,147 @@ fn planted_api_key_is_redacted() {
     let text = rows[0]["body"]["text"].as_str().unwrap();
     assert!(text.contains("[REDACTED TOKEN]"), "{text}");
     assert!(!text.contains(&key));
+}
+
+#[test]
+fn history_reports_real_delivery_stages() {
+    for stage in ["delivered", "working", "replied", "completed", "held"] {
+        let f = Fixture::new(1, "request");
+        let ns = StateNamespace::for_space(SOCKET, "w1");
+        let attempt = DeliveryAttemptId::new("attempt-0");
+        StateStore::open(&f.state)
+            .unwrap()
+            .transaction(|tx| {
+                let leased = tx.lease_mailbox_head(
+                    &ns,
+                    &PaneAddressId::new("address-b"),
+                    &LeaseDraft {
+                        attempt_id: attempt.clone(),
+                        binding_id: PaneBindingId::new("binding-b"),
+                        agent_session_id: AgentSessionId::new("session-b"),
+                        retry_of_attempt_id: None,
+                        owner: "history-test".into(),
+                        acquired_at_ms: 20,
+                        expires_at_ms: 100_000,
+                    },
+                    &at(20),
+                )?;
+                assert!(leased.is_some());
+                tx.transition_delivery_attempt(&ns, &attempt, DeliveryState::Submitted, &at(21))
+            })
+            .unwrap();
+
+        if matches!(stage, "working" | "replied" | "completed") {
+            StateStore::open(&f.state)
+                .unwrap()
+                .transaction(|tx| {
+                    tx.acknowledge_delivery_attempt(
+                        &ns,
+                        &attempt,
+                        "ack-0",
+                        &AgentSessionId::new("session-b"),
+                        &at(22),
+                    )
+                })
+                .unwrap();
+        }
+        if stage == "replied" {
+            StateStore::open(&f.state)
+                .unwrap()
+                .transaction(|tx| {
+                    tx.append_message(
+                        &ns,
+                        &MessageDraft {
+                            thread_id: ThreadId::new("thread-1"),
+                            message_id: MessageId::new("reply-0"),
+                            in_reply_to: Some(MessageId::new("message-0")),
+                            author_address_id: PaneAddressId::new("address-b"),
+                            author_kind: ActorKind::AgentSession,
+                            author_alias_snapshot: "b".into(),
+                            author_agent_session_snapshot: Some(AgentSessionId::new("session-b")),
+                            request_id: "reply-request-0".into(),
+                            authored_source: "@a response".into(),
+                            body: "response".into(),
+                            grammar_version: "mention/v1".into(),
+                            recipients: vec![MessageRecipientDraft {
+                                address_id: PaneAddressId::new("address-a"),
+                                alias_snapshot: "a".into(),
+                                agent_session_snapshot: Some(AgentSessionId::new("session-a")),
+                                delivery_id: DeliveryId::new("reply-delivery-0"),
+                            }],
+                            context_references: Vec::new(),
+                        },
+                        &at(23),
+                    )?;
+                    tx.record_reply_disposition(
+                        &ns,
+                        &attempt,
+                        &MessageId::new("reply-0"),
+                        &AgentSessionId::new("session-b"),
+                        &at(24),
+                    )
+                })
+                .unwrap();
+        }
+        if stage == "completed" {
+            StateStore::open(&f.state)
+                .unwrap()
+                .transaction(|tx| {
+                    tx.transition_delivery_attempt(&ns, &attempt, DeliveryState::Settled, &at(25))
+                })
+                .unwrap();
+        }
+        if stage == "held" {
+            StateStore::open(&f.state)
+                .unwrap()
+                .transaction(|tx| tx.hold_delivery_attempt(&ns, &attempt, &at(26)))
+                .unwrap();
+        }
+
+        let (status, rows) = f.get("");
+        assert_eq!(status, 200, "{stage}");
+        let row = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["message_id"] == "message-0")
+            .unwrap();
+        let expected = match stage {
+            "delivered" => serde_json::json!({"stage": "delivered"}),
+            "working" => serde_json::json!({"stage": "working", "acked_at_ms": 22}),
+            "replied" => serde_json::json!({"stage": "replied", "reply_id": "reply-0"}),
+            "completed" => serde_json::json!({"stage": "completed", "kind": "settled"}),
+            "held" => serde_json::json!({"stage": "held"}),
+            _ => unreachable!(),
+        };
+        assert_eq!(
+            row["legs"],
+            serde_json::json!([{"to": "address-b", "stage": expected}]),
+            "{stage}"
+        );
+    }
+}
+
+#[test]
+fn history_legs_are_scoped_to_their_worktree() {
+    let dir = TestDirectory::new();
+    let state = dir.path().join("state");
+    let first = setup(&state, "w1");
+    let second = setup(&state, "w2");
+    append_recipients(&state, &first, 0, 1, "first", true);
+    append(&state, &second, 0, 1, "second");
+    let server = Server::start(&state);
+
+    for (ns, recipient) in [(&first, "address-a"), (&second, "address-b")] {
+        let (status, rows) = server.get(&path(&SpaceKey::of(ns), ""), true);
+        assert_eq!(status, 200);
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["message_id"], "message-0");
+        assert_eq!(
+            rows[0]["legs"],
+            serde_json::json!([{"to": recipient, "stage": {"stage": "queued"}}])
+        );
+    }
 }
 
 #[test]
