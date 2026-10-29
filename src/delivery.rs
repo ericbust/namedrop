@@ -409,9 +409,6 @@ where
             || (first.pane_type == crate::PaneType::Terminal
                 && !crate::terminal::shell_is_available(runtime.herdr, &first.pane_id))
         {
-            if first.pane_type == crate::PaneType::Terminal {
-                report.terminal_waiting.push(address_id);
-            }
             continue;
         }
 
@@ -441,9 +438,6 @@ where
                         .map(|p| &p.terminal_id)
                     || !crate::terminal::shell_is_available(runtime.herdr, &second.pane_id)))
         {
-            if second.pane_type == crate::PaneType::Terminal {
-                report.terminal_waiting.push(address_id);
-            }
             continue;
         }
 
@@ -636,9 +630,12 @@ where
         }
     }
 
-    report.terminal_running = store
+    let final_discovery = discover(runtime)?;
+    let final_live = live.with_here(final_discovery.clone());
+    (report.terminal_running, report.terminal_waiting) = store
         .transaction(|tx| {
-            tx.inflight_delivery_attempts(&namespace)?
+            let running = tx
+                .inflight_delivery_attempts(&namespace)?
                 .into_iter()
                 .filter_map(|attempt| {
                     match tx.terminal_execution(&namespace, &attempt.attempt_id) {
@@ -647,10 +644,27 @@ where
                         Err(e) => Some(Err(e)),
                     }
                 })
-                .collect::<Result<Vec<_>, StoreError>>()
+                .collect::<Result<Vec<_>, StoreError>>()?;
+            let mut waiting = Vec::new();
+            for address in tx.queued_mailbox_addresses(&namespace)? {
+                let Some(candidate) = tx.dispatch_candidate(&namespace, &address)? else {
+                    continue;
+                };
+                if candidate.pane_type == crate::PaneType::Terminal
+                    && live_candidate_matches(&candidate, &final_discovery)
+                    && tx.coordination_wake_message_eligible(
+                        &namespace,
+                        &candidate.message_id,
+                        &final_live,
+                    )?
+                {
+                    waiting.push(address);
+                }
+            }
+            Ok((running, waiting))
         })
         .map_err(|e| e.to_string())?;
-    publish_status_metadata(runtime, &first_discovery)?;
+    publish_status_metadata(runtime, &final_discovery)?;
     Ok(report)
 }
 
