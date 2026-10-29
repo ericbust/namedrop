@@ -1,12 +1,19 @@
 use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
-use super::server_files::{ServerFiles, Token};
+use super::server_files::{ServerFiles, Token, UiSource, open_directory};
 use super::snapshot::SpaceKey;
 use std::{
+    ffi::CString,
+    fs::File,
     io::{self, BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::fs::MetadataExt,
+    },
+    path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
     },
     thread,
@@ -31,12 +38,17 @@ pub(crate) struct Front {
     pub session: Token,
     pub instance: String,
     pub hub: Sender<HubCommand>,
+    pub assets: Assets,
+    pub restarting: Arc<AtomicBool>,
 }
 
-pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>) {
+pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<AtomicBool>) {
     let next_id = Arc::new(AtomicU64::new(1));
     let open = Arc::new(AtomicUsize::new(0));
     for mut stream in listener.incoming().flatten() {
+        if stop.load(Ordering::Acquire) {
+            break;
+        }
         if open.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
             open.fetch_sub(1, Ordering::AcqRel);
             let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
@@ -129,9 +141,136 @@ impl Status {
     }
 }
 
-enum Asset {
-    Script,
-    Style,
+pub(crate) enum Assets {
+    Embedded,
+    Directory(PathBuf),
+}
+
+enum AssetBody {
+    Embedded(&'static [u8]),
+    File(File),
+}
+
+struct ResolvedAsset {
+    body: AssetBody,
+    length: u64,
+    is_index: bool,
+}
+
+impl Assets {
+    pub fn new(source: &UiSource) -> Self {
+        match source {
+            UiSource::Embedded => Self::Embedded,
+            UiSource::Directory(path) => Self::Directory(path.clone()),
+        }
+    }
+
+    fn resolve(&self, path: &str) -> Option<ResolvedAsset> {
+        match self {
+            Self::Embedded => {
+                let bytes = match path {
+                    "/index.html" => INDEX_HTML.as_bytes(),
+                    "/assets/app.js" => APP_JS.as_bytes(),
+                    "/assets/app.css" => APP_CSS.as_bytes(),
+                    _ => return None,
+                };
+                Some(ResolvedAsset {
+                    body: AssetBody::Embedded(bytes),
+                    length: bytes.len() as u64,
+                    is_index: path == "/index.html",
+                })
+            }
+            Self::Directory(path_root) => {
+                let root = open_directory(path_root).ok()?;
+                let file = open_asset(&root, path)?;
+                let metadata = file.metadata().ok()?;
+                let is_index = open_asset(&root, "/index.html")
+                    .and_then(|index| index.metadata().ok())
+                    .is_some_and(|index| {
+                        (index.dev(), index.ino()) == (metadata.dev(), metadata.ino())
+                    });
+                Some(ResolvedAsset {
+                    body: AssetBody::File(file),
+                    length: metadata.len(),
+                    is_index,
+                })
+            }
+        }
+    }
+}
+
+fn open_asset(root: &File, path: &str) -> Option<File> {
+    let parts: Vec<_> = path.strip_prefix('/')?.split('/').collect();
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || part.starts_with('.'))
+    {
+        return None;
+    }
+    let mut file = root.try_clone().ok()?;
+    for (index, part) in parts.iter().enumerate() {
+        let name = CString::new(*part).ok()?;
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | if index + 1 == parts.len() {
+                libc::O_NONBLOCK
+            } else {
+                libc::O_DIRECTORY
+            };
+        let fd = unsafe { libc::openat(file.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return None;
+        }
+        // openat returned a new owned descriptor.
+        file = unsafe { File::from_raw_fd(fd) };
+    }
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
+fn decode_asset_path(path: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(path.len());
+    let mut bytes = path.bytes();
+    while let Some(byte) = bytes.next() {
+        let byte = if byte == b'%' {
+            let high = (bytes.next()? as char).to_digit(16)?;
+            let low = (bytes.next()? as char).to_digit(16)?;
+            (high * 16 + low) as u8
+        } else {
+            byte
+        };
+        if byte == 0 || byte == b'\\' {
+            return None;
+        }
+        decoded.push(byte);
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn content_type(path: &str) -> &'static str {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "json" | "map" => "application/json",
+        "wasm" => "application/wasm",
+        "ico" => "image/x-icon",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "avif" => "image/avif",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
 }
 
 enum Route {
@@ -140,12 +279,18 @@ enum Route {
     Events(SpaceKey),
     AllEvents,
     Spaces,
-    Asset(Asset),
+    Asset(String),
     Favicon,
     Health,
 }
 
-fn route(request: &Request, port: u16, token: &Token, session: &Token) -> Result<Route, Status> {
+fn route(
+    request: &Request,
+    port: u16,
+    token: &Token,
+    session: &Token,
+    directory: bool,
+) -> Result<Route, Status> {
     let host = request.header("host").ok_or(Status::Forbidden)?;
     // Exact loopback Host defeats DNS rebinding onto this port.
     if host != format!("127.0.0.1:{port}") && host != format!("localhost:{port}") {
@@ -165,13 +310,32 @@ fn route(request: &Request, port: u16, token: &Token, session: &Token) -> Result
                 _ => Err(Status::Unauthorized),
             };
         }
-        "/assets/app.js" => return Ok(Route::Asset(Asset::Script)),
-        "/assets/app.css" => return Ok(Route::Asset(Asset::Style)),
-        "/favicon.ico" => return Ok(Route::Favicon),
+        "/assets/app.js" => return Ok(Route::Asset(path.to_owned())),
+        "/assets/app.css" => return Ok(Route::Asset(path.to_owned())),
+        "/favicon.ico" if !directory => return Ok(Route::Favicon),
         _ => {}
+    }
+    let decoded = if directory {
+        Some(decode_asset_path(path).ok_or(Status::NotFound)?)
+    } else {
+        None
+    };
+    let custom_index = decoded.as_deref() == Some("/index.html");
+    if directory
+        && path != "/"
+        && !custom_index
+        && !path.starts_with("/api/")
+        && !path.starts_with("/w/")
+    {
+        let decoded = decoded.as_deref().ok_or(Status::NotFound)?;
+        if decoded == "/healthz" || decoded.starts_with("/api/") || decoded.starts_with("/w/") {
+            return Err(Status::NotFound);
+        }
+        return Ok(Route::Asset(decoded.to_owned()));
     }
     let page = match path {
         "/" | "/api/spaces" | "/api/events" => None,
+        _ if custom_index => None,
         _ => {
             let rest = path.strip_prefix("/w/").ok_or(Status::NotFound)?;
             let (segment, events) = match rest.strip_suffix("/events") {
@@ -213,7 +377,13 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
         Ok(request) => request,
         Err(status) => return respond_status(&mut writer, status),
     };
-    match route(&request, front.port, &front.token, &front.session) {
+    match route(
+        &request,
+        front.port,
+        &front.token,
+        &front.session,
+        matches!(front.assets, Assets::Directory(_)),
+    ) {
         Err(status) => respond_status(&mut writer, status),
         Ok(Route::Redeem { nonce, .. }) if !front.files.consume_entry(&nonce) => {
             respond_status(&mut writer, Status::Unauthorized)
@@ -226,36 +396,20 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
             );
             respond(&mut writer, "303 See Other", "text/plain", &headers, b"")
         }
-        Ok(Route::Page) => respond(
-            &mut writer,
-            "200 OK",
-            "text/html; charset=utf-8",
-            "",
-            INDEX_HTML.as_bytes(),
-        ),
-        Ok(Route::Asset(Asset::Script)) => respond(
-            &mut writer,
-            "200 OK",
-            "text/javascript; charset=utf-8",
-            "",
-            APP_JS.as_bytes(),
-        ),
-        Ok(Route::Asset(Asset::Style)) => respond(
-            &mut writer,
-            "200 OK",
-            "text/css; charset=utf-8",
-            "",
-            APP_CSS.as_bytes(),
-        ),
+        Ok(Route::Page) => serve_asset(&mut writer, front, &request, "/index.html"),
+        Ok(Route::Asset(path)) => serve_asset(&mut writer, front, &request, &path),
         Ok(Route::Favicon) => respond(&mut writer, "204 No Content", "text/plain", "", b""),
         Ok(Route::Health) => respond(
             &mut writer,
             "200 OK",
             "application/json",
             "",
-            serde_json::json!({"instance": front.instance})
-                .to_string()
-                .as_bytes(),
+            serde_json::json!({
+                "instance": front.instance,
+                "restarting": front.restarting.load(Ordering::Acquire) || front.files.restarting(),
+            })
+            .to_string()
+            .as_bytes(),
         ),
         Ok(Route::Spaces) => {
             let (reply, answer) = mpsc::channel();
@@ -278,6 +432,46 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
         }
         Ok(Route::AllEvents) => stream_events(stream, writer, front, next_id, Subscription::All),
     }
+}
+
+fn serve_asset(
+    writer: &mut TcpStream,
+    front: &Front,
+    request: &Request,
+    path: &str,
+) -> io::Result<()> {
+    writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let Some(asset) = front.assets.resolve(path) else {
+        return respond_status(writer, Status::NotFound);
+    };
+    if asset.is_index
+        && !request
+            .cookie(&cookie_name(front.port))
+            .is_some_and(|candidate| front.session.matches(candidate))
+    {
+        return respond_status(writer, Status::Unauthorized);
+    }
+    write!(
+        writer,
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n{SECURITY_HEADERS}Connection: close\r\n\r\n",
+        content_type(path),
+        asset.length
+    )?;
+    match asset.body {
+        AssetBody::Embedded(bytes) => writer.write_all(bytes)?,
+        AssetBody::File(file) => {
+            let mut reader = file.take(asset.length);
+            let mut chunk = [0u8; 16 * 1024];
+            loop {
+                let count = reader.read(&mut chunk)?;
+                if count == 0 {
+                    break;
+                }
+                writer.write_all(&chunk[..count])?;
+            }
+        }
+    }
+    writer.flush()
 }
 
 fn stream_events(

@@ -208,8 +208,26 @@ impl Cli {
         }
     }
 
+    pub fn dashboard_ui(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Dashboard(args) => args.ui.as_deref(),
+            Command::DashboardServer { ui, .. } => ui.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn dashboard_inherit_claim(&self) -> bool {
+        matches!(
+            self.command,
+            Command::DashboardServer {
+                inherit_claim: true,
+                ..
+            }
+        )
+    }
+
     pub fn is_dashboard_server(&self) -> bool {
-        matches!(self.command, Command::DashboardServer)
+        matches!(self.command, Command::DashboardServer { .. })
     }
 
     pub fn is_reset_tour(&self) -> bool {
@@ -304,7 +322,12 @@ enum Command {
     Dashboard(DashboardArgs),
     /// The singleton dashboard server; `namedrop dashboard` starts it.
     #[command(hide = true)]
-    DashboardServer,
+    DashboardServer {
+        #[arg(long, value_name = "DIR")]
+        ui: Option<PathBuf>,
+        #[arg(long, hide = true)]
+        inherit_claim: bool,
+    },
     /// Runtime hooks installed for supported agents.
     #[command(hide = true)]
     Hook {
@@ -354,7 +377,7 @@ impl Command {
             Self::Reconcile => "reconcile",
             Self::Event { command } => command.operation(),
             Self::Dashboard(_) => "dashboard",
-            Self::DashboardServer => "dashboard.server",
+            Self::DashboardServer { .. } => "dashboard.server",
             Self::Hook { command } => command.operation(),
         }
     }
@@ -435,6 +458,9 @@ struct DashboardArgs {
     /// Print the URL without opening a browser.
     #[arg(long = "no-open")]
     no_open: bool,
+    /// Serve the dashboard UI from this directory instead of embedded assets.
+    #[arg(long, value_name = "DIR")]
+    ui: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
