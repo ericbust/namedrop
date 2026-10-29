@@ -1556,6 +1556,65 @@ test("design-b: landing follows the URL, then Needs you, and selection keeps the
   );
 });
 
+function selected(ui, n) {
+  return ui.page.waitForFunction(
+    (key) =>
+      document
+        .querySelector(`.channels-navigation [data-channel-key="${key}"]`)
+        ?.getAttribute("aria-current") === "page",
+    key(n),
+  );
+}
+test("landing: late frames select the URL's channel when it arrives, and an automatic choice never rewrites the URL", async (t) => {
+  const requested = await open(t, () => {}, undefined, {
+    path: `/w/${key(2)}`,
+  });
+  const path = (ui) => ui.page.evaluate(() => location.pathname);
+  const pushed = (ui) =>
+    ui.page.evaluate(() => history.length - window.initialHistoryLength);
+  await requested.page.waitForTimeout(2300);
+  requested.connections[0].send("space", frame(1, "alpha"));
+  await selected(requested, 1);
+  assert.equal(await path(requested), `/w/${key(2)}`);
+  requested.connections[0].send("space", frame(3, "gamma", "needs_you"));
+  await selected(requested, 3);
+  assert.equal(await path(requested), `/w/${key(2)}`);
+  requested.connections[0].send("space", frame(2, "beta"));
+  await selected(requested, 2);
+  assert.equal(await path(requested), `/w/${key(2)}`);
+  assert.equal(await pushed(requested), 0);
+  requested.connections[0].send("space", frame(1, "alpha", "needs_you"));
+  await requested.page.waitForFunction(
+    () => document.title === "(2) Needs you · Namedrop",
+  );
+  assert.equal(await requested.row(2).getAttribute("aria-current"), "page");
+  requested.connections[0].send("ready", { keys: [key(1), key(2), key(3)] });
+  await requested.live();
+  assert.equal(await requested.row(2).getAttribute("aria-current"), "page");
+  assert.equal(await path(requested), `/w/${key(2)}`);
+
+  const root = await open(t, () => {});
+  await root.page.waitForTimeout(2300);
+  root.connections[0].send("space", frame(1, "alpha"));
+  await selected(root, 1);
+  assert.equal(await path(root), "/");
+  root.connections[0].send("space", frame(3, "gamma", "needs_you"));
+  await selected(root, 3);
+  assert.equal(await path(root), "/");
+  assert.equal(await pushed(root), 0);
+  root.connections[0].send("ready", { keys: [key(1), key(3)] });
+  await root.live();
+  assert.equal(await root.row(3).getAttribute("aria-current"), "page");
+  assert.equal(await path(root), "/");
+  await root.row(1).click();
+  assert.equal(await path(root), `/w/${key(1)}`);
+  assert.equal(await pushed(root), 1);
+  root.connections[0].send("space", frame(4, "delta", "needs_you"));
+  await root.row(4).waitFor();
+  assert.equal(await root.row(1).getAttribute("aria-current"), "page");
+  assert.equal(await path(root), `/w/${key(1)}`);
+});
+
 test("design-b: a channel is read after 1.5 seconds on screen, and arrow keys passing over keep it unread", async (t) => {
   const ui = await open(t, (client) =>
     replay(client, [frame(1, "alpha"), frame(2, "beta"), frame(3, "gamma")]),

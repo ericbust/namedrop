@@ -1799,6 +1799,76 @@ test("design-b: switching channels closes the open thread", () => {
   );
   assert.equal(apply(open, changedChannel()).openThread, "m1");
 });
+test("landing: a late URL key is selected when it arrives, and from then on nothing moves by itself", () => {
+  const keyC = "c".repeat(20);
+  const fallback = reduce(
+    reduce(initialState({ requestedKey: parsed(snapshot(keyB)).key }), {
+      type: "opened",
+    }),
+    { type: "replay-timeout" },
+  );
+  const alpha = apply(fallback, landingFrame(keyA, "alpha"));
+  assert.equal(alpha.selectedKey, keyA);
+  const requested = apply(alpha, landingFrame(keyB, "beta"));
+  assert.equal(requested.selectedKey, keyB);
+  const later = apply(
+    requested,
+    landingFrame(keyC, "gamma", { needsYou: true }),
+  );
+  assert.equal(later.selectedKey, keyB);
+  assert.equal(ready(later, [keyA, keyB, keyC]).selectedKey, keyB);
+});
+test("landing: without a URL key each new channel re-runs the rule, updates never move it, and a pick ends it", () => {
+  const keyC = "c".repeat(20);
+  const keyD = "d".repeat(20);
+  const fallback = reduce(reduce(initialState(), { type: "opened" }), {
+    type: "replay-timeout",
+  });
+  const alpha = apply(fallback, landingFrame(keyA, "alpha"));
+  assert.equal(alpha.selectedKey, keyA);
+  const needsYou = apply(
+    alpha,
+    landingFrame(keyC, "gamma", { needsYou: true }),
+  );
+  assert.equal(needsYou.selectedKey, keyC);
+  const updated = apply(
+    needsYou,
+    landingFrame(keyA, "alpha", { needsYou: true }),
+  );
+  assert.equal(updated.selectedKey, keyC);
+  assert.equal(ready(updated, [keyA, keyC]).selectedKey, keyC);
+  const chosen = reduce(updated, {
+    type: "select",
+    key: parsed(snapshot(keyA)).key,
+  });
+  const delta = landingFrame(keyD, "delta", { needsYou: true });
+  assert.equal(apply(chosen, delta).selectedKey, keyA);
+  assert.equal(
+    ready(apply(chosen, delta), [keyA, keyC, keyD]).selectedKey,
+    keyA,
+  );
+});
+test("landing: a replay that brings a new channel re-runs the rule, a replay of known channels keeps the choice", () => {
+  const alpha = landingFrame(keyA, "alpha");
+  const state = landed([alpha]);
+  assert.equal(state.selectedKey, keyA);
+  const known = ready(
+    apply(
+      reduce(state, { type: "opened" }),
+      landingFrame(keyA, "alpha", { needsYou: true }),
+    ),
+    [keyA],
+  );
+  assert.equal(known.selectedKey, keyA);
+  const grown = ready(
+    apply(
+      apply(reduce(state, { type: "opened" }), alpha),
+      landingFrame(keyB, "beta", { needsYou: true }),
+    ),
+    [keyA, keyB],
+  );
+  assert.equal(grown.selectedKey, keyB);
+});
 
 const MIN = 60_000;
 type RowOptions = {
