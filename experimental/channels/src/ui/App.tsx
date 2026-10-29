@@ -621,16 +621,24 @@ export function App() {
     return () => clearTimeout(done);
   }, [located]);
   const showAttention = useCallback<FocusAttention>(
-    (key, target, response, button) => {
-      returnFocus.current = { button, threadId: target.threadId };
-      focusIntent.current = false;
+    (key, navigation, button) => {
+      const { target } = navigation;
       go({ kind: "channel", key });
       dispatch({ type: "jump", key });
-      dispatch({ type: "thread", threadId: target.threadId });
-      focusEvidence({ type: "open", request: { key, target, response } });
+      if (navigation.kind === "loaded") {
+        openThread(target.threadId, button);
+      } else {
+        returnFocus.current = { button, threadId: target.threadId };
+        focusIntent.current = false;
+        dispatch({ type: "thread", threadId: target.threadId });
+        focusEvidence({
+          type: "open",
+          request: { key, target, response: navigation.response },
+        });
+      }
       locate({ messageId: target.messageId });
     },
-    [],
+    [openThread],
   );
   const closeThread = useCallback(() => {
     focusEvidence({ type: "close" });
@@ -702,6 +710,13 @@ export function App() {
     paneWasOpen.current = pane !== null;
     shownView.current = view;
   });
+  const prepareResponse = () =>
+    focusEvidence({
+      type: "prepare-message",
+      draftEmpty:
+        composerId !== null &&
+        (state.drafts.get(draftKey(composerId))?.text.length ?? 0) === 0,
+    });
   let threadResponse: ThreadResponse | null = null;
   if (focused?.kind === "ready") {
     const response = focused.request.response;
@@ -712,7 +727,7 @@ export function App() {
       case "message":
         threadResponse = {
           kind: "message",
-          prepare: () => focusEvidence({ type: "prepare-message" }),
+          prepare: prepareResponse,
         };
         break;
       case "pane":
@@ -795,7 +810,7 @@ export function App() {
                   <button
                     type="button"
                     className="text-button"
-                    onClick={() => focusEvidence({ type: "prepare-message" })}
+                    onClick={prepareResponse}
                   >
                     Prepare response
                   </button>

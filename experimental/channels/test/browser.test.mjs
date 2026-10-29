@@ -4889,4 +4889,22 @@ test("CL-A: preparing an already prepared coordination response keeps the draft 
     0,
   );
   assert.equal(ui.posts.attempts.length, 0);
+  await draft.fill("");
+  await pane
+    .getByRole("button", { name: "Prepare response", exact: true })
+    .click();
+  await ui.page.waitForFunction(() =>
+    document
+      .querySelector("main .composer textarea")
+      ?.value.includes("Regarding coordination decision-1:"),
+  );
+  assert.equal(await draft.inputValue(), prepared);
+  assert.equal(
+    await ui.page
+      .getByText("Your channel draft or pending send was kept.", {
+        exact: false,
+      })
+      .count(),
+    0,
+  );
 });

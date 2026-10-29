@@ -1,21 +1,15 @@
 import {
+  type AttentionNavigation,
   attentionConversation,
-  type EvidenceResponse,
   messageIntent,
 } from "../attention.ts";
-import type {
-  Attention,
-  ChannelSnapshot,
-  Conversation,
-  SpaceKey,
-} from "../model.ts";
+import type { Attention, ChannelSnapshot, SpaceKey } from "../model.ts";
 import { peekTarget } from "../peek.ts";
 import { PeekControl } from "./PeekContext.tsx";
 
 export type FocusAttention = (
   key: SpaceKey,
-  target: Conversation,
-  response: EvidenceResponse | null,
+  navigation: AttentionNavigation,
   button: HTMLButtonElement,
 ) => void;
 export function AttentionActions({
@@ -30,25 +24,33 @@ export function AttentionActions({
   const target = attentionConversation(item, channel);
   const response = item.response;
   const member =
-    response?.kind === "pane"
+    response && "addressId" in response
       ? channel.members.get(response.addressId)
       : undefined;
-  const peek = member === undefined ? null : peekTarget(channel.key, member);
-  return (
-    <div className="attention-actions">
-      {target !== null && (
-        <button
-          type="button"
-          className="text-button"
-          onClick={(event) =>
-            onFocus(
-              channel.key,
-              target,
+  const subject = item.subjectAlias ?? member?.alias;
+  const navigation: AttentionNavigation | null =
+    target === null
+      ? null
+      : item.conversation
+        ? {
+            kind: "context",
+            target,
+            response:
               response?.kind === "pane"
                 ? response
                 : messageIntent(item, target, false),
-              event.currentTarget,
-            )
+          }
+        : { kind: "loaded", target };
+  const peek = member === undefined ? null : peekTarget(channel.key, member);
+  return (
+    <div className="attention-actions">
+      {navigation !== null && (
+        <button
+          type="button"
+          className="text-button"
+          aria-label={subject ? `Show message from ${subject}` : undefined}
+          onClick={(event) =>
+            onFocus(channel.key, navigation, event.currentTarget)
           }
         >
           Show message
@@ -59,14 +61,22 @@ export function AttentionActions({
         <button
           type="button"
           className="text-button"
+          aria-label={member ? `Respond to ${member.alias}` : undefined}
           onClick={(event) =>
             response.kind === "reply"
-              ? onFocus(channel.key, response, response, event.currentTarget)
+              ? onFocus(
+                  channel.key,
+                  { kind: "context", target: response, response },
+                  event.currentTarget,
+                )
               : target !== null &&
                 onFocus(
                   channel.key,
-                  target,
-                  messageIntent(item, target, true),
+                  {
+                    kind: "context",
+                    target,
+                    response: messageIntent(item, target, true),
+                  },
                   event.currentTarget,
                 )
           }

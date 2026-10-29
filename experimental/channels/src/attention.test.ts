@@ -304,7 +304,10 @@ test("channel preparation retries after preserved drafts without losing the trac
     state.kind === "ready" && state.request.response?.kind === "message",
   );
   assert.equal(state.request.response.preparation, "preserved");
-  const retried = evidenceReduce(state, { type: "prepare-message" });
+  const retried = evidenceReduce(state, {
+    type: "prepare-message",
+    draftEmpty: false,
+  });
   assert.ok(
     retried.kind === "ready" && retried.request.response?.kind === "message",
   );
@@ -350,6 +353,21 @@ test("channel preparation is idempotent while requested or already prepared", ()
       ),
       { type: "loaded", version: 1, context },
     );
-    assert.equal(evidenceReduce(state, { type: "prepare-message" }), state);
+    assert.equal(
+      evidenceReduce(state, { type: "prepare-message", draftEmpty: false }),
+      state,
+    );
+    const cleared = evidenceReduce(state, {
+      type: "prepare-message",
+      draftEmpty: true,
+    });
+    if (preparation === "requested") assert.equal(cleared, state);
+    else {
+      assert.ok(
+        cleared.kind === "ready" &&
+          cleared.request.response?.kind === "message",
+      );
+      assert.equal(cleared.request.response.preparation, "requested");
+    }
   }
 });

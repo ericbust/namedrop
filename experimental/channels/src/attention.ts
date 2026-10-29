@@ -20,6 +20,13 @@ export type EvidenceResponse =
   | ReplyIntent
   | MessageIntent
   | Extract<AttentionResponse, { kind: "pane" }>;
+export type AttentionNavigation =
+  | { kind: "loaded"; target: Conversation }
+  | {
+      kind: "context";
+      target: Conversation;
+      response: EvidenceResponse | null;
+    };
 export type EvidenceRequest = {
   key: SpaceKey;
   target: Conversation;
@@ -38,7 +45,7 @@ export type FocusedEvidence =
 export type EvidenceEvent =
   | { type: "open"; request: EvidenceRequest }
   | { type: "retry" }
-  | { type: "prepare-message" }
+  | { type: "prepare-message"; draftEmpty: boolean }
   | {
       type: "message-prepared";
       version: number;
@@ -71,7 +78,9 @@ export function evidenceReduce(
       return { kind: "closed", version: state.version + 1 };
     case "prepare-message":
       return state.kind === "ready" &&
-        state.request.response?.kind === "message"
+        state.request.response?.kind === "message" &&
+        state.request.response.preparation !== "requested" &&
+        (state.request.response.preparation !== "prepared" || event.draftEmpty)
         ? {
             ...state,
             request: {
