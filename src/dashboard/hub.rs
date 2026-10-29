@@ -333,6 +333,7 @@ struct Hub<'a> {
     idle: Duration,
     store: Option<StateStore>,
     data_version: Option<i64>,
+    channel_notes_revision: Option<(std::time::SystemTime, u64)>,
     spaces: HashMap<SpaceKey, KnownSpace>,
     subscribers: HashMap<u64, Subscriber>,
     published: HashMap<SpaceKey, Published>,
@@ -361,6 +362,7 @@ pub(crate) fn run(
         idle,
         store: None,
         data_version: None,
+        channel_notes_revision: None,
         spaces: HashMap::new(),
         subscribers: HashMap::new(),
         published: HashMap::new(),
@@ -543,7 +545,10 @@ impl Hub<'_> {
         self.unpublished_spaces
             .retain(|key| self.live_spaces.contains_key(key));
         self.metadata_dirty |= previous != self.live_spaces;
-        let metadata_changed = std::mem::take(&mut self.metadata_dirty);
+        let notes_revision = snapshot::channel_routing::revision(self.files.state());
+        let metadata_changed = std::mem::take(&mut self.metadata_dirty)
+            || notes_revision != self.channel_notes_revision;
+        self.channel_notes_revision = notes_revision;
         if !database_changed && !metadata_changed && incoming.is_none() {
             self.complete_replays();
             return true;
@@ -898,7 +903,13 @@ impl Hub<'_> {
                         return None;
                     }
                 };
-                snapshot::build(&rows, label.as_deref(), 0)
+                let mut snapshot = snapshot::build(&rows, label.as_deref(), 0);
+                snapshot::channel_routing::merge(
+                    self.files.state(),
+                    &namespace,
+                    &mut snapshot.messages,
+                );
+                snapshot
             }
             None => DashboardSnapshot::unknown(key.clone(), label.as_deref(), 0),
         };
@@ -1063,6 +1074,7 @@ mod tests {
             idle: Duration::from_secs(60),
             store: None,
             data_version: None,
+            channel_notes_revision: None,
             spaces: HashMap::new(),
             subscribers: HashMap::new(),
             published: HashMap::new(),

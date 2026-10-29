@@ -986,14 +986,20 @@ fn serve_connection(
                     .dashboard_history(&namespace, before.as_deref(), limit)
                     .map_err(|_| Status::Unavailable)?
                     .ok_or(Status::NotFound)
+                    .map(|rows| (namespace, rows))
             })();
             match result {
-                Ok(rows) => {
-                    let messages: Vec<_> = rows
+                Ok((namespace, rows)) => {
+                    let mut messages: Vec<_> = rows
                         .messages
                         .iter()
                         .map(|row| snapshot::message(row, &rows.legs))
                         .collect();
+                    snapshot::channel_routing::merge(
+                        front.files.state(),
+                        &namespace,
+                        &mut messages,
+                    );
                     let body = serde_json::to_vec(&messages).map_err(io::Error::other)?;
                     respond(&mut writer, "200 OK", "application/json", "", &body)
                 }
@@ -1039,14 +1045,22 @@ fn send_operator_post(
         ids: &ids,
     };
     let target = post.in_reply_to.map(crate::MessageId::new);
-    match crate::send_operator_message(&post.request_id, &post.source, target.as_ref(), &runtime) {
-        Ok(receipt) => respond(
-            writer,
-            "200 OK",
-            "application/json",
-            "",
-            receipt.to_string().as_bytes(),
-        ),
+    let sent = if target.is_none() && crate::message::is_plain_channel_post(&post.source) {
+        crate::message::send_operator_channel_message(&post.request_id, &post.source, &runtime)
+    } else {
+        crate::send_operator_message(&post.request_id, &post.source, target.as_ref(), &runtime)
+    };
+    match sent {
+        Ok(mut receipt) => {
+            snapshot::channel_routing::finish_post(front.files.state(), &namespace, &mut receipt);
+            respond(
+                writer,
+                "200 OK",
+                "application/json",
+                "",
+                receipt.to_string().as_bytes(),
+            )
+        }
         Err(error) => respond(
             writer,
             match error.kind() {

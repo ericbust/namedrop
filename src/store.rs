@@ -2402,6 +2402,114 @@ impl StateTransaction<'_> {
         }))
     }
 
+    pub(crate) fn channel_thread(
+        &self,
+        namespace: &StateNamespace,
+        thread_id: &ThreadId,
+    ) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM collaboration_messages
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND thread_id = ?3
+               AND in_reply_to IS NULL AND grammar_version = 'channel/v1')",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                thread_id.as_str()
+            ],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn channel_members(
+        &self,
+        namespace: &StateNamespace,
+    ) -> Result<Vec<RoutingAddressSnapshot>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "WITH live AS MATERIALIZED (
+                 SELECT a.address_id, c.alias, b.binding_id,
+                        (SELECT o.agent_session_id FROM agent_session_observations o
+                         WHERE o.session_socket_id = a.session_socket_id AND o.worktree_id = a.worktree_id
+                           AND o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
+                         ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1) AS agent_session_id
+                 FROM pane_addresses a
+                 JOIN alias_claims c USING (session_socket_id, worktree_id, address_id)
+                 JOIN pane_bindings b USING (session_socket_id, worktree_id, address_id)
+                 WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2
+                   AND a.retired = 0 AND a.collaboration_disabled = 0 AND a.pane_type = 'agent'
+                   AND c.claim_state = 'active' AND c.alias <> 'operator' AND b.active = 1
+             )
+             SELECT address_id, alias, binding_id, agent_session_id FROM live
+             WHERE agent_session_id <> '' AND EXISTS (
+                 SELECT 1 FROM integration_registrations r
+                 WHERE r.session_socket_id = ?1 AND r.worktree_id = ?2
+                   AND r.address_id = live.address_id AND r.agent_session_id = live.agent_session_id
+                   AND r.active = 1 AND r.runtime IN ('claude-code', 'codex'))
+             ORDER BY address_id")?;
+        Ok(statement
+            .query_map(
+                params![namespace.session_socket_id, namespace.space_id.as_str()],
+                |row| {
+                    Ok(RoutingAddressSnapshot {
+                        address_id: PaneAddressId::new(row.get::<_, String>(0)?),
+                        alias: row.get(1)?,
+                        pane_binding_id: Some(crate::PaneBindingId::new(row.get::<_, String>(2)?)),
+                        agent_session_id: Some(crate::AgentSessionId::new(
+                            row.get::<_, String>(3)?,
+                        )),
+                    })
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?)
+    }
+
+    fn channel_recap(
+        &self,
+        namespace: &StateNamespace,
+        exclude: &MessageId,
+    ) -> Result<String, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT m.author_alias_snapshot, m.body FROM collaboration_messages m
+             WHERE m.session_socket_id = ?1 AND m.worktree_id = ?2 AND m.message_id <> ?3
+               AND EXISTS(SELECT 1 FROM collaboration_messages root
+                   WHERE root.session_socket_id = m.session_socket_id AND root.worktree_id = m.worktree_id
+                     AND root.thread_id = m.thread_id AND root.in_reply_to IS NULL AND root.grammar_version = 'channel/v1')
+             ORDER BY m.created_at_ms DESC, m.rowid DESC LIMIT 6")?;
+        let mut lines = statement
+            .query_map(
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    exclude.as_str()
+                ],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        lines.reverse();
+        let single_line = |source: &str, cap| {
+            source
+                .chars()
+                .map(|ch| {
+                    if ch.is_whitespace() || ch.is_control() {
+                        ' '
+                    } else {
+                        ch
+                    }
+                })
+                .take(cap)
+                .collect::<String>()
+        };
+        Ok(lines
+            .into_iter()
+            .map(|(author, body)| {
+                format!("{}: {}", single_line(&author, 32), single_line(&body, 160))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .take(1200)
+            .collect())
+    }
+
     pub(crate) fn message_route(
         &self,
         namespace: &StateNamespace,
@@ -2451,10 +2559,16 @@ impl StateTransaction<'_> {
                 participants.push(recipient);
             }
         }
+        let mut reply_mode = crate::DeliveryReplyMode::for_message_grammar(&grammar_version);
+        if reply_mode == crate::DeliveryReplyMode::AgentThread
+            && self.channel_thread(namespace, &thread_id)?
+        {
+            reply_mode = crate::DeliveryReplyMode::Channel;
+        }
         Ok(MessageRoute {
             thread_id,
             participants,
-            reply_mode: crate::DeliveryReplyMode::for_message_grammar(&grammar_version),
+            reply_mode,
             from_namedrop: matches!(
                 grammar_version.as_str(),
                 "coordination-nudge/v1" | "coordination-report/v1" | "result-set/v1"
@@ -2519,7 +2633,12 @@ impl StateTransaction<'_> {
             }
             return self.message_receipt(namespace, &MessageId::new(message_id), true);
         }
-        if draft.recipients.is_empty() {
+        if draft.recipients.is_empty()
+            && !(draft.grammar_version == "channel/v1"
+                && draft.in_reply_to.is_none()
+                && draft.author_kind == ActorKind::Human
+                && self.is_operator_address(namespace, &draft.author_address_id)?)
+        {
             return Err(StoreError::invalid_input(
                 "a collaboration message needs at least one recipient".to_owned(),
             ));
@@ -4848,7 +4967,13 @@ impl StateTransaction<'_> {
         let stale_nudge = nudge
             && !self.coordination_wake_current(namespace, &MessageId::new(message_id.clone()))?;
         let tracked_join = result_set.is_some() && !assignments.is_empty();
-        let reply_mode = if tracked_join {
+        let reply_mode = if !tracked_join
+            && crate::DeliveryReplyMode::for_message_grammar(&grammar_version)
+                == crate::DeliveryReplyMode::AgentThread
+            && self.channel_thread(namespace, &ThreadId::new(&thread_id))?
+        {
+            crate::DeliveryReplyMode::Channel
+        } else if tracked_join {
             crate::DeliveryReplyMode::AgentThread
         } else {
             crate::DeliveryReplyMode::for_message_grammar(&grammar_version)
@@ -4927,6 +5052,12 @@ impl StateTransaction<'_> {
             review_source_message_id,
         )
         .map_err(StoreError::invalid_input)?;
+        if reply_mode == crate::DeliveryReplyMode::Channel {
+            let recap = self.channel_recap(namespace, &control.message_id)?;
+            if !recap.is_empty() {
+                control.untrusted_channel_recap = Some(recap);
+            }
+        }
         control.coordination_id = assignments.first().map(|a| a.coordination_id.clone());
         if nudge {
             control.coordination_id = wake_identity.map(|(id, _)| id);

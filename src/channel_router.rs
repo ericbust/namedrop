@@ -414,6 +414,8 @@ mod tests {
         }
         for index in 0..10 {
             rows.messages.push(MessageRow {
+                channel_to: None,
+                woke: Vec::new(),
                 message_id: index.to_string(),
                 thread_id: "channel-thread".to_owned(),
                 in_reply_to: if index == 0 {
@@ -434,6 +436,8 @@ mod tests {
             });
         }
         rows.messages.push(MessageRow {
+            channel_to: None,
+            woke: Vec::new(),
             message_id: "unrelated".to_owned(),
             thread_id: "other-thread".to_owned(),
             in_reply_to: None,
