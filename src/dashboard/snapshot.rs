@@ -1070,6 +1070,24 @@ mod redaction_regression_tests {
     }
 
     #[test]
+    fn displayed_terminal_payloads_keep_split_secrets_redacted() {
+        for (open, close, expected) in [
+            ("\u{1b}]0;", "\u{7}", "👩‍💻 ]0;[REDACTED TOKEN] می‌خواهم"),
+            ("\u{1b}]0;", "\u{1b}\\", "👩‍💻 ]0;[REDACTED TOKEN]\\ می‌خواهم"),
+            ("\u{1b}P", "\u{1b}\\", "👩‍💻 P[REDACTED TOKEN]\\ می‌خواهم"),
+            ("\u{90}", "\u{9c}", "👩‍💻 [REDACTED TOKEN] می‌خواهم"),
+        ] {
+            let raw =
+                format!("👩‍💻 {open}s\u{200d}k-abcdefghijklmnopqrstuvwxyz123456{close} می‌خواهم");
+            assert_eq!(
+                SafeText::from_untrusted(&raw, 2000).text,
+                expected,
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
     fn terminal_sequence_families_inside_secrets_are_redacted() {
         for sequence in [
             "\u{1b}[31m",
