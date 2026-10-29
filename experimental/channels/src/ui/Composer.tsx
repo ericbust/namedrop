@@ -56,7 +56,12 @@ function Option({
       content = (
         <>
           <Icon name="hash" className="opt-icon" />
-          <span className="opt-name">{channel.name}</span>
+          <span className="opt-name">
+            {channel.name}
+            {channel.suffix !== null && (
+              <span className="row-suffix"> · {channel.suffix}</span>
+            )}
+          </span>
           {channel.token !== null && (
             <span className="opt-meta">{channel.token}</span>
           )}

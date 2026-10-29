@@ -1,8 +1,10 @@
 import type { ChannelSnapshot, Member, ReplyTo, SpaceKey } from "./model.ts";
+import { channelSuffix } from "./store.ts";
 
 export type ChannelOption = {
   key: SpaceKey;
   name: string;
+  suffix: string | null;
   token: string | null;
   disabledReason: "shared-label" | "no-label" | null;
 };
@@ -38,9 +40,11 @@ export function channelOptions(
     >
   >,
 ): ChannelOption[] {
-  return [...channels].map((channel) => ({
+  const all = [...channels];
+  return all.map((channel) => ({
     key: channel.key,
     name: channel.displayName,
+    suffix: channelSuffix(channel, all),
     token:
       channel.addressableLabel === null ? null : `#${channel.addressableLabel}`,
     // The server falls back to the workspace id only when Herdr has no label.

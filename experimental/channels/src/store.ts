@@ -745,8 +745,8 @@ export function sortedChannels(state: {
   );
 }
 export function channelSuffix(
-  channel: ChannelSnapshot,
-  channels: Iterable<ChannelSnapshot>,
+  channel: Pick<ChannelSnapshot, "key" | "displayName" | "workspaceId">,
+  channels: Iterable<Pick<ChannelSnapshot, "displayName">>,
 ): string | null {
   let sameName = 0;
   for (const other of channels)
