@@ -1512,7 +1512,7 @@ fn addressability_reasons_come_from_raw_labels_and_routing_state() {
     for id in ["all-a", "all-b", "collision", "good", "deactivated"] {
         activate(&directory.path().join("state"), id);
     }
-    StateStore::open(&directory.path().join("state"))
+    StateStore::open(directory.path().join("state"))
         .unwrap()
         .transaction(|tx| tx.deactivate_worktree(&namespace("deactivated"), &attribution()))
         .unwrap();
@@ -1556,4 +1556,23 @@ fn addressability_reasons_come_from_raw_labels_and_routing_state() {
         .unwrap();
     assert_eq!(good["frame"]["space"]["addressable_label"], "good-label");
     assert!(good["frame"]["space"]["not_addressable_reason"].is_null());
+}
+
+#[test]
+fn secret_like_workspace_labels_never_become_addressable_tokens() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "sensitive");
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    let server = Server::start(directory.path(), &[("sensitive", Some(secret))]);
+    let mut all = server.events("/api/events");
+    let frame = all.space();
+    assert!(
+        !frame.to_string().contains(secret),
+        "addressable tokens must keep the frame's secret redaction"
+    );
+    assert!(frame["frame"]["space"]["addressable_label"].is_null());
+    assert_eq!(
+        frame["frame"]["space"]["not_addressable_reason"],
+        "unavailable"
+    );
 }
