@@ -10,6 +10,8 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Added
 
+- The dashboard serves sanitized recent pane output at authenticated `GET /w/<key>/participants/<address_id>/screen` for agents and terminals. Concurrent requests for one pane share a bounded Herdr read. Retired or closed panes return 410.
+
 - The dashboard can post as the local operator through authenticated `POST /w/<key>/messages`, with session-bound CSRF protection and optional thread follow-ups. Agent replies settle without an operator pane and appear in one persistent human lane. `GET /api/session` supplies the CSRF token for custom apps.
 
 - Dashboard attention entries include nullable `subject_alias` and `message_id` fields, and terminal runs include the request's nullable `message_id`. Links remain available for requests older than the live frame window.
