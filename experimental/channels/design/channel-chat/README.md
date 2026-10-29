@@ -51,7 +51,41 @@ Follow-ups, none blocking:
 3. The follow-up that Send anyway posts repeats the post's text right under the
    post. It is honest, but it would read better if the server could add a
    recipient to the existing post.
-4. Check on CH-1's head: how the operator leg id looks, whether `channel` and
-   `woke` match the contract, whether the `routing` state can ever show, and
-   whether a thread reply with no mention reaches the thread's agents. The page
-   no longer adds mentions to such a reply, so a server without D11 refuses it.
+4. Answered on CH-1's head (`f148c8e`, merged): the server sends operator legs
+   as `human`; `channel` carries `state`, `to`, `mentioned`, `reason`, and
+   `router`, with bare aliases; `woke` is a list of bare aliases; the server
+   never sends `routing`, because it routes before it answers the post; and a
+   thread reply with no mention reaches the thread's agents. Send anyway now
+   offers the agents in `channel.mentioned`.
+
+## Live on CH-1's head
+
+`live/` holds the run on a testbed with real Claude Code 2.1.310 and Codex
+0.164.0. The testbed was made by `testbed test --link . --keep`, which passed all
+10 of its checks at f9c79c4. `live/live-log.json` holds every post's receipt.
+
+| Scenario                     | What happened                                                                                                                                                                                       | Shot                 |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- |
+| Plain post, no mention       | `unrouted`, nothing mentioned, no deliveries, and no route line. Neither agent answered in 20 s.                                                                                                    | `live-plain.png`     |
+| Post that mentions an agent  | Routed to @claude, which answered in the room. The line then read "@claude · reason · 1 reply".                                                                                                     | `live-mention-*.png` |
+| Thread reply with no mention | The text was sent as typed, with `in_reply_to`. The label read "To @claude", and @claude answered.                                                                                                  | `live-thread-*.png`  |
+| An agent pulls another in    | @claude's reply mentioned @codex and read "@codex · pulled in · Working on it". @codex answered "pong" in the room.                                                                                 | `live-pullin-*.png`  |
+| Passing mention              | `unrouted` with `mentioned: ["codex"]`, which read "Mentioned @codex, not sent · Send anyway". Send anyway filled the box with no member list. @codex answered, and the offer went away.            | `live-passing*.png`  |
+| Router failure               | The dashboard ran with a router stub that exits 1. The post was kept as `router_failed`, and the line read "Couldn't check who this is for · Send to @claude" in the failed tone, with its tooltip. | `live-failed.png`    |
+
+`live-walkthrough.mp4` (66 s) is the live run. The 20 s wait after the plain
+post plays at three times speed. `live-channel-{1024,1440}-{light,dark}.png`
+show the finished channel, and the page did not scroll at any of those sizes.
+
+Live verdict: **PASS with follow-ups**. The room reads as one conversation with
+real agents, and every state renders as designed. One fix landed from the live
+run: the "2 replies" link's focus ring covered the line above it after a thread
+closed. It now hugs the text.
+
+Follow-ups from the live run:
+
+5. **Router reasons**: they read like tickets and repeat the agent's name, as in
+   "@claude · Post asks @claude to provide information". The plan's form is a
+   short topic, such as "build question". This belongs to CH-1's router prompt
+   round: ask for two to four words that name the topic, without the agent or
+   "Post asks". The page shows the reason as the server sends it.

@@ -566,7 +566,9 @@ read like a room you talk in, not a ticket queue.
   retired, in the order the text first names them. A mention is `@alias` at the
   start of the text or after a character that is not a letter, digit, `_`, or
   backslash. Terminals never count, because a terminal runs its text as a
-  command.
+  command. The composer's hint and pending row find them in the text with this
+  rule. A stored post's route line reads them from the server's
+  `channel.mentioned`, which the server found with the same rule.
 
 **What reads as a conversation.** These threads show every message as its own
 row in the timeline, in time order. Nothing in them collapses into a reply
@@ -614,6 +616,8 @@ Names in it are peek buttons at 12px 600 in `--text`.
   the server's router name, when the server sends one.
 - Legs to the operator never show, in the route line or anywhere else in channel
   chat. The operator wrote the post and reads every reply in the room.
+- The server routes a post before it answers the send, so frames do not carry
+  `routing` today. The row stays for a server that stores first.
 - Receipts follow the names, with the receipt line's own rules and copy: the
   state alone for one recipient, as in "@claude · build question · Working on
   it", and "@claude Working on it · @codex Delivered" for several. They hide once
@@ -902,7 +906,9 @@ Motion shows state and nothing else.
 - Every presence dot, receipt icon, and avatar has a text equivalent. Decorative
   icons are `aria-hidden`.
 - Hit targets are at least 32 by 32px. Names in a message header are the one
-  exception: they are inline text buttons, like links in a sentence.
+  exception: they are inline text buttons, like links in a sentence. The route
+  line's buttons keep the 32px target through padding, and their focus ring
+  hugs the 12px text, so it never covers the line above.
 - The layout holds at 200 percent zoom and at 1024 by 700 without horizontal
   scroll.
 - Theme the browser surfaces: `::selection` uses `--bg-selected`, the scrollbar
