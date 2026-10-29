@@ -3447,6 +3447,44 @@ test("UI-3: channels that share a label are listed disabled with a tooltip and c
   assert.equal(ui.posts.attempts.length, 0);
 });
 
+test("UI-3: channels that share a label carry the sidebar's workspace suffix in the popup", async (t) => {
+  const twin = (n) => {
+    const value = frame(n, "twin");
+    value.frame.space.addressable_label = null;
+    return value;
+  };
+  const ui = await open(t, (client) =>
+    replay(client, [team(1, "alpha"), twin(2), twin(3)]),
+  );
+  await ui.live();
+  await ui.row(1).click();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("#tw");
+  const list = ui.page.getByRole("listbox", { name: "Channels" });
+  await list.waitFor();
+  assert.equal(await list.getByRole("option").count(), 2);
+  const look = (locator) =>
+    locator.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return [style.color, style.fontSize];
+    });
+  for (const n of [2, 3]) {
+    const suffix = `w${n} · ${key(n)}`;
+    const option = list.getByRole("option", {
+      name: `twin · ${suffix}`,
+      exact: true,
+    });
+    assert.equal(await option.count(), 1, `the w${n} option names its suffix`);
+    assert.equal(await option.getAttribute("aria-disabled"), "true");
+    assert.deepEqual(
+      await look(option.getByText(suffix)),
+      await look(ui.row(n).getByText(suffix)),
+      `the w${n} suffix looks like the sidebar's`,
+    );
+  }
+});
+
 test("UI-3: headers show two recipients then +N, envoys read as words, and a paused channel holds queued legs", async (t) => {
   const now = Date.now();
   const alpha = team(1, "alpha");

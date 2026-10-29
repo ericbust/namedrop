@@ -247,6 +247,42 @@ test("complete: channel options mark shared and missing labels from the snapshot
   );
 });
 
+test("complete: channel options that share a name carry the sidebar's workspace suffix", () => {
+  const e = "e".repeat(20);
+  const f = "f".repeat(20);
+  const nine = "9".repeat(20);
+  assert.deepEqual(
+    channelOptions([
+      snapshot("e", "twin", null),
+      snapshot("f", "twin", null),
+      snapshot("9", "solo", "solo"),
+    ]),
+    [
+      {
+        key: e,
+        name: "twin",
+        token: null,
+        disabledReason: "shared-label",
+        suffix: `w-e · ${e}`,
+      },
+      {
+        key: f,
+        name: "twin",
+        token: null,
+        disabledReason: "shared-label",
+        suffix: `w-f · ${f}`,
+      },
+      {
+        key: nine,
+        name: "solo",
+        token: "#solo",
+        disabledReason: null,
+        suffix: null,
+      },
+    ],
+  );
+});
+
 test("complete: a post names its recipients only the way the server's grammar reads them", () => {
   const cases: [string, boolean][] = [
     ["@codex hi", true],
