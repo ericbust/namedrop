@@ -170,9 +170,9 @@ To open a popup without a key, run `herdr plugin action invoke <action> --plugin
 
 Names belong to a Herdr workspace, and a `#label` before a mention reaches another one. A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
 
-In the dashboard channel, a top-level post can use plain text. The server asks a separate, tool-free small model to choose recipients from the workspace's registered agents. It prefers Claude Haiku when Claude Code is registered, otherwise Codex Luna. The router only chooses recipients and leaves your words unchanged. A statement can stay in the channel without waking anyone. Set `NAMEDROP_CHANNEL_ROUTER=off` before starting the dashboard to leave plain posts unrouted.
+In the dashboard channel, a top-level post can use plain text. Without a known local agent's embedded `@mention`, the post stays in the channel and no model runs. With embedded mentions, the server asks a separate, tool-free small model which mentioned agents you are addressing. A passing mention such as "nice work by @codex" can stay unrouted. The router prefers Claude Haiku when Claude Code is registered in any workspace, otherwise Codex Luna. It leaves your words unchanged. Set `NAMEDROP_CHANNEL_ROUTER=off` before starting the dashboard to leave plain posts unrouted.
 
-Replies to these channel posts stay visible in the channel. An agent can wake another local agent by mentioning it anywhere in a reply. Escaped mentions, unknown names, terminals, and self-mentions stay text. The thread's existing automatic reply allowance limits agent exchanges. Leading mentions and explicit thread follow-ups keep their existing addressing rules.
+Replies to these channel posts stay visible in the channel. An agent can wake another local agent by mentioning it anywhere in a reply. Escaped mentions, unknown names, terminals, and self-mentions stay text. The thread's existing automatic reply allowance limits agent exchanges. In a thread, your plain follow-up goes to its agent participants without a model call. Embedded mentions of new participants go through the router. Terminals always need an explicit leading mention. Leading mentions keep their existing addressing rules.
 
 ### Mention agents in other workspaces
 

@@ -292,6 +292,7 @@ function deliveryStage(value: unknown): DeliveryStage {
 export type ChannelRouting = {
   state: "routing" | "routed" | "unrouted" | "router_failed";
   to: readonly string[];
+  mentioned?: readonly string[];
   reason?: string;
   router?: string;
 };
@@ -312,6 +313,9 @@ function channelRouting(value: unknown): ChannelRouting {
       return {
         state,
         to: array(item.to).map(identity),
+        ...(item.mentioned === undefined
+          ? {}
+          : { mentioned: array(item.mentioned).map(identity) }),
         ...(item.reason === undefined ? {} : { reason: text(item.reason) }),
         ...(item.router === undefined ? {} : { router: identity(item.router) }),
       };

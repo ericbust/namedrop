@@ -23,6 +23,7 @@ test("channel history preserves optional routing and wake metadata", () => {
   const channel = {
     state: "routed",
     to: ["claude"],
+    mentioned: ["claude", "codex"],
     reason: "build question",
     router: "claude-haiku",
   };
@@ -50,6 +51,7 @@ test("channel routing rejects malformed optional metadata", () => {
     { state: "routed", to: [42] },
     { state: "routed", to: [], reason: 42 },
     { state: "routed", to: [], router: "" },
+    { state: "unrouted", to: [], mentioned: [42] },
   ]) {
     assert.throws(() => parseHistory([{ ...channelRow, channel }]));
   }
