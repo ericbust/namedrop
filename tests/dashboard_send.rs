@@ -1387,7 +1387,7 @@ else:
                 expected_rows
             );
             assert!(prompts(&f).is_empty());
-            let replay = server.post(&path, &body, &[]);
+            let replay = server.post(path, body, &[]);
             assert_eq!(replay.status, 200, "{}", replay.body);
             let replay: Value = serde_json::from_str(&replay.body).unwrap();
             assert_eq!(replay["message_id"], receipt["message_id"]);
