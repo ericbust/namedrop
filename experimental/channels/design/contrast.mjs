@@ -91,6 +91,7 @@ const pairs = [
   ["idle", "bg", 3],
   ["offline", "bg", 3],
   ["working", "bg-sidebar", 3],
+  ["working", "bg-selected", 3],
   ["blocked", "bg-sidebar", 3],
   ["focus", "bg", 3],
   ["focus", "bg-sidebar", 3],
