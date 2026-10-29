@@ -6,6 +6,9 @@ import {
   participantCopy,
   pendingCopy,
   receiptCopy,
+  referenceCopy,
+  repliesCopy,
+  routeCopy,
   SHOWN_RECIPIENTS,
 } from "../copy.ts";
 import type {
@@ -18,7 +21,14 @@ import type {
   TerminalRun,
 } from "../model.ts";
 import { peekTargetOf } from "../peek.ts";
-import { participant } from "../store.ts";
+import {
+  type Chat,
+  chatPeople,
+  type RouteLine,
+  type RoutePart,
+  sameChat,
+} from "../route.ts";
+import { participant, type ReplyReference } from "../store.ts";
 import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
@@ -272,6 +282,199 @@ function variantFor(
     : "text";
 }
 
+export type SendToHandler = (
+  post: MessageRow,
+  alias: string,
+  button: HTMLButtonElement,
+) => void;
+type ThreadOpener = (threadId: string, button: HTMLButtonElement) => void;
+function Reference({
+  reference,
+  message,
+  directory,
+  onThread,
+}: {
+  reference: ReplyReference;
+  message: MessageRow;
+  directory: Directory;
+  onThread: ThreadOpener;
+}) {
+  let label = referenceCopy.earlierLabel;
+  let content: ReactNode = referenceCopy.earlier;
+  if (reference.kind === "message") {
+    const author = who(directory, reference.parent.author);
+    const [line = ""] = reference.parent.body.text.split("\n", 1);
+    label = referenceCopy.label(author.name, line);
+    content = (
+      <>
+        <span className="reply-ref-author">
+          <Name person={author} />:
+        </span>
+        <span className="reply-ref-text">{line}</span>
+      </>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="reply-ref"
+      data-thread-id={message.threadId}
+      aria-label={label}
+      onClick={(event) => onThread(message.threadId, event.currentTarget)}
+    >
+      <Icon name="reply" className="icon-12" />
+      {content}
+    </button>
+  );
+}
+function partKey(part: RoutePart): string {
+  return part.kind === "receipt" ? `receipt:${part.id}` : part.kind;
+}
+function Route({
+  line,
+  message,
+  directory,
+  paused,
+  onThread,
+  onSendTo,
+  paneId,
+  expanded,
+}: {
+  line: RouteLine;
+  message: MessageRow;
+  directory: Directory;
+  paused: boolean;
+  onThread: ThreadOpener | undefined;
+  onSendTo: SendToHandler | undefined;
+  paneId: string | undefined;
+  expanded: boolean;
+}) {
+  const offer = (alias: string, text: string) =>
+    onSendTo === undefined ? (
+      text
+    ) : (
+      <button
+        type="button"
+        className="route-link"
+        data-thread-id={message.threadId}
+        aria-label={routeCopy.sendThis(alias)}
+        onClick={(event) => onSendTo(message, alias, event.currentTarget)}
+      >
+        {text}
+      </button>
+    );
+  function part(part: RoutePart): ReactNode {
+    switch (part.kind) {
+      case "state":
+        return <li className="route-state">{routeCopy.state[part.state]}</li>;
+      case "names":
+        return (
+          <li className="route-names">
+            {part.ids.map((id, index) => (
+              <Fragment key={id}>
+                {index > 0 && ", "}
+                <PeekName directory={directory} id={id} />
+              </Fragment>
+            ))}
+          </li>
+        );
+      case "reason":
+        return <li>{part.text}</li>;
+      case "pulled-in":
+        return <li>{routeCopy.pulledIn}</li>;
+      case "receipt": {
+        const copy = receiptCopy(part.stage, paused);
+        return (
+          <li
+            data-stage={part.stage.stage}
+            data-tone={copy.tone}
+            title={copy.title}
+          >
+            {part.named && (
+              <span className="receipt-to">
+                <Name person={who(directory, part.id)} />
+              </span>
+            )}
+            <Icon name={copy.icon} className="icon-12" />
+            {copy.label}
+          </li>
+        );
+      }
+      case "mentioned":
+        return <li>{routeCopy.mentioned(part.aliases)}</li>;
+      case "send":
+        return (
+          <li>
+            {part.form === "anyway"
+              ? part.aliases.map((alias) => (
+                  <Fragment key={alias}>
+                    {offer(alias, routeCopy.send.anyway)}
+                  </Fragment>
+                ))
+              : [
+                  `${routeCopy.send.to} `,
+                  ...part.aliases.map((alias, index) => (
+                    <Fragment key={alias}>
+                      {index > 0 && ", "}
+                      {offer(alias, alias)}
+                    </Fragment>
+                  )),
+                ]}
+          </li>
+        );
+      case "replies":
+        return (
+          <li>
+            {onThread === undefined ? (
+              repliesCopy(part.count)
+            ) : (
+              <button
+                type="button"
+                className="route-link"
+                data-thread-id={message.threadId}
+                aria-controls={paneId}
+                aria-expanded={expanded}
+                aria-label={routeCopy.openReplies(part.count)}
+                onClick={(event) =>
+                  onThread(message.threadId, event.currentTarget)
+                }
+              >
+                {repliesCopy(part.count)}
+              </button>
+            )}
+          </li>
+        );
+      default: {
+        const exhaustive: never = part;
+        return exhaustive;
+      }
+    }
+  }
+  const { tip } = line;
+  return (
+    <div
+      className="route"
+      data-tone={line.tone}
+      title={
+        tip === null
+          ? undefined
+          : tip.kind === "router"
+            ? routeCopy.tip.router(tip.name)
+            : routeCopy.tip.unreachable
+      }
+    >
+      {line.icon !== null && (
+        <Icon name={line.icon} className="icon-12 route-icon" />
+      )}
+      <ul className="route-parts" aria-label={routeCopy.label}>
+        {line.parts.map((item) => (
+          <Fragment key={partKey(item)}>{part(item)}</Fragment>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 type MessageProps = {
   message: MessageRow;
   directory: Directory;
@@ -284,7 +487,9 @@ type MessageProps = {
   latestReply?: MessageRow | null;
   replyCount?: number;
   replyExit?: TerminalRun | undefined;
-  onThread?: (threadId: string, button: HTMLButtonElement) => void;
+  chat?: Chat | null;
+  onThread?: ThreadOpener;
+  onSendTo?: SendToHandler;
   paneId?: string;
   threadExpanded?: boolean;
   arrive?: boolean;
@@ -338,7 +543,7 @@ function ReplyPreview({
   reply: MessageRow | null;
   count: number;
   exit: TerminalRun | undefined;
-  onThread: NonNullable<MessageProps["onThread"]>;
+  onThread: ThreadOpener;
   paneId: string | undefined;
   expanded: boolean;
 }) {
@@ -423,7 +628,9 @@ export const Message = memo(
     latestReply = null,
     replyCount = 0,
     replyExit,
+    chat = null,
     onThread,
+    onSendTo,
     paneId,
     threadExpanded = false,
     arrive = false,
@@ -444,12 +651,22 @@ export const Message = memo(
     const variant = variantFor(message, directory, recipients);
     const named = recipients.map((id) => who(directory, id));
     const result = variant === "output" ? terminalResult(message.body) : null;
+    // A channel-chat message went to the room, so its route line says who got it.
+    const room = chat?.kind === "channel";
     return (
       <article
         className={`msg ${grouped ? "grouped" : "group-start"}${arrive ? " arrive" : ""}${located ? " located" : ""}`}
         data-message-id={message.id}
         data-kind={message.kind}
       >
+        {chat?.reference && onThread && (
+          <Reference
+            reference={chat.reference}
+            message={message}
+            directory={directory}
+            onThread={onThread}
+          />
+        )}
         {grouped ? (
           <time className="msg-gutter" dateTime={time?.iso} title={time?.full}>
             {time?.short}
@@ -466,7 +683,7 @@ export const Message = memo(
                 </span>
               )}
               {!grouped && <Exit run={exit} result={result} />}
-              {recipients.length > 0 && (
+              {!room && recipients.length > 0 && (
                 <span
                   className="to"
                   title={
@@ -527,10 +744,28 @@ export const Message = memo(
               variant={variant}
             />
           )}
-          {receipts && message.legs.length > 0 && (
-            <Receipts message={message} directory={directory} paused={paused} />
-          )}
-          {onThread && replyCount > 0 && (
+          {room
+            ? chat.route && (
+                <Route
+                  line={chat.route}
+                  message={message}
+                  directory={directory}
+                  paused={paused}
+                  onThread={onThread}
+                  onSendTo={onSendTo}
+                  paneId={paneId}
+                  expanded={threadExpanded}
+                />
+              )
+            : receipts &&
+              message.legs.length > 0 && (
+                <Receipts
+                  message={message}
+                  directory={directory}
+                  paused={paused}
+                />
+              )}
+          {!room && onThread && replyCount > 0 && (
             <ReplyPreview
               message={message}
               directory={directory}
@@ -556,7 +791,9 @@ export const Message = memo(
     before.latestReply === after.latestReply &&
     before.replyCount === after.replyCount &&
     before.replyExit === after.replyExit &&
+    sameChat(before.chat ?? null, after.chat ?? null) &&
     before.onThread === after.onThread &&
+    before.onSendTo === after.onSendTo &&
     before.paneId === after.paneId &&
     before.threadExpanded === after.threadExpanded &&
     before.arrive === after.arrive &&
@@ -572,7 +809,10 @@ export const Message = memo(
             before.directory,
             after.directory,
             before.latestReply.author,
-          )))),
+          )) &&
+        chatPeople(before.chat ?? null).every((id) =>
+          samePerson(before.directory, after.directory, id),
+        ))),
 );
 
 export function PendingMessage({

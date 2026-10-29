@@ -10,6 +10,7 @@ import type {
   Outgoing,
   SendRule,
 } from "../model.ts";
+import { chatOf } from "../route.ts";
 import {
   exitFor,
   type RunIndex,
@@ -20,7 +21,7 @@ import {
 } from "../store.ts";
 import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
-import { Message, PendingMessage } from "./Message.tsx";
+import { Message, PendingMessage, type SendToHandler } from "./Message.tsx";
 import { useEscape } from "./useEscape.ts";
 
 export function ThreadPane({
@@ -34,6 +35,7 @@ export function ThreadPane({
   posted,
   onEdit,
   onSend,
+  onSendTo,
   onClose,
   paneId,
 }: {
@@ -50,6 +52,7 @@ export function ThreadPane({
     outgoing: Pick<Outgoing, "composer" | "source" | "inReplyTo">,
     startedAt: number,
   ) => void;
+  onSendTo?: SendToHandler;
   onClose: () => void;
   paneId: string;
 }) {
@@ -118,6 +121,14 @@ export function ThreadPane({
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}
             exit={exitFor(runs, message)}
+            chat={chatOf({
+              message,
+              thread,
+              reference: null,
+              directory,
+              replies: 0,
+            })}
+            onSendTo={onSendTo}
           />
         ))}
         <p className="divider">
@@ -132,6 +143,14 @@ export function ThreadPane({
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}
             exit={exitFor(runs, message)}
+            chat={chatOf({
+              message,
+              thread,
+              reference: null,
+              directory,
+              replies: 0,
+            })}
+            onSendTo={onSendTo}
             arrive={message.at > openedAt && !posted.has(message.id)}
           />
         ))}

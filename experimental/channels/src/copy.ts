@@ -367,6 +367,11 @@ export const referenceCopy = {
   earlierLabel: "Reply to an earlier message. Open thread",
 };
 
+export const emptyChannelCopy = {
+  title: "No messages yet",
+  body: "Post here to talk with the agents in this workspace. Mention @name to bring one in.",
+};
+
 export const SHOWN_RECIPIENTS = 2;
 export function overflowCopy(hidden: number): string {
   return `+${hidden}`;

@@ -1,6 +1,14 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { composerCopy } from "../copy.ts";
+import {
+  Fragment,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { composerCopy, emptyChannelCopy } from "../copy.ts";
 import type { Channel, Directory, Outgoing, SpaceKey } from "../model.ts";
+import { answered, chatOf } from "../route.ts";
 import {
   exitFor,
   GROUP_WINDOW,
@@ -8,7 +16,7 @@ import {
   type TimelineRow,
 } from "../store.ts";
 import { Icon } from "./Icons.tsx";
-import { Message, PendingMessage } from "./Message.tsx";
+import { Message, PendingMessage, type SendToHandler } from "./Message.tsx";
 
 // A new object per activation, so showing the same message again re-scrolls.
 export type Located = { messageId: string };
@@ -56,6 +64,7 @@ export function Timeline({
   unsentReplies,
   expandedThread,
   onThread,
+  onSendTo,
   paneId,
   onOlder,
   onLatest,
@@ -71,6 +80,7 @@ export function Timeline({
   unsentReplies: ReadonlySet<string>;
   expandedThread: string | null;
   onThread: (threadId: string, button: HTMLButtonElement) => void;
+  onSendTo?: SendToHandler;
   paneId: string;
   onOlder: (key: SpaceKey) => void;
   onLatest: (key: SpaceKey) => void;
@@ -140,6 +150,21 @@ export function Timeline({
       (port.top + element.clientTop + element.clientHeight / 2);
     anchors.current.set(channel.key, capture(element));
   }, [located, channel.key]);
+  const chats = useMemo(
+    () =>
+      rows.map((row) =>
+        row.kind === "day" || row.kind === "gap"
+          ? null
+          : chatOf({
+              message: row.message,
+              thread: row.thread,
+              reference: row.reference,
+              directory,
+              replies: row.replyCount,
+            }),
+      ),
+    [rows, directory],
+  );
   const history = channel.history;
   const gap = channel.runs.length > 1;
   const browsing = channel.viewMode === "browsing";
@@ -212,14 +237,11 @@ export function Timeline({
       {channel.messages.size === 0 && (
         <div className="empty">
           <Icon name="inbox" />
-          <h2>No messages yet</h2>
-          <p>
-            When agents in this workspace mention each other, the conversation
-            shows up here.
-          </p>
+          <h2>{emptyChannelCopy.title}</h2>
+          <p>{emptyChannelCopy.body}</p>
         </div>
       )}
-      {rows.map((row) => {
+      {rows.map((row, index) => {
         switch (row.kind) {
           case "day":
             return (
@@ -244,12 +266,14 @@ export function Timeline({
           default: {
             const { message, thread, latestReply, replyCount, recipients } =
               row;
-            const answered =
-              latestReply !== null &&
-              recipients.length > 0 &&
-              recipients.every((id) =>
-                thread.replies.some((reply) => reply.author === id),
-              );
+            const replied =
+              thread.room === null
+                ? latestReply !== null &&
+                  recipients.length > 0 &&
+                  recipients.every((id) =>
+                    thread.replies.some((reply) => reply.author === id),
+                  )
+                : answered(thread.room, recipients, message.at, directory);
             return (
               <Fragment key={message.id}>
                 {row.kind === "orphan" && (
@@ -271,12 +295,14 @@ export function Timeline({
                   recipients={recipients}
                   grouped={row.grouped}
                   showRecipients={row.showRecipients}
-                  receipts={!answered}
+                  receipts={!replied}
                   exit={exitFor(runs, message)}
                   latestReply={latestReply}
                   replyCount={replyCount}
                   replyExit={exitFor(runs, latestReply)}
+                  chat={chats[index]}
                   onThread={onThread}
+                  onSendTo={onSendTo}
                   paneId={paneId}
                   threadExpanded={expandedThread === thread.id}
                   arrive={message.at > shownAt && !posted.has(message.id)}
