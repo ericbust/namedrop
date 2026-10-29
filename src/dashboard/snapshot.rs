@@ -196,10 +196,9 @@ fn secret_shadow(source: &str, canonical: bool) -> Shadow {
                 ']' => State::ControlString { osc: true },
                 'P' | 'X' | '^' | '_' => State::ControlString { osc: false },
                 '\u{1b}' => State::Escape,
-                '\u{20}'..='\u{2f}' => State::EscapeIntermediate,
+                '\u{21}'..='\u{2f}' => State::EscapeIntermediate,
                 _ if character.is_control() => State::Escape,
                 _ => {
-                    // A bare ESC keeps the legacy token-joining behavior.
                     shadow.push(character, start);
                     State::Ground
                 }
@@ -1053,6 +1052,7 @@ mod redaction_regression_tests {
             "ghp_abcdefgh\u{1b}[32mijklmnopqrstuvwxyz123456",
             "AKIAABCD\u{9b}31mEFGHIJKLMNOP",
             "-----BEGIN\u{1b}[31m PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----",
+            "-----BEGIN\u{1b} PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----",
         ] {
             let expected = if raw.starts_with("-----") {
                 "[REDACTED PRIVATE KEY]"
