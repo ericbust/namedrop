@@ -242,19 +242,32 @@ impl StateTransaction<'_> {
                 legs: Vec::new(),
             }));
         }
-        let placeholders = std::iter::repeat_n("?", messages.len())
+        let placeholders = (3..messages.len() + 3)
+            .map(|index| format!("?{index}"))
             .collect::<Vec<_>>()
             .join(",");
         let sql = format!(
-            "SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
+            "WITH page_recipients AS MATERIALIZED (
+                 SELECT session_socket_id, worktree_id, message_id, address_id, recipient_order
+                 FROM message_recipients
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND message_id IN ({placeholders})
+             ), page_addresses AS MATERIALIZED (
+                 SELECT DISTINCT session_socket_id, worktree_id, address_id FROM page_recipients
+             ), page_deliveries AS MATERIALIZED (
+                 SELECT d.* FROM page_addresses addresses CROSS JOIN mailbox_deliveries d
+                 WHERE d.session_socket_id = addresses.session_socket_id
+                   AND d.worktree_id = addresses.worktree_id
+                   AND d.address_id = addresses.address_id
+                   AND d.message_id IN (SELECT message_id FROM page_recipients)
+             )
+             SELECT r.message_id, r.address_id, d.state, ack.acknowledged_at_ms,
                     p.disposition_kind, p.disposition_id
-             FROM message_recipients r
-             LEFT JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
+             FROM page_recipients r
+             LEFT JOIN page_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
              LEFT JOIN delivery_attempts a ON {LATEST_ATTEMPT}
              LEFT JOIN delivery_acknowledgements ack USING (session_socket_id, worktree_id, attempt_id)
              LEFT JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id)
-             WHERE r.session_socket_id = ? AND r.worktree_id = ?
-               AND r.message_id IN ({placeholders})
              ORDER BY r.message_id, r.recipient_order"
         );
         let values = std::iter::once(ns[0].to_owned())

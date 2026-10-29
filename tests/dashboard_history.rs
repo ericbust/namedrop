@@ -27,7 +27,10 @@ struct Server {
 }
 impl Server {
     fn start(state: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        Self::start_binary(state, Path::new(env!("CARGO_BIN_EXE_namedrop")))
+    }
+    fn start_binary(state: &Path, binary: &Path) -> Self {
+        let child = Command::new(binary)
             .arg("--plugin-state")
             .arg(state)
             .arg("dashboard-server")
@@ -150,10 +153,25 @@ fn setup(state: &Path, space: &str) -> StateNamespace {
     ns
 }
 fn append(state: &Path, ns: &StateNamespace, start: usize, count: usize, body: &str) {
+    append_recipients(state, ns, start, count, body, false);
+}
+fn append_recipients(
+    state: &Path,
+    ns: &StateNamespace,
+    start: usize,
+    count: usize,
+    body: &str,
+    alternate: bool,
+) {
     StateStore::open(state)
         .unwrap()
         .transaction(|tx| {
             for index in start..start + count {
+                let alias = if alternate && index % 2 == 0 {
+                    "a"
+                } else {
+                    "b"
+                };
                 tx.append_message(
                     ns,
                     &MessageDraft {
@@ -174,9 +192,11 @@ fn append(state: &Path, ns: &StateNamespace, start: usize, count: usize, body: &
                         }
                         .into(),
                         recipients: vec![MessageRecipientDraft {
-                            address_id: PaneAddressId::new("address-b"),
-                            alias_snapshot: "b".into(),
-                            agent_session_snapshot: Some(AgentSessionId::new("session-b")),
+                            address_id: PaneAddressId::new(format!("address-{alias}")),
+                            alias_snapshot: alias.into(),
+                            agent_session_snapshot: Some(AgentSessionId::new(format!(
+                                "session-{alias}"
+                            ))),
                             delivery_id: DeliveryId::new(format!("delivery-{index}")),
                         }],
                         context_references: Vec::new(),
@@ -348,4 +368,62 @@ fn planted_api_key_is_redacted() {
     let text = rows[0]["body"]["text"].as_str().unwrap();
     assert!(text.contains("[REDACTED TOKEN]"), "{text}");
     assert!(!text.contains(&key));
+}
+
+#[test]
+#[ignore = "release HTTP benchmark; run with --release --ignored --nocapture"]
+fn history_http_benchmark() {
+    if cfg!(debug_assertions) {
+        panic!("run this benchmark with --release");
+    }
+    let binary = std::env::var_os("NAMEDROP_HISTORY_BENCH_BINARY")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_namedrop").into());
+    for count in [10_000, 40_000] {
+        let dir = TestDirectory::new();
+        let state = dir.path().join("state");
+        let ns = setup(&state, "benchmark");
+        append_recipients(&state, &ns, 0, count, "benchmark body", true);
+        let key = SpaceKey::of(&ns);
+        for run in 1..=3 {
+            let server = Server::start_binary(&state, &binary);
+            let mut elapsed = Vec::new();
+            for request in 0..=100 {
+                let cursor = count - 1 - (request * 379 % (count - 51));
+                let started = Instant::now();
+                let (status, rows) = server.get(
+                    &path(&key, &format!("?before=message-{cursor}&limit=50")),
+                    true,
+                );
+                let duration = started.elapsed();
+                assert_eq!(status, 200);
+                let rows = rows.as_array().unwrap();
+                assert_eq!(rows.len(), 50);
+                for (offset, row) in rows.iter().enumerate() {
+                    let index = cursor - 1 - offset;
+                    assert_eq!(row["message_id"], format!("message-{index}"));
+                    assert_eq!(row["body"]["text"], "benchmark body");
+                    let alias = if index % 2 == 0 { "a" } else { "b" };
+                    assert_eq!(
+                        row["legs"],
+                        serde_json::json!([{
+                            "to": format!("address-{alias}"),
+                            "stage": {"stage": "queued"}
+                        }])
+                    );
+                }
+                if request > 0 {
+                    elapsed.push(duration);
+                }
+            }
+            elapsed.sort_unstable();
+            eprintln!(
+                "history_http count={count} run={run} samples={} p95_ms={:.3} load={} binary={}",
+                elapsed.len(),
+                elapsed[94].as_secs_f64() * 1000.0,
+                fs::read_to_string("/proc/loadavg").unwrap().trim(),
+                binary.display(),
+            );
+        }
+    }
 }

@@ -46,7 +46,7 @@ pub(crate) struct Front {
 pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<AtomicBool>) {
     let next_id = Arc::new(AtomicU64::new(1));
     let open = Arc::new(AtomicUsize::new(0));
-    let history_store = Arc::new(Mutex::new(None::<StateStore>));
+    let history_store = Arc::new(Mutex::new(HistoryStore::Unopened));
     for mut stream in listener.incoming().flatten() {
         if stop.load(Ordering::Acquire) {
             break;
@@ -71,6 +71,35 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
             let _permit = permit;
             let _ = serve_connection(stream, &front, &next_id, &history_store);
         });
+    }
+}
+
+enum HistoryStore {
+    Unopened,
+    Ready(StateStore),
+    Failed,
+}
+
+impl HistoryStore {
+    fn store(&mut self, state: &Path) -> Result<&mut StateStore, Status> {
+        if matches!(self, Self::Unopened) {
+            let opened = StateStore::open_read_only(state).and_then(|store| {
+                if let Some(store) = &store {
+                    store.set_busy_timeout(Duration::from_millis(250))?;
+                }
+                Ok(store)
+            });
+            *self = match opened {
+                Ok(Some(store)) => Self::Ready(store),
+                Ok(None) => Self::Unopened,
+                Err(_) => Self::Failed,
+            };
+        }
+        match self {
+            Self::Ready(store) => Ok(store),
+            Self::Unopened => Err(Status::NotFound),
+            Self::Failed => Err(Status::Unavailable),
+        }
     }
 }
 
@@ -443,7 +472,7 @@ fn serve_connection(
     stream: TcpStream,
     front: &Front,
     next_id: &AtomicU64,
-    history_store: &Mutex<Option<StateStore>>,
+    history_store: &Mutex<HistoryStore>,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
@@ -507,18 +536,7 @@ fn serve_connection(
         Ok(Route::Messages { key, before, limit }) => {
             let result = (|| {
                 let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
-                if guard.is_none() {
-                    *guard = StateStore::open_read_only(front.files.state())
-                        .map_err(|_| Status::Unavailable)?;
-                    if let Some(store) = guard.as_ref() {
-                        store
-                            .set_busy_timeout(Duration::from_millis(250))
-                            .map_err(|_| Status::Unavailable)?;
-                    }
-                }
-                let Some(store) = guard.as_mut() else {
-                    return Err(Status::NotFound);
-                };
+                let store = guard.store(front.files.state())?;
                 let namespace = store
                     .dashboard_spaces()
                     .map_err(|_| Status::Unavailable)?
@@ -734,4 +752,45 @@ fn respond(
     )?;
     writer.write_all(body)?;
     writer.flush()
+}
+
+#[cfg(test)]
+mod history_store_tests {
+    use super::*;
+
+    #[test]
+    fn history_open_failure_is_sticky_after_database_repair() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-history-failed-{}", std::process::id()));
+        std::fs::create_dir(&state).unwrap();
+        let database = state.join("namedrop.sqlite3");
+        std::fs::write(&database, b"invalid sqlite database").unwrap();
+        let mut cache = HistoryStore::Unopened;
+        assert!(matches!(cache.store(&state), Err(Status::Unavailable)));
+        std::fs::remove_file(&database).unwrap();
+        drop(StateStore::open(&state).unwrap());
+        assert!(StateStore::open_read_only(&state).unwrap().is_some());
+        assert!(matches!(cache.store(&state), Err(Status::Unavailable)));
+        drop(cache);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn history_missing_database_can_appear_later() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-history-missing-{}", std::process::id()));
+        let mut cache = HistoryStore::Unopened;
+        assert!(matches!(cache.store(&state), Err(Status::NotFound)));
+        drop(StateStore::open(&state).unwrap());
+        assert!(
+            cache
+                .store(&state)
+                .unwrap()
+                .dashboard_spaces()
+                .unwrap()
+                .is_empty()
+        );
+        drop(cache);
+        std::fs::remove_dir_all(state).unwrap();
+    }
 }
