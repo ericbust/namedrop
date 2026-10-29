@@ -1100,6 +1100,79 @@ mod tests {
     }
 
     #[test]
+    fn retained_member_expiry_republishes_without_a_database_change() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-hub-expiry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let namespace = StateNamespace::for_space("socket-a", "w1");
+        let at = MutationAttribution::new(ActorKind::Plugin, "test", 1);
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| tx.activate_worktree(&namespace, &at))
+            .unwrap();
+        add_address(&state, &namespace, "closed");
+        let closed_at = u64::try_from(now_ms() - 300_000 + 1_500).unwrap();
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                let address = PaneAddressId::new("address-closed");
+                tx.bind_pane(
+                    &namespace,
+                    &crate::PaneBindingId::new("binding-closed"),
+                    &address,
+                    "p1",
+                    &at,
+                )?;
+                tx.retire_pane_address(
+                    &namespace,
+                    &address,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", closed_at),
+                )
+            })
+            .unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = test_hub(&files);
+        let (frames, inbox) = sync_channel(8);
+        hub.handle(HubCommand::Subscribe {
+            id: 1,
+            subscription: Subscription::Space(SpaceKey::of(&namespace)),
+            frames,
+            notify: std::sync::mpsc::channel().0,
+        });
+        let Frame::Snapshot(initial) = inbox.recv().unwrap() else {
+            panic!("snapshot")
+        };
+        let initial: serde_json::Value = serde_json::from_str(&initial).unwrap();
+        assert!(
+            initial["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| member["alias"] == "@closed")
+        );
+        let version = hub.data_version;
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let expired = loop {
+            hub.refresh(None);
+            if let Ok(Frame::Snapshot(frame)) = inbox.try_recv() {
+                break frame;
+            }
+            assert!(Instant::now() < deadline, "expiry did not publish a frame");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(hub.data_version, version);
+        let expired: serde_json::Value = serde_json::from_str(&expired).unwrap();
+        assert!(
+            !expired["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| member["alias"] == "@closed")
+        );
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn a_failed_read_is_retried_on_the_next_tick() {
         let state = std::env::temp_dir().join(format!("namedrop-hub-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);

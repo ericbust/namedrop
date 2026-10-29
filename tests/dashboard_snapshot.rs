@@ -2021,3 +2021,36 @@ fn terminal_links_use_the_namespace_when_delivery_and_attempt_ids_repeat() {
         assert_eq!(frame.terminal_runs[0].message_id.as_deref(), Some(want));
     }
 }
+
+#[test]
+fn recently_closed_members_expire_at_five_minutes_but_references_keep_them() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    store
+        .transaction(|tx| {
+            tx.retire_pane_address(
+                &ns,
+                &id(&ns, "b"),
+                &MutationAttribution::new(ActorKind::Plugin, "test", 1_000),
+            )
+        })
+        .unwrap();
+    let rows = store.dashboard_rows(&ns).unwrap();
+    let before = build(&rows, None, 300_999);
+    assert_eq!(lane(&before, "@b").activity, Activity::Retired);
+    let expired = build(&rows, None, 301_000);
+    assert!(
+        !expired
+            .participants
+            .iter()
+            .any(|member| member.alias == "@b")
+    );
+    send(&mut store, &ns, "reference", "a", "a", "history", None);
+    let mut rows = store.dashboard_rows(&ns).unwrap();
+    rows.messages[0].author_address_id = id(&ns, "b").as_str().to_owned();
+    assert_eq!(
+        lane(&build(&rows, None, 301_001), "@b").activity,
+        Activity::Retired
+    );
+}

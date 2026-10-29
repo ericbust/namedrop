@@ -34,6 +34,7 @@ function snapshot(
   participants: unknown[] = [],
   workspace = `w-${letter}`,
   state: string | null = "active",
+  reason: string | null = null,
 ): ChannelSnapshot {
   const key = letter.repeat(20);
   const event = parseEvent(
@@ -47,6 +48,7 @@ function snapshot(
           workspace_id: workspace,
           display_name: name,
           addressable_label: label,
+          not_addressable_reason: reason,
           ...(state === null ? {} : { state }),
         },
         health: { level: "calm" },
@@ -405,4 +407,18 @@ test("complete: a post sends its own recipients, else the thread's, else nothing
   assert.equal(postSource("#alpha hi", to), "#alpha @lead #alpha hi");
   assert.equal(postSource("hello", null), null);
   assert.equal(postSource("   ", to), null);
+});
+
+test("complete: disabled copy follows the server reason despite sanitized or identical names", () => {
+  const channels = [
+    snapshot("1", "same name", null, [], "w-1", "not_activated", "shared_label"),
+    snapshot("2", "same name", null, [], "w-2", "not_activated", "shared_label"),
+    snapshot("3", "all", null, [], "w-3", "active", "reserved_all"),
+    snapshot("4", "all", null, [], "w-4", "active", "reserved_all"),
+    snapshot("5", "w-5", null, [], "w-5", "active", "id_collision"),
+    snapshot("6", "日本語", null, [], "w-6", "active", "empty_label"),
+    snapshot("7", "anything", null, [], "w-7", "active", "missing_label"),
+  ];
+  assert.deepEqual(channelOptions(channels).map((option) => option.disabledReason),
+    ["shared-name", "shared-name", "unknown", "unknown", "unknown", "unusable-label", "no-label"]);
 });
