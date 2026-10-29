@@ -70,7 +70,7 @@ const snapshots = [
     participant("@ghost", { type: "agent", runtime: null }, "retired"),
     participant("@shell", { type: "terminal" }),
   ]),
-  snapshot("c", "shared", null),
+  snapshot("c", "dormant", null),
   snapshot("d", "w-d", null),
 ];
 const [beta, alpha] = snapshots;
@@ -82,6 +82,11 @@ const context: CompletionContext = {
   current: alphaKey,
   channels: channelOptions(snapshots),
   membersOf: (key) => [...(byKey.get(key)?.members.values() ?? [])],
+};
+const project = snapshot("1", "Alpha Project", "alpha-project");
+const withProject: CompletionContext = {
+  ...context,
+  channels: channelOptions([...snapshots, project]),
 };
 function names(completion: Completion | null): string[] {
   assert.ok(completion);
@@ -164,12 +169,12 @@ test("complete: a channel without a token is listed but accept refuses it", () =
   assert.deepEqual(names(completion), [
     "alpha",
     "beta",
-    "shared",
+    "dormant",
     "w-d",
     "#all",
   ]);
   assert.ok(completion);
-  assert.equal(accept("#", completion, pick(completion, "shared")), null);
+  assert.equal(accept("#", completion, pick(completion, "dormant")), null);
   assert.equal(accept("#", completion, pick(completion, "w-d")), null);
   assert.deepEqual(accept("#", completion, pick(completion, "#all")), {
     text: "#all ",
@@ -207,6 +212,34 @@ test("complete: prefix matches rank before substring matches, ties by name, igno
   assert.deepEqual(names(complete("#l", 2, context)), ["alpha", "#all"]);
 });
 
+test("complete: a # query matches the typeable token as well as the name, ignoring case", () => {
+  const listed = (text: string) =>
+    names(complete(text, text.length, withProject));
+  assert.deepEqual(listed("#alpha-p"), ["Alpha Project"]);
+  assert.deepEqual(listed("#ALPHA"), ["alpha", "Alpha Project"]);
+  assert.deepEqual(listed("#proj"), ["Alpha Project"]);
+  assert.deepEqual(listed("#-pro"), ["Alpha Project"]);
+  assert.deepEqual(
+    listed("#DORM"),
+    ["dormant"],
+    "a channel without a token still matches by name",
+  );
+});
+
+test("complete: the #token before an @ resolves by folding, so #Beta @ lists beta's members", () => {
+  assert.deepEqual(names(complete("#Beta @", 7, context)), [
+    "@coder",
+    "@reviewer",
+  ]);
+  assert.equal(complete("#Beta @", 7, context)?.target, betaKey);
+  assert.deepEqual(names(complete("#BETA @co", 9, context)), ["@coder"]);
+  assert.deepEqual(names(complete("#Alpha_Project @", 16, withProject)), []);
+  assert.equal(
+    complete("#Alpha_Project @", 16, withProject)?.target,
+    project.key,
+  );
+});
+
 test("complete: #all comes last and accepting a member replaces the token and adds one space", () => {
   assert.deepEqual(names(complete("#a", 2, context)).at(-1), "#all");
   const text = "#al";
@@ -231,7 +264,7 @@ test("complete: #all comes last and accepting a member replaces the token and ad
   );
 });
 
-test("complete: channel options mark shared and missing labels from the snapshot", () => {
+test("complete: channel options name why a channel cannot be mentioned, in the table's order", () => {
   assert.deepEqual(
     channelOptions(snapshots).map(({ name, token, disabledReason }) => [
       name,
@@ -241,10 +274,30 @@ test("complete: channel options mark shared and missing labels from the snapshot
     [
       ["beta", "#beta", null],
       ["alpha", "#alpha", null],
-      ["shared", null, "shared-label"],
+      ["dormant", null, "inactive"],
       ["w-d", null, "no-label"],
     ],
   );
+  const reasons = channelOptions([
+    snapshot("2", "w-2", null),
+    snapshot("3", "日本語", null),
+    snapshot("4", "All", null),
+    snapshot("5", "Twin", null),
+    snapshot("6", "twin", null),
+    snapshot("7", "Gamma", "gamma"),
+    snapshot("8", "gamma!", null),
+    snapshot("9", "Dormant", null),
+  ]).map(({ name, disabledReason }) => [name, disabledReason]);
+  assert.deepEqual(reasons, [
+    ["w-2", "no-label"],
+    ["日本語", "unusable-label"],
+    ["All", "all"],
+    ["Twin", "shared-label"],
+    ["twin", "shared-label"],
+    ["Gamma", null],
+    ["gamma!", "shared-label"],
+    ["Dormant", "inactive"],
+  ]);
 });
 
 test("complete: channel options that share a name carry the sidebar's workspace suffix", () => {

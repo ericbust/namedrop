@@ -16,6 +16,7 @@ import {
   receiptCopy,
   recipientsLabel,
   relativeAge,
+  replyLabel,
   replyPlaceholder,
   runtimeName,
   sendErrorCopy,
@@ -387,22 +388,31 @@ test("composer words name the channel, the thread's recipients and the reason a 
     }),
     "Message testbed ui2-live",
   );
-  assert.equal(replyPlaceholder(["@codex"]), "Reply to @codex");
-  assert.equal(replyPlaceholder(["@lead · #alpha"]), "Reply to @lead · #alpha");
-  assert.equal(
-    replyPlaceholder([]),
-    "No one in this thread can be mentioned. Start with @name to choose someone.",
-  );
+  assert.equal(replyPlaceholder(["@codex"]), "Write a reply");
+  assert.equal(replyPlaceholder(["@lead · #alpha"]), "Write a reply");
+  assert.equal(replyLabel(["@codex"]), "Reply to @codex");
+  assert.equal(replyLabel(["@lead · #alpha"]), "Reply to @lead · #alpha");
+  const noOne =
+    "No one in this thread can be mentioned. Start with @name to choose someone.";
+  assert.equal(replyPlaceholder([]), noOne);
+  assert.equal(replyLabel([]), noOne);
   assert.equal(recipientsLabel(["@codex", "@shell"]), "To @codex, @shell");
   assert.equal(
     composerCopy.needsRecipient,
     "Start with @name to choose who gets this.",
   );
   assert.deepEqual(disabledChannelCopy, {
+    "no-label": "This workspace has no label. Name it in Herdr to mention it.",
+    "unusable-label":
+      "This label has no letters or digits Namedrop can use. Rename it in Herdr to mention it.",
+    all: "“all” means every workspace. Rename this one in Herdr to mention it.",
     "shared-label":
       "Two workspaces share this label. Rename one in Herdr to mention it.",
-    "no-label": "This workspace has no label. Name it in Herdr to mention it.",
+    inactive:
+      "Namedrop isn't active in this workspace yet, so it can't be mentioned.",
   });
+  assert.equal(composerCopy.replyNotSent, "Reply not sent · Open thread");
+  assert.equal(composerCopy.postNotSent, "A post wasn't sent");
   assert.equal(overflowCopy(3), "+3");
 });
 

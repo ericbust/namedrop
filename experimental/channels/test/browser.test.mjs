@@ -3617,3 +3617,296 @@ test("UI-3: the box re-fits a wrapped placeholder when the viewport narrows and 
   assert.deepEqual(await fit(1440), wide, "back to one line when wide again");
   assert.deepEqual(await ui.page.evaluate(() => window.windowErrors), []);
 });
+
+function askThread() {
+  const now = Date.now();
+  const value = team(1, "alpha");
+  value.frame.messages = [
+    message("ask", "@codex check this", {
+      thread_id: "t1",
+      at_ms: now - 120_000,
+      legs: [{ to: "codex", stage: done() }],
+    }),
+    message("answer", "Checked", {
+      thread_id: "t1",
+      in_reply_to: "ask",
+      kind: "reply",
+      author: "codex",
+      at_ms: now - 60_000,
+    }),
+  ];
+  value.frame.threads = [
+    {
+      thread_id: "t1",
+      title: { text: "Check", truncated: false },
+      message_count: 2,
+    },
+  ];
+  return value;
+}
+// A post route that answers only once the test says so, always with the same 400.
+function slowRefusal() {
+  let refuse;
+  const refused = new Promise((resolve) => {
+    refuse = resolve;
+  });
+  return {
+    onPost: () => refused,
+    refuse: () => refuse({ status: 400, error: "unknown recipient @ghost" }),
+  };
+}
+const notSent = (ui, n) =>
+  ui.row(n).getByRole("img", { name: "A post wasn't sent" });
+
+test("UI-3 fix: a post refused after switching channels comes back as that channel's draft with its error, and the sidebar marks it", async (t) => {
+  const server = slowRefusal();
+  const ui = await open(
+    t,
+    (client) => replay(client, [team(1, "alpha"), frame(3, "gamma")]),
+    () => [],
+    { onPost: server.onPost },
+  );
+  await ui.live();
+  await ui.row(1).click();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("@ghost hi");
+  await box.press("Enter");
+  await ui.page.locator("main article.pending").waitFor();
+  await ui.row(3).click();
+  await ui.page.getByRole("heading", { name: "gamma", exact: true }).waitFor();
+  const gammaBox = ui.page.getByRole("combobox", { name: "Message #gamma" });
+  assert.equal(await gammaBox.inputValue(), "");
+  assert.equal(await notSent(ui, 1).count(), 0, "no marker while sending");
+  server.refuse();
+  await notSent(ui, 1).waitFor();
+  assert.equal(await notSent(ui, 3).count(), 0);
+  assert.equal(
+    await ui.page.locator(".composer").getByRole("alert").count(),
+    0,
+    "gamma's box shows no error",
+  );
+  assert.equal(await gammaBox.inputValue(), "");
+  await ui.row(1).click();
+  await box.waitFor();
+  assert.equal(await box.inputValue(), "@ghost hi");
+  const error = ui.page.locator(".composer").getByRole("alert");
+  await error.waitFor();
+  assert.equal(await error.textContent(), "Unknown recipient @ghost.");
+  assert.equal(await box.getAttribute("readonly"), null);
+  assert.equal(await ui.page.locator("article.pending").count(), 0);
+  assert.equal(await notSent(ui, 1).count(), 1);
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 2, "the retry");
+  await error.waitFor();
+  assert.equal(new Set(requestIds(ui)).size, 1, "the retry reused its id");
+  await box.pressSequentially("!");
+  await error.waitFor({ state: "detached" });
+  assert.equal(await notSent(ui, 1).count(), 0, "editing clears the marker");
+});
+
+test("UI-3 fix: a thread reply refused after the pane closed marks its parent, and opening the thread shows the draft and its error", async (t) => {
+  const server = slowRefusal();
+  const ui = await open(
+    t,
+    (client) => replay(client, [askThread()]),
+    () => [],
+    { onPost: server.onPost },
+  );
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.getByRole("button", { name: /^1 reply from @codex/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  await reply.click();
+  await reply.pressSequentially("thanks");
+  await reply.press("Enter");
+  await pane.locator("article.pending").waitFor();
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  const marker = timeline.getByRole("button", {
+    name: "Reply not sent · Open thread",
+  });
+  assert.equal(await marker.count(), 0, "no marker while sending");
+  server.refuse();
+  await marker.waitFor();
+  assert.equal(await marker.getAttribute("data-thread-id"), "t1");
+  const parent = await timeline
+    .locator('[data-message-id="ask"]')
+    .boundingBox();
+  const below = await marker.boundingBox();
+  assert.ok(
+    below.y >= parent.y + parent.height - 1,
+    "the marker sits under its parent message",
+  );
+  assert.equal(await notSent(ui, 1).count(), 1);
+  assert.equal(
+    await ui.page.locator("main .composer").getByRole("alert").count(),
+    0,
+    "the channel's own box shows no error",
+  );
+  await marker.click();
+  await pane.waitFor();
+  assert.equal(await reply.inputValue(), "thanks");
+  const error = pane.locator(".composer").getByRole("alert");
+  await error.waitFor();
+  assert.equal(await error.textContent(), "Unknown recipient @ghost.");
+  assert.equal(
+    await marker.count(),
+    0,
+    "the marker goes while the thread is open",
+  );
+  assert.equal(await pane.locator("article.pending").count(), 0);
+  await reply.press("Enter");
+  await until(() => ui.posts.attempts.length === 2, "the retry");
+  assert.equal(new Set(requestIds(ui)).size, 1, "the retry reused its id");
+  assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "@codex thanks");
+});
+
+test("UI-3 fix: switching channels and closing a thread keep unsent text", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [askThread(), frame(3, "gamma")]),
+  );
+  await ui.live();
+  await ui.row(1).click();
+  const alpha = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await alpha.click();
+  await alpha.pressSequentially("@codex half a post");
+  await ui.row(3).click();
+  const gamma = ui.page.getByRole("combobox", { name: "Message #gamma" });
+  await gamma.waitFor();
+  assert.equal(await gamma.inputValue(), "");
+  await gamma.click();
+  await gamma.pressSequentially("gamma draft");
+  await ui.row(1).click();
+  await alpha.waitFor();
+  assert.equal(await alpha.inputValue(), "@codex half a post");
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const preview = timeline.getByRole("button", {
+    name: /^1 reply from @codex/,
+  });
+  await preview.click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  await reply.click();
+  await reply.pressSequentially("half a reply");
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  await preview.click();
+  await reply.waitFor();
+  assert.equal(await reply.inputValue(), "half a reply");
+  assert.equal(await alpha.inputValue(), "@codex half a post");
+  await ui.row(3).click();
+  await gamma.waitFor();
+  assert.equal(await gamma.inputValue(), "gamma draft");
+  assert.equal(ui.posts.attempts.length, 0);
+});
+
+test("UI-3 fix: the thread box says Write a reply while the To label names the recipients", async (t) => {
+  const ui = await open(t, (client) => replay(client, [askThread()]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.getByRole("button", { name: /^1 reply from @codex/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  assert.equal(await reply.getAttribute("placeholder"), "Write a reply");
+  assert.equal(
+    await ui.page
+      .getByRole("combobox", { name: "Message #alpha" })
+      .getAttribute("placeholder"),
+    "Message #alpha",
+  );
+});
+
+test("UI-3 fix: a disabled channel's tooltip names its own reason", async (t) => {
+  const disabled = (n, name) => {
+    const value = frame(n, name);
+    value.frame.space.addressable_label = null;
+    return value;
+  };
+  const ui = await open(t, (client) =>
+    replay(client, [
+      team(1, "alpha"),
+      disabled(2, "w2"),
+      disabled(3, "日本語"),
+      disabled(4, "All"),
+      disabled(5, "Twin"),
+      disabled(6, "twin"),
+      disabled(7, "Dormant"),
+    ]),
+  );
+  await ui.live();
+  await ui.row(1).click();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("#");
+  const list = ui.page.getByRole("listbox", { name: "Channels" });
+  await list.waitFor();
+  const shared =
+    "Two workspaces share this label. Rename one in Herdr to mention it.";
+  const titles = {
+    w2: "This workspace has no label. Name it in Herdr to mention it.",
+    日本語:
+      "This label has no letters or digits Namedrop can use. Rename it in Herdr to mention it.",
+    All: "“all” means every workspace. Rename this one in Herdr to mention it.",
+    Twin: shared,
+    twin: shared,
+    Dormant:
+      "Namedrop isn't active in this workspace yet, so it can't be mentioned.",
+  };
+  for (const [name, title] of Object.entries(titles)) {
+    const option = list.getByRole("option").filter({
+      has: ui.page.locator(".opt-name", { hasText: new RegExp(`^${name}$`) }),
+    });
+    assert.equal(await option.count(), 1, name);
+    assert.equal(await option.getAttribute("aria-disabled"), "true", name);
+    assert.equal(await option.getAttribute("title"), title, name);
+  }
+  const alpha = list.getByRole("option").filter({
+    has: ui.page.locator(".opt-name", { hasText: /^alpha$/ }),
+  });
+  assert.equal(await alpha.getAttribute("title"), null);
+  assert.equal(await alpha.getAttribute("aria-disabled"), null);
+});
+
+test("UI-3 fix: # matches the typeable token ignoring case, and #Beta before @ lists beta's members", async (t) => {
+  const project = frame(2, "Alpha Project");
+  project.frame.space.addressable_label = "alpha-project";
+  const beta = frame(3, "beta");
+  beta.frame.participants = [
+    { ...people()[0], address_id: "reviewer", alias: "@reviewer" },
+  ];
+  const ui = await open(t, (client) =>
+    replay(client, [team(1, "alpha"), project, beta]),
+  );
+  await ui.live();
+  await ui.row(1).click();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("#alpha-p");
+  const channels = ui.page.getByRole("listbox", { name: "Channels" });
+  await channels.waitFor();
+  assert.deepEqual(await channels.locator(".opt-name").allTextContents(), [
+    "Alpha Project",
+  ]);
+  await box.press("Tab");
+  assert.equal(await box.inputValue(), "#alpha-project ");
+  await box.press("Control+a");
+  await box.press("Backspace");
+  await box.pressSequentially("#Beta @");
+  const members = ui.page.getByRole("listbox", { name: "Members" });
+  await members.waitFor();
+  assert.deepEqual(await members.locator(".opt-name").allTextContents(), [
+    "@reviewer",
+  ]);
+});
