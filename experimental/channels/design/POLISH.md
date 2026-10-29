@@ -27,6 +27,18 @@ To rebuild the evidence, run `node design/shoot-mockup.mjs design/after`, then
 | 12  | Read on dwell                                 | Arrow keys mark every channel they pass as read.                                                                                                                                                                   | Mark a channel read after 1.5 seconds on screen. Arrow-key selection stays as UI-1 built it.                                                                                                                                           | `src/store.ts`                                                                              | n/a, behavior                                        |
 | 13  | Accessibility details                         | Five buttons share the name "1 reply". Sidebar headings come before the page's h1. New Needs-you items are not announced.                                                                                          | Give each reply preview a unique accessible name. Use `aria-label` on the sidebar `nav`s instead of `h2`s. Add a polite live region to the banner.                                                                                     | `src/ui/*.tsx`                                                                              | n/a                                                  |
 
+## Status
+
+Phase B implemented every item above. `reports/DESIGN-2.json` in the
+orchestration state records the status of each item, the checks, and the perf.
+`phase-b/` holds the live captures: four views at 1440 by 900 and 1024 by 700 in
+both themes, and `walkthrough.mp4`, 51 seconds. To rebuild them against a kept
+testbed, run `node design/shoot-phase-b.mjs '<mint-url command>' design/phase-b
+'<live send command>'`, then convert `walkthrough.webm` with
+`ffmpeg -i walkthrough.webm -c:v libx264 -crf 28 -pix_fmt yuv420p walkthrough.mp4`.
+Playwright's video capture needs its own ffmpeg build. A symlink from
+`~/.cache/ms-playwright/ffmpeg-1011/ffmpeg-linux` to the system `ffmpeg` works.
+
 ## Data asks for the builders
 
 These items are not design work. They would make items 2 and 5 better, and they
