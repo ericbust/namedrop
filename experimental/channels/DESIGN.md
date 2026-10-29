@@ -627,7 +627,8 @@ Names in it are peek buttons at 12px 600 in `--text`.
   "Namedrop couldn't reach its router. The post is saved, and no one got it."
 
 **Send anyway.** A post offers to send itself to each agent it mentions that
-did not get it. One such agent reads "Mentioned @codex, not sent · Send
+did not get it. Once a later message in the thread reaches that agent, or the
+agent writes in it, the offer goes, so the line never invites a second send. One such agent reads "Mentioned @codex, not sent · Send
 anyway". Several read "Mentioned 2 agents, not sent · Send to @codex, @lead", so
 each name shows once, as its button. `router_failed` always uses the "Send to"
 form. Each offer is a

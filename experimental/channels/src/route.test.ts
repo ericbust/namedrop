@@ -232,6 +232,46 @@ test("route line: an unrouted post that mentions agents says so with the inbox, 
     "routed with no one reached reads as unrouted",
   );
 });
+test("route line: Send anyway stops offering an agent the thread has reached since", () => {
+  const unrouted = { state: "unrouted", to: [] };
+  const sent = reply("sent", "human", 2_000, {
+    legs: [{ to: "codex", stage: { stage: "delivered" } }],
+  });
+  assert.deepEqual(
+    room(post("nice catch by @codex", unrouted), sent).line("post", 1),
+    {
+      icon: null,
+      tone: "muted",
+      tip: null,
+      parts: [{ kind: "replies", count: 1 }],
+    },
+    "a follow-up sent to @codex leaves only the reply count",
+  );
+  assert.deepEqual(
+    room(
+      post("credit to @claude and @codex", unrouted),
+      reply("answer", "codex", 2_000),
+    ).line()?.parts,
+    [
+      { kind: "mentioned", aliases: ["@claude"] },
+      { kind: "send", aliases: ["@claude"], form: "anyway" },
+    ],
+    "an agent who wrote in the thread is not offered",
+  );
+  assert.deepEqual(
+    room(
+      post("can @claude or @codex look?", {
+        state: "router_failed",
+        to: [],
+      }),
+      sent,
+    ).line()?.parts,
+    [
+      { kind: "state", state: "failed" },
+      { kind: "send", aliases: ["@claude"], form: "to" },
+    ],
+  );
+});
 test("route line: router_failed is in the failed tone, always offers Send to, and explains itself", () => {
   assert.deepEqual(
     room(post("can @codex look?", { state: "router_failed" })).line("post", 1),

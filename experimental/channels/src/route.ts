@@ -96,9 +96,13 @@ export function routeLine(
           stage:
             message.legs.find((leg) => leg.to === id)?.stage ?? unknownStage,
         }));
+  // An agent the thread already reached, by this post or a later message, or
+  // who wrote in it, has the conversation, so it is not offered again.
   const offers = () =>
     mentionedAgents(message.body.text, directory.members)
-      .filter((member) => !reached.includes(member.id))
+      .filter(
+        (member) => !room.heard.has(member.id) && !room.wrote.has(member.id),
+      )
       .map((member) => member.alias);
   // A post the router answered: who it reached, then the mentions it did not.
   const sent = (reason: string | null, router: string | null) => {

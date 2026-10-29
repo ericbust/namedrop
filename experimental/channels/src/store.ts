@@ -936,8 +936,11 @@ export type Wrote = ReadonlyMap<AddressId | "human", number>;
 // A thread that reads as a conversation, every message its own row. Its first
 // loaded parent decides: a channel post makes a channel room, a first message
 // an agent wrote makes an agents room, and anything else is a request thread.
+// Everyone a channel thread sent a message to, so an agent who already has the
+// conversation is never offered it again.
+export type Heard = ReadonlySet<AddressId>;
 export type Room =
-  | { kind: "channel"; post: Message; wrote: Wrote }
+  | { kind: "channel"; post: Message; wrote: Wrote; heard: Heard }
   | { kind: "agents"; root: Message; wrote: Wrote };
 export type ThreadGroup = {
   id: string;
@@ -961,6 +964,12 @@ function wroteIn(group: Pick<ThreadGroup, "parents" | "replies">): Wrote {
       wrote.set(author, Math.max(at, wrote.get(author) ?? at));
   return wrote;
 }
+function heardIn(group: Pick<ThreadGroup, "parents" | "replies">): Heard {
+  const heard = new Set<AddressId>();
+  for (const messages of [group.parents, group.replies])
+    for (const { legs } of messages) for (const { to } of legs) heard.add(to);
+  return heard;
+}
 function roomOf(
   group: Pick<ThreadGroup, "parents" | "replies">,
   members: ReadonlyMap<AddressId, Member>,
@@ -968,7 +977,12 @@ function roomOf(
   const [first] = group.parents;
   if (first === undefined) return null;
   if (first.routing !== null)
-    return { kind: "channel", post: first, wrote: wroteIn(group) };
+    return {
+      kind: "channel",
+      post: first,
+      wrote: wroteIn(group),
+      heard: heardIn(group),
+    };
   return agentAuthor(first.author, members)
     ? { kind: "agents", root: first, wrote: wroteIn(group) }
     : null;
