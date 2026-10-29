@@ -34,6 +34,9 @@ function row(n) {
       truncated: false,
     },
     legs: [{ to: "peer", stage: { stage: "delivered" } }],
+    ...(n % 4 === 0
+      ? { channel: { state: "routed", reason: "bench", router: "haiku" } }
+      : { woke: n % 4 === 1 ? ["peer"] : [] }),
   };
 }
 function frame(rows) {

@@ -75,6 +75,17 @@ export type DeliveryStage =
   | { stage: "working"; ackedAt: number }
   | { stage: "replied"; replyId: string }
   | { stage: "completed"; kind: string };
+// A member alias as `Member.alias` holds it: one "@", then the name.
+export type Alias = `@${string}`;
+// Where a channel post stands with the router. A message carries one exactly
+// when its wire row has a `channel` object, so a state a newer server invents
+// still marks the post as channel chat. Who got it comes from the legs.
+export type Routing =
+  | { state: "routing" }
+  | { state: "routed"; reason: string | null; router: string | null }
+  | { state: "unrouted" }
+  | { state: "router_failed" }
+  | { state: "unknown" };
 export type Message = {
   id: string;
   threadId: string;
@@ -84,6 +95,8 @@ export type Message = {
   kind: MessageKind;
   body: SafeText;
   legs: readonly { to: AddressId; stage: DeliveryStage }[];
+  routing: Routing | null;
+  woke: readonly Alias[];
 };
 export type ThreadChip = { id: string; title: SafeText; messageCount: number };
 export type HistoryRequest = {

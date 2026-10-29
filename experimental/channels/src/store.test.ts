@@ -3186,3 +3186,46 @@ test("activity: three channels derive the list ordered blocked, then waiting, th
   );
   assert.equal(list.count, 3);
 });
+
+test("channel chat: a routing change or a new woke list re-renders the row, and an identical frame keeps it", () => {
+  const value = snapshot();
+  const post = (channel: unknown, woke: unknown = []) => ({
+    ...message("post"),
+    author: "human",
+    channel,
+    woke,
+  });
+  value.frame.messages = [post({ state: "routing" })];
+  const routing = apply(initialState(), value);
+  const before = activeChannel(routing).messages.get("post");
+  value.frame.messages = [post({ state: "routing" })];
+  const same = apply(routing, value);
+  assert.equal(same, routing, "an identical frame is a no-op");
+  value.frame.messages = [
+    post({ state: "routed", reason: "build question", router: "haiku" }),
+  ];
+  const routed = apply(routing, value);
+  const after = activeChannel(routed).messages.get("post");
+  assert.notEqual(after, before);
+  assert.deepEqual(after?.routing, {
+    state: "routed",
+    reason: "build question",
+    router: "haiku",
+  });
+  value.frame.messages = [
+    post({ state: "routed", reason: "ci question", router: "haiku" }),
+  ];
+  assert.notEqual(
+    activeChannel(apply(routed, value)).messages.get("post"),
+    after,
+    "a new reason re-renders",
+  );
+  value.frame.messages = [
+    post({ state: "routed", reason: "build question", router: "haiku" }, [
+      "codex",
+    ]),
+  ];
+  const woke = activeChannel(apply(routed, value)).messages.get("post");
+  assert.notEqual(woke, after);
+  assert.deepEqual(woke?.woke, ["@codex"]);
+});

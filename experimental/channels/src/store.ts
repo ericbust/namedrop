@@ -18,6 +18,7 @@ import type {
   PeekTarget,
   ReplyTo,
   Route,
+  Routing,
   Selection,
   Slot,
   SpaceKey,
@@ -90,6 +91,11 @@ const SNAPSHOT_CAP = 150;
 function sameValue(a: unknown, b: unknown): boolean {
   return a === b || JSON.stringify(a) === JSON.stringify(b);
 }
+function sameRouting(a: Routing | null, b: Routing | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.state !== "routed" || b.state !== "routed") return a.state === b.state;
+  return a.reason === b.reason && a.router === b.router;
+}
 function sameMessage(a: Message, b: Message): boolean {
   return (
     a === b ||
@@ -109,7 +115,9 @@ function sameMessage(a: Message, b: Message): boolean {
           leg.to === other.to &&
           sameValue(leg.stage, other.stage)
         );
-      }))
+      }) &&
+      sameRouting(a.routing, b.routing) &&
+      sameList(a.woke, b.woke))
   );
 }
 function reuseMap<K, V>(

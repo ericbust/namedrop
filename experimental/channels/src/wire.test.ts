@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { routeOf, routePath, sameRoute, terminalResult } from "./wire.ts";
+import type { Message } from "./model.ts";
+import {
+  parseEvent,
+  parseHistory,
+  routeOf,
+  routePath,
+  sameRoute,
+  terminalResult,
+} from "./wire.ts";
 
 const result = (text: string, truncated = false) =>
   terminalResult({ text, truncated });
@@ -106,4 +114,147 @@ test("routes: one parse of the address and one print, so reload and Back agree",
     true,
   );
   assert.equal(sameRoute(at("/"), { kind: "activity" }), false);
+});
+
+function row(id: string, extra: Record<string, unknown> = {}) {
+  return {
+    message_id: id,
+    thread_id: id,
+    in_reply_to: null,
+    at_ms: 1,
+    author: "human",
+    kind: "mention",
+    body: { text: id, truncated: false },
+    legs: [],
+    ...extra,
+  };
+}
+function framed(...rows: unknown[]): ReadonlyMap<string, Message> {
+  const key = "a".repeat(20);
+  const event = parseEvent(
+    "space",
+    JSON.stringify({
+      key,
+      frame: {
+        wire: 1,
+        space: {
+          key,
+          workspace_id: "w1",
+          display_name: "alpha",
+          addressable_label: "alpha",
+        },
+        health: { level: "calm" },
+        participants: [],
+        messages: rows,
+        threads: [],
+        attention: [],
+      },
+    }),
+  );
+  assert.ok(
+    event?.type === "space",
+    "a frame with channel fields still parses",
+  );
+  return event.channel.messages;
+}
+const routingOf = (channel: unknown) =>
+  framed(row("m", { channel })).get("m")?.routing;
+
+test("channel: absent is an ordinary message, and each state the server sends parses", () => {
+  const [plain] = framed(row("m")).values();
+  assert.equal(plain?.routing, null);
+  assert.deepEqual(plain?.woke, []);
+  assert.equal(routingOf(null), null);
+  assert.deepEqual(routingOf({ state: "routing", to: [] }), {
+    state: "routing",
+  });
+  assert.deepEqual(
+    routingOf({
+      state: "routed",
+      to: ["claude"],
+      reason: "build question",
+      router: "claude-haiku",
+    }),
+    { state: "routed", reason: "build question", router: "claude-haiku" },
+  );
+  assert.deepEqual(routingOf({ state: "unrouted", to: [] }), {
+    state: "unrouted",
+  });
+  assert.deepEqual(routingOf({ state: "router_failed" }), {
+    state: "router_failed",
+  });
+});
+test("channel: an unknown, missing or malformed state stays a channel post, and the frame survives", () => {
+  for (const channel of [
+    { state: "triaged" },
+    {},
+    { state: 7 },
+    "routed",
+    [],
+    5,
+  ])
+    assert.deepEqual(
+      routingOf(channel),
+      { state: "unknown" },
+      JSON.stringify(channel),
+    );
+  const rows = framed(
+    row("odd", { channel: "routed", woke: "codex" }),
+    row("next"),
+  );
+  assert.deepEqual([...rows.keys()], ["odd", "next"]);
+});
+test("channel: the reason is one line of at most 60 characters, and a blank reason or router reads as none", () => {
+  const routed = (reason: unknown, router: unknown = "claude-haiku") =>
+    routingOf({ state: "routed", reason, router });
+  assert.deepEqual(routed("  build\n\tquestion  "), {
+    state: "routed",
+    reason: "build question",
+    router: "claude-haiku",
+  });
+  const long = routed(`${"a".repeat(58)} ${"b".repeat(20)}`);
+  assert.ok(long?.state === "routed");
+  assert.equal(long.reason, `${"a".repeat(58)}…`);
+  assert.equal(Array.from(long.reason ?? "").length, 59);
+  const astral = routed("😀".repeat(70));
+  assert.ok(astral?.state === "routed");
+  assert.equal(astral.reason, `${"😀".repeat(59)}…`);
+  assert.equal(Array.from(astral.reason ?? "").length, 60);
+  const exact = routed("x".repeat(60));
+  assert.ok(exact?.state === "routed");
+  assert.equal(exact.reason, "x".repeat(60));
+  assert.deepEqual(routed("   ", "  "), {
+    state: "routed",
+    reason: null,
+    router: null,
+  });
+  assert.deepEqual(routed(42, { name: "x" }), {
+    state: "routed",
+    reason: null,
+    router: null,
+  });
+});
+test("woke: bare and @ aliases read as member aliases, once each, and anything else is dropped", () => {
+  const wokeOf = (woke: unknown) => framed(row("m", { woke })).get("m")?.woke;
+  assert.deepEqual(wokeOf(["codex", "@claude", "@@codex", "", 7, null]), [
+    "@codex",
+    "@claude",
+  ]);
+  assert.deepEqual(wokeOf("codex"), []);
+  assert.deepEqual(wokeOf({ codex: true }), []);
+  assert.deepEqual(wokeOf(undefined), []);
+});
+test("history pages carry the channel state and woke", () => {
+  const [page] = parseHistory([
+    row("old", {
+      channel: { state: "routed", reason: "ci", router: "codex-luna" },
+      woke: ["codex"],
+    }),
+  ]);
+  assert.deepEqual(page?.routing, {
+    state: "routed",
+    reason: "ci",
+    router: "codex-luna",
+  });
+  assert.deepEqual(page?.woke, ["@codex"]);
 });

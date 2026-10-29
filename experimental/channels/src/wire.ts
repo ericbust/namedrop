@@ -1,6 +1,7 @@
 import type {
   Activity,
   AddressId,
+  Alias,
   Attention,
   ChannelSnapshot,
   DeliveryStage,
@@ -14,6 +15,7 @@ import type {
   Message,
   MessageKind,
   Route,
+  Routing,
   SafeText,
   Screen,
   ScreenFailure,
@@ -50,7 +52,7 @@ function addressId(value: unknown): AddressId {
 function optionalIdentity(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
-function optionalAlias(value: unknown): string | null {
+function optionalAlias(value: unknown): Alias | null {
   const bare = typeof value === "string" ? value.replace(/^@+/, "") : "";
   return bare.trim() ? `@${bare}` : null;
 }
@@ -289,6 +291,51 @@ function deliveryStage(value: unknown): DeliveryStage {
       return { stage: "unknown" };
   }
 }
+const REASON_LIMIT = 60;
+// The router model's words, made safe to show on one line.
+function reasonText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const line = value.replace(/\s+/g, " ").trim();
+  if (line === "") return null;
+  const points = Array.from(line);
+  return points.length <= REASON_LIMIT
+    ? line
+    : `${points
+        .slice(0, REASON_LIMIT - 1)
+        .join("")
+        .trimEnd()}…`;
+}
+function routing(value: unknown): Routing | null {
+  if (value === undefined || value === null) return null;
+  const item =
+    typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  switch (item.state) {
+    case "routing":
+    case "unrouted":
+    case "router_failed":
+      return { state: item.state };
+    case "routed":
+      return {
+        state: item.state,
+        reason: reasonText(item.reason),
+        router: optionalIdentity(item.router),
+      };
+    default:
+      return { state: "unknown" };
+  }
+}
+const nobodyWoke: readonly Alias[] = [];
+function woke(value: unknown): readonly Alias[] {
+  if (!Array.isArray(value)) return nobodyWoke;
+  const aliases = new Set<Alias>();
+  for (const raw of value) {
+    const alias = optionalAlias(raw);
+    if (alias !== null) aliases.add(alias);
+  }
+  return aliases.size === 0 ? nobodyWoke : [...aliases];
+}
 function message(value: unknown): Message {
   const item = record(value);
   return {
@@ -303,6 +350,8 @@ function message(value: unknown): Message {
       const leg = record(raw);
       return { to: addressId(leg.to), stage: deliveryStage(leg.stage) };
     }),
+    routing: routing(item.channel),
+    woke: woke(item.woke),
   };
 }
 function messages(value: unknown): Map<string, Message> {
