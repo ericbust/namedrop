@@ -96,13 +96,44 @@ export type HistoryState =
   | { kind: "idle" }
   | { kind: "loading"; request: HistoryRequest }
   | { kind: "error"; request: HistoryRequest; reason: string };
+export type SpaceState =
+  | "active"
+  | "paused"
+  | "not_activated"
+  | "deactivated"
+  | "unknown";
+export type Mention =
+  | { kind: "operator" }
+  | { kind: "alias"; alias: string }
+  | { kind: "envoy"; id: AddressId };
+export type MailState =
+  | "queued"
+  | "dispatching"
+  | "submitted"
+  | "acknowledged"
+  | "held"
+  | "unknown";
+// `since` is the item's latest state time as the server sends it, not its arrival.
+export type MailItem = Readonly<{
+  from: Mention;
+  preview: SafeText;
+  state: MailState;
+  since: number;
+}>;
+export type MemberWork = Readonly<{
+  mailbox: readonly MailItem[];
+  waitingOn: readonly Mention[];
+}>;
 export type ChannelSnapshot = {
   key: SpaceKey;
   workspaceId: string;
   displayName: string;
   addressableLabel: string | null;
+  state: SpaceState;
   health: Health;
   members: ReadonlyMap<AddressId, Member>;
+  // Mail churns every delivery tick, so it lives beside Member to keep Member identity stable.
+  work: ReadonlyMap<AddressId, MemberWork>;
   messages: ReadonlyMap<string, Message>;
   attention: readonly Attention[];
   threads: ReadonlyMap<string, ThreadChip>;
@@ -142,6 +173,7 @@ export type Outgoing = {
   phase: OutgoingPhase;
 };
 export type Home = {
+  key: SpaceKey;
   name: string;
   token: string | null;
   members: ReadonlyMap<string, Member>;
@@ -176,6 +208,9 @@ export type Event =
   | { type: "navigate"; key: SpaceKey | null }
   | { type: "read"; key: SpaceKey }
   | { type: "thread"; threadId: string | null }
+  | { type: "activity" }
+  | { type: "jump"; key: SpaceKey }
+  | { type: "peek"; target: PeekTarget | null }
   | { type: "opened" }
   | { type: "replay-timeout" }
   | { type: "discovery-timeout" }
@@ -193,10 +228,12 @@ export type Sync =
       status: "connecting" | "reconnecting";
       pending: Map<SpaceKey, Channel>;
     };
+// All activity shows no channel, so its key is null and every "seen" rule treats it as no channel shown.
 export type Selection =
   | { kind: "none"; key: null }
   | { kind: "automatic"; key: SpaceKey }
-  | { kind: "chosen"; key: SpaceKey };
+  | { kind: "chosen"; key: SpaceKey }
+  | { kind: "activity"; key: null };
 export type Landing =
   | { kind: "discovering" }
   | { kind: "awaiting-url" }
@@ -206,7 +243,7 @@ export type State = {
   selection: Selection;
   landing: Landing;
   requestedKey: SpaceKey | null;
-  openThread: string | null;
+  slot: Slot;
   unread: ReadonlySet<SpaceKey>;
   sync: Sync;
   visible: boolean;
@@ -215,3 +252,30 @@ export type State = {
   outbox: ReadonlyMap<string, Outgoing>;
   drafts: ReadonlyMap<DraftKey, Draft>;
 };
+export type PeekableKind = Exclude<MemberKind["type"], "human">;
+// Only `peekTarget()` builds one, and it refuses the operator. Alias and kind
+// are kept so the drawer can still name a member that left the frame.
+export type PeekTarget = Readonly<{
+  channel: SpaceKey;
+  member: AddressId;
+  alias: string;
+  kind: PeekableKind;
+}> & { readonly __brand: "PeekTarget" };
+export type Slot =
+  | { kind: "closed" }
+  | { kind: "thread"; id: string }
+  | { kind: "peek"; target: PeekTarget };
+export type Route =
+  | { kind: "root" }
+  | { kind: "channel"; key: SpaceKey }
+  | { kind: "activity" };
+export type Screen = Readonly<{ earlierOmitted: boolean; text: string }>;
+export type ScreenFailure =
+  | "closed"
+  | "missing"
+  | "busy"
+  | "session"
+  | "unreachable";
+export type ScreenResult =
+  | { kind: "text"; screen: Screen }
+  | { kind: "failed"; failure: ScreenFailure };

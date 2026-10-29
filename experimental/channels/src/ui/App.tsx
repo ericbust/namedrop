@@ -17,17 +17,19 @@ import type {
   Home,
   Message,
   Outgoing,
+  Route,
   SpaceKey,
   State,
 } from "../model.ts";
 import { createPoster } from "../send.ts";
 import {
+  bootState,
   channelSuffix,
   connectionStatus,
   draftKey,
   homesOf,
-  initialState,
   reduce,
+  routeEvent,
   runsByMessage,
   sameComposer,
   type ThreadGroup,
@@ -35,7 +37,13 @@ import {
   threadGroups,
   timelineView,
 } from "../store.ts";
-import { parseEvent, parseHistory, pathKey } from "../wire.ts";
+import {
+  parseEvent,
+  parseHistory,
+  routeOf,
+  routePath,
+  sameRoute,
+} from "../wire.ts";
 import { ChannelHeader } from "./ChannelHeader.tsx";
 import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
@@ -52,6 +60,10 @@ const noMessages: ReadonlyMap<string, Message> = new Map();
 const noPending: readonly Outgoing[] = [];
 const noMembers: Directory["members"] = new Map();
 const POSTED_LIMIT = 200;
+function go(route: Route) {
+  if (!sameRoute(routeOf(location), route))
+    history.pushState(null, "", routePath(route));
+}
 function measuredReduce(state: State, event: Event): State {
   if (
     event.type !== "space" &&
@@ -73,10 +85,7 @@ function measuredReduce(state: State, event: Event): State {
 }
 export function App() {
   const [state, dispatch] = useReducer(measuredReduce, undefined, () =>
-    initialState({
-      visible: !document.hidden,
-      requestedKey: pathKey(location.pathname),
-    }),
+    bootState({ visible: !document.hidden, route: routeOf(location) }),
   );
   const [frameVersion, frameArrived] = useReducer(
     (version: number) => version + 1,
@@ -297,8 +306,7 @@ export function App() {
     };
   }, [state.channels.size]);
   useEffect(() => {
-    const back = () =>
-      dispatch({ type: "navigate", key: pathKey(location.pathname) });
+    const back = () => dispatch(routeEvent(routeOf(location)));
     addEventListener("popstate", back);
     return () => removeEventListener("popstate", back);
   }, []);
@@ -392,8 +400,7 @@ export function App() {
     [],
   );
   const select = useCallback((key: SpaceKey) => {
-    const path = `/w/${key}`;
-    if (location.pathname !== path) history.pushState(null, "", path);
+    go({ kind: "channel", key });
     dispatch({ type: "select", key });
   }, []);
   const connection = connectionStatus(state);
@@ -466,7 +473,7 @@ export function App() {
   const terminalRuns = channel?.terminalRuns;
   const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
   const thread =
-    state.openThread === null ? undefined : groups.get(state.openThread);
+    state.slot.kind === "thread" ? groups.get(state.slot.id) : undefined;
   const paneId = useId();
   const returnFocus = useRef<{
     button: HTMLButtonElement;

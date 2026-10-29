@@ -1,5 +1,6 @@
 import { channelMention, channelToken, dayBounds, dayLabel } from "./copy.ts";
 import type {
+  Activity,
   AddressId,
   Channel,
   ChannelSnapshot,
@@ -13,15 +14,23 @@ import type {
   Message,
   Outgoing,
   Participant,
+  PeekableKind,
+  PeekTarget,
   ReplyTo,
+  Route,
   Selection,
+  Slot,
   SpaceKey,
   State,
   TerminalRun,
 } from "./model.ts";
+import { samePeek } from "./peek.ts";
+import { ENVOY } from "./wire.ts";
 
 const channelCollator = new Intl.Collator();
 const noSelection: Selection = { kind: "none", key: null };
+const activitySelection: Selection = { kind: "activity", key: null };
+const closedSlot: Slot = { kind: "closed" };
 const discovered: Landing = { kind: "awaiting-url" };
 const settled: Landing = { kind: "settled" };
 
@@ -37,7 +46,7 @@ export function initialState({
     selection: noSelection,
     landing: { kind: "discovering" },
     requestedKey,
-    openThread: null,
+    slot: closedSlot,
     unread: new Set(),
     sync: { kind: "connecting" },
     visible,
@@ -46,6 +55,35 @@ export function initialState({
     outbox: new Map(),
     drafts: new Map(),
   };
+}
+export function bootState({
+  visible,
+  route,
+}: {
+  visible: boolean;
+  route: Route;
+}): State {
+  const state = initialState({
+    visible,
+    requestedKey: route.kind === "channel" ? route.key : null,
+  });
+  return route.kind === "activity"
+    ? reduce(state, { type: "activity" })
+    : state;
+}
+export function routeEvent(route: Route): Event {
+  switch (route.kind) {
+    case "root":
+      return { type: "navigate", key: null };
+    case "channel":
+      return { type: "navigate", key: route.key };
+    case "activity":
+      return { type: "activity" };
+    default: {
+      const exhaustive: never = route;
+      return exhaustive;
+    }
+  }
 }
 export const HISTORY_CAP = 600;
 const SNAPSHOT_CAP = 150;
@@ -245,6 +283,7 @@ function mergeSnapshot(
         : snapshot.attention,
     terminalRuns: reuseRows(previous?.terminalRuns, snapshot.terminalRuns),
     members: reuseMap(previous?.members, snapshot.members),
+    work: reuseMap(previous?.work, snapshot.work),
     threads: reuseMap(previous?.threads, snapshot.threads),
     messages,
     latestMessages,
@@ -374,21 +413,31 @@ function settle(
   arrived: boolean,
 ): Selection {
   const { selection, landing, requestedKey } = state;
-  if (selection.kind !== "none" && !channels.has(selection.key))
-    return land(channels, requestedKey);
-  if (!arrived || selection.kind === "chosen") return selection;
-  if (selection.kind === "none") return land(channels, requestedKey);
-  switch (landing.kind) {
-    case "discovering":
-      return land(channels, requestedKey);
-    case "awaiting-url":
-      return requestedKey !== null && channels.has(requestedKey)
-        ? { kind: "chosen", key: requestedKey }
-        : selection;
-    case "settled":
+  switch (selection.kind) {
+    case "activity":
       return selection;
+    case "none":
+      return arrived ? land(channels, requestedKey) : selection;
+    case "automatic":
+    case "chosen":
+      if (!channels.has(selection.key)) return land(channels, requestedKey);
+      if (!arrived || selection.kind === "chosen") return selection;
+      switch (landing.kind) {
+        case "discovering":
+          return land(channels, requestedKey);
+        case "awaiting-url":
+          return requestedKey !== null && channels.has(requestedKey)
+            ? { kind: "chosen", key: requestedKey }
+            : selection;
+        case "settled":
+          return selection;
+        default: {
+          const exhaustive: never = landing;
+          return exhaustive;
+        }
+      }
     default: {
-      const exhaustive: never = landing;
+      const exhaustive: never = selection;
       return exhaustive;
     }
   }
@@ -436,20 +485,39 @@ export function landing(
   return latest?.key ?? null;
 }
 export function reduce(state: State, event: Event): State {
-  const next = step(state, event);
-  const { openThread } = next;
-  if (openThread === null) return next;
-  const key = next.selection.key;
-  if (key !== state.selection.key) return { ...next, openThread: null };
-  if (key === null) return next;
-  const channel = next.channels.get(key);
-  if (
-    channel === undefined ||
-    channel.messages === state.channels.get(key)?.messages ||
-    threadLoaded(channel, openThread)
-  )
-    return next;
-  return { ...next, openThread: null };
+  return settleSlot(state, step(state, event));
+}
+function viewOf(selection: Selection): SpaceKey | "activity" | null {
+  return selection.kind === "activity" ? "activity" : selection.key;
+}
+// Changing the view closes either pane. A thread also closes for good once none
+// of its messages are loaded. A peek outlives its member, whose 404 copy needs
+// the drawer, and closes only with its channel.
+function settleSlot(before: State, after: State): State {
+  const { slot } = after;
+  if (slot.kind === "closed") return after;
+  if (viewOf(after.selection) !== viewOf(before.selection))
+    return { ...after, slot: closedSlot };
+  switch (slot.kind) {
+    case "thread": {
+      const key = after.selection.key;
+      if (key === null) return after;
+      const channel = after.channels.get(key);
+      return channel === undefined ||
+        channel.messages === before.channels.get(key)?.messages ||
+        threadLoaded(channel, slot.id)
+        ? after
+        : { ...after, slot: closedSlot };
+    }
+    case "peek":
+      return after.channels.has(slot.target.channel)
+        ? after
+        : { ...after, slot: closedSlot };
+    default: {
+      const exhaustive: never = slot;
+      return exhaustive;
+    }
+  }
 }
 function threadLoaded(channel: Channel, threadId: string): boolean {
   for (const run of channel.runs)
@@ -649,10 +717,37 @@ function step(state: State, event: Event): State {
       const unread = clearUnread(state.unread, event.key);
       return unread === state.unread ? state : { ...state, unread };
     }
-    case "thread":
-      return state.openThread === event.threadId
+    case "thread": {
+      const { slot } = state;
+      if (event.threadId === null)
+        return slot.kind === "thread" ? { ...state, slot: closedSlot } : state;
+      return slot.kind === "thread" && slot.id === event.threadId
         ? state
-        : { ...state, openThread: event.threadId };
+        : { ...state, slot: { kind: "thread", id: event.threadId } };
+    }
+    case "peek": {
+      const { slot } = state;
+      const { target } = event;
+      if (target === null)
+        return slot.kind === "peek" ? { ...state, slot: closedSlot } : state;
+      if (
+        !state.channels.has(target.channel) ||
+        (slot.kind === "peek" && samePeek(slot.target, target))
+      )
+        return state;
+      return { ...state, slot: { kind: "peek", target } };
+    }
+    case "activity":
+      return state.selection.kind === "activity" &&
+        state.landing.kind === "settled"
+        ? state
+        : { ...state, selection: activitySelection, landing: settled };
+    case "jump": {
+      const chosen = step(state, { type: "select", key: event.key });
+      return chosen.channels.get(event.key)?.viewMode === "browsing"
+        ? step(chosen, { type: "latest", key: event.key })
+        : chosen;
+    }
     case "opened":
       return {
         ...state,
@@ -786,15 +881,20 @@ export function inFlight(
       return true;
   return false;
 }
+export function compareChannels(
+  a: Pick<ChannelSnapshot, "displayName" | "workspaceId" | "key">,
+  b: Pick<ChannelSnapshot, "displayName" | "workspaceId" | "key">,
+): number {
+  return (
+    channelCollator.compare(a.displayName, b.displayName) ||
+    channelCollator.compare(a.workspaceId, b.workspaceId) ||
+    channelCollator.compare(a.key, b.key)
+  );
+}
 export function sortedChannels(state: {
   channels: ReadonlyMap<SpaceKey, Channel>;
 }): Channel[] {
-  return [...state.channels.values()].sort(
-    (a, b) =>
-      channelCollator.compare(a.displayName, b.displayName) ||
-      channelCollator.compare(a.workspaceId, b.workspaceId) ||
-      channelCollator.compare(a.key, b.key),
-  );
+  return [...state.channels.values()].sort(compareChannels);
 }
 export function channelSuffix(
   channel: Pick<ChannelSnapshot, "key" | "displayName" | "workspaceId">,
@@ -973,11 +1073,12 @@ export function homesOf(
     const old = previous?.get(channel.workspaceId);
     homes.set(
       channel.workspaceId,
-      old?.name === name &&
+      old?.key === channel.key &&
+        old.name === name &&
         old.token === token &&
         old.members === channel.members
         ? old
-        : { name, token, members: channel.members },
+        : { key: channel.key, name, token, members: channel.members },
     );
   }
   return previous !== undefined &&
@@ -986,7 +1087,6 @@ export function homesOf(
     ? previous
     : homes;
 }
-const ENVOY = /^envoy:([^:]+):(.+)$/;
 export function participant(
   { members, homes }: Directory,
   id: AddressId | "human",
@@ -1038,4 +1138,31 @@ export function replyRecipients(
         names: aliases.map((alias) => `${alias} · ${token}`),
         mentions: `${token} ${aliases.join(" ")}`,
       };
+}
+
+export type PeekWho = Readonly<{
+  alias: string;
+  kind: PeekableKind;
+  activity: Activity | null;
+  channel: { label: string; suffix: string | null };
+}>;
+// The live member wins. The identity captured at open names a member that has
+// left the frame, and activity is then unknown.
+export function peekWho(
+  channels: ReadonlyMap<SpaceKey, Channel>,
+  target: PeekTarget,
+): PeekWho | null {
+  const channel = channels.get(target.channel);
+  if (channel === undefined) return null;
+  const member = channel.members.get(target.member);
+  const kind = member?.kind.type;
+  return {
+    alias: member?.alias ?? target.alias,
+    kind: kind === undefined || kind === "human" ? target.kind : kind,
+    activity: member?.activity ?? null,
+    channel: {
+      label: channelMention(channel),
+      suffix: channelSuffix(channel, channels.values()),
+    },
+  };
 }

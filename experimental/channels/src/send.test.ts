@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SpaceKey } from "./model.ts";
 import { createPoster, type Post } from "./send.ts";
-import { pathKey } from "./wire.ts";
+import { routeOf } from "./wire.ts";
 
 type Exchange = { url: string; init: RequestInit | undefined };
 function fakeServer(
@@ -16,8 +16,9 @@ function fakeServer(
   };
   return { seen, fetcher };
 }
-const key: SpaceKey | null = pathKey(`/w/${"a".repeat(20)}`);
-assert.ok(key);
+const route = routeOf({ pathname: `/w/${"a".repeat(20)}`, search: "" });
+assert.ok(route.kind === "channel");
+const key: SpaceKey = route.key;
 const post: Post = {
   key,
   requestId: "r1",

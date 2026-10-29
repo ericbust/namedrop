@@ -5,12 +5,18 @@ import type {
   ChannelSnapshot,
   DeliveryStage,
   Health,
+  MailItem,
+  MailState,
   Member,
   MemberKind,
+  MemberWork,
+  Mention,
   Message,
   MessageKind,
+  Route,
   SafeText,
   SpaceKey,
+  SpaceState,
   TerminalResult,
   TerminalRun,
   ThreadChip,
@@ -182,6 +188,68 @@ function terminalRuns(value: unknown): TerminalRun[] {
     }
   });
 }
+function spaceState(value: unknown): SpaceState {
+  switch (value) {
+    case "active":
+    case "paused":
+    case "not_activated":
+    case "deactivated":
+      return value;
+    default:
+      return "unknown";
+  }
+}
+function mailState(value: unknown): MailState {
+  switch (value) {
+    case "queued":
+    case "dispatching":
+    case "submitted":
+    case "acknowledged":
+    case "held":
+      return value;
+    default:
+      return "unknown";
+  }
+}
+export const ENVOY = /^envoy:([^:]+):(.+)$/;
+// The server writes "you" for the operator and "@" plus an alias, or plus a raw id it could not name.
+function mention(value: unknown): Mention | null {
+  if (value === "you") return { kind: "operator" };
+  const alias = optionalAlias(value);
+  if (alias === null) return null;
+  const bare = alias.slice(1);
+  return ENVOY.test(bare)
+    ? { kind: "envoy", id: addressId(bare) }
+    : { kind: "alias", alias };
+}
+function mailItem(value: unknown): MailItem[] {
+  try {
+    const item = record(value);
+    const from = mention(item.from);
+    if (from === null) return [];
+    return [
+      {
+        from,
+        preview: safeText(item.preview),
+        state: mailState(item.state),
+        since: timestamp(item.since_ms),
+      },
+    ];
+  } catch {
+    return [];
+  }
+}
+function memberWork(item: Record<string, unknown>): MemberWork | null {
+  const mailbox = Array.isArray(item.mailbox)
+    ? item.mailbox.flatMap(mailItem)
+    : [];
+  const waitingOn = Array.isArray(item.waiting_on)
+    ? item.waiting_on.flatMap((raw) => mention(raw) ?? [])
+    : [];
+  return mailbox.length === 0 && waitingOn.length === 0
+    ? null
+    : { mailbox, waitingOn };
+}
 function messageKind(value: unknown): MessageKind {
   switch (identity(value)) {
     case "mention":
@@ -272,9 +340,36 @@ export function terminalResult({
     stderr,
   };
 }
-export function pathKey(pathname: string): SpaceKey | null {
+export function routeOf({
+  pathname,
+  search,
+}: {
+  pathname: string;
+  search: string;
+}): Route {
   const segment = /^\/w\/([0-9a-f]{20})\/?$/.exec(pathname)?.[1];
-  return segment === undefined ? null : spaceKey(segment);
+  if (segment !== undefined) return { kind: "channel", key: spaceKey(segment) };
+  return pathname === "/" &&
+    new URLSearchParams(search).get("view") === "activity"
+    ? { kind: "activity" }
+    : { kind: "root" };
+}
+export function routePath(route: Route): string {
+  switch (route.kind) {
+    case "root":
+      return "/";
+    case "channel":
+      return `/w/${route.key}`;
+    case "activity":
+      return "/?view=activity";
+    default: {
+      const exhaustive: never = route;
+      return exhaustive;
+    }
+  }
+}
+export function sameRoute(a: Route, b: Route): boolean {
+  return routePath(a) === routePath(b);
 }
 export function parseHistory(raw: unknown): readonly Message[] {
   return [...messages(raw).values()].reverse();
@@ -285,10 +380,13 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
   const space = record(frame.space);
   if (spaceKey(space.key) !== key) throw new Error("Envelope key mismatch");
   const members = new Map<AddressId, Member>();
+  const work = new Map<AddressId, MemberWork>();
   for (const raw of array(frame.participants)) {
     const item = record(raw);
     const id = addressId(item.address_id);
     if (members.has(id)) throw new Error("Duplicate participant");
+    const busy = memberWork(item);
+    if (busy !== null) work.set(id, busy);
     members.set(id, {
       id,
       alias: text(item.alias),
@@ -315,8 +413,10 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
     workspaceId: identity(space.workspace_id),
     displayName: identity(space.display_name),
     addressableLabel: nullableText(space.addressable_label),
+    state: spaceState(space.state),
     health: health(frame.health),
     members,
+    work,
     messages: rows,
     threads,
     attention: array(frame.attention).map((item) =>

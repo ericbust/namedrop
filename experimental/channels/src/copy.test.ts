@@ -456,7 +456,12 @@ test("participant names: remote agents carry their home, envoys and unknown ids 
   const codex: Member | undefined = event.channel.members.values().next().value;
   const envoy = event.channel.messages.get("m1")?.author;
   assert.ok(codex && envoy !== undefined && envoy !== "human");
-  const alpha = { name: "#alpha", token: "#alpha", members: new Map() };
+  const alpha = {
+    key: event.channel.key,
+    name: "#alpha",
+    token: "#alpha",
+    members: new Map(),
+  };
   assert.deepEqual(participantCopy({ kind: "operator" }), {
     name: "You",
     suffix: null,

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Activity, ChannelSnapshot, ComposerId, State } from "./model.ts";
+import { peekTarget, peekTargetOf } from "./peek.ts";
 import {
+  bootState,
   channelSuffix,
   connectionStatus,
   draftKey,
@@ -9,9 +11,11 @@ import {
   homesOf,
   initialState,
   type MessageRow,
+  peekWho,
   reduce,
   replyRecipients,
   participant as resolve,
+  routeEvent,
   runsByMessage,
   sortedChannels,
   type TimelineRow,
@@ -1812,16 +1816,25 @@ test("design-b: switching channels closes the open thread", () => {
   const beta = parsed(snapshot(keyB)).key;
   assert.equal(state.selection.key, alpha);
   const open = reduce(state, { type: "thread", threadId: "m1" });
-  assert.equal(open.openThread, "m1");
+  assert.deepEqual(open.slot, { kind: "thread", id: "m1" });
   assert.equal(reduce(open, { type: "thread", threadId: "m1" }), open);
-  assert.equal(reduce(open, { type: "select", key: alpha }).openThread, "m1");
-  assert.equal(reduce(open, { type: "select", key: beta }).openThread, null);
-  assert.equal(reduce(open, { type: "gone", key: alpha }).openThread, null);
-  assert.equal(
-    reduce(open, { type: "thread", threadId: null }).openThread,
-    null,
-  );
-  assert.equal(apply(open, changedChannel()).openThread, "m1");
+  assert.deepEqual(reduce(open, { type: "select", key: alpha }).slot, {
+    kind: "thread",
+    id: "m1",
+  });
+  assert.deepEqual(reduce(open, { type: "select", key: beta }).slot, {
+    kind: "closed",
+  });
+  assert.deepEqual(reduce(open, { type: "gone", key: alpha }).slot, {
+    kind: "closed",
+  });
+  assert.deepEqual(reduce(open, { type: "thread", threadId: null }).slot, {
+    kind: "closed",
+  });
+  assert.deepEqual(apply(open, changedChannel()).slot, {
+    kind: "thread",
+    id: "m1",
+  });
 });
 test("a thread whose messages all left the window closes for good, one still loaded stays open", () => {
   const paged = historyPage(apply(initialState(), withMessages(["a", "b"])), [
@@ -1831,16 +1844,16 @@ test("a thread whose messages all left the window closes for good, one still loa
   assert.equal(activeChannel(paged).messages.size, 4);
   const key = activeChannel(paged).key;
   const open = reduce(paged, { type: "thread", threadId: "h1" });
-  assert.equal(open.openThread, "h1");
+  assert.deepEqual(open.slot, { kind: "thread", id: "h1" });
   const jumped = reduce(open, { type: "latest", key });
   assert.equal(activeChannel(jumped).messages.has("h1"), false);
-  assert.equal(jumped.openThread, null);
-  assert.equal(historyPage(jumped, ["h1", "h2"]).openThread, null);
+  assert.deepEqual(jumped.slot, { kind: "closed" });
+  assert.deepEqual(historyPage(jumped, ["h1", "h2"]).slot, { kind: "closed" });
   const kept = reduce(reduce(paged, { type: "thread", threadId: "a" }), {
     type: "latest",
     key,
   });
-  assert.equal(kept.openThread, "a");
+  assert.deepEqual(kept.slot, { kind: "thread", id: "a" });
 });
 test("landing: a late URL key is selected when it arrives, and from then on nothing moves by itself", () => {
   const keyC = "c".repeat(20);
@@ -1903,7 +1916,7 @@ test("landing: a reconnect replay never moves the selection or closes the thread
     [keyA],
   );
   assert.equal(known.selection.key, keyA);
-  assert.equal(known.openThread, "m1");
+  assert.deepEqual(known.slot, { kind: "thread", id: "m1" });
   const grown = ready(
     apply(
       apply(reduce(state, { type: "opened" }), alpha),
@@ -1912,7 +1925,7 @@ test("landing: a reconnect replay never moves the selection or closes the thread
     [keyA, keyB],
   );
   assert.equal(grown.selection.key, keyA);
-  assert.equal(grown.openThread, "m1");
+  assert.deepEqual(grown.slot, { kind: "thread", id: "m1" });
 });
 test("landing: after ready, a workspace that opens later never moves an automatic landing or closes its thread", () => {
   const keyC = "c".repeat(20);
@@ -1927,10 +1940,10 @@ test("landing: after ready, a workspace that opens later never moves an automati
   assert.equal(state.selection.key, keyB);
   const calm = apply(state, landingFrame(keyC, "gamma", { at: 900 }));
   assert.equal(calm.selection.key, keyB);
-  assert.equal(calm.openThread, "m1");
+  assert.deepEqual(calm.slot, { kind: "thread", id: "m1" });
   const needsYou = apply(calm, landingFrame(keyD, "delta", { needsYou: true }));
   assert.equal(needsYou.selection.key, keyB);
-  assert.equal(needsYou.openThread, "m1");
+  assert.deepEqual(needsYou.slot, { kind: "thread", id: "m1" });
   assert.equal(needsYou.channels.size, 4);
 });
 test("navigate: Back to the root lands once more, and after the reader's pick nothing moves it again", () => {
@@ -2791,4 +2804,342 @@ test("thread recipients: a reply goes to the workspace of the latest agent messa
     "latest agent's workspace has no token: nobody left",
   );
   assert.equal(thread(["envoy:w4:pane-5"]), null, "nobody left");
+});
+
+function mail(from: unknown, state = "submitted", since = 500) {
+  return {
+    delivery_id: "d1",
+    message_id: "m9",
+    from,
+    preview: { text: "check the diff", truncated: false },
+    state,
+    since_ms: since,
+    attempts: 0,
+  };
+}
+function busy(
+  key = keyA,
+  name = "alpha",
+  workspace = "w1",
+  extra: Record<string, unknown> = {},
+) {
+  const value = snapshot(key, name, workspace);
+  return {
+    ...value,
+    frame: {
+      ...value.frame,
+      space: { ...value.frame.space, state: "active" },
+      participants: [
+        {
+          ...participant("agent-1", "working"),
+          mailbox: [mail("@lead")],
+          waiting_on: [],
+          ...extra,
+        },
+      ],
+    },
+  };
+}
+test("work: mailbox and waiting_on parse leniently beside members, and space.state never rejects a frame", () => {
+  const channel = parsed(
+    busy(keyA, "alpha", "w1", {
+      mailbox: [
+        mail("you", "queued", 100),
+        mail("@@lead", "dispatching", 200),
+        mail("@envoy:w2:pane-9", "future_state", 300),
+        mail("", "queued"),
+        { ...mail("@lead"), since_ms: -1 },
+        { ...mail("@lead"), preview: "not safe text" },
+        "junk",
+      ],
+      waiting_on: ["@codex", "you", 7, " ", "@envoy:w3:pane-1"],
+    }),
+  );
+  const work = channel.work.get(
+    channel.members.keys().next().value ?? ("" as never),
+  );
+  assert.deepEqual(work, {
+    mailbox: [
+      {
+        from: { kind: "operator" },
+        preview: { text: "check the diff", truncated: false },
+        state: "queued",
+        since: 100,
+      },
+      {
+        from: { kind: "alias", alias: "@lead" },
+        preview: { text: "check the diff", truncated: false },
+        state: "dispatching",
+        since: 200,
+      },
+      {
+        from: { kind: "envoy", id: "envoy:w2:pane-9" },
+        preview: { text: "check the diff", truncated: false },
+        state: "unknown",
+        since: 300,
+      },
+    ],
+    waitingOn: [
+      { kind: "alias", alias: "@codex" },
+      { kind: "operator" },
+      { kind: "envoy", id: "envoy:w3:pane-1" },
+    ],
+  });
+  assert.equal(channel.state, "active");
+  const idle = parsed(
+    busy(keyA, "alpha", "w1", { mailbox: "junk", waiting_on: null }),
+  );
+  assert.equal(idle.work.size, 0, "nothing to show leaves no entry");
+  for (const [state, expected] of [
+    ["paused", "paused"],
+    ["not_activated", "not_activated"],
+    ["deactivated", "deactivated"],
+    ["future_state", "unknown"],
+    [7, "unknown"],
+  ] as const) {
+    const value = busy();
+    value.frame.space = { ...value.frame.space, state } as never;
+    assert.equal(parsed(value).state, expected);
+  }
+  assert.equal(parsed(snapshot()).state, "unknown", "a frame without a state");
+  assert.equal(parsed(snapshot()).work.size, 0);
+});
+test("work: a frame that repeats the mail is an identity no-op, and mail-only changes keep Member identity and leave unread alone", () => {
+  const state = apply(
+    apply(initialState(), snapshot()),
+    busy(keyB, "beta", "w2"),
+  );
+  assert.equal(state.selection.key, keyA);
+  assert.equal(apply(state, busy(keyB, "beta", "w2")), state);
+  const before = state.channels.get(parsed(busy(keyB)).key);
+  const acked = apply(
+    state,
+    busy(keyB, "beta", "w2", { mailbox: [mail("@lead", "acknowledged", 900)] }),
+  );
+  const after = acked.channels.get(parsed(busy(keyB)).key);
+  assert.ok(before && after);
+  assert.notEqual(after.work, before.work);
+  assert.equal(after.members, before.members);
+  assert.equal(acked.unread.has(after.key), false);
+  const working = apply(
+    acked,
+    busy(keyB, "beta", "w2", { activity: "blocked" }),
+  );
+  assert.equal(
+    working.unread.has(after.key),
+    true,
+    "an activity change still marks unread",
+  );
+});
+test("activity view: the URL opens it and ends landing, arrivals and replays never move it, and Back to the root lands", () => {
+  const boot = bootState({ visible: true, route: { kind: "activity" } });
+  assert.deepEqual(boot.selection, { kind: "activity", key: null });
+  assert.equal(boot.landing.kind, "settled");
+  assert.equal(reduce(boot, { type: "activity" }), boot);
+  const keyC = "c".repeat(20);
+  let state = reduce(boot, { type: "opened" });
+  state = apply(state, landingFrame(keyB, "beta"));
+  state = apply(state, landingFrame(keyA, "alpha", { needsYou: true }));
+  state = ready(state, [keyA, keyB]);
+  assert.equal(state.selection.kind, "activity");
+  state = apply(state, landingFrame(keyC, "gamma", { needsYou: true }));
+  assert.equal(state.selection.kind, "activity");
+  const changed = changedChannel();
+  assert.ok(
+    apply(state, changed).unread.has(parsed(changed).key),
+    "every channel collects unread marks",
+  );
+  const root = reduce(state, routeEvent({ kind: "root" }));
+  assert.equal(root.selection.key, keyA);
+  assert.equal(root.selection.kind, "automatic");
+  assert.deepEqual(reduce(root, routeEvent({ kind: "activity" })).selection, {
+    kind: "activity",
+    key: null,
+  });
+  const beta = parsed(snapshot(keyB)).key;
+  assert.deepEqual(
+    reduce(state, routeEvent({ kind: "channel", key: beta })).selection,
+    {
+      kind: "chosen",
+      key: beta,
+    },
+  );
+  const chosen = bootState({
+    visible: true,
+    route: { kind: "channel", key: beta },
+  });
+  assert.equal(chosen.requestedKey, beta);
+  assert.equal(chosen.landing.kind, "discovering");
+  assert.equal(
+    bootState({ visible: true, route: { kind: "root" } }).requestedKey,
+    null,
+  );
+});
+test("jump: a row's channel button picks that channel and returns a browsing window to its newest messages", () => {
+  const browsing = historyPage(loadedWindow(), numbered(101, 150));
+  const key = activeChannel(browsing).key;
+  assert.equal(activeChannel(browsing).viewMode, "browsing");
+  const away = reduce(browsing, { type: "activity" });
+  assert.equal(away.selection.kind, "activity");
+  const jumped = reduce(away, { type: "jump", key });
+  assert.deepEqual(jumped.selection, { kind: "chosen", key });
+  assert.equal(jumped.landing.kind, "settled");
+  const channel = activeChannel(jumped);
+  assert.equal(channel.viewMode, "following");
+  assert.deepEqual(channel.runs, [[...channel.latestMessages.keys()]]);
+  const following = reduce(apply(initialState(), snapshot()), {
+    type: "activity",
+  });
+  const alpha = parsed(snapshot()).key;
+  const picked = reduce(following, { type: "jump", key: alpha });
+  assert.equal(
+    picked.channels.get(alpha),
+    following.channels.get(alpha),
+    "a following channel is left as it is",
+  );
+  assert.equal(
+    reduce(following, { type: "jump", key: parsed(snapshot(keyB)).key }),
+    following,
+  );
+});
+test("slot: a thread and a peek exclude each other, a view change closes either, and a peek outlives its member but not its channel", () => {
+  const state = apply(twoChannels(), busy(keyB, "beta", "w2"));
+  const alpha = parsed(snapshot()).key;
+  const beta = parsed(snapshot(keyB)).key;
+  const codex = state.channels.get(beta)?.members.values().next().value;
+  assert.ok(codex);
+  const target = peekTarget(beta, codex);
+  assert.ok(target);
+  const closed = { kind: "closed" };
+  const peeking = reduce(state, { type: "peek", target });
+  assert.deepEqual(peeking.slot, { kind: "peek", target });
+  const again = peekTarget(beta, codex);
+  assert.ok(again);
+  assert.equal(reduce(peeking, { type: "peek", target: again }), peeking);
+  const thread = reduce(peeking, { type: "thread", threadId: "m1" });
+  assert.deepEqual(thread.slot, { kind: "thread", id: "m1" });
+  assert.deepEqual(reduce(thread, { type: "peek", target }).slot, {
+    kind: "peek",
+    target,
+  });
+  assert.equal(reduce(peeking, { type: "thread", threadId: null }), peeking);
+  assert.equal(reduce(thread, { type: "peek", target: null }), thread);
+  assert.deepEqual(
+    reduce(peeking, { type: "peek", target: null }).slot,
+    closed,
+  );
+  assert.equal(
+    reduce(peeking, { type: "select", key: alpha }).slot.kind,
+    "peek",
+  );
+  assert.deepEqual(reduce(peeking, { type: "select", key: beta }).slot, closed);
+  assert.deepEqual(reduce(peeking, { type: "activity" }).slot, closed);
+  assert.deepEqual(reduce(thread, { type: "activity" }).slot, closed);
+  const idle = apply(peeking, busy(keyB, "beta", "w2", { activity: "idle" }));
+  assert.equal(idle.slot.kind, "peek", "an idle member keeps its drawer");
+  const vanished = snapshot(keyB, "beta", "w2");
+  vanished.frame.participants = [];
+  const left = apply(peeking, vanished);
+  assert.equal(
+    left.slot.kind,
+    "peek",
+    "a member that left the frame keeps its drawer",
+  );
+  assert.deepEqual(peekWho(left.channels, target), {
+    alias: "@codex",
+    kind: "agent",
+    activity: null,
+    channel: { label: "#beta", suffix: null },
+  });
+  assert.deepEqual(reduce(peeking, { type: "gone", key: beta }).slot, closed);
+  const elsewhere = reduce(apply(initialState(), snapshot()), {
+    type: "peek",
+    target,
+  });
+  assert.deepEqual(
+    elsewhere.slot,
+    closed,
+    "no drawer for a channel the page does not have",
+  );
+  const watched = reduce(reduce(state, { type: "activity" }), {
+    type: "peek",
+    target,
+  });
+  assert.equal(
+    apply(watched, busy(keyB, "beta", "w2", { mailbox: [] })).slot.kind,
+    "peek",
+  );
+});
+test("peek targets: never the operator, a local member reads in the channel shown, and an envoy reads in its home under its origin id", () => {
+  const alpha = parsed(snapshot(keyA, "alpha", "w1"));
+  const home = snapshot(keyB, "beta", "w2");
+  const beta = parsed({
+    ...home,
+    frame: {
+      ...home.frame,
+      participants: [
+        {
+          ...participant("pane-9"),
+          alias: "@reviewer",
+          kind: { type: "terminal" },
+        },
+        { ...participant("human"), alias: "you", kind: { type: "human" } },
+      ],
+    },
+  });
+  const homes = homesOf([alpha, beta], undefined);
+  assert.equal(homes.get("w2")?.key, beta.key);
+  const directory = { members: alpha.members, homes };
+  const local = peekTargetOf(resolve(directory, "agent-1" as never), alpha.key);
+  assert.deepEqual(
+    local && {
+      channel: local.channel,
+      member: local.member,
+      alias: local.alias,
+      kind: local.kind,
+    },
+    { channel: alpha.key, member: "agent-1", alias: "@codex", kind: "agent" },
+  );
+  assert.equal(
+    peekTargetOf(resolve(directory, "agent-1" as never), null),
+    null,
+  );
+  const remote = peekTargetOf(
+    resolve(directory, "envoy:w2:pane-9" as never),
+    alpha.key,
+  );
+  assert.deepEqual(
+    remote && {
+      channel: remote.channel,
+      member: remote.member,
+      kind: remote.kind,
+    },
+    { channel: beta.key, member: "pane-9", kind: "terminal" },
+  );
+  assert.equal(
+    peekTargetOf(resolve(directory, "envoy:w2:pane-gone" as never), alpha.key),
+    null,
+  );
+  assert.equal(
+    peekTargetOf(resolve(directory, "stranger" as never), alpha.key),
+    null,
+  );
+  assert.equal(peekTargetOf(resolve(directory, "human"), alpha.key), null);
+  const operator = beta.members.get("human" as never);
+  assert.ok(operator);
+  assert.equal(peekTarget(beta.key, operator), null);
+  const renamed = snapshot(keyB, "beta", "w2");
+  renamed.frame.participants = [
+    { ...participant("pane-9"), alias: "@critic", activity: "working" },
+  ];
+  const channels = new Map([[beta.key, { ...beta, ...parsed(renamed) }]]);
+  assert.ok(remote);
+  const who = peekWho(channels as never, remote);
+  assert.equal(
+    who?.alias,
+    "@critic",
+    "the live member's alias wins over the one captured at open",
+  );
+  assert.equal(who?.kind, "agent");
+  assert.equal(who?.activity, "working");
 });
