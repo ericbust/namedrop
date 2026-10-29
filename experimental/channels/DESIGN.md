@@ -460,17 +460,21 @@ main column, under the timeline, and at the bottom of the thread pane.
 
 ### Thread replies
 
-A follow-up must start with its recipients. The thread composer shows them as a
-muted "To @codex" label at the left of the box: every agent who wrote in the
-thread, else the parent's recipients, never the operator. An agent from another
-workspace is addressed through its home channel's token, so the label reads "To
-@lead · #alpha" and the source starts `#alpha @lead`. Recipients in the current
-channel come first, then each other workspace's token with its agents. The
-source sent is those mentions, then the text. When the text starts with its own
-mentions, those win and the label hides. When an agent's home channel has no
-token, that agent is left out. When no recipient is left, the box reads "No one
-in this thread can be mentioned. Start with @name to choose someone." The post
-carries `in_reply_to` with the latest message in the thread.
+A follow-up must start with its recipients, and a reply goes to one workspace.
+Namedrop's grammar is one run of `#label` tokens, then one run of `@alias`
+mentions, and it looks every alias up in every named workspace, so mixing
+workspaces would reach agents who are not in the thread.
+
+- The recipients are the agents who wrote in the thread from the workspace of
+  the latest agent message. With no agent message yet, they are the parent's
+  recipients from the workspace of its first recipient. Never the operator.
+- The thread composer shows them as a muted label at the left of the box: "To
+  @codex", or "To @lead · #alpha" for another workspace, where the source starts
+  with that workspace's token, as in `#alpha @lead`.
+- When that workspace has no token, nobody can be addressed, and the box reads
+  "No one in this thread can be mentioned. Start with @name to choose someone."
+- When the text starts with its own mentions, those win and the label hides.
+- The post carries `in_reply_to` with the latest message in the thread.
 
 ### Autocomplete
 
