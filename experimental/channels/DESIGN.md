@@ -421,7 +421,8 @@ main column, under the timeline, and at the bottom of the thread pane.
   scrolls. While focused, the border turns `--accent` with a 3px ring of
   `--accent` at 20 percent, mixed in sRGB.
 - **Placeholder**: "Message #alpha" for an addressable channel, else "Message
-  testbed ui2-live". In the thread pane: "Reply to @codex".
+  testbed ui2-live". In the thread pane, where the "To" label already names the
+  recipients: "Write a reply".
 - **Send button**: a 32px square at the right, `--radius-md`, with a drawn
   arrow-up icon. It is `--accent` with `--on-accent` when there is text, and
   muted and disabled when the box is empty. Its accessible name is "Send".
@@ -459,6 +460,15 @@ main column, under the timeline, and at the bottom of the thread pane.
   still being typed.
 - A retry with the same text reuses the same request id, so it can never post
   twice. Changed text gets a new id.
+- Every composer keeps its own draft for as long as the page is open: one per
+  channel and one per thread. Switching channels or closing a thread keeps the
+  text.
+- A post refused while you are elsewhere is never lost. Its text and its error
+  go back into the draft of the composer that sent it, and show when you return.
+  Until then the channel's sidebar row shows a 14px alert icon in
+  `--failed-text` after its name, with the accessible name "A post wasn't sent".
+  A refused thread reply also shows "Reply not sent · Open thread" in 12px
+  `--failed-text` under its parent message, as a button that opens the thread.
 
 ### Thread replies
 
@@ -489,15 +499,26 @@ workspaces would reach agents who are not in the thread.
 - **Channel rows**, 32px: a muted `#` icon, the name, and its token in muted
   text. Channels that share a name add the sidebar's muted suffix with the
   workspace id, so the operator can tell which one to rename. `#all` comes last, as "#all · every workspace". A channel with no token
-  shows at 50 percent opacity and cannot be chosen. Its tooltip reads "Two
-  workspaces share this label. Rename one in Herdr to mention it.", or "This
-  workspace has no label. Name it in Herdr to mention it."
+  shows at 50 percent opacity and cannot be chosen. Its tooltip says why, using
+  Namedrop's own folding of the Herdr label (ASCII letters, digits, `-`, `_` and
+  `.`, lowercased, other runs become one `-`):
+
+  | Case                                       | Tooltip                                                                                   |
+  | ------------------------------------------ | ----------------------------------------------------------------------------------------- |
+  | No Herdr label                             | "This workspace has no label. Name it in Herdr to mention it."                            |
+  | The label folds to nothing, as with 日本語 | "This label has no letters or digits Namedrop can use. Rename it in Herdr to mention it." |
+  | The label folds to `all`                   | "“all” means every workspace. Rename this one in Herdr to mention it."                    |
+  | Another channel folds to the same token    | "Two workspaces share this label. Rename one in Herdr to mention it."                     |
+  | Anything else                              | "Namedrop isn't active in this workspace yet, so it can't be mentioned."                  |
 - **Member rows**, 32px: a 20px avatar with its presence badge, the alias, and
   the presence word in muted text at the right. The members come from the
   channel named by the last `#token` before the caret, else the current
   channel. The operator never appears.
-- Ranking: names that start with the query come before names that contain it.
-  Ties sort by name. An empty query lists everything.
+- A channel query matches its typeable token as well as its name, and ignores
+  case, so `#alpha-p` finds "Alpha Project". The `#token` before an `@` is
+  matched the same way, so `#Beta @` lists beta's members.
+- Ranking: tokens or names that start with the query come before those that
+  contain it. Ties sort by name. An empty query lists everything.
 - Up and Down move the highlight and wrap. Tab and Enter accept, and Escape
   closes. A click accepts. Accepting replaces the whole token around the caret
   and adds one space.
