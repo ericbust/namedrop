@@ -117,6 +117,30 @@ use std::{
 };
 use support::TestDirectory;
 
+// A concurrent spawn can inherit a writable fixture fd until exec, even with CLOEXEC.
+// Keep those fds in waited child processes so published executables are never busy.
+fn write_executable(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "write-executable"])
+        .arg(path.as_ref())
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child.stdin.take().unwrap().write_all(contents.as_ref())?;
+    let output = child.wait_with_output()?;
+    assert!(output.status.success(), "{output:?}");
+    Ok(())
+}
+
+fn copy_executable(source: impl AsRef<Path>, destination: impl AsRef<Path>) -> std::io::Result<()> {
+    let output = Command::new("cp")
+        .arg(source.as_ref())
+        .arg(destination.as_ref())
+        .output()?;
+    assert!(output.status.success(), "{output:?}");
+    Ok(())
+}
+
 struct Dashboard {
     directory: TestDirectory,
 }
@@ -125,12 +149,11 @@ impl Dashboard {
     fn new() -> Self {
         let directory = TestDirectory::new();
         let herdr = directory.path().join("herdr");
-        fs::write(
+        write_executable(
             &herdr,
             "#!/bin/sh\nprintf '{\"result\":{\"workspace\":{\"label\":\"test\"}}}'\n",
         )
         .unwrap();
-        fs::set_permissions(herdr, fs::Permissions::from_mode(0o755)).unwrap();
         Self { directory }
     }
 
@@ -597,7 +620,7 @@ fn upgrade_handoff_keeps_directory_port_and_browser_session() {
     }
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
-    fs::copy(
+    copy_executable(
         env!("CARGO_BIN_EXE_namedrop"),
         runtime.join("release/namedrop"),
     )
@@ -698,17 +721,12 @@ fn fix_forward_index_file_aliases_require_the_session_cookie() {
 
 fn selected_startup_fixture(dashboard: &Dashboard, startup: &str) {
     let runtime = dashboard.state().join("runtime");
-    fs::write(runtime.join("release/namedrop"), format!(
+    write_executable(runtime.join("release/namedrop"), format!(
         "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) {startup};; esac\nexec '{}' \"$@\"\n",
         env!("CARGO_BIN_EXE_namedrop")
     )).unwrap();
-    fs::set_permissions(
-        runtime.join("release/namedrop"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
     symlink("release", runtime.join("current")).unwrap();
-    fs::write(
+    write_executable(
         runtime.join("namedrop"),
         format!(
             "#!/bin/sh\nrm '{}'\nexec '{}' \"$@\"\n",
@@ -717,7 +735,6 @@ fn selected_startup_fixture(dashboard: &Dashboard, startup: &str) {
         ),
     )
     .unwrap();
-    fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[test]
@@ -895,7 +912,7 @@ fn fix_two_handoff_to_a_release_without_claim_support_stays_running() {
         let _events = fix_two_subscribe(&dashboard, &opened);
         let runtime = dashboard.state().join("runtime");
         fs::create_dir_all(runtime.join("release")).unwrap();
-        fs::copy(&old, runtime.join("release/namedrop")).unwrap();
+        copy_executable(&old, runtime.join("release/namedrop")).unwrap();
         symlink("release", runtime.join("current")).unwrap();
         symlink("current/namedrop", runtime.join("namedrop")).unwrap();
         let successor = eventually(|| {
@@ -976,17 +993,12 @@ fn fix_two_handoff_resolves_and_probes_the_release_after_acquiring_the_runtime_g
     let gate = fs::File::create(runtime.join("commands.lock")).unwrap();
     gate.lock().unwrap();
     let premature_probe = dashboard.root().join("premature-probe");
-    fs::write(
+    write_executable(
         runtime.join("before-update/namedrop"),
         format!("#!/bin/sh\ntouch '{}'\nexit 1\n", premature_probe.display()),
     )
     .unwrap();
-    fs::set_permissions(
-        runtime.join("before-update/namedrop"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    fs::copy(
+    copy_executable(
         env!("CARGO_BIN_EXE_namedrop"),
         runtime.join("release/namedrop"),
     )
@@ -1033,14 +1045,9 @@ fn fix_two_probe_failure_does_not_fall_back_to_a_legacy_spawn() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
     let spawned = dashboard.root().join("unexpected-legacy-spawn");
-    fs::write(runtime.join("release/namedrop"), format!(
+    write_executable(runtime.join("release/namedrop"), format!(
         "#!/bin/sh\ncase \"$*\" in *--help*) echo 'could not acquire --inherit-claim' >&2; exit 69;; esac\ntouch '{}'\nexit 1\n", spawned.display()
     )).unwrap();
-    fs::set_permissions(
-        runtime.join("release/namedrop"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
     symlink("release", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     eventually(|| {
@@ -1068,7 +1075,7 @@ fn fix_three_legacy_stub(dashboard: &Dashboard, fail_start: bool) -> PathBuf {
             .unwrap(),
     )
     .unwrap();
-    fs::write(&executable, format!(r#"#!/usr/bin/env python3
+    write_executable(&executable, format!(r#"#!/usr/bin/env python3
 import json,os,sys
 from pathlib import Path
 for argument in sys.argv[1:]:
@@ -1088,7 +1095,6 @@ state=Path(sys.argv[sys.argv.index('--plugin-state')+1])
 (state/'runtime/namedrop').unlink(missing_ok=True)
 os.execv({target},[{target}]+sys.argv[1:])
 "#, fail_start=if fail_start {"True"} else {"False"})).unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
     executable
 }
 
@@ -1161,7 +1167,7 @@ fn fix_three_inherited_successor_can_release_its_claim_for_a_legacy_rollback() {
     let _events = fix_two_subscribe(&dashboard, &opened);
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("current-release")).unwrap();
-    fs::copy(
+    copy_executable(
         env!("CARGO_BIN_EXE_namedrop"),
         runtime.join("current-release/namedrop"),
     )
@@ -1236,7 +1242,7 @@ fn fix_three_real_pre_nd2_rollback_drops_custom_ui() {
     let _events = fix_two_subscribe(&dashboard, &opened);
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("pre-nd2")).unwrap();
-    fs::copy(old, runtime.join("pre-nd2/namedrop")).unwrap();
+    copy_executable(old, runtime.join("pre-nd2/namedrop")).unwrap();
     symlink("pre-nd2", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     let successor = eventually(|| {
@@ -1277,7 +1283,7 @@ fn fix_three_package_switch_during_probe_starts_the_probed_executable() {
         serde_json::to_string(dashboard.root().join("release-probe").to_str().unwrap()).unwrap();
     let spawned =
         serde_json::to_string(dashboard.root().join("pinned-started").to_str().unwrap()).unwrap();
-    fs::write(
+    write_executable(
         runtime.join("pinned/namedrop"),
         format!(
             r#"#!/usr/bin/env python3
@@ -1295,11 +1301,6 @@ else:
 os.execv({target},[{target}]+sys.argv[1:])
 "#
         ),
-    )
-    .unwrap();
-    fs::set_permissions(
-        runtime.join("pinned/namedrop"),
-        fs::Permissions::from_mode(0o755),
     )
     .unwrap();
     let packages = fs::OpenOptions::new()
@@ -1368,17 +1369,12 @@ fn fix_three_current_successor_stays_pinned_when_its_probe_changes_current() {
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("new")).unwrap();
     fix_three_legacy_stub(&dashboard, false);
-    fs::copy(env!("CARGO_BIN_EXE_namedrop"), runtime.join("new/real")).unwrap();
+    copy_executable(env!("CARGO_BIN_EXE_namedrop"), runtime.join("new/real")).unwrap();
     let started = dashboard.root().join("pinned-wrapper-started");
-    fs::write(runtime.join("new/namedrop"), format!(
+    write_executable(runtime.join("new/namedrop"), format!(
         "#!/bin/sh\ncase \"$*\" in *--help*) ln -s legacy '{r}/next' && mv -T '{r}/next' '{r}/current';; *) touch '{}' ;; esac\nexec '{r}/new/real' \"$@\"\n",
         started.display(), r=runtime.display()
     )).unwrap();
-    fs::set_permissions(
-        runtime.join("new/namedrop"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
     symlink("new", runtime.join("current")).unwrap();
     symlink("current/namedrop", runtime.join("namedrop")).unwrap();
     let successor = eventually(|| {
@@ -1670,7 +1666,7 @@ fn fix_four_current_handoff_keeps_server_log_lines_prefixed() {
     let _events = fix_two_subscribe(&dashboard, &opened);
     let runtime = dashboard.state().join("runtime");
     fs::create_dir_all(runtime.join("release")).unwrap();
-    fs::copy(
+    copy_executable(
         env!("CARGO_BIN_EXE_namedrop"),
         runtime.join("release/namedrop"),
     )
@@ -1821,7 +1817,7 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
     let legacy = if let Some(old) = std::env::var_os("REVIEW_PRE_ND2_BINARY") {
         fs::create_dir_all(runtime.join("legacy")).unwrap();
         let legacy = runtime.join("legacy/namedrop");
-        fs::copy(old, &legacy).unwrap();
+        copy_executable(old, &legacy).unwrap();
         legacy
     } else {
         fix_three_legacy_stub(&dashboard, false)
@@ -1829,27 +1825,17 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
     fs::create_dir_all(runtime.join("release")).unwrap();
     let delayed = dashboard.root().join("successor-delayed");
     let resumed = dashboard.root().join("successor-resumed");
-    fs::write(runtime.join("release/namedrop"), format!(
+    write_executable(runtime.join("release/namedrop"), format!(
         "#!/bin/sh\ncase \"$*\" in *--help*) ;; *dashboard-server*) touch '{}'; sleep 2; touch '{}';; esac\nexec '{}' \"$@\"\n",
         delayed.display(), resumed.display(), legacy.display()
     )).unwrap();
-    fs::set_permissions(
-        runtime.join("release/namedrop"),
-        fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    fs::write(
+    write_executable(
         runtime.join("caller-launcher"),
         format!(
             "#!/bin/sh\nrm '{}'\nexec '{}' \"$@\"\n",
             runtime.join("namedrop").display(),
             env!("CARGO_BIN_EXE_namedrop")
         ),
-    )
-    .unwrap();
-    fs::set_permissions(
-        runtime.join("caller-launcher"),
-        fs::Permissions::from_mode(0o755),
     )
     .unwrap();
     symlink("release", runtime.join("current")).unwrap();
