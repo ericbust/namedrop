@@ -458,8 +458,11 @@ main column, under the timeline, and at the bottom of the thread pane.
   a click on Send does the hint line read "Start with @name to choose who gets
   this." in `--text`. Typing clears it, so it never nags while a recipient is
   still being typed.
-- A retry with the same text reuses the same request id, so it can never post
-  twice. Changed text gets a new id.
+- A refused draft remembers the request id and the exact text it tried to
+  send. Sending that same text again reuses the id, even after edits that end
+  back at the same text, so an attempt whose outcome is unknown can never post
+  twice. Different text gets a new id. The id is forgotten only after a success.
+  Ids never move between drafts.
 - Every composer keeps its own draft for as long as the page is open: one per
   channel and one per thread. Switching channels or closing a thread keeps the
   text.
@@ -500,17 +503,16 @@ workspaces would reach agents who are not in the thread.
 - **Channel rows**, 32px: a muted `#` icon, the name, and its token in muted
   text. Channels that share a name add the sidebar's muted suffix with the
   workspace id, so the operator can tell which one to rename. `#all` comes last, as "#all · every workspace". A channel with no token
-  shows at 50 percent opacity and cannot be chosen. Its tooltip says why, using
-  Namedrop's own folding of the Herdr label (ASCII letters, digits, `-`, `_` and
-  `.`, lowercased, other runs become one `-`):
+  shows at 50 percent opacity and cannot be chosen. Its tooltip names a reason
+  only when the page can be sure of it. The page sees the server's cleaned
+  display name, not the raw Herdr label, so anything else gets general copy:
 
-  | Case                                       | Tooltip                                                                                   |
-  | ------------------------------------------ | ----------------------------------------------------------------------------------------- |
-  | No Herdr label                             | "This workspace has no label. Name it in Herdr to mention it."                            |
-  | The label folds to nothing, as with 日本語 | "This label has no letters or digits Namedrop can use. Rename it in Herdr to mention it." |
-  | The label folds to `all`                   | "“all” means every workspace. Rename this one in Herdr to mention it."                    |
-  | Another channel folds to the same token    | "Two workspaces share this label. Rename one in Herdr to mention it."                     |
-  | Anything else                              | "Namedrop isn't active in this workspace yet, so it can't be mentioned."                  |
+  | Case, checked in this order                       | Tooltip                                                                                                                                  |
+  | ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+  | The display name folds to nothing, as with 日本語 | "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr."                                           |
+  | The display name is the workspace id              | "This workspace has no label in Herdr. Name it to mention it."                                                                           |
+  | Another channel shows the same name               | "Another workspace shows the same name. Give one a unique label in Herdr to mention it."                                                 |
+  | Anything else                                     | "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there." |
 - **Member rows**, 32px: a 20px avatar with its presence badge, the alias, and
   the presence word in muted text at the right. The members come from the
   channel named by the last `#token` before the caret, else the current
