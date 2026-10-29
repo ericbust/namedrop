@@ -380,7 +380,11 @@ impl DashboardSnapshot {
 
 pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> DashboardSnapshot {
     let state = SpaceState::of(rows.worktree.as_ref());
-    let messages: Vec<MessageRow> = rows.messages.iter().map(|m| message(m, rows)).collect();
+    let messages: Vec<MessageRow> = rows
+        .messages
+        .iter()
+        .map(|m| message(m, &rows.legs))
+        .collect();
     let participants = participants(rows, &messages);
     let in_flight = rows
         .mailbox
@@ -482,7 +486,7 @@ fn health(state: SpaceState, attention: usize, in_flight: usize, working: usize)
     }
 }
 
-fn message(row: &rows::MessageRow, rows: &DashboardRows) -> MessageRow {
+pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageRow {
     MessageRow {
         message_id: row.message_id.clone(),
         thread_id: row.thread_id.clone(),
@@ -495,8 +499,7 @@ fn message(row: &rows::MessageRow, rows: &DashboardRows) -> MessageRow {
         },
         kind: MessageKind::of(&row.grammar_version, row.in_reply_to.is_some()),
         body: SafeText::from_untrusted(&row.body, BODY_CHARS),
-        legs: rows
-            .legs
+        legs: legs
             .iter()
             .filter(|leg| leg.message_id == row.message_id)
             .map(|leg| DeliveryLeg {

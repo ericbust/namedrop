@@ -1,6 +1,7 @@
 use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
 use super::server_files::{ServerFiles, Token, UiSource, open_directory};
-use super::snapshot::SpaceKey;
+use super::snapshot::{self, SpaceKey};
+use crate::StateStore;
 use std::{
     ffi::CString,
     fs::File,
@@ -12,7 +13,7 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, RecvTimeoutError, Sender},
     },
@@ -45,6 +46,7 @@ pub(crate) struct Front {
 pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<AtomicBool>) {
     let next_id = Arc::new(AtomicU64::new(1));
     let open = Arc::new(AtomicUsize::new(0));
+    let history_store = Arc::new(Mutex::new(HistoryStore::Unopened));
     for mut stream in listener.incoming().flatten() {
         if stop.load(Ordering::Acquire) {
             break;
@@ -64,10 +66,40 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
         let permit = ConnectionPermit(open.clone());
         let front = front.clone();
         let next_id = next_id.clone();
+        let history_store = history_store.clone();
         thread::spawn(move || {
             let _permit = permit;
-            let _ = serve_connection(stream, &front, &next_id);
+            let _ = serve_connection(stream, &front, &next_id, &history_store);
         });
+    }
+}
+
+enum HistoryStore {
+    Unopened,
+    Ready(StateStore),
+    Failed,
+}
+
+impl HistoryStore {
+    fn store(&mut self, state: &Path) -> Result<&mut StateStore, Status> {
+        if matches!(self, Self::Unopened) {
+            let opened = StateStore::open_read_only(state).and_then(|store| {
+                if let Some(store) = &store {
+                    store.set_busy_timeout(Duration::from_millis(250))?;
+                }
+                Ok(store)
+            });
+            *self = match opened {
+                Ok(Some(store)) => Self::Ready(store),
+                Ok(None) => Self::Unopened,
+                Err(_) => Self::Failed,
+            };
+        }
+        match self {
+            Self::Ready(store) => Ok(store),
+            Self::Unopened => Err(Status::NotFound),
+            Self::Failed => Err(Status::Unavailable),
+        }
     }
 }
 
@@ -115,6 +147,7 @@ enum Status {
     Forbidden,
     NotFound,
     MethodNotAllowed,
+    Unavailable,
 }
 
 impl Status {
@@ -125,6 +158,7 @@ impl Status {
             Self::Forbidden => "403 Forbidden",
             Self::NotFound => "404 Not Found",
             Self::MethodNotAllowed => "405 Method Not Allowed",
+            Self::Unavailable => "503 Service Unavailable",
         }
     }
 
@@ -137,6 +171,7 @@ impl Status {
             Self::Forbidden => "Forbidden.\n",
             Self::NotFound => "Not found.\n",
             Self::MethodNotAllowed => "The dashboard is read-only.\n",
+            Self::Unavailable => "History is temporarily unavailable.\n",
         }
     }
 }
@@ -247,6 +282,52 @@ fn decode_asset_path(path: &str) -> Option<String> {
     String::from_utf8(decoded).ok()
 }
 
+fn history_query(request: &Request) -> Result<(Option<String>, i64), Status> {
+    let mut before = None;
+    let mut limit = None;
+    for pair in request
+        .query
+        .as_deref()
+        .unwrap_or("")
+        .split('&')
+        .filter(|p| !p.is_empty())
+    {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if name != "before" && name != "limit" {
+            continue;
+        }
+        let value = decode_query_value(value).ok_or(Status::BadRequest)?;
+        if name == "before" {
+            if before.replace(value).is_some() || before.as_deref() == Some("") {
+                return Err(Status::BadRequest);
+            }
+        } else if limit.replace(value).is_some() {
+            return Err(Status::BadRequest);
+        }
+    }
+    let limit = limit
+        .map(|value| value.parse::<i64>().map(|n| n.clamp(1, 100)))
+        .transpose()
+        .map_err(|_| Status::BadRequest)?
+        .unwrap_or(50);
+    Ok((before, limit))
+}
+
+fn decode_query_value(raw: &str) -> Option<String> {
+    let mut decoded = Vec::with_capacity(raw.len());
+    let mut bytes = raw.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            let high = (bytes.next()? as char).to_digit(16)?;
+            let low = (bytes.next()? as char).to_digit(16)?;
+            decoded.push((high * 16 + low) as u8);
+        } else {
+            decoded.push(if byte == b'+' { b' ' } else { byte });
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
 fn content_type(path: &str) -> &'static str {
     let extension = Path::new(path)
         .extension()
@@ -274,9 +355,17 @@ fn content_type(path: &str) -> &'static str {
 }
 
 enum Route {
-    Redeem { location: String, nonce: String },
+    Redeem {
+        location: String,
+        nonce: String,
+    },
     Page,
     Events(SpaceKey),
+    Messages {
+        key: SpaceKey,
+        before: Option<String>,
+        limit: i64,
+    },
     AllEvents,
     Spaces,
     Asset(String),
@@ -338,14 +427,19 @@ fn route(
         _ if custom_index => None,
         _ => {
             let rest = path.strip_prefix("/w/").ok_or(Status::NotFound)?;
-            let (segment, events) = match rest.strip_suffix("/events") {
-                Some(segment) => (segment, true),
-                None => (rest, false),
+            let (segment, kind) = if let Some(segment) = rest.strip_suffix("/events") {
+                (segment, "events")
+            } else if let Some(segment) = rest.strip_suffix("/messages") {
+                (segment, "messages")
+            } else {
+                (rest, "page")
             };
-            Some((SpaceKey::parse(segment).ok_or(Status::NotFound)?, events))
+            Some((SpaceKey::parse(segment).ok_or(Status::NotFound)?, kind))
         }
     };
-    if let Some(nonce) = request.query("n") {
+    if !matches!(page, Some((_, "messages")))
+        && let Some(nonce) = request.query("n")
+    {
         return Ok(Route::Redeem {
             location: path.to_owned(),
             nonce: nonce.to_owned(),
@@ -357,10 +451,14 @@ fn route(
     {
         return Err(Status::Unauthorized);
     }
+    if let Some((key, "messages")) = page {
+        let (before, limit) = history_query(request)?;
+        return Ok(Route::Messages { key, before, limit });
+    }
     Ok(match (path, page) {
         ("/api/spaces", _) => Route::Spaces,
         ("/api/events", _) => Route::AllEvents,
-        (_, Some((key, true))) => Route::Events(key),
+        (_, Some((key, "events"))) => Route::Events(key),
         _ => Route::Page,
     })
 }
@@ -370,7 +468,12 @@ fn cookie_name(port: u16) -> String {
     format!("namedrop_dashboard_{port}")
 }
 
-fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io::Result<()> {
+fn serve_connection(
+    stream: TcpStream,
+    front: &Front,
+    next_id: &AtomicU64,
+    history_store: &Mutex<HistoryStore>,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
     let request = match read_request(&stream) {
@@ -429,6 +532,35 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
         }
         Ok(Route::Events(key)) => {
             stream_events(stream, writer, front, next_id, Subscription::Space(key))
+        }
+        Ok(Route::Messages { key, before, limit }) => {
+            let result = (|| {
+                let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
+                let store = guard.store(front.files.state())?;
+                let namespace = store
+                    .dashboard_spaces()
+                    .map_err(|_| Status::Unavailable)?
+                    .into_iter()
+                    .find(|space| SpaceKey::of(&space.namespace) == key)
+                    .map(|space| space.namespace)
+                    .ok_or(Status::NotFound)?;
+                store
+                    .dashboard_history(&namespace, before.as_deref(), limit)
+                    .map_err(|_| Status::Unavailable)?
+                    .ok_or(Status::NotFound)
+            })();
+            match result {
+                Ok(rows) => {
+                    let messages: Vec<_> = rows
+                        .messages
+                        .iter()
+                        .map(|row| snapshot::message(row, &rows.legs))
+                        .collect();
+                    let body = serde_json::to_vec(&messages).map_err(io::Error::other)?;
+                    respond(&mut writer, "200 OK", "application/json", "", &body)
+                }
+                Err(status) => respond_status(&mut writer, status),
+            }
         }
         Ok(Route::AllEvents) => stream_events(stream, writer, front, next_id, Subscription::All),
     }
@@ -620,4 +752,45 @@ fn respond(
     )?;
     writer.write_all(body)?;
     writer.flush()
+}
+
+#[cfg(test)]
+mod history_store_tests {
+    use super::*;
+
+    #[test]
+    fn history_open_failure_is_sticky_after_database_repair() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-history-failed-{}", std::process::id()));
+        std::fs::create_dir(&state).unwrap();
+        let database = state.join("namedrop.sqlite3");
+        std::fs::write(&database, b"invalid sqlite database").unwrap();
+        let mut cache = HistoryStore::Unopened;
+        assert!(matches!(cache.store(&state), Err(Status::Unavailable)));
+        std::fs::remove_file(&database).unwrap();
+        drop(StateStore::open(&state).unwrap());
+        assert!(StateStore::open_read_only(&state).unwrap().is_some());
+        assert!(matches!(cache.store(&state), Err(Status::Unavailable)));
+        drop(cache);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn history_missing_database_can_appear_later() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-history-missing-{}", std::process::id()));
+        let mut cache = HistoryStore::Unopened;
+        assert!(matches!(cache.store(&state), Err(Status::NotFound)));
+        drop(StateStore::open(&state).unwrap());
+        assert!(
+            cache
+                .store(&state)
+                .unwrap()
+                .dashboard_spaces()
+                .unwrap()
+                .is_empty()
+        );
+        drop(cache);
+        std::fs::remove_dir_all(state).unwrap();
+    }
 }
