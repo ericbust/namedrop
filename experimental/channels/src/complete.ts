@@ -3,12 +3,13 @@ import type { ChannelSnapshot, Member, ReplyTo, SpaceKey } from "./model.ts";
 import { channelSuffix } from "./store.ts";
 
 // Why the server gave a channel no token, in the order DESIGN.md's table checks.
+// The page sees the cleaned display name, not the raw Herdr label, so it names
+// only reasons that name cannot hide.
 export type DisabledReason =
-  | "no-label"
   | "unusable-label"
-  | "all"
-  | "shared-label"
-  | "inactive";
+  | "no-label"
+  | "shared-name"
+  | "unknown";
 export type ChannelOption = {
   key: SpaceKey;
   name: string;
@@ -41,14 +42,16 @@ const ALL = "#all";
 const WHITESPACE = /\s/;
 
 function disabledReason(
-  folded: string | null,
-  others: readonly (string | null)[],
+  channel: Pick<ChannelSnapshot, "displayName" | "workspaceId">,
+  suffix: string | null,
 ): DisabledReason {
-  if (folded === null) return "no-label";
-  if (folded === "") return "unusable-label";
-  if (folded === "all") return "all";
-  if (others.includes(folded)) return "shared-label";
-  return "inactive";
+  // Stripped characters fold to separators, so a name that folds to nothing came from a label that does too.
+  if (foldLabel(channel.displayName) === "") return "unusable-label";
+  // The server shows the workspace id as the name only when Herdr has no label.
+  if (channel.displayName === channel.workspaceId) return "no-label";
+  // The sidebar suffix appears exactly when another channel shows the same name.
+  if (suffix !== null) return "shared-name";
+  return "unknown";
 }
 
 export function channelOptions(
@@ -60,30 +63,22 @@ export function channelOptions(
   >,
 ): ChannelOption[] {
   const all = [...channels];
-  // The server shows the workspace id as the name only when Herdr has no label.
-  const folded = all.map((channel) => ({
-    channel,
-    token:
-      channel.displayName === channel.workspaceId
-        ? null
-        : foldLabel(channel.displayName),
-  }));
-  return folded.map(({ channel, token }) => ({
-    key: channel.key,
-    name: channel.displayName,
-    suffix: channelSuffix(channel, all),
-    token:
-      channel.addressableLabel === null ? null : `#${channel.addressableLabel}`,
-    disabledReason:
-      channel.addressableLabel !== null
-        ? null
-        : disabledReason(
-            token,
-            folded.flatMap((other) =>
-              other.channel === channel ? [] : [other.token],
-            ),
-          ),
-  }));
+  return all.map((channel) => {
+    const suffix = channelSuffix(channel, all);
+    return {
+      key: channel.key,
+      name: channel.displayName,
+      suffix,
+      token:
+        channel.addressableLabel === null
+          ? null
+          : `#${channel.addressableLabel}`,
+      disabledReason:
+        channel.addressableLabel === null
+          ? disabledReason(channel, suffix)
+          : null,
+    };
+  });
 }
 
 function tokenAt(text: string, caret: number): Token | null {
