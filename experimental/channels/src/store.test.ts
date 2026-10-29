@@ -1870,6 +1870,49 @@ test("landing: a replay that brings a new channel re-runs the rule, a replay of 
   );
   assert.equal(grown.selection.key, keyB);
 });
+test("navigate: Back to the root lands again and stays automatic, Back to a channel chooses it", () => {
+  const keyC = "c".repeat(20);
+  const keyD = "d".repeat(20);
+  const betaKey = parsed(snapshot(keyB)).key;
+  const state = landed([
+    landingFrame(keyA, "alpha"),
+    landingFrame(keyB, "beta"),
+  ]);
+  const chosen = reduce(state, { type: "select", key: betaKey });
+  const root = reduce(chosen, { type: "navigate", key: null });
+  assert.equal(root.selection.key, keyA);
+  const gamma = apply(root, landingFrame(keyC, "gamma", { needsYou: true }));
+  assert.equal(gamma.selection.key, keyC);
+  const forward = reduce(gamma, { type: "navigate", key: betaKey });
+  assert.equal(forward.selection.key, keyB);
+  const delta = landingFrame(keyD, "delta", { needsYou: true });
+  assert.equal(apply(forward, delta).selection.key, keyB);
+  assert.equal(
+    reduce(forward, {
+      type: "navigate",
+      key: parsed(snapshot("e".repeat(20))).key,
+    }),
+    forward,
+  );
+});
+test("select: the pick replaces the URL's key, so a lost pick lands by Needs you instead of the load-time URL", () => {
+  const keyC = "c".repeat(20);
+  const betaKey = parsed(snapshot(keyB)).key;
+  const state = landed(
+    [landingFrame(keyA, "alpha"), landingFrame(keyB, "beta")],
+    keyA,
+  );
+  assert.equal(state.selection.key, keyA);
+  const lost = reduce(reduce(state, { type: "select", key: betaKey }), {
+    type: "gone",
+    key: betaKey,
+  });
+  assert.equal(lost.selection.key, null);
+  assert.equal(
+    apply(lost, landingFrame(keyC, "gamma", { needsYou: true })).selection.key,
+    keyC,
+  );
+});
 
 const MIN = 60_000;
 type RowOptions = {

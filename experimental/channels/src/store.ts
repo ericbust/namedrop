@@ -361,10 +361,15 @@ function settle(
       ? !arrived
       : channels.has(selection.key) &&
         (selection.kind === "chosen" || !arrived);
-  if (keep) return selection;
-  const key = landing(channels, state.requestedKey);
+  return keep ? selection : land(channels, state.requestedKey);
+}
+function land(
+  channels: ReadonlyMap<SpaceKey, Channel>,
+  requestedKey: SpaceKey | null,
+): Selection {
+  const key = landing(channels, requestedKey);
   if (key === null) return noSelection;
-  return { kind: key === state.requestedKey ? "chosen" : "automatic", key };
+  return { kind: key === requestedKey ? "chosen" : "automatic", key };
 }
 function latestWindow(channel: Channel): Channel {
   return {
@@ -559,7 +564,19 @@ function step(state: State, event: Event): State {
       const { selection } = state;
       if (selection.kind === "chosen" && selection.key === event.key)
         return state;
-      return { ...state, selection: { kind: "chosen", key: event.key } };
+      return {
+        ...state,
+        requestedKey: event.key,
+        selection: { kind: "chosen", key: event.key },
+      };
+    }
+    case "navigate": {
+      if (event.key !== null && !state.channels.has(event.key)) return state;
+      return {
+        ...state,
+        requestedKey: event.key,
+        selection: land(state.channels, event.key),
+      };
     }
     case "read": {
       if (state.selection.key !== event.key) return state;

@@ -268,10 +268,8 @@ export function App() {
     };
   }, [state.channels.size]);
   useEffect(() => {
-    const back = () => {
-      const key = pathKey(location.pathname);
-      if (key !== null) dispatch({ type: "select", key });
-    };
+    const back = () =>
+      dispatch({ type: "navigate", key: pathKey(location.pathname) });
     addEventListener("popstate", back);
     return () => removeEventListener("popstate", back);
   }, []);

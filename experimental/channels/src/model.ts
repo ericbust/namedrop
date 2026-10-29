@@ -133,6 +133,7 @@ export type Event =
         | { kind: "error"; reason: string };
     }
   | { type: "select"; key: SpaceKey }
+  | { type: "navigate"; key: SpaceKey | null }
   | { type: "read"; key: SpaceKey }
   | { type: "thread"; threadId: string | null }
   | { type: "opened" }
