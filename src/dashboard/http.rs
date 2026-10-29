@@ -1,4 +1,4 @@
-use super::hub::{Frame, HubCommand};
+use super::hub::{Frame, HubCommand, SpaceEvent, Subscription};
 use super::server_files::{ServerFiles, Token};
 use super::snapshot::SpaceKey;
 use std::{
@@ -138,6 +138,7 @@ enum Route {
     Redeem { location: String, nonce: String },
     Page,
     Events(SpaceKey),
+    AllEvents,
     Spaces,
     Asset(Asset),
     Favicon,
@@ -170,7 +171,7 @@ fn route(request: &Request, port: u16, token: &Token, session: &Token) -> Result
         _ => {}
     }
     let page = match path {
-        "/" | "/api/spaces" => None,
+        "/" | "/api/spaces" | "/api/events" => None,
         _ => {
             let rest = path.strip_prefix("/w/").ok_or(Status::NotFound)?;
             let (segment, events) = match rest.strip_suffix("/events") {
@@ -194,6 +195,7 @@ fn route(request: &Request, port: u16, token: &Token, session: &Token) -> Result
     }
     Ok(match (path, page) {
         ("/api/spaces", _) => Route::Spaces,
+        ("/api/events", _) => Route::AllEvents,
         (_, Some((key, true))) => Route::Events(key),
         _ => Route::Page,
     })
@@ -271,7 +273,10 @@ fn serve_connection(stream: TcpStream, front: &Front, next_id: &AtomicU64) -> io
                 body.as_bytes(),
             )
         }
-        Ok(Route::Events(key)) => stream_events(stream, writer, front, next_id, key),
+        Ok(Route::Events(key)) => {
+            stream_events(stream, writer, front, next_id, Subscription::Space(key))
+        }
+        Ok(Route::AllEvents) => stream_events(stream, writer, front, next_id, Subscription::All),
     }
 }
 
@@ -280,7 +285,7 @@ fn stream_events(
     mut writer: TcpStream,
     front: &Front,
     next_id: &AtomicU64,
-    key: SpaceKey,
+    subscription: Subscription,
 ) -> io::Result<()> {
     write!(
         writer,
@@ -291,7 +296,12 @@ fn stream_events(
     let (frames, inbox) = mpsc::sync_channel(8);
     if front
         .hub
-        .send(HubCommand::Subscribe { id, key, frames })
+        .send(HubCommand::Subscribe {
+            id,
+            subscription,
+            frames,
+            notify: front.hub.clone(),
+        })
         .is_err()
     {
         return Ok(());
@@ -300,6 +310,22 @@ fn stream_events(
     let result = loop {
         let written = match inbox.recv_timeout(Duration::from_secs(1)) {
             Ok(Frame::Snapshot(json)) => write!(writer, "event: snapshot\ndata: {json}\n\n"),
+            Ok(Frame::Spaces(events)) => events.iter().try_for_each(|event| match event {
+                SpaceEvent::Space { key, frame } => write!(
+                    writer,
+                    "event: space\ndata: {{\"key\":\"{}\",\"frame\":{frame}}}\n\n",
+                    key.as_str()
+                ),
+                SpaceEvent::Gone { key } => write!(
+                    writer,
+                    "event: gone\ndata: {{\"key\":\"{}\"}}\n\n",
+                    key.as_str()
+                ),
+                SpaceEvent::Ready { keys } => {
+                    let data = serde_json::json!({"keys": keys});
+                    write!(writer, "event: ready\ndata: {data}\n\n")
+                }
+            }),
             Ok(Frame::Restarting) => {
                 let _ = write!(writer, "event: restarting\ndata: {{}}\n\n");
                 break writer.flush();

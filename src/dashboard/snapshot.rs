@@ -93,7 +93,23 @@ pub struct SpaceHeader {
     pub key: SpaceKey,
     pub workspace_id: String,
     pub label: Option<SafeText>,
+    pub display_name: String,
+    pub addressable_label: Option<String>,
     pub state: SpaceState,
+}
+
+impl SpaceHeader {
+    pub(crate) fn set_live_label(
+        &mut self,
+        workspace_id: &str,
+        label: Option<&str>,
+        addressable_label: Option<String>,
+    ) {
+        let label = SafeText::optional(label, SHORT_CHARS).map(|label| label.text);
+        self.display_name = label.unwrap_or_else(|| workspace_id.to_owned());
+        self.addressable_label = addressable_label
+            .filter(|token| SafeText::from_untrusted(token, SHORT_CHARS).text == *token);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -347,6 +363,8 @@ impl DashboardSnapshot {
                 key,
                 workspace_id: String::new(),
                 label: SafeText::optional(label, SHORT_CHARS),
+                display_name: String::new(),
+                addressable_label: None,
                 state: SpaceState::Unknown,
             },
             health: SpaceHealth::Inactive,
@@ -399,6 +417,8 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             key: SpaceKey::of(&rows.namespace),
             workspace_id: rows.namespace.space_id.as_str().to_owned(),
             label: SafeText::optional(label, SHORT_CHARS),
+            display_name: rows.namespace.space_id.as_str().to_owned(),
+            addressable_label: None,
             state,
         },
         health: health(state, attention.len(), in_flight, working),
