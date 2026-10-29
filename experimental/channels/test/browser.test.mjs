@@ -4676,3 +4676,46 @@ test("UI-4: the drawer is 480 wide at 1440 and 400 at 1024, opening a row select
   );
   assert.equal(await row.getAttribute("aria-expanded"), "false");
 });
+
+test("CH-2: the page fills the window and never scrolls, with a long channel and a thread open", async (t) => {
+  const codex = fixture.frame.participants[0].address_id;
+  const busy = frame(1, "alpha");
+  busy.frame.messages = Array.from({ length: 80 }, (_, index) =>
+    message(
+      `long-${index}`,
+      `@codex message ${index} with enough words to wrap`,
+      {
+        at_ms: 1_000 + index * 60_000,
+        legs: [{ to: codex, stage: { stage: "delivered" } }],
+      },
+    ),
+  ).reverse();
+  const ui = await open(t, (client) => replay(client, [busy]));
+  await ui.page.locator('[data-message-id="long-79"]').waitFor();
+  const page = () =>
+    ui.page.evaluate(() => {
+      window.scrollTo(0, 100_000);
+      return {
+        overflow:
+          document.documentElement.scrollHeight -
+          document.documentElement.clientHeight,
+        scrolled: window.scrollY,
+      };
+    });
+  for (const [width, height] of [
+    [1440, 900],
+    [1024, 700],
+    [640, 800],
+    [1152, 720],
+  ]) {
+    await ui.page.setViewportSize({ width, height });
+    assert.deepEqual(
+      await page(),
+      { overflow: 0, scrolled: 0 },
+      `${width}x${height}`,
+    );
+  }
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  await ui.page.locator('[data-message-id="long-79"]').hover();
+  assert.deepEqual(await page(), { overflow: 0, scrolled: 0 });
+});
