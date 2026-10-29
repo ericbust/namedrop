@@ -155,80 +155,115 @@ fn is_secret_ignorable(character: char) -> bool {
     )
 }
 
-fn secret_shadow(source: &str, canonical: bool) -> Shadow {
-    enum State {
-        Ground,
-        Escape,
-        EscapeIntermediate,
-        Csi,
-        ControlString { osc: bool },
-        StringEscape { osc: bool },
+fn secret_shadows(source: &str) -> impl Iterator<Item = Shadow> + '_ {
+    enum View {
+        Original,
+        Joined,
+        Terminal,
     }
-    let mut state = State::Ground;
-    let mut shadow = Shadow {
-        text: String::with_capacity(source.len()),
-        source: Vec::with_capacity(source.len()),
-    };
-    for (start, character) in source.char_indices() {
-        if !canonical {
-            shadow.push(character, start);
-            continue;
-        }
-        if is_secret_ignorable(character) {
-            continue;
-        }
-        state = match state {
-            State::Ground => match character {
-                '\u{1b}' => State::Escape,
-                '\u{9b}' => State::Csi,
-                '\u{9d}' => State::ControlString { osc: true },
-                '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => State::ControlString { osc: false },
-                _ => {
-                    if character == '\n' || !character.is_control() {
+    [View::Original, View::Joined, View::Terminal]
+        .into_iter()
+        .map(move |view| {
+            enum State {
+                Ground,
+                Escape,
+                EscapeIntermediate,
+                Csi,
+                ControlString { osc: bool },
+                StringEscape { osc: bool },
+            }
+            let mut state = State::Ground;
+            let mut pending_escape = false;
+            let mut shadow = Shadow {
+                text: String::with_capacity(source.len()),
+                source: Vec::with_capacity(source.len()),
+            };
+            for (start, character) in source.char_indices() {
+                match view {
+                    View::Original => {
                         shadow.push(character, start);
+                        continue;
                     }
-                    State::Ground
+                    View::Joined => {
+                        if is_secret_ignorable(character) {
+                            continue;
+                        }
+                        match character {
+                            '\u{1b}' => pending_escape = true,
+                            '\n' => {
+                                if !pending_escape {
+                                    shadow.push(character, start);
+                                }
+                                pending_escape = false;
+                            }
+                            _ if character.is_control() => {}
+                            _ => {
+                                shadow.push(character, start);
+                                pending_escape = false;
+                            }
+                        }
+                        continue;
+                    }
+                    View::Terminal => {}
                 }
-            },
-            State::Escape => match character {
-                '\n' => State::Ground,
-                '[' => State::Csi,
-                ']' => State::ControlString { osc: true },
-                'P' | 'X' | '^' | '_' => State::ControlString { osc: false },
-                '\u{1b}' => State::Escape,
-                '\u{21}'..='\u{2f}' => State::EscapeIntermediate,
-                _ if character.is_control() => State::Escape,
-                _ => {
-                    shadow.push(character, start);
-                    State::Ground
+                if is_secret_ignorable(character) {
+                    continue;
                 }
-            },
-            State::EscapeIntermediate => match character {
-                '\u{30}'..='\u{7e}' => State::Ground,
-                '\u{1b}' => State::Escape,
-                '\n' => State::Ground,
-                _ => State::EscapeIntermediate,
-            },
-            State::Csi => match character {
-                '\u{40}'..='\u{7e}' => State::Ground,
-                '\u{1b}' => State::Escape,
-                _ => State::Csi,
-            },
-            State::ControlString { osc } => match character {
-                '\u{9c}' => State::Ground,
-                '\u{7}' if osc => State::Ground,
-                '\u{1b}' => State::StringEscape { osc },
-                _ => State::ControlString { osc },
-            },
-            State::StringEscape { osc } => match character {
-                '\\' | '\u{9c}' => State::Ground,
-                '\u{7}' if osc => State::Ground,
-                '\u{1b}' => State::StringEscape { osc },
-                _ => State::ControlString { osc },
-            },
-        };
-    }
-    shadow
+                state = match state {
+                    State::Ground => match character {
+                        '\u{1b}' => State::Escape,
+                        '\u{9b}' => State::Csi,
+                        '\u{9d}' => State::ControlString { osc: true },
+                        '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
+                            State::ControlString { osc: false }
+                        }
+                        _ => {
+                            if character == '\n' || !character.is_control() {
+                                shadow.push(character, start);
+                            }
+                            State::Ground
+                        }
+                    },
+                    State::Escape => match character {
+                        '\n' => State::Ground,
+                        '[' => State::Csi,
+                        ']' => State::ControlString { osc: true },
+                        'P' | 'X' | '^' | '_' => State::ControlString { osc: false },
+                        '\u{1b}' => State::Escape,
+                        '\u{21}'..='\u{2f}' => State::EscapeIntermediate,
+                        _ if character.is_control() => State::Escape,
+                        _ => {
+                            shadow.push(character, start);
+                            State::Ground
+                        }
+                    },
+                    State::EscapeIntermediate => match character {
+                        '\u{30}'..='\u{7e}' => State::Ground,
+                        '\u{1b}' => State::Escape,
+                        '\n' => State::Ground,
+                        _ => State::EscapeIntermediate,
+                    },
+                    State::Csi => match character {
+                        '\u{40}'..='\u{7e}' => State::Ground,
+                        '\u{1b}' => State::Escape,
+                        _ => State::Csi,
+                    },
+                    State::ControlString { osc } => match character {
+                        '\u{9c}' => State::Ground,
+                        '\u{7}' if osc => State::Ground,
+                        '\u{1b}' => State::StringEscape { osc },
+                        _ => State::ControlString { osc },
+                    },
+                    State::StringEscape { osc } => match character {
+                        '\\' | '\u{9c}' => State::Ground,
+                        '\u{7}' if osc => State::Ground,
+                        '\u{1b}' => State::StringEscape { osc },
+                        _ => State::ControlString { osc },
+                    },
+                };
+            }
+            shadow
+        })
 }
 
 fn token_masks(shadow: &Shadow, masks: &mut Vec<Mask>) {
@@ -347,8 +382,7 @@ fn apply_masks(source: &str, mut masks: Vec<Mask>) -> String {
 
 fn redact_for_display(source: &str) -> String {
     let mut masks = Vec::new();
-    for canonical in [false, true] {
-        let shadow = secret_shadow(source, canonical);
+    for shadow in secret_shadows(source) {
         token_masks(&shadow, &mut masks);
         policy_masks(&shadow, source.len(), &mut masks);
     }
@@ -1071,16 +1105,139 @@ mod redaction_regression_tests {
 
     #[test]
     fn displayed_terminal_payloads_keep_split_secrets_redacted() {
-        for (open, close, expected) in [
-            ("\u{1b}]0;", "\u{7}", "👩‍💻 ]0;[REDACTED TOKEN] می‌خواهم"),
-            ("\u{1b}]0;", "\u{1b}\\", "👩‍💻 ]0;[REDACTED TOKEN]\\ می‌خواهم"),
-            ("\u{1b}P", "\u{1b}\\", "👩‍💻 P[REDACTED TOKEN]\\ می‌خواهم"),
-            ("\u{90}", "\u{9c}", "👩‍💻 [REDACTED TOKEN] می‌خواهم"),
+        for split in [
+            "\u{200d}",
+            "\t",
+            "\u{1b}\n",
+            "\u{1b}\r\n",
+            "\u{1b}\u{200d}\t\r\n",
         ] {
-            let raw =
-                format!("👩‍💻 {open}s\u{200d}k-abcdefghijklmnopqrstuvwxyz123456{close} می‌خواهم");
+            for (open, close, expected) in [
+                ("\u{1b}]0;", "\u{7}", "👩‍💻 ]0;[REDACTED TOKEN] می‌خواهم"),
+                ("\u{1b}]0;", "\u{1b}\\", "👩‍💻 ]0;[REDACTED TOKEN]\\ می‌خواهم"),
+                ("\u{1b}P", "\u{1b}\\", "👩‍💻 P[REDACTED TOKEN]\\ می‌خواهم"),
+                ("\u{9d}0;", "\u{9c}", "👩‍💻 0;[REDACTED TOKEN] می‌خواهم"),
+                ("\u{90}", "\u{9c}", "👩‍💻 [REDACTED TOKEN] می‌خواهم"),
+                ("\u{1b}]0;", "", "👩‍💻 ]0;[REDACTED TOKEN] می‌خواهم"),
+                ("\u{1b}P", "", "👩‍💻 P[REDACTED TOKEN] می‌خواهم"),
+                ("\u{9d}0;", "", "👩‍💻 0;[REDACTED TOKEN] می‌خواهم"),
+                ("\u{90}", "", "👩‍💻 [REDACTED TOKEN] می‌خواهم"),
+            ] {
+                let raw =
+                    format!("👩‍💻 {open}s{split}k-abcdefghijklmnopqrstuvwxyz123456{close} می‌خواهم");
+                assert_eq!(
+                    SafeText::from_untrusted(&raw, 2000).text,
+                    expected,
+                    "{raw:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn displayed_terminal_payloads_keep_split_policy_secrets_redacted() {
+        for split in ["\u{200d}", "\t", "\u{1b}\n", "\u{1b}\r\n"] {
+            for (open, close, expected) in [
+                (
+                    "\u{1b}]0;",
+                    "\u{7}",
+                    "👩‍💻 ]0;\n[REDACTED PRIVATE KEY]\n می‌خواهم",
+                ),
+                (
+                    "\u{1b}]0;",
+                    "\u{1b}\\",
+                    "👩‍💻 ]0;\n[REDACTED PRIVATE KEY]\n\\ می‌خواهم",
+                ),
+                (
+                    "\u{1b}P",
+                    "\u{1b}\\",
+                    "👩‍💻 P\n[REDACTED PRIVATE KEY]\n\\ می‌خواهم",
+                ),
+                (
+                    "\u{9d}0;",
+                    "\u{9c}",
+                    "👩‍💻 0;\n[REDACTED PRIVATE KEY]\n می‌خواهم",
+                ),
+                ("\u{90}", "\u{9c}", "👩‍💻 \n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+                ("\u{1b}]0;", "", "👩‍💻 ]0;\n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+                ("\u{1b}P", "", "👩‍💻 P\n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+                ("\u{9d}0;", "", "👩‍💻 0;\n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+                ("\u{90}", "", "👩‍💻 \n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+            ] {
+                let raw = format!(
+                    "👩‍💻 {open}\n-----BE{split}GIN PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----\n{close} می‌خواهم"
+                );
+                assert_eq!(
+                    SafeText::from_untrusted(&raw, 2000).text,
+                    expected,
+                    "{raw:?}"
+                );
+            }
+        }
+        for (raw, expected) in [
+            (
+                "👩‍💻 \u{1b}]0;TOK\u{200d}EN=hunter2\n\u{7} می‌خواهم",
+                "👩‍💻 ]0;TOK\u{200d}EN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}]0;TOK\tEN=hunter2\n\u{1b}\\ می‌خواهم",
+                "👩‍💻 ]0;TOK\tEN=[REDACTED ENV VALUE]\n\\ می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}PTOK\u{1b}\nEN=hunter2\n\u{1b}\\ می‌خواهم",
+                "👩‍💻 PTOK\nEN=[REDACTED ENV VALUE]\n\\ می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{90}TOK\u{1b}\r\nEN=hunter2\n\u{9c} می‌خواهم",
+                "👩‍💻 TOK\nEN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}]0;TOK\u{200d}EN=hunter2\n می‌خواهم",
+                "👩‍💻 ]0;TOK\u{200d}EN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}PTOK\tEN=hunter2\n می‌خواهم",
+                "👩‍💻 PTOK\tEN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{9d}0;TOK\u{1b}\nEN=hunter2\n می‌خواهم",
+                "👩‍💻 0;TOK\nEN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{90}TOK\u{1b}\r\nEN=hunter2\n می‌خواهم",
+                "👩‍💻 TOK\nEN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+        ] {
             assert_eq!(
-                SafeText::from_untrusted(&raw, 2000).text,
+                SafeText::from_untrusted(raw, 2000).text,
+                expected,
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn displayed_terminal_payloads_preserve_ordinary_line_breaks() {
+        for (raw, expected) in [
+            (
+                "👩‍💻 \u{1b}]0;s\nk-abcdefghijklmnopqrstuvwxyz123456\u{7} می‌خواهم",
+                "👩‍💻 ]0;s\nk-abcdefghijklmnopqrstuvwxyz123456 می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}Ps\u{1b}\r\n\nk-abcdefghijklmnopqrstuvwxyz123456\u{1b}\\ می‌خواهم",
+                "👩‍💻 Ps\n\nk-abcdefghijklmnopqrstuvwxyz123456\\ می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{90}\u{1b}s\nk-abcdefghijklmnopqrstuvwxyz123456\u{9c} می‌خواهم",
+                "👩‍💻 s\nk-abcdefghijklmnopqrstuvwxyz123456 می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{9d}0;s\nk-abcdefghijklmnopqrstuvwxyz123456 می‌خواهم",
+                "👩‍💻 0;s\nk-abcdefghijklmnopqrstuvwxyz123456 می‌خواهم",
+            ),
+        ] {
+            assert_eq!(
+                SafeText::from_untrusted(raw, 2000).text,
                 expected,
                 "{raw:?}"
             );
