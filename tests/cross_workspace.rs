@@ -635,6 +635,25 @@ fn envoys_never_appear_where_a_workspace_lists_its_own_names() {
         Fixture::untrusted_body(&fixture.herdr.last_envelope("pane-1-planner")),
         "Plan received."
     );
+
+    let mut store = StateStore::open(&fixture.state).unwrap();
+    for workspace in ["w1", "w2"] {
+        let namespace = StateNamespace::for_space("socket-a", workspace);
+        let snapshot = namedrop::dashboard::snapshot::build(
+            &store.dashboard_rows(&namespace).unwrap(),
+            None,
+            1,
+        );
+        let lanes: Vec<&str> = snapshot
+            .participants
+            .iter()
+            .map(|lane| lane.address_id.as_str())
+            .collect();
+        assert!(
+            lanes.iter().all(|lane| !lane.starts_with("envoy:")),
+            "{workspace} dashboard lanes: {lanes:?}"
+        );
+    }
 }
 
 fn receive_until_result_set(fixture: &Fixture, workspace: &str, pane: &str) -> Vec<Value> {
