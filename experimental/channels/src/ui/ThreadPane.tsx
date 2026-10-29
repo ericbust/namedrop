@@ -79,7 +79,9 @@ export function ThreadPane({
           />
         ))}
         <p className="divider">
-          {count} {count === 1 ? "reply" : "replies"}
+          {count === 0 && !unloaded
+            ? "No replies yet"
+            : `${count} ${count === 1 ? "reply" : "replies"}`}
           {unloaded ? " · earlier replies not loaded" : ""}
         </p>
         {thread.replies.map((message) => (

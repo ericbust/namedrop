@@ -2503,6 +2503,40 @@ test("Needs you: Show message on a live arrival does not replay its arrival when
   );
 });
 
+test("thread pane: a thread with no replies reads No replies yet, and one with unloaded replies keeps its count", async (t) => {
+  const value = locatedChannel();
+  value.frame.threads = [
+    {
+      thread_id: "m40",
+      title: { text: "Request 40", truncated: false },
+      message_count: 3,
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const items = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("listitem");
+  const pane = ui.page.getByRole("complementary", { name: "Thread" });
+  await items
+    .nth(0)
+    .getByRole("button", { name: "Show message from @codex", exact: true })
+    .click();
+  await pane.locator('[data-message-id="m20"]').waitFor();
+  assert.equal(await pane.locator(".divider").textContent(), "No replies yet");
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  await items
+    .nth(2)
+    .getByRole("button", { name: "Show message", exact: true })
+    .click();
+  await pane.locator('[data-message-id="m40"]').waitFor();
+  assert.equal(
+    await pane.locator(".divider").textContent(),
+    "0 replies · earlier replies not loaded",
+  );
+});
+
 test("design-b: the layout gives the timeline the room, wraps members in two lines, and never scrolls sideways", async (t) => {
   const value = frame(1, "alpha", "needs_you");
   value.frame.attention = [

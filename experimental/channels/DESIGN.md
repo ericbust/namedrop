@@ -367,9 +367,11 @@ server wrote it. Hints keep their wording from the first table.
 600, then "in #alpha" in 12px muted, and a 32px icon button with a drawn X at the
 right. Its accessible name is "Close thread", and Escape closes it. Below it come
 the parent message, a divider that reads "1 reply" with hairlines on both sides,
-and the replies. Replies use the message component without a reply preview. The
-pane slides in from 16px right with a fade over `--duration`. Below 860px of
-window width, the pane stacks under the timeline instead of beside it.
+and the replies. When the thread has no replies and the server knows of none, the
+divider reads "No replies yet". Replies use the message component without a
+reply preview. The pane slides in from 16px right with a fade over `--duration`.
+Below 860px of window width, the pane stacks under the timeline instead of
+beside it.
 
 ### History window
 
