@@ -183,19 +183,24 @@ export function avatarHue(alias: string): number {
   return sum % 6;
 }
 
+const sameYearDate = new Intl.DateTimeFormat([], {
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+});
+const otherYearDate = new Intl.DateTimeFormat([], {
+  weekday: "long",
+  month: "long",
+  day: "numeric",
+  year: "numeric",
+});
 export function dayLabel(dayStart: number, now: number): string {
   const today = dayBounds(now).start;
   if (dayStart === today) return "Today";
   if (dayBounds(dayStart).end === today) return "Yesterday";
-  const date = new Date(dayStart);
-  return date.toLocaleDateString([], {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-    ...(date.getFullYear() === new Date(now).getFullYear()
-      ? {}
-      : { year: "numeric" }),
-  });
+  return new Date(dayStart).getFullYear() === new Date(now).getFullYear()
+    ? sameYearDate.format(dayStart)
+    : otherYearDate.format(dayStart);
 }
 export function dayBounds(ms: number): { start: number; end: number } {
   const date = new Date(ms);

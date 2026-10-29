@@ -1,4 +1,6 @@
+import { dayBounds, dayLabel } from "./copy.ts";
 import type {
+  AddressId,
   Channel,
   ChannelSnapshot,
   Event,
@@ -607,27 +609,95 @@ export function threadGroups(
   }
   return groups;
 }
+export type MessageRow = {
+  kind: "message" | "orphan";
+  message: Message;
+  thread: ThreadGroup;
+  grouped: boolean;
+  showRecipients: boolean;
+  recipients: readonly AddressId[];
+  latestReply: Message | null;
+  replyCount: number;
+};
 export type TimelineRow =
-  | { kind: "message"; message: Message; thread: ThreadGroup }
-  | { kind: "orphan"; message: Message; thread: ThreadGroup }
-  | { kind: "gap"; before: string };
+  | MessageRow
+  | { kind: "gap"; before: string }
+  | { kind: "day"; label: string; before: string };
+const GROUP_WINDOW = 5 * 60_000;
+const noRecipients: readonly AddressId[] = [];
+const recipientCache = new WeakMap<Message, readonly AddressId[]>();
+export function recipients(message: Message): readonly AddressId[] {
+  let cached = recipientCache.get(message);
+  if (cached === undefined) {
+    cached =
+      message.legs.length === 0
+        ? noRecipients
+        : [...new Set(message.legs.map((leg) => leg.to))];
+    recipientCache.set(message, cached);
+  }
+  return cached;
+}
+function sameList<T>(a: readonly T[], b: readonly T[]): boolean {
+  return a === b || (a.length === b.length && a.every((x, i) => x === b[i]));
+}
+function isSystem(message: Message): boolean {
+  return message.kind === "nudge" || message.kind === "hook";
+}
 export function timelineView(
   channel: Pick<Channel, "messages" | "runs" | "threads">,
   groups: ReadonlyMap<string, ThreadGroup> = threadGroups(channel),
+  now = Date.now(),
 ): readonly TimelineRow[] {
   const rows: TimelineRow[] = [];
+  let dayStart = Number.POSITIVE_INFINITY;
+  let dayEnd = Number.NEGATIVE_INFINITY;
+  let previous: Message | null = null;
   for (const [index, run] of channel.runs.entries()) {
     const before = run[0];
-    if (index > 0 && before !== undefined) rows.push({ kind: "gap", before });
+    if (index > 0 && before !== undefined) {
+      rows.push({ kind: "gap", before });
+      previous = null;
+    }
     for (const id of run) {
       const message = channel.messages.get(id);
       if (!message) continue;
       const thread = groups.get(message.threadId);
       if (!thread) continue;
-      if (message.inReplyTo !== null || message.kind === "reply") {
-        if (thread.parents.length === 0)
-          rows.push({ kind: "orphan", message, thread });
-      } else rows.push({ kind: "message", message, thread });
+      const reply = message.inReplyTo !== null || message.kind === "reply";
+      if (reply && thread.parents.length > 0) continue;
+      if (message.at < dayStart || message.at >= dayEnd) {
+        ({ start: dayStart, end: dayEnd } = dayBounds(message.at));
+        rows.push({ kind: "day", label: dayLabel(dayStart, now), before: id });
+        previous = null;
+      }
+      const to = recipients(message);
+      const grouped =
+        !reply &&
+        previous !== null &&
+        previous.author === message.author &&
+        message.at - previous.at >= 0 &&
+        message.at - previous.at <= GROUP_WINDOW &&
+        !isSystem(message) &&
+        !isSystem(previous);
+      rows.push({
+        kind: reply ? "orphan" : "message",
+        message,
+        thread,
+        grouped,
+        showRecipients:
+          !grouped ||
+          previous?.kind !== message.kind ||
+          !sameList(recipients(previous), to),
+        recipients: to,
+        latestReply: reply ? null : (thread.replies.at(-1) ?? null),
+        replyCount: reply
+          ? 0
+          : Math.max(
+              thread.replies.length,
+              thread.knownCount - Math.max(1, thread.parents.length),
+            ),
+      });
+      previous = reply ? null : message;
     }
   }
   return rows;

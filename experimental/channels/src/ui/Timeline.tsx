@@ -195,7 +195,11 @@ export function Timeline({
             </div>
           )}
           {rows.map((row) =>
-            row.kind === "gap" ? (
+            row.kind === "day" ? (
+              <p className="divider" key={`day:${row.before}`}>
+                {row.label}
+              </p>
+            ) : row.kind === "gap" ? (
               <div className="message-gap" key={`gap:${row.before}`}>
                 <span>Messages missing between updates</span>
                 <button
@@ -224,11 +228,7 @@ export function Timeline({
                 <Message
                   message={row.message}
                   members={channel.members}
-                  replies={Math.max(
-                    row.thread.replies.length,
-                    row.thread.knownCount -
-                      Math.max(1, row.thread.parents.length),
-                  )}
+                  replies={row.replyCount}
                   onThread={openThread}
                   paneId={paneId}
                   threadExpanded={thread?.id === row.thread.id}

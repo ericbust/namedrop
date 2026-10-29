@@ -5,6 +5,7 @@ import {
   channelName,
   connectionStatus,
   initialState,
+  type MessageRow,
   reduce,
   sortedChannels,
   threadGroups,
@@ -1204,7 +1205,9 @@ test("UI-2: thread groups derive loaded replies, preserve orphans and reveal fet
   reply.kind = "reply";
   reply.in_reply_to = "parent";
   let state = apply(initialState(), value);
-  assert.equal(timelineView(activeChannel(state))[0]?.kind, "orphan");
+  const rows = (state: State) =>
+    timelineView(activeChannel(state)).filter((row) => row.kind !== "day");
+  assert.equal(rows(state)[0]?.kind, "orphan");
   const parent = message("parent");
   parent.thread_id = "thread";
   const pending = requesting(state);
@@ -1227,7 +1230,7 @@ test("UI-2: thread groups derive loaded replies, preserve orphans and reveal fet
     group?.replies.map((row) => row.id),
     ["reply"],
   );
-  assert.equal(timelineView(activeChannel(state)).length, 1);
+  assert.equal(rows(state).length, 1);
 });
 test("UI-2: history boundary reverses newest-first once and future kinds and stages remain visible", () => {
   const rows = [message("new"), message("old")];
@@ -1717,4 +1720,142 @@ test("design-b: switching channels closes the open thread", () => {
     null,
   );
   assert.equal(apply(open, changedChannel()).openThread, "m1");
+});
+
+const MIN = 60_000;
+function row(
+  id: string,
+  at: number,
+  {
+    author = "agent-1",
+    to = [] as string[],
+    kind = "mention",
+    thread = id,
+    inReplyTo = null as string | null,
+  } = {},
+) {
+  return {
+    ...message(id),
+    thread_id: thread,
+    in_reply_to: inReplyTo,
+    at_ms: at,
+    author,
+    kind,
+    legs: to.map((address) => ({ to: address, stage: { stage: "queued" } })),
+  };
+}
+function view(rows: ReturnType<typeof row>[], now: number) {
+  const value = snapshot();
+  value.frame.messages = rows;
+  return timelineView(
+    activeChannel(apply(initialState(), value)),
+    undefined,
+    now,
+  );
+}
+function summary(rows: ReturnType<typeof view>) {
+  return rows.map((item) =>
+    item.kind === "day" || item.kind === "gap"
+      ? item.kind === "day"
+        ? `day:${item.label}`
+        : "gap"
+      : `${item.message.id}${item.grouped ? " grouped" : ""}${item.showRecipients ? " to" : ""}`,
+  );
+}
+test("design-b: timeline groups by author within five minutes and never across a day", () => {
+  const today = new Date(2026, 9, 28, 0, 1).getTime();
+  const yesterday = new Date(2026, 9, 27, 23, 58).getTime();
+  const rows = view(
+    [
+      row("y1", yesterday, { to: ["agent-2"] }),
+      row("t1", today, { to: ["agent-2"] }),
+      row("t2", today + 4 * MIN, { to: ["agent-2"] }),
+      row("t3", today + 9 * MIN + 1, { to: ["agent-2"] }),
+      row("t4", today + 10 * MIN, { to: ["agent-2", "agent-2"] }),
+      row("t5", today + 11 * MIN, { to: ["shell"] }),
+      row("t6", today + 12 * MIN, { to: ["shell"], kind: "handoff" }),
+      row("t7", today + 13 * MIN, { author: "human", to: ["shell"] }),
+      row("t8", today + 14 * MIN, { author: "human", kind: "nudge" }),
+      row("t9", today + 15 * MIN, { author: "human" }),
+    ],
+    today + 20 * MIN,
+  );
+  assert.deepEqual(summary(rows), [
+    "day:Yesterday",
+    "y1 to",
+    "day:Today",
+    "t1 to",
+    "t2 grouped",
+    "t3 to",
+    "t4 grouped",
+    "t5 grouped to",
+    "t6 grouped to",
+    "t7 to",
+    "t8 to",
+    "t9 to",
+  ]);
+  const t4 = rows.find(
+    (item) => item.kind === "message" && item.message.id === "t4",
+  );
+  assert.ok(t4?.kind === "message");
+  assert.deepEqual(t4.recipients, ["agent-2"]);
+  const again = view([row("t4", today, { to: ["agent-2", "agent-2"] })], today);
+  assert.ok(again[1]?.kind === "message");
+  assert.deepEqual(again[1].recipients, ["agent-2"]);
+});
+test("design-b: request rows carry their latest reply and count, and replies stay in the thread", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  const rows = view(
+    [
+      row("ask", now - 10 * MIN, { to: ["agent-2"], thread: "t" }),
+      row("first", now - 9 * MIN, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "t",
+        inReplyTo: "ask",
+      }),
+      row("lone", now - 8 * MIN),
+      row("second", now - 7 * MIN, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "t",
+        inReplyTo: "ask",
+      }),
+    ],
+    now,
+  );
+  const messages = rows.filter(
+    (item): item is MessageRow => item.kind === "message",
+  );
+  assert.deepEqual(
+    messages.map((item) => [
+      item.message.id,
+      item.latestReply?.id ?? null,
+      item.replyCount,
+    ]),
+    [
+      ["ask", "second", 2],
+      ["lone", null, 0],
+    ],
+  );
+  assert.equal(
+    messages[1]?.grouped,
+    true,
+    "hidden replies do not break the author's group",
+  );
+});
+test("design-b: a gap row resets grouping and keeps the day", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  let state = apply(initialState(), {
+    ...snapshot(),
+    frame: { ...snapshot().frame, messages: [row("a", now - 3 * MIN)] },
+  });
+  state = apply(state, {
+    ...snapshot(),
+    frame: { ...snapshot().frame, messages: [row("b", now - 2 * MIN)] },
+  });
+  assert.deepEqual(
+    summary(timelineView(activeChannel(state), undefined, now)),
+    ["day:Today", "a to", "gap", "b to"],
+  );
 });
