@@ -1000,8 +1000,15 @@ fn extract_response(raw: &str, expected_field: &str) -> Result<Value, String> {
     if text.len() > MAX_RESPONSE_BYTES {
         return Err("the model worker response exceeded its limit".to_owned());
     }
-    serde_json::from_str(text.trim())
-        .map_err(|_| "the model worker returned malformed output".to_owned())
+    let text = text.trim();
+    let text = match text.split_once('\n') {
+        Some((header, body)) if matches!(header.trim(), "```json" | "```") => body
+            .rsplit_once('\n')
+            .filter(|(_, closing)| closing.trim() == "```")
+            .map_or(text, |(content, _)| content.trim()),
+        _ => text,
+    };
+    serde_json::from_str(text).map_err(|_| "the model worker returned malformed output".to_owned())
 }
 
 /// Accepts prose and nothing else: identities must already be known, and every
@@ -1236,6 +1243,79 @@ mod response_tests {
                 "to": ["claude"],
                 "reason": "Post requests Claude to take first turn and provide bound reply"
             }))
+        );
+    }
+
+    #[test]
+    fn response_framing_preserves_supported_envelopes_and_caller_fields() {
+        for field in ["to", "origin_description", "description"] {
+            let response = json!({field: "text containing ``` stays intact"});
+            for envelope in [
+                response.clone(),
+                json!({"structured_output": response}),
+                json!({"result": response}),
+                json!({"result": response.to_string()}),
+            ] {
+                assert_eq!(
+                    extract_response(&envelope.to_string(), field),
+                    Ok(response.clone())
+                );
+            }
+            for (opening, newline) in [("```json", "\n"), ("```", "\n"), ("```json  ", "\r\n")] {
+                let text = format!("  {opening}{newline}{response}{newline}``` \n");
+                for envelope in [
+                    json!({"result": text}),
+                    json!({"structured_output": text}),
+                    json!(text),
+                ] {
+                    assert_eq!(
+                        extract_response(&envelope.to_string(), field),
+                        Ok(response.clone())
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn response_framing_does_not_recover_prose_unknown_fences_or_invalid_json() {
+        let response = r#"{"to":["claude"],"reason":"request"}"#;
+        for text in [
+            format!("Here is the JSON:\n```json\n{response}\n```"),
+            format!("```json\n{response}\n```\nDone."),
+            format!("```json\n{response}\n```\n```json\n{response}\n```"),
+            format!("```javascript\n{response}\n```"),
+            format!("```JSON\n{response}\n```"),
+            format!("```json\n{response}"),
+            format!("```json {response}```"),
+            format!("```json\n{response}```"),
+            format!("```json\n```json\n{response}\n```\n```"),
+            format!("```json\n{response}\n{response}\n```"),
+            "```json\n{\"to\":[\"claude\"],}\n```".to_owned(),
+        ] {
+            assert_eq!(
+                extract_response(&json!({"result": text}).to_string(), "to"),
+                Err("the model worker returned malformed output".to_owned()),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_size_is_checked_before_removing_framing() {
+        let response = json!({"description": "x".repeat(MAX_RESPONSE_BYTES - 18)});
+        let text = response.to_string();
+        assert_eq!(text.len(), MAX_RESPONSE_BYTES);
+        assert_eq!(
+            extract_response(&json!({"result": text}).to_string(), "description"),
+            Ok(response)
+        );
+        assert_eq!(
+            extract_response(
+                &json!({"result": format!("```json\n{text}\n```")}).to_string(),
+                "description"
+            ),
+            Err("the model worker response exceeded its limit".to_owned())
         );
     }
 }
