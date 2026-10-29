@@ -105,11 +105,31 @@ fn bounded_text(text: &str, limit: usize) -> String {
 }
 
 fn build_input(rows: &DashboardRows, source: &str) -> Option<RouterInput> {
+    let registered_host = |runtime| {
+        rows.registrations.iter().any(|registration| {
+            registration.runtime == runtime
+                && rows.addresses.iter().any(|address| {
+                    address.address_id == registration.address_id
+                        && !address.retired
+                        && address.pane_type == PaneType::Agent
+                        && address.address_id != "operator:local"
+                })
+        })
+    };
+    let host = if registered_host("claude-code") {
+        "claude"
+    } else if registered_host("codex") {
+        "codex"
+    } else {
+        return None;
+    };
     let candidates: Vec<_> = rows
         .addresses
         .iter()
         .filter(|address| {
             !address.retired
+                && address.bound
+                && address.occupied
                 && address.pane_type == PaneType::Agent
                 && address.address_id != "operator:local"
                 && address.alias != "operator"
@@ -124,16 +144,9 @@ fn build_input(rows: &DashboardRows, source: &str) -> Option<RouterInput> {
                 .map(|registration| (address, registration.runtime.as_str()))
         })
         .collect();
-    let host = if candidates
-        .iter()
-        .any(|(_, runtime)| *runtime == "claude-code")
-    {
-        "claude"
-    } else if candidates.iter().any(|(_, runtime)| *runtime == "codex") {
-        "codex"
-    } else {
+    if candidates.is_empty() {
         return None;
-    };
+    }
     let mut aliases = Vec::new();
     let mut roster = Vec::new();
     for (address, runtime) in candidates.into_iter().take(MAX_ROSTER) {
@@ -268,7 +281,7 @@ mod tests {
             pane_type,
             retired,
             bound: true,
-            occupied: false,
+            occupied: true,
             agent_status: None,
             blocked_since_ms: None,
             blocked_message_id: None,
@@ -317,10 +330,31 @@ mod tests {
         );
         rows.registrations
             .retain(|registration| registration.address_id != "claude");
+        rows.registrations
+            .retain(|registration| registration.address_id != "operator:local");
         assert_eq!(build_input(&rows, "request").unwrap().host, "codex");
         rows.registrations
             .retain(|registration| registration.address_id != "codex");
         assert!(build_input(&rows, "request").is_none());
+    }
+
+    #[test]
+    fn host_preference_uses_registration_while_picks_require_live_members() {
+        let mut rows = rows();
+        rows.addresses
+            .iter_mut()
+            .find(|address| address.alias == "claude")
+            .unwrap()
+            .bound = false;
+        let input = build_input(&rows, "Can someone review?").unwrap();
+        assert_eq!(input.host, "claude");
+        assert_eq!(input.aliases, ["codex"]);
+        rows.addresses
+            .iter_mut()
+            .find(|address| address.alias == "codex")
+            .unwrap()
+            .occupied = false;
+        assert!(build_input(&rows, "Can someone review?").is_none());
     }
 
     #[test]

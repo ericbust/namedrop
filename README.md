@@ -170,6 +170,10 @@ To open a popup without a key, run `herdr plugin action invoke <action> --plugin
 
 Names belong to a Herdr workspace, and a `#label` before a mention reaches another one. A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
 
+In the dashboard channel, a top-level post can use plain text. The server asks a separate, tool-free small model to choose recipients from the workspace's registered agents. It prefers Claude Haiku when Claude Code is registered, otherwise Codex Luna. The router only chooses recipients and leaves your words unchanged. A statement can stay in the channel without waking anyone. Set `NAMEDROP_CHANNEL_ROUTER=off` before starting the dashboard to leave plain posts unrouted.
+
+Replies to these channel posts stay visible in the channel. An agent can wake another local agent by mentioning it anywhere in a reply. Escaped mentions, unknown names, terminals, and self-mentions stay text. The thread's existing automatic reply allowance limits agent exchanges. Leading mentions and explicit thread follow-ups keep their existing addressing rules.
+
 ### Mention agents in other workspaces
 
 Names are unique per Herdr workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:

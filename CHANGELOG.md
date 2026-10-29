@@ -10,6 +10,8 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Added
 
+- Dashboard channels accept plain top-level posts. An isolated small-model router chooses registered recipients without changing the text. Channel replies can wake local agents through embedded mentions, with bounded context and the existing reply allowance. Set `NAMEDROP_CHANNEL_ROUTER=off` to keep plain posts unrouted. Routing explanations use a dashboard sidecar so the ledger stays at schema 6.
+
 - The dashboard serves sanitized recent pane output at authenticated `GET /w/<key>/participants/<address_id>/screen` for agents and terminals. Concurrent requests for one pane share a bounded Herdr read. Retired or closed panes return 410.
 - Screen reads use unwrapped output and redact keys split by invisible characters or tabs. Oversized screens keep the newest text with an omission marker. Followers stop waiting after four seconds, and a 16-request peek limit reserves capacity for other dashboard routes.
 - Secret redaction preserves emoji and script formatting outside secrets, and keeps ENV values protected when a tab splits the variable name.

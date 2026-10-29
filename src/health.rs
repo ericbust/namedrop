@@ -126,7 +126,7 @@ where
         issues.push(issue(
             "ND-MODEL-001",
             HealthSeverity::Notice,
-            "Codex summaries and persona suggestions are unavailable on this setup.",
+            "Codex summaries, persona suggestions, and channel routing are unavailable on this setup.",
             &error,
             HealthRepairKind::HumanDecision,
             "Resolve the reported Landlock or native Codex installation requirement, then retry the helper. Collaboration messages remain available.",

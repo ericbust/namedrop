@@ -1,13 +1,3 @@
-//! Isolated cheap-model worker that turns an agent status snapshot into short
-//! descriptions, suggests a persona, and routes plain channel posts.
-//!
-//! The worker is a fresh child of the invoking host CLI. It never resumes or
-//! forks the active conversation, carries no Herdr or Namedrop identifiers, and
-//! runs with tools, MCP, hooks, skills and project instruction loading disabled
-//! through controls verified against each CLI's real outbound request. Facts
-//! come only from the supplied snapshot, persona draft, or channel roster and
-//! post. The model writes prose or selects recipients; it never edits messages.
-
 #[path = "channel_router.rs"]
 pub(crate) mod channel_router;
 
@@ -781,9 +771,6 @@ fn run_worker_with_deadline(
     // reachable from it, and the sandbox need allow only this one path.
     command.current_dir(&worker_directory).process_group(0);
 
-    // Strip the collaboration identity so the worker cannot be mistaken for the
-    // registered agent session or reach its mailbox. Binary overrides have
-    // already been consumed by the host plan before these are removed.
     for (key, _) in env::vars_os() {
         let name = key.to_string_lossy();
         if name.starts_with("HERDR_") || name.starts_with("NAMEDROP_") {

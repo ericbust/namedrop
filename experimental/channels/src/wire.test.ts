@@ -1,6 +1,60 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { routeOf, routePath, sameRoute, terminalResult } from "./wire.ts";
+import {
+  parseHistory,
+  routeOf,
+  routePath,
+  sameRoute,
+  terminalResult,
+} from "./wire.ts";
+
+const channelRow = {
+  message_id: "message-channel",
+  thread_id: "thread-channel",
+  in_reply_to: null,
+  at_ms: 42,
+  author: "human",
+  kind: "mention",
+  body: { text: "Can someone check this?", truncated: false },
+  legs: [],
+};
+
+test("channel history preserves optional routing and wake metadata", () => {
+  const channel = {
+    state: "routed",
+    to: ["claude"],
+    reason: "build question",
+    router: "claude-haiku",
+  };
+  const [message] = parseHistory([{ ...channelRow, channel, woke: ["codex"] }]);
+  assert.deepEqual(message?.channel, channel);
+  assert.deepEqual(message?.woke, ["codex"]);
+});
+
+test("channel routing tolerates absent sidecar explanations and legacy rows", () => {
+  for (const state of ["routing", "routed", "unrouted", "router_failed"]) {
+    const channel = { state, to: [] };
+    assert.deepEqual(
+      parseHistory([{ ...channelRow, channel }])[0]?.channel,
+      channel,
+    );
+  }
+  const [legacy] = parseHistory([channelRow]);
+  assert.equal(legacy && "channel" in legacy, false);
+  assert.equal(legacy && "woke" in legacy, false);
+});
+
+test("channel routing rejects malformed optional metadata", () => {
+  for (const channel of [
+    { state: "invented", to: [] },
+    { state: "routed", to: [42] },
+    { state: "routed", to: [], reason: 42 },
+    { state: "routed", to: [], router: "" },
+  ]) {
+    assert.throws(() => parseHistory([{ ...channelRow, channel }]));
+  }
+  assert.throws(() => parseHistory([{ ...channelRow, woke: [42] }]));
+});
 
 const result = (text: string, truncated = false) =>
   terminalResult({ text, truncated });

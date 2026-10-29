@@ -289,7 +289,38 @@ function deliveryStage(value: unknown): DeliveryStage {
       return { stage: "unknown" };
   }
 }
-function message(value: unknown): Message {
+export type ChannelRouting = {
+  state: "routing" | "routed" | "unrouted" | "router_failed";
+  to: readonly string[];
+  reason?: string;
+  router?: string;
+};
+
+export type ChannelMessage = Message & {
+  channel?: ChannelRouting;
+  woke?: readonly string[];
+};
+
+function channelRouting(value: unknown): ChannelRouting {
+  const item = record(value);
+  const state = text(item.state);
+  switch (state) {
+    case "routing":
+    case "routed":
+    case "unrouted":
+    case "router_failed":
+      return {
+        state,
+        to: array(item.to).map(identity),
+        ...(item.reason === undefined ? {} : { reason: text(item.reason) }),
+        ...(item.router === undefined ? {} : { router: identity(item.router) }),
+      };
+    default:
+      throw new Error("Invalid channel routing state");
+  }
+}
+
+function message(value: unknown): ChannelMessage {
   const item = record(value);
   return {
     id: identity(item.message_id),
@@ -299,14 +330,20 @@ function message(value: unknown): Message {
     author: item.author === "human" ? "human" : addressId(item.author),
     kind: messageKind(item.kind),
     body: safeText(item.body),
+    ...(item.channel === undefined
+      ? {}
+      : { channel: channelRouting(item.channel) }),
+    ...(item.woke === undefined
+      ? {}
+      : { woke: array(item.woke).map(identity) }),
     legs: array(item.legs).map((raw) => {
       const leg = record(raw);
       return { to: addressId(leg.to), stage: deliveryStage(leg.stage) };
     }),
   };
 }
-function messages(value: unknown): Map<string, Message> {
-  const rows = new Map<string, Message>();
+function messages(value: unknown): Map<string, ChannelMessage> {
+  const rows = new Map<string, ChannelMessage>();
   for (const raw of array(value)) {
     const row = message(raw);
     if (rows.has(row.id)) throw new Error("Duplicate message");
@@ -393,7 +430,7 @@ export function screenFailure(status: number): ScreenFailure {
       return "unreachable";
   }
 }
-export function parseHistory(raw: unknown): readonly Message[] {
+export function parseHistory(raw: unknown): readonly ChannelMessage[] {
   return [...messages(raw).values()].reverse();
 }
 function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
