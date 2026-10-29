@@ -388,6 +388,9 @@ export function App() {
               paneId={paneId}
               onOlder={(key) => dispatch({ type: "older", key })}
               onLatest={(key) => dispatch({ type: "latest", key })}
+              onFollow={(key, atBottom) =>
+                dispatch({ type: "follow", key, atBottom })
+              }
             />
           </>
         ) : state.channels.size > 0 ? (

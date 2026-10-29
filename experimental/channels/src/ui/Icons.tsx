@@ -9,6 +9,7 @@ const shapes = {
     </>
   ),
   arrow: <path d="M3 8h10M9 4l4 4-4 4" />,
+  arrowDown: <path d="M8 3v10M4 9l4 4 4-4" />,
   bell: <path d="M4.5 11.5V7.5a3.5 3.5 0 0 1 7 0v4M3 11.5h10M6.75 13.75h2.5" />,
   cancelled: (
     <>

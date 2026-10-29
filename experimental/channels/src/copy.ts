@@ -3,6 +3,7 @@ import type { Activity, Attention, DeliveryStage, Health } from "./model.ts";
 export type IconName =
   | "alert"
   | "arrow"
+  | "arrowDown"
   | "bell"
   | "cancelled"
   | "check"

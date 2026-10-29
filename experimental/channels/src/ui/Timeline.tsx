@@ -1,4 +1,4 @@
-import { Fragment, useLayoutEffect, useMemo, useRef } from "react";
+import { Fragment, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { Channel, SpaceKey, TerminalRun } from "../model.ts";
 import { exitFor, type ThreadGroup, timelineView } from "../store.ts";
 import { Icon } from "./Icons.tsx";
@@ -31,6 +31,12 @@ function capture(element: HTMLElement): Anchor {
     top: element.scrollTop,
   };
 }
+function screensAbove(element: HTMLElement): boolean {
+  return (
+    element.scrollHeight - element.scrollTop - element.clientHeight >
+    element.clientHeight
+  );
+}
 export function Timeline({
   channel,
   groups,
@@ -40,6 +46,7 @@ export function Timeline({
   paneId,
   onOlder,
   onLatest,
+  onFollow,
 }: {
   channel: Channel;
   groups: ReadonlyMap<string, ThreadGroup>;
@@ -49,9 +56,11 @@ export function Timeline({
   paneId: string;
   onOlder: (key: SpaceKey) => void;
   onLatest: (key: SpaceKey) => void;
+  onFollow: (key: SpaceKey, atBottom: boolean) => void;
 }) {
   const scroller = useRef<HTMLElement>(null);
   const anchors = useRef(new Map<SpaceKey, Anchor>());
+  const [far, setFar] = useState(false);
   const shown = useRef<{ key: SpaceKey; at: number } | null>(null);
   if (shown.current?.key !== channel.key)
     shown.current = { key: channel.key, at: Date.now() };
@@ -82,9 +91,18 @@ export function Timeline({
       else element.scrollTop = anchor.top;
     }
     anchors.current.set(channel.key, capture(element));
+    setFar(screensAbove(element));
   }, [channel]);
   const history = channel.history;
   const gap = channel.runs.length > 1;
+  const browsing = channel.viewMode === "browsing";
+  const jumpToLatest = () => {
+    if (browsing) {
+      anchors.current.delete(channel.key);
+      onLatest(channel.key);
+    } else if (scroller.current)
+      scroller.current.scrollTop = scroller.current.scrollHeight;
+  };
   const loadOlder = () => onOlder(channel.key);
   return (
     <section
@@ -94,7 +112,11 @@ export function Timeline({
       // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard scrolling requires focus. https://www.w3.org/WAI/standards-guidelines/act/rules/0ssw9k/
       tabIndex={0}
       onScroll={(event) => {
-        anchors.current.set(channel.key, capture(event.currentTarget));
+        const anchor = capture(event.currentTarget);
+        anchors.current.set(channel.key, anchor);
+        if (anchor.bottom !== channel.atBottom)
+          onFollow(channel.key, anchor.bottom);
+        setFar(screensAbove(event.currentTarget));
         if (
           event.currentTarget.scrollTop < 40 &&
           history.kind === "idle" &&
@@ -104,18 +126,6 @@ export function Timeline({
       }}
     >
       <div className="history-edge">
-        {channel.viewMode === "browsing" && (
-          <button
-            type="button"
-            className="text-button"
-            onClick={() => {
-              anchors.current.delete(channel.key);
-              onLatest(channel.key);
-            }}
-          >
-            Jump to latest
-          </button>
-        )}
         {history.kind === "loading" ? (
           <span role="status">
             {history.request.purpose === "bridge"
@@ -215,6 +225,27 @@ export function Timeline({
           }
         }
       })}
+      {browsing && (
+        <div className="divider window-end">
+          Newer messages aren't loaded
+          <button type="button" className="text-button" onClick={jumpToLatest}>
+            Jump to latest
+          </button>
+        </div>
+      )}
+      {(browsing || far) && (
+        <div className="jump-dock">
+          <button
+            type="button"
+            className="jump-latest"
+            aria-label="Jump to latest messages"
+            onClick={jumpToLatest}
+          >
+            <Icon name="arrowDown" />
+            Jump to latest
+          </button>
+        </div>
+      )}
     </section>
   );
 }

@@ -1305,6 +1305,197 @@ test("UI-2 fix1: live frames format timestamps only for changed message rows", a
   assert.equal(await ui.page.evaluate(() => window.timestampFormats), 0);
 });
 
+function numberedRows(from, to) {
+  return Array.from({ length: to - from + 1 }, (_, n) =>
+    message(`m${from + n}`, `Message ${from + n}`),
+  );
+}
+async function pagedChannel(t, pages) {
+  const value = frame(1, "alpha");
+  value.frame.messages = numberedRows(1851, 2000);
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    async (url) => {
+      const before = Number(url.searchParams.get("before").slice(1));
+      return numberedRows(before - 50, before - 1).reverse();
+    },
+  );
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  await ui.live();
+  const scroll = ui.page.locator(".timeline");
+  for (let page = 1; page <= pages; page++) {
+    await scroll.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await ui.page.locator(`[data-message-id="m${1851 - page * 50}"]`).waitFor();
+  }
+  await nextFrames(ui.page);
+  return { ...ui, value, scroll };
+}
+function nextFrames(page) {
+  return page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+}
+function firstVisible(scroll) {
+  return scroll.evaluate((el) => {
+    const top = el.getBoundingClientRect().top;
+    const row = [...el.querySelectorAll("[data-message-id]")].find(
+      (row) => row.getBoundingClientRect().bottom > top + 1,
+    );
+    return {
+      id: row.dataset.messageId,
+      offset: row.getBoundingClientRect().top - top,
+    };
+  });
+}
+function jumpControls(scroll) {
+  return scroll.evaluate((el) => {
+    const port = el.getBoundingClientRect();
+    return [...el.querySelectorAll("button")]
+      .map((button) => ({
+        name: button.getAttribute("aria-label") ?? button.textContent,
+        rect: button.getBoundingClientRect(),
+      }))
+      .filter(({ name }) => name.startsWith("Jump to latest"))
+      .map(({ name, rect }) => ({
+        name,
+        inside: rect.top >= port.top && rect.bottom <= port.bottom,
+      }));
+  });
+}
+function pillPlacement(scroll) {
+  return scroll.evaluate((el) => {
+    const pill = el
+      .querySelector('[aria-label="Jump to latest messages"]')
+      .getBoundingClientRect();
+    const end = [...el.querySelectorAll("button")]
+      .find(
+        (button) =>
+          button.textContent === "Jump to latest" &&
+          !button.hasAttribute("aria-label"),
+      )
+      ?.parentElement.getBoundingClientRect();
+    return {
+      gap: Math.round(el.getBoundingClientRect().bottom - pill.bottom),
+      clearsEndRow: end === undefined || end.bottom <= pill.top,
+    };
+  });
+}
+const atBottom = (scroll) =>
+  scroll.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 2);
+
+test("history window: a live frame at the cap keeps the row being read in place", async (t) => {
+  const ui = await pagedChannel(t, 9);
+  assert.equal(
+    await ui.page.locator(".timeline [data-message-id]").count(),
+    600,
+  );
+  await ui.scroll.evaluate((el) => {
+    el.scrollTop = 120;
+  });
+  await nextFrames(ui.page);
+  const reading = await firstVisible(ui.scroll);
+  ui.value.frame.messages = numberedRows(1856, 2005);
+  ui.connections[0].send("space", ui.value);
+  await ui.page
+    .locator('[data-message-id="m2005"], .window-end')
+    .first()
+    .waitFor({ state: "attached" });
+  await nextFrames(ui.page);
+  const row = ui.page.locator(`[data-message-id="${reading.id}"]`);
+  assert.equal(
+    await row.count(),
+    1,
+    `${reading.id} was dropped while being read`,
+  );
+  const after = await firstVisible(ui.scroll);
+  assert.equal(after.id, reading.id);
+  assert.ok(
+    Math.abs(after.offset - reading.offset) <= 2,
+    `the row being read moved ${after.offset - reading.offset}px`,
+  );
+  assert.equal(await ui.page.locator('[data-message-id="m2005"]').count(), 0);
+});
+
+test("history window: while browsing, Jump to latest waits at the bottom and returns without loading history", async (t) => {
+  const ui = await pagedChannel(t, 10);
+  ui.value.frame.messages = numberedRows(1856, 2005);
+  ui.connections[0].send("space", ui.value);
+  await ui.page.waitForTimeout(160);
+  assert.deepEqual(
+    await ui.page
+      .locator(".history-edge button")
+      .evaluateAll((buttons) => buttons.map((button) => button.textContent)),
+    ["Load earlier messages"],
+  );
+  const requests = ui.historyRequests.length;
+  await ui.page.mouse.move(700, 500);
+  for (let step = 0; step < 100 && !(await atBottom(ui.scroll)); step++) {
+    await ui.page.mouse.wheel(0, 2000);
+    await nextFrames(ui.page);
+  }
+  assert.equal(await atBottom(ui.scroll), true);
+  assert.deepEqual(await jumpControls(ui.scroll), [
+    { name: "Jump to latest", inside: true },
+    { name: "Jump to latest messages", inside: true },
+  ]);
+  assert.equal(ui.historyRequests.length, requests);
+  assert.deepEqual(await pillPlacement(ui.scroll), {
+    gap: 16,
+    clearsEndRow: true,
+  });
+  await ui.page
+    .getByRole("button", { name: "Jump to latest messages" })
+    .click();
+  await ui.page.locator('[data-message-id="m2005"]').waitFor();
+  await nextFrames(ui.page);
+  assert.equal(await atBottom(ui.scroll), true);
+  assert.deepEqual(await jumpControls(ui.scroll), []);
+  assert.equal(ui.historyRequests.length, requests);
+});
+
+test("history window: a screen above the newest message, the pill scrolls back to it", async (t) => {
+  const ui = await pagedChannel(t, 0);
+  const pill = ui.page.getByRole("button", { name: "Jump to latest messages" });
+  assert.equal(await pill.count(), 0);
+  await ui.scroll.evaluate((el) => {
+    el.scrollTop = el.scrollHeight - el.clientHeight * 1.5;
+  });
+  await nextFrames(ui.page);
+  assert.equal(await pill.count(), 0);
+  await ui.scroll.evaluate((el) => {
+    el.scrollTop = el.scrollHeight - el.clientHeight * 3;
+  });
+  await nextFrames(ui.page);
+  assert.deepEqual(await jumpControls(ui.scroll), [
+    { name: "Jump to latest messages", inside: true },
+  ]);
+  assert.deepEqual(await pillPlacement(ui.scroll), {
+    gap: 16,
+    clearsEndRow: true,
+  });
+  await pill.click();
+  await ui.page.waitForFunction(
+    () =>
+      document.querySelector('[aria-label="Jump to latest messages"]') === null,
+  );
+  assert.equal(await atBottom(ui.scroll), true);
+  assert.equal(
+    await ui.page.locator(".timeline [data-message-id]").count(),
+    150,
+  );
+  ui.value.frame.messages = numberedRows(1856, 2005);
+  ui.connections[0].send("space", ui.value);
+  await ui.page.locator('[data-message-id="m2005"]').waitFor();
+  await nextFrames(ui.page);
+  assert.equal(await atBottom(ui.scroll), true);
+});
+
 test("design-b: landing follows the URL, then Needs you, and selection keeps the URL, Back and the tab title", async (t) => {
   const frames = () => [
     frame(1, "alpha"),

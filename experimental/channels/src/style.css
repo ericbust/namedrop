@@ -727,11 +727,12 @@ a:hover {
 }
 
 .timeline {
+  --pad-bottom: var(--space-6);
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   overflow-anchor: none;
-  padding: var(--space-2) var(--space-6) var(--space-6);
+  padding: var(--space-2) var(--space-6) var(--pad-bottom);
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px);
   mask-image: linear-gradient(to bottom, transparent, #000 12px);
 }
@@ -770,12 +771,44 @@ a:hover {
   height: 1px;
   background: var(--line);
 }
-.divider.gap {
+.divider.gap,
+.divider.window-end {
   font-weight: 400;
   margin: var(--space-4) 0;
 }
-.divider.gap .text-button {
+.divider.gap .text-button,
+.divider.window-end .text-button {
   font-size: var(--text-xs);
+}
+.divider.window-end {
+  margin-bottom: var(--space-10);
+}
+.jump-dock {
+  position: sticky;
+  bottom: 0;
+  height: 0;
+  display: flex;
+  justify-content: center;
+  align-items: flex-end;
+}
+.jump-latest {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 var(--space-3) 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--accent-text);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  box-shadow: var(--shadow-pop);
+  /* The dock sticks above the bottom padding; drop the pill to 16px from the edge. */
+  translate: 0 calc(var(--pad-bottom) - 16px);
+}
+.jump-latest:hover {
+  background: var(--bg-hover);
 }
 .msg {
   display: grid;
