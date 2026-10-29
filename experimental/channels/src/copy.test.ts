@@ -15,9 +15,12 @@ import {
   presenceWord,
   receiptCopy,
   recipientsLabel,
+  referenceCopy,
   relativeAge,
+  repliesCopy,
   replyLabel,
   replyPlaceholder,
+  routeCopy,
   runtimeName,
   sendErrorCopy,
 } from "./copy.ts";
@@ -488,4 +491,45 @@ test("participant names: remote agents carry their home, envoys and unknown ids 
     title: "envoy:w2:pane-7",
     avatar: "unresolved",
   });
+});
+
+test("channel chat words: the route line, its offers and tooltips, reply counts and the reference line", () => {
+  assert.deepEqual(routeCopy.state, {
+    checking: "Checking who this is for…",
+    failed: "Couldn't check who this is for",
+  });
+  assert.equal(routeCopy.pulledIn, "pulled in");
+  assert.equal(routeCopy.mentioned(["@codex"]), "Mentioned @codex, not sent");
+  assert.equal(
+    routeCopy.mentioned(["@codex", "@claude"]),
+    "Mentioned @codex, @claude, not sent",
+  );
+  assert.deepEqual(routeCopy.send, { anyway: "Send anyway", to: "Send to" });
+  assert.equal(routeCopy.sendThis("@codex"), "Send this to @codex");
+  assert.equal(routeCopy.tip.router("claude-haiku"), "Picked by claude-haiku");
+  assert.equal(
+    routeCopy.tip.unreachable,
+    "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+  );
+  assert.equal(repliesCopy(1), "1 reply");
+  assert.equal(repliesCopy(3), "3 replies");
+  assert.equal(routeCopy.openReplies(3), "3 replies. Open thread");
+  assert.equal(
+    referenceCopy.label("@claude", "The arm64 link step fails."),
+    "Reply to @claude: The arm64 link step fails. Open thread",
+  );
+  assert.equal(
+    referenceCopy.label("@claude", `${"a".repeat(78)} ${"b".repeat(9)}`),
+    `Reply to @claude: ${"a".repeat(78)}… Open thread`,
+    "a long first line is clipped in the accessible name",
+  );
+  assert.equal(
+    referenceCopy.label("You", "can you look"),
+    "Reply to You: can you look. Open thread",
+  );
+  assert.equal(referenceCopy.earlier, "Reply to an earlier message");
+  assert.equal(
+    referenceCopy.earlierLabel,
+    "Reply to an earlier message. Open thread",
+  );
 });

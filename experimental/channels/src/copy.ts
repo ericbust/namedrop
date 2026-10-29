@@ -13,6 +13,7 @@ import type {
   SendFailure,
 } from "./model.ts";
 import type { PeekNotice } from "./peek.ts";
+import type { RouteState, RouteTip, SendForm } from "./route.ts";
 import type { PeekWho } from "./store.ts";
 
 export type IconName =
@@ -311,6 +312,48 @@ export const disabledChannelCopy = {
   unknown:
     "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.",
 } satisfies Record<DisabledReason, string>;
+
+export function repliesCopy(count: number): string {
+  return `${count} ${count === 1 ? "reply" : "replies"}`;
+}
+export const routeCopy = {
+  label: "Who got this",
+  state: {
+    checking: "Checking who this is for…",
+    failed: "Couldn't check who this is for",
+  } satisfies Record<RouteState, string>,
+  pulledIn: "pulled in",
+  mentioned: (aliases: readonly string[]) =>
+    `Mentioned ${aliases.join(", ")}, not sent`,
+  send: { anyway: "Send anyway", to: "Send to" } satisfies Record<
+    SendForm,
+    string
+  >,
+  sendThis: (alias: string) => `Send this to ${alias}`,
+  tip: {
+    router: (name: string) => `Picked by ${name}`,
+    unreachable:
+      "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+  } satisfies Record<RouteTip["kind"], unknown>,
+  openReplies: (count: number) => `${repliesCopy(count)}. Open thread`,
+};
+const REFERENCE_LIMIT = 80;
+export const referenceCopy = {
+  earlier: "Reply to an earlier message",
+  label: (author: string, line: string) => {
+    const points = Array.from(line);
+    const clipped =
+      points.length > REFERENCE_LIMIT
+        ? `${points
+            .slice(0, REFERENCE_LIMIT - 1)
+            .join("")
+            .trimEnd()}…`
+        : line;
+    const stop = /[.!?…]$/.test(clipped) ? "" : ".";
+    return `Reply to ${author}: ${clipped}${stop} Open thread`;
+  },
+  earlierLabel: "Reply to an earlier message. Open thread",
+};
 
 export const SHOWN_RECIPIENTS = 2;
 export function overflowCopy(hidden: number): string {
