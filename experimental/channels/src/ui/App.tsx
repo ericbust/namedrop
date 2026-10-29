@@ -430,11 +430,13 @@ export function App() {
   const messages = channel?.messages;
   const windows = channel?.runs;
   const threads = channel?.threads;
+  const members = channel?.members ?? noMembers;
   const { groups, rows, inTimeline } = useMemo(() => {
     if (!messages || !windows || !threads)
       return { groups: noGroups, rows: noRows, inTimeline: noMessages };
-    const groups = threadGroups({ messages, runs: windows, threads });
-    const rows = timelineView({ messages, runs: windows, threads }, groups);
+    const window = { messages, runs: windows, threads, members };
+    const groups = threadGroups(window);
+    const rows = timelineView(window, groups);
     const inTimeline = new Map(
       rows.flatMap((row): [string, Message][] =>
         row.kind === "message" || row.kind === "orphan"
@@ -443,7 +445,7 @@ export function App() {
       ),
     );
     return { groups, rows, inTimeline };
-  }, [messages, windows, threads]);
+  }, [messages, windows, threads, members]);
   const homesSeen = useRef<ReadonlyMap<string, Home> | undefined>(undefined);
   const homes = useMemo(() => {
     homesSeen.current = homesOf(state.channels.values(), homesSeen.current);
@@ -456,7 +458,6 @@ export function App() {
     measure("namedrop:activity-derive", start);
     return activitySeen.current;
   }, [state.channels]);
-  const members = channel?.members ?? noMembers;
   const directory = useMemo<Directory>(
     () => ({ members, homes }),
     [members, homes],

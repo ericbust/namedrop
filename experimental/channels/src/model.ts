@@ -229,6 +229,7 @@ export type Event =
   | { type: "disconnected" }
   | { type: "visibility"; visible: boolean }
   | { type: "edit"; composer: ComposerId; text: string }
+  | { type: "fill"; composer: ComposerId; text: string }
   | { type: "send"; outgoing: Omit<Outgoing, "phase"> }
   | { type: "sent"; requestId: string; messageId: string }
   | { type: "send-failed"; requestId: string; status: number; message: string };

@@ -1228,6 +1228,7 @@ test("UI-2: thread groups derive loaded replies, preserve orphans and reveal fet
   assert.equal(rows(state)[0]?.kind, "orphan");
   const parent = message("parent");
   parent.thread_id = "thread";
+  parent.author = "human";
   const pending = requesting(state);
   state = reduce(pending.state, {
     type: "history",
@@ -2142,14 +2143,18 @@ test("design-b: request rows carry their latest reply and count, and replies sta
   const now = new Date(2026, 9, 28, 12, 0).getTime();
   const rows = view(
     [
-      row("ask", now - 10 * MIN, { to: ["agent-2"], thread: "t" }),
+      row("ask", now - 10 * MIN, {
+        author: "human",
+        to: ["agent-2"],
+        thread: "t",
+      }),
       row("first", now - 9 * MIN, {
         author: "agent-2",
         kind: "reply",
         thread: "t",
         inReplyTo: "ask",
       }),
-      row("lone", now - 8 * MIN),
+      row("lone", now - 8 * MIN, { author: "human" }),
       row("second", now - 7 * MIN, {
         author: "agent-2",
         kind: "reply",
@@ -3228,4 +3233,290 @@ test("channel chat: a routing change or a new woke list re-renders the row, and 
   const woke = activeChannel(apply(routed, value)).messages.get("post");
   assert.notEqual(woke, after);
   assert.deepEqual(woke?.woke, ["@codex"]);
+});
+
+function members(): unknown[] {
+  return [
+    participant("agent-1"),
+    { ...participant("agent-2"), alias: "@claude" },
+    { ...participant("shell"), alias: "@shell", kind: { type: "terminal" } },
+    { ...participant("operator"), alias: "you", kind: { type: "human" } },
+  ];
+}
+function roomChannel(rows: unknown[]) {
+  const value = snapshot();
+  return activeChannel(
+    apply(initialState(), {
+      ...value,
+      frame: { ...value.frame, participants: members(), messages: rows },
+    }),
+  );
+}
+function talk(rows: unknown[], now: number) {
+  return timelineView(roomChannel(rows), undefined, now);
+}
+function shown(rows: readonly TimelineRow[]) {
+  return rows.flatMap((item) =>
+    item.kind === "message" || item.kind === "orphan"
+      ? [
+          `${item.kind === "orphan" ? "orphan " : ""}${item.message.id}${item.grouped ? " grouped" : ""}${item.showRecipients ? " to" : ""}${
+            item.reference === null
+              ? ""
+              : item.reference.kind === "earlier"
+                ? " ↩earlier"
+                : ` ↩${item.reference.parent.id}`
+          }${item.latestReply ? ` preview:${item.latestReply.id}` : ""}`,
+        ]
+      : [],
+  );
+}
+const routed = { state: "routed", reason: "build question", router: "haiku" };
+test("rooms: the first loaded parent decides between a channel post, an agent conversation and a request", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  const kinds = (author: string, extra: Record<string, unknown> = {}) => {
+    const groups = threadGroups(
+      roomChannel([
+        { ...row("p", now - 3 * MIN, { author, to: ["agent-2"] }), ...extra },
+        row("r", now - 2 * MIN, {
+          author: "agent-2",
+          kind: "reply",
+          thread: "p",
+          inReplyTo: "p",
+        }),
+      ]),
+    );
+    return groups.get("p")?.room?.kind ?? null;
+  };
+  assert.equal(kinds("human", { channel: routed }), "channel");
+  assert.equal(
+    kinds("human", { channel: { state: "from-the-future" } }),
+    "channel",
+  );
+  assert.equal(kinds("agent-1"), "agents");
+  assert.equal(kinds("envoy:w2:pane-9"), "agents", "an envoy is an agent");
+  assert.equal(kinds("human"), null, "an operator request");
+  assert.equal(kinds("operator"), null, "the operator's member id");
+  assert.equal(kinds("shell"), null, "a terminal never starts a conversation");
+  const replyOnly = threadGroups(
+    roomChannel([
+      row("r", now, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "p",
+        inReplyTo: "p",
+      }),
+    ]),
+  ).get("p");
+  assert.equal(replyOnly?.room, null, "a post that is not loaded");
+});
+test("rooms: wrote keeps each author's latest message across parents and replies", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  const room = threadGroups(
+    roomChannel([
+      { ...row("p", now - 9 * MIN, { author: "human" }), channel: routed },
+      row("a", now - 8 * MIN, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "p",
+        inReplyTo: "p",
+      }),
+      row("b", now - 4 * MIN, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "p",
+        inReplyTo: "p",
+      }),
+      row("c", now - 6 * MIN, {
+        author: "human",
+        kind: "reply",
+        thread: "p",
+        inReplyTo: "a",
+      }),
+    ]),
+  ).get("p")?.room;
+  assert.ok(room?.kind === "channel");
+  assert.equal(room.post.id, "p");
+  assert.deepEqual(
+    Object.fromEntries(room.wrote),
+    Object.fromEntries([
+      ["human", now - 6 * MIN],
+      ["agent-2", now - 4 * MIN],
+    ]),
+  );
+});
+test("conversations: replies are their own rows in time order, with a reference only when the row above is not the parent", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  const reply = (id: string, at: number, author: string, parent: string) =>
+    row(id, at, {
+      author,
+      kind: "reply",
+      thread: parent === "q" ? "q" : "p",
+      inReplyTo: parent,
+    });
+  const rows = talk(
+    [
+      { ...row("p", now - 20 * MIN, { author: "human" }), channel: routed },
+      reply("a", now - 19 * MIN, "agent-2", "p"),
+      reply("b", now - 18 * MIN, "agent-1", "a"),
+      row("other", now - 17 * MIN, { author: "human", to: ["agent-1"] }),
+      reply("c", now - 16 * MIN, "agent-2", "b"),
+      reply("d", now - 15 * MIN, "agent-2", "c"),
+      reply("e", now - 14 * MIN, "agent-2", "gone"),
+      row("q", now - 12 * MIN, { author: "agent-1", to: ["agent-2"] }),
+      reply("q1", now - 11 * MIN, "agent-2", "q"),
+    ],
+    now,
+  );
+  assert.deepEqual(shown(rows), [
+    "p to",
+    "a to",
+    "b to",
+    "other to",
+    "c to ↩b",
+    "d grouped",
+    "e to ↩earlier",
+    "q to",
+    "q1 to",
+  ]);
+  const post = rows.find(
+    (item): item is MessageRow =>
+      item.kind === "message" && item.message.id === "p",
+  );
+  assert.equal(post?.replyCount, 5, "the post row still counts its replies");
+  const answer = rows.find(
+    (item): item is MessageRow =>
+      item.kind === "message" && item.message.id === "c",
+  );
+  assert.equal(
+    answer?.reference?.kind === "message" && answer.reference.parent.id,
+    "b",
+  );
+});
+test("conversations: a referenced reply starts a group, and a day divider brings the reference back", () => {
+  const today = new Date(2026, 9, 28, 0, 2).getTime();
+  const yesterday = new Date(2026, 9, 27, 23, 59).getTime();
+  const rows = talk(
+    [
+      row("p", yesterday, { author: "agent-2" }),
+      row("a", today, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "p",
+        inReplyTo: "p",
+      }),
+      row("b", today + 1000, {
+        author: "agent-2",
+        kind: "reply",
+        thread: "p",
+        inReplyTo: "p",
+      }),
+    ],
+    today + MIN,
+  );
+  assert.deepEqual(shown(rows), ["p to", "a to ↩p", "b to ↩p"]);
+  assert.equal(
+    rows.filter((item) => item.kind === "day").length,
+    2,
+    "the day divider sits between the parent and its reply",
+  );
+});
+test("conversations: a request grouped under a channel-chat row keeps its recipients, and a channel-chat row grouped under it shows no header", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  assert.deepEqual(
+    shown(
+      talk(
+        [
+          {
+            ...row("post", now - 4 * MIN, {
+              author: "human",
+              to: ["agent-2"],
+            }),
+            channel: routed,
+          },
+          row("ask", now - 3 * MIN, { author: "human", to: ["agent-2"] }),
+          {
+            ...row("again", now - 2 * MIN, {
+              author: "human",
+              to: ["agent-2"],
+            }),
+            channel: routed,
+          },
+        ],
+        now,
+      ),
+    ),
+    ["post to", "ask grouped to", "again grouped"],
+  );
+});
+test("conversations: request threads still collapse under their parent with the latest reply", () => {
+  const now = new Date(2026, 9, 28, 12, 0).getTime();
+  assert.deepEqual(
+    shown(
+      talk(
+        [
+          row("ask", now - 3 * MIN, { author: "human", to: ["shell"] }),
+          row("out", now - 2 * MIN, {
+            author: "shell",
+            kind: "reply",
+            thread: "ask",
+            inReplyTo: "ask",
+          }),
+          row("cmd", now - MIN, { author: "shell", to: ["agent-1"] }),
+          row("cmd-reply", now, {
+            author: "agent-1",
+            kind: "reply",
+            thread: "cmd",
+            inReplyTo: "cmd",
+          }),
+        ],
+        now,
+      ),
+    ),
+    ["ask to preview:out", "cmd to preview:cmd-reply"],
+  );
+});
+test("fill: writes a draft only when it is empty, keeps a remembered attempt, and repeats as a no-op", () => {
+  const state = apply(initialState(), snapshot());
+  const composer: ComposerId = { key: activeChannel(state).key, thread: "t" };
+  const fill = (from: State, text: string) =>
+    reduce(from, { type: "fill", composer, text });
+  const filled = fill(state, "@codex hello");
+  assert.equal(filled.drafts.get(draftKey(composer))?.text, "@codex hello");
+  assert.equal(
+    fill(filled, "@claude hello"),
+    filled,
+    "a second fill is a no-op",
+  );
+  const typed = reduce(state, { type: "edit", composer, text: "my words" });
+  assert.equal(fill(typed, "@codex hello"), typed, "typed text stays");
+  const refused = reduce(
+    reduce(typed, {
+      type: "send",
+      outgoing: {
+        requestId: "r1",
+        composer,
+        source: "my words",
+        inReplyTo: "m1",
+        at: 1,
+      },
+    }),
+    { type: "send-failed", requestId: "r1", status: 500, message: "" },
+  );
+  const emptied = reduce(refused, { type: "edit", composer, text: "" });
+  const refilled = fill(emptied, "@codex hello");
+  assert.deepEqual(refilled.drafts.get(draftKey(composer)), {
+    ...composer,
+    text: "@codex hello",
+    attempt: { requestId: "r1", source: "my words", inReplyTo: "m1" },
+    failure: null,
+  });
+});
+test("participants: the server's own operator address reads as the operator", () => {
+  assert.deepEqual(
+    resolve(
+      { members: new Map(), homes: new Map() },
+      "operator:local" as AddressId,
+    ),
+    { kind: "operator" },
+  );
 });
