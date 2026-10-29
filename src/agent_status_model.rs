@@ -1,12 +1,15 @@
 //! Isolated cheap-model worker that turns an agent status snapshot into short
-//! descriptions, and suggests a persona for a named agent.
+//! descriptions, suggests a persona, and routes plain channel posts.
 //!
 //! The worker is a fresh child of the invoking host CLI. It never resumes or
 //! forks the active conversation, carries no Herdr or Namedrop identifiers, and
 //! runs with tools, MCP, hooks, skills and project instruction loading disabled
 //! through controls verified against each CLI's real outbound request. Facts
-//! come from the snapshot alone, or for a persona from the name and draft the
-//! user supplied: the model writes prose and nothing else.
+//! come only from the supplied snapshot, persona draft, or channel roster and
+//! post. The model writes prose or selects recipients; it never edits messages.
+
+#[path = "channel_router.rs"]
+pub(crate) mod channel_router;
 
 use crate::MAX_PERSONA_CHARS;
 use crate::runtime::stop_process_group;
@@ -677,6 +680,7 @@ fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String
     let mut command = crate::linux_sandbox::command(&binary, &directory.0, &codex_home()?)?;
     command
         .arg("exec")
+        .arg("--json")
         // No user config, no project rules, no persisted session.
         .args(["--ignore-user-config", "--ignore-rules", "--ephemeral"])
         .arg("--skip-git-repo-check")
@@ -752,6 +756,21 @@ fn run_worker(
     payload: &str,
     cancelled: &AtomicBool,
 ) -> Result<String, String> {
+    run_worker_with_deadline(host, prompt, payload, cancelled, None).map(|output| output.response)
+}
+
+struct WorkerOutput {
+    response: String,
+    usage: Option<Value>,
+}
+
+fn run_worker_with_deadline(
+    host: &str,
+    prompt: &WorkerPrompt,
+    payload: &str,
+    cancelled: &AtomicBool,
+    deadline: Option<Instant>,
+) -> Result<WorkerOutput, String> {
     let mut plan = match host {
         "codex" => codex_plan(prompt, payload)?,
         _ => claude_plan(prompt, payload)?,
@@ -763,15 +782,15 @@ fn run_worker(
     command.current_dir(&worker_directory).process_group(0);
 
     // Strip the collaboration identity so the worker cannot be mistaken for the
-    // registered agent session or reach its mailbox. Both hosts get this.
+    // registered agent session or reach its mailbox. Binary overrides have
+    // already been consumed by the host plan before these are removed.
+    for (key, _) in env::vars_os() {
+        let name = key.to_string_lossy();
+        if name.starts_with("HERDR_") || name.starts_with("NAMEDROP_") {
+            command.env_remove(key);
+        }
+    }
     for key in [
-        "HERDR_PLUGIN_STATE_DIR",
-        "HERDR_SOCKET_PATH",
-        "HERDR_WORKSPACE_ID",
-        "HERDR_PANE_ID",
-        "HERDR_SESSION_ID",
-        "NAMEDROP_AGENT_SESSION_ID",
-        "NAMEDROP_REGISTRATION_ID",
         // The invoking agent's own session markers, observed in a live pane.
         // Left in place they would mark the worker as that agent's child.
         "CLAUDE_CODE_SESSION_ID",
@@ -814,6 +833,10 @@ fn run_worker(
         .map_err(|error| format!("failed to run the model worker: {error}"))?;
 
     loop {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            stop_process_group(&mut child);
+            return Err("model worker deadline exceeded".to_owned());
+        }
         if cancelled.load(Ordering::Relaxed) {
             stop_process_group(&mut child);
             return Err("agent status summary cancelled".to_owned());
@@ -847,14 +870,35 @@ fn run_worker(
         thread::sleep(Duration::from_millis(10));
     }
 
-    match &plan.result_path {
-        // Read through the same bounded reader as the capture files, so an
-        // oversized result can never be slurped into memory first.
+    let raw_stdout = read_capture(stdout)?;
+    let usage = worker_usage(&raw_stdout);
+    let response = match &plan.result_path {
         Some(result) => read_capture(
             fs::File::open(result).map_err(|_| "the model worker returned nothing".to_owned())?,
-        ),
-        None => read_capture(stdout),
+        )?,
+        None => raw_stdout,
+    };
+    Ok(WorkerOutput { response, usage })
+}
+
+fn worker_usage(raw: &str) -> Option<Value> {
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
+        return value
+            .get("usage")
+            .filter(|usage| usage.is_object())
+            .cloned();
     }
+    // Codex emits JSONL events; the completed turn carries the token receipt.
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|event| event.get("type").and_then(Value::as_str) == Some("turn.completed"))
+        .filter_map(|event| {
+            event
+                .get("usage")
+                .filter(|usage| usage.is_object())
+                .cloned()
+        })
+        .next_back()
 }
 
 /// Pulls the model's own JSON out of the host result envelope.
@@ -883,7 +927,10 @@ fn extract_response(raw: &str, expected_field: &str) -> Result<Value, String> {
         });
     }
 
-    let candidate = match parsed.get("result") {
+    let candidate = match parsed
+        .get("structured_output")
+        .or_else(|| parsed.get("result"))
+    {
         Some(result) => result.clone(),
         None => parsed,
     };
