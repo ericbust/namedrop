@@ -1050,6 +1050,7 @@ button.member:not(.more):hover {
   color: var(--text);
 }
 .route-link {
+  position: relative;
   padding-block: var(--space-2);
   margin-block: calc(-1 * var(--space-2));
   font-weight: 600;
@@ -1058,6 +1059,20 @@ button.member:not(.more):hover {
 .route-link:hover {
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+/* The padding gives a 32px hit target. The ring hugs the 12px text instead, so
+   it never covers the line above. */
+.route-link:focus-visible {
+  outline: none;
+}
+.route-link:focus-visible::after {
+  content: "";
+  position: absolute;
+  inset: var(--space-2) 0;
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  pointer-events: none;
 }
 .route-parts [data-stage] {
   display: inline-flex;
