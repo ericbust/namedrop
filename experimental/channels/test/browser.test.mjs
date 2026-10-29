@@ -5073,3 +5073,60 @@ for (const status of [404, 410, 401, 403]) {
     );
   });
 }
+
+for (const status of [404, 410, 401, 403]) {
+  test(`CL-K fix 1: HTTP ${status} replaces retained text and its old stamp after reopen`, async (t) => {
+    let release = () => {};
+    let reads = 0;
+    const gate = new Promise((resolve) => (release = resolve));
+    const ui = await open(
+      t,
+      (client) => replay(client, busyTeam()),
+      undefined,
+      {
+        onScreen: async () => {
+          if (++reads === 1) return { body: "old screen before pane closes" };
+          await gate;
+          return { status };
+        },
+      },
+    );
+    t.after(() => release());
+    await ui.live();
+    const chip = ui.page
+      .locator(".members")
+      .getByRole("button", { name: /@codex/ });
+    await chip.click();
+    await screenText(ui).getByText("old screen before pane closes").waitFor();
+    await ui.page.keyboard.press("Escape");
+    await drawer(ui).waitFor({ state: "detached" });
+    await chip.click();
+    await until(
+      () => ui.screens.requests.length === 2,
+      "the reopen screen request",
+    );
+    assert.equal(
+      await screenText(ui).textContent(),
+      "old screen before pane closes",
+    );
+    release();
+    await ui.page.waitForFunction(
+      () =>
+        document
+          .querySelector(".peek-refresh")
+          ?.getAttribute("aria-disabled") === null,
+    );
+    assert.equal(
+      await screenText(ui).textContent(),
+      "",
+      "failed target or session must remove retained screen text",
+    );
+    assert.equal(await drawer(ui).locator(".peek-bar").count(), 0);
+    assert.equal(await drawer(ui).locator(".peek-failure").count(), 1);
+    assert.doesNotMatch(
+      await drawer(ui).locator(".peek-where").textContent(),
+      /Read at/,
+    );
+    assert.equal(ui.screens.requests.length, 2);
+  });
+}

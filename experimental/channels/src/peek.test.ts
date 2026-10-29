@@ -259,3 +259,39 @@ test("a retained empty snapshot stays empty during a fresh read and failures kee
   assert.equal(peekView(failure, who).stamp, `Read at ${clock(early)}`);
   assert.deepEqual(peekView(failure, who).body, { kind: "empty" });
 });
+
+for (const failure of ["closed", "missing", "session"] as const) {
+  test(`target or session failure ${failure} replaces earlier text and its timestamp`, () => {
+    const snapshot = {
+      screen: { earlierOmitted: false, text: "old screen" },
+      at: early,
+    };
+    for (const reading of [
+      firstRead(snapshot),
+      peekReduce(shownAt("old screen"), { type: "again" }),
+    ]) {
+      const read = peekReduce(reading, {
+        type: "settled",
+        request: reading.request,
+        result: failed(failure),
+        at: later,
+      });
+      const view = peekView(read, who);
+      assert.equal(
+        view.body.kind,
+        "failure",
+        "invalid screen must be replaced by its failure",
+      );
+      assert.equal(
+        view.stamp,
+        null,
+        "invalid screen must not retain its read time",
+      );
+      assert.equal(
+        view.bar,
+        null,
+        "invalid screen must not stay behind a failure bar",
+      );
+    }
+  });
+}
