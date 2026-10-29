@@ -66,20 +66,33 @@ surface and text tokens.
 ## Read messages and threads
 
 The timeline shows parent messages with a reply button. The button opens the
-**Thread** pane, which updates when replies arrive. **Close** or Escape dismisses
-the pane and restores focus to its reply button. On narrow screens the pane sits
-below the timeline. Replies whose parent is not loaded remain visible as
+**Thread** pane, which updates when replies arrive. Opening a thread moves focus
+to **Close** once; returning to its channel keeps focus in the sidebar. The reply
+button exposes its expanded state and pane ID. **Close** restores focus to that
+button. Escape does the same from inside the pane, or from the page body when no
+dialog is open; other focused controls keep their own Escape behavior. On narrow
+screens the pane sits below the timeline. Replies whose parent is not loaded remain visible as
 **Earlier thread** rows.
 
 Scroll to the top or select **Load older messages** to fetch history. The first
 visible message keeps its position across prepends, live updates, and channel
 switches. Disjoint live windows show a gap and load missing pages automatically.
+The visible window holds at most 600 messages per channel: four live windows or
+twelve history pages, preserving the established 400-message history case. Live
+arrivals discard the oldest edge and keep it reachable through **Load older
+messages**. Paging past the cap discards the newest edge and enters browsing
+mode. While browsing, live frames refresh overlapping receipts and the latest
+reset source without restoring discarded rows or creating an artificial gap.
+**Jump to latest** resets to the latest snapshot and scrolls to the bottom.
 Failed history requests offer **Retry**. The member roster remains above the
 timeline and scrolls when it has many members.
 
 Message bodies render as text. Fenced code uses a monospace font, and HTTP and
 HTTPS URLs become links with `rel="noreferrer"`. Bodies over 480 characters have
-**Show more**. A server truncation note identifies text omitted before delivery.
+**Show more**. Preview boundaries preserve surrogate pairs. Links are recognized
+before shortening, so a shortened label retains its complete destination and the
+ellipsis stays outside the link. A server truncation note identifies text omitted
+before delivery.
 Unknown message kinds and delivery stages use neutral labels.
 
 ## State and connection behavior
@@ -91,8 +104,16 @@ the snapshot as explicit unknown variants. Unknown status values use neutral lab
 Attention summaries remain visible only for known `needs_you` health, including
 `agent_status` and future attention sources.
 `store.ts` owns `channels: Map<SpaceKey, Channel>` and a pure reducer. Snapshots replace channel metadata atomically and accumulate full messages by ID.
-Equal retained content returns the same state. Live rows update receipts; older
-history fills only missing rows. Contiguous ordered runs preserve server ordering
+`Channel.latestMessages` retains only the newest 150 snapshot rows as the reset
+source, separate from the bounded visible `messages` and `runs`. `viewMode` is
+`following` until history evicts the newest edge, then `browsing` until the explicit
+`latest` event. These structures retain at most 750 message references per channel.
+Equal incoming rows reuse their objects; unchanged maps, members and runs retain
+identity. Equality and unread detection inspect frame rows and small metadata,
+without serializing accumulated messages. A changed visible map can copy up to
+600 entries per copy. Thread grouping is memoized and shared with timeline construction;
+message components receive stable members, row references and thread callbacks.
+Live rows update receipts; older history fills only missing rows. Contiguous ordered runs preserve server ordering
 for equal timestamps and expose gaps between disjoint live windows.
 
 The app opens exactly one same-origin `EventSource('/api/events')` per tab. Native
@@ -130,8 +151,8 @@ shows **No live workspaces**. Reconnects preserve that knowledge.
 
 New channels establish a read baseline. New message IDs or changes to membership,
 activity, or attention mark a background channel unread. Messages leaving the live
-window stay loaded without creating unread activity. Changes to names, roles,
-or health counts alone do not. A selected channel stays read while the document
+window stay loaded up to the visible cap without creating unread activity.
+Changes to names, roles, or health counts alone do not. A selected channel stays read while the document
 is visible. Returning to a visible document clears the selected channel's unread
 flag. **Needs you** follows the server's `health.level === "needs_you"`, so paused
 and inactive channels do not show attention shortcuts or summaries.
@@ -162,3 +183,15 @@ The browser's standard Performance API exposes these measures.
 Temporary marks are cleared after measurement. Read the entries with
 `performance.getEntriesByName(name, 'measure')`. The live performance lane owns
 latency conclusions and comparisons with the embedded dashboard.
+
+Run the reducer comparison from this directory. The baseline directory must
+contain `store.ts`, `model.ts`, and `wire.ts` from the baseline commit.
+
+```sh
+node --experimental-strip-types test/reduce-bench.mjs --before /path/to/baseline/src --after src --rounds 5 --max-p50-ms 5 --out /path/to/results.json
+```
+
+The benchmark alternates both versions, verifies each appended message, and
+records source hashes and actual loaded counts. The new cap applies during
+warmup, so a large preload retains 600 rows in the changed app. JSON parsing,
+fixture setup, and assertions are outside the reducer timing.

@@ -7,16 +7,29 @@ export function ThreadPane({
   channel,
   thread,
   onClose,
+  paneId,
 }: {
   channel: Channel;
   thread: ThreadGroup;
   onClose: () => void;
+  paneId: string;
 }) {
-  const close = useRef<HTMLButtonElement>(null);
+  const pane = useRef<HTMLElement>(null);
   useEffect(() => {
-    close.current?.focus();
     const onEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const target = document.activeElement;
+      if (target?.closest('dialog, [role="dialog"], [role="alertdialog"]'))
+        return;
+      const inside = target !== null && pane.current?.contains(target);
+      const body =
+        target === document.body &&
+        ![
+          ...document.querySelectorAll(
+            'dialog[open], [role="dialog"], [role="alertdialog"]',
+          ),
+        ].some((dialog) => dialog.getClientRects().length > 0);
+      if (inside || body) {
         event.preventDefault();
         onClose();
       }
@@ -25,13 +38,12 @@ export function ThreadPane({
     return () => document.removeEventListener("keydown", onEscape);
   }, [onClose]);
   return (
-    <aside className="thread-pane" aria-label="Thread">
+    <aside className="thread-pane" aria-label="Thread" id={paneId} ref={pane}>
       <header className="thread-heading">
         <h2>Thread</h2>
         <button
           type="button"
           className="text-button"
-          ref={close}
           onClick={onClose}
           aria-label="Close thread"
         >
@@ -45,7 +57,11 @@ export function ThreadPane({
           </p>
         )}
         {thread.parents.map((message) => (
-          <Message key={message.id} message={message} channel={channel} />
+          <Message
+            key={message.id}
+            message={message}
+            members={channel.members}
+          />
         ))}
         <p className="reply-divider">
           {thread.replies.length}{" "}
@@ -55,7 +71,11 @@ export function ThreadPane({
             : ""}
         </p>
         {thread.replies.map((message) => (
-          <Message key={message.id} message={message} channel={channel} />
+          <Message
+            key={message.id}
+            message={message}
+            members={channel.members}
+          />
         ))}
       </div>
     </aside>

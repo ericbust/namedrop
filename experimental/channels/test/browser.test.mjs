@@ -1012,3 +1012,262 @@ test("UI-2: message history is a named keyboard-scrollable region", async (t) =>
     before,
   );
 });
+
+test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t) => {
+  const value = frame(1, "alpha");
+  const stages = [
+    [{ stage: "queued" }, "Queued"],
+    [{ stage: "delivered" }, "Delivered"],
+    [{ stage: "working", acked_at_ms: 100 }, "Working (acknowledged)"],
+    [{ stage: "replied", reply_id: "reply" }, "Replied"],
+    [{ stage: "completed", kind: "success" }, "Completed · success"],
+    [{ stage: "held" }, "Held"],
+    [{ stage: "failed" }, "Failed"],
+    [{ stage: "cancelled" }, "Cancelled"],
+    [{ stage: "future_stage" }, "Status unavailable"],
+  ];
+  value.frame.messages = stages.map(([stage], n) =>
+    message(`stage${n}`, `Delivery ${n}`, { legs: [{ to: "agent", stage }] }),
+  );
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  for (const [index, [, label]] of stages.entries()) {
+    const receipt = ui.page.locator(
+      `[data-message-id="stage${index}"] .receipts li`,
+    );
+    await receipt.waitFor();
+    assert.equal(await receipt.textContent(), `agent · ${label}`);
+  }
+});
+
+test("UI-2 fix1: collapsed previews preserve full href and Unicode boundaries", async (t) => {
+  const href = `https://example.com/${"y".repeat(300)}`;
+  const value = frame(1, "alpha");
+  value.frame.messages = [
+    message("cut-url", `token:${"x".repeat(400)} and ${href}`),
+    message("unicode", `${"x".repeat(479)}😀 trailing text`),
+    message(
+      "fenced",
+      `${"x".repeat(450)}\n\x60\x60\x60js\nhttps://example.com/${"z".repeat(100)}\n\x60\x60\x60`,
+    ),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const row = ui.page.locator('[data-message-id="cut-url"]');
+  const link = row.getByRole("link");
+  assert.equal(await link.getAttribute("href"), href);
+  assert.ok((await link.textContent()).length < href.length);
+  assert.equal((await link.textContent()).includes("…"), false);
+  assert.equal(
+    (await row.locator(".message-body").textContent()).endsWith("…"),
+    true,
+  );
+  const unicode = ui.page.locator('[data-message-id="unicode"]');
+  assert.equal(
+    await unicode.locator(".message-body").textContent(),
+    `${"x".repeat(479)}…`,
+  );
+  await unicode.getByRole("button", { name: "Show more", exact: true }).click();
+  assert.equal(
+    await unicode.locator(".message-body").textContent(),
+    `${"x".repeat(479)}😀 trailing text`,
+  );
+  assert.equal(
+    await ui.page.locator('[data-message-id="fenced"] a').count(),
+    0,
+  );
+  assert.equal(
+    await ui.page.locator('[data-message-id="fenced"] pre').count(),
+    1,
+  );
+});
+
+test("UI-2 fix1: thread remount preserves sidebar focus and ARIA with scoped Escape", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [exchange(), frame(2, "beta")]),
+  );
+  await ui.live();
+  const button = ui.page
+    .locator(".timeline")
+    .getByRole("button", { name: "1 reply", exact: true });
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  assert.equal(await button.getAttribute("aria-expanded"), "false");
+  const paneId = await button.getAttribute("aria-controls");
+  assert.ok(paneId);
+  await button.click();
+  await pane.waitFor();
+  assert.equal(await pane.getAttribute("id"), paneId);
+  assert.equal(await button.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    await pane
+      .getByRole("button", { name: "Close thread" })
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
+  await button.click();
+  assert.equal(
+    await pane
+      .getByRole("button", { name: "Close thread" })
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
+  await ui.row(2).click();
+  await pane.waitFor({ state: "detached" });
+  await ui.row(1).click();
+  await pane.waitFor();
+  await focused(ui, 1);
+  assert.equal(await button.getAttribute("aria-controls"), paneId);
+  assert.equal(await button.getAttribute("aria-expanded"), "true");
+  await ui.page.keyboard.press("Escape");
+  assert.equal(await pane.count(), 1);
+  await ui.page.evaluate(() => {
+    const form = document.createElement("form");
+    form.innerHTML = '<input aria-label="Other input">';
+    document.body.append(form);
+    form.querySelector("input").focus();
+  });
+  await ui.page.keyboard.press("Escape");
+  assert.equal(await pane.count(), 1);
+  await ui.page.evaluate(() => {
+    const dialog = document.createElement("dialog");
+    dialog.innerHTML = "<button>Dialog action</button>";
+    document.body.append(dialog);
+    dialog.showModal();
+  });
+  await ui.page.keyboard.press("Escape");
+  assert.equal(await pane.count(), 1);
+  await pane.getByRole("button", { name: "Close thread" }).focus();
+  await ui.page.evaluate(() => {
+    document.activeElement.addEventListener(
+      "keydown",
+      (event) => event.preventDefault(),
+      { once: true },
+    );
+  });
+  await ui.page.keyboard.press("Escape");
+  assert.equal(await pane.count(), 1);
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  assert.equal(await button.getAttribute("aria-expanded"), "false");
+  assert.equal(
+    await button.evaluate((el) => el === document.activeElement),
+    true,
+  );
+  await button.click();
+  await ui.page.evaluate(() => document.activeElement.blur());
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+});
+
+test("UI-2 fix1: capped history preserves anchor and jumps to refreshed latest without bridge loops", async (t) => {
+  const value = frame(1, "alpha");
+  const rows = (from, to) =>
+    Array.from({ length: to - from + 1 }, (_, n) =>
+      message(`m${from + n}`, `Message ${from + n}`),
+    );
+  value.frame.messages = rows(1001, 1150);
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    async (url) => {
+      const before = Number(url.searchParams.get("before").slice(1));
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return rows(Math.max(1, before - 50), before - 1).reverse();
+    },
+  );
+  await ui.live();
+  const scroll = ui.page.locator(".timeline-scroll");
+  const count = () => ui.page.locator(".timeline [data-message-id]").count();
+  for (let first = 1001; first >= 551; first -= 50) {
+    const anchor = ui.page.locator(`[data-message-id="m${first}"]`);
+    await scroll.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await ui.page
+      .getByText("Loading older messages…", { exact: true })
+      .waitFor();
+    const top = await anchor.evaluate((el) => el.getBoundingClientRect().top);
+    await ui.page.locator(`[data-message-id="m${first - 50}"]`).waitFor();
+    const after = await anchor.evaluate((el) => el.getBoundingClientRect().top);
+    assert.ok(
+      Math.abs(after - top) <= 2,
+      `cap anchor shifted ${after - top}px`,
+    );
+    assert.ok((await count()) <= 600);
+  }
+  assert.equal(await count(), 600);
+  const jump = ui.page.getByRole("button", {
+    name: "Jump to latest",
+    exact: true,
+  });
+  await jump.waitFor();
+  const requests = ui.historyRequests.length;
+  value.frame.messages = rows(1101, 1250);
+  value.frame.messages[0].legs = [{ to: "agent", stage: { stage: "held" } }];
+  ui.connections[0].send("space", value);
+  await ui.page.waitForTimeout(160);
+  assert.equal(await count(), 600);
+  assert.equal(await ui.page.locator('[data-message-id="m1250"]').count(), 0);
+  assert.equal(await ui.page.locator(".message-gap").count(), 0);
+  assert.equal(ui.historyRequests.length, requests);
+  await jump.click();
+  await ui.page.locator('[data-message-id="m1250"]').waitFor();
+  assert.equal(await count(), 150);
+  assert.equal(await jump.count(), 0);
+  assert.equal(
+    await scroll.evaluate(
+      (el) => el.scrollHeight - el.scrollTop - el.clientHeight < 2,
+    ),
+    true,
+  );
+  await scroll.evaluate((el) => {
+    el.scrollTop = 0;
+  });
+  await ui.page.locator('[data-message-id="m1051"]').waitFor();
+  assert.equal(await count(), 200);
+});
+
+test("UI-2 fix1: live frames format timestamps only for changed message rows", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = Array.from({ length: 150 }, (_, n) =>
+    message(`row${n}`),
+  );
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  await ui.page.evaluate(() => {
+    window.timestampFormats = 0;
+    const format = Date.prototype.toLocaleTimeString;
+    Date.prototype.toLocaleTimeString = function (...args) {
+      window.timestampFormats++;
+      return format.apply(this, args);
+    };
+  });
+  value.frame.messages[70].legs = [{ to: "agent", stage: { stage: "held" } }];
+  ui.connections[0].send("space", value);
+  await ui.page
+    .locator('[data-message-id="row70"] [data-stage="held"]')
+    .waitFor();
+  assert.equal(await ui.page.evaluate(() => window.timestampFormats), 1);
+  const measures = await ui.page.evaluate(() => {
+    window.timestampFormats = 0;
+    return performance.getEntriesByName("namedrop:frame-apply").length;
+  });
+  value.frame.participants[0].activity =
+    value.frame.participants[0].activity === "working" ? "idle" : "working";
+  ui.connections[0].send("space", value);
+  await ui.page.waitForFunction(
+    (before) =>
+      performance.getEntriesByName("namedrop:frame-apply").length > before,
+    measures,
+  );
+  await ui.page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+  assert.equal(await ui.page.evaluate(() => window.timestampFormats), 0);
+});

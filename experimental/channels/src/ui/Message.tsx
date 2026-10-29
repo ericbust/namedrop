@@ -1,4 +1,4 @@
-import { Fragment, type ReactNode, useState } from "react";
+import { Fragment, memo, type ReactNode, useState } from "react";
 import type {
   ChannelSnapshot,
   DeliveryStage,
@@ -7,56 +7,75 @@ import type {
 } from "../model.ts";
 
 export function authorName(
-  channel: ChannelSnapshot,
+  members: ChannelSnapshot["members"],
   id: MessageRow["author"],
 ): string {
-  return id === "human" ? "You" : (channel.members.get(id)?.alias ?? id);
+  return id === "human" ? "You" : (members.get(id)?.alias ?? id);
 }
-function linkedText(text: string): ReactNode {
-  const matches = [...text.matchAll(/https?:\/\/[^\s<>"']+/g)];
+function linkedText(text: string, limit: number): ReactNode {
   const parts: ReactNode[] = [];
   let start = 0;
-  for (const match of matches) {
+  for (const match of text.matchAll(/https?:\/\/[^\s<>"']+/g)) {
     const at = match.index;
+    if (at >= limit) break;
     const href = match[0].replace(/[.,;!?)]+$/, "");
-    parts.push(text.slice(start, at));
+    parts.push(text.slice(start, Math.min(at, limit)));
     parts.push(
       <a key={at} href={href} target="_blank" rel="noreferrer">
-        {href}
+        {href.slice(0, limit - at)}
       </a>,
     );
     start = at + href.length;
   }
-  parts.push(text.slice(start));
+  if (start < limit) parts.push(text.slice(start, limit));
   return parts;
 }
-function formattedText(text: string): ReactNode {
+function formattedText(text: string, limit: number): ReactNode {
   const parts = text.split(/(```[^\n]*\n[\s\S]*?(?:```|$))/g);
   let offset = 0;
-  return parts
-    .filter((part) => part.length > 0)
-    .map((part) => {
-      const key = offset;
-      offset += part.length;
-      return part.startsWith("```") ? (
-        <pre key={key}>
-          <code>{part.replace(/^```[^\n]*\n/, "").replace(/```$/, "")}</code>
-        </pre>
-      ) : (
-        <Fragment key={key}>{linkedText(part)}</Fragment>
-      );
-    });
+  return parts.flatMap((part) => {
+    const key = offset;
+    offset += part.length;
+    const available = Math.min(part.length, limit - key);
+    if (available <= 0) return [];
+    return part.startsWith("```") ? (
+      <pre key={key}>
+        <code>
+          {part
+            .slice(0, available)
+            .replace(/^```[^\n]*\n/, "")
+            .replace(/```$/, "")}
+        </code>
+      </pre>
+    ) : (
+      <Fragment key={key}>{linkedText(part, available)}</Fragment>
+    );
+  });
+}
+function previewLimit(text: string): number {
+  const limit = Math.min(480, text.length);
+  const previous = text.charCodeAt(limit - 1);
+  const next = text.charCodeAt(limit);
+  return previous >= 0xd800 &&
+    previous <= 0xdbff &&
+    next >= 0xdc00 &&
+    next <= 0xdfff
+    ? limit - 1
+    : limit;
 }
 function Body({ message }: { message: MessageRow }) {
   const [expanded, setExpanded] = useState(false);
   const long = message.body.text.length > 480;
-  const body =
+  const limit =
     long && !expanded
-      ? `${message.body.text.slice(0, 480)}…`
-      : message.body.text;
+      ? previewLimit(message.body.text)
+      : message.body.text.length;
   return (
     <>
-      <div className="message-body">{formattedText(body)}</div>
+      <div className="message-body">
+        {formattedText(message.body.text, limit)}
+        {long && !expanded ? "…" : null}
+      </div>
       {long && (
         <button
           className="text-button"
@@ -136,57 +155,81 @@ function receipt(stage: DeliveryStage): string {
     }
   }
 }
-export function Message({
-  message,
-  channel,
-  replies = 0,
-  onThread,
-}: {
+type MessageProps = {
   message: MessageRow;
-  channel: ChannelSnapshot;
+  members: ChannelSnapshot["members"];
   replies?: number;
-  onThread?: (button: HTMLButtonElement) => void;
-}) {
-  const Content = renderers[message.kind];
-  const date = new Date(message.at);
-  const validDate = Number.isFinite(date.getTime());
-  return (
-    <article
-      className={`message message-${message.kind}`}
-      data-message-id={message.id}
-    >
-      <header className="message-header">
-        <strong>{authorName(channel, message.author)}</strong>
-        {validDate && (
-          <time dateTime={date.toISOString()} title={date.toLocaleString()}>
-            {date.toLocaleTimeString([], {
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
-          </time>
+  onThread?: (threadId: string, button: HTMLButtonElement) => void;
+  paneId?: string;
+  threadExpanded?: boolean;
+};
+export const Message = memo(
+  function Message({
+    message,
+    members,
+    replies = 0,
+    onThread,
+    paneId,
+    threadExpanded = false,
+  }: MessageProps) {
+    const Content = renderers[message.kind];
+    const date = new Date(message.at);
+    const validDate = Number.isFinite(date.getTime());
+    return (
+      <article
+        className={`message message-${message.kind}`}
+        data-message-id={message.id}
+      >
+        <header className="message-header">
+          <strong>{authorName(members, message.author)}</strong>
+          {validDate && (
+            <time dateTime={date.toISOString()} title={date.toLocaleString()}>
+              {date.toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </time>
+          )}
+        </header>
+        <Content message={message} />
+        {message.legs.length > 0 && (
+          <ul className="receipts" aria-label="Delivery receipts">
+            {message.legs.map((leg) => (
+              <li key={leg.to} data-stage={leg.stage.stage}>
+                {authorName(members, leg.to)}
+                <span aria-hidden="true"> · </span>
+                {receipt(leg.stage)}
+              </li>
+            ))}
+          </ul>
         )}
-      </header>
-      <Content message={message} />
-      {message.legs.length > 0 && (
-        <ul className="receipts" aria-label="Delivery receipts">
-          {message.legs.map((leg) => (
-            <li key={leg.to} data-stage={leg.stage.stage}>
-              {authorName(channel, leg.to)}
-              <span aria-hidden="true"> · </span>
-              {receipt(leg.stage)}
-            </li>
-          ))}
-        </ul>
-      )}
-      {onThread && replies > 0 && (
-        <button
-          type="button"
-          className="text-button thread-button"
-          onClick={(event) => onThread(event.currentTarget)}
-        >
-          {replies} {replies === 1 ? "reply" : "replies"}
-        </button>
-      )}
-    </article>
-  );
-}
+        {onThread && replies > 0 && (
+          <button
+            type="button"
+            className="text-button thread-button"
+            data-thread-id={message.threadId}
+            aria-controls={paneId}
+            aria-expanded={threadExpanded}
+            onClick={(event) => onThread(message.threadId, event.currentTarget)}
+          >
+            {replies} {replies === 1 ? "reply" : "replies"}
+          </button>
+        )}
+      </article>
+    );
+  },
+  (before, after) =>
+    before.message === after.message &&
+    before.replies === after.replies &&
+    before.onThread === after.onThread &&
+    before.paneId === after.paneId &&
+    before.threadExpanded === after.threadExpanded &&
+    (before.members === after.members ||
+      (authorName(before.members, before.message.author) ===
+        authorName(after.members, after.message.author) &&
+        before.message.legs.every(
+          (leg) =>
+            authorName(before.members, leg.to) ===
+            authorName(after.members, leg.to),
+        ))),
+);

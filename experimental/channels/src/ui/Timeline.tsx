@@ -1,4 +1,11 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { Channel, SpaceKey } from "../model.ts";
 import { threadGroups, timelineView } from "../store.ts";
 import { Message } from "./Message.tsx";
@@ -34,23 +41,64 @@ function capture(element: HTMLElement): Anchor {
 export function Timeline({
   channel,
   onOlder,
+  onLatest,
 }: {
   channel: Channel;
   onOlder: (key: SpaceKey) => void;
+  onLatest: (key: SpaceKey) => void;
 }) {
   const scroller = useRef<HTMLElement>(null);
   const anchors = useRef(new Map<SpaceKey, Anchor>());
   const [open, setOpen] = useState<{ key: SpaceKey; threadId: string } | null>(
     null,
   );
-  const returnFocus = useRef<HTMLButtonElement | null>(null);
-  const groups = threadGroups(channel);
+  const returnFocus = useRef<{
+    button: HTMLButtonElement;
+    threadId: string;
+  } | null>(null);
+  const paneId = useId();
+  const focusIntent = useRef(false);
+  const { messages, runs, threads } = channel;
+  const groups = useMemo(
+    () => threadGroups({ messages, runs, threads }),
+    [messages, runs, threads],
+  );
+  const rows = useMemo(
+    () => timelineView({ messages, runs, threads }, groups),
+    [messages, runs, threads, groups],
+  );
   const thread =
     open?.key === channel.key ? groups.get(open.threadId) : undefined;
   const close = useCallback(() => {
     setOpen(null);
-    if (returnFocus.current?.isConnected) returnFocus.current.focus();
+    const saved = returnFocus.current;
+    if (!saved) return;
+    const button = saved.button.isConnected
+      ? saved.button
+      : [
+          ...(scroller.current?.querySelectorAll<HTMLButtonElement>(
+            "button[data-thread-id]",
+          ) ?? []),
+        ].find((button) => button.dataset.threadId === saved.threadId);
+    button?.focus();
   }, []);
+  const openThread = useCallback(
+    (threadId: string, button: HTMLButtonElement) => {
+      returnFocus.current = { button, threadId };
+      focusIntent.current = true;
+      setOpen({ key: channel.key, threadId });
+    },
+    [channel.key],
+  );
+  useLayoutEffect(() => {
+    if (thread && focusIntent.current) {
+      document
+        .getElementById(paneId)
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Close thread"]')
+        ?.focus();
+      focusIntent.current = false;
+    }
+  });
   useLayoutEffect(() => {
     const element = scroller.current;
     if (!element) return;
@@ -95,6 +143,18 @@ export function Timeline({
           }}
         >
           <div className="history-control">
+            {channel.viewMode === "browsing" && (
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  anchors.current.delete(channel.key);
+                  onLatest(channel.key);
+                }}
+              >
+                Jump to latest
+              </button>
+            )}
             {history.kind === "loading" ? (
               <span role="status">
                 Loading{" "}
@@ -132,7 +192,7 @@ export function Timeline({
               <p>Agent exchanges will appear here as they happen.</p>
             </div>
           )}
-          {timelineView(channel).map((row) =>
+          {rows.map((row) =>
             row.kind === "gap" ? (
               <div className="message-gap" key={`gap:${row.before}`}>
                 <span>Messages missing between updates</span>
@@ -151,9 +211,9 @@ export function Timeline({
                   <button
                     type="button"
                     className="text-button earlier-thread"
+                    data-thread-id={row.thread.id}
                     onClick={(event) => {
-                      returnFocus.current = event.currentTarget;
-                      setOpen({ key: channel.key, threadId: row.thread.id });
+                      openThread(row.thread.id, event.currentTarget);
                     }}
                   >
                     Earlier thread · parent not loaded
@@ -161,16 +221,15 @@ export function Timeline({
                 )}
                 <Message
                   message={row.message}
-                  channel={channel}
+                  members={channel.members}
                   replies={Math.max(
                     row.thread.replies.length,
                     row.thread.knownCount -
                       Math.max(1, row.thread.parents.length),
                   )}
-                  onThread={(button) => {
-                    returnFocus.current = button;
-                    setOpen({ key: channel.key, threadId: row.thread.id });
-                  }}
+                  onThread={openThread}
+                  paneId={paneId}
+                  threadExpanded={thread?.id === row.thread.id}
                 />
               </div>
             ),
@@ -178,7 +237,12 @@ export function Timeline({
         </section>
       </section>
       {thread && (
-        <ThreadPane channel={channel} thread={thread} onClose={close} />
+        <ThreadPane
+          channel={channel}
+          thread={thread}
+          onClose={close}
+          paneId={paneId}
+        />
       )}
     </div>
   );

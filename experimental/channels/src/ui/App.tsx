@@ -276,6 +276,7 @@ export function App() {
             <Timeline
               channel={channel}
               onOlder={(key) => dispatch({ type: "older", key })}
+              onLatest={(key) => dispatch({ type: "latest", key })}
             />
           </>
         ) : (

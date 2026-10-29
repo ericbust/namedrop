@@ -94,6 +94,8 @@ export type ChannelSnapshot = {
   threads: ReadonlyMap<string, ThreadChip>;
 };
 export type Channel = ChannelSnapshot & {
+  latestMessages: ReadonlyMap<string, Message>;
+  viewMode: "following" | "browsing";
   runs: readonly (readonly string[])[];
   history: HistoryState;
   exhausted: boolean;
@@ -105,6 +107,7 @@ export type WireEvent =
 export type Event =
   | WireEvent
   | { type: "older"; key: SpaceKey }
+  | { type: "latest"; key: SpaceKey }
   | {
       type: "history";
       request: HistoryRequest;

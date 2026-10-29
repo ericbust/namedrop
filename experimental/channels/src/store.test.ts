@@ -678,7 +678,9 @@ test("messages leaving the live window stay loaded without marking background un
   beta.frame.messages = [];
   const next = apply(state, beta);
   const key = parsed(beta).key;
-  assert.equal(next, state);
+  assert.equal(activeChannel(next).messages, activeChannel(state).messages);
+  assert.equal(activeChannel(next).runs, activeChannel(state).runs);
+  assert.equal(next.unread, state.unread);
   assert.equal(next.unread.has(key), false);
   assert.equal(next.channels.get(key)?.messages.size, 1);
   assert.equal(state.channels.get(key)?.messages.size, 1);
@@ -1290,4 +1292,219 @@ test("UI-2: every real delivery stage retains its payload and invalid known payl
     row.legs = [{ to: "agent", stage }];
     assert.equal(parseEvent("space", JSON.stringify(value)), null);
   }
+});
+
+test("UI-2 fix1: no-op frames retain maps and touched rows reuse unchanged objects", () => {
+  const value = withMessages(Array.from({ length: 150 }, (_, n) => `row${n}`));
+  const state = apply(initialState(), value);
+  const before = activeChannel(state);
+  assert.equal(apply(state, structuredClone(value)), state);
+  const metadata = structuredClone(value);
+  metadata.frame.space.display_name = "Renamed";
+  const renamed = activeChannel(apply(state, metadata));
+  assert.equal(renamed.messages, before.messages);
+  assert.equal(renamed.runs, before.runs);
+  assert.equal(renamed.members, before.members);
+  const touched = value.frame.messages[70];
+  assert.ok(touched);
+  touched.legs = [{ to: "agent-1", stage: { stage: "held" } }];
+  const after = activeChannel(apply(state, value));
+  assert.notEqual(after.messages.get("row70"), before.messages.get("row70"));
+  assert.equal(after.runs, before.runs);
+  assert.equal(after.members, before.members);
+  for (const [id, row] of before.messages)
+    if (id !== "row70") assert.equal(after.messages.get(id), row);
+});
+function numbered(from: number, to: number) {
+  return Array.from({ length: to - from + 1 }, (_, n) => `m${n + from}`);
+}
+function loadedWindow() {
+  let state = apply(initialState(), withMessages(numbered(1, 150)));
+  for (let last = 250; last <= 750; last += 100)
+    state = apply(state, withMessages(numbered(last - 149, last)));
+  return state;
+}
+test("UI-2 fix1: following caps at 600, clears exhaustion and keeps evicted history reachable", () => {
+  let state = apply(initialState(), withMessages(numbered(1, 150)));
+  state = historyPage(state, []);
+  assert.equal(activeChannel(state).exhausted, true);
+  for (let last = 250; last <= 750; last += 100)
+    state = apply(state, withMessages(numbered(last - 149, last)));
+  const channel = activeChannel(state);
+  assert.equal(channel.messages.size, 600);
+  assert.deepEqual(channel.runs, [numbered(151, 750)]);
+  assert.equal(channel.latestMessages.size, 150);
+  assert.equal(channel.exhausted, false);
+  assert.equal(channel.viewMode, "following");
+  const pending = requesting(state);
+  assert.equal(pending.request.before, "m151");
+  assert.equal(pending.request.purpose, "older");
+});
+test("UI-2 fix1: capped older pages keep their anchor and walk older while live frames refresh overlap", () => {
+  let state = historyPage(loadedWindow(), numbered(101, 150));
+  assert.deepEqual(activeChannel(state).runs, [numbered(101, 700)]);
+  assert.equal(activeChannel(state).viewMode, "browsing");
+  const pending = requesting(state);
+  assert.equal(pending.request.before, "m101");
+  const live = withMessages(numbered(651, 800));
+  const overlap = live.frame.messages.find((row) => row.message_id === "m675");
+  assert.ok(overlap);
+  overlap.legs = [{ to: "agent-1", stage: { stage: "held" } }];
+  state = apply(pending.state, live);
+  assert.equal(activeChannel(state).messages.has("m800"), false);
+  assert.equal(
+    activeChannel(state).messages.get("m675")?.legs[0]?.stage.stage,
+    "held",
+  );
+  assert.equal(activeChannel(state).runs.length, 1);
+  state = reduce(state, {
+    type: "history",
+    request: pending.request,
+    result: {
+      kind: "page",
+      messages: [...parsed(withMessages(numbered(51, 100))).messages.values()],
+    },
+  });
+  assert.deepEqual(activeChannel(state).runs, [numbered(51, 650)]);
+  state = historyPage(state, numbered(1, 50));
+  state = historyPage(state, []);
+  assert.equal(activeChannel(state).exhausted, true);
+  const stale = requesting(
+    reduce(state, { type: "latest", key: activeChannel(state).key }),
+  );
+  state = reduce(stale.state, {
+    type: "latest",
+    key: activeChannel(state).key,
+  });
+  assert.deepEqual(activeChannel(state).runs, [numbered(651, 800)]);
+  assert.equal(activeChannel(state).viewMode, "following");
+  assert.equal(activeChannel(state).exhausted, false);
+  assert.equal(
+    reduce(state, {
+      type: "history",
+      request: stale.request,
+      result: { kind: "page", messages: [] },
+    }),
+    state,
+  );
+});
+test("UI-2 fix1: replay stays capped without restoring an intentionally evicted newest edge", () => {
+  let state = historyPage(loadedWindow(), numbered(101, 150));
+  state = apply(
+    reduce(state, { type: "opened" }),
+    withMessages(numbered(751, 900)),
+  );
+  assert.equal(state.sync.kind, "replaying");
+  if (state.sync.kind === "replaying")
+    assert.equal(
+      state.sync.pending.get(activeChannel(state).key)?.messages.size,
+      600,
+    );
+  state = ready(state, [keyA]);
+  assert.deepEqual(activeChannel(state).runs, [numbered(101, 700)]);
+  assert.equal(activeChannel(state).latestMessages.has("m900"), true);
+  assert.equal(activeChannel(state).viewMode, "browsing");
+  let following = loadedWindow();
+  following = apply(
+    reduce(following, { type: "opened" }),
+    withMessages(numbered(701, 850)),
+  );
+  following = apply(following, withMessages(numbered(801, 950)));
+  following = ready(following, [keyA]);
+  assert.deepEqual(activeChannel(following).runs, [numbered(351, 950)]);
+  assert.equal(activeChannel(following).messages.size, 600);
+});
+
+test("UI-2 fix1: an overlapping frame can join coverage without adding rows", () => {
+  let state = apply(initialState(), withMessages(["a", "b"]));
+  state = apply(state, withMessages(["c", "d"]));
+  assert.equal(activeChannel(state).runs.length, 2);
+  state = apply(state, withMessages(["b", "c"]));
+  assert.deepEqual(activeChannel(state).runs, [["a", "b", "c", "d"]]);
+});
+test("UI-2 fix1: oversized snapshots keep only the newest 150 rows as latest source", () => {
+  const channel = activeChannel(
+    apply(initialState(), withMessages(numbered(1, 900))),
+  );
+  assert.equal(channel.latestMessages.size, 150);
+  assert.deepEqual([...channel.latestMessages.keys()], numbered(751, 900));
+  assert.equal(channel.messages.size, 600);
+  assert.deepEqual(channel.runs, [numbered(301, 900)]);
+  const belowCap = activeChannel(
+    apply(initialState(), withMessages(numbered(1, 400))),
+  );
+  assert.equal(belowCap.messages.size, 400);
+  assert.equal(belowCap.latestMessages.size, 150);
+});
+
+test("UI-2 fix1: one replay window caps both runs and rows at the same boundary", () => {
+  let state = loadedWindow();
+  state = apply(
+    reduce(state, { type: "opened" }),
+    withMessages(numbered(701, 850)),
+  );
+  state = ready(state, [keyA]);
+  const channel = activeChannel(state);
+  assert.equal(channel.messages.size, 600);
+  assert.deepEqual(channel.runs, [numbered(251, 850)]);
+  assert.deepEqual(
+    new Set(channel.runs.flat()),
+    new Set(channel.messages.keys()),
+  );
+});
+
+test("UI-2 fix1: evicting a pending history cursor invalidates its stale response", () => {
+  const pending = requesting(loadedWindow());
+  let state = apply(pending.state, withMessages(numbered(701, 850)));
+  assert.equal(activeChannel(state).history.kind, "idle");
+  assert.equal(
+    reduce(state, {
+      type: "history",
+      request: pending.request,
+      result: {
+        kind: "page",
+        messages: [
+          ...parsed(withMessages(numbered(101, 150))).messages.values(),
+        ],
+      },
+    }),
+    state,
+  );
+  const retry = requesting(state);
+  assert.equal(retry.request.before, "m251");
+  assert.notEqual(retry.request.id, pending.request.id);
+  state = historyPage(state, numbered(201, 250));
+  assert.deepEqual(activeChannel(state).runs, [numbered(201, 800)]);
+});
+
+test("UI-2 fix1: jumping during replay does not restore discarded browsing history", () => {
+  let state = historyPage(loadedWindow(), numbered(101, 150));
+  state = apply(
+    reduce(state, { type: "opened" }),
+    withMessages(numbered(651, 800)),
+  );
+  state = reduce(state, { type: "latest", key: activeChannel(state).key });
+  state = ready(state, [keyA]);
+  const channel = activeChannel(state);
+  assert.equal(channel.viewMode, "following");
+  assert.deepEqual(channel.runs, [numbered(601, 800)]);
+  assert.equal(channel.messages.has("m101"), false);
+});
+
+test("UI-2 fix1: browsing keeps receipt updates from every staged replay window", () => {
+  let state = historyPage(loadedWindow(), numbered(101, 150));
+  const before = activeChannel(state);
+  state = reduce(state, { type: "opened" });
+  const first = withMessages(numbered(651, 800));
+  const receipt = first.frame.messages.find((row) => row.message_id === "m675");
+  assert.ok(receipt);
+  receipt.legs = [{ to: "agent-1", stage: { stage: "held" } }];
+  state = apply(state, first);
+  state = apply(state, withMessages(numbered(751, 900)));
+  state = ready(state, [keyA]);
+  const after = activeChannel(state);
+  assert.equal(after.messages.get("m675")?.legs[0]?.stage.stage, "held");
+  assert.deepEqual(after.runs, before.runs);
+  assert.equal(after.messages.size, 600);
+  assert.equal(after.messages.has("m900"), false);
 });

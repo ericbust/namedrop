@@ -21,26 +21,90 @@ export function initialState(visible = true): State {
     nextRequestId: 1,
   };
 }
-function sameChannel(a: Channel, b: Channel): boolean {
+export const HISTORY_CAP = 600;
+const SNAPSHOT_CAP = 150;
+function sameValue(a: unknown, b: unknown): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
+function sameMessage(a: Message, b: Message): boolean {
   return (
-    JSON.stringify({
-      ...a,
-      members: [...a.members],
-      messages: [...a.messages],
-      threads: [...a.threads],
-    }) ===
-    JSON.stringify({
-      ...b,
-      members: [...b.members],
-      messages: [...b.messages],
-      threads: [...b.threads],
+    a === b ||
+    (a.id === b.id &&
+      a.threadId === b.threadId &&
+      a.inReplyTo === b.inReplyTo &&
+      a.at === b.at &&
+      a.author === b.author &&
+      a.kind === b.kind &&
+      a.body.text === b.body.text &&
+      a.body.truncated === b.body.truncated &&
+      a.legs.length === b.legs.length &&
+      a.legs.every((leg, index) => {
+        const other = b.legs[index];
+        return (
+          other !== undefined &&
+          leg.to === other.to &&
+          sameValue(leg.stage, other.stage)
+        );
+      }))
+  );
+}
+function reuseMap<K, V>(
+  previous: ReadonlyMap<K, V> | undefined,
+  incoming: ReadonlyMap<K, V>,
+): ReadonlyMap<K, V> {
+  if (
+    previous &&
+    previous.size === incoming.size &&
+    [...incoming].every(([id, row]) => sameValue(previous.get(id), row))
+  )
+    return previous;
+  return new Map(
+    [...incoming].map(([id, row]) => {
+      const old = previous?.get(id);
+      return [id, old !== undefined && sameValue(old, row) ? old : row];
+    }),
+  );
+}
+function sameRuns(a: Channel["runs"], b: Channel["runs"]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((run, index) => {
+      const other = b[index];
+      return (
+        other !== undefined &&
+        run.length === other.length &&
+        run.every((id, at) => id === other[at])
+      );
     })
   );
 }
-function sameAttention(a: Channel, b: Channel): boolean {
-  return JSON.stringify(a.attention) === JSON.stringify(b.attention);
+function capWindow(channel: Channel, edge: "oldest" | "newest"): Channel {
+  if (channel.messages.size <= HISTORY_CAP) return channel;
+  const all = channel.runs.flat();
+  const retained =
+    edge === "oldest" ? all.slice(-HISTORY_CAP) : all.slice(0, HISTORY_CAP);
+  const ids = new Set(retained);
+  return {
+    ...channel,
+    messages: new Map(
+      retained.flatMap((id) => {
+        const row = channel.messages.get(id);
+        return row ? [[id, row] as const] : [];
+      }),
+    ),
+    runs: channel.runs
+      .map((run) => run.filter((id) => ids.has(id)))
+      .filter((run) => run.length > 0),
+    viewMode: edge === "newest" ? "browsing" : channel.viewMode,
+    exhausted: edge === "oldest" ? false : channel.exhausted,
+    history:
+      edge === "oldest" &&
+      channel.history.kind === "loading" &&
+      !ids.has(channel.history.request.before)
+        ? { kind: "idle" }
+        : channel.history,
+  };
 }
-
 function mergeContiguousRuns(
   runs: Channel["runs"],
   incoming: readonly string[],
@@ -54,6 +118,7 @@ function mergeContiguousRuns(
     if (runs[i]?.some((id) => ids.has(id))) last = i;
   const joined = runs.slice(first, last + 1).flat();
   const known = new Set(joined);
+  let inserted = false;
   for (let i = 0; i < incoming.length; i++) {
     const id = incoming[i];
     if (id === undefined || known.has(id)) continue;
@@ -63,40 +128,108 @@ function mergeContiguousRuns(
     const at = next === undefined ? joined.length : joined.indexOf(next);
     joined.splice(at, 0, id);
     known.add(id);
+    inserted = true;
   }
-  return [...runs.slice(0, first), joined, ...runs.slice(last + 1)];
+  return first === last && !inserted
+    ? runs
+    : [...runs.slice(0, first), joined, ...runs.slice(last + 1)];
 }
 function mergeSnapshot(
   previous: Channel | undefined,
   snapshot: ChannelSnapshot,
 ): Channel {
-  const messages = new Map(previous?.messages);
-  for (const [id, message] of snapshot.messages) messages.set(id, message);
-  const channel: Channel = {
-    ...snapshot,
-    messages,
-    runs: mergeContiguousRuns(previous?.runs ?? [], [
-      ...snapshot.messages.keys(),
-    ]),
-    history: previous?.history ?? { kind: "idle" },
-    exhausted: previous?.exhausted ?? false,
-  };
-  return previous && sameChannel(previous, channel) ? previous : channel;
+  let messages = previous?.messages ?? new Map<string, Message>();
+  let changed: Map<string, Message> | undefined;
+  const latest = new Map<string, Message>();
+  const incomingRows = [...snapshot.messages];
+  const latestIds = new Set(
+    incomingRows.slice(-SNAPSHOT_CAP).map(([id]) => id),
+  );
+  for (const [id, incoming] of incomingRows) {
+    const old = previous?.latestMessages.get(id) ?? messages.get(id);
+    const row = old && sameMessage(old, incoming) ? old : incoming;
+    if (latestIds.has(id)) latest.set(id, row);
+    if (
+      (previous?.viewMode !== "browsing" || messages.has(id)) &&
+      messages.get(id) !== row
+    ) {
+      changed ??= new Map(messages);
+      changed.set(id, row);
+    }
+  }
+  if (changed) messages = changed;
+  const latestMessages =
+    previous &&
+    previous.latestMessages.size === latest.size &&
+    [...latest].every(([id, row]) => previous.latestMessages.get(id) === row)
+      ? previous.latestMessages
+      : latest;
+  const extendsCoverage =
+    !previous || incomingRows.some(([id]) => !previous.latestMessages.has(id));
+  const runs =
+    previous && (!extendsCoverage || previous.viewMode === "browsing")
+      ? previous.runs
+      : mergeContiguousRuns(previous?.runs ?? [], [
+          ...snapshot.messages.keys(),
+        ]);
+  const channel: Channel = capWindow(
+    {
+      ...snapshot,
+      health:
+        previous && sameValue(previous.health, snapshot.health)
+          ? previous.health
+          : snapshot.health,
+      attention:
+        previous && sameValue(previous.attention, snapshot.attention)
+          ? previous.attention
+          : snapshot.attention,
+      members: reuseMap(previous?.members, snapshot.members),
+      threads: reuseMap(previous?.threads, snapshot.threads),
+      messages,
+      latestMessages,
+      viewMode: previous?.viewMode ?? "following",
+      runs,
+      history: previous?.history ?? { kind: "idle" },
+      exhausted: previous?.exhausted ?? false,
+    },
+    "oldest",
+  );
+  return previous &&
+    Object.keys(channel).every(
+      (key) => Reflect.get(previous, key) === Reflect.get(channel, key),
+    )
+    ? previous
+    : channel;
 }
 function reconcile(previous: Channel | undefined, pending: Channel): Channel {
   if (!previous) return pending;
+  const merged = mergeSnapshot(previous, {
+    ...pending,
+    messages: pending.latestMessages,
+  });
+  if (merged.viewMode === "browsing") {
+    let changed: Map<string, Message> | undefined;
+    for (const [id, row] of pending.messages) {
+      if (!merged.messages.has(id) || merged.messages.get(id) === row) continue;
+      changed ??= new Map(merged.messages);
+      changed.set(id, row);
+    }
+    return changed ? { ...merged, messages: changed } : merged;
+  }
   let runs = previous.runs;
   for (const run of pending.runs) runs = mergeContiguousRuns(runs, run);
-  const messages = new Map(previous.messages);
-  for (const [id, row] of pending.messages) messages.set(id, row);
-  const channel = {
-    ...pending,
-    messages,
-    runs,
-    history: previous.history,
-    exhausted: previous.exhausted,
-  };
-  return sameChannel(previous, channel) ? previous : channel;
+  let messages = previous.messages;
+  let changed: Map<string, Message> | undefined;
+  for (const [id, row] of pending.messages) {
+    if (messages.get(id) === row) continue;
+    changed ??= new Map(messages);
+    changed.set(id, row);
+  }
+  if (changed) messages = changed;
+  if (sameRuns(merged.runs, runs)) runs = merged.runs;
+  return messages === merged.messages && runs === merged.runs
+    ? merged
+    : capWindow({ ...merged, messages, runs }, "oldest");
 }
 function requestHistory(state: State, key: SpaceKey): State {
   const channel = state.channels.get(key);
@@ -116,11 +249,13 @@ function requestHistory(state: State, key: SpaceKey): State {
 }
 function hasActivity(a: Channel, b: Channel): boolean {
   return (
-    [...b.messages.keys()].some((id) => !a.messages.has(id)) ||
-    !sameAttention(a, b) ||
+    [...b.latestMessages.keys()].some(
+      (id) => !a.latestMessages.has(id) && !a.messages.has(id),
+    ) ||
+    a.attention !== b.attention ||
     a.members.size !== b.members.size ||
-    [...a.members].some(
-      ([id, member]) => b.members.get(id)?.activity !== member.activity,
+    [...b.members].some(
+      ([id, member]) => a.members.get(id)?.activity !== member.activity,
     )
   );
 }
@@ -176,6 +311,19 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
         : { kind: "live" },
   };
 }
+function latestWindow(channel: Channel): Channel {
+  return {
+    ...channel,
+    messages: channel.latestMessages,
+    runs:
+      channel.latestMessages.size > 0
+        ? [[...channel.latestMessages.keys()]]
+        : [],
+    viewMode: "following",
+    history: { kind: "idle" },
+    exhausted: false,
+  };
+}
 export function reduce(state: State, event: Event): State {
   switch (event.type) {
     case "space": {
@@ -209,6 +357,22 @@ export function reduce(state: State, event: Event): State {
     }
     case "older":
       return requestHistory(state, event.key);
+    case "latest": {
+      const channel = state.channels.get(event.key);
+      if (!channel) return state;
+      const channels = new Map(state.channels);
+      channels.set(event.key, latestWindow(channel));
+      let sync = state.sync;
+      if (sync.kind === "replaying") {
+        const staged = sync.pending.get(event.key);
+        if (staged) {
+          const pending = new Map(sync.pending);
+          pending.set(event.key, latestWindow(staged));
+          sync = { ...sync, pending };
+        }
+      }
+      return { ...state, channels, sync };
+    }
     case "history": {
       const channel = state.channels.get(event.request.key);
       if (
@@ -242,23 +406,23 @@ export function reduce(state: State, event: Event): State {
         const messages = new Map(channel.messages);
         for (const row of event.result.messages)
           if (!messages.has(row.id)) messages.set(row.id, row);
-        next = {
-          ...channel,
-          messages,
-          runs: mergeContiguousRuns(channel.runs, [
-            ...event.result.messages.map((row) => row.id),
-            event.request.before,
-          ]),
-          history: { kind: "idle" },
-          exhausted:
-            channel.exhausted ||
-            (event.request.purpose === "older" &&
-              event.result.messages.length === 0),
-        };
-        if (
-          next.runs.length > 1 &&
-          JSON.stringify(next.runs) === JSON.stringify(channel.runs)
-        )
+        next = capWindow(
+          {
+            ...channel,
+            messages,
+            runs: mergeContiguousRuns(channel.runs, [
+              ...event.result.messages.map((row) => row.id),
+              event.request.before,
+            ]),
+            history: { kind: "idle" },
+            exhausted:
+              channel.exhausted ||
+              (event.request.purpose === "older" &&
+                event.result.messages.length === 0),
+          },
+          "newest",
+        );
+        if (next.runs.length > 1 && sameRuns(next.runs, channel.runs))
           next = {
             ...next,
             history: {
@@ -378,7 +542,7 @@ export type ThreadGroup = {
   knownCount: number;
 };
 export function threadGroups(
-  channel: Channel,
+  channel: Pick<Channel, "messages" | "runs" | "threads">,
 ): ReadonlyMap<string, ThreadGroup> {
   const groups = new Map<
     string,
@@ -406,8 +570,10 @@ export type TimelineRow =
   | { kind: "message"; message: Message; thread: ThreadGroup }
   | { kind: "orphan"; message: Message; thread: ThreadGroup }
   | { kind: "gap"; before: string };
-export function timelineView(channel: Channel): readonly TimelineRow[] {
-  const groups = threadGroups(channel);
+export function timelineView(
+  channel: Pick<Channel, "messages" | "runs" | "threads">,
+  groups: ReadonlyMap<string, ThreadGroup> = threadGroups(channel),
+): readonly TimelineRow[] {
   const rows: TimelineRow[] = [];
   for (const [index, run] of channel.runs.entries()) {
     const before = run[0];
