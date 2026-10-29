@@ -1174,9 +1174,8 @@ else:
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
-            stream
-                .write_all(request.as_bytes())
-                .expect("send the entire large request");
+            // An early refusal can close the socket before the whole body is sent.
+            let write_result = stream.write_all(request.as_bytes());
             let mut response = Vec::new();
             stream
                 .read_to_end(&mut response)
@@ -1187,6 +1186,9 @@ else:
                 "{response}"
             );
             assert!(response.contains("Connection: close\r\n"));
+            if let Err(error) = write_result {
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
+            }
         }
         assert_eq!(f.message_rows(), (0, 0));
     }
