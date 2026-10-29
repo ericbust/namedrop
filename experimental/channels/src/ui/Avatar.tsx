@@ -9,14 +9,14 @@ export function Avatar({
   presence,
 }: {
   alias: string;
-  type: MemberKind["type"];
+  type: MemberKind["type"] | "unresolved";
   small?: boolean;
   presence?: Activity;
 }) {
   const tone =
     type === "human"
       ? "id-operator"
-      : type === "terminal"
+      : type === "terminal" || type === "unresolved"
         ? "id-terminal"
         : `id-${avatarHue(alias)}`;
   return (
@@ -25,6 +25,8 @@ export function Avatar({
         <Icon name="prompt" />
       ) : type === "human" ? (
         "Y"
+      ) : type === "unresolved" ? (
+        "?"
       ) : (
         ([...alias.replace(/^@/, "")][0] ?? "?").toUpperCase()
       )}

@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Activity, ChannelSnapshot, State } from "./model.ts";
+import type { Activity, ChannelSnapshot, ComposerId, State } from "./model.ts";
 import {
   channelSuffix,
   connectionStatus,
+  draftKey,
   exitFor,
+  homesOf,
   initialState,
   type MessageRow,
   reduce,
+  replyRecipients,
+  participant as resolve,
   runsByMessage,
   sortedChannels,
   type TimelineRow,
@@ -2259,4 +2263,532 @@ test("design-b: each terminal reply gets the latest run that started at or befor
   assert.equal(exit("r2"), 0);
   assert.equal(exit("r0"), undefined);
   assert.equal(exit("m1"), undefined);
+});
+
+const alphaKey = parsed(snapshot()).key;
+const alphaBox = { key: alphaKey, thread: null };
+const threadBox = { key: alphaKey, thread: "t1" };
+function outgoing(requestId = "r1", source = "@codex hi") {
+  return {
+    requestId,
+    composer: alphaBox,
+    source,
+    inReplyTo: null,
+    at: 1,
+  };
+}
+function phases(state: State): Record<string, string> {
+  return Object.fromEntries(
+    [...state.outbox].map(([id, entry]) => [id, entry.phase.kind]),
+  );
+}
+test("outbox: a send is pending until accepted, then a frame carrying its row drops it", () => {
+  const ready = apply(initialState(), snapshot());
+  const sending = reduce(ready, { type: "send", outgoing: outgoing() });
+  assert.deepEqual(phases(sending), { r1: "sending" });
+  assert.equal(
+    reduce(sending, { type: "send", outgoing: outgoing() }),
+    sending,
+    "a second send with the same id while sending changes nothing",
+  );
+  const sent = reduce(sending, {
+    type: "sent",
+    requestId: "r1",
+    messageId: "posted",
+  });
+  assert.deepEqual(phases(sent), { r1: "sent" });
+  const unrelated = snapshot();
+  unrelated.frame.messages.push(message("other"));
+  assert.deepEqual(phases(apply(sent, unrelated)), { r1: "sent" });
+  const arrived = snapshot();
+  arrived.frame.messages.push({ ...message("posted"), author: "human" });
+  const settled = apply(sent, arrived);
+  assert.deepEqual(phases(settled), {});
+  assert.ok(settled.channels.get(parsed(arrived).key)?.messages.has("posted"));
+});
+test("outbox: a row that lands in another channel still settles the send", () => {
+  const state = reduce(twoChannels(), { type: "send", outgoing: outgoing() });
+  const sent = reduce(state, {
+    type: "sent",
+    requestId: "r1",
+    messageId: "cross",
+  });
+  const beta = snapshot(keyB, "beta", "w2");
+  beta.frame.messages.push(message("cross"));
+  assert.deepEqual(phases(apply(sent, beta)), {});
+});
+test("outbox: an acceptance that arrives after its row settles at once", () => {
+  const arrived = snapshot();
+  arrived.frame.messages.push(message("early"));
+  const state = reduce(apply(initialState(), snapshot()), {
+    type: "send",
+    outgoing: outgoing(),
+  });
+  const withRow = apply(state, arrived);
+  assert.deepEqual(phases(withRow), { r1: "sending" });
+  assert.deepEqual(
+    phases(
+      reduce(withRow, { type: "sent", requestId: "r1", messageId: "early" }),
+    ),
+    {},
+  );
+});
+test("outbox: replayed rows settle a send only when the replay commits", () => {
+  const sent = reduce(
+    reduce(apply(initialState(), snapshot()), {
+      type: "send",
+      outgoing: outgoing(),
+    }),
+    { type: "sent", requestId: "r1", messageId: "replayed" },
+  );
+  const replaying = reduce(sent, { type: "opened" });
+  const arrived = snapshot();
+  arrived.frame.messages.push(message("replayed"));
+  const staged = apply(replaying, arrived);
+  assert.deepEqual(phases(staged), { r1: "sent" });
+  const committed = reduce(staged, {
+    type: "ready",
+    keys: new Set([parsed(arrived).key]),
+  });
+  assert.deepEqual(phases(committed), {});
+});
+test("drafts: each composer keeps its own text across switches, and an emptied draft is dropped", () => {
+  const state = twoChannels();
+  const typed = reduce(
+    reduce(state, { type: "edit", composer: alphaBox, text: "hello" }),
+    { type: "edit", composer: threadBox, text: "half a reply" },
+  );
+  assert.deepEqual(
+    [...typed.drafts.values()],
+    [
+      {
+        key: alphaKey,
+        thread: null,
+        text: "hello",
+        attempt: null,
+        failure: null,
+      },
+      {
+        key: alphaKey,
+        thread: "t1",
+        text: "half a reply",
+        attempt: null,
+        failure: null,
+      },
+    ],
+  );
+  assert.equal(typed.drafts.get(draftKey(alphaBox))?.text, "hello");
+  assert.equal(
+    reduce(typed, { type: "edit", composer: alphaBox, text: "hello" }),
+    typed,
+    "an unchanged edit changes nothing",
+  );
+  const switched = reduce(typed, {
+    type: "select",
+    key: parsed(snapshot(keyB, "beta", "w2")).key,
+  });
+  assert.equal(switched.drafts, typed.drafts, "switching keeps the drafts");
+  const closed = reduce(reduce(typed, { type: "thread", threadId: "t1" }), {
+    type: "thread",
+    threadId: null,
+  });
+  assert.equal(closed.drafts, typed.drafts, "closing the thread keeps it");
+  const emptied = reduce(typed, { type: "edit", composer: alphaBox, text: "" });
+  assert.deepEqual([...emptied.drafts.keys()], [draftKey(threadBox)]);
+  assert.equal(
+    reduce(emptied, { type: "edit", composer: alphaBox, text: "" }),
+    emptied,
+  );
+});
+const attempt1 = { requestId: "r1", source: "@codex hi", inReplyTo: null };
+const refusal = {
+  type: "send-failed",
+  requestId: "r1",
+  status: 400,
+  message: "Nope",
+} as const;
+function sendingAlpha(): State {
+  const ready = reduce(apply(initialState(), snapshot()), {
+    type: "edit",
+    composer: alphaBox,
+    text: "@codex hi",
+  });
+  return reduce(ready, { type: "send", outgoing: outgoing() });
+}
+test("drafts: a refused send returns to its composer's draft with the error and its attempt, and leaves the outbox", () => {
+  const sending = sendingAlpha();
+  assert.equal(
+    sending.drafts.get(draftKey(alphaBox))?.text,
+    "@codex hi",
+    "the box keeps its text while sending",
+  );
+  const failed = reduce(sending, refusal);
+  assert.deepEqual(phases(failed), {}, "nothing lingers in the outbox");
+  assert.deepEqual(failed.drafts.get(draftKey(alphaBox)), {
+    key: alphaKey,
+    thread: null,
+    text: "@codex hi",
+    attempt: attempt1,
+    failure: { status: 400, message: "Nope" },
+  });
+  assert.equal(
+    reduce(failed, { type: "sent", requestId: "r1", messageId: "late" }),
+    failed,
+    "a late result for a refused send changes nothing",
+  );
+  const retried = reduce(failed, {
+    type: "send",
+    outgoing: { ...outgoing(), at: 2 },
+  });
+  assert.deepEqual(phases(retried), { r1: "sending" });
+  assert.equal(retried.outbox.get("r1")?.at, 2);
+  assert.deepEqual(
+    retried.drafts.get(draftKey(alphaBox)),
+    {
+      key: alphaKey,
+      thread: null,
+      text: "@codex hi",
+      attempt: attempt1,
+      failure: null,
+    },
+    "sending again hides the error and keeps the text and the attempt",
+  );
+  assert.equal(
+    reduce(retried, { type: "sent", requestId: "missing", messageId: "x" }),
+    retried,
+  );
+  const edited = reduce(failed, {
+    type: "edit",
+    composer: alphaBox,
+    text: "@codex hi!",
+  });
+  assert.deepEqual(
+    edited.drafts.get(draftKey(alphaBox)),
+    {
+      key: alphaKey,
+      thread: null,
+      text: "@codex hi!",
+      attempt: attempt1,
+      failure: null,
+    },
+    "editing clears the error and keeps the attempt",
+  );
+});
+test("drafts: a refused draft keeps its attempt through edits that empty or restore the text, until a success", () => {
+  const failed = reduce(sendingAlpha(), refusal);
+  const edit = (state: State, text: string) =>
+    reduce(state, { type: "edit", composer: alphaBox, text });
+  const draft = (state: State) => state.drafts.get(draftKey(alphaBox));
+  const roundTrip = edit(edit(failed, "@codex hix"), "@codex hi");
+  assert.deepEqual(draft(roundTrip)?.attempt, attempt1, "a round trip");
+  assert.equal(draft(roundTrip)?.failure, null);
+  const emptied = edit(failed, "");
+  assert.deepEqual(
+    draft(emptied),
+    {
+      key: alphaKey,
+      thread: null,
+      text: "",
+      attempt: attempt1,
+      failure: null,
+    },
+    "an emptied refused draft stays, with its attempt",
+  );
+  assert.equal(edit(emptied, ""), emptied, "emptying it again changes nothing");
+  assert.deepEqual(
+    draft(edit(emptied, "@codex hi"))?.attempt,
+    attempt1,
+    "pasting the text back",
+  );
+  const replaced = reduce(
+    reduce(edit(failed, "@codex hi!"), {
+      type: "send",
+      outgoing: outgoing("r2", "@codex hi!"),
+    }),
+    { type: "send-failed", requestId: "r2", status: 503, message: "" },
+  );
+  assert.deepEqual(
+    draft(replaced),
+    {
+      key: alphaKey,
+      thread: null,
+      text: "@codex hi!",
+      attempt: { requestId: "r2", source: "@codex hi!", inReplyTo: null },
+      failure: { status: 503, message: "" },
+    },
+    "a refusal of different text replaces the attempt",
+  );
+  const sent = reduce(
+    reduce(roundTrip, { type: "send", outgoing: { ...outgoing(), at: 3 } }),
+    { type: "sent", requestId: "r1", messageId: "posted" },
+  );
+  assert.equal(draft(sent), undefined, "a success forgets the attempt");
+});
+test("drafts: attempts never move between drafts, even with the same text", () => {
+  const same = (
+    composer: ComposerId,
+    requestId: string,
+    inReplyTo: string | null = null,
+  ) => [
+    { type: "edit", composer, text: "@codex same" } as const,
+    {
+      type: "send",
+      outgoing: { ...outgoing(requestId, "@codex same"), composer, inReplyTo },
+    } as const,
+    { type: "send-failed", requestId, status: 503, message: "" } as const,
+  ];
+  const betaBox = {
+    key: parsed(snapshot(keyB, "beta", "w2")).key,
+    thread: null,
+  };
+  const state = [
+    ...same(alphaBox, "r1"),
+    ...same(betaBox, "r2"),
+    ...same(threadBox, "r3", "m1"),
+  ].reduce(reduce, twoChannels());
+  const attempts = [alphaBox, betaBox, threadBox].map(
+    (composer) => state.drafts.get(draftKey(composer))?.attempt,
+  );
+  assert.deepEqual(attempts, [
+    { requestId: "r1", source: "@codex same", inReplyTo: null },
+    { requestId: "r2", source: "@codex same", inReplyTo: null },
+    { requestId: "r3", source: "@codex same", inReplyTo: "m1" },
+  ]);
+});
+test("drafts: an accepted send clears its composer's draft, and a refusal with no draft restores the sent text", () => {
+  const sent = reduce(
+    reduce(
+      reduce(apply(initialState(), snapshot()), {
+        type: "edit",
+        composer: alphaBox,
+        text: "@codex hi",
+      }),
+      { type: "send", outgoing: outgoing() },
+    ),
+    { type: "sent", requestId: "r1", messageId: "posted" },
+  );
+  assert.deepEqual(phases(sent), { r1: "sent" });
+  assert.equal(sent.drafts.has(draftKey(alphaBox)), false);
+  const reply = {
+    ...outgoing("r2", "#alpha @codex thanks"),
+    composer: threadBox,
+    inReplyTo: "m1",
+  };
+  const failed = reduce(
+    reduce(apply(initialState(), snapshot()), {
+      type: "send",
+      outgoing: reply,
+    }),
+    { type: "send-failed", requestId: "r2", status: 0, message: "" },
+  );
+  assert.deepEqual(phases(failed), {});
+  assert.deepEqual(failed.drafts.get(draftKey(threadBox)), {
+    key: alphaKey,
+    thread: "t1",
+    text: "#alpha @codex thanks",
+    attempt: {
+      requestId: "r2",
+      source: "#alpha @codex thanks",
+      inReplyTo: "m1",
+    },
+    failure: { status: 0, message: "" },
+  });
+});
+test("participants: envoys resolve through their home channel, else read in plain words", () => {
+  const alpha = parsed(snapshot(keyA, "alpha", "w1"));
+  const home = snapshot(keyB, "beta", "w2");
+  home.frame.participants = [{ ...participant("pane-9"), alias: "@reviewer" }];
+  const beta = parsed(home);
+  const homes = homesOf([alpha, beta], undefined);
+  assert.equal(homesOf([alpha, beta], homes), homes, "unchanged homes reuse");
+  const directory = { members: alpha.members, homes };
+  const id = (raw: string) => {
+    const [leg] =
+      parsed({
+        ...snapshot(),
+        frame: {
+          ...snapshot().frame,
+          messages: [
+            { ...message(), legs: [{ to: raw, stage: { stage: "queued" } }] },
+          ],
+        },
+      }).messages.get("m1")?.legs ?? [];
+    assert.ok(leg);
+    return leg.to;
+  };
+  assert.deepEqual(resolve(directory, "human"), { kind: "operator" });
+  assert.equal(resolve(directory, id("agent-1")).kind, "member");
+  const remote = resolve(directory, id("envoy:w2:pane-9"));
+  assert.ok(remote.kind === "member");
+  assert.equal(remote.member.alias, "@reviewer");
+  assert.equal(remote.home?.name, "#beta");
+  assert.deepEqual(resolve(directory, id("envoy:w2:pane-gone")), {
+    kind: "envoy",
+    id: "envoy:w2:pane-gone",
+    home: homes.get("w2"),
+  });
+  assert.deepEqual(resolve(directory, id("envoy:w7:pane-9")), {
+    kind: "envoy",
+    id: "envoy:w7:pane-9",
+    home: null,
+  });
+  assert.deepEqual(resolve(directory, id("stranger")), {
+    kind: "unknown",
+    id: "stranger",
+  });
+});
+test("thread recipients: the agents who wrote, else the parent's recipients, never the operator", () => {
+  const operator: unknown = {
+    ...participant("human"),
+    alias: "you",
+    kind: { type: "human" },
+  };
+  const parent = {
+    ...message("parent"),
+    author: "human",
+    legs: [{ to: "agent-2", stage: { stage: "queued" } }],
+  };
+  const answer = {
+    ...message("answer"),
+    thread_id: "parent",
+    in_reply_to: "parent",
+    kind: "reply",
+    author: "agent-1",
+  };
+  const thread = (messages: unknown[]) => {
+    const value = snapshot();
+    const channel = parsed({
+      ...value,
+      frame: {
+        ...value.frame,
+        participants: [
+          participant("agent-1"),
+          { ...participant("agent-2"), alias: "@claude" },
+          operator,
+        ],
+        messages,
+      },
+    });
+    const group = threadGroups({
+      ...channel,
+      runs: [[...channel.messages.keys()]],
+    }).get("parent");
+    assert.ok(group);
+    return replyRecipients(group, {
+      members: channel.members,
+      homes: new Map(),
+    });
+  };
+  assert.deepEqual(thread([parent]), {
+    names: ["@claude"],
+    mentions: "@claude",
+  });
+  assert.deepEqual(thread([parent, answer]), {
+    names: ["@codex"],
+    mentions: "@codex",
+  });
+});
+test("thread recipients: a reply goes to the workspace of the latest agent message, named through its home channel's token", () => {
+  const agent = (address_id: string, alias: string) => ({
+    ...participant(address_id),
+    alias,
+  });
+  const channel = (
+    key: string,
+    workspace: string,
+    label: string | null,
+    participants: unknown[],
+  ) => {
+    const value = snapshot(key, label ?? workspace, workspace);
+    return parsed({
+      ...value,
+      frame: {
+        ...value.frame,
+        space: { ...value.frame.space, addressable_label: label },
+        participants,
+        messages: [],
+      },
+    });
+  };
+  const here = channel(keyA, "w1", "testbed", [
+    agent("agent-1", "@codex"),
+    agent("agent-2", "@claude"),
+  ]);
+  const homes = homesOf(
+    [
+      here,
+      channel(keyB, "w2", "alpha", [agent("pane-9", "@lead")]),
+      channel("c".repeat(20), "w3", "beta", [agent("pane-4", "@reviewer")]),
+      channel("d".repeat(20), "w4", null, [agent("pane-5", "@ghost")]),
+    ],
+    undefined,
+  );
+  const directory = { members: here.members, homes };
+  const thread = (authors: string[], asked: string[] = []) => {
+    const parent = {
+      ...message("parent"),
+      author: "human",
+      legs: asked.map((to) => ({ to, stage: { stage: "queued" } })),
+    };
+    const replies = authors.map((author, n) => ({
+      ...message(`reply-${n}`),
+      thread_id: "parent",
+      in_reply_to: "parent",
+      kind: "reply",
+      at_ms: 200 + n,
+      author,
+    }));
+    const value = snapshot();
+    const parsedChannel = parsed({
+      ...value,
+      frame: { ...value.frame, messages: [parent, ...replies] },
+    });
+    const group = threadGroups({
+      ...parsedChannel,
+      runs: [[...parsedChannel.messages.keys()]],
+    }).get("parent");
+    assert.ok(group);
+    return replyRecipients(group, directory);
+  };
+  assert.deepEqual(
+    thread(["envoy:w2:pane-9"]),
+    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
+    "an envoy whose home channel has a token",
+  );
+  assert.deepEqual(
+    thread(["agent-1"]),
+    { names: ["@codex"], mentions: "@codex" },
+    "local only",
+  );
+  assert.deepEqual(
+    thread([], ["envoy:w2:pane-9"]),
+    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
+    "an envoy the parent asked",
+  );
+  assert.deepEqual(
+    thread(["agent-1", "envoy:w2:pane-9", "agent-2"]),
+    { names: ["@codex", "@claude"], mentions: "@codex @claude" },
+    "mixed, latest local: every local agent who wrote, and no envoy",
+  );
+  assert.deepEqual(
+    thread(["agent-1", "envoy:w3:pane-4", "envoy:w2:pane-9"]),
+    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
+    "mixed, latest an envoy: only that envoy's workspace",
+  );
+  assert.deepEqual(
+    thread([], ["envoy:w2:pane-9", "agent-1"]),
+    { names: ["@lead · #alpha"], mentions: "#alpha @lead" },
+    "no agent wrote: the parent's recipients from its first recipient's workspace",
+  );
+  assert.deepEqual(
+    thread([], ["agent-1", "envoy:w2:pane-9", "agent-2"]),
+    { names: ["@codex", "@claude"], mentions: "@codex @claude" },
+    "no agent wrote, first recipient local",
+  );
+  assert.equal(
+    thread(["agent-1", "envoy:w4:pane-5"]),
+    null,
+    "latest agent's workspace has no token: nobody left",
+  );
+  assert.equal(thread(["envoy:w4:pane-5"]), null, "nobody left");
 });

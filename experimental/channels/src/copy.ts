@@ -1,9 +1,21 @@
-import type { Activity, Attention, DeliveryStage, Health } from "./model.ts";
+import type { DisabledReason } from "./complete.ts";
+import type {
+  Activity,
+  Attention,
+  ChannelSnapshot,
+  DeliveryStage,
+  Health,
+  MemberKind,
+  OutgoingPhase,
+  Participant,
+  SendFailure,
+} from "./model.ts";
 
 export type IconName =
   | "alert"
   | "arrow"
   | "arrowDown"
+  | "arrowUp"
   | "bell"
   | "cancelled"
   | "check"
@@ -42,7 +54,8 @@ const completedCopy: ReadonlyMap<string, ReceiptCopy> = new Map([
   ["settled", done],
   ["no_reply", { ...done, label: "Done, no reply needed" }],
 ]);
-export function receiptCopy(stage: DeliveryStage): ReceiptCopy {
+export function receiptCopy(stage: DeliveryStage, paused = false): ReceiptCopy {
+  if (paused && stage.stage === "queued") return stageCopy.held;
   if (stage.stage !== "completed") return stageCopy[stage.stage];
   return completedCopy.get(stage.kind) ?? { ...done, title: stage.kind };
 }
@@ -216,4 +229,126 @@ export function dayBounds(ms: number): { start: number; end: number } {
   const start = date.getTime();
   date.setDate(date.getDate() + 1);
   return { start, end: date.getTime() };
+}
+
+export const pendingCopy = {
+  sending: { label: "Sending…", icon: "clock" },
+  sent: { label: "Sent", icon: "check" },
+} satisfies Record<OutgoingPhase["kind"], { label: string; icon: IconName }>;
+
+const couldNotSend = "Namedrop couldn't send this. Try again.";
+const sessionExpired = () =>
+  "Your session expired. Reload the page to keep posting.";
+function serverSays(message: string): string {
+  const text = message.trim();
+  if (!text) return couldNotSend;
+  const sentence = `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+  return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+const sendErrors: ReadonlyMap<number, (message: string) => string> = new Map([
+  [400, serverSays],
+  [404, serverSays],
+  [409, serverSays],
+  [401, sessionExpired],
+  [403, sessionExpired],
+  [413, () => "This message is too long."],
+]);
+export function sendErrorCopy({ status, message }: SendFailure): string {
+  return (sendErrors.get(status) ?? (() => couldNotSend))(message);
+}
+
+export const composerCopy = {
+  hint: "Enter to send · Shift+Enter for a new line",
+  sending: "Sending…",
+  send: "Send",
+  everyWorkspace: "every workspace",
+  needsRecipient: "Start with @name to choose who gets this.",
+  postNotSent: "A post wasn't sent",
+  replyNotSent: "Reply not sent · Open thread",
+};
+export function channelToken(
+  channel: Pick<ChannelSnapshot, "addressableLabel">,
+): string | null {
+  return channel.addressableLabel === null
+    ? null
+    : `#${channel.addressableLabel}`;
+}
+export function channelMention(
+  channel: Pick<ChannelSnapshot, "addressableLabel" | "displayName">,
+): string {
+  return channelToken(channel) ?? channel.displayName;
+}
+export function composerPlaceholder(
+  channel: Pick<ChannelSnapshot, "addressableLabel" | "displayName">,
+): string {
+  return `Message ${channelMention(channel)}`;
+}
+const noOneToReplyTo =
+  "No one in this thread can be mentioned. Start with @name to choose someone.";
+// The "To" label above the box already names the recipients.
+export function replyPlaceholder(recipients: readonly string[]): string {
+  return recipients.length === 0 ? noOneToReplyTo : "Write a reply";
+}
+export function replyLabel(recipients: readonly string[]): string {
+  return recipients.length === 0
+    ? noOneToReplyTo
+    : `Reply to ${recipients.join(", ")}`;
+}
+export function recipientsLabel(recipients: readonly string[]): string {
+  return `To ${recipients.join(", ")}`;
+}
+export const disabledChannelCopy = {
+  "unusable-label":
+    "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr.",
+  "no-label": "This workspace has no label in Herdr. Name it to mention it.",
+  "shared-name":
+    "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there.",
+  unknown:
+    "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.",
+} satisfies Record<DisabledReason, string>;
+
+export const SHOWN_RECIPIENTS = 2;
+export function overflowCopy(hidden: number): string {
+  return `+${hidden}`;
+}
+
+export type ParticipantCopy = {
+  name: string;
+  suffix: string | null;
+  title: string | null;
+  avatar: MemberKind["type"] | "unresolved";
+};
+export function participantCopy(who: Participant): ParticipantCopy {
+  switch (who.kind) {
+    case "operator":
+      return { name: "You", suffix: null, title: null, avatar: "human" };
+    case "member":
+      return {
+        name: who.member.alias,
+        suffix: who.home?.name ?? null,
+        title: null,
+        avatar: who.member.kind.type,
+      };
+    case "envoy":
+      return {
+        name:
+          who.home === null
+            ? "an agent in another workspace"
+            : `an agent in ${who.home.name}`,
+        suffix: null,
+        title: who.id,
+        avatar: "unresolved",
+      };
+    case "unknown":
+      return {
+        name: "an unknown agent",
+        suffix: null,
+        title: who.id,
+        avatar: "unresolved",
+      };
+    default: {
+      const exhaustive: never = who;
+      return exhaustive;
+    }
+  }
 }

@@ -1,12 +1,19 @@
-import { dayBounds, dayLabel } from "./copy.ts";
+import { channelMention, channelToken, dayBounds, dayLabel } from "./copy.ts";
 import type {
   AddressId,
   Channel,
   ChannelSnapshot,
+  ComposerId,
+  Directory,
+  DraftKey,
   Event,
   HistoryRequest,
+  Home,
   Landing,
   Message,
+  Outgoing,
+  Participant,
+  ReplyTo,
   Selection,
   SpaceKey,
   State,
@@ -36,6 +43,8 @@ export function initialState({
     visible,
     viewKnown: false,
     nextRequestId: 1,
+    outbox: new Map(),
+    drafts: new Map(),
   };
 }
 export const HISTORY_CAP = 600;
@@ -350,6 +359,7 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
     channels,
     selection,
     unread,
+    outbox: settleOutbox(state.outbox, [...channels.values()]),
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
     sync: { kind: keys === null ? "fallback" : "live" },
     landing:
@@ -475,7 +485,14 @@ function step(state: State, event: Event): State {
         !(selection.key === channel.key && state.visible)
       )
         unread = new Set([...unread, channel.key]);
-      return { ...state, channels, selection, unread, viewKnown: true };
+      return {
+        ...state,
+        channels,
+        selection,
+        unread,
+        outbox: settleOutbox(state.outbox, [accumulated]),
+        viewKnown: true,
+      };
     }
     case "older":
       return requestHistory(state, event.key);
@@ -653,11 +670,121 @@ function step(state: State, event: Event): State {
       return state.visible === event.visible
         ? state
         : { ...state, visible: event.visible };
+    case "edit": {
+      const at = draftKey(event.composer);
+      const known = state.drafts.get(at);
+      if (
+        known === undefined
+          ? event.text === ""
+          : known.text === event.text && known.failure === null
+      )
+        return state;
+      const drafts = new Map(state.drafts);
+      const attempt = known?.attempt ?? null;
+      if (event.text === "" && attempt === null) drafts.delete(at);
+      else
+        drafts.set(at, {
+          ...event.composer,
+          text: event.text,
+          attempt,
+          failure: null,
+        });
+      return { ...state, drafts };
+    }
+    case "send": {
+      const { outgoing } = event;
+      if (state.outbox.has(outgoing.requestId)) return state;
+      const outbox = new Map(state.outbox);
+      outbox.set(outgoing.requestId, {
+        ...outgoing,
+        phase: { kind: "sending" },
+      });
+      const at = draftKey(outgoing.composer);
+      const draft = state.drafts.get(at);
+      return {
+        ...state,
+        outbox,
+        drafts: draft?.failure
+          ? new Map(state.drafts).set(at, { ...draft, failure: null })
+          : state.drafts,
+      };
+    }
+    case "sent": {
+      const known = state.outbox.get(event.requestId);
+      if (known?.phase.kind !== "sending") return state;
+      const outbox = new Map(state.outbox);
+      outbox.set(event.requestId, {
+        ...known,
+        phase: { kind: "sent", messageId: event.messageId },
+      });
+      const drafts = new Map(state.drafts);
+      drafts.delete(draftKey(known.composer));
+      return {
+        ...state,
+        outbox: settleOutbox(outbox, [...state.channels.values()]),
+        drafts,
+      };
+    }
+    case "send-failed": {
+      const known = state.outbox.get(event.requestId);
+      if (known?.phase.kind !== "sending") return state;
+      const outbox = new Map(state.outbox);
+      outbox.delete(event.requestId);
+      const at = draftKey(known.composer);
+      const drafts = new Map(state.drafts);
+      drafts.set(at, {
+        ...known.composer,
+        text: state.drafts.get(at)?.text ?? known.source,
+        attempt: {
+          requestId: event.requestId,
+          source: known.source,
+          inReplyTo: known.inReplyTo,
+        },
+        failure: { status: event.status, message: event.message },
+      });
+      return { ...state, outbox, drafts };
+    }
     default: {
       const exhaustive: never = event;
       return exhaustive;
     }
   }
+}
+function settleOutbox(
+  outbox: ReadonlyMap<string, Outgoing>,
+  channels: readonly Channel[],
+): ReadonlyMap<string, Outgoing> {
+  let settled: Map<string, Outgoing> | undefined;
+  for (const [requestId, { phase }] of outbox) {
+    if (phase.kind !== "sent") continue;
+    const arrived = channels.some(
+      (channel) =>
+        channel.messages.has(phase.messageId) ||
+        channel.latestMessages.has(phase.messageId),
+    );
+    if (!arrived) continue;
+    settled ??= new Map(outbox);
+    settled.delete(requestId);
+  }
+  return settled ?? outbox;
+}
+export function draftKey({ key, thread }: ComposerId): DraftKey {
+  return thread === null ? `channel:${key}` : `thread:${thread}`;
+}
+export function sameComposer(a: ComposerId, b: ComposerId): boolean {
+  return a.key === b.key && a.thread === b.thread;
+}
+export function inFlight(
+  outbox: ReadonlyMap<string, Outgoing>,
+  composer: ComposerId,
+): boolean {
+  for (const entry of outbox.values())
+    if (
+      entry.phase.kind === "sending" &&
+      sameComposer(entry.composer, composer)
+    )
+      return true;
+  return false;
 }
 export function sortedChannels(state: {
   channels: ReadonlyMap<SpaceKey, Channel>;
@@ -670,8 +797,8 @@ export function sortedChannels(state: {
   );
 }
 export function channelSuffix(
-  channel: ChannelSnapshot,
-  channels: Iterable<ChannelSnapshot>,
+  channel: Pick<ChannelSnapshot, "key" | "displayName" | "workspaceId">,
+  channels: Iterable<Pick<ChannelSnapshot, "displayName">>,
 ): string | null {
   let sameName = 0;
   for (const other of channels)
@@ -732,7 +859,7 @@ export type TimelineRow =
   | MessageRow
   | { kind: "gap"; before: string }
   | { kind: "day"; label: string; before: string };
-const GROUP_WINDOW = 5 * 60_000;
+export const GROUP_WINDOW = 5 * 60_000;
 const noRecipients: readonly AddressId[] = [];
 const recipientCache = new WeakMap<Message, readonly AddressId[]>();
 export function recipients(message: Message): readonly AddressId[] {
@@ -833,4 +960,82 @@ export function exitFor(
   return runs
     .get(reply.inReplyTo)
     ?.find((run) => run.terminal === reply.author && run.startedAt <= reply.at);
+}
+export function homesOf(
+  channels: Iterable<ChannelSnapshot>,
+  previous: ReadonlyMap<string, Home> | undefined,
+): ReadonlyMap<string, Home> {
+  const homes = new Map<string, Home>();
+  for (const channel of channels) {
+    if (homes.has(channel.workspaceId)) continue;
+    const name = channelMention(channel);
+    const token = channelToken(channel);
+    const old = previous?.get(channel.workspaceId);
+    homes.set(
+      channel.workspaceId,
+      old?.name === name &&
+        old.token === token &&
+        old.members === channel.members
+        ? old
+        : { name, token, members: channel.members },
+    );
+  }
+  return previous !== undefined &&
+    previous.size === homes.size &&
+    [...homes].every(([id, home]) => previous.get(id) === home)
+    ? previous
+    : homes;
+}
+const ENVOY = /^envoy:([^:]+):(.+)$/;
+export function participant(
+  { members, homes }: Directory,
+  id: AddressId | "human",
+): Participant {
+  if (id === "human") return { kind: "operator" };
+  const member = members.get(id);
+  if (member !== undefined)
+    return member.kind.type === "human"
+      ? { kind: "operator" }
+      : { kind: "member", member, home: null };
+  const [, workspace, origin] = ENVOY.exec(id) ?? [];
+  if (workspace === undefined || origin === undefined)
+    return { kind: "unknown", id };
+  const home = homes.get(workspace);
+  const agent = home?.members.get(origin);
+  return home !== undefined && agent !== undefined
+    ? { kind: "member", member: agent, home }
+    : { kind: "envoy", id, home: home ?? null };
+}
+// The server looks every `@alias` up in every workspace a post names, so a reply
+// names one workspace, or it would reach same-named agents outside the thread.
+export function replyRecipients(
+  thread: ThreadGroup,
+  directory: Directory,
+): ReplyTo | null {
+  const agents = (ids: readonly (AddressId | "human")[]) =>
+    ids.flatMap((id) => {
+      const who = participant(directory, id);
+      return who.kind === "member" ? [who] : [];
+    });
+  const wrote = agents(
+    [...thread.parents, ...thread.replies].map((message) => message.author),
+  );
+  const pool =
+    wrote.length > 0 ? wrote : agents(thread.parents.flatMap(recipients));
+  const anchor = wrote.length > 0 ? wrote.at(-1) : pool[0];
+  if (anchor === undefined) return null;
+  const { home } = anchor;
+  const aliases = [
+    ...new Set(
+      pool.flatMap((who) => (who.home === home ? [who.member.alias] : [])),
+    ),
+  ];
+  if (home === null) return { names: aliases, mentions: aliases.join(" ") };
+  const { token } = home;
+  return token === null
+    ? null
+    : {
+        names: aliases.map((alias) => `${alias} · ${token}`),
+        mentions: `${token} ${aliases.join(" ")}`,
+      };
 }

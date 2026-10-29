@@ -116,6 +116,46 @@ export type Channel = ChannelSnapshot & {
   history: HistoryState;
   exhausted: boolean;
 };
+export type OutgoingPhase =
+  | { kind: "sending" }
+  | { kind: "sent"; messageId: string };
+export type ComposerId = { key: SpaceKey; thread: string | null };
+export type DraftKey = `channel:${SpaceKey}` | `thread:${string}`;
+export type SendAttempt = {
+  requestId: string;
+  source: string;
+  inReplyTo: string | null;
+};
+export type SendFailure = { status: number; message: string };
+// A refused draft keeps its attempt until a success, so the same post reuses
+// its id. The failure shows only until the next edit, and never without an attempt.
+export type Draft = ComposerId & { text: string } & (
+    | { attempt: null; failure: null }
+    | { attempt: SendAttempt; failure: SendFailure | null }
+  );
+export type Outgoing = {
+  requestId: string;
+  composer: ComposerId;
+  source: string;
+  inReplyTo: string | null;
+  at: number;
+  phase: OutgoingPhase;
+};
+export type Home = {
+  name: string;
+  token: string | null;
+  members: ReadonlyMap<string, Member>;
+};
+export type Directory = {
+  members: ReadonlyMap<AddressId, Member>;
+  homes: ReadonlyMap<string, Home>;
+};
+export type Participant =
+  | { kind: "operator" }
+  | { kind: "member"; member: Member; home: Home | null }
+  | { kind: "envoy"; id: AddressId; home: Home | null }
+  | { kind: "unknown"; id: AddressId };
+export type ReplyTo = { names: readonly string[]; mentions: string };
 export type WireEvent =
   | { type: "space"; channel: ChannelSnapshot }
   | { type: "gone"; key: SpaceKey }
@@ -141,7 +181,11 @@ export type Event =
   | { type: "discovery-timeout" }
   | { type: "input" }
   | { type: "disconnected" }
-  | { type: "visibility"; visible: boolean };
+  | { type: "visibility"; visible: boolean }
+  | { type: "edit"; composer: ComposerId; text: string }
+  | { type: "send"; outgoing: Omit<Outgoing, "phase"> }
+  | { type: "sent"; requestId: string; messageId: string }
+  | { type: "send-failed"; requestId: string; status: number; message: string };
 export type Sync =
   | { kind: "connecting" | "reconnecting" | "live" | "fallback" }
   | {
@@ -168,4 +212,6 @@ export type State = {
   visible: boolean;
   viewKnown: boolean;
   nextRequestId: number;
+  outbox: ReadonlyMap<string, Outgoing>;
+  drafts: ReadonlyMap<DraftKey, Draft>;
 };

@@ -76,6 +76,49 @@ test("item 1: rendered display names never invent mentions and exact tokens stay
   }
 });
 
+test("a channel whose post was refused while the reader was elsewhere shows the alert icon in its sidebar row", async () => {
+  const { Sidebar } = await load<typeof import("./ui/Sidebar.tsx")>(
+    "/src/ui/Sidebar.tsx",
+  );
+  const lines = await fixtures();
+  const event = space(JSON.parse(lines[0] ?? "null"));
+  const composer = { key: event.channel.key, thread: null };
+  const sending = reduce(
+    reduce(reduce(initialState(), event), {
+      type: "edit",
+      composer,
+      text: "@ghost hi",
+    }),
+    {
+      type: "send",
+      outgoing: {
+        requestId: "r1",
+        composer,
+        source: "@ghost hi",
+        inReplyTo: null,
+        at: 1,
+      },
+    },
+  );
+  const failed = reduce(sending, {
+    type: "send-failed",
+    requestId: "r1",
+    status: 400,
+    message: "Unknown mention: @ghost.",
+  });
+  const marker = /role="img" aria-label="A post wasn(?:'|&#x27;)t sent"/g;
+  const render = (state: typeof failed) =>
+    renderToStaticMarkup(createElement(Sidebar, { state, onSelect() {} }));
+  assert.equal((render(sending).match(marker) ?? []).length, 0);
+  assert.equal((render(failed).match(marker) ?? []).length, 1);
+  const edited = reduce(failed, {
+    type: "edit",
+    composer,
+    text: "@codex hi",
+  });
+  assert.equal((render(edited).match(marker) ?? []).length, 0);
+});
+
 test("item 6: paused and inactive channels with attention have no Needs you shortcuts, dots or banner", async () => {
   const { Sidebar } = await load<typeof import("./ui/Sidebar.tsx")>(
     "/src/ui/Sidebar.tsx",
@@ -273,7 +316,7 @@ test("a terminal run for the request decides Exit over the code in the result bo
     const markup = renderToStaticMarkup(
       createElement(Message, {
         message: result,
-        members: channel.members,
+        directory: { members: channel.members, homes: new Map() },
         recipients: [],
         exit: exitFor(runsByMessage(channel.terminalRuns), result),
       }),

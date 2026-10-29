@@ -168,7 +168,7 @@ thread pane scroll.
 - Only the Channels row of the selected channel gets the selected background.
   Its Needs-you row stays unselected.
 - **Footer**, 40px: the connection dot and "Live", "Connecting…", or
-  "Reconnecting…". Keep "Read only" at the right until UI-3 adds the composer.
+  "Reconnecting…".
 - Section labels are 12px 600 `--text-muted`, sentence case, with the count in
   tabular numerals. They are not headings. Each `nav` carries the section name
   as its `aria-label`, so the channel title is the page's first heading.
@@ -410,6 +410,150 @@ The way back is always at the bottom.
 - Scrolling down does not load newer pages. The history route only pages
   backward.
 
+### Composer
+
+The composer is how the operator talks to agents. It docks at the bottom of the
+main column, under the timeline, and at the bottom of the thread pane.
+
+- **Box**: 24px from the column's sides and 12px from its bottom. `--bg`, a 1px
+  `--line-strong` border, `--radius-lg`, 10px by 12px padding. The text area is
+  14px with 21px line height. It starts at one line, grows to eight, then
+  scrolls. While focused, the border turns `--accent` with a 3px ring of
+  `--accent` at 20 percent, mixed in sRGB.
+- **Placeholder**: "Message #alpha" for an addressable channel, else "Message
+  testbed ui2-live". In the thread pane, where the "To" label already names the
+  recipients: "Write a reply".
+- **Send button**: a 32px square at the right, `--radius-md`, with a drawn
+  arrow-up icon. It is `--accent` with `--on-accent` when there is text, and
+  muted and disabled when the box is empty. Its accessible name is "Send".
+- **Keys**: Enter sends, and Shift+Enter starts a new line. While the popup is
+  open, Enter and Tab accept the highlighted suggestion instead.
+- **Hint**: while the box has focus, a 12px muted line under it reads "Enter to
+  send · Shift+Enter for a new line".
+- The Jump to latest pill floats 16px above the composer, not above the
+  timeline's bottom edge.
+
+### Sending
+
+- Enter locks the box, which keeps its text, and shows "Sending…" in place of
+  the hint. A second Enter while sending does nothing, so a double Enter writes
+  one row.
+- At once, a pending row appears at the bottom of the timeline: the operator's
+  message at 60 percent opacity, with a clock icon and "Sending…" as its
+  receipt. In the thread pane it appears at the end of the replies.
+- When the server accepts the post, the box clears and unlocks, and the pending
+  receipt reads "Sent". When the real row arrives in a frame, it replaces the
+  pending row with no jump.
+- When the server refuses the post, the pending row goes away. The box keeps
+  the text, unlocks, and shows the error under it in 13px `--failed-text` with a
+  drawn alert icon. For 400, 404 and 409 the error is the server's own message,
+  such as "Unknown recipient @ghost". For 403 it reads "Your session expired.
+  Reload the page to keep posting." For 413 it reads "This message is too
+  long." For 401 it reads the same as 403. A server message shows with its first
+  letter capitalized and a final period. Anything else reads "Namedrop couldn't
+  send this. Try again." Editing the text clears the error.
+- A post must start with a recipient. When the text does not start with
+  `@name`, `#channel @name`, or `#all @name`, and the thread gives no recipients,
+  Enter does not send, and the Send button stays disabled. Only after Enter or
+  a click on Send does the hint line read "Start with @name to choose who gets
+  this." in `--text`. Typing clears it, so it never nags while a recipient is
+  still being typed.
+- A refused draft remembers its latest attempt: the request id and the exact
+  text and reply target it tried. Sending that same text again reuses the id,
+  even after edits that end back at the same text, so retrying an attempt whose
+  outcome is unknown can never post twice. Different text gets a new id, and a
+  new refusal replaces the remembered attempt. The attempt is forgotten only
+  after a success. Ids never move between drafts.
+- Every composer keeps its own draft for as long as the page is open: one per
+  channel and one per thread. Switching channels or closing a thread keeps the
+  text.
+- A post refused while you are elsewhere is never lost. Its text and its error
+  go back into the draft of the composer that sent it, and show when you return.
+  While any draft in a channel holds a refused post, the channel's sidebar row
+  shows a 14px alert icon in
+  `--failed-text` after its name, with the accessible name "A post wasn't sent".
+  A refused thread reply also shows "Reply not sent · Open thread" in 12px
+  `--failed-text` under its parent message, as a button that opens the thread.
+
+### Thread replies
+
+A follow-up must start with its recipients, and a reply goes to one workspace.
+Namedrop's grammar is one run of `#label` tokens, then one run of `@alias`
+mentions, and it looks every alias up in every named workspace, so mixing
+workspaces would reach agents who are not in the thread.
+
+- The recipients are the agents who wrote in the thread from the workspace of
+  the latest agent message. With no agent message yet, they are the parent's
+  recipients from the workspace of its first recipient. Never the operator.
+- The thread composer shows them as a muted label at the left of the box: "To
+  @codex", or "To @lead · #alpha" for another workspace, where the source starts
+  with that workspace's token, as in `#alpha @lead`.
+- When that workspace has no token, nobody can be addressed, and the box reads
+  "No one in this thread can be mentioned. Start with @name to choose someone."
+- When the text starts with its own mentions, those win and the label hides.
+- The post carries `in_reply_to` with the latest message in the thread.
+
+### Autocomplete
+
+- Typing `#` at the start of the box or after a space opens the channel list.
+  Typing `@` the same way opens the member list. An `@` inside a word, as in an
+  email address, never opens it.
+- The list opens upward from the box, at its left edge, 320px wide, at most six
+  rows tall, then it scrolls. It uses `--bg`, a 1px `--line-strong` border,
+  `--radius-md`, and `--shadow-pop`.
+- **Channel rows**, 32px: a muted `#` icon, the name, and its token in muted
+  text. Channels that share a name add the sidebar's muted suffix with the
+  workspace id, so the operator can tell which one to rename. `#all` comes last, as "#all · every workspace". A channel with no token
+  shows at 50 percent opacity and cannot be chosen. Its tooltip names a reason
+  only when the page can be sure of it. The page sees the server's cleaned
+  display name, not the raw Herdr label, so anything else gets general copy:
+
+  | Case, checked in this order                                                | Tooltip                                                                                                                                  |
+  | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+  | The display name folds to nothing, as with 日本語                          | "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr."                                           |
+  | The display name is the workspace id                                       | "This workspace has no label in Herdr. Name it to mention it."                                                                           |
+  | Another labelled channel shows the same name, and none of them has a token | "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there."                      |
+  | Anything else                                                              | "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there." |
+
+  The server compares tokens folded from the raw label, so two channels can
+  show the same name and still have different tokens, as when one label hides
+  a soft hyphen. A shared name therefore counts only when every labelled
+  channel showing it lacks a token. A channel whose name is its workspace id
+  has no label, so it never makes another channel's name shared. The shared
+  copy also names activation. When one of two same-named workspaces isn't
+  active, both still lose their tokens, and renaming the inactive one won't
+  make it mentionable. A label that equals its own workspace id looks the same
+  as no label, so it gets the no-label line. Herdr's ids make that label
+  unlikely.
+- **Member rows**, 32px: a 20px avatar with its presence badge, the alias, and
+  the presence word in muted text at the right. The members come from the
+  channel named by the last `#token` before the caret, else the current
+  channel. The operator never appears.
+- A channel query matches its typeable token as well as its name, and ignores
+  case, so `#alpha-p` finds "Alpha Project". The `#token` before an `@` is
+  matched the same way, so `#Beta @` lists beta's members.
+- Ranking: tokens or names that start with the query come before those that
+  contain it. Ties sort by name. An empty query lists everything.
+- Up and Down move the highlight and wrap. Tab and Enter accept, and Escape
+  closes. A click accepts. Accepting replaces the whole token around the caret
+  and adds one space.
+- The highlighted row uses `--bg-selected` and `--accent-text`.
+- The box is a `combobox` that owns a `listbox`. The highlighted option is its
+  `aria-activedescendant`, and a disabled option has `aria-disabled`.
+
+### Recipients and envoys
+
+- A message header shows at most two recipients, then "+N" in muted text. The
+  tooltip and the receipt line list everyone.
+- An agent from another workspace shows as its alias with its home channel as a
+  muted suffix, as in "@codex · #alpha". When the server has not sent that agent
+  as a participant, an `envoy:<workspace>:…` id reads "an agent in #alpha",
+  using the channel whose workspace id matches, else "an agent in another
+  workspace". Any other unknown id reads "an unknown agent". Its avatar uses
+  `--id-terminal` with a "?". The raw id appears only in the tooltip.
+- In a paused channel a `queued` leg reads "Held while paused", with the pause
+  icon in `--held-text`, so the receipt agrees with the header.
+
 ## Motion
 
 Motion shows state and nothing else.
@@ -475,13 +619,6 @@ it.
 
 ## Coming next
 
-- **UI-3 composer**: docks at the bottom of the timeline and of the thread pane.
-  The input has `--bg`, a 1px `--line-strong` border, `--radius-lg`, and 12px
-  padding, with the placeholder "Message #alpha". The `#` and `@` popup uses
-  `--bg`, `--shadow-pop`, and `--radius-md`, with 32px rows that each hold an
-  avatar, the alias, and the presence word. The highlighted row uses
-  `--bg-selected`. A pending message renders at 60 percent opacity with a
-  "Sending…" receipt.
 - **UI-4 All activity**: a sidebar row above Needs you with a drawn pulse icon.
   The view lists member rows in the member-chip vocabulary, grouped Needs you,
   Waiting, Working, with the channel and "waiting on @codex" as the second line.

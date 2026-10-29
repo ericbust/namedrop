@@ -1,8 +1,14 @@
-import { Fragment, useLayoutEffect, useRef, useState } from "react";
-import type { Channel, SpaceKey } from "../model.ts";
-import { exitFor, type RunIndex, type TimelineRow } from "../store.ts";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { composerCopy } from "../copy.ts";
+import type { Channel, Directory, Outgoing, SpaceKey } from "../model.ts";
+import {
+  exitFor,
+  GROUP_WINDOW,
+  type RunIndex,
+  type TimelineRow,
+} from "../store.ts";
 import { Icon } from "./Icons.tsx";
-import { Message } from "./Message.tsx";
+import { Message, PendingMessage } from "./Message.tsx";
 
 // A new object per activation, so showing the same message again re-scrolls.
 export type Located = { messageId: string };
@@ -43,7 +49,11 @@ export function Timeline({
   channel,
   rows,
   runs,
+  directory,
+  pending,
+  posted,
   located,
+  unsentReplies,
   expandedThread,
   onThread,
   paneId,
@@ -54,7 +64,11 @@ export function Timeline({
   channel: Channel;
   rows: readonly TimelineRow[];
   runs: RunIndex;
+  directory: Directory;
+  pending: readonly Outgoing[];
+  posted: ReadonlySet<string>;
   located: Located | null;
+  unsentReplies: ReadonlySet<string>;
   expandedThread: string | null;
   onThread: (threadId: string, button: HTMLButtonElement) => void;
   paneId: string;
@@ -69,11 +83,30 @@ export function Timeline({
   if (shown.current?.key !== channel.key)
     shown.current = { key: channel.key, at: Date.now() };
   const shownAt = shown.current.at;
+  const shownPending = useRef(pending);
+  const following = useRef(channel.key);
+  following.current = channel.key;
+  useEffect(() => {
+    const element = scroller.current;
+    if (!element) return;
+    const observer = new ResizeObserver(() => {
+      if (anchors.current.get(following.current)?.bottom)
+        element.scrollTop = element.scrollHeight;
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   useLayoutEffect(() => {
     const element = scroller.current;
     if (!element) return;
     const anchor = anchors.current.get(channel.key);
-    if (!anchor || anchor.bottom) element.scrollTop = element.scrollHeight;
+    const earlier = new Set(
+      shownPending.current.map((entry) => entry.requestId),
+    );
+    const sent = pending.some((entry) => !earlier.has(entry.requestId));
+    shownPending.current = pending;
+    if (!anchor || anchor.bottom || sent)
+      element.scrollTop = element.scrollHeight;
     else {
       const rows = [
         ...element.querySelectorAll<HTMLElement>("[data-message-id]"),
@@ -91,7 +124,7 @@ export function Timeline({
     }
     anchors.current.set(channel.key, capture(element));
     setFar(screensAbove(element));
-  }, [channel]);
+  }, [channel, pending]);
   useLayoutEffect(() => {
     const element = scroller.current;
     if (!element || located === null) return;
@@ -119,6 +152,18 @@ export function Timeline({
       scroller.current.scrollTop = scroller.current.scrollHeight;
   };
   const loadOlder = () => onOlder(channel.key);
+  const paused = channel.health.level === "paused";
+  // A pending post groups with the operator's message above it, as its row will.
+  const last = rows.findLast(
+    (row) => row.kind === "message" || row.kind === "orphan",
+  );
+  let previousAt =
+    last?.kind === "message" &&
+    last.message.author === "human" &&
+    last.message.kind !== "nudge" &&
+    last.message.kind !== "hook"
+      ? last.message.at
+      : null;
   return (
     <section
       className="timeline"
@@ -221,7 +266,8 @@ export function Timeline({
                 )}
                 <Message
                   message={message}
-                  members={channel.members}
+                  directory={directory}
+                  paused={paused}
                   recipients={recipients}
                   grouped={row.grouped}
                   showRecipients={row.showRecipients}
@@ -233,13 +279,41 @@ export function Timeline({
                   onThread={onThread}
                   paneId={paneId}
                   threadExpanded={expandedThread === thread.id}
-                  arrive={message.at > shownAt}
+                  arrive={message.at > shownAt && !posted.has(message.id)}
                   located={located?.messageId === message.id}
                 />
+                {unsentReplies.has(thread.id) &&
+                  expandedThread !== thread.id &&
+                  message === thread.parents.at(-1) && (
+                    <button
+                      type="button"
+                      className="text-button reply-failed"
+                      data-thread-id={thread.id}
+                      onClick={(event) =>
+                        onThread(thread.id, event.currentTarget)
+                      }
+                    >
+                      {composerCopy.replyNotSent}
+                    </button>
+                  )}
               </Fragment>
             );
           }
         }
+      })}
+      {pending.map((entry) => {
+        const grouped =
+          previousAt !== null &&
+          entry.at - previousAt >= 0 &&
+          entry.at - previousAt <= GROUP_WINDOW;
+        previousAt = entry.at;
+        return (
+          <PendingMessage
+            key={entry.requestId}
+            entry={entry}
+            grouped={grouped}
+          />
+        );
       })}
       {browsing && (
         <div className="divider window-end">

@@ -3,15 +3,26 @@ import { test } from "node:test";
 import {
   attentionCopy,
   avatarHue,
+  composerCopy,
+  composerPlaceholder,
   dayBounds,
   dayLabel,
+  disabledChannelCopy,
   healthCopy,
+  overflowCopy,
+  participantCopy,
+  pendingCopy,
   presenceWord,
   receiptCopy,
+  recipientsLabel,
   relativeAge,
+  replyLabel,
+  replyPlaceholder,
   runtimeName,
+  sendErrorCopy,
 } from "./copy.ts";
-import type { Attention, DeliveryStage } from "./model.ts";
+import type { Attention, DeliveryStage, Member } from "./model.ts";
+import { parseEvent } from "./wire.ts";
 
 test("receipt copy covers every stage and completed kind in plain words", () => {
   const cases: [DeliveryStage, string, string, string, string | undefined][] = [
@@ -320,4 +331,156 @@ test("day labels say Today and Yesterday, then a date", () => {
   assert.notEqual(older, "Yesterday");
   assert.match(older, /20/);
   assert.match(dayLabel(new Date(2025, 9, 20).getTime(), now), /2025/);
+});
+
+test("send errors show the server's words as a sentence for 400, 404 and 409 and fixed words otherwise", () => {
+  const generic = "Namedrop couldn't send this. Try again.";
+  const expired = "Your session expired. Reload the page to keep posting.";
+  const cases: [number, string, string][] = [
+    [
+      400,
+      "message must begin with one or more recipient Mentions",
+      "Message must begin with one or more recipient Mentions.",
+    ],
+    [400, "Unknown recipient @ghost", "Unknown recipient @ghost."],
+    [400, "@ghost is not here", "@ghost is not here."],
+    [404, "Not found.", "Not found."],
+    [409, "  already posted differently? \n", "Already posted differently?"],
+    [400, "   ", generic],
+    [403, "Forbidden.", expired],
+    [413, "Request body is too large.", "This message is too long."],
+    [401, "This dashboard needs its key.", expired],
+    [500, "internal detail", generic],
+    [503, "", generic],
+    [0, "", generic],
+  ];
+  for (const [status, message, shown] of cases)
+    assert.equal(sendErrorCopy({ status, message }), shown, `status ${status}`);
+});
+
+test("a queued leg in a paused channel reads Held while paused, other stages keep their words", () => {
+  assert.deepEqual(receiptCopy({ stage: "queued" }, true), {
+    label: "Held while paused",
+    icon: "pause",
+    tone: "held",
+  });
+  assert.equal(receiptCopy({ stage: "queued" }, false).label, "Queued");
+  assert.equal(receiptCopy({ stage: "delivered" }, true).label, "Delivered");
+  assert.deepEqual(pendingCopy, {
+    sending: { label: "Sending…", icon: "clock" },
+    sent: { label: "Sent", icon: "check" },
+  });
+});
+
+test("composer words name the channel, the thread's recipients and the reason a channel is disabled", () => {
+  assert.equal(
+    composerPlaceholder({ addressableLabel: "alpha", displayName: "alpha" }),
+    "Message #alpha",
+  );
+  assert.equal(
+    composerPlaceholder({
+      addressableLabel: null,
+      displayName: "testbed ui2-live",
+    }),
+    "Message testbed ui2-live",
+  );
+  assert.equal(replyPlaceholder(["@codex"]), "Write a reply");
+  assert.equal(replyPlaceholder(["@lead · #alpha"]), "Write a reply");
+  assert.equal(replyLabel(["@codex"]), "Reply to @codex");
+  assert.equal(replyLabel(["@lead · #alpha"]), "Reply to @lead · #alpha");
+  const noOne =
+    "No one in this thread can be mentioned. Start with @name to choose someone.";
+  assert.equal(replyPlaceholder([]), noOne);
+  assert.equal(replyLabel([]), noOne);
+  assert.equal(recipientsLabel(["@codex", "@shell"]), "To @codex, @shell");
+  assert.equal(
+    composerCopy.needsRecipient,
+    "Start with @name to choose who gets this.",
+  );
+  assert.deepEqual(disabledChannelCopy, {
+    "unusable-label":
+      "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr.",
+    "no-label": "This workspace has no label in Herdr. Name it to mention it.",
+    "shared-name":
+      "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there.",
+    unknown:
+      "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.",
+  });
+  assert.equal(composerCopy.replyNotSent, "Reply not sent · Open thread");
+  assert.equal(composerCopy.postNotSent, "A post wasn't sent");
+  assert.equal(overflowCopy(3), "+3");
+});
+
+test("participant names: remote agents carry their home, envoys and unknown ids read as words", () => {
+  const event = parseEvent(
+    "space",
+    JSON.stringify({
+      key: "a".repeat(20),
+      frame: {
+        wire: 1,
+        space: {
+          key: "a".repeat(20),
+          workspace_id: "w1",
+          display_name: "alpha",
+          addressable_label: "alpha",
+        },
+        health: { level: "calm" },
+        participants: [
+          {
+            address_id: "pane-1",
+            alias: "@codex",
+            kind: { type: "agent", runtime: "codex" },
+            activity: "idle",
+            role: null,
+            pane_label: null,
+          },
+        ],
+        messages: [
+          {
+            message_id: "m1",
+            thread_id: "m1",
+            in_reply_to: null,
+            at_ms: 1,
+            author: "envoy:w2:pane-7",
+            kind: "mention",
+            body: { text: "hi", truncated: false },
+            legs: [],
+          },
+        ],
+        threads: [],
+        attention: [],
+      },
+    }),
+  );
+  assert.ok(event?.type === "space");
+  const codex: Member | undefined = event.channel.members.values().next().value;
+  const envoy = event.channel.messages.get("m1")?.author;
+  assert.ok(codex && envoy !== undefined && envoy !== "human");
+  const alpha = { name: "#alpha", token: "#alpha", members: new Map() };
+  assert.deepEqual(participantCopy({ kind: "operator" }), {
+    name: "You",
+    suffix: null,
+    title: null,
+    avatar: "human",
+  });
+  assert.deepEqual(
+    participantCopy({ kind: "member", member: codex, home: alpha }),
+    { name: "@codex", suffix: "#alpha", title: null, avatar: "agent" },
+  );
+  assert.deepEqual(participantCopy({ kind: "envoy", id: envoy, home: alpha }), {
+    name: "an agent in #alpha",
+    suffix: null,
+    title: "envoy:w2:pane-7",
+    avatar: "unresolved",
+  });
+  assert.equal(
+    participantCopy({ kind: "envoy", id: envoy, home: null }).name,
+    "an agent in another workspace",
+  );
+  assert.deepEqual(participantCopy({ kind: "unknown", id: envoy }), {
+    name: "an unknown agent",
+    suffix: null,
+    title: "envoy:w2:pane-7",
+    avatar: "unresolved",
+  });
 });

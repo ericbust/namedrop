@@ -8,13 +8,28 @@ import {
   useRef,
   useState,
 } from "react";
-import type { Event, Message, SpaceKey, State } from "../model.ts";
+import { type CompletionContext, channelOptions } from "../complete.ts";
+import { composerPlaceholder } from "../copy.ts";
+import type {
+  ComposerId,
+  Directory,
+  Event,
+  Home,
+  Message,
+  Outgoing,
+  SpaceKey,
+  State,
+} from "../model.ts";
+import { createPoster } from "../send.ts";
 import {
   channelSuffix,
   connectionStatus,
+  draftKey,
+  homesOf,
   initialState,
   reduce,
   runsByMessage,
+  sameComposer,
   type ThreadGroup,
   type TimelineRow,
   threadGroups,
@@ -22,8 +37,10 @@ import {
 } from "../store.ts";
 import { parseEvent, parseHistory, pathKey } from "../wire.ts";
 import { ChannelHeader } from "./ChannelHeader.tsx";
+import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
 import { MemberStrip } from "./MemberStrip.tsx";
+import { measure } from "./measure.ts";
 import { NeedsYou } from "./NeedsYou.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { ThreadPane } from "./ThreadPane.tsx";
@@ -32,6 +49,9 @@ import { type Located, Timeline } from "./Timeline.tsx";
 const noGroups: ReadonlyMap<string, ThreadGroup> = new Map();
 const noRows: readonly TimelineRow[] = [];
 const noMessages: ReadonlyMap<string, Message> = new Map();
+const noPending: readonly Outgoing[] = [];
+const noMembers: Directory["members"] = new Map();
+const POSTED_LIMIT = 200;
 function measuredReduce(state: State, event: Event): State {
   if (
     event.type !== "space" &&
@@ -68,6 +88,10 @@ export function App() {
   const selectedForPaint = useRef<SpaceKey | null>(null);
   const requests = useRef(new Map<number, AbortController>());
   const lastUpdate = useRef<number | null>(null);
+  const [poster] = useState(createPoster);
+  const inFlightPosts = useRef(new Map<string, ComposerId>());
+  const posted = useRef(new Set<string>());
+  useEffect(() => poster.prepare(), [poster]);
   useEffect(() => {
     const active = new Set<number>();
     for (const channel of state.channels.values()) {
@@ -315,6 +339,58 @@ export function App() {
     document.title =
       needsYou > 0 ? `(${needsYou}) Needs you · Namedrop` : "Namedrop";
   }, [needsYou]);
+  const send = useCallback(
+    (
+      outgoing: Pick<Outgoing, "composer" | "source" | "inReplyTo">,
+      startedAt: number,
+    ) => {
+      // A second Enter can land before the render that locks the box.
+      for (const composer of inFlightPosts.current.values())
+        if (sameComposer(composer, outgoing.composer)) return;
+      const tried = state.drafts.get(draftKey(outgoing.composer))?.attempt;
+      const requestId =
+        tried?.source === outgoing.source &&
+        tried.inReplyTo === outgoing.inReplyTo
+          ? tried.requestId
+          : crypto.randomUUID();
+      inFlightPosts.current.set(requestId, outgoing.composer);
+      dispatch({
+        type: "send",
+        outgoing: { ...outgoing, requestId, at: Date.now() },
+      });
+      void poster
+        .post({
+          requestId,
+          key: outgoing.composer.key,
+          source: outgoing.source,
+          inReplyTo: outgoing.inReplyTo,
+        })
+        .then((result) => {
+          inFlightPosts.current.delete(requestId);
+          if (result.kind === "failed") {
+            dispatch({
+              type: "send-failed",
+              requestId,
+              status: result.status,
+              message: result.message,
+            });
+            return;
+          }
+          measure("namedrop:enter-to-sent", startedAt);
+          posted.current.add(result.messageId);
+          const [oldest] = posted.current;
+          if (posted.current.size > POSTED_LIMIT && oldest !== undefined)
+            posted.current.delete(oldest);
+          dispatch({ type: "sent", requestId, messageId: result.messageId });
+        });
+    },
+    [poster, state.drafts],
+  );
+  const edit = useCallback(
+    (composer: ComposerId, text: string) =>
+      dispatch({ type: "edit", composer, text }),
+    [],
+  );
   const select = useCallback((key: SpaceKey) => {
     const path = `/w/${key}`;
     if (location.pathname !== path) history.pushState(null, "", path);
@@ -342,6 +418,51 @@ export function App() {
     );
     return { groups, rows, inTimeline };
   }, [messages, windows, threads]);
+  const homesSeen = useRef<ReadonlyMap<string, Home> | undefined>(undefined);
+  const homes = useMemo(() => {
+    homesSeen.current = homesOf(state.channels.values(), homesSeen.current);
+    return homesSeen.current;
+  }, [state.channels]);
+  const members = channel?.members ?? noMembers;
+  const directory = useMemo<Directory>(
+    () => ({ members, homes }),
+    [members, homes],
+  );
+  const current = channel?.key;
+  const allChannels = state.channels;
+  const completion = useMemo<CompletionContext | null>(
+    () =>
+      current === undefined
+        ? null
+        : {
+            current,
+            channels: channelOptions(allChannels.values()),
+            membersOf: (key) => [
+              ...(allChannels.get(key)?.members.values() ?? []),
+            ],
+          },
+    [current, allChannels],
+  );
+  const composerId = useMemo<ComposerId | null>(
+    () => (current === undefined ? null : { key: current, thread: null }),
+    [current],
+  );
+  const pending = useMemo(
+    () =>
+      composerId === null
+        ? noPending
+        : [...state.outbox.values()].filter((entry) =>
+            sameComposer(entry.composer, composerId),
+          ),
+    [composerId, state.outbox],
+  );
+  const unsentReplies = useMemo(() => {
+    const threads = new Set<string>();
+    for (const draft of state.drafts.values())
+      if (draft.key === current && draft.thread !== null && draft.failure)
+        threads.add(draft.thread);
+    return threads;
+  }, [current, state.drafts]);
   const terminalRuns = channel?.terminalRuns;
   const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
   const thread =
@@ -437,7 +558,11 @@ export function App() {
               channel={channel}
               rows={rows}
               runs={runs}
+              directory={directory}
+              pending={pending}
+              posted={posted.current}
               located={located}
+              unsentReplies={unsentReplies}
               expandedThread={thread ? thread.id : null}
               onThread={openThread}
               paneId={paneId}
@@ -447,6 +572,27 @@ export function App() {
                 dispatch({ type: "follow", key, atBottom })
               }
             />
+            {completion && composerId && (
+              <Composer
+                key={`composer:${channel.key}`}
+                context={completion}
+                composer={composerId}
+                drafts={state.drafts}
+                outbox={state.outbox}
+                placeholder={composerPlaceholder(channel)}
+                label={composerPlaceholder(channel)}
+                to={null}
+                onEdit={(text) => edit(composerId, text)}
+                onSend={(source, startedAt) => {
+                  if (channel.viewMode === "browsing")
+                    dispatch({ type: "latest", key: channel.key });
+                  send(
+                    { composer: composerId, source, inReplyTo: null },
+                    startedAt,
+                  );
+                }}
+              />
+            )}
           </>
         ) : state.channels.size > 0 ? (
           <div className="empty">
@@ -490,6 +636,13 @@ export function App() {
           channel={channel}
           thread={thread}
           runs={runs}
+          directory={directory}
+          completion={completion}
+          drafts={state.drafts}
+          outbox={state.outbox}
+          posted={posted.current}
+          onEdit={edit}
+          onSend={send}
           onClose={closeThread}
           paneId={paneId}
         />

@@ -342,3 +342,16 @@ export function parseEvent(name: string, rawJson: string): WireEvent | null {
     return null;
   }
 }
+export function parseReceipt(raw: unknown): string {
+  return identity(record(raw).message_id);
+}
+export function parseSessionToken(raw: unknown): string {
+  return identity(record(raw).csrf_token);
+}
+export function parseRefusal(body: string): string {
+  try {
+    const error = record(JSON.parse(body) as unknown).error;
+    if (typeof error === "string") return error.trim();
+  } catch {}
+  return body.trim();
+}

@@ -303,6 +303,22 @@ Pause the testbed space with a mention queued and confirm its receipt says
 **Held while paused** and the channel header says **Paused · deliveries held**. Save the format, long-message, hostile-text, and held-receipt screenshots
 named in the plan. Keep all commands inside the `tb` wrapper above.
 
+For UI-3, post through the composer only. Its box is
+`getByRole('combobox', {name: 'Message #alpha'})`, or `Message <display name>` for a
+channel without a mention label. In the thread pane it is named `Reply to @codex`, or
+`Reply to @lead · #alpha` when the agent lives in another workspace, and `.composer-to`
+shows the same recipients after "To". A post that names nobody stays in the box with
+`.composer-guard` under it and never reaches the server.
+Type with `pressSequentially` so each key fires an input event. `#` and `@` open
+`getByRole('listbox', {name: 'Channels'})` or `{name: 'Members'}`. The combobox's
+`aria-activedescendant` names the highlighted option. A disabled option carries
+`aria-disabled="true"` and its reason in `title`. Each post shows as
+`article.pending[data-request-id]` in the timeline, or at the end of the thread pane,
+until its row arrives in a frame. A refused post shows its error as
+`.composer [role="alert"]`. Read each posted row and its `in_reply_to` with
+`sqlite3 -readonly` on the profile's `namedrop.sqlite3`. Two quick Enter presses must
+leave one row with that text.
+
 - `getByRole('navigation', {name: 'Channels', exact: true})` holds every channel.
   Channel buttons carry `data-channel-key` with the opaque key. `.row-name` holds
   the display name. Same-name buttons add `.row-suffix` with
@@ -333,6 +349,9 @@ named in the plan. Keep all commands inside the `tb` wrapper above.
   keys, then press an arrow key. A selected channel clears its unread mark only
   after 1.5 seconds on screen. Confirm omitted keys disappear and an empty ready
   set clears the view. The app opens exactly one `/api/events` EventSource per tab.
+- `performance.getEntriesByName('namedrop:keystroke-to-popup', 'measure')` and
+  `'namedrop:enter-to-sent'` time the composer. `experimental/channels/README.md`
+  documents where each starts and ends. Each keeps at most 200 entries.
 - `performance.getEntriesByName('namedrop:frame-apply', 'measure')` measures reducer
   calls, including replay timeout reconciliation. `namedrop:load-to-sidebar-paint`
   measures navigation start to the first

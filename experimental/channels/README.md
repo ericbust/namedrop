@@ -1,8 +1,9 @@
 # Namedrop channels experiment
 
-This read-only app shows live Herdr workspaces as channels, with their messages, threads, members,
-presence, and attention requests. It needs the dashboard's all-workspace stream
-and `--ui` support. It does not send messages or change a workspace.
+This app shows live Herdr workspaces as channels, with their messages, threads, members,
+presence, and attention requests. You can post to a channel or reply in a thread as the
+operator. It needs the dashboard's all-workspace stream, its operator post route, and
+`--ui` support. It does not change a workspace's panes or labels.
 
 ## Check and build the app
 
@@ -31,7 +32,9 @@ CHROME=/opt/google/chrome/chrome npm run test:browser
 Set `CHROME` to your installed Chrome or Chromium executable. The headless runner
 uses `--no-sandbox` and needs permission to bind a local test port. It covers focus
 restoration, late `ready`, slow discovery, replay mismatches, old servers without
-`ready`, and replay removal.
+`ready`, and replay removal. It also covers the composer against a local fake of
+`POST /w/<key>/messages` that checks the session cookie and CSRF header, keeps request
+IDs idempotent, and returns the server's error codes.
 
 The optional, path-filtered **Channels experiment** workflow runs these checks.
 It adds no required-check configuration. Cargo excludes `/experimental/**` from
@@ -114,6 +117,35 @@ request, else the parsed exit code. A reply that does not parse renders as
 monospace text with no **Exit N**. Receipts use the plain words in
 `src/copy.ts` and hide once every recipient has replied.
 Unknown message kinds and delivery stages use neutral labels.
+
+## Post messages
+
+The composer sits under the timeline and at the bottom of the thread pane. Enter
+sends, and Shift+Enter starts a new line. Typing `#` or `@` at the start of the box
+or after a space opens a list of channels or members. The members come from the
+channel named by the last `#token` before the caret, else the open channel. The
+operator and retired members never appear. Up and Down move the highlight, Tab or
+Enter accepts, and Escape closes the list. A channel without a mention label is
+listed but cannot be chosen. Frames carry no groups, so `@` lists only members.
+`complete()` and `accept()` in `src/complete.ts` hold these rules as pure functions.
+
+At startup the app reads its CSRF token from `GET /api/session`. A send posts
+`{request_id, source}`, plus `in_reply_to` for a thread reply, to
+`POST /w/<key>/messages` with the `X-Namedrop-Csrf` header. After a 403 the app reads
+the token again and retries the same request once. The store's `outbox` holds each
+post by request ID. A post shows as a pending row with **Sending…**, then **Sent**
+after the server accepts it. The row that a later frame carries for that message ID
+replaces it. A refused post keeps its text and shows the error under the box. Sending
+the same text again reuses its request ID, so the server never writes it twice. A
+thread reply goes to one workspace, because the server looks every `@alias` up in
+every workspace a post names. It starts with the mentions of the agents who wrote in
+the thread from the workspace of the latest agent message, else the parent's
+recipients from the workspace of its first recipient, unless its text starts with its
+own mentions. Local agents read `@codex @claude`. Another workspace's agents follow
+its token, as in `#alpha @lead`. When that workspace has no token, nobody is left. A
+post that names nobody does not send.
+`replyRecipients()` in `src/store.ts` and `postSource()` in `src/complete.ts` hold
+these rules.
 
 ## State and connection behavior
 
@@ -203,6 +235,17 @@ The browser's standard Performance API exposes these measures.
   ends after two animation frames following a committed sidebar with at least
   one channel. It emits once per page load. It includes loading and connection
   time. An empty collection does not emit it.
+
+- `namedrop:keystroke-to-popup` starts at the `timeStamp` of the composer's input
+  event and ends in the layout effect after the commit that renders the open `#` or
+  `@` list, once a forced layout read of the list returns. It covers completion,
+  React rendering, style, and layout, but not paint. Input that leaves the list closed
+  records nothing. The app clears this measure after 200 samples, then starts a new batch.
+- `namedrop:enter-to-sent` starts at the `timeStamp` of the Enter keydown, or of the
+  **Send** click, and ends when the post route answers with a 2xx and its receipt
+  parses. It includes a token refresh and the retry after a 403. A refused or failed
+  post records nothing. The app clears this measure after 200 samples, then starts a
+  new batch.
 
 Temporary marks are cleared after measurement. Read the entries with
 `performance.getEntriesByName(name, 'measure')`. The live performance lane owns

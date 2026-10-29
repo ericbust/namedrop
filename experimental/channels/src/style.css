@@ -422,9 +422,6 @@ a:hover {
 .connection-dot.live {
   background: var(--working);
 }
-.sidebar-footer .read-only {
-  margin-left: auto;
-}
 
 .main {
   display: flex;
@@ -1259,6 +1256,172 @@ code.inline {
   background: var(--bg-hover);
 }
 
+.composer {
+  flex: none;
+  padding: 0 var(--space-6) var(--space-3);
+}
+.composer-box {
+  position: relative;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: 10px var(--space-3);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg);
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+.composer-box:has(textarea:focus) {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+.composer-box textarea {
+  flex: 1;
+  min-width: 0;
+  /* One 21px line plus padding matches the 32px send button; eight lines, then it scrolls. */
+  max-height: calc(8 * 21px + 11px);
+  padding: 5.5px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--text-base);
+  line-height: 21px;
+  resize: none;
+  overflow-y: auto;
+}
+.composer-box textarea:focus-visible {
+  /* The box's accent border and ring replace the outline. */
+  outline: none;
+}
+.composer-box textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1;
+}
+.composer-box textarea[readonly] {
+  cursor: wait;
+}
+.composer-to {
+  flex: none;
+  align-self: flex-start;
+  max-width: 40%;
+  padding: 5.5px 0;
+  line-height: 21px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.send {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: var(--radius-md);
+  background: var(--accent);
+  color: var(--on-accent);
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+.send:not(:disabled):hover {
+  background: color-mix(in srgb, var(--accent) 88%, var(--text));
+}
+.send:disabled {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+  cursor: default;
+}
+.composer-box textarea[readonly] ~ .send:disabled {
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: wait;
+}
+.composer-status {
+  min-height: 16px;
+  margin-top: var(--space-1);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  color: var(--text-muted);
+}
+.composer-guard {
+  color: var(--text);
+}
+.composer-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  color: var(--failed-text);
+}
+.icon-14 {
+  width: 14px;
+  height: 14px;
+}
+.completions {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + var(--space-1));
+  z-index: 3;
+  width: 320px;
+  max-width: 100%;
+  max-height: calc(6 * 32px + 2 * var(--space-1) + 2px);
+  overflow-y: auto;
+  padding: var(--space-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  box-shadow: var(--shadow-pop);
+}
+.option {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: 32px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.option:hover {
+  background: var(--bg-hover);
+}
+.option[aria-selected="true"] {
+  background: var(--bg-selected);
+  color: var(--accent-text);
+}
+.option[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.opt-icon {
+  color: var(--text-muted);
+}
+.opt-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.opt-meta,
+.opt-presence {
+  flex: none;
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.opt-presence {
+  margin-left: auto;
+}
+.msg.pending {
+  opacity: 0.6;
+}
+.name-home {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
 @media (max-width: 1100px) {
   .app-shell {
     grid-template-columns: 220px minmax(0, 1fr);
@@ -1285,6 +1448,7 @@ code.inline {
   .channel-header,
   .members,
   .timeline,
+  .composer,
   .reconnect {
     padding-inline: var(--space-4);
   }
@@ -1297,7 +1461,6 @@ code.inline {
   .app-shell.has-thread {
     grid-template-columns: 160px minmax(0, 1fr);
   }
-  .sidebar-footer .read-only,
   .channel-header .health {
     display: none;
   }
@@ -1315,4 +1478,15 @@ code.inline {
     animation: none;
     background-color: var(--bg-selected);
   }
+}
+.row-failed {
+  display: inline-flex;
+  flex: none;
+  color: var(--failed-text);
+}
+.reply-failed {
+  display: block;
+  margin: 2px 0 0 calc(var(--avatar) + var(--space-3));
+  font-size: var(--text-xs);
+  color: var(--failed-text);
 }
