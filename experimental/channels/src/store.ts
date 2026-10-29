@@ -806,7 +806,7 @@ export type TimelineRow =
   | MessageRow
   | { kind: "gap"; before: string }
   | { kind: "day"; label: string; before: string };
-const GROUP_WINDOW = 5 * 60_000;
+export const GROUP_WINDOW = 5 * 60_000;
 const noRecipients: readonly AddressId[] = [];
 const recipientCache = new WeakMap<Message, readonly AddressId[]>();
 export function recipients(message: Message): readonly AddressId[] {

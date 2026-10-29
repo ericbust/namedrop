@@ -1,29 +1,70 @@
-import { useEffect, useRef, useState } from "react";
-import type { Channel } from "../model.ts";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CompletionContext } from "../complete.ts";
+import { replyPlaceholder } from "../copy.ts";
+import type { Channel, Directory, Draft, Outgoing } from "../model.ts";
 import {
   exitFor,
   type RunIndex,
   recipients,
+  replyRecipients,
   type ThreadGroup,
 } from "../store.ts";
+import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
-import { Message } from "./Message.tsx";
+import { Message, PendingMessage } from "./Message.tsx";
 
 export function ThreadPane({
   channel,
   thread,
   runs,
+  directory,
+  completion,
+  outbox,
+  posted,
+  onSend,
   onClose,
   paneId,
 }: {
   channel: Channel;
   thread: ThreadGroup;
   runs: RunIndex;
+  directory: Directory;
+  completion: CompletionContext | null;
+  outbox: ReadonlyMap<string, Outgoing>;
+  posted: ReadonlySet<string>;
+  onSend: (draft: Draft, startedAt: number) => string;
   onClose: () => void;
   paneId: string;
 }) {
   const pane = useRef<HTMLElement>(null);
+  const body = useRef<HTMLDivElement>(null);
   const [openedAt] = useState(() => Date.now());
+  const to = useMemo(
+    () => replyRecipients(thread, directory),
+    [thread, directory],
+  );
+  const latest = thread.replies.at(-1) ?? thread.parents.at(-1);
+  const pending = useMemo(() => {
+    const ids = new Set(
+      [...thread.parents, ...thread.replies].map((message) => message.id),
+    );
+    return [...outbox.values()].filter(
+      (entry) =>
+        entry.key === channel.key &&
+        entry.inReplyTo !== null &&
+        ids.has(entry.inReplyTo) &&
+        entry.phase.kind !== "failed",
+    );
+  }, [outbox, thread, channel.key]);
+  const shownPending = useRef(pending);
+  useLayoutEffect(() => {
+    const earlier = new Set(
+      shownPending.current.map((entry) => entry.requestId),
+    );
+    shownPending.current = pending;
+    if (body.current && pending.some((entry) => !earlier.has(entry.requestId)))
+      body.current.scrollTop = body.current.scrollHeight;
+  }, [pending]);
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
@@ -68,7 +109,7 @@ export function ThreadPane({
           <Icon name="x" />
         </button>
       </header>
-      <div className="thread-body">
+      <div className="thread-body" ref={body}>
         {thread.parents.length === 0 && (
           <p className="earlier-thread">
             Earlier thread · the parent message is not loaded yet.
@@ -78,7 +119,8 @@ export function ThreadPane({
           <Message
             key={message.id}
             message={message}
-            members={channel.members}
+            directory={directory}
+            paused={channel.health.level === "paused"}
             recipients={recipients(message)}
             exit={exitFor(runs, message)}
           />
@@ -93,13 +135,31 @@ export function ThreadPane({
           <Message
             key={message.id}
             message={message}
-            members={channel.members}
+            directory={directory}
+            paused={channel.health.level === "paused"}
             recipients={recipients(message)}
             exit={exitFor(runs, message)}
-            arrive={message.at > openedAt}
+            arrive={message.at > openedAt && !posted.has(message.id)}
           />
         ))}
+        {pending.map((entry) => (
+          <PendingMessage key={entry.requestId} entry={entry} />
+        ))}
       </div>
+      {completion && latest && (
+        <Composer
+          context={completion}
+          outbox={outbox}
+          placeholder={replyPlaceholder(to)}
+          recipients={to}
+          onSend={(source, startedAt) =>
+            onSend(
+              { key: channel.key, source, inReplyTo: latest.id },
+              startedAt,
+            )
+          }
+        />
+      )}
     </aside>
   );
 }

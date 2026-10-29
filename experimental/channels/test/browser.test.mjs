@@ -65,11 +65,134 @@ after(async () => {
   await browser?.close();
 });
 
-async function open(t, onConnect, history = () => [], { path = "/" } = {}) {
+const COOKIE = "namedrop_test";
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+    });
+    req.on("end", () => resolve(body));
+    req.on("error", reject);
+  });
+}
+function sendJson(res, status, value) {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(value));
+}
+// Mirrors ND-4's POST /w/<key>/messages: cookie, CSRF header, JSON body, idempotent ids.
+function postRoute(onPost) {
+  const session = { secret: "session-1", csrf: "csrf-1", tokenReads: 0 };
+  const attempts = [];
+  const receipts = new Map();
+  const authorized = (req) =>
+    (req.headers.cookie ?? "")
+      .split(/;\s*/)
+      .includes(`${COOKIE}=${session.secret}`);
+  return {
+    session,
+    attempts,
+    receipts,
+    cookie: `${COOKIE}=${session.secret}; Path=/; HttpOnly; SameSite=Strict`,
+    rotate() {
+      session.csrf = `csrf-${Number(session.csrf.slice(5)) + 1}`;
+    },
+    token(req, res) {
+      session.tokenReads++;
+      if (!authorized(req)) return sendJson(res, 401, {});
+      sendJson(res, 200, { csrf_token: session.csrf });
+    },
+    async post(req, res, key) {
+      const raw = await readBody(req);
+      const attempt = {
+        key,
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        type: req.headers["content-type"] ?? null,
+        raw,
+        body: null,
+        status: 0,
+      };
+      attempts.push(attempt);
+      const reply = (status, value) => {
+        attempt.status = status;
+        sendJson(res, status, value);
+      };
+      if (!authorized(req)) return reply(401, { error: "No session." });
+      if (attempt.csrf !== session.csrf) {
+        attempt.status = 403;
+        res.writeHead(403, { "Content-Type": "text/plain" });
+        return res.end("Forbidden.\n");
+      }
+      if (attempt.type !== "application/json")
+        return reply(400, { error: "Expected JSON." });
+      let body;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return reply(400, { error: "Invalid JSON." });
+      }
+      const fields = Object.keys(body);
+      if (
+        fields.some(
+          (field) => !["request_id", "source", "in_reply_to"].includes(field),
+        ) ||
+        typeof body.request_id !== "string" ||
+        typeof body.source !== "string" ||
+        !body.source.trim() ||
+        ("in_reply_to" in body && typeof body.in_reply_to !== "string")
+      )
+        return reply(400, { error: "Bad request." });
+      attempt.body = body;
+      const post = {
+        key,
+        request_id: body.request_id,
+        source: body.source,
+        in_reply_to: body.in_reply_to ?? null,
+      };
+      const known = receipts.get(post.request_id);
+      if (known !== undefined)
+        return JSON.stringify(known.post) === JSON.stringify(post)
+          ? reply(200, known.receipt)
+          : reply(400, {
+              error: "That request id was used for another message.",
+            });
+      const outcome = await onPost(post);
+      if (outcome.status !== 200)
+        return reply(outcome.status, { error: outcome.error ?? "Refused." });
+      const message_id = `posted-${receipts.size + 1}`;
+      const receipt = {
+        message_id,
+        thread_id: post.in_reply_to ?? message_id,
+        request_id: post.request_id,
+      };
+      receipts.set(post.request_id, { post, receipt });
+      reply(200, receipt);
+    },
+    // The row a later frame carries for an accepted post.
+    row(requestId, at = Date.now()) {
+      const { post, receipt } = receipts.get(requestId);
+      return message(receipt.message_id, post.source, {
+        thread_id: receipt.thread_id,
+        in_reply_to: post.in_reply_to,
+        at_ms: at,
+        kind: post.in_reply_to === null ? "mention" : "reply",
+        legs: [{ to: "codex", stage: { stage: "delivered" } }],
+      });
+    },
+  };
+}
+async function open(
+  t,
+  onConnect,
+  history = () => [],
+  { path = "/", onPost = () => ({ status: 200 }) } = {},
+) {
   const clients = new Set();
   const connections = [];
   const errors = [];
   const historyRequests = [];
+  const posts = postRoute(onPost);
   const server = createServer(async (req, res) => {
     if (req.url === "/api/events") {
       res.writeHead(200, {
@@ -92,6 +215,10 @@ async function open(t, onConnect, history = () => [], { path = "/" } = {}) {
       return;
     }
     const url = new URL(req.url ?? "/", "http://localhost");
+    if (url.pathname === "/api/session") return posts.token(req, res);
+    const postKey = /^\/w\/([^/]+)\/messages$/.exec(url.pathname)?.[1];
+    if (req.method === "POST" && postKey !== undefined)
+      return posts.post(req, res, postKey);
     if (/^\/w\/[^/]+\/messages$/.test(url.pathname)) {
       historyRequests.push(url);
       try {
@@ -114,6 +241,7 @@ async function open(t, onConnect, history = () => [], { path = "/" } = {}) {
         "Content-Type":
           types[extname(file.pathname)] ?? "application/octet-stream",
         "Content-Security-Policy": csp,
+        ...(page ? { "Set-Cookie": posts.cookie } : {}),
       });
       res.end(body);
     } catch {
@@ -149,7 +277,7 @@ async function open(t, onConnect, history = () => [], { path = "/" } = {}) {
   });
   const row = (n) => channels.locator(`button[data-channel-key="${key(n)}"]`);
   const live = () => page.locator(".connection-dot.live").waitFor();
-  return { page, channels, row, connections, live, historyRequests };
+  return { page, channels, row, connections, live, historyRequests, posts };
 }
 function replay(client, values, keys = values.map((value) => value.key)) {
   for (const value of values) client.send("space", value);
@@ -452,7 +580,7 @@ test("fix3 item 2: slow first discovery stays loading at 2.4s until data arrives
   );
   assert.equal(
     await ui.page.locator(".sidebar-footer").textContent(),
-    "Connecting…Read only",
+    "Connecting…",
   );
   assert.equal(
     await ui.page.getByText("No workspaces yet", { exact: true }).count(),
@@ -650,7 +778,7 @@ test("fix3 item 2: interrupted staged discovery and first retries remain loading
   assert.equal(await ui.channels.getByRole("button").count(), 0);
   assert.equal(
     await ui.page.locator(".sidebar-footer").textContent(),
-    "Connecting…Read only",
+    "Connecting…",
   );
   ui.connections[1].send("ready", { keys: [] });
   await ui.page
@@ -668,10 +796,7 @@ test("fix3 item 2: legacy fallback data followed by last gone keeps known empty 
   await ui.page
     .getByRole("heading", { name: "No workspaces yet", exact: true })
     .waitFor();
-  assert.equal(
-    await ui.page.locator(".sidebar-footer").textContent(),
-    "LiveRead only",
-  );
+  assert.equal(await ui.page.locator(".sidebar-footer").textContent(), "Live");
   assert.equal(ui.connections.length, 1);
 });
 
@@ -1060,7 +1185,7 @@ test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t
     await ui.page
       .locator('[data-message-id="several"] .receipt li')
       .allTextContents(),
-    ["agentDone", "YouWorking on it"],
+    ["an unknown agentDone", "YouWorking on it"],
   );
   assert.equal(
     await ui.page.getByText(/settled|no_reply|Completed/).count(),
@@ -2746,5 +2871,468 @@ test("design-b: the layout gives the timeline the room, wraps members in two lin
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
     true,
+  );
+});
+
+function team(n, name) {
+  const value = frame(n, name);
+  value.frame.participants = [
+    ...people(),
+    {
+      ...people()[0],
+      address_id: "claude",
+      alias: "@claude",
+      kind: { type: "agent", runtime: "claude-code" },
+      activity: "working",
+    },
+  ];
+  return value;
+}
+async function until(check, what) {
+  const deadline = Date.now() + 5000;
+  while (!check()) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+function requestIds(ui) {
+  return ui.posts.attempts.map((attempt) => JSON.parse(attempt.raw).request_id);
+}
+async function activeOption(page, box) {
+  const id = await box.getAttribute("aria-activedescendant");
+  return page.locator(`[id="${id}"] .opt-name`).textContent();
+}
+const measures = (page, name) =>
+  page.evaluate(
+    (name) =>
+      performance
+        .getEntriesByName(name, "measure")
+        .map((entry) => entry.duration),
+    name,
+  );
+
+test("UI-3: the # and @ popup moves with Up and Down, accepts with Tab and Enter, and closes with Escape", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [team(1, "alpha"), team(2, "beta")]),
+  );
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("#");
+  const channels = ui.page.getByRole("listbox", { name: "Channels" });
+  await channels.waitFor();
+  assert.deepEqual(await channels.locator(".opt-name").allTextContents(), [
+    "alpha",
+    "beta",
+    "#all",
+  ]);
+  assert.equal(
+    await channels.getByRole("option").last().textContent(),
+    "#all· every workspace",
+  );
+  assert.equal(await box.getAttribute("aria-expanded"), "true");
+  assert.equal(await activeOption(ui.page, box), "alpha");
+  await box.press("ArrowDown");
+  assert.equal(await activeOption(ui.page, box), "beta");
+  await box.press("ArrowUp");
+  await box.press("ArrowUp");
+  assert.equal(await activeOption(ui.page, box), "#all", "Up wraps to the end");
+  await box.press("ArrowDown");
+  assert.equal(await activeOption(ui.page, box), "alpha", "Down wraps");
+  assert.equal(
+    await channels.locator('[aria-selected="true"] .opt-name').textContent(),
+    "alpha",
+  );
+  await box.press("Escape");
+  await channels.waitFor({ state: "detached" });
+  assert.equal(await box.inputValue(), "#");
+  assert.equal(await box.getAttribute("aria-expanded"), "false");
+  await box.pressSequentially("b");
+  await channels.waitFor();
+  await box.press("Enter");
+  assert.equal(await box.inputValue(), "#beta ");
+  await box.pressSequentially("@");
+  const members = ui.page.getByRole("listbox", { name: "Members" });
+  await members.waitFor();
+  assert.deepEqual(await members.locator(".opt-name").allTextContents(), [
+    "@claude",
+    "@codex",
+    "@shell",
+  ]);
+  assert.deepEqual(await members.locator(".opt-presence").allTextContents(), [
+    "Working",
+    "Idle",
+    "Idle",
+  ]);
+  await box.press("ArrowDown");
+  await box.press("Tab");
+  assert.equal(await box.inputValue(), "#beta @codex ");
+  assert.equal(
+    await box.evaluate((element) => document.activeElement === element),
+    true,
+    "Tab accepted instead of moving focus",
+  );
+  await box.pressSequentially("#");
+  await channels.waitFor();
+  await channels.getByRole("option").filter({ hasText: "alpha" }).click();
+  assert.equal(await box.inputValue(), "#beta @codex #alpha ");
+  assert.equal(ui.posts.attempts.length, 0, "accepting never sends");
+  const popupTimes = await measures(ui.page, "namedrop:keystroke-to-popup");
+  assert.ok(popupTimes.length >= 4, `${popupTimes.length} popup measures`);
+  assert.ok(popupTimes.every((duration) => duration >= 0 && duration < 1000));
+});
+
+test("UI-3: typing #al, Tab, @co, Tab gives #alpha @codex and Enter posts it", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [team(1, "alpha"), team(2, "beta")]),
+  );
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("#al");
+  await ui.page.getByRole("listbox", { name: "Channels" }).waitFor();
+  await box.press("Tab");
+  await box.pressSequentially("@co");
+  await ui.page.getByRole("listbox", { name: "Members" }).waitFor();
+  await box.press("Tab");
+  assert.equal(await box.inputValue(), "#alpha @codex ");
+  await box.pressSequentially("say hi");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  const [attempt] = ui.posts.attempts;
+  assert.equal(attempt.key, key(1));
+  assert.equal(attempt.type, "application/json");
+  assert.equal(attempt.csrf, "csrf-1");
+  assert.deepEqual(Object.keys(JSON.parse(attempt.raw)), [
+    "request_id",
+    "source",
+  ]);
+  assert.equal(JSON.parse(attempt.raw).source, "#alpha @codex say hi");
+});
+
+test("UI-3: a post shows Sending…, then Sent, and its real row replaces the pending row in place", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const value = team(1, "alpha");
+  value.frame.messages = [
+    message("earlier", "Earlier from codex", {
+      author: "codex",
+      at_ms: Date.now() - 60_000,
+    }),
+  ];
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    {
+      onPost: async () => {
+        await gate;
+        return { status: 200 };
+      },
+    },
+  );
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("@codex say hi");
+  await box.press("Enter");
+  const pending = timeline.locator("article.pending");
+  await pending.getByText("Sending…", { exact: true }).waitFor();
+  assert.equal(await pending.locator(".body").textContent(), "@codex say hi");
+  assert.equal(
+    await pending.evaluate((row) => getComputedStyle(row).opacity),
+    "0.6",
+  );
+  assert.equal(
+    await box.inputValue(),
+    "@codex say hi",
+    "the box keeps its text",
+  );
+  assert.equal(await box.getAttribute("readonly"), "");
+  assert.equal(
+    await ui.page.locator(".composer-status").textContent(),
+    "Sending…",
+  );
+  release();
+  await pending.getByText("Sent", { exact: true }).waitFor();
+  assert.equal(await box.inputValue(), "");
+  assert.equal(await box.getAttribute("readonly"), null);
+  assert.equal((await measures(ui.page, "namedrop:enter-to-sent")).length, 1);
+  const before = await pending.boundingBox();
+  const update = structuredClone(value);
+  update.frame.messages.push(ui.posts.row(requestIds(ui)[0]));
+  ui.connections[0].send("space", update);
+  const real = timeline.locator('[data-message-id="posted-1"]');
+  await real.waitFor();
+  assert.equal(await pending.count(), 0);
+  assert.equal(
+    await timeline.getByText("@codex say hi", { exact: true }).count(),
+    1,
+  );
+  assert.equal(
+    await real.evaluate((row) => row.classList.contains("arrive")),
+    false,
+  );
+  const after = await real.boundingBox();
+  assert.ok(
+    Math.abs(after.y - before.y) <= 1,
+    `the row stayed in place: ${before.y} then ${after.y}`,
+  );
+});
+
+test("UI-3: pressing Enter twice writes one post", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const value = team(1, "alpha");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    {
+      onPost: async () => {
+        await gate;
+        return { status: 200 };
+      },
+    },
+  );
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("once");
+  await box.press("Enter");
+  await box.press("Enter");
+  await box.pressSequentially("ignored while sending");
+  assert.equal(await box.inputValue(), "once");
+  release();
+  await ui.page.getByText("Sent", { exact: true }).waitFor();
+  await box.pressSequentially("twice in one task");
+  await box.evaluate((element) => {
+    for (let n = 0; n < 2; n++)
+      element.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+  });
+  await until(() => ui.posts.receipts.size === 2, "both posts");
+  assert.equal(ui.posts.attempts.length, 2);
+  assert.equal(new Set(requestIds(ui)).size, 2);
+  const update = structuredClone(value);
+  update.frame.messages = requestIds(ui).map((id, n) =>
+    ui.posts.row(id, Date.now() + n),
+  );
+  ui.connections[0].send("space", update);
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.locator('[data-message-id="posted-2"]').waitFor();
+  assert.equal(await timeline.locator("article.pending").count(), 0);
+  assert.equal(await timeline.locator("[data-message-id]").count(), 2);
+});
+
+test("UI-3: a thread reply carries in_reply_to and keeps its recipients", async (t) => {
+  const now = Date.now();
+  const value = team(1, "alpha");
+  value.frame.messages = [
+    message("ask", "@codex check this", {
+      thread_id: "t1",
+      at_ms: now - 120_000,
+      legs: [{ to: "codex", stage: done() }],
+    }),
+    message("answer", "Checked", {
+      thread_id: "t1",
+      in_reply_to: "ask",
+      kind: "reply",
+      author: "codex",
+      at_ms: now - 60_000,
+    }),
+  ];
+  value.frame.threads = [
+    {
+      thread_id: "t1",
+      title: { text: "Check", truncated: false },
+      message_count: 2,
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.getByRole("button", { name: /^1 reply from @codex/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  await reply.click();
+  await reply.pressSequentially("thanks");
+  await reply.press("Enter");
+  await pane.locator("article.pending").getByText("Sent").waitFor();
+  assert.equal(await timeline.locator("article.pending").count(), 0);
+  const first = JSON.parse(ui.posts.attempts[0].raw);
+  assert.equal(first.source, "@codex thanks");
+  assert.equal(first.in_reply_to, "answer");
+  await reply.pressSequentially("@claude look too");
+  assert.equal(await pane.locator(".composer-to").count(), 0);
+  await reply.press("Enter");
+  await until(() => ui.posts.attempts.length === 2, "the second reply");
+  const second = JSON.parse(ui.posts.attempts[1].raw);
+  assert.equal(second.source, "@claude look too");
+  assert.equal(second.in_reply_to, "answer");
+});
+
+test("UI-3: a refused post keeps the text, shows the server's message, and retries with the same id", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, [team(1, "alpha")]),
+    () => [],
+    { onPost: () => ({ status: 400, error: "Unknown recipient @ghost" }) },
+  );
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("@ghost hi");
+  await box.press("Enter");
+  const error = ui.page.locator(".composer").getByRole("alert");
+  await error.getByText("Unknown recipient @ghost", { exact: true }).waitFor();
+  assert.equal(await box.inputValue(), "@ghost hi");
+  assert.equal(await box.getAttribute("readonly"), null);
+  assert.equal(await ui.page.locator("article.pending").count(), 0);
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 2, "the retry");
+  await error.waitFor();
+  assert.equal(new Set(requestIds(ui)).size, 1, "the retry reused its id");
+  await box.pressSequentially("!");
+  await error.waitFor({ state: "detached" });
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 3, "the edited post");
+  assert.equal(new Set(requestIds(ui)).size, 2, "changed text gets a new id");
+});
+
+test("UI-3: a 403 refreshes the CSRF token once and retries the same post", async (t) => {
+  const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
+  await ui.live();
+  await until(() => ui.posts.session.tokenReads === 1, "the startup token");
+  ui.posts.rotate();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("@codex hi");
+  await box.press("Enter");
+  await ui.page.locator("article.pending").getByText("Sent").waitFor();
+  assert.deepEqual(
+    ui.posts.attempts.map(({ csrf, status }) => [csrf, status]),
+    [
+      ["csrf-1", 403],
+      ["csrf-2", 200],
+    ],
+  );
+  assert.equal(new Set(requestIds(ui)).size, 1);
+  assert.equal(ui.posts.session.tokenReads, 2);
+});
+
+test("UI-3: channels that share a label are listed disabled with a tooltip and cannot be chosen", async (t) => {
+  const twin = (n) => {
+    const value = frame(n, "twin");
+    value.frame.space.addressable_label = null;
+    return value;
+  };
+  const ui = await open(t, (client) =>
+    replay(client, [team(1, "alpha"), twin(2), twin(3)]),
+  );
+  await ui.live();
+  await ui.row(1).click();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.click();
+  await box.pressSequentially("#tw");
+  const list = ui.page.getByRole("listbox", { name: "Channels" });
+  await list.waitFor();
+  const options = list.getByRole("option");
+  assert.equal(await options.count(), 2);
+  for (const option of await options.all()) {
+    assert.equal(await option.getAttribute("aria-disabled"), "true");
+    assert.equal(
+      await option.getAttribute("title"),
+      "Two workspaces share this label. Rename one in Herdr to mention it.",
+    );
+    assert.equal(
+      await option.evaluate((element) => getComputedStyle(element).opacity),
+      "0.5",
+    );
+  }
+  await box.press("Enter");
+  await box.press("Tab");
+  // Playwright refuses to click an aria-disabled element unless forced, unlike a person.
+  await options.first().click({ force: true });
+  assert.equal(await box.inputValue(), "#tw");
+  assert.equal(ui.posts.attempts.length, 0);
+});
+
+test("UI-3: headers show two recipients then +N, envoys read as words, and a paused channel holds queued legs", async (t) => {
+  const now = Date.now();
+  const alpha = team(1, "alpha");
+  alpha.frame.health = { level: "paused" };
+  const queued = { stage: "queued" };
+  alpha.frame.messages = [
+    message("wide", "Everyone look", {
+      at_ms: now - 50_000,
+      legs: ["codex", "shell", "claude"].map((to) => ({ to, stage: queued })),
+    }),
+    message("remote", "From beta", {
+      author: "envoy:w2:pane-9",
+      at_ms: now - 40_000,
+    }),
+    message("lost", "Lost agent", {
+      author: "envoy:w2:pane-0",
+      at_ms: now - 30_000,
+    }),
+    message("far", "Far agent", {
+      author: "envoy:w9:pane-9",
+      at_ms: now - 20_000,
+    }),
+    message("odd", "Odd id", { author: "stranger", at_ms: now - 10_000 }),
+  ];
+  const beta = frame(2, "beta");
+  beta.frame.participants = [
+    { ...people()[0], address_id: "pane-9", alias: "@reviewer" },
+  ];
+  const ui = await open(t, (client) => replay(client, [alpha, beta]));
+  await ui.live();
+  await ui.row(1).click();
+  const row = (id) => ui.page.locator(`[data-message-id="${id}"]`);
+  const to = row("wide").locator(".to");
+  assert.equal(await to.textContent(), " to @codex, @shell +1");
+  assert.equal(await to.getAttribute("title"), "@codex, @shell, @claude");
+  assert.equal(
+    await row("wide").locator(".receipt").textContent(),
+    "@codexHeld while paused@shellHeld while paused@claudeHeld while paused",
+  );
+  assert.equal(
+    await row("remote").locator(".author").textContent(),
+    "@reviewer · #beta",
+  );
+  assert.equal(
+    await row("lost").locator(".author").textContent(),
+    "an agent in #beta",
+  );
+  assert.equal(
+    await row("far").locator(".author").textContent(),
+    "an agent in another workspace",
+  );
+  const odd = row("odd");
+  assert.equal(await odd.locator(".author").textContent(), "an unknown agent");
+  assert.equal(
+    await odd.locator(".author [title]").getAttribute("title"),
+    "stranger",
+  );
+  assert.equal(await odd.locator(".avatar").textContent(), "?");
+  assert.ok(
+    await odd
+      .locator(".avatar")
+      .evaluate((avatar) => avatar.classList.contains("id-terminal")),
   );
 });

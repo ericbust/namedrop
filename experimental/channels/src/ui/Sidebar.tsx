@@ -197,7 +197,6 @@ export function Sidebar({ state, onSelect }: Props) {
           : connection === "connecting"
             ? "Connecting…"
             : "Reconnecting…"}
-        <span className="read-only">Read only</span>
       </footer>
     </aside>
   );

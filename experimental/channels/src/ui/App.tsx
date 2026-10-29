@@ -8,12 +8,26 @@ import {
   useRef,
   useState,
 } from "react";
-import type { Event, Message, SpaceKey, State } from "../model.ts";
+import { type CompletionContext, channelOptions } from "../complete.ts";
+import { composerPlaceholder } from "../copy.ts";
+import type {
+  Directory,
+  Draft,
+  Event,
+  Home,
+  Message,
+  Outgoing,
+  SpaceKey,
+  State,
+} from "../model.ts";
+import { createPoster, type Post } from "../send.ts";
 import {
   channelSuffix,
   connectionStatus,
+  homesOf,
   initialState,
   reduce,
+  retryId,
   runsByMessage,
   type ThreadGroup,
   type TimelineRow,
@@ -22,8 +36,10 @@ import {
 } from "../store.ts";
 import { parseEvent, parseHistory, pathKey } from "../wire.ts";
 import { ChannelHeader } from "./ChannelHeader.tsx";
+import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
 import { MemberStrip } from "./MemberStrip.tsx";
+import { measure } from "./measure.ts";
 import { NeedsYou } from "./NeedsYou.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { ThreadPane } from "./ThreadPane.tsx";
@@ -32,6 +48,9 @@ import { type Located, Timeline } from "./Timeline.tsx";
 const noGroups: ReadonlyMap<string, ThreadGroup> = new Map();
 const noRows: readonly TimelineRow[] = [];
 const noMessages: ReadonlyMap<string, Message> = new Map();
+const noPending: readonly Outgoing[] = [];
+const noMembers: Directory["members"] = new Map();
+const POSTED_LIMIT = 200;
 function measuredReduce(state: State, event: Event): State {
   if (
     event.type !== "space" &&
@@ -68,6 +87,10 @@ export function App() {
   const selectedForPaint = useRef<SpaceKey | null>(null);
   const requests = useRef(new Map<number, AbortController>());
   const lastUpdate = useRef<number | null>(null);
+  const [poster] = useState(createPoster);
+  const posts = useRef(new Map<string, Post>());
+  const posted = useRef(new Set<string>());
+  useEffect(() => poster.prepare(), [poster]);
   useEffect(() => {
     const active = new Set<number>();
     for (const channel of state.channels.values()) {
@@ -315,6 +338,36 @@ export function App() {
     document.title =
       needsYou > 0 ? `(${needsYou}) Needs you · Namedrop` : "Namedrop";
   }, [needsYou]);
+  const send = useCallback(
+    (draft: Draft, startedAt: number): string => {
+      for (const [requestId, post] of posts.current)
+        if (
+          post.key === draft.key &&
+          post.source === draft.source &&
+          post.inReplyTo === draft.inReplyTo
+        )
+          return requestId;
+      const requestId = retryId(state.outbox, draft) ?? crypto.randomUUID();
+      const post = { ...draft, requestId };
+      posts.current.set(requestId, post);
+      dispatch({ type: "send", outgoing: { ...post, at: Date.now() } });
+      void poster.post(post).then((result) => {
+        posts.current.delete(requestId);
+        if (result.kind === "failed") {
+          dispatch({ type: "send-failed", requestId, ...result });
+          return;
+        }
+        measure("namedrop:enter-to-sent", startedAt);
+        posted.current.add(result.messageId);
+        const [oldest] = posted.current;
+        if (posted.current.size > POSTED_LIMIT && oldest !== undefined)
+          posted.current.delete(oldest);
+        dispatch({ type: "sent", requestId, messageId: result.messageId });
+      });
+      return requestId;
+    },
+    [poster, state.outbox],
+  );
   const select = useCallback((key: SpaceKey) => {
     const path = `/w/${key}`;
     if (location.pathname !== path) history.pushState(null, "", path);
@@ -342,6 +395,43 @@ export function App() {
     );
     return { groups, rows, inTimeline };
   }, [messages, windows, threads]);
+  const homesSeen = useRef<ReadonlyMap<string, Home> | undefined>(undefined);
+  const homes = useMemo(() => {
+    homesSeen.current = homesOf(state.channels.values(), homesSeen.current);
+    return homesSeen.current;
+  }, [state.channels]);
+  const members = channel?.members ?? noMembers;
+  const directory = useMemo<Directory>(
+    () => ({ members, homes }),
+    [members, homes],
+  );
+  const current = channel?.key;
+  const allChannels = state.channels;
+  const completion = useMemo<CompletionContext | null>(
+    () =>
+      current === undefined
+        ? null
+        : {
+            current,
+            channels: channelOptions(allChannels.values()),
+            membersOf: (key) => [
+              ...(allChannels.get(key)?.members.values() ?? []),
+            ],
+          },
+    [current, allChannels],
+  );
+  const pending = useMemo(
+    () =>
+      current === undefined
+        ? noPending
+        : [...state.outbox.values()].filter(
+            (entry) =>
+              entry.key === current &&
+              entry.inReplyTo === null &&
+              entry.phase.kind !== "failed",
+          ),
+    [current, state.outbox],
+  );
   const terminalRuns = channel?.terminalRuns;
   const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
   const thread =
@@ -437,6 +527,9 @@ export function App() {
               channel={channel}
               rows={rows}
               runs={runs}
+              directory={directory}
+              pending={pending}
+              posted={posted.current}
               located={located}
               expandedThread={thread ? thread.id : null}
               onThread={openThread}
@@ -447,6 +540,22 @@ export function App() {
                 dispatch({ type: "follow", key, atBottom })
               }
             />
+            {completion && (
+              <Composer
+                key={`composer:${channel.key}`}
+                context={completion}
+                outbox={state.outbox}
+                placeholder={composerPlaceholder(channel)}
+                onSend={(source, startedAt) => {
+                  if (channel.viewMode === "browsing")
+                    dispatch({ type: "latest", key: channel.key });
+                  return send(
+                    { key: channel.key, source, inReplyTo: null },
+                    startedAt,
+                  );
+                }}
+              />
+            )}
           </>
         ) : state.channels.size > 0 ? (
           <div className="empty">
@@ -490,6 +599,11 @@ export function App() {
           channel={channel}
           thread={thread}
           runs={runs}
+          directory={directory}
+          completion={completion}
+          outbox={state.outbox}
+          posted={posted.current}
+          onSend={send}
           onClose={closeThread}
           paneId={paneId}
         />

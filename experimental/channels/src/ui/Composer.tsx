@@ -1,0 +1,340 @@
+import {
+  type ChangeEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  accept,
+  type Candidate,
+  type CompletionContext,
+  complete,
+  insertion,
+  leadingMention,
+} from "../complete.ts";
+import {
+  composerCopy,
+  disabledChannelCopy,
+  presenceWord,
+  recipientsLabel,
+  sendErrorCopy,
+} from "../copy.ts";
+import type { Outgoing } from "../model.ts";
+import { Avatar } from "./Avatar.tsx";
+import { Icon } from "./Icons.tsx";
+import { measure } from "./measure.ts";
+
+const noRecipients: readonly string[] = [];
+
+function Option({
+  candidate,
+  id,
+  active,
+  onChoose,
+}: {
+  candidate: Candidate;
+  id: string;
+  active: boolean;
+  onChoose: () => void;
+}) {
+  const disabled = insertion(candidate) === null;
+  let content: ReactNode;
+  let title: string | undefined;
+  switch (candidate.kind) {
+    case "channel": {
+      const { channel } = candidate;
+      title =
+        channel.disabledReason === null
+          ? undefined
+          : disabledChannelCopy[channel.disabledReason];
+      content = (
+        <>
+          <Icon name="hash" className="opt-icon" />
+          <span className="opt-name">{channel.name}</span>
+          {channel.token !== null && (
+            <span className="opt-meta">{channel.token}</span>
+          )}
+        </>
+      );
+      break;
+    }
+    case "all":
+      content = (
+        <>
+          <Icon name="hash" className="opt-icon" />
+          <span className="opt-name">#all</span>
+          <span className="opt-meta">· {composerCopy.everyWorkspace}</span>
+        </>
+      );
+      break;
+    case "member": {
+      const { member } = candidate;
+      content = (
+        <>
+          <Avatar
+            alias={member.alias}
+            type={member.kind.type}
+            small
+            presence={member.activity}
+          />
+          <span className="opt-name">{member.alias}</span>
+          <span className="opt-presence">{presenceWord[member.activity]}</span>
+        </>
+      );
+      break;
+    }
+    default: {
+      const exhaustive: never = candidate;
+      return exhaustive;
+    }
+  }
+  return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: keys reach options through the combobox's aria-activedescendant.
+    <div
+      role="option"
+      id={id}
+      className="option"
+      aria-selected={active}
+      aria-disabled={disabled || undefined}
+      title={title}
+      tabIndex={-1}
+      onMouseDown={(event) => event.preventDefault()}
+      onClick={onChoose}
+    >
+      {content}
+    </div>
+  );
+}
+
+export function Composer({
+  context,
+  outbox,
+  placeholder,
+  recipients = noRecipients,
+  onSend,
+}: {
+  context: CompletionContext;
+  outbox: ReadonlyMap<string, Outgoing>;
+  placeholder: string;
+  recipients?: readonly string[];
+  onSend: (source: string, startedAt: number) => string;
+}) {
+  const [text, setText] = useState("");
+  const [caret, setCaret] = useState(0);
+  const [focused, setFocused] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const [highlight, setHighlight] = useState({ token: "", index: 0 });
+  const [attempt, setAttempt] = useState<string | null>(null);
+  const box = useRef<HTMLTextAreaElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const placedCaret = useRef<number | null>(null);
+  const typedAt = useRef<number | null>(null);
+  const listId = useId();
+
+  const phase = attempt === null ? null : (outbox.get(attempt)?.phase ?? null);
+  const sending = phase?.kind === "sending";
+  const failure = phase?.kind === "failed" ? phase : null;
+  // A post leaves the outbox only after its row arrives, so a missing entry was accepted too.
+  const accepted = attempt !== null && !sending && failure === null;
+  useLayoutEffect(() => {
+    if (!accepted) return;
+    setText("");
+    setCaret(0);
+    setAttempt(null);
+  }, [accepted]);
+
+  const completion = useMemo(
+    () => (sending ? null : complete(text, caret, context)),
+    [sending, text, caret, context],
+  );
+  const candidates = completion?.candidates ?? [];
+  const open = focused && !dismissed && candidates.length > 0;
+  const token =
+    completion === null
+      ? ""
+      : `${completion.token.kind}:${completion.token.start}:${completion.token.query}`;
+  const active = !open
+    ? -1
+    : highlight.token === token
+      ? Math.min(highlight.index, candidates.length - 1)
+      : Math.max(
+          0,
+          candidates.findIndex((candidate) => insertion(candidate) !== null),
+        );
+  const optionId = (index: number) => `${listId}-${index}`;
+
+  useLayoutEffect(() => {
+    if (placedCaret.current === null) return;
+    box.current?.setSelectionRange(placedCaret.current, placedCaret.current);
+    placedCaret.current = null;
+  });
+  useLayoutEffect(() => {
+    const element = box.current;
+    if (!element) return;
+    element.style.height = "auto";
+    element.style.height = `${element.scrollHeight}px`;
+  }, [text]);
+  useLayoutEffect(() => {
+    const element = list.current;
+    const option =
+      active < 0 ? null : document.getElementById(`${listId}-${active}`);
+    if (!element || !option) return;
+    if (option.offsetTop < element.scrollTop)
+      element.scrollTop = option.offsetTop;
+    else if (
+      option.offsetTop + option.offsetHeight >
+      element.scrollTop + element.clientHeight
+    )
+      element.scrollTop =
+        option.offsetTop + option.offsetHeight - element.clientHeight;
+  }, [active, listId]);
+  useLayoutEffect(() => {
+    const start = typedAt.current;
+    typedAt.current = null;
+    if (start === null || !open || !list.current) return;
+    list.current.getBoundingClientRect();
+    measure("namedrop:keystroke-to-popup", start);
+  });
+
+  function edit(next: string, at: number) {
+    setText(next);
+    setCaret(at);
+    setDismissed(false);
+    if (failure !== null) setAttempt(null);
+  }
+  function choose(index: number) {
+    const candidate = candidates[index];
+    if (completion === null || candidate === undefined) return;
+    const next = accept(text, completion, candidate);
+    if (next === null) return;
+    placedCaret.current = next.caret;
+    edit(next.text, next.caret);
+  }
+  function submit(startedAt: number) {
+    const body = text.trim();
+    if (sending || !body) return;
+    setAttempt(
+      onSend(
+        recipients.length > 0 && !leadingMention(body)
+          ? `${recipients.join(" ")} ${body}`
+          : body,
+        startedAt,
+      ),
+    );
+  }
+  function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.nativeEvent.isComposing) return;
+    const plain = !event.shiftKey;
+    if (open) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const step = event.key === "ArrowDown" ? 1 : -1;
+        setHighlight({
+          token,
+          index: (active + step + candidates.length) % candidates.length,
+        });
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setDismissed(true);
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && plain) {
+        event.preventDefault();
+        choose(active);
+        return;
+      }
+    }
+    if (event.key === "Enter" && plain) {
+      event.preventDefault();
+      submit(event.timeStamp);
+    }
+  }
+  function onChange(event: ChangeEvent<HTMLTextAreaElement>) {
+    typedAt.current = event.timeStamp;
+    edit(event.target.value, event.target.selectionStart);
+  }
+
+  const showRecipients = recipients.length > 0 && !leadingMention(text);
+  return (
+    <div className="composer">
+      <div className="composer-box">
+        {open && (
+          <div
+            ref={list}
+            id={listId}
+            role="listbox"
+            className="completions"
+            aria-label={
+              completion?.token.kind === "member" ? "Members" : "Channels"
+            }
+          >
+            {candidates.map((candidate, index) => (
+              <Option
+                key={
+                  candidate.kind === "channel"
+                    ? candidate.channel.key
+                    : candidate.kind === "member"
+                      ? candidate.member.id
+                      : "#all"
+                }
+                candidate={candidate}
+                id={optionId(index)}
+                active={index === active}
+                onChoose={() => choose(index)}
+              />
+            ))}
+          </div>
+        )}
+        {showRecipients && (
+          <span className="composer-to">{recipientsLabel(recipients)}</span>
+        )}
+        <textarea
+          ref={box}
+          rows={1}
+          role="combobox"
+          aria-label={placeholder}
+          aria-autocomplete="list"
+          aria-expanded={open}
+          aria-controls={open ? listId : undefined}
+          aria-activedescendant={active < 0 ? undefined : optionId(active)}
+          placeholder={placeholder}
+          value={text}
+          readOnly={sending}
+          onChange={onChange}
+          onKeyDown={onKeyDown}
+          onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+        />
+        <button
+          type="button"
+          className="send"
+          aria-label={composerCopy.send}
+          disabled={sending || !text.trim()}
+          onMouseDown={(event) => event.preventDefault()}
+          onClick={(event) => submit(event.timeStamp)}
+        >
+          <Icon name="arrowUp" />
+        </button>
+      </div>
+      <div className="composer-status">
+        {failure !== null ? (
+          <p className="composer-error" role="alert">
+            <Icon name="alert" className="icon-14" />
+            {sendErrorCopy(failure)}
+          </p>
+        ) : sending ? (
+          <p>{composerCopy.sending}</p>
+        ) : focused ? (
+          <p>{composerCopy.hint}</p>
+        ) : null}
+      </div>
+    </div>
+  );
+}

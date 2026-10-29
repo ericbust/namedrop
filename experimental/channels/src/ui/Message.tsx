@@ -1,28 +1,39 @@
 import { Fragment, memo, type ReactNode, useState } from "react";
-import { receiptCopy } from "../copy.ts";
+import {
+  overflowCopy,
+  type ParticipantCopy,
+  participantCopy,
+  pendingCopy,
+  receiptCopy,
+  SHOWN_RECIPIENTS,
+} from "../copy.ts";
 import type {
   AddressId,
-  ChannelSnapshot,
-  MemberKind,
+  Directory,
   Message as MessageRow,
+  Outgoing,
   TerminalResult,
   TerminalRun,
 } from "../model.ts";
+import { participant } from "../store.ts";
 import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 
-type Members = ChannelSnapshot["members"];
 const PREVIEW = 480;
 
-export function authorName(members: Members, id: MessageRow["author"]): string {
-  return id === "human" ? "You" : (members.get(id)?.alias ?? id);
+function who(directory: Directory, id: MessageRow["author"]): ParticipantCopy {
+  return participantCopy(participant(directory, id));
 }
-function authorType(
-  members: Members,
-  id: MessageRow["author"],
-): MemberKind["type"] {
-  return id === "human" ? "human" : (members.get(id)?.kind.type ?? "unknown");
+function Name({ person }: { person: ParticipantCopy }) {
+  return (
+    <>
+      <span title={person.title ?? undefined}>{person.name}</span>
+      {person.suffix !== null && (
+        <span className="name-home"> · {person.suffix}</span>
+      )}
+    </>
+  );
 }
 function clock(at: number) {
   const date = new Date(at);
@@ -192,16 +203,18 @@ function Exit({
 }
 function Receipts({
   message,
-  members,
+  directory,
+  paused,
 }: {
   message: MessageRow;
-  members: Members;
+  directory: Directory;
+  paused: boolean;
 }) {
   const several = message.legs.length > 1;
   return (
     <ul className="receipt" aria-label="Delivery">
       {message.legs.map((leg) => {
-        const copy = receiptCopy(leg.stage);
+        const copy = receiptCopy(leg.stage, paused);
         return (
           <li
             key={leg.to}
@@ -210,7 +223,9 @@ function Receipts({
             title={copy.title}
           >
             {several && (
-              <span className="receipt-to">{authorName(members, leg.to)}</span>
+              <span className="receipt-to">
+                <Name person={who(directory, leg.to)} />
+              </span>
             )}
             <Icon name={copy.icon} className="icon-12" />
             {copy.label}
@@ -222,21 +237,22 @@ function Receipts({
 }
 function variantFor(
   message: MessageRow,
-  members: Members,
+  directory: Directory,
   recipients: readonly AddressId[],
 ): Variant {
-  if (authorType(members, message.author) === "terminal") return "output";
+  if (who(directory, message.author).avatar === "terminal") return "output";
   const [only] = recipients;
   return recipients.length === 1 &&
     only !== undefined &&
-    members.get(only)?.kind.type === "terminal"
+    who(directory, only).avatar === "terminal"
     ? "command"
     : "text";
 }
 
 type MessageProps = {
   message: MessageRow;
-  members: Members;
+  directory: Directory;
+  paused?: boolean;
   recipients: readonly AddressId[];
   grouped?: boolean;
   showRecipients?: boolean;
@@ -253,10 +269,13 @@ type MessageProps = {
 };
 function SystemRow({
   message,
-  members,
+  directory,
+  paused,
   arrive,
   located,
-}: Pick<MessageProps, "message" | "members" | "arrive" | "located">) {
+}: Pick<MessageProps, "message" | "directory" | "arrive" | "located"> & {
+  paused: boolean;
+}) {
   const failed = message.legs.some((leg) => leg.stage.stage === "failed");
   const { text, truncated } = message.body;
   return (
@@ -274,14 +293,16 @@ function SystemRow({
             {text.length > PREVIEW || truncated ? "…" : null}
           </span>
         </p>
-        {failed && <Receipts message={message} members={members} />}
+        {failed && (
+          <Receipts message={message} directory={directory} paused={paused} />
+        )}
       </div>
     </article>
   );
 }
 function ReplyPreview({
   message,
-  members,
+  directory,
   reply,
   count,
   exit,
@@ -290,7 +311,7 @@ function ReplyPreview({
   expanded,
 }: {
   message: MessageRow;
-  members: Members;
+  directory: Directory;
   reply: MessageRow | null;
   count: number;
   exit: TerminalRun | undefined;
@@ -302,8 +323,9 @@ function ReplyPreview({
   let label = `${replies}. Open thread`;
   let content: ReactNode = null;
   if (reply !== null) {
-    const name = authorName(members, reply.author);
-    const type = authorType(members, reply.author);
+    const author = who(directory, reply.author);
+    const name = author.name;
+    const type = author.avatar;
     const time = clock(reply.at);
     const result = type === "terminal" ? terminalResult(reply.body) : null;
     const text = result
@@ -315,7 +337,9 @@ function ReplyPreview({
         <Avatar alias={name} type={type} small />
         <span className="rp-main">
           <span className="rp-head">
-            <span className="rp-author">{name}</span>
+            <span className="rp-author">
+              <Name person={author} />
+            </span>
             <Exit run={exit} result={result} />
             {time && (
               <time dateTime={time.iso} title={time.full}>
@@ -349,20 +373,25 @@ function ReplyPreview({
     </button>
   );
 }
-function sameMember(
-  before: Members,
-  after: Members,
+function samePerson(
+  before: Directory,
+  after: Directory,
   id: MessageRow["author"],
 ): boolean {
-  if (id === "human") return true;
-  const a = before.get(id);
-  const b = after.get(id);
-  return a === b || (a?.alias === b?.alias && a?.kind.type === b?.kind.type);
+  const a = who(before, id);
+  const b = who(after, id);
+  return (
+    a.name === b.name &&
+    a.suffix === b.suffix &&
+    a.title === b.title &&
+    a.avatar === b.avatar
+  );
 }
 export const Message = memo(
   function Message({
     message,
-    members,
+    directory,
+    paused = false,
     recipients,
     grouped = false,
     showRecipients = true,
@@ -381,14 +410,17 @@ export const Message = memo(
       return (
         <SystemRow
           message={message}
-          members={members}
+          directory={directory}
+          paused={paused}
           arrive={arrive}
           located={located}
         />
       );
-    const name = authorName(members, message.author);
+    const author = who(directory, message.author);
     const time = clock(message.at);
-    const variant = variantFor(message, members, recipients);
+    const variant = variantFor(message, directory, recipients);
+    const named = recipients.map((id) => who(directory, id));
+    const shown = named.slice(0, SHOWN_RECIPIENTS);
     const result = variant === "output" ? terminalResult(message.body) : null;
     return (
       <article
@@ -401,18 +433,42 @@ export const Message = memo(
             {time?.short}
           </time>
         ) : (
-          <Avatar alias={name} type={authorType(members, message.author)} />
+          <Avatar alias={author.name} type={author.avatar} />
         )}
         <div className="msg-content">
           {(!grouped || showRecipients) && (
             <header className="msg-head">
-              {!grouped && <span className="author">{name}</span>}
+              {!grouped && (
+                <span className="author">
+                  <Name person={author} />
+                </span>
+              )}
               {!grouped && <Exit run={exit} result={result} />}
               {recipients.length > 0 && (
-                <span className="to">
+                <span
+                  className="to"
+                  title={
+                    named.length > SHOWN_RECIPIENTS
+                      ? named.map((person) => person.name).join(", ")
+                      : undefined
+                  }
+                >
                   <Icon name="arrow" />
                   <span className="sr-only"> to </span>
-                  {recipients.map((id) => authorName(members, id)).join(", ")}
+                  <span>
+                    {shown.map((person, index) => (
+                      <Fragment key={recipients[index]}>
+                        {index > 0 && ", "}
+                        <Name person={person} />
+                      </Fragment>
+                    ))}
+                  </span>
+                  {named.length > SHOWN_RECIPIENTS && (
+                    <span className="overflow">
+                      {" "}
+                      {overflowCopy(named.length - SHOWN_RECIPIENTS)}
+                    </span>
+                  )}
                 </span>
               )}
               {message.kind === "handoff" && (
@@ -450,12 +506,12 @@ export const Message = memo(
             />
           )}
           {receipts && message.legs.length > 0 && (
-            <Receipts message={message} members={members} />
+            <Receipts message={message} directory={directory} paused={paused} />
           )}
           {onThread && replyCount > 0 && (
             <ReplyPreview
               message={message}
-              members={members}
+              directory={directory}
               reply={latestReply}
               count={replyCount}
               exit={replyExit}
@@ -483,15 +539,60 @@ export const Message = memo(
     before.threadExpanded === after.threadExpanded &&
     before.arrive === after.arrive &&
     before.located === after.located &&
-    (before.members === after.members ||
-      (sameMember(before.members, after.members, before.message.author) &&
-        before.recipients.every((id) =>
-          sameMember(before.members, after.members, id),
+    before.paused === after.paused &&
+    (before.directory === after.directory ||
+      (samePerson(before.directory, after.directory, before.message.author) &&
+        before.message.legs.every(({ to }) =>
+          samePerson(before.directory, after.directory, to),
         ) &&
         (before.latestReply == null ||
-          sameMember(
-            before.members,
-            after.members,
+          samePerson(
+            before.directory,
+            after.directory,
             before.latestReply.author,
           )))),
 );
+
+export function PendingMessage({
+  entry,
+  grouped = false,
+}: {
+  entry: Outgoing;
+  grouped?: boolean;
+}) {
+  const time = clock(entry.at);
+  const copy = pendingCopy[entry.phase.kind === "sent" ? "sent" : "sending"];
+  return (
+    <article
+      className={`msg pending ${grouped ? "grouped" : "group-start"}`}
+      data-request-id={entry.requestId}
+    >
+      {grouped ? (
+        <time className="msg-gutter" dateTime={time?.iso} title={time?.full}>
+          {time?.short}
+        </time>
+      ) : (
+        <Avatar alias="You" type="human" />
+      )}
+      <div className="msg-content">
+        {!grouped && (
+          <header className="msg-head">
+            <span className="author">You</span>
+            {time && (
+              <time dateTime={time.iso} title={time.full}>
+                {time.label}
+              </time>
+            )}
+          </header>
+        )}
+        <Body text={entry.source} truncated={false} variant="text" />
+        <ul className="receipt" aria-label="Delivery">
+          <li data-stage={entry.phase.kind}>
+            <Icon name={copy.icon} className="icon-12" />
+            {copy.label}
+          </li>
+        </ul>
+      </div>
+    </article>
+  );
+}

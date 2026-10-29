@@ -273,7 +273,7 @@ test("a terminal run for the request decides Exit over the code in the result bo
     const markup = renderToStaticMarkup(
       createElement(Message, {
         message: result,
-        members: channel.members,
+        directory: { members: channel.members, homes: new Map() },
         recipients: [],
         exit: exitFor(runsByMessage(channel.terminalRuns), result),
       }),
