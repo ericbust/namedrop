@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Activity, ChannelSnapshot, State } from "./model.ts";
 import {
-  channelName,
+  channelSuffix,
   connectionStatus,
   initialState,
   type MessageRow,
@@ -142,10 +142,10 @@ test("same-name channels keep separate keys and each shows its full workspace su
   const channels = sortedChannels(state);
   assert.equal(state.channels.size, 2);
   assert.deepEqual(
-    channels.map((channel) => channelName(channel, channels)),
-    [`shared (w11 · ${keyA})`, `shared (w22 · ${keyB})`],
+    channels.map((channel) => channelSuffix(channel, channels)),
+    [`w11 · ${keyA}`, `w22 · ${keyB}`],
   );
-  assert.equal(channelName(parsed(snapshot()), channels), "alpha");
+  assert.equal(channelSuffix(parsed(snapshot()), channels), null);
 });
 test("channel ordering uses display name, then workspace id, then key", () => {
   const state = apply(
@@ -704,19 +704,18 @@ test("repeated workspace IDs have unique full-key suffixes", () => {
     initialState(),
   );
   const channels = sortedChannels(state);
-  const names = channels.map((channel) => channelName(channel, channels));
+  const names = channels.map((channel) => channelSuffix(channel, channels));
   assert.equal(new Set(names).size, 3);
   for (const [index, name] of names.entries()) {
-    assert.ok(name.startsWith("shared (w1 · "));
-    assert.ok(name.endsWith(")"));
-    const suffix = name.slice("shared (w1 · ".length, -1);
+    assert.ok(name !== null && name.startsWith("w1 · "));
+    const suffix = name.slice("w1 · ".length);
     assert.equal(suffix.length, 20);
     assert.ok(channels[index]?.key.startsWith(suffix));
   }
   assert.deepEqual(
     [...channels]
       .reverse()
-      .map((channel) => channelName(channel, channels))
+      .map((channel) => channelSuffix(channel, channels))
       .reverse(),
     names,
   );
@@ -853,12 +852,12 @@ test("fix2 item 5: duplicate display suffix stays fixed across new peers with di
   const first = parsed(snapshot("abcdef11111111111111", "shared", "w1"));
   const second = parsed(snapshot("abcdef22222222222222", "shared", "w2"));
   const third = parsed(snapshot("abcdef11111111111112", "shared", "w1"));
-  const label = channelName(first, [first, second]);
-  assert.equal(label, `shared (w1 · ${first.key})`);
-  assert.equal(channelName(first, [first, second, third]), label);
+  const label = channelSuffix(first, [first, second]);
+  assert.equal(label, `w1 · ${first.key}`);
+  assert.equal(channelSuffix(first, [first, second, third]), label);
   assert.equal(
-    channelName(third, [first, second, third]),
-    `shared (w1 · ${third.key})`,
+    channelSuffix(third, [first, second, third]),
+    `w1 · ${third.key}`,
   );
 });
 test("fix2 item 6: gone removes committed and pending snapshots during replay and later space may recreate", () => {
@@ -1775,6 +1774,7 @@ test("design-b: timeline groups by author within five minutes and never across a
       row("t5", today + 11 * MIN, { to: ["shell"] }),
       row("t6", today + 12 * MIN, { to: ["shell"], kind: "handoff" }),
       row("t7", today + 13 * MIN, { author: "human", to: ["shell"] }),
+      row("t7b", today + 13 * MIN + 30_000, { author: "human" }),
       row("t8", today + 14 * MIN, { author: "human", kind: "nudge" }),
       row("t9", today + 15 * MIN, { author: "human" }),
     ],
@@ -1791,6 +1791,7 @@ test("design-b: timeline groups by author within five minutes and never across a
     "t5 grouped to",
     "t6 grouped to",
     "t7 to",
+    "t7b grouped",
     "t8 to",
     "t9 to",
   ]);

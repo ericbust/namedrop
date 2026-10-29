@@ -184,11 +184,15 @@ test("fix5: blocked agent_status attention survives replay and future attention 
   );
   await ui.live();
   assert.equal(await ui.channels.getByRole("button").count(), 1);
-  await ui.page
+  const banner = ui.page.getByRole("region", { name: "Attention needed" });
+  await banner
     .getByText("Waiting on approval or a question", { exact: true })
     .waitFor();
+  await banner.getByText("Open its pane in Herdr to answer.").waitFor();
   assert.equal(
-    await ui.page.locator('.member-row[data-activity="blocked"]').count(),
+    await ui.page
+      .locator('.members .presence[data-activity="blocked"]')
+      .count(),
     1,
   );
   assert.equal(
@@ -205,7 +209,9 @@ test("fix5: blocked agent_status attention survives replay and future attention 
   await ui.page
     .getByRole("heading", { name: "alpha updated", exact: true })
     .waitFor();
-  await ui.page.getByText("New future request…", { exact: true }).waitFor();
+  await banner.getByText("Something needs you", { exact: true }).waitFor();
+  await banner.getByRole("button", { name: "Details" }).click();
+  await banner.getByText("New future request…", { exact: true }).waitFor();
   assert.equal(
     await ui.page
       .getByText("Waiting on approval or a question", { exact: true })
@@ -245,24 +251,24 @@ test("fix5: future statuses stay neutral and duplicate generic attention rows su
       keyErrors.push(message.text());
   });
   await ui.live();
-  await ui.page.getByText("Unknown status", { exact: true }).waitFor();
-  assert.equal(
-    await ui.page.locator(".member-description").textContent(),
-    "Member",
-  );
-  const color = await ui.page
-    .locator('.presence-dot[data-activity="unknown"]')
-    .evaluate((dot) => getComputedStyle(dot).backgroundColor);
+  const chip = ui.page.locator(".members .member");
+  await chip.getByText("Unknown", { exact: true }).waitFor();
+  assert.equal(await chip.getAttribute("title"), "Member");
+  const unknown = await ui.page
+    .locator('.members .presence[data-activity="unknown"]')
+    .evaluate((dot) => {
+      const style = getComputedStyle(dot);
+      return [style.outlineStyle, style.backgroundColor];
+    });
+  assert.equal(unknown[0], "dashed");
   const offline = frame(2, "beta");
   offline.frame.participants[0].activity = "offline";
   ui.connections[0].send("space", offline);
   await ui.row(2).click();
-  assert.equal(
-    color,
-    await ui.page
-      .locator('.presence-dot[data-activity="offline"]')
-      .evaluate((dot) => getComputedStyle(dot).backgroundColor),
-  );
+  const offlineColor = await ui.page
+    .locator('.members .presence[data-activity="offline"]')
+    .evaluate((dot) => getComputedStyle(dot).backgroundColor);
+  assert.notEqual(offlineColor, unknown[1]);
   await ui.row(1).click();
   const update = attentionFrame("future_one");
   update.frame.attention.push({
@@ -275,27 +281,32 @@ test("fix5: future statuses stay neutral and duplicate generic attention rows su
     .getByRole("listitem");
   await rows.nth(1).waitFor();
   assert.equal(await rows.count(), 2);
+  await rows.nth(0).getByRole("button", { name: "Details" }).click();
   update.frame.attention[0].summary.text = "First request changed";
   ui.connections[0].send("space", update);
+  await rows.nth(0).getByRole("button", { name: "Details" }).click();
   await rows.getByText("First request changed", { exact: true }).waitFor();
   assert.equal(await rows.count(), 2);
-  assert.equal(
+  assert.match(
     await rows.nth(1).textContent(),
-    "Waiting on approval or a question",
+    /^Something needs you.*Open Details for the full message\.Details$/,
   );
   for (const level of ["future_health", "paused", "inactive"]) {
     update.frame.health = { level };
     ui.connections[0].send("space", update);
     await ui.page
-      .getByText(
-        level === "future_health"
-          ? "Status unavailable"
-          : level === "paused"
-            ? "Paused"
-            : "Not active",
-        { exact: false },
-      )
-      .waitFor();
+      .getByRole("region", { name: "Attention needed" })
+      .waitFor({ state: "detached" });
+    await ui.page.waitForFunction(
+      (expected) =>
+        (document.querySelector(".channel-header .health")?.textContent ??
+          null) === expected,
+      {
+        future_health: null,
+        paused: "Paused · deliveries held",
+        inactive: "Not active",
+      }[level],
+    );
     assert.equal(
       await ui.page.getByRole("region", { name: "Attention needed" }).count(),
       0,
@@ -444,7 +455,7 @@ test("fix3 item 2: slow first discovery stays loading at 2.4s until data arrives
     "Connecting…Read only",
   );
   assert.equal(
-    await ui.page.getByText("No live workspaces.", { exact: true }).count(),
+    await ui.page.getByText("No workspaces yet", { exact: true }).count(),
     0,
   );
   await new Promise((resolve) => setTimeout(resolve, 600));
@@ -643,7 +654,7 @@ test("fix3 item 2: interrupted staged discovery and first retries remain loading
   );
   ui.connections[1].send("ready", { keys: [] });
   await ui.page
-    .getByRole("heading", { name: "No live workspaces", exact: true })
+    .getByRole("heading", { name: "No workspaces yet", exact: true })
     .waitFor();
   await ui.live();
   assert.equal(ui.connections.length, 2);
@@ -655,11 +666,11 @@ test("fix3 item 2: legacy fallback data followed by last gone keeps known empty 
   await ui.row(1).waitFor();
   ui.connections[0].send("gone", { key: key(1) });
   await ui.page
-    .getByRole("heading", { name: "No live workspaces", exact: true })
+    .getByRole("heading", { name: "No workspaces yet", exact: true })
     .waitFor();
   assert.equal(
     await ui.page.locator(".sidebar-footer").textContent(),
-    "Live updatesRead only",
+    "LiveRead only",
   );
   assert.equal(ui.connections.length, 1);
 });
@@ -692,9 +703,11 @@ test("UI-2: parent opens a live thread, Escape returns focus, and channels remai
   beta.frame.messages = [message("beta-only", "Only beta")];
   const ui = await open(t, (client) => replay(client, [initial, beta]));
   await ui.live();
-  const timeline = ui.page.getByRole("region", { name: "Channel messages" });
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
   assert.equal(await timeline.locator("[data-message-id]").count(), 1);
-  const button = timeline.getByRole("button", { name: "1 reply", exact: true });
+  const button = timeline.getByRole("button", {
+    name: /^1 reply from You at /,
+  });
   await button.click();
   const pane = ui.page.getByRole("complementary", {
     name: "Thread",
@@ -716,7 +729,7 @@ test("UI-2: parent opens a live thread, Escape returns focus, and channels remai
   await pane.waitFor({ state: "detached" });
   assert.equal(
     await timeline
-      .getByRole("button", { name: "2 replies", exact: true })
+      .getByRole("button", { name: /^2 replies, latest from You at / })
       .evaluate((element) => element === document.activeElement),
     true,
   );
@@ -762,12 +775,9 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
   });
   await ui.live();
   await ui.page.getByText(hostile, { exact: true }).waitFor();
-  assert.equal(
-    await ui.page.locator(".message img, .message script").count(),
-    0,
-  );
+  assert.equal(await ui.page.locator(".msg img, .msg script").count(), 0);
   assert.equal(dialogs, 0);
-  const code = ui.page.locator(".message-body pre code");
+  const code = ui.page.locator(".body pre code");
   assert.equal(await code.textContent(), 'const value = "<safe>";\n');
   assert.match(
     await code.evaluate((element) => getComputedStyle(element).fontFamily),
@@ -779,28 +789,20 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
   });
   assert.equal(await link.getAttribute("href"), "https://example.com/docs");
   assert.equal(await link.getAttribute("rel"), "noreferrer");
-  assert.equal(
-    await ui.page.locator('.message a[href^="javascript:"]').count(),
-    0,
-  );
+  assert.equal(await ui.page.locator('.msg a[href^="javascript:"]').count(), 0);
   const long = ui.page.locator('[data-message-id="long"]');
   assert.equal(
-    (await long.locator(".message-body").textContent()).includes("END OF BODY"),
+    (await long.locator(".body").textContent()).includes("END OF BODY"),
     false,
   );
   await long.getByRole("button", { name: "Show more", exact: true }).click();
   assert.equal(
-    (await long.locator(".message-body").textContent()).includes("END OF BODY"),
+    (await long.locator(".body").textContent()).includes("END OF BODY"),
     true,
   );
-  await long
-    .getByText(
-      "Message shortened by the server. Only the available text is shown.",
-      { exact: true },
-    )
-    .waitFor();
+  await long.getByText("Shortened by Namedrop.", { exact: true }).waitFor();
   await ui.page.getByText("Future messages survive", { exact: true }).waitFor();
-  await ui.page.getByText("Status unavailable", { exact: false }).waitFor();
+  await ui.page.getByText("Status unknown", { exact: true }).waitFor();
   assert.equal(
     await ui.page.getByRole("heading", { name: "Coordination report" }).count(),
     1,
@@ -836,12 +838,14 @@ test("UI-2: scrolling to top loads history without shifting the first visible me
     },
   );
   await ui.live();
-  const scroll = ui.page.locator(".timeline-scroll");
+  const scroll = ui.page.locator(".timeline");
   const first = ui.page.locator('[data-message-id="m101"]');
   await scroll.evaluate((element) => {
     element.scrollTop = 0;
   });
-  await ui.page.getByText("Loading older messages…", { exact: true }).waitFor();
+  await ui.page
+    .getByText("Loading earlier messages…", { exact: true })
+    .waitFor();
   const before = await first.evaluate(
     (element) => element.getBoundingClientRect().top,
   );
@@ -901,7 +905,7 @@ test("UI-2: reconnect gaps repair through history and receipt-only live updates 
       .evaluateAll((rows) => rows.map((row) => row.dataset.messageId)),
     ["a", "b", "c", "d", "e", "f", "g"],
   );
-  assert.equal(await ui.page.locator(".message-gap").count(), 0);
+  assert.equal(await ui.page.locator(".divider.gap").count(), 0);
   live.frame.messages[0].legs[0].stage = { stage: "held" };
   ui.connections[0].send("space", live);
   await ui.page.locator('[data-message-id="f"] [data-stage="held"]').waitFor();
@@ -1010,7 +1014,7 @@ test("UI-2: message history is a named keyboard-scrollable region", async (t) =>
   assert.ok(before > 0);
   await ui.page.keyboard.press("PageUp");
   await ui.page.waitForFunction(
-    (top) => document.querySelector(".timeline-scroll").scrollTop < top,
+    (top) => document.querySelector(".timeline").scrollTop < top,
     before,
   );
 });
@@ -1018,28 +1022,50 @@ test("UI-2: message history is a named keyboard-scrollable region", async (t) =>
 test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t) => {
   const value = frame(1, "alpha");
   const stages = [
-    [{ stage: "queued" }, "Queued"],
-    [{ stage: "delivered" }, "Delivered"],
-    [{ stage: "working", acked_at_ms: 100 }, "Working (acknowledged)"],
-    [{ stage: "replied", reply_id: "reply" }, "Replied"],
-    [{ stage: "completed", kind: "success" }, "Completed · success"],
-    [{ stage: "held" }, "Held"],
-    [{ stage: "failed" }, "Failed"],
-    [{ stage: "cancelled" }, "Cancelled"],
-    [{ stage: "future_stage" }, "Status unavailable"],
+    [{ stage: "queued" }, "Queued", null],
+    [{ stage: "delivered" }, "Delivered", null],
+    [{ stage: "working", acked_at_ms: 100 }, "Working on it", null],
+    [{ stage: "replied", reply_id: "reply" }, "Replied", null],
+    [{ stage: "completed", kind: "settled" }, "Done", null],
+    [{ stage: "completed", kind: "no_reply" }, "Done, no reply needed", null],
+    [{ stage: "completed", kind: "success" }, "Done", "success"],
+    [{ stage: "held" }, "Held while paused", null],
+    [{ stage: "failed" }, "Not delivered", null],
+    [{ stage: "cancelled" }, "Cancelled", null],
+    [{ stage: "future_stage" }, "Status unknown", null],
   ];
   value.frame.messages = stages.map(([stage], n) =>
     message(`stage${n}`, `Delivery ${n}`, { legs: [{ to: "agent", stage }] }),
   );
+  value.frame.messages.push(
+    message("several", "Two recipients", {
+      legs: [
+        { to: "agent", stage: { stage: "completed", kind: "settled" } },
+        { to: "human", stage: { stage: "working", acked_at_ms: 100 } },
+      ],
+    }),
+  );
   const ui = await open(t, (client) => replay(client, [value]));
   await ui.live();
-  for (const [index, [, label]] of stages.entries()) {
+  for (const [index, [, label, title]] of stages.entries()) {
     const receipt = ui.page.locator(
-      `[data-message-id="stage${index}"] .receipts li`,
+      `[data-message-id="stage${index}"] .receipt li`,
     );
     await receipt.waitFor();
-    assert.equal(await receipt.textContent(), `agent · ${label}`);
+    assert.equal(await receipt.textContent(), label);
+    assert.equal(await receipt.getAttribute("title"), title);
+    assert.equal(await receipt.locator("svg").count(), 1);
   }
+  assert.deepEqual(
+    await ui.page
+      .locator('[data-message-id="several"] .receipt li')
+      .allTextContents(),
+    ["agentDone", "YouWorking on it"],
+  );
+  assert.equal(
+    await ui.page.getByText(/settled|no_reply|Completed/).count(),
+    0,
+  );
 });
 
 test("UI-2 fix1: collapsed previews preserve full href and Unicode boundaries", async (t) => {
@@ -1060,18 +1086,15 @@ test("UI-2 fix1: collapsed previews preserve full href and Unicode boundaries", 
   assert.equal(await link.getAttribute("href"), href);
   assert.ok((await link.textContent()).length < href.length);
   assert.equal((await link.textContent()).includes("…"), false);
-  assert.equal(
-    (await row.locator(".message-body").textContent()).endsWith("…"),
-    true,
-  );
+  assert.equal((await row.locator(".body").textContent()).endsWith("…"), true);
   const unicode = ui.page.locator('[data-message-id="unicode"]');
   assert.equal(
-    await unicode.locator(".message-body").textContent(),
+    await unicode.locator(".body").textContent(),
     `${"x".repeat(479)}…`,
   );
   await unicode.getByRole("button", { name: "Show more", exact: true }).click();
   assert.equal(
-    await unicode.locator(".message-body").textContent(),
+    await unicode.locator(".body").textContent(),
     `${"x".repeat(479)}😀 trailing text`,
   );
   assert.equal(
@@ -1091,7 +1114,7 @@ test("UI-2 fix1: switching closes the thread, live frames keep sidebar focus, an
   await ui.live();
   const button = ui.page
     .locator(".timeline")
-    .getByRole("button", { name: "1 reply", exact: true });
+    .getByRole("button", { name: /^1 reply from You at .*\. Open thread$/ });
   const pane = ui.page.getByRole("complementary", {
     name: "Thread",
     exact: true,
@@ -1189,7 +1212,7 @@ test("UI-2 fix1: capped history preserves anchor and jumps to refreshed latest w
     },
   );
   await ui.live();
-  const scroll = ui.page.locator(".timeline-scroll");
+  const scroll = ui.page.locator(".timeline");
   const count = () => ui.page.locator(".timeline [data-message-id]").count();
   for (let first = 1001; first >= 551; first -= 50) {
     const anchor = ui.page.locator(`[data-message-id="m${first}"]`);
@@ -1197,7 +1220,7 @@ test("UI-2 fix1: capped history preserves anchor and jumps to refreshed latest w
       el.scrollTop = 0;
     });
     await ui.page
-      .getByText("Loading older messages…", { exact: true })
+      .getByText("Loading earlier messages…", { exact: true })
       .waitFor();
     const top = await anchor.evaluate((el) => el.getBoundingClientRect().top);
     await ui.page.locator(`[data-message-id="m${first - 50}"]`).waitFor();
@@ -1221,7 +1244,7 @@ test("UI-2 fix1: capped history preserves anchor and jumps to refreshed latest w
   await ui.page.waitForTimeout(160);
   assert.equal(await count(), 600);
   assert.equal(await ui.page.locator('[data-message-id="m1250"]').count(), 0);
-  assert.equal(await ui.page.locator(".message-gap").count(), 0);
+  assert.equal(await ui.page.locator(".divider.gap").count(), 0);
   assert.equal(ui.historyRequests.length, requests);
   await jump.click();
   await ui.page.locator('[data-message-id="m1250"]').waitFor();
@@ -1362,4 +1385,387 @@ test("design-b: a channel is read after 1.5 seconds on screen, and arrow keys pa
   await unread(3).waitFor({ state: "detached" });
   assert.ok(Date.now() - selected >= 1400, "read before the dwell elapsed");
   assert.equal(await unread(2).count(), 1);
+});
+
+function people() {
+  const base = fixture.frame.participants[0];
+  return [
+    {
+      ...base,
+      address_id: "codex",
+      alias: "@codex",
+      kind: { type: "agent", runtime: "codex" },
+      activity: "idle",
+    },
+    {
+      ...base,
+      address_id: "shell",
+      alias: "@shell",
+      kind: { type: "terminal" },
+      activity: "idle",
+    },
+    {
+      ...base,
+      address_id: "human",
+      alias: "you",
+      kind: { type: "human" },
+      activity: "waiting",
+    },
+  ];
+}
+const done = (kind = "settled") => ({ stage: "completed", kind });
+function conversation() {
+  const at = Date.now() - 10 * 60_000;
+  const value = frame(1, "alpha");
+  value.frame.participants = people();
+  const reply = (id, thread, parent, author, text, offset, to = "human") =>
+    message(id, text, {
+      thread_id: thread,
+      in_reply_to: parent,
+      kind: "reply",
+      author,
+      at_ms: at + offset,
+      legs: [{ to, stage: done("no_reply") }],
+    });
+  value.frame.messages = [
+    message("ask", "please reply with the single word pong.", {
+      thread_id: "t1",
+      kind: "handoff",
+      at_ms: at,
+      legs: [{ to: "codex", stage: done() }],
+    }),
+    reply("r1", "t1", "ask", "codex", "first answer", 60_000),
+    reply("r2", "t1", "ask", "codex", "pong", 120_000),
+    message("cmd", "echo hello", {
+      thread_id: "t2",
+      at_ms: at + 180_000,
+      legs: [{ to: "shell", stage: { stage: "replied", reply_id: "out" } }],
+    }),
+    reply(
+      "out",
+      "t2",
+      "cmd",
+      "shell",
+      "@shell command finished with exit code 0.\nstdout:\nhello\n\nstderr:",
+      190_000,
+    ),
+    message("cmd2", "false", {
+      thread_id: "t3",
+      at_ms: at + 200_000,
+      legs: [{ to: "shell", stage: { stage: "replied", reply_id: "out2" } }],
+    }),
+    reply("out2", "t3", "cmd2", "shell", "exit code 1", 210_000),
+    message("pending", "Summarize the open TODOs.", {
+      thread_id: "t4",
+      at_ms: at + 220_000,
+      legs: [{ to: "codex", stage: { stage: "working", acked_at_ms: 1 } }],
+    }),
+  ];
+  value.frame.threads = [
+    {
+      thread_id: "t1",
+      title: { text: "t1", truncated: false },
+      message_count: 3,
+    },
+  ];
+  value.frame.terminal_runs = [
+    {
+      terminal: "shell",
+      command: { text: "echo hello", truncated: false },
+      started_at_ms: at + 180_000,
+      exit_code: 0,
+      message_id: "cmd",
+    },
+    {
+      terminal: "shell",
+      command: { text: "false", truncated: false },
+      started_at_ms: at + 200_000,
+      exit_code: 1,
+      message_id: "something-else",
+    },
+  ];
+  return { value, at };
+}
+
+test("design-b: requests show their latest reply inline, commands and output read as terminal text, and Exit needs a matching run", async (t) => {
+  const { value, at } = conversation();
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const time = await ui.page.evaluate(
+    (ms) =>
+      new Date(ms).toLocaleTimeString([], {
+        hour: "numeric",
+        minute: "2-digit",
+      }),
+    at + 120_000,
+  );
+  const preview = timeline.getByRole("button", {
+    name: `2 replies, latest from @codex at ${time}. Open thread`,
+    exact: true,
+  });
+  assert.equal(await preview.locator(".rp-body").textContent(), "pong");
+  assert.equal(await preview.locator(".rp-count").textContent(), "2 replies");
+  assert.equal(
+    await timeline.locator('[data-message-id="ask"] .receipt').count(),
+    0,
+  );
+  assert.equal(
+    await timeline.locator('[data-message-id="ask"] .msg-head').textContent(),
+    `You to @codexHandoff${await ui.page.evaluate(
+      (ms) =>
+        new Date(ms).toLocaleTimeString([], {
+          hour: "numeric",
+          minute: "2-digit",
+        }),
+      at,
+    )}`,
+  );
+  assert.equal(
+    await timeline
+      .locator('[data-message-id="pending"] .receipt')
+      .textContent(),
+    "Working on it",
+  );
+  assert.equal(
+    await timeline.locator('[data-message-id="cmd"] .command').textContent(),
+    "echo hello",
+  );
+  const output = timeline.locator('[data-message-id="cmd"] .reply-preview');
+  assert.equal(
+    await output.locator(".rp-body.mono").textContent(),
+    "@shell command finished with exit code 0.\nstdout:\nhello",
+  );
+  assert.equal(await output.locator(".exit").textContent(), "Exit 0");
+  assert.equal(
+    await timeline.locator('[data-message-id="cmd2"] .exit').count(),
+    0,
+  );
+  assert.equal(await timeline.locator("[data-message-id]").count(), 4);
+  await preview.click();
+  const pane = ui.page.getByRole("complementary", { name: "Thread" });
+  assert.equal(await pane.locator(".thread-where").textContent(), "in #alpha");
+  assert.equal(await pane.locator(".divider").textContent(), "2 replies");
+  assert.equal(await pane.locator("[data-message-id]").count(), 3);
+  await output.click();
+  await pane.locator('[data-message-id="out"] pre.output').waitFor();
+  assert.equal(
+    await pane.locator('[data-message-id="out"] pre.output').textContent(),
+    "@shell command finished with exit code 0.\nstdout:\nhello",
+  );
+  assert.equal(
+    await pane.locator('[data-message-id="out"] .msg-head .exit').textContent(),
+    "Exit 0",
+  );
+});
+
+test("design-b: loading, empty channel and history errors use the design copy", async (t) => {
+  let fail = true;
+  const loading = await open(t, () => {});
+  const skeleton = loading.page.locator(".main .skeleton");
+  await skeleton.waitFor({ state: "attached" });
+  const first = await skeleton.evaluate((element) => ({
+    visibility: getComputedStyle(element).visibility,
+    time: Number(element.getAnimations()[0]?.currentTime ?? 0),
+  }));
+  if (first.time < 380) assert.equal(first.visibility, "hidden");
+  await loading.page.waitForFunction(
+    () =>
+      getComputedStyle(document.querySelector(".main .skeleton")).visibility ===
+      "visible",
+  );
+  assert.equal(
+    await loading.page.getByRole("heading", { level: 1 }).textContent(),
+    "Connecting to Namedrop",
+  );
+  assert.equal(
+    await loading.page.locator(".sidebar .skeleton .skeleton-row").count(),
+    3,
+  );
+  loading.connections[0].send("ready", { keys: [] });
+  await loading.page
+    .getByText(
+      "Open a workspace in Herdr and name an agent with namedrop name. It shows up here as a channel.",
+      { exact: true },
+    )
+    .waitFor();
+
+  const empty = frame(2, "beta");
+  empty.frame.messages = [];
+  const full = frame(1, "alpha");
+  full.frame.messages = [message("m9", "Latest", { at_ms: 900 })];
+  const ui = await open(
+    t,
+    (client) => replay(client, [full, empty]),
+    () => {
+      if (fail) {
+        fail = false;
+        throw new Error("history down");
+      }
+      return [message("m1", "Earlier")];
+    },
+  );
+  await ui.live();
+  await ui.page
+    .getByRole("button", { name: "Load earlier messages", exact: true })
+    .click();
+  await ui.page
+    .getByText("Couldn't load earlier messages.", { exact: true })
+    .waitFor();
+  await ui.page.getByRole("button", { name: "Try again", exact: true }).click();
+  await ui.page.getByText("Earlier", { exact: true }).waitFor();
+  assert.equal(ui.historyRequests.length, 2);
+  await ui.row(2).click();
+  await ui.page
+    .getByRole("heading", { name: "No messages yet", exact: true })
+    .waitFor();
+  await ui.page
+    .getByText(
+      "When agents in this workspace mention each other, the conversation shows up here.",
+      { exact: true },
+    )
+    .waitFor();
+});
+
+test("design-b: Needs you shows titles, hints and ages three at a time and announces new items", async (t) => {
+  const value = frame(1, "alpha", "needs_you");
+  const opened = Date.now() - 4 * 60_000 - 5_000;
+  const card = (source_kind, text, extra = {}) => ({
+    source_kind,
+    summary: { text, truncated: false },
+    opened_at_ms: opened,
+    ...extra,
+  });
+  value.frame.attention = [
+    card(
+      "delivery_attempt",
+      "ND-DELIVERY-003: The agent received this message and ended its turn without a reply or a no-reply. Its exact session can still answer it from delivery.inbox.",
+      { subject_alias: "@codex", message_id: "m1" },
+    ),
+    card("agent_status", "@claude is waiting on an approval or question."),
+    card("coordination", "Coordination ND-COORD-001 waits for close."),
+    card("context_grant", "Context grant request pending."),
+  ];
+  const ui = await open(t, (client) =>
+    replay(client, [value, frame(2, "beta")]),
+  );
+  await ui.live();
+  const banner = ui.page.getByRole("region", { name: "Attention needed" });
+  const items = banner.getByRole("listitem");
+  assert.equal(await items.count(), 3);
+  assert.deepEqual(await items.locator(".attention-title").allTextContents(), [
+    "@codex didn't answer a request",
+    "@claude is waiting on an approval or question.",
+    "Coordination needs a decision",
+  ]);
+  assert.equal(
+    await items.nth(0).locator(".attention-hint").textContent(),
+    "It ended its turn without replying.",
+  );
+  assert.equal(
+    await items.nth(0).locator(".attention-age").textContent(),
+    "4 min",
+  );
+  assert.equal(
+    await banner.getByText(/ND-DELIVERY|delivery\.inbox/).count(),
+    0,
+  );
+  await items.nth(0).getByRole("button", { name: "Details" }).click();
+  await banner.getByText(/delivery\.inbox/).waitFor();
+  await banner
+    .getByRole("button", { name: "Show 1 more", exact: true })
+    .click();
+  assert.equal(await items.count(), 4);
+  assert.equal(
+    await ui.page
+      .getByRole("navigation", { name: "Needs you" })
+      .locator(".row-reason")
+      .textContent(),
+    "@codex didn't answer a request · 3 more",
+  );
+  assert.equal(await ui.page.locator(".channel-header .health").count(), 0);
+  const live = ui.page.locator('[aria-live="polite"]');
+  assert.equal(await live.textContent(), "");
+  value.frame.attention.push(card("pane_binding", "Pane moved."));
+  ui.connections[0].send("space", value);
+  await ui.page.waitForFunction(
+    () =>
+      document.querySelector('[aria-live="polite"]')?.textContent ===
+      "Needs you: An agent's pane changed",
+  );
+});
+
+test("design-b: the layout gives the timeline the room, wraps members in two lines, and never scrolls sideways", async (t) => {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.attention = [
+    {
+      source_kind: "agent_status",
+      summary: {
+        text: "@claude is waiting on an approval or question.",
+        truncated: false,
+      },
+      opened_at_ms: Date.now(),
+    },
+  ];
+  value.frame.participants = Array.from({ length: 4 }, (_, n) => ({
+    ...fixture.frame.participants[0],
+    address_id: `agent-${n}`,
+    alias: `@agent${n}`,
+  }));
+  const crowd = structuredClone(value);
+  crowd.key = key(2);
+  crowd.frame.space = {
+    ...crowd.frame.space,
+    key: key(2),
+    display_name: "crowd",
+  };
+  crowd.frame.health = { level: "calm" };
+  crowd.frame.participants = Array.from({ length: 40 }, (_, n) => ({
+    ...fixture.frame.participants[0],
+    address_id: `crowd-${n}`,
+    alias: `@crowded-agent-${n}`,
+  }));
+  const exchanged = exchange();
+  exchanged.key = key(3);
+  exchanged.frame.space = {
+    ...exchanged.frame.space,
+    key: key(3),
+    display_name: "talk",
+  };
+  const ui = await open(t, (client) =>
+    replay(client, [value, crowd, exchanged]),
+  );
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  await ui.live();
+  const share = await ui.page
+    .locator(".timeline")
+    .evaluate(
+      (element) => element.getBoundingClientRect().height / innerHeight,
+    );
+  assert.ok(share >= 0.7, `timeline holds ${Math.round(share * 100)}%`);
+  await ui.page.setViewportSize({ width: 1024, height: 700 });
+  await ui.row(2).click();
+  const more = ui.page.getByRole("button", { name: /^\+\d+ more$/ });
+  await more.waitFor();
+  const strip = await ui.page
+    .locator(".members")
+    .evaluate((element) => element.getBoundingClientRect().height);
+  assert.ok(strip <= 2 * 36 + 10 + 2, `member strip is ${strip}px tall`);
+  const hidden = Number((await more.textContent()).match(/\d+/)[0]);
+  const shown = await ui.page.locator(".members li[data-address-id]").count();
+  assert.equal(shown + hidden, 40);
+  await more.click();
+  assert.equal(
+    await ui.page.locator(".members li[data-address-id]").count(),
+    40,
+  );
+  await ui.row(3).click();
+  await ui.page.getByRole("button", { name: /^1 reply from/ }).click();
+  await ui.page.getByRole("complementary", { name: "Thread" }).waitFor();
+  assert.equal(
+    await ui.page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+    true,
+  );
 });

@@ -1,22 +1,32 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useLayoutEffect,
+  useMemo,
   useReducer,
   useRef,
 } from "react";
 import type { Event, SpaceKey, State } from "../model.ts";
 import {
-  channelName,
+  channelSuffix,
   connectionStatus,
   initialState,
   reduce,
+  runsByMessage,
+  type ThreadGroup,
+  threadGroups,
 } from "../store.ts";
 import { parseEvent, parseHistory, pathKey } from "../wire.ts";
-import { MemberList } from "./MemberList.tsx";
+import { ChannelHeader } from "./ChannelHeader.tsx";
+import { Icon } from "./Icons.tsx";
+import { MemberStrip } from "./MemberStrip.tsx";
+import { NeedsYou } from "./NeedsYou.tsx";
 import { Sidebar } from "./Sidebar.tsx";
+import { ThreadPane } from "./ThreadPane.tsx";
 import { Timeline } from "./Timeline.tsx";
 
+const noGroups: ReadonlyMap<string, ThreadGroup> = new Map();
 function measuredReduce(state: State, event: Event): State {
   if (
     event.type !== "space" &&
@@ -52,6 +62,7 @@ export function App() {
   const paintCallbacks = useRef(new Set<number>());
   const selectedForPaint = useRef<SpaceKey | null>(null);
   const requests = useRef(new Map<number, AbortController>());
+  const lastUpdate = useRef<number | null>(null);
   useEffect(() => {
     const active = new Set<number>();
     for (const channel of state.channels.values()) {
@@ -197,6 +208,7 @@ export function App() {
           const event = parseEvent(name, message.data);
           if (event) {
             if (event.type === "space") {
+              lastUpdate.current = Date.now();
               arrivals.current = [
                 ...arrivals.current,
                 { key: event.channel.key, at: arrivedAt },
@@ -286,63 +298,144 @@ export function App() {
     if (location.pathname !== path) history.pushState(null, "", path);
     dispatch({ type: "select", key });
   }, []);
-  const onThread = useCallback(
-    (threadId: string | null) => dispatch({ type: "thread", threadId }),
-    [],
-  );
   const connection = connectionStatus(state);
   const channel =
     state.selectedKey === null
       ? undefined
       : state.channels.get(state.selectedKey);
+  const messages = channel?.messages;
+  const windows = channel?.runs;
+  const threads = channel?.threads;
+  const groups = useMemo(
+    () =>
+      messages && windows && threads
+        ? threadGroups({ messages, runs: windows, threads })
+        : noGroups,
+    [messages, windows, threads],
+  );
+  const terminalRuns = channel?.terminalRuns;
+  const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
+  const thread =
+    state.openThread === null ? undefined : groups.get(state.openThread);
+  const paneId = useId();
+  const returnFocus = useRef<{
+    button: HTMLButtonElement;
+    threadId: string;
+  } | null>(null);
+  const focusIntent = useRef(false);
+  const [, requestFocus] = useReducer((count: number) => count + 1, 0);
+  const openThread = useCallback(
+    (threadId: string, button: HTMLButtonElement) => {
+      returnFocus.current = { button, threadId };
+      focusIntent.current = true;
+      requestFocus();
+      dispatch({ type: "thread", threadId });
+    },
+    [],
+  );
+  const closeThread = useCallback(() => {
+    dispatch({ type: "thread", threadId: null });
+    const saved = returnFocus.current;
+    if (!saved) return;
+    const button = saved.button.isConnected
+      ? saved.button
+      : [
+          ...document.querySelectorAll<HTMLButtonElement>(
+            ".timeline button[data-thread-id]",
+          ),
+        ].find((button) => button.dataset.threadId === saved.threadId);
+    button?.focus();
+  }, []);
+  useLayoutEffect(() => {
+    if (thread && focusIntent.current) {
+      document
+        .getElementById(paneId)
+        ?.querySelector<HTMLButtonElement>('button[aria-label="Close thread"]')
+        ?.focus();
+      focusIntent.current = false;
+    }
+  });
+  const updatedAt = lastUpdate.current;
   return (
-    <div className="app-shell">
+    <div className={`app-shell${channel && thread ? " has-thread" : ""}`}>
       <a className="skip-link" href="#main-content">
         Skip to messages
       </a>
       <Sidebar state={state} onSelect={select} />
-      <main id="main-content" tabIndex={-1}>
+      <main className="main" id="main-content" tabIndex={-1}>
         {connection === "reconnecting" && (
-          <div className="reconnect-banner" role="status">
-            Connection lost. Reconnecting automatically…
-            <span>Showing the last received update.</span>
+          <div className="reconnect" role="status">
+            <Icon name="refresh" />
+            Reconnecting…
+            {updatedAt !== null &&
+              ` Showing updates up to ${new Date(updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`}
           </div>
         )}
         {channel ? (
           <>
-            <MemberList
+            <ChannelHeader
               channel={channel}
-              name={channelName(channel, [...state.channels.values()])}
+              suffix={channelSuffix(channel, state.channels.values())}
             />
+            <MemberStrip key={channel.key} members={channel.members} />
+            <NeedsYou channel={channel} />
             <Timeline
               channel={channel}
-              openThread={state.openThread}
-              onThread={onThread}
+              groups={groups}
+              runs={runs}
+              expandedThread={thread ? thread.id : null}
+              onThread={openThread}
+              paneId={paneId}
               onOlder={(key) => dispatch({ type: "older", key })}
               onLatest={(key) => dispatch({ type: "latest", key })}
             />
           </>
-        ) : (
-          <div className="empty-state">
-            <h1>
-              {state.channels.size > 0
-                ? "Choose a channel"
-                : connection === "live"
-                  ? "No live workspaces"
-                  : connection === "reconnecting"
-                    ? "Waiting to reconnect"
-                    : "Connecting to Namedrop"}
-            </h1>
+        ) : state.channels.size > 0 ? (
+          <div className="empty">
+            <h1>Choose a channel</h1>
+            <p>Select a channel to read its messages and live status.</p>
+          </div>
+        ) : connection === "live" ? (
+          <div className="empty">
+            <Icon name="inbox" />
+            <h1>No workspaces yet</h1>
             <p>
-              {state.channels.size > 0
-                ? "Select a workspace to read its messages and live status."
-                : connection === "live"
-                  ? "Open a Herdr workspace to see its channel here."
-                  : "Your workspaces will appear when the live connection is ready."}
+              Open a workspace in Herdr and name an agent with{" "}
+              <code className="inline">namedrop name</code>. It shows up here as
+              a channel.
             </p>
           </div>
+        ) : (
+          <>
+            <h1 className="sr-only">
+              {connection === "reconnecting"
+                ? "Waiting to reconnect"
+                : "Connecting to Namedrop"}
+            </h1>
+            <div className="skeleton" aria-hidden="true">
+              <div className="skeleton-message">
+                <span />
+              </div>
+              <div className="skeleton-message">
+                <span />
+              </div>
+              <div className="skeleton-message">
+                <span />
+              </div>
+            </div>
+          </>
         )}
       </main>
+      {channel && thread && (
+        <ThreadPane
+          key={thread.id}
+          channel={channel}
+          thread={thread}
+          runs={runs}
+          onClose={closeThread}
+          paneId={paneId}
+        />
+      )}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import type {
   Message,
   SpaceKey,
   State,
+  TerminalRun,
 } from "./model.ts";
 
 const channelCollator = new Intl.Collator();
@@ -559,15 +560,14 @@ export function sortedChannels(state: {
       channelCollator.compare(a.key, b.key),
   );
 }
-export function channelName(
+export function channelSuffix(
   channel: ChannelSnapshot,
-  channels: readonly ChannelSnapshot[],
-): string {
-  const sameName = channels.filter(
-    (other) => other.displayName === channel.displayName,
-  );
-  if (sameName.length < 2) return channel.displayName;
-  return `${channel.displayName} (${channel.workspaceId} · ${channel.key})`;
+  channels: Iterable<ChannelSnapshot>,
+): string | null {
+  let sameName = 0;
+  for (const other of channels)
+    if (other.displayName === channel.displayName) sameName++;
+  return sameName < 2 ? null : `${channel.workspaceId} · ${channel.key}`;
 }
 export function connectionStatus(
   state: State,
@@ -686,8 +686,9 @@ export function timelineView(
         grouped,
         showRecipients:
           !grouped ||
-          previous?.kind !== message.kind ||
-          !sameList(recipients(previous), to),
+          ((to.length > 0 || message.kind === "handoff") &&
+            (previous?.kind !== message.kind ||
+              !sameList(recipients(previous), to))),
         recipients: to,
         latestReply: reply ? null : (thread.replies.at(-1) ?? null),
         replyCount: reply
@@ -701,4 +702,20 @@ export function timelineView(
     }
   }
   return rows;
+}
+export function runsByMessage(
+  runs: readonly TerminalRun[],
+): ReadonlyMap<string, TerminalRun> {
+  const byMessage = new Map<string, TerminalRun>();
+  for (const run of runs)
+    if (run.messageId !== null) byMessage.set(run.messageId, run);
+  return byMessage;
+}
+export function exitFor(
+  runs: ReadonlyMap<string, TerminalRun>,
+  reply: Message | null,
+): TerminalRun | undefined {
+  if (reply === null || reply.inReplyTo === null) return undefined;
+  const run = runs.get(reply.inReplyTo);
+  return run?.terminal === reply.author ? run : undefined;
 }

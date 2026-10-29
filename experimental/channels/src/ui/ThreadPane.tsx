@@ -1,20 +1,24 @@
-import { useEffect, useRef } from "react";
-import type { Channel } from "../model.ts";
-import type { ThreadGroup } from "../store.ts";
+import { useEffect, useRef, useState } from "react";
+import type { Channel, TerminalRun } from "../model.ts";
+import { exitFor, recipients, type ThreadGroup } from "../store.ts";
+import { Icon } from "./Icons.tsx";
 import { Message } from "./Message.tsx";
 
 export function ThreadPane({
   channel,
   thread,
+  runs,
   onClose,
   paneId,
 }: {
   channel: Channel;
   thread: ThreadGroup;
+  runs: ReadonlyMap<string, TerminalRun>;
   onClose: () => void;
   paneId: string;
 }) {
   const pane = useRef<HTMLElement>(null);
+  const [openedAt] = useState(() => Date.now());
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
@@ -37,20 +41,29 @@ export function ThreadPane({
     document.addEventListener("keydown", onEscape);
     return () => document.removeEventListener("keydown", onEscape);
   }, [onClose]);
+  const count = thread.replies.length;
+  const unloaded =
+    thread.knownCount > thread.parents.length + thread.replies.length;
   return (
-    <aside className="thread-pane" aria-label="Thread" id={paneId} ref={pane}>
-      <header className="thread-heading">
-        <h2>Thread</h2>
+    <aside className="thread" aria-label="Thread" id={paneId} ref={pane}>
+      <header className="thread-head">
+        <h2 className="thread-title">Thread</h2>
+        <span className="thread-where">
+          in{" "}
+          {channel.addressableLabel === null
+            ? channel.displayName
+            : `#${channel.addressableLabel}`}
+        </span>
         <button
           type="button"
-          className="text-button"
+          className="icon-button"
           onClick={onClose}
           aria-label="Close thread"
         >
-          Close
+          <Icon name="x" />
         </button>
       </header>
-      <div className="thread-messages">
+      <div className="thread-body">
         {thread.parents.length === 0 && (
           <p className="earlier-thread">
             Earlier thread · the parent message is not loaded yet.
@@ -61,20 +74,22 @@ export function ThreadPane({
             key={message.id}
             message={message}
             members={channel.members}
+            recipients={recipients(message)}
+            exit={exitFor(runs, message)}
           />
         ))}
-        <p className="reply-divider">
-          {thread.replies.length}{" "}
-          {thread.replies.length === 1 ? "reply" : "replies"}
-          {thread.knownCount > thread.parents.length + thread.replies.length
-            ? " loaded · earlier messages may be available"
-            : ""}
+        <p className="divider">
+          {count} {count === 1 ? "reply" : "replies"}
+          {unloaded ? " · earlier replies not loaded" : ""}
         </p>
         {thread.replies.map((message) => (
           <Message
             key={message.id}
             message={message}
             members={channel.members}
+            recipients={recipients(message)}
+            exit={exitFor(runs, message)}
+            arrive={message.at > openedAt}
           />
         ))}
       </div>

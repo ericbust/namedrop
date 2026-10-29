@@ -1,15 +1,8 @@
-import {
-  useCallback,
-  useId,
-  useLayoutEffect,
-  useMemo,
-  useReducer,
-  useRef,
-} from "react";
-import type { Channel, SpaceKey } from "../model.ts";
-import { threadGroups, timelineView } from "../store.ts";
+import { Fragment, useLayoutEffect, useMemo, useRef } from "react";
+import type { Channel, SpaceKey, TerminalRun } from "../model.ts";
+import { exitFor, type ThreadGroup, timelineView } from "../store.ts";
+import { Icon } from "./Icons.tsx";
 import { Message } from "./Message.tsx";
-import { ThreadPane } from "./ThreadPane.tsx";
 
 type Anchor = {
   ids: readonly { id: string; offset: number }[];
@@ -40,67 +33,34 @@ function capture(element: HTMLElement): Anchor {
 }
 export function Timeline({
   channel,
-  openThread: openThreadId,
+  groups,
+  runs,
+  expandedThread,
   onThread,
+  paneId,
   onOlder,
   onLatest,
 }: {
   channel: Channel;
-  openThread: string | null;
-  onThread: (threadId: string | null) => void;
+  groups: ReadonlyMap<string, ThreadGroup>;
+  runs: ReadonlyMap<string, TerminalRun>;
+  expandedThread: string | null;
+  onThread: (threadId: string, button: HTMLButtonElement) => void;
+  paneId: string;
   onOlder: (key: SpaceKey) => void;
   onLatest: (key: SpaceKey) => void;
 }) {
   const scroller = useRef<HTMLElement>(null);
   const anchors = useRef(new Map<SpaceKey, Anchor>());
-  const returnFocus = useRef<{
-    button: HTMLButtonElement;
-    threadId: string;
-  } | null>(null);
-  const paneId = useId();
-  const focusIntent = useRef(false);
-  const [, requestFocus] = useReducer((count: number) => count + 1, 0);
-  const { messages, runs, threads } = channel;
-  const groups = useMemo(
-    () => threadGroups({ messages, runs, threads }),
-    [messages, runs, threads],
-  );
+  const shown = useRef<{ key: SpaceKey; at: number } | null>(null);
+  if (shown.current?.key !== channel.key)
+    shown.current = { key: channel.key, at: Date.now() };
+  const shownAt = shown.current.at;
+  const { messages, runs: windows, threads } = channel;
   const rows = useMemo(
-    () => timelineView({ messages, runs, threads }, groups),
-    [messages, runs, threads, groups],
+    () => timelineView({ messages, runs: windows, threads }, groups),
+    [messages, windows, threads, groups],
   );
-  const thread = openThreadId === null ? undefined : groups.get(openThreadId);
-  const close = useCallback(() => {
-    onThread(null);
-    const saved = returnFocus.current;
-    if (!saved) return;
-    const button = saved.button.isConnected
-      ? saved.button
-      : [
-          ...(scroller.current?.querySelectorAll<HTMLButtonElement>(
-            "button[data-thread-id]",
-          ) ?? []),
-        ].find((button) => button.dataset.threadId === saved.threadId);
-    button?.focus();
-  }, [onThread]);
-  const openThread = useCallback(
-    (threadId: string, button: HTMLButtonElement) => {
-      returnFocus.current = { button, threadId };
-      focusIntent.current = true;
-      requestFocus();
-      onThread(threadId);
-    },
-    [onThread],
-  );
-  useLayoutEffect(() => {
-    if (thread && focusIntent.current) {
-      document
-        .getElementById(paneId)
-        ?.querySelector<HTMLButtonElement>('button[aria-label="Close thread"]')
-        ?.focus();
-      focusIntent.current = false;
-    }
-  });
   useLayoutEffect(() => {
     const element = scroller.current;
     if (!element) return;
@@ -125,127 +85,136 @@ export function Timeline({
   }, [channel]);
   const history = channel.history;
   const gap = channel.runs.length > 1;
+  const loadOlder = () => onOlder(channel.key);
   return (
-    <div className={`conversation${thread ? " has-thread" : ""}`}>
-      <section className="timeline" aria-label="Channel messages">
-        <section
-          className="timeline-scroll"
-          ref={scroller}
-          aria-label="Message history"
-          // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard scrolling requires focus. https://www.w3.org/WAI/standards-guidelines/act/rules/0ssw9k/
-          tabIndex={0}
-          onScroll={(event) => {
-            anchors.current.set(channel.key, capture(event.currentTarget));
-            if (
-              event.currentTarget.scrollTop < 40 &&
-              history.kind === "idle" &&
-              !channel.exhausted
-            )
-              onOlder(channel.key);
-          }}
-        >
-          <div className="history-control">
-            {channel.viewMode === "browsing" && (
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => {
-                  anchors.current.delete(channel.key);
-                  onLatest(channel.key);
-                }}
-              >
-                Jump to latest
-              </button>
-            )}
-            {history.kind === "loading" ? (
-              <span role="status">
-                Loading{" "}
-                {history.request.purpose === "bridge" ? "missing" : "older"}{" "}
-                messages…
-              </span>
-            ) : history.kind === "error" ? (
-              <>
-                <span role="alert">
-                  Could not load messages: {history.reason}
-                </span>
-                <button
-                  type="button"
-                  className="text-button"
-                  onClick={() => onOlder(channel.key)}
-                >
-                  Retry
-                </button>
-              </>
-            ) : channel.messages.size > 0 && (!channel.exhausted || gap) ? (
-              <button
-                type="button"
-                className="text-button"
-                onClick={() => onOlder(channel.key)}
-              >
-                Load {gap ? "missing" : "older"} messages
-              </button>
-            ) : channel.messages.size > 0 ? (
-              <span>Beginning of channel</span>
-            ) : null}
-          </div>
-          {channel.messages.size === 0 && (
-            <div className="empty-messages">
-              <h2>No messages yet</h2>
-              <p>Agent exchanges will appear here as they happen.</p>
-            </div>
-          )}
-          {rows.map((row) =>
-            row.kind === "day" ? (
+    <section
+      className="timeline"
+      ref={scroller}
+      aria-label="Message history"
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: Keyboard scrolling requires focus. https://www.w3.org/WAI/standards-guidelines/act/rules/0ssw9k/
+      tabIndex={0}
+      onScroll={(event) => {
+        anchors.current.set(channel.key, capture(event.currentTarget));
+        if (
+          event.currentTarget.scrollTop < 40 &&
+          history.kind === "idle" &&
+          !channel.exhausted
+        )
+          onOlder(channel.key);
+      }}
+    >
+      <div className="history-edge">
+        {channel.viewMode === "browsing" && (
+          <button
+            type="button"
+            className="text-button"
+            onClick={() => {
+              anchors.current.delete(channel.key);
+              onLatest(channel.key);
+            }}
+          >
+            Jump to latest
+          </button>
+        )}
+        {history.kind === "loading" ? (
+          <span role="status">
+            {history.request.purpose === "bridge"
+              ? "Loading missing messages…"
+              : "Loading earlier messages…"}
+          </span>
+        ) : history.kind === "error" ? (
+          <>
+            <span role="alert" title={history.reason}>
+              Couldn't load earlier messages.
+            </span>
+            <button type="button" className="text-button" onClick={loadOlder}>
+              Try again
+            </button>
+          </>
+        ) : channel.messages.size > 0 && (!channel.exhausted || gap) ? (
+          <button type="button" className="text-button" onClick={loadOlder}>
+            {gap ? "Load missing messages" : "Load earlier messages"}
+          </button>
+        ) : channel.messages.size > 0 ? (
+          <span>Beginning of channel</span>
+        ) : null}
+      </div>
+      {channel.messages.size === 0 && (
+        <div className="empty">
+          <Icon name="inbox" />
+          <h2>No messages yet</h2>
+          <p>
+            When agents in this workspace mention each other, the conversation
+            shows up here.
+          </p>
+        </div>
+      )}
+      {rows.map((row) => {
+        switch (row.kind) {
+          case "day":
+            return (
               <p className="divider" key={`day:${row.before}`}>
                 {row.label}
               </p>
-            ) : row.kind === "gap" ? (
-              <div className="message-gap" key={`gap:${row.before}`}>
-                <span>Messages missing between updates</span>
+            );
+          case "gap":
+            return (
+              <div className="divider gap" key={`gap:${row.before}`}>
+                Some messages are missing here
                 <button
                   type="button"
                   className="text-button"
                   disabled={history.kind === "loading"}
-                  onClick={() => onOlder(channel.key)}
+                  onClick={loadOlder}
                 >
-                  Load missing messages
+                  Load them
                 </button>
               </div>
-            ) : (
-              <div key={row.message.id}>
+            );
+          default: {
+            const { message, thread, latestReply, replyCount, recipients } =
+              row;
+            const answered =
+              latestReply !== null &&
+              recipients.length > 0 &&
+              recipients.every((id) =>
+                thread.replies.some((reply) => reply.author === id),
+              );
+            return (
+              <Fragment key={message.id}>
                 {row.kind === "orphan" && (
                   <button
                     type="button"
                     className="text-button earlier-thread"
-                    data-thread-id={row.thread.id}
-                    onClick={(event) => {
-                      openThread(row.thread.id, event.currentTarget);
-                    }}
+                    data-thread-id={thread.id}
+                    onClick={(event) =>
+                      onThread(thread.id, event.currentTarget)
+                    }
                   >
                     Earlier thread · parent not loaded
                   </button>
                 )}
                 <Message
-                  message={row.message}
+                  message={message}
                   members={channel.members}
-                  replies={row.replyCount}
-                  onThread={openThread}
+                  recipients={recipients}
+                  grouped={row.grouped}
+                  showRecipients={row.showRecipients}
+                  receipts={!answered}
+                  exit={exitFor(runs, message)}
+                  latestReply={latestReply}
+                  replyCount={replyCount}
+                  replyExit={exitFor(runs, latestReply)}
+                  onThread={onThread}
                   paneId={paneId}
-                  threadExpanded={thread?.id === row.thread.id}
+                  threadExpanded={expandedThread === thread.id}
+                  arrive={message.at > shownAt}
                 />
-              </div>
-            ),
-          )}
-        </section>
-      </section>
-      {thread && (
-        <ThreadPane
-          channel={channel}
-          thread={thread}
-          onClose={close}
-          paneId={paneId}
-        />
-      )}
-    </div>
+              </Fragment>
+            );
+          }
+        }
+      })}
+    </section>
   );
 }
