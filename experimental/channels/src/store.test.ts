@@ -4,6 +4,7 @@ import type { Activity, ChannelSnapshot, State } from "./model.ts";
 import {
   channelSuffix,
   connectionStatus,
+  exitFor,
   initialState,
   type MessageRow,
   reduce,
@@ -93,7 +94,7 @@ test("space installs a complete channel, selects the first arrival, and leaves t
   const channel = parsed(snapshot());
   const after = reduce(before, { type: "space", channel });
   assert.deepEqual(after.channels.get(channel.key)?.messages, channel.messages);
-  assert.equal(after.selectedKey, channel.key);
+  assert.equal(after.selection.key, channel.key);
   assert.equal(after.unread.size, 0);
   assert.equal(before.channels.size, 0);
 });
@@ -132,7 +133,7 @@ test("gone removes channel and unread metadata, clears selected key, and unknown
   assert.equal(reduce(next, { type: "gone", key: channel.key }), next);
   const selected = reduce(state, { type: "select", key: channel.key });
   assert.equal(
-    reduce(selected, { type: "gone", key: channel.key }).selectedKey,
+    reduce(selected, { type: "gone", key: channel.key }).selection.key,
     null,
   );
 });
@@ -191,7 +192,7 @@ test("fix5: channel collation preserves default locale Unicode ordering and ever
     sortedChannels(state).map((channel) => channel.key),
     expected,
   );
-  assert.equal(state.selectedKey, expected[0]);
+  assert.equal(state.selection.key, expected[0]);
   assert.deepEqual(
     sortedChannels(state)
       .filter((channel) => channel.displayName === "shared")
@@ -575,10 +576,10 @@ test("design-b: select keeps unread, and read clears only the selected key", () 
   const key = parsed(snapshot(keyB, "beta", "w2")).key;
   const alpha = parsed(snapshot()).key;
   const next = reduce(state, { type: "select", key });
-  assert.equal(next.selectedKey, key);
+  assert.equal(next.selection.key, key);
   assert.ok(next.unread.has(key));
   assert.equal(
-    reduce(initialState(), { type: "select", key }).selectedKey,
+    reduce(initialState(), { type: "select", key }).selection.key,
     null,
   );
   assert.equal(reduce(next, { type: "select", key }), next);
@@ -611,17 +612,17 @@ test("fix2 item 3: reconnect retains gamma selection while alpha sorts first and
   const disconnected = reduce(before, { type: "disconnected" });
   const opened = reduce(disconnected, { type: "opened" });
   assert.equal(opened.channels, before.channels);
-  assert.equal(opened.selectedKey, gamma.key);
+  assert.equal(opened.selection.key, gamma.key);
   assert.equal(opened.unread, before.unread);
   const partial = apply(opened, changedChannel());
   assert.equal(partial.channels, before.channels);
-  assert.equal(partial.selectedKey, gamma.key);
+  assert.equal(partial.selection.key, gamma.key);
   assert.equal(partial.unread, before.unread);
   const completed = ready(
     apply(apply(partial, snapshot()), snapshot(gamma.key, "gamma", "w3")),
     [keyB, keyA, gamma.key],
   );
-  assert.equal(completed.selectedKey, gamma.key);
+  assert.equal(completed.selection.key, gamma.key);
   assert.ok(completed.unread.has(beta));
   assert.equal(completed.channels.get(alpha), before.channels.get(alpha));
 });
@@ -633,14 +634,14 @@ test("item 2: initial ready selects sidebar order and ready removes omitted keys
   );
   assert.equal(pending.channels.size, 0);
   const complete = ready(pending, [keyA, keyB]);
-  assert.equal(complete.selectedKey, parsed(snapshot(keyB)).key);
+  assert.equal(complete.selection.key, parsed(snapshot(keyB)).key);
   const reconnect = reduce(complete, { type: "opened" });
   const replacement = ready(apply(reconnect, snapshot(keyA, "zeta")), [keyA]);
   assert.equal(replacement.channels.size, 1);
-  assert.equal(replacement.selectedKey, parsed(snapshot()).key);
+  assert.equal(replacement.selection.key, parsed(snapshot()).key);
   const empty = ready(reduce(replacement, { type: "opened" }), []);
   assert.equal(empty.channels.size, 0);
-  assert.equal(empty.selectedKey, null);
+  assert.equal(empty.selection.key, null);
   assert.equal(empty.unread.size, 0);
 });
 test("interrupted replay and duplicate ready cannot replace the view", () => {
@@ -811,7 +812,7 @@ test("fix3 item 1: timeout publishes first load and reconnect without pruning an
     type: "replay-timeout",
   });
   assert.equal(first.sync.kind, "fallback");
-  assert.equal(first.selectedKey, parsed(snapshot(keyB)).key);
+  assert.equal(first.selection.key, parsed(snapshot(keyB)).key);
   const before = apply(first, snapshot());
   const next = reduce(
     apply(reduce(before, { type: "opened" }), changedChannel()),
@@ -819,7 +820,7 @@ test("fix3 item 1: timeout publishes first load and reconnect without pruning an
   );
   assert.equal(next.sync.kind, "fallback");
   assert.equal(next.channels.size, 2);
-  assert.equal(next.selectedKey, before.selectedKey);
+  assert.equal(next.selection.key, before.selection.key);
   assert.equal(reduce(next, { type: "replay-timeout" }), next);
   assert.equal(
     apply(next, snapshot(keyB, "live beta", "w2")).channels.get(
@@ -836,7 +837,7 @@ test("fix2 item 4: fallback selection keeps its unread mark until read on dwell"
     apply(reduce(before, { type: "opened" }), changedChannel()),
     [keyB],
   );
-  assert.equal(next.selectedKey, beta);
+  assert.equal(next.selection.key, beta);
   assert.ok(next.unread.has(beta));
   assert.equal(
     reduce(next, { type: "read", key: beta }).unread.has(beta),
@@ -868,7 +869,7 @@ test("fix2 item 6: gone removes committed and pending snapshots during replay an
   const replay = apply(reduce(before, { type: "opened" }), snapshot());
   const gone = reduce(replay, { type: "gone", key: alpha });
   assert.equal(gone.channels.has(alpha), false);
-  assert.equal(gone.selectedKey, null);
+  assert.equal(gone.selection.key, null);
   assert.equal(gone.sync.kind, "replaying");
   assert.ok(gone.sync.kind === "replaying" && !gone.sync.pending.has(alpha));
   assert.equal(ready(gone, [keyA, keyB]).channels.has(alpha), false);
@@ -908,7 +909,7 @@ test("fix3 item 1: late ready prunes the current map and retains gamma selection
   assert.deepEqual([...next.channels.keys()].sort(), [keyA, gammaKey]);
   assert.equal(next.channels.get(alphaKey), current.channels.get(alphaKey));
   assert.equal(next.channels.get(gammaKey)?.displayName, "gamma-current");
-  assert.equal(next.selectedKey, gammaKey);
+  assert.equal(next.selection.key, gammaKey);
   assert.deepEqual([...next.unread], [alphaKey]);
   assert.equal(next.sync.kind, "live");
 });
@@ -928,7 +929,7 @@ test("fix3 item 1: late ready removes selected gamma and selects the sorted fall
   assert.ok(current.unread.has(beta.key));
   const next = ready(current, [keyA, keyB]);
   assert.equal(next.channels.has(gamma.key), false);
-  assert.equal(next.selectedKey, beta.key);
+  assert.equal(next.selection.key, beta.key);
   assert.ok(next.unread.has(beta.key));
   assert.equal(
     reduce(next, { type: "read", key: beta.key }).unread.has(beta.key),
@@ -1015,13 +1016,13 @@ for (const beforeTimeout of [false, true]) {
     const fallback = reduce(pending, { type: "replay-timeout" });
     const current = apply(apply(fallback, beta), snapshot());
     const betaKey = parsed(beta).key;
-    assert.equal(current.selectedKey, betaKey);
+    assert.equal(current.selection.key, parsed(snapshot()).key);
     assert.equal(
-      ready(current, [keyA, keyB]).selectedKey,
+      ready(current, [keyA, keyB]).selection.key,
       parsed(snapshot()).key,
     );
     const chosen = reduce(current, { type: "select", key: betaKey });
-    assert.equal(ready(chosen, [keyA, keyB]).selectedKey, betaKey);
+    assert.equal(ready(chosen, [keyA, keyB]).selection.key, betaKey);
   });
 }
 
@@ -1031,7 +1032,8 @@ function withMessages(ids: string[], key = keyA) {
   return value;
 }
 function activeChannel(state: State) {
-  const channel = state.selectedKey && state.channels.get(state.selectedKey);
+  const channel =
+    state.selection.key && state.channels.get(state.selection.key);
   assert.ok(channel);
   return channel;
 }
@@ -1604,7 +1606,7 @@ test("history window: replay decides from the reader's position when ready arriv
   assert.equal(channel.messages.get("m456")?.legs[0]?.stage.stage, "held");
 });
 
-test("design-b: attention subject and message ids parse tolerantly and propagate", () => {
+test("design-b: attention subject and message ids parse from the server's shape and the alias gets one @", () => {
   const base = snapshot();
   function frame(extra: Record<string, unknown>) {
     return {
@@ -1623,29 +1625,39 @@ test("design-b: attention subject and message ids parse tolerantly and propagate
       },
     };
   }
-  const plain = apply(initialState(), frame({}));
-  const [missing] = activeChannel(plain).attention;
-  assert.equal(missing?.subjectAlias, null);
-  assert.equal(missing?.messageId, null);
-  for (const malformed of [
+  const plain = apply(
+    initialState(),
+    frame({ subject_alias: null, message_id: null }),
+  );
+  const [unnamed] = activeChannel(plain).attention;
+  assert.equal(unnamed?.subjectAlias, null);
+  assert.equal(unnamed?.messageId, null);
+  for (const other of [
+    {},
     { subject_alias: 7, message_id: { id: "m1" } },
     { subject_alias: " ", message_id: "" },
-    { subject_alias: null, message_id: null },
+    { subject_alias: "@", message_id: " " },
   ]) {
-    const [item] = parsed(frame(malformed)).attention;
+    const [item] = parsed(frame(other)).attention;
     assert.equal(item?.subjectAlias, null);
     assert.equal(item?.messageId, null);
   }
   const withSubject = apply(
     plain,
-    frame({ subject_alias: "@codex", message_id: "m1" }),
+    frame({ subject_alias: "codex", message_id: "m1" }),
   );
   assert.notEqual(withSubject, plain);
   const [item] = activeChannel(withSubject).attention;
   assert.equal(item?.subjectAlias, "@codex");
   assert.equal(item?.messageId, "m1");
+  for (const alias of ["@codex", "@@codex"])
+    assert.equal(
+      parsed(frame({ subject_alias: alias, message_id: "m1" })).attention[0]
+        ?.subjectAlias,
+      "@codex",
+    );
   assert.equal(
-    apply(withSubject, frame({ subject_alias: "@codex", message_id: "m1" })),
+    apply(withSubject, frame({ subject_alias: "codex", message_id: "m1" })),
     withSubject,
   );
 });
@@ -1673,6 +1685,7 @@ test("design-b: terminal runs parse tolerantly, keep identity and propagate exit
         { ...valid, command: "echo hi" },
         { ...valid, started_at_ms: -1 },
         "not a run",
+        { ...valid, exit_code: null, message_id: null },
         { ...valid, exit_code: null, message_id: undefined },
         { ...valid, exit_code: "1", message_id: 5 },
       ]),
@@ -1684,6 +1697,13 @@ test("design-b: terminal runs parse tolerantly, keep identity and propagate exit
         startedAt: 90,
         exitCode: 0,
         messageId: "m1",
+      },
+      {
+        terminal: "shell-1",
+        command: { text: "echo hi", truncated: false },
+        startedAt: 90,
+        exitCode: null,
+        messageId: null,
       },
       {
         terminal: "shell-1",
@@ -1756,16 +1776,16 @@ test("design-b: landing prefers the URL key, then needs you in sidebar order, th
     beta,
   ];
   for (const end of ["ready", "timeout"] as const) {
-    assert.equal(landed(frames, keyA, end).selectedKey, keyA);
-    assert.equal(landed(frames, null, end).selectedKey, keyC);
-    assert.equal(landed(frames, "e".repeat(20), end).selectedKey, keyC);
-    assert.equal(landed([alpha, beta], null, end).selectedKey, keyD);
+    assert.equal(landed(frames, keyA, end).selection.key, keyA);
+    assert.equal(landed(frames, null, end).selection.key, keyC);
+    assert.equal(landed(frames, "e".repeat(20), end).selection.key, keyC);
+    assert.equal(landed([alpha, beta], null, end).selection.key, keyD);
     assert.equal(
       landed(
         [landingFrame(keyB, "zeta"), landingFrame(keyA, "alpha")],
         null,
         end,
-      ).selectedKey,
+      ).selection.key,
       keyA,
     );
   }
@@ -1780,13 +1800,13 @@ test("design-b: landing prefers the URL key, then needs you in sidebar order, th
     ),
     frames.map((frame) => frame.key),
   );
-  assert.equal(reconnect.selectedKey, keyD);
+  assert.equal(reconnect.selection.key, keyD);
 });
 test("design-b: switching channels closes the open thread", () => {
   const state = twoChannels();
   const alpha = parsed(snapshot()).key;
   const beta = parsed(snapshot(keyB)).key;
-  assert.equal(state.selectedKey, alpha);
+  assert.equal(state.selection.key, alpha);
   const open = reduce(state, { type: "thread", threadId: "m1" });
   assert.equal(open.openThread, "m1");
   assert.equal(reduce(open, { type: "thread", threadId: "m1" }), open);
@@ -1798,6 +1818,210 @@ test("design-b: switching channels closes the open thread", () => {
     null,
   );
   assert.equal(apply(open, changedChannel()).openThread, "m1");
+});
+test("a thread whose messages all left the window closes for good, one still loaded stays open", () => {
+  const paged = historyPage(apply(initialState(), withMessages(["a", "b"])), [
+    "h1",
+    "h2",
+  ]);
+  assert.equal(activeChannel(paged).messages.size, 4);
+  const key = activeChannel(paged).key;
+  const open = reduce(paged, { type: "thread", threadId: "h1" });
+  assert.equal(open.openThread, "h1");
+  const jumped = reduce(open, { type: "latest", key });
+  assert.equal(activeChannel(jumped).messages.has("h1"), false);
+  assert.equal(jumped.openThread, null);
+  assert.equal(historyPage(jumped, ["h1", "h2"]).openThread, null);
+  const kept = reduce(reduce(paged, { type: "thread", threadId: "a" }), {
+    type: "latest",
+    key,
+  });
+  assert.equal(kept.openThread, "a");
+});
+test("landing: a late URL key is selected when it arrives, and from then on nothing moves by itself", () => {
+  const keyC = "c".repeat(20);
+  const fallback = reduce(
+    reduce(initialState({ requestedKey: parsed(snapshot(keyB)).key }), {
+      type: "opened",
+    }),
+    { type: "replay-timeout" },
+  );
+  const alpha = apply(fallback, landingFrame(keyA, "alpha"));
+  assert.equal(alpha.selection.key, keyA);
+  const requested = apply(alpha, landingFrame(keyB, "beta"));
+  assert.equal(requested.selection.key, keyB);
+  const later = apply(
+    requested,
+    landingFrame(keyC, "gamma", { needsYou: true }),
+  );
+  assert.equal(later.selection.key, keyB);
+  assert.equal(ready(later, [keyA, keyB, keyC]).selection.key, keyB);
+});
+test("landing: without a URL key each new channel re-runs the rule, updates never move it, and a pick ends it", () => {
+  const keyC = "c".repeat(20);
+  const keyD = "d".repeat(20);
+  const fallback = reduce(reduce(initialState(), { type: "opened" }), {
+    type: "replay-timeout",
+  });
+  const alpha = apply(fallback, landingFrame(keyA, "alpha"));
+  assert.equal(alpha.selection.key, keyA);
+  const needsYou = apply(
+    alpha,
+    landingFrame(keyC, "gamma", { needsYou: true }),
+  );
+  assert.equal(needsYou.selection.key, keyC);
+  const updated = apply(
+    needsYou,
+    landingFrame(keyA, "alpha", { needsYou: true }),
+  );
+  assert.equal(updated.selection.key, keyC);
+  assert.equal(ready(updated, [keyA, keyC]).selection.key, keyC);
+  const chosen = reduce(updated, {
+    type: "select",
+    key: parsed(snapshot(keyA)).key,
+  });
+  const delta = landingFrame(keyD, "delta", { needsYou: true });
+  assert.equal(apply(chosen, delta).selection.key, keyA);
+  assert.equal(
+    ready(apply(chosen, delta), [keyA, keyC, keyD]).selection.key,
+    keyA,
+  );
+});
+test("landing: a reconnect replay never moves the selection or closes the thread, even when it brings a channel that needs you", () => {
+  const alpha = landingFrame(keyA, "alpha");
+  const state = reduce(landed([alpha]), { type: "thread", threadId: "m1" });
+  assert.equal(state.selection.key, keyA);
+  const known = ready(
+    apply(
+      reduce(state, { type: "opened" }),
+      landingFrame(keyA, "alpha", { needsYou: true }),
+    ),
+    [keyA],
+  );
+  assert.equal(known.selection.key, keyA);
+  assert.equal(known.openThread, "m1");
+  const grown = ready(
+    apply(
+      apply(reduce(state, { type: "opened" }), alpha),
+      landingFrame(keyB, "beta", { needsYou: true }),
+    ),
+    [keyA, keyB],
+  );
+  assert.equal(grown.selection.key, keyA);
+  assert.equal(grown.openThread, "m1");
+});
+test("landing: after ready, a workspace that opens later never moves an automatic landing or closes its thread", () => {
+  const keyC = "c".repeat(20);
+  const keyD = "d".repeat(20);
+  const state = reduce(
+    landed([
+      landingFrame(keyA, "alpha", { at: 100 }),
+      landingFrame(keyB, "beta", { at: 200 }),
+    ]),
+    { type: "thread", threadId: "m1" },
+  );
+  assert.equal(state.selection.key, keyB);
+  const calm = apply(state, landingFrame(keyC, "gamma", { at: 900 }));
+  assert.equal(calm.selection.key, keyB);
+  assert.equal(calm.openThread, "m1");
+  const needsYou = apply(calm, landingFrame(keyD, "delta", { needsYou: true }));
+  assert.equal(needsYou.selection.key, keyB);
+  assert.equal(needsYou.openThread, "m1");
+  assert.equal(needsYou.channels.size, 4);
+});
+test("navigate: Back to the root lands once more, and after the reader's pick nothing moves it again", () => {
+  const keyC = "c".repeat(20);
+  const keyD = "d".repeat(20);
+  const betaKey = parsed(snapshot(keyB)).key;
+  const state = landed([
+    landingFrame(keyA, "alpha"),
+    landingFrame(keyB, "beta"),
+  ]);
+  const chosen = reduce(state, { type: "select", key: betaKey });
+  const root = reduce(chosen, { type: "navigate", key: null });
+  assert.equal(root.selection.key, keyA);
+  const gamma = apply(root, landingFrame(keyC, "gamma", { needsYou: true }));
+  assert.equal(gamma.selection.key, keyA);
+  const forward = reduce(gamma, { type: "navigate", key: betaKey });
+  assert.equal(forward.selection.key, keyB);
+  const delta = landingFrame(keyD, "delta", { needsYou: true });
+  assert.equal(apply(forward, delta).selection.key, keyB);
+  assert.equal(
+    reduce(forward, {
+      type: "navigate",
+      key: parsed(snapshot("e".repeat(20))).key,
+    }),
+    forward,
+  );
+});
+test("select: the pick replaces the URL's key, so a lost pick lands by Needs you instead of the load-time URL", () => {
+  const keyC = "c".repeat(20);
+  const betaKey = parsed(snapshot(keyB)).key;
+  const state = landed(
+    [landingFrame(keyA, "alpha"), landingFrame(keyB, "beta")],
+    keyA,
+  );
+  assert.equal(state.selection.key, keyA);
+  const lost = reduce(reduce(state, { type: "select", key: betaKey }), {
+    type: "gone",
+    key: betaKey,
+  });
+  assert.equal(lost.selection.key, null);
+  assert.equal(
+    apply(lost, landingFrame(keyC, "gamma", { needsYou: true })).selection.key,
+    keyC,
+  );
+});
+test("landing: reader input ends discovery, so a channel that needs you no longer moves the selection", () => {
+  const keyC = "c".repeat(20);
+  const fallback = reduce(reduce(initialState(), { type: "opened" }), {
+    type: "replay-timeout",
+  });
+  const touched = reduce(apply(fallback, landingFrame(keyA, "alpha")), {
+    type: "input",
+  });
+  assert.equal(touched.selection.key, keyA);
+  const gamma = apply(touched, landingFrame(keyC, "gamma", { needsYou: true }));
+  assert.equal(gamma.selection.key, keyA);
+  assert.equal(ready(gamma, [keyA, keyC]).selection.key, keyA);
+  assert.equal(reduce(gamma, { type: "input" }), gamma);
+});
+test("landing: a server without ready ends discovery on the timeout, after which only the URL's channel is chosen", () => {
+  const keyC = "c".repeat(20);
+  const fallback = reduce(
+    reduce(initialState({ requestedKey: parsed(snapshot(keyB)).key }), {
+      type: "opened",
+    }),
+    { type: "replay-timeout" },
+  );
+  const timedOut = reduce(apply(fallback, landingFrame(keyA, "alpha")), {
+    type: "discovery-timeout",
+  });
+  assert.equal(timedOut.selection.key, keyA);
+  assert.equal(reduce(timedOut, { type: "discovery-timeout" }), timedOut);
+  const gamma = apply(
+    timedOut,
+    landingFrame(keyC, "gamma", { needsYou: true }),
+  );
+  assert.equal(gamma.selection.key, keyA);
+  assert.deepEqual(apply(gamma, landingFrame(keyB, "beta")).selection, {
+    kind: "chosen",
+    key: keyB,
+  });
+});
+test("landing: after ready the URL's channel is chosen when it arrives, unless the reader acted first", () => {
+  const start = reduce(
+    initialState({ requestedKey: parsed(snapshot(keyB)).key }),
+    { type: "opened" },
+  );
+  const state = ready(apply(start, landingFrame(keyA, "alpha")), [keyA]);
+  assert.equal(state.selection.key, keyA);
+  assert.deepEqual(apply(state, landingFrame(keyB, "beta")).selection, {
+    kind: "chosen",
+    key: keyB,
+  });
+  const touched = reduce(state, { type: "input" });
+  assert.equal(apply(touched, landingFrame(keyB, "beta")).selection.key, keyA);
 });
 
 const MIN = 60_000;
@@ -1985,7 +2209,54 @@ test("design-b fix: a new terminal run keeps unchanged runs identical", () => {
   });
   const before = runsByMessage(activeChannel(state).terminalRuns);
   const after = runsByMessage(activeChannel(next).terminalRuns);
-  assert.equal(after.get("m2")?.exitCode, 1);
-  assert.ok(before.get("m1"));
-  assert.equal(after.get("m1"), before.get("m1"));
+  assert.equal(after.get("m2")?.[0]?.exitCode, 1);
+  assert.ok(before.get("m1")?.[0]);
+  assert.equal(after.get("m1")?.[0], before.get("m1")?.[0]);
+});
+test("design-b: each terminal reply gets the latest run that started at or before it, whatever the list order", () => {
+  const run = (
+    exit_code: number,
+    started_at_ms: number,
+    terminal = "shell-1",
+  ) => ({
+    terminal,
+    command: { text: "make", truncated: false },
+    started_at_ms,
+    exit_code,
+    message_id: "m1",
+  });
+  const reply = (message_id: string, at_ms: number) => ({
+    ...message(message_id),
+    thread_id: "m1",
+    in_reply_to: "m1",
+    kind: "reply",
+    author: "shell-1",
+    at_ms,
+  });
+  const value = snapshot();
+  value.frame.messages = [
+    message("m1"),
+    reply("r0", 500),
+    reply("r1", 1500),
+    reply("r2", 2500),
+  ];
+  const channel = activeChannel(
+    apply(initialState(), {
+      ...value,
+      frame: {
+        ...value.frame,
+        terminal_runs: [run(7, 1200, "shell-2"), run(0, 2000), run(1, 1000)],
+      },
+    }),
+  );
+  const runs = runsByMessage(channel.terminalRuns);
+  const exit = (id: string) => {
+    const row = channel.messages.get(id);
+    assert.ok(row);
+    return exitFor(runs, row)?.exitCode;
+  };
+  assert.equal(exit("r1"), 1);
+  assert.equal(exit("r2"), 0);
+  assert.equal(exit("r0"), undefined);
+  assert.equal(exit("m1"), undefined);
 });

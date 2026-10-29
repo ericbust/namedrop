@@ -22,11 +22,11 @@ export function Sidebar({ state, onSelect }: Props) {
       row &&
       !row.isConnected &&
       document.activeElement === document.body &&
-      state.selectedKey !== null
+      state.selection.key !== null
     ) {
       sidebar.current
         ?.querySelector<HTMLButtonElement>(
-          `.channels-navigation button[data-channel-key="${state.selectedKey}"]`,
+          `.channels-navigation button[data-channel-key="${state.selection.key}"]`,
         )
         ?.focus();
     }
@@ -65,8 +65,8 @@ export function Sidebar({ state, onSelect }: Props) {
     target?.click();
   }
   function tabKey(items: Channel[]) {
-    return items.some((channel) => channel.key === state.selectedKey)
-      ? state.selectedKey
+    return items.some((channel) => channel.key === state.selection.key)
+      ? state.selection.key
       : items[0]?.key;
   }
   function name(channel: Channel) {
@@ -160,7 +160,7 @@ export function Sidebar({ state, onSelect }: Props) {
                       className={`row${unread ? " unread" : ""}`}
                       data-channel-key={channel.key}
                       aria-current={
-                        state.selectedKey === channel.key ? "page" : undefined
+                        state.selection.key === channel.key ? "page" : undefined
                       }
                       tabIndex={channelsTab === channel.key ? 0 : -1}
                       onClick={() => onSelect(channel.key)}

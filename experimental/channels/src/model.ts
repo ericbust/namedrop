@@ -133,23 +133,34 @@ export type Event =
         | { kind: "error"; reason: string };
     }
   | { type: "select"; key: SpaceKey }
+  | { type: "navigate"; key: SpaceKey | null }
   | { type: "read"; key: SpaceKey }
   | { type: "thread"; threadId: string | null }
   | { type: "opened" }
   | { type: "replay-timeout" }
+  | { type: "discovery-timeout" }
+  | { type: "input" }
   | { type: "disconnected" }
   | { type: "visibility"; visible: boolean };
 export type Sync =
-  | { kind: "connecting" | "reconnecting" | "live" }
-  | { kind: "fallback"; preserveSelection: boolean }
+  | { kind: "connecting" | "reconnecting" | "live" | "fallback" }
   | {
       kind: "replaying";
       status: "connecting" | "reconnecting";
       pending: Map<SpaceKey, Channel>;
     };
+export type Selection =
+  | { kind: "none"; key: null }
+  | { kind: "automatic"; key: SpaceKey }
+  | { kind: "chosen"; key: SpaceKey };
+export type Landing =
+  | { kind: "discovering" }
+  | { kind: "awaiting-url" }
+  | { kind: "settled" };
 export type State = {
   channels: Map<SpaceKey, Channel>;
-  selectedKey: SpaceKey | null;
+  selection: Selection;
+  landing: Landing;
   requestedKey: SpaceKey | null;
   openThread: string | null;
   unread: ReadonlySet<SpaceKey>;

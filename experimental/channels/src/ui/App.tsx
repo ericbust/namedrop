@@ -6,8 +6,9 @@ import {
   useMemo,
   useReducer,
   useRef,
+  useState,
 } from "react";
-import type { Event, SpaceKey, State } from "../model.ts";
+import type { Event, Message, SpaceKey, State } from "../model.ts";
 import {
   channelSuffix,
   connectionStatus,
@@ -15,7 +16,9 @@ import {
   reduce,
   runsByMessage,
   type ThreadGroup,
+  type TimelineRow,
   threadGroups,
+  timelineView,
 } from "../store.ts";
 import { parseEvent, parseHistory, pathKey } from "../wire.ts";
 import { ChannelHeader } from "./ChannelHeader.tsx";
@@ -24,9 +27,11 @@ import { MemberStrip } from "./MemberStrip.tsx";
 import { NeedsYou } from "./NeedsYou.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { ThreadPane } from "./ThreadPane.tsx";
-import { Timeline } from "./Timeline.tsx";
+import { type Located, Timeline } from "./Timeline.tsx";
 
 const noGroups: ReadonlyMap<string, ThreadGroup> = new Map();
+const noRows: readonly TimelineRow[] = [];
+const noMessages: ReadonlyMap<string, Message> = new Map();
 function measuredReduce(state: State, event: Event): State {
   if (
     event.type !== "space" &&
@@ -118,14 +123,14 @@ export function App() {
     };
   }, []);
   useLayoutEffect(() => {
-    selectedForPaint.current = state.selectedKey;
+    selectedForPaint.current = state.selection.key;
     if (
       frameVersion === 0 ||
       arrivals.current.length === 0 ||
       state.sync.kind === "replaying"
     )
       return;
-    const key = state.selectedKey;
+    const key = state.selection.key;
     const starts = arrivals.current
       .splice(0)
       .filter(
@@ -268,24 +273,41 @@ export function App() {
     };
   }, [state.channels.size]);
   useEffect(() => {
-    if (state.selectedKey === null) return;
-    const path = `/w/${state.selectedKey}`;
-    if (location.pathname !== path) history.replaceState(null, "", path);
-  }, [state.selectedKey]);
-  useEffect(() => {
-    const back = () => {
-      const key = pathKey(location.pathname);
-      if (key !== null) dispatch({ type: "select", key });
-    };
+    const back = () =>
+      dispatch({ type: "navigate", key: pathKey(location.pathname) });
     addEventListener("popstate", back);
     return () => removeEventListener("popstate", back);
   }, []);
+  const discovering =
+    state.landing.kind === "discovering" &&
+    (state.channels.size > 0 ||
+      (state.sync.kind === "replaying" && state.sync.pending.size > 0));
   useEffect(() => {
-    const key = state.selectedKey;
+    if (!discovering) return;
+    const timer = setTimeout(
+      () => dispatch({ type: "discovery-timeout" }),
+      2000,
+    );
+    return () => clearTimeout(timer);
+  }, [discovering]);
+  useEffect(() => {
+    const names = ["pointerdown", "keydown", "wheel", "touchstart"] as const;
+    const input = () => {
+      dispatch({ type: "input" });
+      for (const name of names) removeEventListener(name, input, true);
+    };
+    for (const name of names)
+      addEventListener(name, input, { capture: true, passive: true });
+    return () => {
+      for (const name of names) removeEventListener(name, input, true);
+    };
+  }, []);
+  useEffect(() => {
+    const key = state.selection.key;
     if (key === null || !state.visible) return;
     const dwell = setTimeout(() => dispatch({ type: "read", key }), 1500);
     return () => clearTimeout(dwell);
-  }, [state.selectedKey, state.visible]);
+  }, [state.selection.key, state.visible]);
   let needsYou = 0;
   for (const channel of state.channels.values())
     if (channel.health.level === "needs_you") needsYou++;
@@ -300,19 +322,26 @@ export function App() {
   }, []);
   const connection = connectionStatus(state);
   const channel =
-    state.selectedKey === null
+    state.selection.key === null
       ? undefined
-      : state.channels.get(state.selectedKey);
+      : state.channels.get(state.selection.key);
   const messages = channel?.messages;
   const windows = channel?.runs;
   const threads = channel?.threads;
-  const groups = useMemo(
-    () =>
-      messages && windows && threads
-        ? threadGroups({ messages, runs: windows, threads })
-        : noGroups,
-    [messages, windows, threads],
-  );
+  const { groups, rows, inTimeline } = useMemo(() => {
+    if (!messages || !windows || !threads)
+      return { groups: noGroups, rows: noRows, inTimeline: noMessages };
+    const groups = threadGroups({ messages, runs: windows, threads });
+    const rows = timelineView({ messages, runs: windows, threads }, groups);
+    const inTimeline = new Map(
+      rows.flatMap((row): [string, Message][] =>
+        row.kind === "message" || row.kind === "orphan"
+          ? [[row.message.id, row.message]]
+          : [],
+      ),
+    );
+    return { groups, rows, inTimeline };
+  }, [messages, windows, threads]);
   const terminalRuns = channel?.terminalRuns;
   const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
   const thread =
@@ -333,6 +362,19 @@ export function App() {
     },
     [],
   );
+  const [located, locate] = useState<Located | null>(null);
+  useEffect(() => {
+    if (located === null) return;
+    const done = setTimeout(() => locate(null), 1500);
+    return () => clearTimeout(done);
+  }, [located]);
+  const showMessage = useCallback(
+    (message: Message, button: HTMLButtonElement) => {
+      locate({ messageId: message.id });
+      openThread(message.threadId, button);
+    },
+    [openThread],
+  );
   const closeThread = useCallback(() => {
     dispatch({ type: "thread", threadId: null });
     const saved = returnFocus.current;
@@ -346,6 +388,7 @@ export function App() {
         ].find((button) => button.dataset.threadId === saved.threadId);
     button?.focus();
   }, []);
+  const paneWasOpen = useRef(false);
   useLayoutEffect(() => {
     if (thread && focusIntent.current) {
       document
@@ -354,6 +397,13 @@ export function App() {
         ?.focus();
       focusIntent.current = false;
     }
+    if (
+      !thread &&
+      paneWasOpen.current &&
+      document.activeElement === document.body
+    )
+      document.querySelector<HTMLElement>("section.timeline")?.focus();
+    paneWasOpen.current = thread !== undefined;
   });
   const updatedAt = lastUpdate.current;
   return (
@@ -378,11 +428,16 @@ export function App() {
               suffix={channelSuffix(channel, state.channels.values())}
             />
             <MemberStrip key={channel.key} members={channel.members} />
-            <NeedsYou channel={channel} />
+            <NeedsYou
+              channel={channel}
+              inTimeline={inTimeline}
+              onShow={showMessage}
+            />
             <Timeline
               channel={channel}
-              groups={groups}
+              rows={rows}
               runs={runs}
+              located={located}
               expandedThread={thread ? thread.id : null}
               onThread={openThread}
               paneId={paneId}

@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import type { Channel, TerminalRun } from "../model.ts";
-import { exitFor, recipients, type ThreadGroup } from "../store.ts";
+import type { Channel } from "../model.ts";
+import {
+  exitFor,
+  type RunIndex,
+  recipients,
+  type ThreadGroup,
+} from "../store.ts";
 import { Icon } from "./Icons.tsx";
 import { Message } from "./Message.tsx";
 
@@ -13,7 +18,7 @@ export function ThreadPane({
 }: {
   channel: Channel;
   thread: ThreadGroup;
-  runs: ReadonlyMap<string, TerminalRun>;
+  runs: RunIndex;
   onClose: () => void;
   paneId: string;
 }) {
@@ -79,7 +84,9 @@ export function ThreadPane({
           />
         ))}
         <p className="divider">
-          {count} {count === 1 ? "reply" : "replies"}
+          {count === 0 && !unloaded
+            ? "No replies yet"
+            : `${count} ${count === 1 ? "reply" : "replies"}`}
           {unloaded ? " · earlier replies not loaded" : ""}
         </p>
         {thread.replies.map((message) => (

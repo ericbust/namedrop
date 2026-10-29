@@ -1195,6 +1195,35 @@ test("UI-2 fix1: switching closes the thread, live frames keep sidebar focus, an
   await pane.waitFor({ state: "detached" });
 });
 
+test("thread pane: with the thread open, focus on the timeline or the current sidebar row survives a live frame", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [exchange(), frame(2, "beta")]),
+  );
+  await ui.live();
+  await ui.page.locator(".timeline .reply-preview").first().click();
+  await ui.page.locator("aside.thread").waitFor();
+  for (const [label, focus] of [
+    ["timeline", () => ui.page.locator(".timeline").focus()],
+    ["sidebar", () => ui.row(1).focus()],
+  ]) {
+    await focus();
+    const value = exchange();
+    value.frame.messages.push(message(`live-${label}`, "live", { at_ms: 500 }));
+    ui.connections[0].send("space", value);
+    await ui.page
+      .locator(`.timeline [data-message-id="live-${label}"]`)
+      .waitFor();
+    await nextFrames(ui.page);
+    assert.equal(
+      await ui.page.evaluate(
+        () => !!document.activeElement?.closest("aside.thread"),
+      ),
+      false,
+      `${label} focus taken by the pane`,
+    );
+  }
+});
+
 test("UI-2 fix1: capped history preserves anchor and jumps to refreshed latest without bridge loops", async (t) => {
   const value = frame(1, "alpha");
   const rows = (from, to) =>
@@ -1305,34 +1334,50 @@ test("UI-2 fix1: live frames format timestamps only for changed message rows", a
   assert.equal(await ui.page.evaluate(() => window.timestampFormats), 0);
 });
 
-function numberedRows(from, to) {
+function numberedRows(from, to, extra = () => ({})) {
   return Array.from({ length: to - from + 1 }, (_, n) =>
-    message(`m${from + n}`, `Message ${from + n}`),
+    message(`m${from + n}`, `Message ${from + n}`, extra(from + n)),
   );
 }
-async function pagedChannel(t, pages) {
+async function loadPages(ui, pages) {
+  for (let page = 1; page <= pages; page++) {
+    await ui.scroll.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await ui.scroll
+      .locator(`[data-message-id="m${1851 - page * 50}"]`)
+      .waitFor();
+  }
+  await nextFrames(ui.page);
+}
+async function pagedChannel(t, pages, extra) {
   const value = frame(1, "alpha");
-  value.frame.messages = numberedRows(1851, 2000);
+  value.frame.messages = numberedRows(1851, 2000, extra);
   const ui = await open(
     t,
     (client) => replay(client, [value]),
     async (url) => {
       const before = Number(url.searchParams.get("before").slice(1));
-      return numberedRows(before - 50, before - 1).reverse();
+      return numberedRows(before - 50, before - 1, extra).reverse();
     },
   );
   await ui.page.setViewportSize({ width: 1440, height: 900 });
   await ui.live();
-  const scroll = ui.page.locator(".timeline");
-  for (let page = 1; page <= pages; page++) {
-    await scroll.evaluate((el) => {
-      el.scrollTop = 0;
-    });
-    await ui.page.locator(`[data-message-id="m${1851 - page * 50}"]`).waitFor();
-  }
-  await nextFrames(ui.page);
-  return { ...ui, value, scroll };
+  const paged = { ...ui, value, scroll: ui.page.locator(".timeline") };
+  await loadPages(paged, pages);
+  return paged;
 }
+const threadAt = (parent) => (n) =>
+  n === parent
+    ? { thread_id: `m${parent}` }
+    : n === parent + 1
+      ? {
+          thread_id: `m${parent}`,
+          in_reply_to: `m${parent}`,
+          kind: "reply",
+          author: "codex",
+        }
+      : {};
 function nextFrames(page) {
   return page.evaluate(
     () =>
@@ -1496,6 +1541,55 @@ test("history window: a screen above the newest message, the pill scrolls back t
   assert.equal(await atBottom(ui.scroll), true);
 });
 
+test("thread pane: a thread that Jump to latest unloads closes for good, and focus lands on the timeline", async (t) => {
+  const ui = await pagedChannel(t, 12, threadAt(1300));
+  const pane = ui.page.locator("aside.thread");
+  const preview = ui.page.locator(
+    '.timeline [data-message-id="m1300"] .reply-preview',
+  );
+  await preview.click();
+  await pane.waitFor();
+  await ui.page
+    .getByRole("button", { name: "Jump to latest messages" })
+    .click();
+  await pane.waitFor({ state: "detached" });
+  const focus = await ui.page.evaluate(() =>
+    document.activeElement?.matches("section.timeline")
+      ? "timeline"
+      : document.activeElement?.tagName,
+  );
+  await loadPages(ui, 12);
+  await preview.waitFor();
+  await nextFrames(ui.page);
+  assert.equal(await pane.count(), 0, "closed pane reopened by itself");
+  assert.equal(await preview.getAttribute("aria-expanded"), "false");
+  assert.equal(focus, "timeline");
+});
+
+test("thread pane: a thread the history cap evicts closes and moves focus from the pane to the timeline", async (t) => {
+  const ui = await pagedChannel(t, 0, threadAt(1999));
+  const pane = ui.page.locator("aside.thread");
+  await ui.page
+    .locator('.timeline [data-message-id="m1999"] .reply-preview')
+    .click();
+  await pane.waitFor();
+  assert.equal(
+    await pane
+      .getByRole("button", { name: "Close thread" })
+      .evaluate((el) => el === document.activeElement),
+    true,
+  );
+  await loadPages(ui, 10);
+  await pane.waitFor({ state: "detached" });
+  assert.equal(
+    await ui.page.evaluate(() =>
+      document.activeElement?.matches("section.timeline"),
+    ),
+    true,
+    "focus moved to the timeline, not the body",
+  );
+});
+
 test("design-b: landing follows the URL, then Needs you, and selection keeps the URL, Back and the tab title", async (t) => {
   const frames = () => [
     frame(1, "alpha"),
@@ -1545,14 +1639,177 @@ test("design-b: landing follows the URL, then Needs you, and selection keeps the
   assert.equal(await landing.row(3).getAttribute("aria-current"), "page");
   assert.equal(
     await landing.page.evaluate(() => location.pathname),
-    `/w/${key(3)}`,
+    "/",
+    "automatic landing never rewrites the URL",
   );
   assert.equal(
     await landing.page.evaluate(
       () => history.length === window.initialHistoryLength,
     ),
     true,
-    "automatic landing replaces the URL instead of pushing",
+  );
+});
+
+function selected(ui, n) {
+  return ui.page.waitForFunction(
+    (key) =>
+      document
+        .querySelector(`.channels-navigation [data-channel-key="${key}"]`)
+        ?.getAttribute("aria-current") === "page",
+    key(n),
+  );
+}
+test("landing: late frames select the URL's channel when it arrives, and an automatic choice never rewrites the URL", async (t) => {
+  const requested = await open(t, () => {}, undefined, {
+    path: `/w/${key(2)}`,
+  });
+  const path = (ui) => ui.page.evaluate(() => location.pathname);
+  const pushed = (ui) =>
+    ui.page.evaluate(() => history.length - window.initialHistoryLength);
+  await requested.page.waitForTimeout(2300);
+  requested.connections[0].send("space", frame(1, "alpha"));
+  await selected(requested, 1);
+  assert.equal(await path(requested), `/w/${key(2)}`);
+  requested.connections[0].send("space", frame(3, "gamma", "needs_you"));
+  await selected(requested, 3);
+  assert.equal(await path(requested), `/w/${key(2)}`);
+  requested.connections[0].send("space", frame(2, "beta"));
+  await selected(requested, 2);
+  assert.equal(await path(requested), `/w/${key(2)}`);
+  assert.equal(await pushed(requested), 0);
+  requested.connections[0].send("space", frame(1, "alpha", "needs_you"));
+  await requested.page.waitForFunction(
+    () => document.title === "(2) Needs you · Namedrop",
+  );
+  assert.equal(await requested.row(2).getAttribute("aria-current"), "page");
+  requested.connections[0].send("ready", { keys: [key(1), key(2), key(3)] });
+  await requested.live();
+  assert.equal(await requested.row(2).getAttribute("aria-current"), "page");
+  assert.equal(await path(requested), `/w/${key(2)}`);
+
+  const root = await open(t, () => {});
+  await root.page.waitForTimeout(2300);
+  root.connections[0].send("space", frame(1, "alpha"));
+  await selected(root, 1);
+  assert.equal(await path(root), "/");
+  root.connections[0].send("space", frame(3, "gamma", "needs_you"));
+  await selected(root, 3);
+  assert.equal(await path(root), "/");
+  assert.equal(await pushed(root), 0);
+  root.connections[0].send("ready", { keys: [key(1), key(3)] });
+  await root.live();
+  assert.equal(await root.row(3).getAttribute("aria-current"), "page");
+  assert.equal(await path(root), "/");
+  await root.row(1).click();
+  assert.equal(await path(root), `/w/${key(1)}`);
+  assert.equal(await pushed(root), 1);
+  root.connections[0].send("space", frame(4, "delta", "needs_you"));
+  await root.row(4).waitFor();
+  assert.equal(await root.row(1).getAttribute("aria-current"), "page");
+  assert.equal(await path(root), `/w/${key(1)}`);
+  await root.page.goBack();
+  await root.page.waitForFunction(() => location.pathname === "/");
+  await nextFrames(root.page);
+  assert.equal(
+    await root.channels
+      .locator('[aria-current="page"]')
+      .getAttribute("data-channel-key"),
+    key(4),
+    "Back to the root lands again on the first channel that needs you",
+  );
+  await root.page.goForward();
+  await selected(root, 1);
+  assert.equal(await path(root), `/w/${key(1)}`);
+});
+
+test("landing: after ready, a workspace that opens later or a reconnect replay never moves the reader or closes the thread", async (t) => {
+  const alpha = exchange();
+  for (const row of alpha.frame.messages) row.at_ms = Date.now() - 1000;
+  const later = frame(5, "epsilon");
+  later.frame.messages = [message("later", "newest", { at_ms: Date.now() })];
+  const ui = await open(t, (client, n) =>
+    replay(
+      client,
+      n === 1
+        ? [alpha, frame(2, "beta")]
+        : [alpha, frame(2, "beta"), later, frame(7, "eta", "needs_you")],
+    ),
+  );
+  await ui.live();
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+  await ui.page.locator(".timeline .reply-preview").first().click();
+  const pane = ui.page.locator("aside.thread");
+  await pane.waitFor();
+  ui.connections[0].send("space", later);
+  await ui.row(5).waitFor();
+  assert.equal(
+    await ui.row(1).getAttribute("aria-current"),
+    "page",
+    "a new calm workspace moved the reader",
+  );
+  assert.equal(await pane.count(), 1, "a new workspace closed the thread");
+  ui.connections[0].send("space", frame(6, "zeta", "needs_you"));
+  await ui.row(6).waitFor();
+  assert.equal(
+    await ui.row(1).getAttribute("aria-current"),
+    "page",
+    "a new workspace that needs you moved the reader",
+  );
+  assert.equal(await pane.count(), 1);
+  ui.connections[0].destroy();
+  await ui.page.getByRole("status").waitFor();
+  await ui.row(7).waitFor();
+  await ui.live();
+  assert.equal(
+    await ui.row(1).getAttribute("aria-current"),
+    "page",
+    "a reconnect replay moved the reader",
+  );
+  assert.equal(await pane.count(), 1, "a reconnect replay closed the thread");
+});
+
+test("landing: reader input ends discovery, and after ready the URL's channel is still chosen when it arrives", async (t) => {
+  const touched = await open(t, () => {});
+  await touched.page.waitForTimeout(2300);
+  touched.connections[0].send("space", frame(1, "alpha"));
+  await selected(touched, 1);
+  await touched.page.evaluate(() => {
+    window.wheeled = new Promise((resolve) =>
+      addEventListener("wheel", resolve, { once: true }),
+    );
+  });
+  await touched.page.mouse.move(300, 300);
+  await touched.page.mouse.wheel(0, 40);
+  await touched.page.evaluate(() => window.wheeled);
+  touched.connections[0].send("space", frame(3, "gamma", "needs_you"));
+  await touched.row(3).waitFor();
+  await nextFrames(touched.page);
+  assert.equal(
+    await touched.row(1).getAttribute("aria-current"),
+    "page",
+    "input during discovery did not stop the landing",
+  );
+
+  const requested = await open(
+    t,
+    (client) =>
+      replay(client, [frame(1, "alpha"), frame(3, "gamma", "needs_you")]),
+    undefined,
+    { path: `/w/${key(2)}` },
+  );
+  await requested.live();
+  assert.equal(await requested.row(3).getAttribute("aria-current"), "page");
+  requested.connections[0].send("space", frame(2, "beta"));
+  await selected(requested, 2);
+  assert.equal(
+    await requested.page.evaluate(() => location.pathname),
+    `/w/${key(2)}`,
+  );
+  assert.equal(
+    await requested.page.evaluate(
+      () => history.length - window.initialHistoryLength,
+    ),
+    0,
   );
 });
 
@@ -1744,6 +2001,89 @@ test("design-b: requests show their latest reply inline, commands and output rea
   assert.equal(
     await pane.locator('[data-message-id="out"] .msg-head .exit').textContent(),
     "Exit 0",
+  );
+});
+
+test("thread pane: each terminal reply shows its own run, and the preview shows the newest", async (t) => {
+  const at = Date.now() - 10 * 60_000;
+  const value = frame(1, "alpha");
+  value.frame.participants = people();
+  const result =
+    "@shell command finished with exit code 5.\nstdout:\nout\n\nstderr:";
+  const reply = (id, offset) =>
+    message(id, result, {
+      thread_id: "make",
+      in_reply_to: "make",
+      kind: "reply",
+      author: "shell",
+      at_ms: at + offset,
+    });
+  value.frame.messages = [
+    message("make", "make", {
+      thread_id: "make",
+      at_ms: at,
+      legs: [{ to: "shell", stage: done() }],
+    }),
+    reply("first", 1500),
+    reply("second", 2500),
+  ];
+  const run = (exit_code, offset) => ({
+    terminal: "shell",
+    command: { text: "make", truncated: false },
+    started_at_ms: at + offset,
+    exit_code,
+    message_id: "make",
+  });
+  value.frame.terminal_runs = [run(0, 2000), run(1, 1000)];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const preview = ui.page.locator(
+    '.timeline [data-message-id="make"] .reply-preview',
+  );
+  assert.equal(await preview.locator(".exit").textContent(), "Exit 0");
+  await preview.click();
+  const pane = ui.page.locator("aside.thread");
+  await pane.waitFor();
+  assert.deepEqual(await pane.locator(".exit").allTextContents(), [
+    "Exit 1",
+    "Exit 0",
+  ]);
+});
+
+test("thread pane: a non-terminal reply that mimics a terminal result renders as text", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.participants = people();
+  const at = Date.now() - 600_000;
+  value.frame.messages = [
+    message("ask", "run it", {
+      thread_id: "t",
+      at_ms: at,
+      legs: [{ to: "codex", stage: done() }],
+    }),
+    message(
+      "answer",
+      "@shell command finished with exit code 8.\nstdout:\nx\n\nstderr:",
+      {
+        thread_id: "t",
+        in_reply_to: "ask",
+        kind: "reply",
+        author: "codex",
+        at_ms: at + 500,
+      },
+    ),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  await ui.page
+    .locator('.timeline [data-message-id="ask"] .reply-preview')
+    .click();
+  const reply = ui.page.locator('aside.thread [data-message-id="answer"]');
+  await reply.waitFor();
+  assert.equal(await reply.locator(".exit").count(), 0);
+  assert.equal(await reply.locator("pre.output").count(), 0);
+  assert.match(
+    await reply.locator(".body").first().textContent(),
+    /command finished/,
   );
 });
 
@@ -2068,7 +2408,7 @@ test("design-b: Needs you shows titles, hints and ages three at a time and annou
     card(
       "delivery_attempt",
       "ND-DELIVERY-003: The agent received this message and ended its turn without a reply or a no-reply. Its exact session can still answer it from delivery.inbox.",
-      { subject_alias: "@codex", message_id: "m1" },
+      { subject_alias: "codex", message_id: "m1" },
     ),
     card("agent_status", "@claude is waiting on an approval or question."),
     card("coordination", "Coordination ND-COORD-001 waits for close."),
@@ -2111,6 +2451,10 @@ test("design-b: Needs you shows titles, hints and ages three at a time and annou
       .textContent(),
     "@codex didn't answer a request · 3 more",
   );
+  assert.equal(
+    await banner.getByRole("button", { name: /^Show message/ }).count(),
+    0,
+  );
   assert.equal(await ui.page.locator(".channel-header .health").count(), 0);
   const live = ui.page.locator('[aria-live="polite"]');
   assert.equal(await live.textContent(), "");
@@ -2120,6 +2464,213 @@ test("design-b: Needs you shows titles, hints and ages three at a time and annou
     () =>
       document.querySelector('[aria-live="polite"]')?.textContent ===
       "Needs you: An agent's pane changed",
+  );
+});
+
+function locatedChannel() {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants = people();
+  const at = Date.now() - 60 * 60_000;
+  value.frame.messages = Array.from({ length: 60 }, (_, n) =>
+    message(`m${n}`, `Request ${n}`, {
+      at_ms: at + n * 60_000,
+      legs: [{ to: "codex", stage: { stage: "delivered" } }],
+    }),
+  );
+  const card = (source_kind, text, subject_alias, message_id) => ({
+    source_kind,
+    summary: { text, truncated: false },
+    opened_at_ms: at,
+    subject_alias,
+    message_id,
+  });
+  value.frame.attention = [
+    card("delivery_attempt", "No reply.", "codex", "m20"),
+    card("agent_status", "@claude is waiting.", "claude", "older"),
+    card("coordination", "Close it.", null, "m40"),
+  ];
+  return value;
+}
+async function centerOffset(timeline, id) {
+  return timeline.evaluate((element, id) => {
+    const row = element.querySelector(`[data-message-id="${id}"]`);
+    const port = element.getBoundingClientRect();
+    const box = row.getBoundingClientRect();
+    return Math.abs(
+      box.top +
+        box.height / 2 -
+        (port.top + element.clientTop + element.clientHeight / 2),
+    );
+  }, id);
+}
+async function tint(row) {
+  return row.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      located: element.classList.contains("located"),
+      animation: style.animationName,
+      background: style.backgroundColor,
+    };
+  });
+}
+
+test("Needs you: Show message centers the loaded request, tints it, opens its thread, and Escape returns to the button", async (t) => {
+  const ui = await open(t, (client) => replay(client, [locatedChannel()]));
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  await ui.live();
+  const banner = ui.page.getByRole("region", { name: "Attention needed" });
+  const items = banner.getByRole("listitem");
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.locator('[data-message-id="m59"]').waitFor();
+  const show = items
+    .nth(0)
+    .getByRole("button", { name: "Show message from @codex", exact: true });
+  assert.equal(await show.textContent(), "Show message");
+  assert.equal(
+    await items
+      .nth(1)
+      .getByRole("button", { name: /^Show message/ })
+      .count(),
+    0,
+  );
+  assert.equal(
+    await items
+      .nth(2)
+      .getByRole("button", { name: "Show message", exact: true })
+      .count(),
+    1,
+  );
+  const row = timeline.locator('[data-message-id="m20"]');
+  assert.ok((await centerOffset(timeline, "m20")) > 100, "starts far away");
+  await show.click();
+  const pane = ui.page.getByRole("complementary", { name: "Thread" });
+  await pane.locator('[data-message-id="m20"]').waitFor();
+  const offset = await centerOffset(timeline, "m20");
+  assert.ok(offset <= 4, `row center is ${offset}px from the middle`);
+  const tinted = await tint(row);
+  assert.equal(tinted.located, true);
+  assert.equal(tinted.animation, "located");
+  assert.equal(
+    await pane
+      .getByRole("button", { name: "Close thread" })
+      .evaluate((button) => button === document.activeElement),
+    true,
+  );
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  assert.equal(
+    await show.evaluate((button) => button === document.activeElement),
+    true,
+  );
+  await ui.page.waitForFunction(
+    () =>
+      !document
+        .querySelector('.timeline [data-message-id="m20"]')
+        .classList.contains("located"),
+  );
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await items
+    .nth(2)
+    .getByRole("button", { name: "Show message", exact: true })
+    .click();
+  await pane.locator('[data-message-id="m40"]').waitFor();
+  const still = await tint(timeline.locator('[data-message-id="m40"]'));
+  assert.deepEqual(still, {
+    located: true,
+    animation: "none",
+    background: await ui.page.evaluate(() => {
+      const probe = document.body.appendChild(document.createElement("div"));
+      probe.style.backgroundColor = "var(--bg-selected)";
+      const color = getComputedStyle(probe).backgroundColor;
+      probe.remove();
+      return color;
+    }),
+  });
+  assert.ok((await centerOffset(timeline, "m40")) <= 4);
+});
+
+test("Needs you: Show message on a live arrival does not replay its arrival when the tint ends", async (t) => {
+  const value = frame(1, "alpha");
+  value.frame.messages = [
+    message("old", "Old", { at_ms: Date.now() - 60_000 }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  await timeline.locator('[data-message-id="old"]').waitFor();
+  const next = structuredClone(value);
+  next.frame.messages.push(message("new", "New", { at_ms: Date.now() + 1000 }));
+  next.frame.health = { level: "needs_you", items: 1 };
+  next.frame.attention = [
+    {
+      source_kind: "delivery_attempt",
+      summary: { text: "No reply.", truncated: false },
+      opened_at_ms: Date.now(),
+      subject_alias: "codex",
+      message_id: "new",
+    },
+  ];
+  ui.connections[0].send("space", next);
+  const row = timeline.locator('[data-message-id="new"]');
+  await ui.page.waitForFunction(
+    () =>
+      document
+        .querySelector('.timeline [data-message-id="new"]')
+        ?.getAnimations().length === 0,
+  );
+  await ui.page
+    .getByRole("button", { name: "Show message from @codex", exact: true })
+    .click();
+  assert.equal(
+    await row.evaluate((element) => element.classList.contains("located")),
+    true,
+  );
+  await ui.page.waitForFunction(
+    () =>
+      !document
+        .querySelector('.timeline [data-message-id="new"]')
+        .classList.contains("located"),
+  );
+  assert.deepEqual(
+    await row.evaluate((element) => [
+      element.classList.contains("arrive"),
+      element.getAnimations().map((animation) => animation.animationName),
+    ]),
+    [true, []],
+  );
+});
+
+test("thread pane: a thread with no replies reads No replies yet, and one with unloaded replies keeps its count", async (t) => {
+  const value = locatedChannel();
+  value.frame.threads = [
+    {
+      thread_id: "m40",
+      title: { text: "Request 40", truncated: false },
+      message_count: 3,
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const items = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("listitem");
+  const pane = ui.page.getByRole("complementary", { name: "Thread" });
+  await items
+    .nth(0)
+    .getByRole("button", { name: "Show message from @codex", exact: true })
+    .click();
+  await pane.locator('[data-message-id="m20"]').waitFor();
+  assert.equal(await pane.locator(".divider").textContent(), "No replies yet");
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  await items
+    .nth(2)
+    .getByRole("button", { name: "Show message", exact: true })
+    .click();
+  await pane.locator('[data-message-id="m40"]').waitFor();
+  assert.equal(
+    await pane.locator(".divider").textContent(),
+    "0 replies · earlier replies not loaded",
   );
 });
 

@@ -53,64 +53,71 @@ export type AttentionCopy = {
   details: string | null;
 };
 const SHORT_SUMMARY = 90;
-const unanswered = {
-  title: "Unanswered request",
-  hint: "An agent ended its turn without replying.",
+type AttentionRow = {
+  title: string;
+  named: (alias: string) => string;
+  hint: string;
+  namedHint?: string;
 };
-const attentionTable = {
-  agent_status: {
-    title: "Something needs you",
-    hint: "Open its pane in Herdr to answer.",
-  },
+const needsYou = {
+  title: "Something needs you",
+  named: (alias: string) => `${alias} needs you`,
+};
+const unanswered: AttentionRow = {
+  title: "Unanswered request",
+  named: (alias) => `${alias} didn't answer a request`,
+  hint: "An agent ended its turn without replying.",
+  namedHint: "It ended its turn without replying.",
+};
+const attentionTable: Record<Attention["source"], AttentionRow> = {
+  agent_status: { ...needsYou, hint: "Open its pane in Herdr to answer." },
   agent_disposition: unanswered,
   delivery_attempt: unanswered,
   automatic_reply_limit: {
     title: "Reply limit reached",
+    named: (alias) => `${alias} hit the reply limit`,
     hint: "Continue or stop this thread from its pane.",
   },
   coordination: {
     title: "Coordination needs a decision",
+    named: (alias) => `${alias}'s coordination needs a decision`,
     hint: "Review the report and close it from the lead's pane.",
   },
   context_grant: {
     title: "Context request waiting",
+    named: (alias) => `${alias} is asking for context`,
     hint: "Approve or decline it from the pane.",
   },
   pane_binding: {
     title: "An agent's pane changed",
+    named: (alias) => `${alias}'s pane changed`,
     hint: "Name the pane again to reconnect it.",
   },
   integration_registration: {
     title: "Agent setup incomplete",
+    named: (alias) => `${alias} isn't set up yet`,
     hint: "Start a new session in that pane.",
   },
-  unknown: {
-    title: "Something needs you",
-    hint: "Open Details for the full message.",
-  },
-} satisfies Record<Attention["source"], { title: string; hint: string }>;
+  unknown: { ...needsYou, hint: "Open Details for the full message." },
+};
 export function attentionCopy(item: Attention): AttentionCopy {
-  const summary = `${item.summary.text}${item.summary.truncated ? "…" : ""}`;
+  const { text, truncated } = item.summary;
   const row = attentionTable[item.source];
-  switch (item.source) {
-    case "agent_status":
-      return item.summary.truncated ||
-        item.summary.text.length > SHORT_SUMMARY ||
-        !item.summary.text.trim()
-        ? { ...row, details: summary }
-        : { title: item.summary.text, hint: row.hint, details: null };
-    case "agent_disposition":
-    case "delivery_attempt":
-      return item.subjectAlias === null
-        ? { ...row, details: summary }
-        : {
-            title: `${item.subjectAlias} didn't answer a request`,
-            hint: "It ended its turn without replying.",
-            details: summary,
-          };
-    default:
-      return { ...row, details: summary };
-  }
+  if (
+    item.source === "agent_status" &&
+    !truncated &&
+    text.trim() &&
+    text.length <= SHORT_SUMMARY
+  )
+    return { title: text, hint: row.hint, details: null };
+  const details = `${text}${truncated ? "…" : ""}`;
+  return item.subjectAlias === null
+    ? { title: row.title, hint: row.hint, details }
+    : {
+        title: row.named(item.subjectAlias),
+        hint: row.namedHint ?? row.hint,
+        details,
+      };
 }
 
 export type HealthCopy = { text: string; tone: "muted" | "held" };

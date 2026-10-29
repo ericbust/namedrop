@@ -122,13 +122,27 @@ thread pane scroll.
 
 ### Landing and navigation
 
-- With no channel in the URL, open the first channel that needs you. Else open
-  the channel with the latest message.
-- Keep the selected channel in the URL as `/w/<key>`, and push a history entry
-  on each selection, so reload and Back work.
+- Open the channel the URL names. With no channel in the URL, or one that has
+  not arrived, open the first channel that needs you, else the channel with the
+  latest message.
+- Landing runs only while channels are being discovered. Discovery ends when
+  the server says `ready`. A server that never says `ready` ends it 2 seconds
+  after the first channel arrives. During discovery each newly arrived channel
+  re-runs this rule, so the app moves to Needs you as soon as it appears. The
+  URL's own channel is the exception: it is chosen whenever it arrives, even
+  after discovery, because the reader asked for it.
+- Any input from the reader stops all of this: a click, a key press, a scroll,
+  or a channel pick. From then on the app never moves by itself. A workspace
+  that opens later, or a reconnect that replays channels, never changes the open
+  channel or closes its thread.
+- When you pick a channel, its URL becomes `/w/<key>` with a new history entry,
+  so reload and Back work. An automatic choice never rewrites the URL.
 - The tab title is "Namedrop" when nothing needs you, and "(2) Needs you ·
   Namedrop" when two channels need you.
 - Switching channels closes the thread pane.
+- When none of an open thread's messages are loaded any more, for example after
+  Jump to latest, the thread closes for good. It does not reopen when history
+  loads it again. Focus moves to the timeline, never to the page body.
 - Arrow keys still move the selection, as UI-1 specified. A channel counts as
   read only after it has been shown for 1.5 seconds, so passing over it with the
   arrow keys keeps its unread mark.
@@ -245,9 +259,11 @@ click.
   "Exit 0" with a check-circle in `--working` (or "Exit 1" with an alert in
   `--failed-text`) after the author, then stdout as a code block, then stderr
   under a small "stderr" label only when it is not empty. With neither, show
-  "No output" in muted text. A body that does not parse renders as it is. A
-  `TerminalRun` whose `message_id` matches the request overrides the parsed
-  code.
+  "No output" in muted text. A body that does not parse renders as it is. Each
+  reply shows its own run: of the `TerminalRun`s whose `message_id` names the
+  request, the latest one that started at or before the reply. That run's code
+  overrides the parsed one. The request row shows the newest run. The server
+  sends runs newest first, so never let list order pick the run.
 - **Body**: 14px with 21px line height, at most `--measure` wide. Links use
   `--accent-text` with a 3px underline offset. Code blocks use `--bg-raised`, a 1px
   `--line` border, `--radius-md`, 10px by 12px padding, `--font-mono` at 13px, and
@@ -331,15 +347,39 @@ Never cut the server's summary mid-word into the visible line. When an
 `agent_status` summary is longer than 90 characters, use the `unknown` title and
 put the summary under **Details**.
 
+When the item names its agent (`subject_alias`), the title names it too. For an
+unanswered request that reads "@codex didn't answer a request", with the hint
+"It ended its turn without replying." When the item names a message
+(`message_id`) that is loaded in the timeline, a **Show message** text button
+follows the hint. It scrolls the message to the middle of the timeline, tints it
+with `--bg-selected` for 1.5 seconds, and opens its thread. When that message is
+not loaded, the button is absent.
+
+| `source`                                   | Title when the item names its agent                                          |
+| ------------------------------------------ | ---------------------------------------------------------------------------- |
+| `agent_disposition`, `delivery_attempt`    | "@codex didn't answer a request", hint "It ended its turn without replying." |
+| `agent_status`, summary over 90 characters | "@claude needs you"                                                          |
+| `automatic_reply_limit`                    | "@codex hit the reply limit"                                                 |
+| `coordination`                             | "@claude's coordination needs a decision"                                    |
+| `context_grant`                            | "@codex is asking for context"                                               |
+| `pane_binding`                             | "@codex's pane changed"                                                      |
+| `integration_registration`                 | "@codex isn't set up yet"                                                    |
+| `unknown`                                  | "@codex needs you"                                                           |
+
+A short `agent_status` summary already names the agent, so it stays as the
+server wrote it. Hints keep their wording from the first table.
+
 ### Thread pane
 
 400px wide, with a 1px `--line` left border. The header is 52px: "Thread" at 15px
 600, then "in #alpha" in 12px muted, and a 32px icon button with a drawn X at the
 right. Its accessible name is "Close thread", and Escape closes it. Below it come
 the parent message, a divider that reads "1 reply" with hairlines on both sides,
-and the replies. Replies use the message component without a reply preview. The
-pane slides in from 16px right with a fade over `--duration`. Below 860px of
-window width, the pane stacks under the timeline instead of beside it.
+and the replies. When the thread has no replies and the server knows of none, the
+divider reads "No replies yet". Replies use the message component without a
+reply preview. The pane slides in from 16px right with a fade over `--duration`.
+Below 860px of window width, the pane stacks under the timeline instead of
+beside it.
 
 ### History window
 

@@ -4,7 +4,7 @@ import { after, before, test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer, type ViteDevServer } from "vite";
-import { initialState, reduce } from "./store.ts";
+import { exitFor, initialState, reduce, runsByMessage } from "./store.ts";
 import { parseEvent } from "./wire.ts";
 
 let vite: ViteDevServer;
@@ -112,7 +112,11 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
       createElement(ChannelHeader, { channel: event.channel, suffix: null }),
     );
     const banner = renderToStaticMarkup(
-      createElement(NeedsYou, { channel: event.channel }),
+      createElement(NeedsYou, {
+        channel: event.channel,
+        inTimeline: new Map(),
+        onShow() {},
+      }),
     );
     const needsYou = level === "needs_you";
     assert.equal(sidebar.includes('aria-label="Needs you" class='), needsYou);
@@ -217,4 +221,67 @@ test("design-b: member chips order by state, end with the operator as You withou
   assert.ok(chip("g").includes("avatar sm id-terminal"));
   assert.equal(markup.includes("@gone"), false);
   assert.equal(markup.includes("claude-code"), false);
+});
+
+test("a terminal run for the request decides Exit over the code in the result body", async () => {
+  const { Message } = await load<typeof import("./ui/Message.tsx")>(
+    "/src/ui/Message.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[0] ?? "null");
+  fixture.frame.participants[0] = {
+    ...fixture.frame.participants[0],
+    address_id: "shell",
+    alias: "@shell",
+    kind: { type: "terminal" },
+  };
+  const row = (id: string, extra: Record<string, unknown>) => ({
+    message_id: id,
+    thread_id: "t",
+    in_reply_to: null,
+    at_ms: 1,
+    author: "human",
+    kind: "mention",
+    body: { text: id, truncated: false },
+    legs: [],
+    ...extra,
+  });
+  fixture.frame.messages = [
+    row("request", { legs: [{ to: "shell", stage: { stage: "queued" } }] }),
+    row("result", {
+      in_reply_to: "request",
+      kind: "reply",
+      author: "shell",
+      body: {
+        text: "@shell command finished with exit code 0.\nstdout:\nok\n\nstderr:",
+        truncated: false,
+      },
+    }),
+  ];
+  const exitShown = (runFor: string) => {
+    fixture.frame.terminal_runs = [
+      {
+        terminal: "shell",
+        command: { text: "false", truncated: false },
+        started_at_ms: 1,
+        exit_code: 1,
+        message_id: runFor,
+      },
+    ];
+    const { channel } = space(fixture);
+    const result = channel.messages.get("result");
+    assert.ok(result);
+    const markup = renderToStaticMarkup(
+      createElement(Message, {
+        message: result,
+        members: channel.members,
+        recipients: [],
+        exit: exitFor(runsByMessage(channel.terminalRuns), result),
+      }),
+    );
+    return text(
+      markup.match(/<span class="exit"[^>]*>(.*?)<\/span>/)?.[1] ?? "",
+    );
+  };
+  assert.equal(exitShown("request"), "Exit 1");
+  assert.equal(exitShown("another-request"), "Exit 0");
 });

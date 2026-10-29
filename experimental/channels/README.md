@@ -61,11 +61,14 @@ label**. Duplicate names add a muted suffix with the workspace ID and the full
 arrive. The **Needs you** section lists each channel that needs you with the
 reason, and it is hidden when nothing needs you.
 Arrow keys, Home, and End select and focus channel buttons inside each region. Tab
-moves between regions. When replay completes, the app opens the channel in the
-URL (`/w/<key>`), else the first channel that needs you in sidebar order, else the
-channel with the latest message. The URL follows the selection: a click pushes a
-history entry, an automatic selection replaces it, and Back selects the previous
-channel. The tab title reads **(N) Needs you · Namedrop** while channels need you.
+moves between regions. The app opens the channel in the URL (`/w/<key>`), else
+the first channel that needs you in sidebar order, else the channel with the
+latest message. Until you pick a channel, each newly arrived channel re-runs that
+rule, so the app moves to the URL's channel or to Needs you as soon as it
+appears. An update to a channel already present never moves the selection. A
+click pushes a history entry for `/w/<key>` and Back selects the previous
+channel. An automatic selection never rewrites the URL. The tab title reads
+**(N) Needs you · Namedrop** while channels need you.
 Closing the selected workspace leaves **Choose a channel** when other
 channels remain. OS dark mode switches every token to the indigo night theme.
 
@@ -75,11 +78,14 @@ The timeline groups consecutive messages by author within five minutes and
 inserts day dividers. Each request shows its latest reply in a preview box. The
 preview opens the **Thread** pane, which updates when replies arrive. Opening a
 thread moves focus to **Close thread** once, and switching channels closes the
-pane. The preview exposes its expanded state and pane ID. **Close thread** restores
-focus to that preview. Escape does the same from inside the pane, or from the page body when no
-dialog is open; other focused controls keep their own Escape behavior. On narrow
-screens the pane sits below the timeline. Replies whose parent is not loaded remain visible as
-**Earlier thread** rows.
+pane. When none of the thread's messages are loaded any more, after Jump to
+latest or when the history cap evicts them, the pane closes for good and focus
+moves to the timeline. The preview exposes its expanded state and pane ID.
+**Close thread** restores focus to that preview. Escape does the same from
+inside the pane, or from the page body when no dialog is open; other focused
+controls keep their own Escape behavior. On narrow screens the pane sits below
+the timeline. Replies whose parent is not loaded remain visible as **Earlier
+thread** rows.
 
 Scroll to the top or select **Load earlier messages** to fetch history. The first
 visible message keeps its position across prepends, live updates, and channel
@@ -154,8 +160,9 @@ merges parsed snapshots without pruning existing channels, then resumes live upd
 This compatibility interval gives ordinary replay time to complete. It does not
 infer which channels an old server omitted. The first `ready` on that connection
 still removes omitted keys from the current collection after fallback. Later
-`ready` events on the same connection are ignored. On first load, that first
-`ready` applies the landing rule unless you selected a channel during fallback.
+`ready` events on the same connection are ignored. A `ready` keeps the channel
+you picked. It keeps an automatic selection too, unless the replay brought a
+channel the app had not seen, which re-runs the landing rule.
 Ready, errors, restarting, a new open, and unmount cancel the current timer.
 
 Before any channel is committed or an authoritative `ready` arrives, the page keeps

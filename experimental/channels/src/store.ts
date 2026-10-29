@@ -5,13 +5,18 @@ import type {
   ChannelSnapshot,
   Event,
   HistoryRequest,
+  Landing,
   Message,
+  Selection,
   SpaceKey,
   State,
   TerminalRun,
 } from "./model.ts";
 
 const channelCollator = new Intl.Collator();
+const noSelection: Selection = { kind: "none", key: null };
+const discovered: Landing = { kind: "awaiting-url" };
+const settled: Landing = { kind: "settled" };
 
 export function initialState({
   visible = true,
@@ -22,7 +27,8 @@ export function initialState({
 } = {}): State {
   return {
     channels: new Map(),
-    selectedKey: null,
+    selection: noSelection,
+    landing: { kind: "discovering" },
     requestedKey,
     openThread: null,
     unread: new Set(),
@@ -327,35 +333,63 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
       if (!keys.has(key)) channels.delete(key);
     }
   }
-  const preserveSelection =
-    state.sync.kind !== "fallback" || state.sync.preserveSelection;
-  const selectedKey =
-    preserveSelection &&
-    state.selectedKey !== null &&
-    channels.has(state.selectedKey)
-      ? state.selectedKey
-      : landing(channels, state.requestedKey);
+  const arrived = [...channels.keys()].some((key) => !state.channels.has(key));
+  const selection = settle(state, channels, arrived);
   const unread = new Set([...state.unread].filter((key) => channels.has(key)));
   for (const [key, channel] of channels) {
     const previous = state.channels.get(key);
     if (
       previous &&
       hasActivity(previous, channel) &&
-      !(state.visible && key === state.selectedKey)
+      !(state.visible && key === state.selection.key)
     )
       unread.add(key);
   }
   return {
     ...state,
     channels,
-    selectedKey,
+    selection,
     unread,
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
-    sync:
-      keys === null
-        ? { kind: "fallback", preserveSelection: state.viewKnown }
-        : { kind: "live" },
+    sync: { kind: keys === null ? "fallback" : "live" },
+    landing:
+      keys !== null && state.landing.kind === "discovering"
+        ? discovered
+        : state.landing,
   };
+}
+function settle(
+  state: State,
+  channels: ReadonlyMap<SpaceKey, Channel>,
+  arrived: boolean,
+): Selection {
+  const { selection, landing, requestedKey } = state;
+  if (selection.kind !== "none" && !channels.has(selection.key))
+    return land(channels, requestedKey);
+  if (!arrived || selection.kind === "chosen") return selection;
+  if (selection.kind === "none") return land(channels, requestedKey);
+  switch (landing.kind) {
+    case "discovering":
+      return land(channels, requestedKey);
+    case "awaiting-url":
+      return requestedKey !== null && channels.has(requestedKey)
+        ? { kind: "chosen", key: requestedKey }
+        : selection;
+    case "settled":
+      return selection;
+    default: {
+      const exhaustive: never = landing;
+      return exhaustive;
+    }
+  }
+}
+function land(
+  channels: ReadonlyMap<SpaceKey, Channel>,
+  requestedKey: SpaceKey | null,
+): Selection {
+  const key = landing(channels, requestedKey);
+  if (key === null) return noSelection;
+  return { kind: key === requestedKey ? "chosen" : "automatic", key };
 }
 function latestWindow(channel: Channel): Channel {
   return {
@@ -393,9 +427,25 @@ export function landing(
 }
 export function reduce(state: State, event: Event): State {
   const next = step(state, event);
-  return next.openThread !== null && next.selectedKey !== state.selectedKey
-    ? { ...next, openThread: null }
-    : next;
+  const { openThread } = next;
+  if (openThread === null) return next;
+  const key = next.selection.key;
+  if (key !== state.selection.key) return { ...next, openThread: null };
+  if (key === null) return next;
+  const channel = next.channels.get(key);
+  if (
+    channel === undefined ||
+    channel.messages === state.channels.get(key)?.messages ||
+    threadLoaded(channel, openThread)
+  )
+    return next;
+  return { ...next, openThread: null };
+}
+function threadLoaded(channel: Channel, threadId: string): boolean {
+  for (const run of channel.runs)
+    for (const id of run)
+      if (channel.messages.get(id)?.threadId === threadId) return true;
+  return false;
 }
 function step(state: State, event: Event): State {
   switch (event.type) {
@@ -417,16 +467,15 @@ function step(state: State, event: Event): State {
       if (accumulated === previous) return state;
       const channels = new Map(state.channels);
       channels.set(channel.key, accumulated);
-      const selectedKey =
-        state.channels.size === 0 ? channel.key : state.selectedKey;
+      const selection = settle(state, channels, previous === undefined);
       let unread = state.unread;
       if (
         previous &&
         hasActivity(previous, accumulated) &&
-        !(selectedKey === channel.key && state.visible)
+        !(selection.key === channel.key && state.visible)
       )
         unread = new Set([...unread, channel.key]);
-      return { ...state, channels, selectedKey, unread, viewKnown: true };
+      return { ...state, channels, selection, unread, viewKnown: true };
     }
     case "older":
       return requestHistory(state, event.key);
@@ -523,6 +572,14 @@ function step(state: State, event: Event): State {
       return state.sync.kind === "replaying"
         ? finishReplay(state, null)
         : state;
+    case "discovery-timeout":
+      return state.landing.kind === "discovering"
+        ? { ...state, landing: discovered }
+        : state;
+    case "input":
+      return state.landing.kind === "settled"
+        ? state
+        : { ...state, landing: settled };
     case "gone": {
       if (
         !state.channels.has(event.key) &&
@@ -541,21 +598,37 @@ function step(state: State, event: Event): State {
         ...state,
         channels,
         sync,
-        selectedKey: state.selectedKey === event.key ? null : state.selectedKey,
+        selection:
+          state.selection.key === event.key ? noSelection : state.selection,
         unread: clearUnread(state.unread, event.key),
       };
     }
     case "select": {
       if (!state.channels.has(event.key)) return state;
-      const sync =
-        state.sync.kind === "fallback" && !state.sync.preserveSelection
-          ? { ...state.sync, preserveSelection: true }
-          : state.sync;
-      if (state.selectedKey === event.key && sync === state.sync) return state;
-      return { ...state, selectedKey: event.key, sync };
+      const { selection } = state;
+      if (
+        selection.kind === "chosen" &&
+        selection.key === event.key &&
+        state.landing.kind === "settled"
+      )
+        return state;
+      return {
+        ...state,
+        requestedKey: event.key,
+        selection: { kind: "chosen", key: event.key },
+        landing: settled,
+      };
+    }
+    case "navigate": {
+      if (event.key !== null && !state.channels.has(event.key)) return state;
+      return {
+        ...state,
+        requestedKey: event.key,
+        selection: land(state.channels, event.key),
+      };
     }
     case "read": {
-      if (state.selectedKey !== event.key) return state;
+      if (state.selection.key !== event.key) return state;
       const unread = clearUnread(state.unread, event.key);
       return unread === state.unread ? state : { ...state, unread };
     }
@@ -739,19 +812,25 @@ export function timelineView(
   }
   return rows;
 }
-export function runsByMessage(
-  runs: readonly TerminalRun[],
-): ReadonlyMap<string, TerminalRun> {
-  const byMessage = new Map<string, TerminalRun>();
-  for (const run of runs)
-    if (run.messageId !== null) byMessage.set(run.messageId, run);
+export type RunIndex = ReadonlyMap<string, readonly TerminalRun[]>;
+export function runsByMessage(runs: readonly TerminalRun[]): RunIndex {
+  const byMessage = new Map<string, TerminalRun[]>();
+  for (const run of runs) {
+    if (run.messageId === null) continue;
+    const known = byMessage.get(run.messageId);
+    if (known) known.push(run);
+    else byMessage.set(run.messageId, [run]);
+  }
+  for (const list of byMessage.values())
+    list.sort((a, b) => b.startedAt - a.startedAt);
   return byMessage;
 }
 export function exitFor(
-  runs: ReadonlyMap<string, TerminalRun>,
+  runs: RunIndex,
   reply: Message | null,
 ): TerminalRun | undefined {
   if (reply === null || reply.inReplyTo === null) return undefined;
-  const run = runs.get(reply.inReplyTo);
-  return run?.terminal === reply.author ? run : undefined;
+  return runs
+    .get(reply.inReplyTo)
+    ?.find((run) => run.terminal === reply.author && run.startedAt <= reply.at);
 }
