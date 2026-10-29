@@ -380,7 +380,10 @@ impl SpaceHeader {
         let label = SafeText::optional(label, SHORT_CHARS).map(|label| label.text);
         self.display_name = label.unwrap_or_else(|| workspace_id.to_owned());
         (self.addressable_label, self.not_addressable_reason) = match addressability {
-            Ok(token) => (Some(token), None),
+            Ok(token) if SafeText::from_untrusted(&token, SHORT_CHARS).text == token => {
+                (Some(token), None)
+            }
+            Ok(_) => (None, Some(NotAddressableReason::Unavailable)),
             Err(reason) => (None, Some(reason)),
         };
     }
