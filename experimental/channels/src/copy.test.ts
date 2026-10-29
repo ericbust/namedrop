@@ -402,7 +402,7 @@ test("composer words name the channel, the thread's recipients and the reason a 
       "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr.",
     "no-label": "This workspace has no label in Herdr. Name it to mention it.",
     "shared-name":
-      "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there.",
+      "Another workspace shows the same name. Give one a unique label in Herdr to mention it.",
     unknown:
       "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.",
   });
@@ -456,7 +456,12 @@ test("participant names: remote agents carry their home, envoys and unknown ids 
   const codex: Member | undefined = event.channel.members.values().next().value;
   const envoy = event.channel.messages.get("m1")?.author;
   assert.ok(codex && envoy !== undefined && envoy !== "human");
-  const alpha = { name: "#alpha", token: "#alpha", members: new Map() };
+  const alpha = {
+    key: event.channel.key,
+    name: "#alpha",
+    token: "#alpha",
+    members: new Map(),
+  };
   assert.deepEqual(participantCopy({ kind: "operator" }), {
     name: "You",
     suffix: null,

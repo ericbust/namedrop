@@ -15,10 +15,12 @@ import type {
   TerminalResult,
   TerminalRun,
 } from "../model.ts";
+import { peekTargetOf } from "../peek.ts";
 import { participant } from "../store.ts";
 import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
+import { PeekControl, usePeek } from "./PeekContext.tsx";
 
 const PREVIEW = 480;
 
@@ -33,6 +35,25 @@ function Name({ person }: { person: ParticipantCopy }) {
         <span className="name-home"> · {person.suffix}</span>
       )}
     </>
+  );
+}
+function PeekName({
+  directory,
+  id,
+}: {
+  directory: Directory;
+  id: MessageRow["author"];
+}) {
+  const scope = usePeek()?.scope ?? null;
+  const person = participant(directory, id);
+  return (
+    <PeekControl
+      target={peekTargetOf(person, scope)}
+      className="peek-name"
+      fallback="none"
+    >
+      <Name person={participantCopy(person)} />
+    </PeekControl>
   );
 }
 function clock(at: number) {
@@ -420,7 +441,6 @@ export const Message = memo(
     const time = clock(message.at);
     const variant = variantFor(message, directory, recipients);
     const named = recipients.map((id) => who(directory, id));
-    const shown = named.slice(0, SHOWN_RECIPIENTS);
     const result = variant === "output" ? terminalResult(message.body) : null;
     return (
       <article
@@ -440,7 +460,7 @@ export const Message = memo(
             <header className="msg-head">
               {!grouped && (
                 <span className="author">
-                  <Name person={author} />
+                  <PeekName directory={directory} id={message.author} />
                 </span>
               )}
               {!grouped && <Exit run={exit} result={result} />}
@@ -456,10 +476,10 @@ export const Message = memo(
                   <Icon name="arrow" />
                   <span className="sr-only"> to </span>
                   <span>
-                    {shown.map((person, index) => (
-                      <Fragment key={recipients[index]}>
+                    {recipients.slice(0, SHOWN_RECIPIENTS).map((id, index) => (
+                      <Fragment key={id}>
                         {index > 0 && ", "}
-                        <Name person={person} />
+                        <PeekName directory={directory} id={id} />
                       </Fragment>
                     ))}
                   </span>

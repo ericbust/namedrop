@@ -143,6 +143,10 @@ thread pane scroll.
 - When none of an open thread's messages are loaded any more, for example after
   Jump to latest, the thread closes for good. It does not reopen when history
   loads it again. Focus moves to the timeline, never to the page body.
+- **All activity** has its own address, `/?view=activity`, because the server
+  serves the page only at `/` and `/w/<key>`. Picking it pushes that URL, so
+  reload and Back work. A URL that names it opens it at once and ends landing,
+  because the reader asked for it.
 - Arrow keys still move the selection, as UI-1 specified. A channel counts as
   read only after it has been shown for 1.5 seconds, so passing over it with the
   arrow keys keeps its unread mark.
@@ -153,6 +157,12 @@ thread pane scroll.
   brand gradient `linear-gradient(135deg, oklch(0.74 0.12 275), oklch(0.82 0.11
   175) 55%, oklch(0.8 0.11 318))`, then **Namedrop** at 15px 600. The wordmark
   text is never a gradient.
+- **All activity** row, 32px, above Needs you: a drawn pulse icon, "All
+  activity", and in the right slot the number of agents that are working,
+  waiting, or need you, in muted tabular numerals. The number hides at zero.
+  When selected, the row gets the selected background like a channel row, and
+  no channel row is selected. The row is reached with Tab. It is not part of
+  the channel list's arrow-key navigation.
 - **Needs you** section: one row per channel that needs you, two lines tall. The
   first line is the channel name. The second line is the reason in 12px
   `--attention-text`: the first item's title from the Needs-you copy table
@@ -202,7 +212,8 @@ The operator chip reads "You", shows no presence, and comes last. The chip's
 tooltip names the runtime in words: "Claude Code", "Codex", "OpenCode", "Pi",
 or "Terminal". An unknown runtime id is shown with its first letter capitalized. After two lines, end with a
 "+N more" chip that expands the strip. Remove the "Members" and "Status"
-headings. In UI-4 a chip opens the peek drawer.
+headings. Each member chip is a button that opens the peek drawer for that
+member. The operator chip is not a button.
 
 ### Presence
 
@@ -244,6 +255,10 @@ click.
   after a drawn 12px arrow icon, as "@codex" or "@codex, @shell", then the kind tag, then the time in 12px
   muted. Recipients come from the unique `legs[].to`. Center the items
   vertically.
+- **Names open the screen**: the author and each named recipient in a header
+  are buttons that open the peek drawer for that member. They keep their text
+  style, underline on hover, and show the focus ring. The operator, "+N", and
+  ids the page cannot place stay plain text.
 - **Kind tag**: "Handoff" is a 12px chip on `--bg-hover` with `--radius-sm` and
   no border. Mentions and replies carry no tag.
 - **Grouping**: consecutive messages by the same author within five minutes drop
@@ -508,21 +523,26 @@ workspaces would reach agents who are not in the thread.
   only when the page can be sure of it. The page sees the server's cleaned
   display name, not the raw Herdr label, so anything else gets general copy:
 
-  | Case, checked in this order                                                | Tooltip                                                                                                                                  |
-  | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-  | The display name folds to nothing, as with 日本語                          | "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr."                                           |
-  | The display name is the workspace id                                       | "This workspace has no label in Herdr. Name it to mention it."                                                                           |
-  | Another labelled channel shows the same name, and none of them has a token | "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there."                      |
-  | Anything else                                                              | "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there." |
+  | Case, checked in this order                                                                                    | Tooltip                                                                                                                                  |
+  | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+  | The display name folds to nothing, as with 日本語                                                              | "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr."                                           |
+  | The display name is the workspace id                                                                           | "This workspace has no label in Herdr. Name it to mention it."                                                                           |
+  | The display name folds to "all"                                                                                | The "Anything else" line                                                                                                                 |
+  | Another labelled channel shows the same name, every channel showing it is active, and none of them has a token | "Another workspace shows the same name. Give one a unique label in Herdr to mention it."                                                 |
+  | Anything else                                                                                                  | "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there." |
 
   The server compares tokens folded from the raw label, so two channels can
   show the same name and still have different tokens, as when one label hides
   a soft hyphen. A shared name therefore counts only when every labelled
   channel showing it lacks a token. A channel whose name is its workspace id
-  has no label, so it never makes another channel's name shared. The shared
-  copy also names activation. When one of two same-named workspaces isn't
-  active, both still lose their tokens, and renaming the inactive one won't
-  make it mentionable. A label that equals its own workspace id looks the same
+  has no label, so it never makes another channel's name shared. Every channel
+  showing the name must also be active: its frame's `space.state` is `active`
+  or `paused`, since the server counts a paused workspace as active. A frame
+  without a state doesn't count as active. When
+  one of them isn't, both still lose their tokens, but renaming won't make the
+  inactive one mentionable, so it gets the general line. A name that folds to
+  "all" is reserved, so two workspaces labelled "all" get the general line too,
+  which names the reserved word. A label that equals its own workspace id looks the same
   as no label, so it gets the no-label line. Herdr's ids make that label
   unlikely.
 - **Member rows**, 32px: a 20px avatar with its presence badge, the alias, and
@@ -554,13 +574,137 @@ workspaces would reach agents who are not in the thread.
 - In a paused channel a `queued` leg reads "Held while paused", with the pause
   icon in `--held-text`, so the receipt agrees with the header.
 
+### All activity
+
+```
+[~] All activity                         1 needs you · 1 waiting · 2 working
+NEEDS YOU 1
+[C] @claude                                                        #beta
+    Waiting for permission to run a command                 since 10:41 PM
+WAITING 1
+[L] @lead                                                         #alpha
+    Waiting on @codex                                       since 10:38 PM
+WORKING 2
+[C] @codex                                                        #alpha
+    From @lead: "check the diff and reply with a verdict"   since 10:38 PM
+```
+
+The one view that spans every channel. It answers "who is busy, and on what?"
+
+- **Header**, 56px, like the channel header: the pulse icon, "All activity" at
+  18px 600, and at the right a 12px muted summary such as "1 needs you · 1
+  waiting · 2 working", leaving out any part that is zero. There is no member
+  strip, Needs-you banner, or composer.
+- **Groups**, in this order: Needs you (`blocked`), Waiting, Working. Each group
+  starts with a label in the sidebar's section-label style, with its count in
+  tabular numerals. An empty group is hidden. Groups are at most 880px wide, so
+  the channel and time stay near the name on a wide window. Idle, offline, retired, and
+  unknown members never appear, and neither does the operator.
+- **Rows**, 56px, in the member-chip vocabulary at row size. A 32px avatar with
+  its presence badge, then two lines:
+  - Line 1: the alias at 14px 600. At the right edge, the channel as a muted
+    13px "#alpha" button that opens that channel at its newest message.
+  - Line 2, 13px `--text-muted`, one line with an ellipsis and the full text in
+    the tooltip. The first case that applies:
+    1. In Needs you, the summary of that channel's newest attention item about
+       this member, in `--attention-text`.
+    2. A member waiting on others: "Waiting on @codex". Names follow
+       [Recipients and envoys](#recipients-and-envoys), with at most two names
+       and then "+N".
+    3. The oldest item in its mailbox: "From @lead:", or "From you:" when the
+       operator sent it, then the preview in quotation marks.
+    4. Nothing. Line 1 and the channel button then sit in the row's vertical
+       center.
+  - At the right of line 2, "since 10:38 PM" in 12px muted tabular numerals: when
+    the oldest mailbox item arrived. It is absolute, so nothing ticks.
+  - When that oldest item is held, or is queued in a paused channel, line 2 ends
+    with the pause icon and "Held while paused" in `--held-text`.
+- A row is one button that opens the peek drawer, except for the channel
+  button, which sits beside it, not inside it. The row whose drawer is open has
+  the selected background. Hover is `--bg-hover`.
+- **Order inside a group**: the oldest mailbox item first, rows with no item
+  last, then by channel name and alias. A row moves only when its own data
+  changes.
+- A row is keyed by channel and member. When a member goes idle, its row leaves
+  the list, but an open peek drawer for it stays open.
+
+### Peek drawer
+
+```
+[C] @codex  Working                                    [↻ Refresh]  [X]
+    in #alpha · Read at 10:42 PM
+┌──────────────────────────────────────────────────────────────────────┐
+│ Earlier lines not shown                                              │
+│ › Reading README.md                                                  │
+│ • Ran npm test                                                       │
+│   └ 144 passed                                                       │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+The drawer shows a member's recent screen, read from ND-5's screen route. It
+reads only when it opens and when the reader asks: never on a timer.
+
+- **Opens from** a member chip, a name in a message header, or an activity row.
+  It never opens for the operator, or for an id the page can't match to a
+  member and channel.
+- **Slot**: the thread pane's slot, `clamp(400px, 36vw, 480px)` wide, which is
+  480px at 1440 and 400px at 1024. Opening the drawer closes the thread pane,
+  and opening a thread closes the drawer. Picking another channel or All
+  activity closes it. Below 860px it stacks under the main column, like the
+  thread pane. Its accessible name is "Screen of @codex".
+- **Header**, 60px, two lines. Line 1: a 20px avatar with its presence badge,
+  the alias at 15px 600, and the presence word in 12px muted. Line 2, 12px
+  muted: "in #alpha · Read at 10:42 PM". The stamp updates with every read and
+  is announced politely, including "Reading…". At the right: **Refresh**, a 32px button with a drawn
+  circular-arrow icon and the word, then the 32px close button "Close screen".
+- **Text**: a `pre` on `--bg-raised`, `--font-mono` at 12.5px with 1.5 line
+  height, 12px 16px padding. It shows the text as text, never as markup. Each
+  line is its own block with a 2ch hanging indent, so a long line wraps under
+  its own start and the drawer never scrolls sideways. The text sits in a
+  scrolling region named "Screen text" that is focusable and gets focus when the
+  drawer opens. When the text starts with the server's "[Earlier screen text
+  omitted]" line, that line shows as a 12px muted UI-font line, "Earlier lines
+  not shown", at the top of the region, above the `pre`, and scrolls with it.
+- **Newest lines in view**: on open and after the first read, the text is
+  scrolled to the bottom. After a refresh, it stays at the bottom if the reader
+  was there, and otherwise keeps their place.
+- **Reading**. Idle panes answer in a few milliseconds and busy panes can take
+  over a second, so:
+
+  | State                    | What shows                                                                                |
+  | ------------------------ | ----------------------------------------------------------------------------------------- |
+  | First read, under 400 ms | The header and an empty body, so a fast read never flashes.                               |
+  | First read, over 400 ms  | "Reading @codex's screen…" in 13px muted at the top of the body.                          |
+  | First read, over 2 s     | A second line under it: "Busy panes can take a few seconds."                              |
+  | Refresh                  | The earlier text stays. **Refresh** is disabled. After 400 ms the stamp reads "Reading…". |
+  | Read done                | The new text replaces the old, and the stamp reads "Read at 10:43 PM".                    |
+  | Empty screen             | "The screen is empty." in 13px muted, for text that is empty or only whitespace.          |
+
+  One read runs at a time. **Refresh** is disabled while it runs, so one click
+  makes one request. A new drawer target cancels the earlier read.
+- **When a read fails**, in plain words:
+
+  | Server answer         | Title                    | Body                                                    | Button        |
+  | --------------------- | ------------------------ | ------------------------------------------------------- | ------------- |
+  | 410                   | Pane closed              | "@codex no longer has a pane Namedrop can read."        | none          |
+  | 404                   | Not in #alpha any more   | "Namedrop can't find @codex in this workspace."         | none          |
+  | 503                   | Couldn't read the screen | "Herdr was busy or didn't answer in time."              | **Try again** |
+  | 401 or 403            | Session ended            | "Open Namedrop's dashboard link again to keep reading." | none          |
+  | No answer, or another | Couldn't reach Namedrop  | "Check that Namedrop is still running."                 | **Try again** |
+
+  With no earlier text, the title (15px 600) and body (13px muted) sit at the
+  top of the body area with the button under them. With earlier text, they
+  become one 36px bar between the header and the text, in `--warning-bg` and
+  `--warning-text`, and the earlier text stays with its old stamp. **Try again**
+  reads again, exactly like **Refresh**.
+
 ## Motion
 
 Motion shows state and nothing else.
 
 - A live message arrives with a 4px rise and fade over 180ms.
 - A presence dot changes color over 180ms. A working dot pulses slowly.
-- The thread pane enters over 180ms.
+- The thread pane and the peek drawer enter over 180ms.
 - The Needs-you banner expands and fades over 180ms when it appears.
 - Under `prefers-reduced-motion: reduce`, remove the pulse and every movement,
   and keep only color changes.
@@ -578,6 +722,7 @@ Motion shows state and nothing else.
 | Missing range                 | A hairline divider with "Some messages are missing here" and a **Load them** button.                                               |
 | Reconnecting                  | A 36px bar at the top of the main column in `--warning-bg` and `--warning-text`: "Reconnecting… Showing updates up to 10:42 PM."   |
 | Server-shortened text         | A 12px muted line "Shortened by Namedrop."                                                                                         |
+| All activity, nothing active  | The pulse icon, title "Every agent is idle", body "Agents show up here while they work, wait on each other, or need you."          |
 
 ## Accessibility
 
@@ -587,9 +732,13 @@ Motion shows state and nothing else.
   Never remove an outline without replacing it.
 - The sidebar keeps its arrow-key navigation. The timeline scroller stays
   focusable. Escape closes the thread pane and returns focus to the thread button.
+  Escape closes the peek drawer and returns focus to the chip, name, or row that
+  opened it. When that control is gone, focus moves to the timeline, or to the
+  activity list in All activity.
 - Every presence dot, receipt icon, and avatar has a text equivalent. Decorative
   icons are `aria-hidden`.
-- Hit targets are at least 32 by 32px.
+- Hit targets are at least 32 by 32px. Names in a message header are the one
+  exception: they are inline text buttons, like links in a sentence.
 - The layout holds at 200 percent zoom and at 1024 by 700 without horizontal
   scroll.
 - Theme the browser surfaces: `::selection` uses `--bg-selected`, the scrollbar
@@ -616,12 +765,3 @@ The verdict is PASS, PASS with follow-ups, or CHANGES with a list of required
 edits. A follow-up never blocks a merge. A broken layout, unreadable text, a
 contrast failure, a database word on screen, or a state with no design blocks
 it.
-
-## Coming next
-
-- **UI-4 All activity**: a sidebar row above Needs you with a drawn pulse icon.
-  The view lists member rows in the member-chip vocabulary, grouped Needs you,
-  Waiting, Working, with the channel and "waiting on @codex" as the second line.
-- **UI-4 Peek drawer**: takes the thread pane's slot and width plus 80px. Text is
-  `--font-mono` at 12.5px on `--bg-raised`, with a **Refresh** button and a
-  "Read at 10:42 PM" stamp in the header.

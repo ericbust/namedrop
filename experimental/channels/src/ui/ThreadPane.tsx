@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CompletionContext } from "../complete.ts";
 import { replyLabel, replyPlaceholder } from "../copy.ts";
 import type {
@@ -20,6 +20,7 @@ import {
 import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
+import { useEscape } from "./useEscape.ts";
 
 export function ThreadPane({
   channel,
@@ -79,33 +80,12 @@ export function ThreadPane({
     if (body.current && pending.some((entry) => !earlier.has(entry.requestId)))
       body.current.scrollTop = body.current.scrollHeight;
   }, [pending]);
-  useEffect(() => {
-    const onEscape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
-      const target = document.activeElement;
-      if (target?.closest('dialog, [role="dialog"], [role="alertdialog"]'))
-        return;
-      const inside = target !== null && pane.current?.contains(target);
-      const body =
-        target === document.body &&
-        ![
-          ...document.querySelectorAll(
-            'dialog[open], [role="dialog"], [role="alertdialog"]',
-          ),
-        ].some((dialog) => dialog.getClientRects().length > 0);
-      if (inside || body) {
-        event.preventDefault();
-        onClose();
-      }
-    };
-    document.addEventListener("keydown", onEscape);
-    return () => document.removeEventListener("keydown", onEscape);
-  }, [onClose]);
+  useEscape(pane, onClose);
   const count = thread.replies.length;
   const unloaded =
     thread.knownCount > thread.parents.length + thread.replies.length;
   return (
-    <aside className="thread" aria-label="Thread" id={paneId} ref={pane}>
+    <aside className="slot thread" aria-label="Thread" id={paneId} ref={pane}>
       <header className="thread-head">
         <h2 className="thread-title">Thread</h2>
         <span className="thread-where">

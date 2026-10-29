@@ -1,3 +1,4 @@
+import type { ActivityGroupKind } from "./activity.ts";
 import type { DisabledReason } from "./complete.ts";
 import type {
   Activity,
@@ -8,8 +9,11 @@ import type {
   MemberKind,
   OutgoingPhase,
   Participant,
+  ScreenFailure,
   SendFailure,
 } from "./model.ts";
+import type { PeekNotice } from "./peek.ts";
+import type { PeekWho } from "./store.ts";
 
 export type IconName =
   | "alert"
@@ -26,6 +30,7 @@ export type IconName =
   | "pause"
   | "plug"
   | "prompt"
+  | "pulse"
   | "refresh"
   | "reply"
   | "report"
@@ -302,7 +307,7 @@ export const disabledChannelCopy = {
     "This label has no Latin letters or digits, so Namedrop can't mention it. Rename it in Herdr.",
   "no-label": "This workspace has no label in Herdr. Name it to mention it.",
   "shared-name":
-    "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there.",
+    "Another workspace shows the same name. Give one a unique label in Herdr to mention it.",
   unknown:
     "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.",
 } satisfies Record<DisabledReason, string>;
@@ -352,3 +357,65 @@ export function participantCopy(who: Participant): ParticipantCopy {
     }
   }
 }
+
+export function timeOfDay(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+export const activityCopy = {
+  title: "All activity",
+  groups: { needs_you: "Needs you", waiting: "Waiting", working: "Working" },
+  counted: { needs_you: "needs you", waiting: "waiting", working: "working" },
+  since: (ms: number) => `since ${timeOfDay(ms)}`,
+  held: stageCopy.held.label,
+  idleTitle: "Every agent is idle",
+  idleBody:
+    "Agents show up here while they work, wait on each other, or need you.",
+} satisfies {
+  groups: Record<ActivityGroupKind, string>;
+  counted: Record<ActivityGroupKind, string>;
+  [copy: string]: unknown;
+};
+export const peekCopy = {
+  label: (alias: string) => `Screen of ${alias}`,
+  where: (channel: string) => `in ${channel}`,
+  readAt: (ms: number) => `Read at ${timeOfDay(ms)}`,
+  reading: "Reading…",
+  readingScreen: (alias: string) => `Reading ${alias}'s screen…`,
+  busy: "Busy panes can take a few seconds.",
+  empty: "The screen is empty.",
+  omitted: "Earlier lines not shown",
+  text: "Screen text",
+  refresh: "Refresh",
+  close: "Close screen",
+  tryAgain: "Try again",
+};
+export const peekFailureCopy = {
+  closed: (who) => ({
+    title: "Pane closed",
+    body: `${who.alias} no longer has a pane Namedrop can read.`,
+    retry: false,
+  }),
+  missing: (who) => ({
+    title: `Not in ${who.channel.label} any more`,
+    body: `Namedrop can't find ${who.alias} in this workspace.`,
+    retry: false,
+  }),
+  busy: () => ({
+    title: "Couldn't read the screen",
+    body: "Herdr was busy or didn't answer in time.",
+    retry: true,
+  }),
+  session: () => ({
+    title: "Session ended",
+    body: "Open Namedrop's dashboard link again to keep reading.",
+    retry: false,
+  }),
+  unreachable: () => ({
+    title: "Couldn't reach Namedrop",
+    body: "Check that Namedrop is still running.",
+    retry: true,
+  }),
+} satisfies Record<ScreenFailure, (who: PeekWho) => PeekNotice>;

@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { type ActivityList, activityOf } from "../activity.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
 import { composerPlaceholder } from "../copy.ts";
 import type {
@@ -17,31 +18,47 @@ import type {
   Home,
   Message,
   Outgoing,
+  PeekTarget,
+  Route,
   SpaceKey,
   State,
 } from "../model.ts";
+import { type PeekKey, peekKey } from "../peek.ts";
+import { createScreenReader } from "../screen.ts";
 import { createPoster } from "../send.ts";
 import {
+  bootState,
   channelSuffix,
   connectionStatus,
   draftKey,
   homesOf,
-  initialState,
+  peekWho,
   reduce,
+  routeEvent,
   runsByMessage,
   sameComposer,
   type ThreadGroup,
   type TimelineRow,
   threadGroups,
   timelineView,
+  viewOf,
 } from "../store.ts";
-import { parseEvent, parseHistory, pathKey } from "../wire.ts";
+import {
+  parseEvent,
+  parseHistory,
+  routeOf,
+  routePath,
+  sameRoute,
+} from "../wire.ts";
+import { ActivityView } from "./ActivityView.tsx";
 import { ChannelHeader } from "./ChannelHeader.tsx";
 import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
 import { MemberStrip } from "./MemberStrip.tsx";
 import { measure } from "./measure.ts";
 import { NeedsYou } from "./NeedsYou.tsx";
+import { type PeekAccess, PeekContext } from "./PeekContext.tsx";
+import { PeekDrawer } from "./PeekDrawer.tsx";
 import { Sidebar } from "./Sidebar.tsx";
 import { ThreadPane } from "./ThreadPane.tsx";
 import { type Located, Timeline } from "./Timeline.tsx";
@@ -52,6 +69,11 @@ const noMessages: ReadonlyMap<string, Message> = new Map();
 const noPending: readonly Outgoing[] = [];
 const noMembers: Directory["members"] = new Map();
 const POSTED_LIMIT = 200;
+const MAIN_SCROLLER = "main .timeline, main .activity-list";
+function go(route: Route) {
+  if (!sameRoute(routeOf(location), route))
+    history.pushState(null, "", routePath(route));
+}
 function measuredReduce(state: State, event: Event): State {
   if (
     event.type !== "space" &&
@@ -73,10 +95,7 @@ function measuredReduce(state: State, event: Event): State {
 }
 export function App() {
   const [state, dispatch] = useReducer(measuredReduce, undefined, () =>
-    initialState({
-      visible: !document.hidden,
-      requestedKey: pathKey(location.pathname),
-    }),
+    bootState({ visible: !document.hidden, route: routeOf(location) }),
   );
   const [frameVersion, frameArrived] = useReducer(
     (version: number) => version + 1,
@@ -89,6 +108,7 @@ export function App() {
   const requests = useRef(new Map<number, AbortController>());
   const lastUpdate = useRef<number | null>(null);
   const [poster] = useState(createPoster);
+  const [reader] = useState(createScreenReader);
   const inFlightPosts = useRef(new Map<string, ComposerId>());
   const posted = useRef(new Set<string>());
   useEffect(() => poster.prepare(), [poster]);
@@ -297,8 +317,7 @@ export function App() {
     };
   }, [state.channels.size]);
   useEffect(() => {
-    const back = () =>
-      dispatch({ type: "navigate", key: pathKey(location.pathname) });
+    const back = () => dispatch(routeEvent(routeOf(location)));
     addEventListener("popstate", back);
     return () => removeEventListener("popstate", back);
   }, []);
@@ -392,9 +411,16 @@ export function App() {
     [],
   );
   const select = useCallback((key: SpaceKey) => {
-    const path = `/w/${key}`;
-    if (location.pathname !== path) history.pushState(null, "", path);
+    go({ kind: "channel", key });
     dispatch({ type: "select", key });
+  }, []);
+  const showActivity = useCallback(() => {
+    go({ kind: "activity" });
+    dispatch({ type: "activity" });
+  }, []);
+  const jump = useCallback((key: SpaceKey) => {
+    go({ kind: "channel", key });
+    dispatch({ type: "jump", key });
   }, []);
   const connection = connectionStatus(state);
   const channel =
@@ -422,6 +448,13 @@ export function App() {
   const homes = useMemo(() => {
     homesSeen.current = homesOf(state.channels.values(), homesSeen.current);
     return homesSeen.current;
+  }, [state.channels]);
+  const activitySeen = useRef<ActivityList | undefined>(undefined);
+  const activity = useMemo(() => {
+    const start = performance.now();
+    activitySeen.current = activityOf(state.channels, activitySeen.current);
+    measure("namedrop:activity-derive", start);
+    return activitySeen.current;
   }, [state.channels]);
   const members = channel?.members ?? noMembers;
   const directory = useMemo<Directory>(
@@ -466,7 +499,10 @@ export function App() {
   const terminalRuns = channel?.terminalRuns;
   const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
   const thread =
-    state.openThread === null ? undefined : groups.get(state.openThread);
+    state.slot.kind === "thread" ? groups.get(state.slot.id) : undefined;
+  const peeking = state.slot.kind === "peek" ? state.slot.target : null;
+  const who = peeking === null ? null : peekWho(state.channels, peeking);
+  const pane = thread ? "thread" : who ? "peek" : null;
   const paneId = useId();
   const returnFocus = useRef<{
     button: HTMLButtonElement;
@@ -509,144 +545,208 @@ export function App() {
         ].find((button) => button.dataset.threadId === saved.threadId);
     button?.focus();
   }, []);
+  const opening = useRef<{
+    element: HTMLElement;
+    key: PeekKey;
+    startedAt: number;
+  } | null>(null);
+  const openPeek = useCallback(
+    (target: PeekTarget, element: HTMLElement, startedAt: number) => {
+      opening.current = { element, key: peekKey(target), startedAt };
+      focusIntent.current = true;
+      requestFocus();
+      dispatch({ type: "peek", target });
+    },
+    [],
+  );
+  const closePeek = useCallback(() => {
+    dispatch({ type: "peek", target: null });
+    const saved = opening.current;
+    const control =
+      saved === null
+        ? null
+        : saved.element.isConnected
+          ? saved.element
+          : document.querySelector<HTMLElement>(
+              `main [data-peek="${CSS.escape(saved.key)}"]`,
+            );
+    (control ?? document.querySelector<HTMLElement>(MAIN_SCROLLER))?.focus();
+  }, []);
+  const scope = channel?.key ?? null;
+  const peekAccess = useMemo<PeekAccess>(
+    () => ({ scope, open: openPeek }),
+    [scope, openPeek],
+  );
   const paneWasOpen = useRef(false);
+  const view = viewOf(state.selection);
+  const shownView = useRef(view);
   useLayoutEffect(() => {
-    if (thread && focusIntent.current) {
+    if (pane !== null && focusIntent.current) {
       document
         .getElementById(paneId)
-        ?.querySelector<HTMLButtonElement>('button[aria-label="Close thread"]')
+        ?.querySelector<HTMLElement>(
+          pane === "thread"
+            ? 'button[aria-label="Close thread"]'
+            : ".peek-text",
+        )
         ?.focus();
       focusIntent.current = false;
     }
-    if (
-      !thread &&
-      paneWasOpen.current &&
-      document.activeElement === document.body
-    )
-      document.querySelector<HTMLElement>("section.timeline")?.focus();
-    paneWasOpen.current = thread !== undefined;
+    const unmounted =
+      (pane === null && paneWasOpen.current) ||
+      (view !== "activity" && shownView.current === "activity");
+    if (unmounted && document.activeElement === document.body)
+      document.querySelector<HTMLElement>(MAIN_SCROLLER)?.focus();
+    paneWasOpen.current = pane !== null;
+    shownView.current = view;
   });
   const updatedAt = lastUpdate.current;
   return (
-    <div className={`app-shell${channel && thread ? " has-thread" : ""}`}>
-      <a className="skip-link" href="#main-content">
-        Skip to messages
-      </a>
-      <Sidebar state={state} onSelect={select} />
-      <main className="main" id="main-content" tabIndex={-1}>
-        {connection === "reconnecting" && (
-          <div className="reconnect" role="status">
-            <Icon name="refresh" />
-            Reconnecting…
-            {updatedAt !== null &&
-              ` Showing updates up to ${new Date(updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`}
-          </div>
-        )}
-        {channel ? (
-          <>
-            <ChannelHeader
-              channel={channel}
-              suffix={channelSuffix(channel, state.channels.values())}
-            />
-            <MemberStrip key={channel.key} members={channel.members} />
-            <NeedsYou
-              channel={channel}
-              inTimeline={inTimeline}
-              onShow={showMessage}
-            />
-            <Timeline
-              channel={channel}
-              rows={rows}
-              runs={runs}
-              directory={directory}
-              pending={pending}
-              posted={posted.current}
-              located={located}
-              unsentReplies={unsentReplies}
-              expandedThread={thread ? thread.id : null}
-              onThread={openThread}
-              paneId={paneId}
-              onOlder={(key) => dispatch({ type: "older", key })}
-              onLatest={(key) => dispatch({ type: "latest", key })}
-              onFollow={(key, atBottom) =>
-                dispatch({ type: "follow", key, atBottom })
-              }
-            />
-            {completion && composerId && (
-              <Composer
-                key={`composer:${channel.key}`}
-                context={completion}
-                composer={composerId}
-                drafts={state.drafts}
-                outbox={state.outbox}
-                placeholder={composerPlaceholder(channel)}
-                label={composerPlaceholder(channel)}
-                to={null}
-                onEdit={(text) => edit(composerId, text)}
-                onSend={(source, startedAt) => {
-                  if (channel.viewMode === "browsing")
-                    dispatch({ type: "latest", key: channel.key });
-                  send(
-                    { composer: composerId, source, inReplyTo: null },
-                    startedAt,
-                  );
-                }}
-              />
-            )}
-          </>
-        ) : state.channels.size > 0 ? (
-          <div className="empty">
-            <h1>Choose a channel</h1>
-            <p>Select a channel to read its messages and live status.</p>
-          </div>
-        ) : connection === "live" ? (
-          <div className="empty">
-            <Icon name="inbox" />
-            <h1>No workspaces yet</h1>
-            <p>
-              Open a workspace in Herdr and name an agent with{" "}
-              <code className="inline">namedrop name</code>. It shows up here as
-              a channel.
-            </p>
-          </div>
-        ) : (
-          <>
-            <h1 className="sr-only">
-              {connection === "reconnecting"
-                ? "Waiting to reconnect"
-                : "Connecting to Namedrop"}
-            </h1>
-            <div className="skeleton" aria-hidden="true">
-              <div className="skeleton-message">
-                <span />
-              </div>
-              <div className="skeleton-message">
-                <span />
-              </div>
-              <div className="skeleton-message">
-                <span />
-              </div>
-            </div>
-          </>
-        )}
-      </main>
-      {channel && thread && (
-        <ThreadPane
-          key={thread.id}
-          channel={channel}
-          thread={thread}
-          runs={runs}
-          directory={directory}
-          completion={completion}
-          drafts={state.drafts}
-          outbox={state.outbox}
-          posted={posted.current}
-          onEdit={edit}
-          onSend={send}
-          onClose={closeThread}
-          paneId={paneId}
+    <PeekContext value={peekAccess}>
+      <div
+        className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}`}
+      >
+        <a className="skip-link" href="#main-content">
+          Skip to messages
+        </a>
+        <Sidebar
+          state={state}
+          busy={activity.count}
+          onSelect={select}
+          onActivity={showActivity}
         />
-      )}
-    </div>
+        <main className="main" id="main-content" tabIndex={-1}>
+          {connection === "reconnecting" && (
+            <div className="reconnect" role="status">
+              <Icon name="refresh" />
+              Reconnecting…
+              {updatedAt !== null &&
+                ` Showing updates up to ${new Date(updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`}
+            </div>
+          )}
+          {state.selection.kind === "activity" && state.channels.size > 0 ? (
+            <ActivityView
+              list={activity}
+              homes={homes}
+              open={peeking === null ? null : peekKey(peeking)}
+              onJump={jump}
+            />
+          ) : channel ? (
+            <>
+              <ChannelHeader
+                channel={channel}
+                suffix={channelSuffix(channel, state.channels.values())}
+              />
+              <MemberStrip key={channel.key} members={channel.members} />
+              <NeedsYou
+                channel={channel}
+                inTimeline={inTimeline}
+                onShow={showMessage}
+              />
+              <Timeline
+                channel={channel}
+                rows={rows}
+                runs={runs}
+                directory={directory}
+                pending={pending}
+                posted={posted.current}
+                located={located}
+                unsentReplies={unsentReplies}
+                expandedThread={thread ? thread.id : null}
+                onThread={openThread}
+                paneId={paneId}
+                onOlder={(key) => dispatch({ type: "older", key })}
+                onLatest={(key) => dispatch({ type: "latest", key })}
+                onFollow={(key, atBottom) =>
+                  dispatch({ type: "follow", key, atBottom })
+                }
+              />
+              {completion && composerId && (
+                <Composer
+                  key={`composer:${channel.key}`}
+                  context={completion}
+                  composer={composerId}
+                  drafts={state.drafts}
+                  outbox={state.outbox}
+                  placeholder={composerPlaceholder(channel)}
+                  label={composerPlaceholder(channel)}
+                  to={null}
+                  onEdit={(text) => edit(composerId, text)}
+                  onSend={(source, startedAt) => {
+                    if (channel.viewMode === "browsing")
+                      dispatch({ type: "latest", key: channel.key });
+                    send(
+                      { composer: composerId, source, inReplyTo: null },
+                      startedAt,
+                    );
+                  }}
+                />
+              )}
+            </>
+          ) : state.channels.size > 0 ? (
+            <div className="empty">
+              <h1>Choose a channel</h1>
+              <p>Select a channel to read its messages and live status.</p>
+            </div>
+          ) : connection === "live" ? (
+            <div className="empty">
+              <Icon name="inbox" />
+              <h1>No workspaces yet</h1>
+              <p>
+                Open a workspace in Herdr and name an agent with{" "}
+                <code className="inline">namedrop name</code>. It shows up here
+                as a channel.
+              </p>
+            </div>
+          ) : (
+            <>
+              <h1 className="sr-only">
+                {connection === "reconnecting"
+                  ? "Waiting to reconnect"
+                  : "Connecting to Namedrop"}
+              </h1>
+              <div className="skeleton" aria-hidden="true">
+                <div className="skeleton-message">
+                  <span />
+                </div>
+                <div className="skeleton-message">
+                  <span />
+                </div>
+                <div className="skeleton-message">
+                  <span />
+                </div>
+              </div>
+            </>
+          )}
+        </main>
+        {channel && thread && (
+          <ThreadPane
+            key={thread.id}
+            channel={channel}
+            thread={thread}
+            runs={runs}
+            directory={directory}
+            completion={completion}
+            drafts={state.drafts}
+            outbox={state.outbox}
+            posted={posted.current}
+            onEdit={edit}
+            onSend={send}
+            onClose={closeThread}
+            paneId={paneId}
+          />
+        )}
+        {peeking && who && (
+          <PeekDrawer
+            target={peeking}
+            who={who}
+            reader={reader}
+            startedAt={opening.current?.startedAt ?? 0}
+            paneId={paneId}
+            onClose={closePeek}
+          />
+        )}
+      </div>
+    </PeekContext>
   );
 }

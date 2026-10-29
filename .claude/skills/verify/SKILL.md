@@ -352,6 +352,11 @@ leave one row with that text.
 - `performance.getEntriesByName('namedrop:keystroke-to-popup', 'measure')` and
   `'namedrop:enter-to-sent'` time the composer. `experimental/channels/README.md`
   documents where each starts and ends. Each keeps at most 200 entries.
+- `performance.getEntriesByName('namedrop:activity-derive', 'measure')` times the
+  All activity derivation on every frame, and `'namedrop:click-to-peek-text'` times
+  a peek from the opening click or key to the frame after its first screen text
+  paints. `experimental/channels/README.md` documents where each starts and ends.
+  Each keeps at most 200 entries.
 - `performance.getEntriesByName('namedrop:frame-apply', 'measure')` measures reducer
   calls, including replay timeout reconciliation. `namedrop:load-to-sidebar-paint`
   measures navigation start to the first

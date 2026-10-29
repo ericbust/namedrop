@@ -1,7 +1,8 @@
 import { type KeyboardEvent, useLayoutEffect, useRef } from "react";
-import { attentionCopy, composerCopy } from "../copy.ts";
+import { activityCopy, attentionCopy, composerCopy } from "../copy.ts";
 import type { Channel, SpaceKey, State } from "../model.ts";
 import { channelSuffix, connectionStatus, sortedChannels } from "../store.ts";
+import { routePath } from "../wire.ts";
 import { Icon } from "./Icons.tsx";
 
 function reason(channel: Channel): string {
@@ -10,8 +11,13 @@ function reason(channel: Channel): string {
   const more = channel.attention.length - 1;
   return `${attentionCopy(first).title}${more > 0 ? ` · ${more} more` : ""}`;
 }
-type Props = { state: State; onSelect: (key: SpaceKey) => void };
-export function Sidebar({ state, onSelect }: Props) {
+type Props = {
+  state: State;
+  busy: number;
+  onSelect: (key: SpaceKey) => void;
+  onActivity: () => void;
+};
+export function Sidebar({ state, busy, onSelect, onActivity }: Props) {
   const sidebar = useRef<HTMLElement>(null);
   const focusedRow = useRef<HTMLButtonElement | null>(null);
   const connection = connectionStatus(state);
@@ -104,6 +110,29 @@ export function Sidebar({ state, onSelect }: Props) {
         <span className="brand-name">Namedrop</span>
       </header>
       <div className="nav">
+        <a
+          className="row activity-entry"
+          href={routePath({ kind: "activity" })}
+          aria-current={
+            state.selection.kind === "activity" ? "page" : undefined
+          }
+          onClick={(event) => {
+            if (
+              event.button !== 0 ||
+              event.metaKey ||
+              event.ctrlKey ||
+              event.shiftKey ||
+              event.altKey
+            )
+              return;
+            event.preventDefault();
+            onActivity();
+          }}
+        >
+          <Icon name="pulse" className="row-icon" />
+          <span className="row-name">{activityCopy.title}</span>
+          {busy > 0 && <span className="count">{busy}</span>}
+        </a>
         {needsYou.length > 0 && (
           <nav
             aria-label="Needs you"

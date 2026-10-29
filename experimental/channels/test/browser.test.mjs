@@ -181,17 +181,52 @@ function postRoute(onPost) {
     },
   };
 }
+function screenRoute(onScreen) {
+  const requests = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  return {
+    requests,
+    maxInFlight: () => maxInFlight,
+    async serve(res, key, address) {
+      requests.push({ key, address, at: Date.now() });
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      try {
+        const {
+          status = 200,
+          body = "",
+          delayMs = 0,
+        } = await onScreen({ key, address });
+        if (delayMs > 0)
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        res.writeHead(status, {
+          "Content-Type": "text/plain; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(body);
+      } finally {
+        inFlight -= 1;
+      }
+    },
+  };
+}
 async function open(
   t,
   onConnect,
   history = () => [],
-  { path = "/", onPost = () => ({ status: 200 }) } = {},
+  {
+    path = "/",
+    onPost = () => ({ status: 200 }),
+    onScreen = () => ({ body: "" }),
+  } = {},
 ) {
   const clients = new Set();
   const connections = [];
   const errors = [];
   const historyRequests = [];
   const posts = postRoute(onPost);
+  const screens = screenRoute(onScreen);
   const server = createServer(async (req, res) => {
     if (req.url === "/api/events") {
       res.writeHead(200, {
@@ -229,6 +264,11 @@ async function open(
       }
       return;
     }
+    const screen = /^\/w\/([^/]+)\/participants\/([^/]+)\/screen$/.exec(
+      url.pathname,
+    );
+    if (req.method === "GET" && screen !== null)
+      return screens.serve(res, screen[1], decodeURIComponent(screen[2]));
     try {
       const page = url.pathname === "/" || /^\/w\/[^/]+$/.test(url.pathname);
       const file = new URL(
@@ -276,7 +316,16 @@ async function open(
   });
   const row = (n) => channels.locator(`button[data-channel-key="${key(n)}"]`);
   const live = () => page.locator(".connection-dot.live").waitFor();
-  return { page, channels, row, connections, live, historyRequests, posts };
+  return {
+    page,
+    channels,
+    row,
+    connections,
+    live,
+    historyRequests,
+    posts,
+    screens,
+  };
 }
 function replay(client, values, keys = values.map((value) => value.key)) {
   for (const value of values) client.send("space", value);
@@ -3586,7 +3635,7 @@ test("UI-3: channels that share a label are listed disabled with a tooltip and c
     assert.equal(await option.getAttribute("aria-disabled"), "true");
     assert.equal(
       await option.getAttribute("title"),
-      "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there.",
+      "Another workspace shows the same name. Give one a unique label in Herdr to mention it.",
     );
     assert.equal(
       await option.evaluate((element) => getComputedStyle(element).opacity),
@@ -4058,7 +4107,7 @@ test("UI-3 fix: a disabled channel's tooltip names a reason only when the page c
   for (const option of await same.all())
     assert.equal(
       await option.getAttribute("title"),
-      "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there.",
+      "Another workspace shows the same name. Give one a unique label in Herdr to mention it.",
     );
   const alpha = list.getByRole("option").filter({
     has: ui.page.locator(".opt-name", { hasText: /^alpha$/ }),
@@ -4097,4 +4146,533 @@ test("UI-3 fix: # matches the typeable token ignoring case, and #Beta before @ l
   assert.deepEqual(await members.locator(".opt-name").allTextContents(), [
     "@reviewer",
   ]);
+});
+
+function crew(n, name, lanes, extra = {}) {
+  const value = frame(n, name);
+  const base = fixture.frame.participants[0];
+  value.frame.participants = [
+    {
+      ...base,
+      address_id: "human",
+      alias: "you",
+      kind: { type: "human" },
+      activity: "idle",
+    },
+    ...lanes.map(([id, alias, activity, more = {}]) => ({
+      ...base,
+      address_id: id,
+      alias,
+      kind: { type: "agent", runtime: "codex" },
+      activity,
+      mailbox: [],
+      waiting_on: [],
+      ...more,
+    })),
+  ];
+  Object.assign(value.frame, extra);
+  return value;
+}
+function inbox(from, text, since) {
+  return {
+    delivery_id: `d-${since}`,
+    message_id: `m-${since}`,
+    from,
+    preview: { text, truncated: false },
+    state: "submitted",
+    since_ms: since,
+    attempts: 0,
+  };
+}
+function busyTeam() {
+  return [
+    crew(1, "alpha", [
+      [
+        "codex",
+        "@codex",
+        "working",
+        { mailbox: [inbox("@lead", "check the diff", 300)] },
+      ],
+      [
+        "lead",
+        "@lead",
+        "waiting",
+        { waiting_on: ["@codex"], mailbox: [inbox("you", "split it", 200)] },
+      ],
+    ]),
+    crew(2, "beta", [["claude", "@claude", "blocked"]], {
+      attention: [
+        {
+          source_kind: "agent_status",
+          summary: {
+            text: "Waiting for permission to run a command",
+            truncated: false,
+          },
+          opened_at_ms: 100,
+          subject_alias: "claude",
+          message_id: null,
+        },
+      ],
+    }),
+  ];
+}
+const drawer = (ui) => ui.page.locator("aside.peek");
+const screenText = (ui) =>
+  ui.page.getByRole("region", { name: "Screen text", exact: true });
+const focusedIn = (locator) =>
+  locator.evaluate((element) => element.contains(document.activeElement));
+
+test("UI-4: All activity lists blocked, then waiting, then working rows, and its URL survives reload and Back", async (t) => {
+  const ui = await open(t, (client) => replay(client, busyTeam()));
+  await ui.live();
+  assert.equal(await ui.channels.getByRole("button").count(), 2);
+  const entry = ui.page.getByRole("link", { name: /^All activity/ });
+  assert.equal(await entry.textContent(), "All activity3");
+  await entry.click();
+  await ui.page
+    .getByRole("heading", { name: "All activity", level: 1 })
+    .waitFor();
+  assert.equal(new URL(ui.page.url()).search, "?view=activity");
+  assert.equal(await entry.getAttribute("aria-current"), "page");
+  assert.equal(await ui.channels.locator('[aria-current="page"]').count(), 0);
+  assert.equal(
+    await ui.page.evaluate(() => history.length - window.initialHistoryLength),
+    1,
+  );
+  const rows = ui.page.locator(".activity-row");
+  assert.deepEqual(
+    await rows.evaluateAll((all) =>
+      all.map(
+        (row) => row.querySelector(".activity-alias")?.firstChild?.textContent,
+      ),
+    ),
+    ["@claude", "@lead", "@codex"],
+  );
+  assert.deepEqual(
+    await ui.page.locator(".activity-group .nav-label").allTextContents(),
+    ["Needs you1", "Waiting1", "Working1"],
+  );
+  assert.equal(
+    await ui.page.locator(".channel-header .health").textContent(),
+    "1 needs you · 1 waiting · 1 working",
+  );
+  const lead = rows.nth(1);
+  assert.equal(
+    await lead.locator(".activity-text").textContent(),
+    "Waiting on @codex",
+  );
+  assert.match(
+    await lead.locator(".activity-since").textContent(),
+    /^since \d/,
+  );
+  assert.equal(
+    await rows.nth(0).locator(".activity-text").textContent(),
+    "Waiting for permission to run a command",
+  );
+  assert.equal(await rows.nth(0).locator(".activity-since").count(), 0);
+  await ui.page.reload();
+  await ui.page
+    .getByRole("heading", { name: "All activity", level: 1 })
+    .waitFor();
+  await ui.live();
+  await ui.page.waitForTimeout(2200);
+  assert.equal(
+    new URL(ui.page.url()).search,
+    "?view=activity",
+    "landing never moves the reader",
+  );
+  assert.equal(await rows.count(), 3);
+  await ui.row(2).click();
+  await ui.page.locator(`[data-selected-channel="${key(2)}"]`).waitFor();
+  await ui.page.goBack();
+  await ui.page
+    .getByRole("heading", { name: "All activity", level: 1 })
+    .waitFor();
+  await ui.page.goBack();
+  await ui.page.waitForFunction(() => location.search === "");
+  await ui.page.locator("[data-selected-channel]").waitFor();
+});
+
+test("UI-4: a row's channel button opens that channel at its newest message, and every agent idle reads as such", async (t) => {
+  const team = busyTeam();
+  team[0].frame.messages = Array.from({ length: 40 }, (_, n) =>
+    message(`row${n}`, `Row ${n}\n\nmore`),
+  );
+  const ui = await open(t, (client) => replay(client, team), undefined, {
+    path: "/?view=activity",
+  });
+  await ui.live();
+  await ui.page
+    .locator(".activity-channel", { hasText: "#alpha" })
+    .first()
+    .click();
+  await ui.page.locator(`[data-selected-channel="${key(1)}"]`).waitFor();
+  assert.equal(new URL(ui.page.url()).pathname, `/w/${key(1)}`);
+  await ui.page.locator('[data-message-id="row39"]').waitFor();
+  assert.equal(
+    await ui.page
+      .locator(".timeline")
+      .evaluate((element) => element === document.activeElement),
+    true,
+    "focus lands in the timeline, not the page body",
+  );
+  assert.ok(
+    await ui.page
+      .locator(".timeline")
+      .evaluate(
+        (element) =>
+          element.scrollHeight - element.scrollTop - element.clientHeight <= 24,
+      ),
+    "the newest message is in view",
+  );
+  await ui.page.goBack();
+  await ui.page
+    .getByRole("heading", { name: "All activity", level: 1 })
+    .waitFor();
+  const idle = busyTeam().map((value) => {
+    for (const lane of value.frame.participants) lane.activity = "idle";
+    value.frame.attention = [];
+    return value;
+  });
+  for (const value of idle) ui.connections[0].send("space", value);
+  await ui.page
+    .getByRole("heading", { name: "Every agent is idle", level: 2 })
+    .waitFor();
+  assert.equal(
+    await ui.page.getByRole("link", { name: /^All activity/ }).textContent(),
+    "All activity",
+  );
+});
+
+test("UI-4: Enter on a member chip opens the drawer with focus on the screen, and Escape closes it with focus back on the chip", async (t) => {
+  const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
+    onScreen: () => ({
+      body: "› Reading README.md\n• Ran npm test\n  └ 144 passed",
+    }),
+  });
+  await ui.live();
+  const chip = ui.page
+    .locator(".members")
+    .getByRole("button", { name: /^C?@codex/ });
+  await chip.focus();
+  await ui.page.keyboard.press("Enter");
+  await screenText(ui).getByText("144 passed").waitFor();
+  assert.equal(await drawer(ui).getAttribute("aria-label"), "Screen of @codex");
+  assert.equal(await ui.page.locator("aside.thread").count(), 0);
+  assert.equal(
+    await screenText(ui).evaluate(
+      (element) => element === document.activeElement,
+    ),
+    true,
+  );
+  assert.deepEqual(
+    ui.screens.requests.map(({ key: at, address }) => [at, address]),
+    [[key(1), "codex"]],
+  );
+  assert.match(
+    await drawer(ui).locator(".peek-where").textContent(),
+    /^in #alpha · Read at \d/,
+  );
+  await ui.page.keyboard.press("Escape");
+  await drawer(ui).waitFor({ state: "detached" });
+  assert.equal(
+    await chip.evaluate((element) => element === document.activeElement),
+    true,
+  );
+  const you = ui.page.locator('.members li[data-address-id="human"]');
+  assert.equal(
+    await you.getByRole("button").count(),
+    0,
+    "the operator chip is not a button",
+  );
+  const times = await measures(ui.page, "namedrop:click-to-peek-text");
+  assert.equal(times.length, 1);
+  assert.ok(times[0] > 0 && times[0] < 5000, `click to peek text ${times[0]}`);
+  assert.ok((await measures(ui.page, "namedrop:activity-derive")).length > 0);
+});
+
+test("UI-4: Refresh makes exactly one request, keeps the earlier text while it reads, and no timer ever reads", async (t) => {
+  let release = () => {};
+  let reads = 0;
+  const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
+    onScreen: async () => {
+      reads += 1;
+      if (reads === 2) await new Promise((resolve) => (release = resolve));
+      return { body: `read ${reads}` };
+    },
+  });
+  await ui.live();
+  await ui.page.clock.install();
+  await ui.page
+    .locator(".members")
+    .getByRole("button", { name: /@codex/ })
+    .click();
+  await screenText(ui).getByText("read 1").waitFor();
+  await ui.page.clock.runFor(60_000);
+  await ui.page.waitForTimeout(300);
+  assert.equal(ui.screens.requests.length, 1, "a minute open makes no request");
+  const refresh = drawer(ui).getByRole("button", { name: "Refresh" });
+  await refresh.click();
+  await until(() => ui.screens.requests.length === 2, "the refresh request");
+  assert.equal(await refresh.getAttribute("aria-disabled"), "true");
+  await refresh.click({ force: true });
+  await refresh.click({ force: true });
+  await ui.page.clock.runFor(500);
+  assert.equal(await screenText(ui).textContent(), "read 1");
+  assert.match(
+    await drawer(ui).locator(".peek-where").textContent(),
+    /Reading…$/,
+  );
+  await ui.page.waitForTimeout(300);
+  assert.equal(
+    ui.screens.requests.length,
+    2,
+    "clicks during a read make no request",
+  );
+  release();
+  await screenText(ui).getByText("read 2").waitFor();
+  assert.equal(await refresh.getAttribute("aria-disabled"), null);
+  assert.equal(ui.screens.maxInFlight(), 1);
+  await ui.page.clock.runFor(60_000);
+  await ui.page.waitForTimeout(300);
+  assert.equal(ui.screens.requests.length, 2);
+});
+
+test("UI-4: a slow first read shows nothing for 400 ms, then names the screen, then the busy line after 2 s", async (t) => {
+  let release = () => {};
+  const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
+    onScreen: async ({ address }) => {
+      if (address === "lead") return { body: "fast", delayMs: 20 };
+      await new Promise((resolve) => (release = resolve));
+      return { body: "slow at last" };
+    },
+  });
+  await ui.live();
+  await ui.page.evaluate(() => {
+    window.sawReading = false;
+    new MutationObserver(() => {
+      if (document.querySelector(".peek-note")) window.sawReading = true;
+    }).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+  });
+  const members = ui.page.locator(".members");
+  await members.getByRole("button", { name: /@lead/ }).click();
+  await screenText(ui).getByText("fast").waitFor();
+  assert.equal(
+    await ui.page.evaluate(() => window.sawReading),
+    false,
+    "a fast read never flashes",
+  );
+  const started = Date.now();
+  await members.getByRole("button", { name: /@codex/ }).click();
+  const note = drawer(ui).locator(".peek-note");
+  await note.getByText("Reading @codex's screen…", { exact: true }).waitFor();
+  assert.ok(
+    Date.now() - started >= 380,
+    `reading shown after ${Date.now() - started} ms`,
+  );
+  assert.equal(
+    await note.getByText("Busy panes can take a few seconds.").count(),
+    0,
+  );
+  await note
+    .getByText("Busy panes can take a few seconds.", { exact: true })
+    .waitFor();
+  assert.ok(
+    Date.now() - started >= 1900,
+    `busy shown after ${Date.now() - started} ms`,
+  );
+  assert.equal(
+    await screenText(ui).textContent(),
+    "",
+    "the earlier target's text never leaks",
+  );
+  release();
+  await screenText(ui).getByText("slow at last").waitFor();
+  assert.equal(await note.count(), 0);
+});
+
+test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and failures over text become a bar", async (t) => {
+  const answers = [
+    { status: 410, body: "This participant's pane is no longer available.\n" },
+    { status: 503, body: "Screen is temporarily unavailable.\n" },
+    { body: "earlier text" },
+    { status: 503, body: "Screen is temporarily unavailable.\n" },
+    { status: 401, body: "This dashboard needs its key.\n" },
+  ];
+  const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
+    onScreen: () => answers.shift() ?? { body: "" },
+  });
+  await ui.live();
+  const chip = ui.page
+    .locator(".members")
+    .getByRole("button", { name: /@codex/ });
+  await chip.click();
+  const failure = drawer(ui).locator(".peek-failure");
+  await failure.getByText("Pane closed", { exact: true }).waitFor();
+  await failure
+    .getByText("@codex no longer has a pane Namedrop can read.", {
+      exact: true,
+    })
+    .waitFor();
+  assert.equal(await failure.getByRole("button").count(), 0);
+  await drawer(ui).getByRole("button", { name: "Refresh" }).click();
+  await failure
+    .getByText("Couldn't read the screen", { exact: true })
+    .waitFor();
+  await failure
+    .getByText("Herdr was busy or didn't answer in time.", { exact: true })
+    .waitFor();
+  await failure.getByRole("button", { name: "Try again", exact: true }).click();
+  await screenText(ui).getByText("earlier text").waitFor();
+  await drawer(ui).getByRole("button", { name: "Refresh" }).click();
+  const bar = drawer(ui).locator(".peek-bar");
+  await bar.getByText("Couldn't read the screen", { exact: true }).waitFor();
+  assert.equal(await screenText(ui).textContent(), "earlier text");
+  assert.match(
+    await drawer(ui).locator(".peek-where").textContent(),
+    /Read at \d/,
+  );
+  await bar.getByRole("button", { name: "Try again", exact: true }).click();
+  await bar.getByText("Session ended", { exact: true }).waitFor();
+  assert.equal(await bar.getByRole("button").count(), 0);
+  assert.equal(ui.screens.requests.length, 5);
+});
+
+test("UI-4: terminal text that looks like markup renders as text", async (t) => {
+  const hostile =
+    '<img src=x onerror="window.pwned = 1"><script>window.pwned = 2</script>\n<dialog open>hi</dialog> **bold** https://example.com';
+  const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
+    onScreen: () => ({ body: `[Earlier screen text omitted]\n${hostile}` }),
+  });
+  await ui.live();
+  await ui.page
+    .locator(".members")
+    .getByRole("button", { name: /@codex/ })
+    .click();
+  await screenText(ui)
+    .locator("pre")
+    .getByText("**bold**", { exact: false })
+    .waitFor();
+  assert.equal(await screenText(ui).locator("pre").textContent(), hostile);
+  assert.equal(
+    await drawer(ui).locator("img, script, dialog, a, strong").count(),
+    0,
+  );
+  assert.equal(await ui.page.locator("dialog").count(), 0);
+  assert.equal(await ui.page.evaluate(() => window.pwned), undefined);
+  await drawer(ui)
+    .getByText("Earlier lines not shown", { exact: true })
+    .waitFor();
+});
+
+test("UI-4: names in a message header open the drawer, which replaces the thread pane and the other way round", async (t) => {
+  const team = busyTeam();
+  team[0].frame.messages = [
+    message("ask", "check the diff", {
+      legs: [{ to: "codex", stage: { stage: "queued" } }],
+    }),
+    message("answer", "looks fine", {
+      author: "codex",
+      thread_id: "ask",
+      in_reply_to: "ask",
+      kind: "reply",
+    }),
+  ];
+  team[0].frame.threads = [
+    {
+      thread_id: "ask",
+      title: { text: "check", truncated: false },
+      message_count: 2,
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, team), undefined, {
+    onScreen: () => ({ body: "codex screen" }),
+  });
+  await ui.live();
+  const timeline = ui.page.locator(".timeline");
+  assert.equal(
+    await timeline.locator('[data-message-id="ask"] .author').textContent(),
+    "You",
+  );
+  assert.equal(
+    await timeline.locator('[data-message-id="ask"] .author button').count(),
+    0,
+  );
+  await timeline.getByRole("button", { name: /^1 reply from @codex/ }).click();
+  const thread = ui.page.locator("aside.thread");
+  await thread.waitFor();
+  await thread
+    .locator('[data-message-id="answer"] .author')
+    .getByRole("button", { name: "@codex" })
+    .click();
+  await screenText(ui).getByText("codex screen").waitFor();
+  assert.equal(await thread.count(), 0);
+  assert.equal(await ui.page.locator("aside.peek.thread").count(), 0);
+  await timeline
+    .locator('[data-message-id="ask"] .to')
+    .getByRole("button", { name: "@codex" })
+    .waitFor();
+  await ui.page.keyboard.press("Escape");
+  await drawer(ui).waitFor({ state: "detached" });
+  assert.equal(
+    await ui.page.evaluate(
+      (key) =>
+        document.activeElement?.closest("main") !== null &&
+        document.activeElement?.getAttribute("data-peek") === key,
+      `${key(1)}/codex`,
+    ),
+    true,
+    "focus moves to an equivalent control when the opener is gone",
+  );
+  await timeline
+    .locator('[data-message-id="ask"] .to')
+    .getByRole("button", { name: "@codex" })
+    .click();
+  await drawer(ui).waitFor();
+  await timeline.getByRole("button", { name: /^1 reply from @codex/ }).click();
+  await thread.waitFor();
+  assert.equal(await drawer(ui).count(), 0);
+});
+
+test("UI-4: the drawer is 480 wide at 1440 and 400 at 1024, opening a row selects it, and nothing scrolls sideways", async (t) => {
+  const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
+    path: "/?view=activity",
+    onScreen: () => ({ body: `${"x".repeat(900)}\n${"word ".repeat(300)}` }),
+  });
+  await ui.live();
+  const row = ui.page.locator('.activity-row[data-peek$="/codex"]');
+  await row.click();
+  await screenText(ui).locator("pre").waitFor();
+  assert.equal(await row.getAttribute("aria-expanded"), "true");
+  assert.equal(await focusedIn(drawer(ui)), true);
+  for (const [width, height, expected] of [
+    [1440, 900, 480],
+    [1024, 700, 400],
+  ]) {
+    await ui.page.setViewportSize({ width, height });
+    const layout = await ui.page.evaluate(() => ({
+      drawer: Math.round(
+        document.querySelector("aside.peek").getBoundingClientRect().width,
+      ),
+      page:
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+      text: (() => {
+        const element = document.querySelector(".peek-text");
+        return element.scrollWidth - element.clientWidth;
+      })(),
+    }));
+    assert.deepEqual(layout, { drawer: expected, page: 0, text: 0 });
+  }
+  await ui.page.keyboard.press("Escape");
+  await drawer(ui).waitFor({ state: "detached" });
+  assert.equal(
+    await row.evaluate((element) => element === document.activeElement),
+    true,
+  );
+  assert.equal(await row.getAttribute("aria-expanded"), "false");
 });

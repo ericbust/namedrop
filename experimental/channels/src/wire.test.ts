@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { terminalResult } from "./wire.ts";
+import { routeOf, routePath, sameRoute, terminalResult } from "./wire.ts";
 
 const result = (text: string, truncated = false) =>
   terminalResult({ text, truncated });
@@ -78,4 +78,32 @@ test("other bodies are not terminal results", () => {
     result("@shell command finished with exit code zero.\nstdout:\n\nstderr:"),
     null,
   );
+});
+
+test("routes: one parse of the address and one print, so reload and Back agree", () => {
+  const key = "0123456789abcdef0123";
+  const at = (pathname: string, search = "") => routeOf({ pathname, search });
+  assert.deepEqual(at("/"), { kind: "root" });
+  assert.deepEqual(at("/", "?view=activity"), { kind: "activity" });
+  assert.deepEqual(at("/", "?n=abc&view=activity"), { kind: "activity" });
+  assert.deepEqual(at("/", "?view=other"), { kind: "root" });
+  assert.deepEqual(at("/index.html", "?view=activity"), { kind: "root" });
+  assert.deepEqual(at(`/w/${key}`), { kind: "channel", key });
+  assert.deepEqual(at(`/w/${key}/`, "?view=activity"), {
+    kind: "channel",
+    key,
+  });
+  assert.deepEqual(at(`/w/${key.toUpperCase()}`), { kind: "root" });
+  assert.deepEqual(at(`/w/${key}/events`), { kind: "root" });
+  for (const route of [at("/"), at("/", "?view=activity"), at(`/w/${key}`)]) {
+    const [pathname = "", search = ""] = routePath(route).split(/(?=\?)/);
+    assert.deepEqual(routeOf({ pathname, search }), route);
+  }
+  assert.equal(routePath(at("/", "?view=activity")), "/?view=activity");
+  assert.equal(sameRoute(at(`/w/${key}`, "?x=1"), at(`/w/${key}`)), true);
+  assert.equal(
+    sameRoute(at("/", "?view=activity&x=1"), { kind: "activity" }),
+    true,
+  );
+  assert.equal(sameRoute(at("/"), { kind: "activity" }), false);
 });

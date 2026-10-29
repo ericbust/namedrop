@@ -41,6 +41,7 @@ const shapes = {
   ),
   plug: <path d="M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3" />,
   prompt: <path d="M3 4.5 6 7.5 3 10.5M8 11h5" />,
+  pulse: <path d="M1.5 8.5h2.8l1.7-4 3 7.5 1.8-3.5h3.7" />,
   refresh: <path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.8V6h-3.2" />,
   reply: <path d="M6.5 4 3 7.5 6.5 11M3 7.5h6.5A3.5 3.5 0 0 1 13 11v1" />,
   report: (

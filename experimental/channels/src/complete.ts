@@ -1,5 +1,11 @@
 import { foldLabel } from "./label.ts";
-import type { ChannelSnapshot, Member, ReplyTo, SpaceKey } from "./model.ts";
+import type {
+  ChannelSnapshot,
+  Member,
+  ReplyTo,
+  SpaceKey,
+  SpaceState,
+} from "./model.ts";
 import { channelSuffix } from "./store.ts";
 
 // Why the server gave a channel no token, in the order DESIGN.md's table checks.
@@ -39,21 +45,27 @@ export type Completion = {
 };
 
 const ALL = "#all";
+const RESERVED_LABEL = "all";
 const WHITESPACE = /\s/;
 
 type Labelling = Pick<
   ChannelSnapshot,
-  "displayName" | "addressableLabel" | "workspaceId"
+  "displayName" | "addressableLabel" | "workspaceId" | "state"
 >;
+function activated(state: SpaceState): boolean {
+  return state === "active" || state === "paused";
+}
 
 function disabledReason(
   channel: Labelling,
   channels: readonly Labelling[],
 ): DisabledReason {
+  const folded = foldLabel(channel.displayName);
   // Stripped characters fold to separators, so a name that folds to nothing came from a label that does too.
-  if (foldLabel(channel.displayName) === "") return "unusable-label";
+  if (folded === "") return "unusable-label";
   // The server shows the workspace id as the name only when Herdr has no label.
   if (channel.displayName === channel.workspaceId) return "no-label";
+  if (folded === RESERVED_LABEL) return "unknown";
   // Only labels can collide on the server, and a token proves this name did not.
   const sameName = channels.filter(
     (other) =>
@@ -62,7 +74,9 @@ function disabledReason(
   );
   if (
     sameName.length > 1 &&
-    sameName.every((other) => other.addressableLabel === null)
+    sameName.every(
+      (other) => other.addressableLabel === null && activated(other.state),
+    )
   )
     return "shared-name";
   return "unknown";
@@ -72,7 +86,7 @@ export function channelOptions(
   channels: Iterable<
     Pick<
       ChannelSnapshot,
-      "key" | "displayName" | "addressableLabel" | "workspaceId"
+      "key" | "displayName" | "addressableLabel" | "workspaceId" | "state"
     >
   >,
 ): ChannelOption[] {
