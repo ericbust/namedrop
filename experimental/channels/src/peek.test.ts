@@ -190,7 +190,7 @@ test("failure table: with no earlier text the notice fills the body, with Try ag
     });
   }
 });
-test("failure table: over earlier text the notice becomes the bar, and the text keeps its old stamp", () => {
+test("failure table: only transient failures keep earlier text and its old stamp under a notice bar", () => {
   for (const [failure, title, body, retry] of table) {
     const read = peekReduce(peekReduce(shownAt("kept"), { type: "again" }), {
       type: "settled",
@@ -198,12 +198,22 @@ test("failure table: over earlier text the notice becomes the bar, and the text 
       result: failed(failure),
       at: later,
     });
-    assert.deepEqual(peekView(read, who), {
-      stamp: `Read at ${clock(early)}`,
-      refreshing: false,
-      bar: { title, body, retry },
-      body: { kind: "text", earlierOmitted: false, text: "kept" },
-    });
+    assert.deepEqual(
+      peekView(read, who),
+      failure === "busy" || failure === "unreachable"
+        ? {
+            stamp: `Read at ${clock(early)}`,
+            refreshing: false,
+            bar: { title, body, retry },
+            body: { kind: "text", earlierOmitted: false, text: "kept" },
+          }
+        : {
+            stamp: null,
+            refreshing: false,
+            bar: null,
+            body: { kind: "failure", notice: { title, body, retry } },
+          },
+    );
     const retried = peekReduce(read, { type: "again" });
     assert.equal(
       retried.phase,

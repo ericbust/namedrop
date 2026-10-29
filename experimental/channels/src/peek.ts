@@ -99,7 +99,10 @@ export function peekReduce(read: PeekRead, event: PeekReadEvent): PeekRead {
             phase: "failed",
             request: read.request,
             failure: result.failure,
-            shown: read.shown,
+            shown:
+              result.failure === "busy" || result.failure === "unreachable"
+                ? read.shown
+                : null,
           };
     }
     default: {

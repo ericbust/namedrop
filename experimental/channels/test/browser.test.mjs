@@ -4497,7 +4497,7 @@ test("UI-4: a slow first read shows nothing for 400 ms, then names the screen, t
   assert.equal(await note.count(), 0);
 });
 
-test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and failures over text become a bar", async (t) => {
+test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and session failure replaces text", async (t) => {
   const answers = [
     { status: 410, body: "This participant's pane is no longer available.\n" },
     { status: 503, body: "Screen is temporarily unavailable.\n" },
@@ -4539,8 +4539,10 @@ test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and 
     /Read at \d/,
   );
   await bar.getByRole("button", { name: "Try again", exact: true }).click();
-  await bar.getByText("Session ended", { exact: true }).waitFor();
-  assert.equal(await bar.getByRole("button").count(), 0);
+  await failure.getByText("Session ended", { exact: true }).waitFor();
+  assert.equal(await failure.getByRole("button").count(), 0);
+  assert.equal(await screenText(ui).textContent(), "");
+  assert.equal(await bar.count(), 0);
   assert.equal(ui.screens.requests.length, 5);
 });
 
@@ -4942,8 +4944,8 @@ test("CL-K: transient failures preserve retention, target failures remove one sc
     await ui.settle("", failure);
     assert.equal(
       await ui.text(),
-      "codex retained",
-      "mounted failure still shows prior text",
+      failure === "busy" || failure === "unreachable" ? "codex retained" : "",
+      "only transient failures keep mounted text",
     );
     await ui.close();
     await ui.show();
@@ -5052,8 +5054,8 @@ for (const status of [404, 410, 401, 403]) {
     await lead.click();
     await screenText(ui).getByText("lead retained").waitFor();
     await codex.click();
-    await drawer(ui).locator(".peek-bar").waitFor();
-    assert.equal(await screenText(ui).textContent(), "codex retained");
+    await drawer(ui).locator(".peek-failure").waitFor();
+    assert.equal(await screenText(ui).textContent(), "");
     await ui.page.keyboard.press("Escape");
     await drawer(ui).waitFor({ state: "detached" });
     await codex.click();
