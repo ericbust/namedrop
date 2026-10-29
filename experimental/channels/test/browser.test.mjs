@@ -1722,6 +1722,90 @@ test("landing: late frames select the URL's channel when it arrives, and an auto
   assert.equal(await path(root), `/w/${key(1)}`);
 });
 
+test("landing: after ready, a workspace that opens later or a reconnect replay never moves the reader or closes the thread", async (t) => {
+  const alpha = exchange();
+  for (const row of alpha.frame.messages) row.at_ms = Date.now() - 1000;
+  const later = frame(5, "epsilon");
+  later.frame.messages = [message("later", "newest", { at_ms: Date.now() })];
+  const ui = await open(t, (client, n) =>
+    replay(
+      client,
+      n === 1
+        ? [alpha, frame(2, "beta")]
+        : [alpha, frame(2, "beta"), later, frame(7, "eta", "needs_you")],
+    ),
+  );
+  await ui.live();
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+  await ui.page.locator(".timeline .reply-preview").first().click();
+  const pane = ui.page.locator("aside.thread");
+  await pane.waitFor();
+  ui.connections[0].send("space", later);
+  await ui.row(5).waitFor();
+  assert.equal(
+    await ui.row(1).getAttribute("aria-current"),
+    "page",
+    "a new calm workspace moved the reader",
+  );
+  assert.equal(await pane.count(), 1, "a new workspace closed the thread");
+  ui.connections[0].send("space", frame(6, "zeta", "needs_you"));
+  await ui.row(6).waitFor();
+  assert.equal(
+    await ui.row(1).getAttribute("aria-current"),
+    "page",
+    "a new workspace that needs you moved the reader",
+  );
+  assert.equal(await pane.count(), 1);
+  ui.connections[0].destroy();
+  await ui.page.getByRole("status").waitFor();
+  await ui.row(7).waitFor();
+  await ui.live();
+  assert.equal(
+    await ui.row(1).getAttribute("aria-current"),
+    "page",
+    "a reconnect replay moved the reader",
+  );
+  assert.equal(await pane.count(), 1, "a reconnect replay closed the thread");
+});
+
+test("landing: reader input ends discovery, and after ready the URL's channel is still chosen when it arrives", async (t) => {
+  const touched = await open(t, () => {});
+  await touched.page.waitForTimeout(2300);
+  touched.connections[0].send("space", frame(1, "alpha"));
+  await selected(touched, 1);
+  await touched.page.mouse.wheel(0, 40);
+  touched.connections[0].send("space", frame(3, "gamma", "needs_you"));
+  await touched.row(3).waitFor();
+  await nextFrames(touched.page);
+  assert.equal(
+    await touched.row(1).getAttribute("aria-current"),
+    "page",
+    "input during discovery did not stop the landing",
+  );
+
+  const requested = await open(
+    t,
+    (client) =>
+      replay(client, [frame(1, "alpha"), frame(3, "gamma", "needs_you")]),
+    undefined,
+    { path: `/w/${key(2)}` },
+  );
+  await requested.live();
+  assert.equal(await requested.row(3).getAttribute("aria-current"), "page");
+  requested.connections[0].send("space", frame(2, "beta"));
+  await selected(requested, 2);
+  assert.equal(
+    await requested.page.evaluate(() => location.pathname),
+    `/w/${key(2)}`,
+  );
+  assert.equal(
+    await requested.page.evaluate(
+      () => history.length - window.initialHistoryLength,
+    ),
+    0,
+  );
+});
+
 test("design-b: a channel is read after 1.5 seconds on screen, and arrow keys passing over keep it unread", async (t) => {
   const ui = await open(t, (client) =>
     replay(client, [frame(1, "alpha"), frame(2, "beta"), frame(3, "gamma")]),
@@ -1911,6 +1995,52 @@ test("design-b: requests show their latest reply inline, commands and output rea
     await pane.locator('[data-message-id="out"] .msg-head .exit').textContent(),
     "Exit 0",
   );
+});
+
+test("thread pane: each terminal reply shows its own run, and the preview shows the newest", async (t) => {
+  const at = Date.now() - 10 * 60_000;
+  const value = frame(1, "alpha");
+  value.frame.participants = people();
+  const result =
+    "@shell command finished with exit code 5.\nstdout:\nout\n\nstderr:";
+  const reply = (id, offset) =>
+    message(id, result, {
+      thread_id: "make",
+      in_reply_to: "make",
+      kind: "reply",
+      author: "shell",
+      at_ms: at + offset,
+    });
+  value.frame.messages = [
+    message("make", "make", {
+      thread_id: "make",
+      at_ms: at,
+      legs: [{ to: "shell", stage: done() }],
+    }),
+    reply("first", 1500),
+    reply("second", 2500),
+  ];
+  const run = (exit_code, offset) => ({
+    terminal: "shell",
+    command: { text: "make", truncated: false },
+    started_at_ms: at + offset,
+    exit_code,
+    message_id: "make",
+  });
+  value.frame.terminal_runs = [run(0, 2000), run(1, 1000)];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const preview = ui.page.locator(
+    '.timeline [data-message-id="make"] .reply-preview',
+  );
+  assert.equal(await preview.locator(".exit").textContent(), "Exit 0");
+  await preview.click();
+  const pane = ui.page.locator("aside.thread");
+  await pane.waitFor();
+  assert.deepEqual(await pane.locator(".exit").allTextContents(), [
+    "Exit 1",
+    "Exit 0",
+  ]);
 });
 
 test("thread pane: a non-terminal reply that mimics a terminal result renders as text", async (t) => {

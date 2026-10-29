@@ -4,6 +4,7 @@ import type { Activity, ChannelSnapshot, State } from "./model.ts";
 import {
   channelSuffix,
   connectionStatus,
+  exitFor,
   initialState,
   type MessageRow,
   reduce,
@@ -1886,9 +1887,9 @@ test("landing: without a URL key each new channel re-runs the rule, updates neve
     keyA,
   );
 });
-test("landing: a replay that brings a new channel re-runs the rule, a replay of known channels keeps the choice", () => {
+test("landing: a reconnect replay never moves the selection or closes the thread, even when it brings a channel that needs you", () => {
   const alpha = landingFrame(keyA, "alpha");
-  const state = landed([alpha]);
+  const state = reduce(landed([alpha]), { type: "thread", threadId: "m1" });
   assert.equal(state.selection.key, keyA);
   const known = ready(
     apply(
@@ -1898,6 +1899,7 @@ test("landing: a replay that brings a new channel re-runs the rule, a replay of 
     [keyA],
   );
   assert.equal(known.selection.key, keyA);
+  assert.equal(known.openThread, "m1");
   const grown = ready(
     apply(
       apply(reduce(state, { type: "opened" }), alpha),
@@ -1905,9 +1907,29 @@ test("landing: a replay that brings a new channel re-runs the rule, a replay of 
     ),
     [keyA, keyB],
   );
-  assert.equal(grown.selection.key, keyB);
+  assert.equal(grown.selection.key, keyA);
+  assert.equal(grown.openThread, "m1");
 });
-test("navigate: Back to the root lands again and stays automatic, Back to a channel chooses it", () => {
+test("landing: after ready, a workspace that opens later never moves an automatic landing or closes its thread", () => {
+  const keyC = "c".repeat(20);
+  const keyD = "d".repeat(20);
+  const state = reduce(
+    landed([
+      landingFrame(keyA, "alpha", { at: 100 }),
+      landingFrame(keyB, "beta", { at: 200 }),
+    ]),
+    { type: "thread", threadId: "m1" },
+  );
+  assert.equal(state.selection.key, keyB);
+  const calm = apply(state, landingFrame(keyC, "gamma", { at: 900 }));
+  assert.equal(calm.selection.key, keyB);
+  assert.equal(calm.openThread, "m1");
+  const needsYou = apply(calm, landingFrame(keyD, "delta", { needsYou: true }));
+  assert.equal(needsYou.selection.key, keyB);
+  assert.equal(needsYou.openThread, "m1");
+  assert.equal(needsYou.channels.size, 4);
+});
+test("navigate: Back to the root lands once more, and after the reader's pick nothing moves it again", () => {
   const keyC = "c".repeat(20);
   const keyD = "d".repeat(20);
   const betaKey = parsed(snapshot(keyB)).key;
@@ -1919,7 +1941,7 @@ test("navigate: Back to the root lands again and stays automatic, Back to a chan
   const root = reduce(chosen, { type: "navigate", key: null });
   assert.equal(root.selection.key, keyA);
   const gamma = apply(root, landingFrame(keyC, "gamma", { needsYou: true }));
-  assert.equal(gamma.selection.key, keyC);
+  assert.equal(gamma.selection.key, keyA);
   const forward = reduce(gamma, { type: "navigate", key: betaKey });
   assert.equal(forward.selection.key, keyB);
   const delta = landingFrame(keyD, "delta", { needsYou: true });
@@ -2139,4 +2161,51 @@ test("design-b fix: a new terminal run keeps unchanged runs identical", () => {
   assert.equal(after.get("m2")?.exitCode, 1);
   assert.ok(before.get("m1"));
   assert.equal(after.get("m1"), before.get("m1"));
+});
+test("design-b: each terminal reply gets the latest run that started at or before it, whatever the list order", () => {
+  const run = (
+    exit_code: number,
+    started_at_ms: number,
+    terminal = "shell-1",
+  ) => ({
+    terminal,
+    command: { text: "make", truncated: false },
+    started_at_ms,
+    exit_code,
+    message_id: "m1",
+  });
+  const reply = (message_id: string, at_ms: number) => ({
+    ...message(message_id),
+    thread_id: "m1",
+    in_reply_to: "m1",
+    kind: "reply",
+    author: "shell-1",
+    at_ms,
+  });
+  const value = snapshot();
+  value.frame.messages = [
+    message("m1"),
+    reply("r0", 500),
+    reply("r1", 1500),
+    reply("r2", 2500),
+  ];
+  const channel = activeChannel(
+    apply(initialState(), {
+      ...value,
+      frame: {
+        ...value.frame,
+        terminal_runs: [run(7, 1200, "shell-2"), run(0, 2000), run(1, 1000)],
+      },
+    }),
+  );
+  const runs = runsByMessage(channel.terminalRuns);
+  const exit = (id: string) => {
+    const row = channel.messages.get(id);
+    assert.ok(row);
+    return exitFor(runs, row)?.exitCode;
+  };
+  assert.equal(exit("r1"), 1);
+  assert.equal(exit("r2"), 0);
+  assert.equal(exit("r0"), undefined);
+  assert.equal(exit("m1"), undefined);
 });
