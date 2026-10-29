@@ -1315,10 +1315,12 @@ where
             })?;
             if !matches!(
                 route.reply_mode,
-                crate::DeliveryReplyMode::AgentThread | crate::DeliveryReplyMode::ReturnToSource
+                crate::DeliveryReplyMode::AgentThread
+                    | crate::DeliveryReplyMode::Channel
+                    | crate::DeliveryReplyMode::ReturnToSource
             ) {
                 return Err(crate::StoreError::invalid_input(
-                    "a context request rides an agent thread or one-shot human relay reply",
+                    "a context request rides an agent thread, channel, or one-shot human relay reply",
                 ));
             }
             let caller = route

@@ -5081,7 +5081,11 @@ impl StateTransaction<'_> {
                 .map(|token| (*token).to_owned())
                 .collect::<Vec<_>>()
         };
-        if reply_mode == crate::DeliveryReplyMode::AgentThread || attached_context.is_some() {
+        if matches!(
+            reply_mode,
+            crate::DeliveryReplyMode::AgentThread | crate::DeliveryReplyMode::Channel
+        ) || attached_context.is_some()
+        {
             permitted_operations.extend(
                 crate::CONTEXT_DELIVERY_OPERATIONS
                     .iter()
