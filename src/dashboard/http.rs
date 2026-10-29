@@ -1114,7 +1114,7 @@ fn wake_mailboxes_after_send(
         }));
     }
     for space in spaces {
-        Command::new(crate::runtime_executable()?)
+        let mut child = Command::new(crate::runtime_executable()?)
             .args(["hook", "mailbox-wake", "--state-directory"])
             .arg(state)
             .env("HERDR_PLUGIN_STATE_DIR", state)
@@ -1127,6 +1127,11 @@ fn wake_mailboxes_after_send(
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| error.to_string())?;
+        thread::spawn(move || {
+            if let Err(error) = child.wait() {
+                eprintln!("could not reap mailbox wake: {error}");
+            }
+        });
     }
     Ok(())
 }
