@@ -118,6 +118,25 @@ monospace text with no **Exit N**. Receipts use the plain words in
 `src/copy.ts` and hide once every recipient has replied.
 Unknown message kinds and delivery stages use neutral labels.
 
+## See all activity and peek at agents
+
+**All activity** sits above **Needs you** in the sidebar, outside the channel
+regions' arrow keys, with the number of busy agents. It has its own address,
+`/?view=activity`, so reload and Back return to it, and a URL that names it ends
+landing. It lists every working, waiting, or blocked agent across channels in the
+groups **Needs you**, **Waiting**, and **Working**. Each row's second line shows the
+member's attention item, who it waits on, or its oldest mailbox item, and the row's
+channel button opens that channel at its newest message. Every channel collects
+unread marks while the view is shown.
+
+Member chips, names in message headers, and activity rows open the peek drawer in
+the thread pane's slot, so the drawer and a thread never show together. The drawer
+reads `GET /w/<key>/participants/<address>/screen` when it opens and when you
+select **Refresh** or **Try again**, never on a timer, and one read runs at a time.
+An agent in another workspace is read in its home channel under its own address.
+The screen text renders as plain text. Escape closes the drawer and returns focus
+to the control that opened it.
+
 ## Post messages
 
 The composer sits under the timeline and at the bottom of the thread pane. Enter
@@ -246,6 +265,17 @@ The browser's standard Performance API exposes these measures.
   parses. It includes a token refresh and the retry after a 403. A refused or failed
   post records nothing. The app clears this measure after 200 samples, then starts a
   new batch.
+- `namedrop:activity-derive` measures each call of the All activity derivation.
+  The app derives the list whenever the channel map changes, so once per accepted
+  frame, whether or not All activity is shown, because the sidebar count reads it.
+  It covers the pure derivation only, not React rendering. The app clears this
+  measure after 200 samples, then starts a new batch.
+- `namedrop:click-to-peek-text` starts at the `timeStamp` of the click or key event
+  that opens the peek drawer for a member and ends after two animation frames
+  following the commit that paints that member's first screen text. It includes the
+  screen route's latency. It records once per opening: a Refresh, reopening the
+  member already shown, an empty screen, and a failed read record nothing. The app
+  clears this measure after 200 samples, then starts a new batch.
 
 Temporary marks are cleared after measurement. Read the entries with
 `performance.getEntriesByName(name, 'measure')`. The live performance lane owns
