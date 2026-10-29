@@ -156,45 +156,78 @@ fn is_secret_ignorable(character: char) -> bool {
 }
 
 fn secret_shadow(source: &str, canonical: bool) -> Shadow {
+    enum State {
+        Ground,
+        Escape,
+        EscapeIntermediate,
+        Csi,
+        ControlString { osc: bool },
+        StringEscape { osc: bool },
+    }
+    let mut state = State::Ground;
     let mut shadow = Shadow {
         text: String::with_capacity(source.len()),
         source: Vec::with_capacity(source.len()),
     };
-    let mut characters = source.char_indices().peekable();
-    while let Some((start, character)) = characters.next() {
-        if canonical
-            && (is_secret_ignorable(character) || character.is_control() && character != '\n')
-        {
-            let mut end = start + character.len_utf8();
-            let mut escape = character == '\u{1b}';
-            while let Some(&(index, next)) = characters.peek() {
-                if next == '\n' && escape {
-                    escape = false;
-                } else if is_secret_ignorable(next) || next.is_control() && next != '\n' {
-                    escape |= next == '\u{1b}';
-                } else {
-                    break;
-                }
-                end = index + next.len_utf8();
-                characters.next();
-            }
-            if start > 0
-                && is_token_byte(source.as_bytes()[start - 1])
-                && source
-                    .as_bytes()
-                    .get(end)
-                    .is_some_and(|byte| is_token_byte(*byte))
-            {
-                continue;
-            }
-            for (index, retained) in source[start..end].char_indices() {
-                if is_display_character(retained) {
-                    shadow.push(retained, start + index);
-                }
-            }
-        } else if !canonical || is_display_character(character) {
+    for (start, character) in source.char_indices() {
+        if !canonical {
             shadow.push(character, start);
+            continue;
         }
+        if is_secret_ignorable(character) {
+            continue;
+        }
+        state = match state {
+            State::Ground => match character {
+                '\u{1b}' => State::Escape,
+                '\u{9b}' => State::Csi,
+                '\u{9d}' => State::ControlString { osc: true },
+                '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => State::ControlString { osc: false },
+                _ => {
+                    if character == '\n' || !character.is_control() {
+                        shadow.push(character, start);
+                    }
+                    State::Ground
+                }
+            },
+            State::Escape => match character {
+                '\n' => State::Ground,
+                '[' => State::Csi,
+                ']' => State::ControlString { osc: true },
+                'P' | 'X' | '^' | '_' => State::ControlString { osc: false },
+                '\u{1b}' => State::Escape,
+                '\u{20}'..='\u{2f}' => State::EscapeIntermediate,
+                _ if character.is_control() => State::Escape,
+                _ => {
+                    // A bare ESC keeps the legacy token-joining behavior.
+                    shadow.push(character, start);
+                    State::Ground
+                }
+            },
+            State::EscapeIntermediate => match character {
+                '\u{30}'..='\u{7e}' => State::Ground,
+                '\u{1b}' => State::Escape,
+                '\n' => State::Ground,
+                _ => State::EscapeIntermediate,
+            },
+            State::Csi => match character {
+                '\u{40}'..='\u{7e}' => State::Ground,
+                '\u{1b}' => State::Escape,
+                _ => State::Csi,
+            },
+            State::ControlString { osc } => match character {
+                '\u{9c}' => State::Ground,
+                '\u{7}' if osc => State::Ground,
+                '\u{1b}' => State::StringEscape { osc },
+                _ => State::ControlString { osc },
+            },
+            State::StringEscape { osc } => match character {
+                '\\' | '\u{9c}' => State::Ground,
+                '\u{7}' if osc => State::Ground,
+                '\u{1b}' => State::StringEscape { osc },
+                _ => State::ControlString { osc },
+            },
+        };
     }
     shadow
 }
@@ -1034,6 +1067,50 @@ mod redaction_regression_tests {
             }
         }
         assert!(failures.is_empty(), "ANSI secret bypasses: {failures:#?}");
+    }
+
+    #[test]
+    fn terminal_sequence_families_inside_secrets_are_redacted() {
+        for sequence in [
+            "\u{1b}[31m",
+            "\u{9b}31m",
+            "\u{1b}]0;title\u{7}",
+            "\u{1b}]0;title\u{1b}\\",
+            "\u{9d}0;title\u{9c}",
+            "\u{1b}Pprivate\u{1b}\\",
+            "\u{1b}Xprivate\u{1b}\\",
+            "\u{1b}^private\u{1b}\\",
+            "\u{1b}_private\u{1b}\\",
+            "\u{90}private\u{9c}",
+            "\u{98}private\u{9c}",
+            "\u{9e}private\u{9c}",
+            "\u{9f}private\u{9c}",
+            "\u{1b}(B",
+            "\u{1b}",
+            "\u{1b}\n",
+            "\u{1b}\r\n",
+            "\t",
+        ] {
+            for (secret, marker) in [
+                (
+                    format!("s{sequence}k-abcdefghijklmnopqrstuvwxyz123456"),
+                    "[REDACTED TOKEN]",
+                ),
+                (
+                    format!(
+                        "-----BE{sequence}GIN PRIVATE KEY-----\nbody\n-----END PRIVATE KEY-----"
+                    ),
+                    "[REDACTED PRIVATE KEY]",
+                ),
+            ] {
+                let raw = format!("👩‍💻 before\n{secret}\nمی‌خواهم after");
+                assert_eq!(
+                    SafeText::from_untrusted(&raw, 2000).text,
+                    format!("👩‍💻 before\n{marker}\nمی‌خواهم after"),
+                    "{sequence:?} in {secret:?}"
+                );
+            }
+        }
     }
 
     #[test]
