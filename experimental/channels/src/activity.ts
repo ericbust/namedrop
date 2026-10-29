@@ -37,7 +37,7 @@ const GROUP_OF = {
 } as const satisfies Record<Activity, ActivityGroupKind | null>;
 
 export type ActivityLine =
-  | { kind: "attention"; summary: SafeText }
+  | { kind: "attention"; summary: SafeText; attention: Attention }
   | { kind: "waiting"; on: readonly Mention[] }
   | { kind: "mail"; item: MailItem; held: boolean }
   | { kind: "nothing" };
@@ -67,12 +67,14 @@ export type ActivityList = Readonly<{
 
 function newestAbout(
   attention: readonly Attention[],
-  alias: string,
+  member: Member,
 ): Attention | undefined {
   let newest: Attention | undefined;
   for (const item of attention)
     if (
-      item.subjectAlias === alias &&
+      (item.response?.kind === "reply" || item.response?.kind === "pane"
+        ? item.response.addressId === member.id
+        : item.subjectAlias === member.alias) &&
       (newest === undefined || item.openedAt > newest.openedAt)
     )
       newest = item;
@@ -84,10 +86,9 @@ function lineFor(
   group: ActivityGroupKind,
 ): ActivityLine {
   const about =
-    group === "needs_you"
-      ? newestAbout(channel.attention, member.alias)
-      : undefined;
-  if (about !== undefined) return { kind: "attention", summary: about.summary };
+    group === "needs_you" ? newestAbout(channel.attention, member) : undefined;
+  if (about !== undefined)
+    return { kind: "attention", summary: about.summary, attention: about };
   const work = channel.work.get(member.id);
   if (work !== undefined && work.waitingOn.length > 0)
     return { kind: "waiting", on: work.waitingOn };
@@ -105,7 +106,7 @@ function lineFor(
 function sameLine(a: ActivityLine, b: ActivityLine): boolean {
   switch (a.kind) {
     case "attention":
-      return b.kind === "attention" && a.summary === b.summary;
+      return b.kind === "attention" && a.attention === b.attention;
     case "waiting":
       return b.kind === "waiting" && a.on === b.on;
     case "mail":
@@ -159,7 +160,11 @@ export function activityOf(
   for (const channel of channels.values()) {
     let suffix: string | null | undefined;
     for (const member of channel.members.values()) {
-      const group = GROUP_OF[member.activity];
+      const group =
+        member.activity !== "retired" &&
+        newestAbout(channel.attention, member)?.response != null
+          ? "needs_you"
+          : GROUP_OF[member.activity];
       const peek = group === null ? null : peekTarget(channel.key, member);
       if (group === null || peek === null) continue;
       suffix ??= channelSuffix(channel, channels.values());

@@ -25,8 +25,23 @@ export type Member = {
   role: SafeText | null;
   paneLabel: SafeText | null;
 };
+export type Conversation = { threadId: string; messageId: string };
+export type AttentionResponse =
+  | ({ kind: "reply"; addressId: AddressId } & Conversation)
+  | { kind: "pane"; addressId: AddressId }
+  | { kind: "local" };
+export type MessageContext = {
+  threadId: string;
+  messageCount: number;
+  earlierOmitted: boolean;
+  messages: readonly Message[];
+};
 export type Attention = {
   rowKey: string;
+  sourceId?: string | null;
+  coordinationId?: string | null;
+  conversation?: Conversation | null;
+  response?: AttentionResponse | null;
   source:
     | "delivery_attempt"
     | "automatic_reply_limit"
