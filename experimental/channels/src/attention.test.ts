@@ -331,3 +331,25 @@ test("channel preparation retries after preserved drafts without losing the trac
     sent,
   );
 });
+
+test("channel preparation is idempotent while requested or already prepared", () => {
+  for (const preparation of ["requested", "prepared"] as const) {
+    const response = {
+      kind: "message",
+      addressId: member.id,
+      reference: { kind: "coordination", id: "coordination-1" },
+      preparation,
+    } as const;
+    const state = evidenceReduce(
+      evidenceReduce(
+        { kind: "closed", version: 0 },
+        {
+          type: "open",
+          request: { ...request, response },
+        },
+      ),
+      { type: "loaded", version: 1, context },
+    );
+    assert.equal(evidenceReduce(state, { type: "prepare-message" }), state);
+  }
+});
