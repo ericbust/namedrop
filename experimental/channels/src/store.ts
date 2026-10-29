@@ -6,12 +6,14 @@ import type {
   Event,
   HistoryRequest,
   Message,
+  Selection,
   SpaceKey,
   State,
   TerminalRun,
 } from "./model.ts";
 
 const channelCollator = new Intl.Collator();
+const noSelection: Selection = { kind: "none", key: null };
 
 export function initialState({
   visible = true,
@@ -22,7 +24,7 @@ export function initialState({
 } = {}): State {
   return {
     channels: new Map(),
-    selectedKey: null,
+    selection: noSelection,
     requestedKey,
     openThread: null,
     unread: new Set(),
@@ -327,35 +329,42 @@ function finishReplay(state: State, keys: ReadonlySet<SpaceKey> | null): State {
       if (!keys.has(key)) channels.delete(key);
     }
   }
-  const preserveSelection =
-    state.sync.kind !== "fallback" || state.sync.preserveSelection;
-  const selectedKey =
-    preserveSelection &&
-    state.selectedKey !== null &&
-    channels.has(state.selectedKey)
-      ? state.selectedKey
-      : landing(channels, state.requestedKey);
+  const arrived = [...channels.keys()].some((key) => !state.channels.has(key));
+  const selection = settle(state, channels, arrived);
   const unread = new Set([...state.unread].filter((key) => channels.has(key)));
   for (const [key, channel] of channels) {
     const previous = state.channels.get(key);
     if (
       previous &&
       hasActivity(previous, channel) &&
-      !(state.visible && key === state.selectedKey)
+      !(state.visible && key === state.selection.key)
     )
       unread.add(key);
   }
   return {
     ...state,
     channels,
-    selectedKey,
+    selection,
     unread,
     viewKnown: state.viewKnown || channels.size > 0 || keys !== null,
-    sync:
-      keys === null
-        ? { kind: "fallback", preserveSelection: state.viewKnown }
-        : { kind: "live" },
+    sync: { kind: keys === null ? "fallback" : "live" },
   };
+}
+function settle(
+  state: State,
+  channels: ReadonlyMap<SpaceKey, Channel>,
+  arrived: boolean,
+): Selection {
+  const { selection } = state;
+  const keep =
+    selection.kind === "none"
+      ? !arrived
+      : channels.has(selection.key) &&
+        (selection.kind === "chosen" || !arrived);
+  if (keep) return selection;
+  const key = landing(channels, state.requestedKey);
+  if (key === null) return noSelection;
+  return { kind: key === state.requestedKey ? "chosen" : "automatic", key };
 }
 function latestWindow(channel: Channel): Channel {
   return {
@@ -393,7 +402,7 @@ export function landing(
 }
 export function reduce(state: State, event: Event): State {
   const next = step(state, event);
-  return next.openThread !== null && next.selectedKey !== state.selectedKey
+  return next.openThread !== null && next.selection.key !== state.selection.key
     ? { ...next, openThread: null }
     : next;
 }
@@ -417,16 +426,15 @@ function step(state: State, event: Event): State {
       if (accumulated === previous) return state;
       const channels = new Map(state.channels);
       channels.set(channel.key, accumulated);
-      const selectedKey =
-        state.channels.size === 0 ? channel.key : state.selectedKey;
+      const selection = settle(state, channels, previous === undefined);
       let unread = state.unread;
       if (
         previous &&
         hasActivity(previous, accumulated) &&
-        !(selectedKey === channel.key && state.visible)
+        !(selection.key === channel.key && state.visible)
       )
         unread = new Set([...unread, channel.key]);
-      return { ...state, channels, selectedKey, unread, viewKnown: true };
+      return { ...state, channels, selection, unread, viewKnown: true };
     }
     case "older":
       return requestHistory(state, event.key);
@@ -541,21 +549,20 @@ function step(state: State, event: Event): State {
         ...state,
         channels,
         sync,
-        selectedKey: state.selectedKey === event.key ? null : state.selectedKey,
+        selection:
+          state.selection.key === event.key ? noSelection : state.selection,
         unread: clearUnread(state.unread, event.key),
       };
     }
     case "select": {
       if (!state.channels.has(event.key)) return state;
-      const sync =
-        state.sync.kind === "fallback" && !state.sync.preserveSelection
-          ? { ...state.sync, preserveSelection: true }
-          : state.sync;
-      if (state.selectedKey === event.key && sync === state.sync) return state;
-      return { ...state, selectedKey: event.key, sync };
+      const { selection } = state;
+      if (selection.kind === "chosen" && selection.key === event.key)
+        return state;
+      return { ...state, selection: { kind: "chosen", key: event.key } };
     }
     case "read": {
-      if (state.selectedKey !== event.key) return state;
+      if (state.selection.key !== event.key) return state;
       const unread = clearUnread(state.unread, event.key);
       return unread === state.unread ? state : { ...state, unread };
     }

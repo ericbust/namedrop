@@ -1545,14 +1545,14 @@ test("design-b: landing follows the URL, then Needs you, and selection keeps the
   assert.equal(await landing.row(3).getAttribute("aria-current"), "page");
   assert.equal(
     await landing.page.evaluate(() => location.pathname),
-    `/w/${key(3)}`,
+    "/",
+    "automatic landing never rewrites the URL",
   );
   assert.equal(
     await landing.page.evaluate(
       () => history.length === window.initialHistoryLength,
     ),
     true,
-    "automatic landing replaces the URL instead of pushing",
   );
 });
 

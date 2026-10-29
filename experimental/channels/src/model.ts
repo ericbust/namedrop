@@ -140,16 +140,19 @@ export type Event =
   | { type: "disconnected" }
   | { type: "visibility"; visible: boolean };
 export type Sync =
-  | { kind: "connecting" | "reconnecting" | "live" }
-  | { kind: "fallback"; preserveSelection: boolean }
+  | { kind: "connecting" | "reconnecting" | "live" | "fallback" }
   | {
       kind: "replaying";
       status: "connecting" | "reconnecting";
       pending: Map<SpaceKey, Channel>;
     };
+export type Selection =
+  | { kind: "none"; key: null }
+  | { kind: "automatic"; key: SpaceKey }
+  | { kind: "chosen"; key: SpaceKey };
 export type State = {
   channels: Map<SpaceKey, Channel>;
-  selectedKey: SpaceKey | null;
+  selection: Selection;
   requestedKey: SpaceKey | null;
   openThread: string | null;
   unread: ReadonlySet<SpaceKey>;

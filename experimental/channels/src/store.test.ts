@@ -93,7 +93,7 @@ test("space installs a complete channel, selects the first arrival, and leaves t
   const channel = parsed(snapshot());
   const after = reduce(before, { type: "space", channel });
   assert.deepEqual(after.channels.get(channel.key)?.messages, channel.messages);
-  assert.equal(after.selectedKey, channel.key);
+  assert.equal(after.selection.key, channel.key);
   assert.equal(after.unread.size, 0);
   assert.equal(before.channels.size, 0);
 });
@@ -132,7 +132,7 @@ test("gone removes channel and unread metadata, clears selected key, and unknown
   assert.equal(reduce(next, { type: "gone", key: channel.key }), next);
   const selected = reduce(state, { type: "select", key: channel.key });
   assert.equal(
-    reduce(selected, { type: "gone", key: channel.key }).selectedKey,
+    reduce(selected, { type: "gone", key: channel.key }).selection.key,
     null,
   );
 });
@@ -191,7 +191,7 @@ test("fix5: channel collation preserves default locale Unicode ordering and ever
     sortedChannels(state).map((channel) => channel.key),
     expected,
   );
-  assert.equal(state.selectedKey, expected[0]);
+  assert.equal(state.selection.key, expected[0]);
   assert.deepEqual(
     sortedChannels(state)
       .filter((channel) => channel.displayName === "shared")
@@ -575,10 +575,10 @@ test("design-b: select keeps unread, and read clears only the selected key", () 
   const key = parsed(snapshot(keyB, "beta", "w2")).key;
   const alpha = parsed(snapshot()).key;
   const next = reduce(state, { type: "select", key });
-  assert.equal(next.selectedKey, key);
+  assert.equal(next.selection.key, key);
   assert.ok(next.unread.has(key));
   assert.equal(
-    reduce(initialState(), { type: "select", key }).selectedKey,
+    reduce(initialState(), { type: "select", key }).selection.key,
     null,
   );
   assert.equal(reduce(next, { type: "select", key }), next);
@@ -611,17 +611,17 @@ test("fix2 item 3: reconnect retains gamma selection while alpha sorts first and
   const disconnected = reduce(before, { type: "disconnected" });
   const opened = reduce(disconnected, { type: "opened" });
   assert.equal(opened.channels, before.channels);
-  assert.equal(opened.selectedKey, gamma.key);
+  assert.equal(opened.selection.key, gamma.key);
   assert.equal(opened.unread, before.unread);
   const partial = apply(opened, changedChannel());
   assert.equal(partial.channels, before.channels);
-  assert.equal(partial.selectedKey, gamma.key);
+  assert.equal(partial.selection.key, gamma.key);
   assert.equal(partial.unread, before.unread);
   const completed = ready(
     apply(apply(partial, snapshot()), snapshot(gamma.key, "gamma", "w3")),
     [keyB, keyA, gamma.key],
   );
-  assert.equal(completed.selectedKey, gamma.key);
+  assert.equal(completed.selection.key, gamma.key);
   assert.ok(completed.unread.has(beta));
   assert.equal(completed.channels.get(alpha), before.channels.get(alpha));
 });
@@ -633,14 +633,14 @@ test("item 2: initial ready selects sidebar order and ready removes omitted keys
   );
   assert.equal(pending.channels.size, 0);
   const complete = ready(pending, [keyA, keyB]);
-  assert.equal(complete.selectedKey, parsed(snapshot(keyB)).key);
+  assert.equal(complete.selection.key, parsed(snapshot(keyB)).key);
   const reconnect = reduce(complete, { type: "opened" });
   const replacement = ready(apply(reconnect, snapshot(keyA, "zeta")), [keyA]);
   assert.equal(replacement.channels.size, 1);
-  assert.equal(replacement.selectedKey, parsed(snapshot()).key);
+  assert.equal(replacement.selection.key, parsed(snapshot()).key);
   const empty = ready(reduce(replacement, { type: "opened" }), []);
   assert.equal(empty.channels.size, 0);
-  assert.equal(empty.selectedKey, null);
+  assert.equal(empty.selection.key, null);
   assert.equal(empty.unread.size, 0);
 });
 test("interrupted replay and duplicate ready cannot replace the view", () => {
@@ -811,7 +811,7 @@ test("fix3 item 1: timeout publishes first load and reconnect without pruning an
     type: "replay-timeout",
   });
   assert.equal(first.sync.kind, "fallback");
-  assert.equal(first.selectedKey, parsed(snapshot(keyB)).key);
+  assert.equal(first.selection.key, parsed(snapshot(keyB)).key);
   const before = apply(first, snapshot());
   const next = reduce(
     apply(reduce(before, { type: "opened" }), changedChannel()),
@@ -819,7 +819,7 @@ test("fix3 item 1: timeout publishes first load and reconnect without pruning an
   );
   assert.equal(next.sync.kind, "fallback");
   assert.equal(next.channels.size, 2);
-  assert.equal(next.selectedKey, before.selectedKey);
+  assert.equal(next.selection.key, before.selection.key);
   assert.equal(reduce(next, { type: "replay-timeout" }), next);
   assert.equal(
     apply(next, snapshot(keyB, "live beta", "w2")).channels.get(
@@ -836,7 +836,7 @@ test("fix2 item 4: fallback selection keeps its unread mark until read on dwell"
     apply(reduce(before, { type: "opened" }), changedChannel()),
     [keyB],
   );
-  assert.equal(next.selectedKey, beta);
+  assert.equal(next.selection.key, beta);
   assert.ok(next.unread.has(beta));
   assert.equal(
     reduce(next, { type: "read", key: beta }).unread.has(beta),
@@ -868,7 +868,7 @@ test("fix2 item 6: gone removes committed and pending snapshots during replay an
   const replay = apply(reduce(before, { type: "opened" }), snapshot());
   const gone = reduce(replay, { type: "gone", key: alpha });
   assert.equal(gone.channels.has(alpha), false);
-  assert.equal(gone.selectedKey, null);
+  assert.equal(gone.selection.key, null);
   assert.equal(gone.sync.kind, "replaying");
   assert.ok(gone.sync.kind === "replaying" && !gone.sync.pending.has(alpha));
   assert.equal(ready(gone, [keyA, keyB]).channels.has(alpha), false);
@@ -908,7 +908,7 @@ test("fix3 item 1: late ready prunes the current map and retains gamma selection
   assert.deepEqual([...next.channels.keys()].sort(), [keyA, gammaKey]);
   assert.equal(next.channels.get(alphaKey), current.channels.get(alphaKey));
   assert.equal(next.channels.get(gammaKey)?.displayName, "gamma-current");
-  assert.equal(next.selectedKey, gammaKey);
+  assert.equal(next.selection.key, gammaKey);
   assert.deepEqual([...next.unread], [alphaKey]);
   assert.equal(next.sync.kind, "live");
 });
@@ -928,7 +928,7 @@ test("fix3 item 1: late ready removes selected gamma and selects the sorted fall
   assert.ok(current.unread.has(beta.key));
   const next = ready(current, [keyA, keyB]);
   assert.equal(next.channels.has(gamma.key), false);
-  assert.equal(next.selectedKey, beta.key);
+  assert.equal(next.selection.key, beta.key);
   assert.ok(next.unread.has(beta.key));
   assert.equal(
     reduce(next, { type: "read", key: beta.key }).unread.has(beta.key),
@@ -1015,13 +1015,13 @@ for (const beforeTimeout of [false, true]) {
     const fallback = reduce(pending, { type: "replay-timeout" });
     const current = apply(apply(fallback, beta), snapshot());
     const betaKey = parsed(beta).key;
-    assert.equal(current.selectedKey, betaKey);
+    assert.equal(current.selection.key, parsed(snapshot()).key);
     assert.equal(
-      ready(current, [keyA, keyB]).selectedKey,
+      ready(current, [keyA, keyB]).selection.key,
       parsed(snapshot()).key,
     );
     const chosen = reduce(current, { type: "select", key: betaKey });
-    assert.equal(ready(chosen, [keyA, keyB]).selectedKey, betaKey);
+    assert.equal(ready(chosen, [keyA, keyB]).selection.key, betaKey);
   });
 }
 
@@ -1031,7 +1031,8 @@ function withMessages(ids: string[], key = keyA) {
   return value;
 }
 function activeChannel(state: State) {
-  const channel = state.selectedKey && state.channels.get(state.selectedKey);
+  const channel =
+    state.selection.key && state.channels.get(state.selection.key);
   assert.ok(channel);
   return channel;
 }
@@ -1756,16 +1757,16 @@ test("design-b: landing prefers the URL key, then needs you in sidebar order, th
     beta,
   ];
   for (const end of ["ready", "timeout"] as const) {
-    assert.equal(landed(frames, keyA, end).selectedKey, keyA);
-    assert.equal(landed(frames, null, end).selectedKey, keyC);
-    assert.equal(landed(frames, "e".repeat(20), end).selectedKey, keyC);
-    assert.equal(landed([alpha, beta], null, end).selectedKey, keyD);
+    assert.equal(landed(frames, keyA, end).selection.key, keyA);
+    assert.equal(landed(frames, null, end).selection.key, keyC);
+    assert.equal(landed(frames, "e".repeat(20), end).selection.key, keyC);
+    assert.equal(landed([alpha, beta], null, end).selection.key, keyD);
     assert.equal(
       landed(
         [landingFrame(keyB, "zeta"), landingFrame(keyA, "alpha")],
         null,
         end,
-      ).selectedKey,
+      ).selection.key,
       keyA,
     );
   }
@@ -1780,13 +1781,13 @@ test("design-b: landing prefers the URL key, then needs you in sidebar order, th
     ),
     frames.map((frame) => frame.key),
   );
-  assert.equal(reconnect.selectedKey, keyD);
+  assert.equal(reconnect.selection.key, keyD);
 });
 test("design-b: switching channels closes the open thread", () => {
   const state = twoChannels();
   const alpha = parsed(snapshot()).key;
   const beta = parsed(snapshot(keyB)).key;
-  assert.equal(state.selectedKey, alpha);
+  assert.equal(state.selection.key, alpha);
   const open = reduce(state, { type: "thread", threadId: "m1" });
   assert.equal(open.openThread, "m1");
   assert.equal(reduce(open, { type: "thread", threadId: "m1" }), open);
@@ -1808,15 +1809,15 @@ test("landing: a late URL key is selected when it arrives, and from then on noth
     { type: "replay-timeout" },
   );
   const alpha = apply(fallback, landingFrame(keyA, "alpha"));
-  assert.equal(alpha.selectedKey, keyA);
+  assert.equal(alpha.selection.key, keyA);
   const requested = apply(alpha, landingFrame(keyB, "beta"));
-  assert.equal(requested.selectedKey, keyB);
+  assert.equal(requested.selection.key, keyB);
   const later = apply(
     requested,
     landingFrame(keyC, "gamma", { needsYou: true }),
   );
-  assert.equal(later.selectedKey, keyB);
-  assert.equal(ready(later, [keyA, keyB, keyC]).selectedKey, keyB);
+  assert.equal(later.selection.key, keyB);
+  assert.equal(ready(later, [keyA, keyB, keyC]).selection.key, keyB);
 });
 test("landing: without a URL key each new channel re-runs the rule, updates never move it, and a pick ends it", () => {
   const keyC = "c".repeat(20);
@@ -1825,33 +1826,33 @@ test("landing: without a URL key each new channel re-runs the rule, updates neve
     type: "replay-timeout",
   });
   const alpha = apply(fallback, landingFrame(keyA, "alpha"));
-  assert.equal(alpha.selectedKey, keyA);
+  assert.equal(alpha.selection.key, keyA);
   const needsYou = apply(
     alpha,
     landingFrame(keyC, "gamma", { needsYou: true }),
   );
-  assert.equal(needsYou.selectedKey, keyC);
+  assert.equal(needsYou.selection.key, keyC);
   const updated = apply(
     needsYou,
     landingFrame(keyA, "alpha", { needsYou: true }),
   );
-  assert.equal(updated.selectedKey, keyC);
-  assert.equal(ready(updated, [keyA, keyC]).selectedKey, keyC);
+  assert.equal(updated.selection.key, keyC);
+  assert.equal(ready(updated, [keyA, keyC]).selection.key, keyC);
   const chosen = reduce(updated, {
     type: "select",
     key: parsed(snapshot(keyA)).key,
   });
   const delta = landingFrame(keyD, "delta", { needsYou: true });
-  assert.equal(apply(chosen, delta).selectedKey, keyA);
+  assert.equal(apply(chosen, delta).selection.key, keyA);
   assert.equal(
-    ready(apply(chosen, delta), [keyA, keyC, keyD]).selectedKey,
+    ready(apply(chosen, delta), [keyA, keyC, keyD]).selection.key,
     keyA,
   );
 });
 test("landing: a replay that brings a new channel re-runs the rule, a replay of known channels keeps the choice", () => {
   const alpha = landingFrame(keyA, "alpha");
   const state = landed([alpha]);
-  assert.equal(state.selectedKey, keyA);
+  assert.equal(state.selection.key, keyA);
   const known = ready(
     apply(
       reduce(state, { type: "opened" }),
@@ -1859,7 +1860,7 @@ test("landing: a replay that brings a new channel re-runs the rule, a replay of 
     ),
     [keyA],
   );
-  assert.equal(known.selectedKey, keyA);
+  assert.equal(known.selection.key, keyA);
   const grown = ready(
     apply(
       apply(reduce(state, { type: "opened" }), alpha),
@@ -1867,7 +1868,7 @@ test("landing: a replay that brings a new channel re-runs the rule, a replay of 
     ),
     [keyA, keyB],
   );
-  assert.equal(grown.selectedKey, keyB);
+  assert.equal(grown.selection.key, keyB);
 });
 
 const MIN = 60_000;

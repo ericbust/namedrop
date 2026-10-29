@@ -118,14 +118,14 @@ export function App() {
     };
   }, []);
   useLayoutEffect(() => {
-    selectedForPaint.current = state.selectedKey;
+    selectedForPaint.current = state.selection.key;
     if (
       frameVersion === 0 ||
       arrivals.current.length === 0 ||
       state.sync.kind === "replaying"
     )
       return;
-    const key = state.selectedKey;
+    const key = state.selection.key;
     const starts = arrivals.current
       .splice(0)
       .filter(
@@ -268,11 +268,6 @@ export function App() {
     };
   }, [state.channels.size]);
   useEffect(() => {
-    if (state.selectedKey === null) return;
-    const path = `/w/${state.selectedKey}`;
-    if (location.pathname !== path) history.replaceState(null, "", path);
-  }, [state.selectedKey]);
-  useEffect(() => {
     const back = () => {
       const key = pathKey(location.pathname);
       if (key !== null) dispatch({ type: "select", key });
@@ -281,11 +276,11 @@ export function App() {
     return () => removeEventListener("popstate", back);
   }, []);
   useEffect(() => {
-    const key = state.selectedKey;
+    const key = state.selection.key;
     if (key === null || !state.visible) return;
     const dwell = setTimeout(() => dispatch({ type: "read", key }), 1500);
     return () => clearTimeout(dwell);
-  }, [state.selectedKey, state.visible]);
+  }, [state.selection.key, state.visible]);
   let needsYou = 0;
   for (const channel of state.channels.values())
     if (channel.health.level === "needs_you") needsYou++;
@@ -300,9 +295,9 @@ export function App() {
   }, []);
   const connection = connectionStatus(state);
   const channel =
-    state.selectedKey === null
+    state.selection.key === null
       ? undefined
-      : state.channels.get(state.selectedKey);
+      : state.channels.get(state.selection.key);
   const messages = channel?.messages;
   const windows = channel?.runs;
   const threads = channel?.threads;
