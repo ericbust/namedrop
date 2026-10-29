@@ -3635,7 +3635,7 @@ test("UI-3: channels that share a label are listed disabled with a tooltip and c
     assert.equal(await option.getAttribute("aria-disabled"), "true");
     assert.equal(
       await option.getAttribute("title"),
-      "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there.",
+      "Another workspace shows the same name. Give one a unique label in Herdr to mention it.",
     );
     assert.equal(
       await option.evaluate((element) => getComputedStyle(element).opacity),
@@ -4107,7 +4107,7 @@ test("UI-3 fix: a disabled channel's tooltip names a reason only when the page c
   for (const option of await same.all())
     assert.equal(
       await option.getAttribute("title"),
-      "Another workspace shows the same name. Give one a unique label in Herdr, and check that Namedrop is active there.",
+      "Another workspace shows the same name. Give one a unique label in Herdr to mention it.",
     );
   const alpha = list.getByRole("option").filter({
     has: ui.page.locator(".opt-name", { hasText: /^alpha$/ }),

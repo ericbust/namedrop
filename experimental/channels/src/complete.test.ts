@@ -33,6 +33,7 @@ function snapshot(
   label: string | null,
   participants: unknown[] = [],
   workspace = `w-${letter}`,
+  state: string | null = "active",
 ): ChannelSnapshot {
   const key = letter.repeat(20);
   const event = parseEvent(
@@ -46,6 +47,7 @@ function snapshot(
           workspace_id: workspace,
           display_name: name,
           addressable_label: label,
+          ...(state === null ? {} : { state }),
         },
         health: { level: "calm" },
         participants,
@@ -316,6 +318,26 @@ test("complete: channel options name why a channel cannot be mentioned, in the t
   ]);
 });
 
+test("complete: twins named all read the general line, and a shared name counts only while every twin is active", () => {
+  const reasons = (...channels: ChannelSnapshot[]) =>
+    channelOptions(channels).map(({ disabledReason }) => disabledReason);
+  const twin = (letter: string, name: string, state: string | null) =>
+    snapshot(letter, name, null, [], `w-${letter}`, state);
+  assert.deepEqual(
+    reasons(twin("1", "all", "active"), twin("2", "all", "active")),
+    ["unknown", "unknown"],
+  );
+  assert.deepEqual(
+    reasons(twin("1", "twin", "paused"), twin("2", "twin", "active")),
+    ["shared-name", "shared-name"],
+  );
+  for (const state of ["deactivated", "not_activated", "unknown", null])
+    assert.deepEqual(
+      reasons(twin("1", "twin", "active"), twin("2", "twin", state)),
+      ["unknown", "unknown"],
+      `a twin whose state is ${state}`,
+    );
+});
 test("complete: channel options that share a name carry the sidebar's workspace suffix", () => {
   const e = "e".repeat(20);
   const f = "f".repeat(20);

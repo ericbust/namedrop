@@ -1,5 +1,11 @@
 import { foldLabel } from "./label.ts";
-import type { ChannelSnapshot, Member, ReplyTo, SpaceKey } from "./model.ts";
+import type {
+  ChannelSnapshot,
+  Member,
+  ReplyTo,
+  SpaceKey,
+  SpaceState,
+} from "./model.ts";
 import { channelSuffix } from "./store.ts";
 
 // Why the server gave a channel no token, in the order DESIGN.md's table checks.
@@ -43,18 +49,26 @@ const WHITESPACE = /\s/;
 
 type Labelling = Pick<
   ChannelSnapshot,
-  "displayName" | "addressableLabel" | "workspaceId"
+  "displayName" | "addressableLabel" | "workspaceId" | "state"
 >;
+// The server counts a paused workspace as active, and a frame without a state as not.
+function active(state: SpaceState): boolean {
+  return state === "active" || state === "paused";
+}
 
 function disabledReason(
   channel: Labelling,
   channels: readonly Labelling[],
 ): DisabledReason {
+  const folded = foldLabel(channel.displayName);
   // Stripped characters fold to separators, so a name that folds to nothing came from a label that does too.
-  if (foldLabel(channel.displayName) === "") return "unusable-label";
+  if (folded === "") return "unusable-label";
   // The server shows the workspace id as the name only when Herdr has no label.
   if (channel.displayName === channel.workspaceId) return "no-label";
+  // "all" is reserved, so renaming a twin would not help, and the general line names the word.
+  if (folded === "all") return "unknown";
   // Only labels can collide on the server, and a token proves this name did not.
+  // Renaming helps only when every twin is active, since an inactive one stays unmentionable.
   const sameName = channels.filter(
     (other) =>
       other.displayName === channel.displayName &&
@@ -62,7 +76,9 @@ function disabledReason(
   );
   if (
     sameName.length > 1 &&
-    sameName.every((other) => other.addressableLabel === null)
+    sameName.every(
+      (other) => other.addressableLabel === null && active(other.state),
+    )
   )
     return "shared-name";
   return "unknown";
@@ -72,7 +88,7 @@ export function channelOptions(
   channels: Iterable<
     Pick<
       ChannelSnapshot,
-      "key" | "displayName" | "addressableLabel" | "workspaceId"
+      "key" | "displayName" | "addressableLabel" | "workspaceId" | "state"
     >
   >,
 ): ChannelOption[] {
