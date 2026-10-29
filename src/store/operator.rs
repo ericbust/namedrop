@@ -62,7 +62,7 @@ impl StateTransaction<'_> {
             ],
         )?;
         if !self.is_operator_address(namespace, &PaneAddressId::new(ADDRESS))? {
-            return Err(StoreError::invalid_input(
+            return Err(StoreError::internal(
                 "the reserved operator address conflicts with existing state",
             ));
         }

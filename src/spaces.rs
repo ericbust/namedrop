@@ -143,15 +143,15 @@ impl SpaceDirectory {
         socket: &str,
         here: &SpaceId,
         run: &RecipientRun,
-    ) -> Result<Self, String> {
-        let index = store
-            .transaction(|transaction| transaction.alias_index(socket))
-            .map_err(|error| error.to_string())?;
+    ) -> Result<Self, SendError> {
+        let index = store.transaction(|transaction| transaction.alias_index(socket))?;
         let Some(here_names) = index
             .iter()
             .find(|space| &space.space == here && space.activated)
         else {
-            return Err("Namedrop is not activated for this space".to_owned());
+            return Err(SendError::Input(
+                "Namedrop is not activated for this space".to_owned(),
+            ));
         };
         let here_entry = |label: Option<&str>, repo: Option<&str>| SpaceEntry {
             space: here.clone(),
@@ -472,32 +472,34 @@ pub(crate) fn route<E: crate::HerdrCommandExecutor>(
     (author, in_reply_to): (&crate::PaneAddressId, Option<&crate::MessageId>),
     run: &RecipientRun,
 ) -> Result<RoutePlan, SendError> {
-    let (pins, fallback) = store
-        .transaction(|transaction| {
-            let Some(message_id) = in_reply_to else {
+    let (pins, fallback) = store.transaction(|transaction| {
+        let Some(message_id) = in_reply_to else {
+            return Ok((Vec::new(), None));
+        };
+        let route = match transaction.message_route(namespace, message_id) {
+            Ok(route) => route,
+            Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => {
                 return Ok((Vec::new(), None));
-            };
-            let Ok(route) = transaction.message_route(namespace, message_id) else {
-                return Ok((Vec::new(), None));
-            };
-            let fallback = if route.from_namedrop {
-                ReplyRetry::Nothing
-            } else {
-                ReplyRetry::ToSender(route.participants[0].alias.clone())
-            };
-            let pins = match run.scope {
-                SpaceScope::Unqualified => reply_participants(
-                    transaction,
-                    namespace,
-                    author,
-                    route.participants,
-                    &run.aliases,
-                )?,
-                _ => Vec::new(),
-            };
-            Ok((pins, Some(fallback)))
-        })
-        .map_err(|error| error.to_string())?;
+            }
+            Err(error) => return Err(error),
+        };
+        let fallback = if route.from_namedrop {
+            ReplyRetry::Nothing
+        } else {
+            ReplyRetry::ToSender(route.participants[0].alias.clone())
+        };
+        let pins = match run.scope {
+            SpaceScope::Unqualified => reply_participants(
+                transaction,
+                namespace,
+                author,
+                route.participants,
+                &run.aliases,
+            )?,
+            _ => Vec::new(),
+        };
+        Ok((pins, Some(fallback)))
+    })?;
     let remaining = RecipientRun {
         scope: run.scope.clone(),
         aliases: run
@@ -583,24 +585,24 @@ fn refuse_remote_terminals(
             continue;
         }
         let there = StateNamespace::new(namespace.session_socket_id.clone(), space.clone());
-        let terminals = store
-            .transaction(|transaction| {
-                // A name that does not resolve fails later with its own error.
-                let Ok(members) = transaction.resolve_recipient_aliases(&there, aliases) else {
+        let terminals = store.transaction(|transaction| {
+            // A name that does not resolve fails later with its own error.
+            let members = match transaction.resolve_recipient_aliases(&there, aliases) {
+                Ok(members) => members,
+                Err(error) if error.kind() == crate::StoreErrorKind::InvalidInput => {
                     return Ok(Vec::new());
-                };
-                let mut terminals = Vec::new();
-                for member in members {
-                    if transaction.pane_type(&there, &member.address_id)?
-                        == crate::PaneType::Terminal
-                    {
-                        let grant = transaction.remote_command_grant(&there, &member.address_id)?;
-                        terminals.push((member.alias, grant.is_some()));
-                    }
                 }
-                Ok(terminals)
-            })
-            .map_err(|error| error.to_string())?;
+                Err(error) => return Err(error),
+            };
+            let mut terminals = Vec::new();
+            for member in members {
+                if transaction.pane_type(&there, &member.address_id)? == crate::PaneType::Terminal {
+                    let grant = transaction.remote_command_grant(&there, &member.address_id)?;
+                    terminals.push((member.alias, grant.is_some()));
+                }
+            }
+            Ok(terminals)
+        })?;
         if !matches!(scope, SpaceScope::Named(_))
             && let Some((alias, _)) = terminals.first()
         {

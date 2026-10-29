@@ -8,7 +8,7 @@ use std::{
     ffi::CString,
     fs::File,
     io::{self, BufRead, BufReader, Read, Write},
-    net::{TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream},
     os::{
         fd::{AsRawFd, FromRawFd},
         unix::fs::MetadataExt,
@@ -583,7 +583,7 @@ fn serve_connection(
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(&stream);
-    let request = match read_request(&mut reader) {
+    let request = match read_request(&mut reader, front.port) {
         Ok(request) => request,
         Err(status) => return respond_status(&mut writer, status),
     };
@@ -734,10 +734,16 @@ fn send_operator_post(
         ),
         Err(error) => respond(
             writer,
-            "400 Bad Request",
+            match error.kind() {
+                crate::OperatorSendErrorKind::InvalidInput => "400 Bad Request",
+                crate::OperatorSendErrorKind::Unavailable => "503 Service Unavailable",
+                crate::OperatorSendErrorKind::Internal => "500 Internal Server Error",
+            },
             "application/json",
             "",
-            serde_json::json!({"error": error}).to_string().as_bytes(),
+            serde_json::json!({"error": error.public_message()})
+                .to_string()
+                .as_bytes(),
         ),
     }
 }
@@ -868,7 +874,7 @@ fn client_closed(stream: &TcpStream) -> bool {
     }
 }
 
-fn read_request(reader: &mut impl BufRead) -> Result<Request, Status> {
+fn read_request(reader: &mut impl BufRead, port: u16) -> Result<Request, Status> {
     fn line(reader: &mut impl BufRead, budget: &mut u64) -> Result<String, Status> {
         let mut bytes = Vec::new();
         let count = reader
@@ -925,10 +931,13 @@ fn read_request(reader: &mut impl BufRead) -> Result<Request, Status> {
         headers.push((name, value.trim().to_owned()));
     }
     if let Some((_, cookie)) = headers.iter().find(|(name, _)| name == "cookie") {
-        let mut names = std::collections::HashSet::new();
+        let own_name = cookie_name(port);
+        let mut seen_session = false;
         for pair in cookie.split(';') {
-            let (name, _) = pair.trim().split_once('=').ok_or(Status::BadRequest)?;
-            if !names.insert(name) {
+            let Some((name, _)) = pair.trim().split_once('=') else {
+                continue;
+            };
+            if name == own_name && std::mem::replace(&mut seen_session, true) {
                 return Err(Status::BadRequest);
             }
         }
@@ -964,7 +973,21 @@ fn respond(
         body.len()
     )?;
     writer.write_all(body)?;
-    writer.flush()
+    writer.flush()?;
+    // Send EOF, then give an in-flight request a bounded chance to finish writing.
+    writer.shutdown(Shutdown::Write)?;
+    writer.set_read_timeout(Some(Duration::from_millis(50)))?;
+    let deadline = Instant::now() + Duration::from_millis(250);
+    let mut remaining = 2 * 1024 * 1024;
+    let mut chunk = [0u8; 16 * 1024];
+    while remaining > 0 && Instant::now() < deadline {
+        let limit = remaining.min(chunk.len());
+        match writer.read(&mut chunk[..limit]) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => remaining -= count,
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

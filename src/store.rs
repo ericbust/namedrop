@@ -6585,6 +6585,7 @@ impl StateTransaction<'_> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StoreErrorKind {
     InvalidInput,
+    Internal,
     Conflict,
     Busy,
     UnsupportedSchema,
@@ -6602,6 +6603,14 @@ impl StoreError {
     pub fn invalid_input(message: impl Into<String>) -> Self {
         Self {
             kind: StoreErrorKind::InvalidInput,
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            kind: StoreErrorKind::Internal,
             message: message.into(),
             source: None,
         }
@@ -7791,6 +7800,71 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn operator_terminal_conversion_is_refused() {
+        assert_operator_terminal_mutation_refused("set");
+    }
+
+    #[test]
+    fn operator_allow_remote_is_refused() {
+        assert_operator_terminal_mutation_refused("allow");
+    }
+
+    #[test]
+    fn operator_deny_remote_is_refused() {
+        assert_operator_terminal_mutation_refused("deny");
+    }
+
+    fn assert_operator_terminal_mutation_refused(operation: &str) {
+        let directory = TestDirectory::new();
+        let mut store = StateStore::open(&directory.0).unwrap();
+        let ns = StateNamespace::for_space("socket", "workspace");
+        let at = MutationAttribution::new(ActorKind::Human, "test", 1);
+        let id = PaneAddressId::new("operator:local");
+        let invoker = crate::DiscoveredPane {
+            pane_id: "invoker".to_owned(),
+            terminal_id: "terminal".to_owned(),
+            tab_id: "tab".to_owned(),
+            workspace_id: "workspace".to_owned(),
+            cwd: None,
+            pane_label: None,
+            agent_session_id: None,
+            agent: None,
+            occupant_label: None,
+            agent_status: None,
+            idle_state_label: None,
+        };
+        store
+            .transaction(|tx| {
+                tx.activate_worktree(&ns, &at)?;
+                tx.ensure_operator_author(&ns, &at)?;
+                Ok(())
+            })
+            .unwrap();
+        let error = store
+            .transaction(|tx| match operation {
+                "set" => tx.set_pane_type(&ns, &id, crate::PaneType::Terminal, &at),
+                "allow" => tx
+                    .allow_remote_commands(&ns, &id, &invoker, &[], &at)
+                    .map(|_| ()),
+                "deny" => tx.deny_remote_commands(&ns, &id, &at).map(|_| ()),
+                _ => unreachable!(),
+            })
+            .expect_err(operation);
+        assert_eq!(error.kind(), StoreErrorKind::InvalidInput, "{operation}");
+        assert_eq!(
+            error.message(),
+            "the operator has no pane lifecycle",
+            "{operation}"
+        );
+        store
+            .transaction(|tx| {
+                assert!(tx.is_operator_address(&ns, &id)?);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

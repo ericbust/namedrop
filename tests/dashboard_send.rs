@@ -128,6 +128,7 @@ fn paneless_operator_round_trip_uses_the_ledger_without_an_operator_pane() {
             &runtime,
         )
         .unwrap_err()
+        .to_string()
         .contains("current Herdr pane")
     );
     let sent =
@@ -209,6 +210,7 @@ fn paneless_operator_round_trip_uses_the_ledger_without_an_operator_pane() {
     assert!(
         send_operator_message("operator-unknown", "@ghost investigate", None, &runtime)
             .unwrap_err()
+            .to_string()
             .contains("ghost")
     );
     let mut missing_workspace = f.runtime("w1", "unused");
@@ -222,6 +224,7 @@ fn paneless_operator_round_trip_uses_the_ledger_without_an_operator_pane() {
             &missing_workspace
         )
         .unwrap_err()
+        .to_string()
         .contains("explicit source workspace")
     );
     assert_eq!(f.message_rows(), before_refusals);
@@ -543,7 +546,10 @@ fn duplicate_workspace_labels_and_dashboard_hash_targets_refuse_without_messages
     let before = f.message_rows();
     let error =
         send_operator_message("duplicate-label", "#ws2 @lead inspect", None, &runtime).unwrap_err();
-    assert!(error.contains("w2") && error.contains("w3"), "{error}");
+    assert!(
+        error.to_string().contains("w2") && error.to_string().contains("w3"),
+        "{error}"
+    );
     let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w2"));
     assert!(
         send_operator_message(
@@ -715,6 +721,7 @@ fn conflicting_reserved_identity_is_never_adopted_or_rewritten() {
         assert!(
             send_operator_message("conflict", "@planner inspect", None, &runtime)
                 .unwrap_err()
+                .to_string()
                 .contains("operator"),
             "{conflict}"
         );
@@ -755,6 +762,7 @@ fn conflicting_operator_identity_keeps_home_and_envoy_projection_in_agent_lanes(
         assert!(
             send_operator_message("conflict", "@planner inspect", None, &runtime)
                 .unwrap_err()
+                .to_string()
                 .contains("operator"),
             "{conflict}"
         );
@@ -978,11 +986,9 @@ else:
             stream.write_all(request.as_bytes()).unwrap();
             stream.shutdown(Shutdown::Write).unwrap();
             let mut bytes = Vec::new();
-            match stream.read_to_end(&mut bytes) {
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
-                Err(error) => panic!("reading dashboard response: {error}"),
-            }
+            stream
+                .read_to_end(&mut bytes)
+                .expect("reading dashboard response without a reset");
             let raw = String::from_utf8(bytes).unwrap();
             let (head, body) = raw.split_once("\r\n\r\n").unwrap();
             Response {
@@ -1037,6 +1043,242 @@ else:
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+
+    #[test]
+    #[ignore = "requires an external attack script and output path; runs only against the isolated fake-Herdr server"]
+    fn external_security_attack() {
+        let script = std::env::var_os("NAMEDROP_SECURITY_ATTACK_SCRIPT")
+            .expect("set NAMEDROP_SECURITY_ATTACK_SCRIPT to the Python attack script");
+        let output_path = std::env::var_os("NAMEDROP_SECURITY_ATTACK_OUTPUT")
+            .expect("set NAMEDROP_SECURITY_ATTACK_OUTPUT to the result JSON path");
+        let f = Fixture::new();
+        f.register_all();
+        f.rename("w1", "planner", "claude");
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let mut nonce = [0u8; 16];
+        fs::File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut nonce)
+            .unwrap();
+        let nonce = nonce
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let entries = f.state.join("dashboard/entry");
+        fs::create_dir_all(&entries).unwrap();
+        fs::set_permissions(&entries, fs::Permissions::from_mode(0o700)).unwrap();
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(entries.join(&nonce))
+            .unwrap();
+        let entry = format!(
+            "http://127.0.0.1:{}/w/{}?n={nonce}",
+            server.port,
+            key.as_str()
+        );
+        let output = Command::new("python3")
+            .arg(script)
+            .arg(entry)
+            .arg(key.as_str())
+            .arg(f.state.join("namedrop.sqlite3"))
+            .arg(&output_path)
+            .env("HERDR_BIN_PATH", f.root.join("http-herdr"))
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_PLUGIN_STATE_DIR")
+            .output()
+            .unwrap();
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+        assert!(
+            output.status.success(),
+            "attack process failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&fs::read(output_path).unwrap()).unwrap();
+        let results = report["results"].as_array().expect("attack report results");
+        assert!(!results.is_empty(), "attack script must report cases");
+        let failures: Vec<_> = results
+            .iter()
+            .filter(|result| result["ok"] != true)
+            .collect();
+        assert!(failures.is_empty(), "failed attacks: {failures:?}");
+    }
+
+    #[test]
+    fn unrelated_cookies_do_not_block_pages_or_operator_posts() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        for (i, prefix) in [
+            "stray; ",
+            "theme=a; theme=b; ",
+            "namedrop_dashboard_1=a; namedrop_dashboard_1=b; ",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let cookie = format!("{prefix}{}", server.cookie);
+            let page = server.request("GET", "/", &[("Cookie", &cookie)], "");
+            assert_eq!(page.status, 200, "cookie {cookie}: {}", page.body);
+            let body = json!({"request_id":format!("cookie-{i}"), "source":"@planner inspect"})
+                .to_string();
+            let post = server.request(
+                "POST",
+                &format!("/w/{}/messages", key.as_str()),
+                &[
+                    ("Cookie", &cookie),
+                    ("X-Namedrop-Csrf", &server.csrf),
+                    ("Content-Type", "application/json"),
+                ],
+                &body,
+            );
+            assert_eq!(post.status, 200, "cookie {cookie}: {}", post.body);
+        }
+        let duplicate = format!("{}; {}", server.cookie, server.cookie);
+        assert_eq!(
+            server
+                .request("GET", "/", &[("Cookie", &duplicate)], "")
+                .status,
+            400
+        );
+    }
+
+    #[test]
+    fn early_refusals_are_readable_after_a_large_body() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let body = "x".repeat(1024 * 1024);
+        for (extra, expected) in [
+            ("", 413),
+            ("Origin: http://foreign.example\r\n", 403),
+            ("Content-Length: 1\r\n", 400),
+        ] {
+            let request = format!(
+                "POST /w/{}/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{extra}\r\n{body}",
+                key.as_str(),
+                server.port,
+                server.cookie,
+                server.csrf,
+                body.len()
+            );
+            let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            stream
+                .write_all(request.as_bytes())
+                .expect("send the entire large request");
+            let mut response = Vec::new();
+            stream
+                .read_to_end(&mut response)
+                .expect("read refusal without connection reset");
+            let response = String::from_utf8(response).unwrap();
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {expected} ")),
+                "{response}"
+            );
+            assert!(response.contains("Connection: close\r\n"));
+        }
+        assert_eq!(f.message_rows(), (0, 0));
+    }
+
+    #[test]
+    fn operator_input_errors_remain_useful_bad_requests() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let path = format!("/w/{}/messages", key.as_str());
+        for (source, reply, expected) in [
+            ("plain text", None, "Mention"),
+            ("@ghost inspect", None, "ghost"),
+            ("#missing @planner inspect", None, "missing"),
+            ("@planner inspect", Some("missing-message"), "message"),
+        ] {
+            let response = server.post(
+                &path,
+                &json!({"request_id":source,"source":source,"in_reply_to":reply}).to_string(),
+                &[],
+            );
+            assert_eq!(response.status, 400, "{}", response.body);
+            assert!(response.body.contains(expected), "{}", response.body);
+        }
+    }
+
+    #[test]
+    fn herdr_discovery_errors_are_safe_service_failures() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let responses = f.root.join("http-herdr-responses.json");
+        let mut values: Value = serde_json::from_slice(&fs::read(&responses).unwrap()).unwrap();
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let path = format!("/w/{}/messages", key.as_str());
+        for command in ["workspace list", "worktree list --workspace w1 --json"] {
+            let original = values[command].clone();
+            values[command] = json!("secret-herdr-diagnostic-/private/runtime");
+            fs::write(&responses, serde_json::to_vec(&values).unwrap()).unwrap();
+            let response = server.post(
+                &path,
+                &json!({"request_id":command,"source":"#all @lead inspect"}).to_string(),
+                &[],
+            );
+            assert_eq!(response.status, 503, "{}", response.body);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.body).unwrap(),
+                json!({"error":"Message service is temporarily unavailable."})
+            );
+            values[command] = original;
+        }
+        assert_eq!(f.message_rows(), (0, 0));
+    }
+
+    #[test]
+    fn reserved_operator_conflicts_are_safe_internal_failures() {
+        let f = Fixture::new();
+        f.register_all();
+        f.sql("INSERT INTO pane_roles (session_socket_id,worktree_id,role_id,name,description) VALUES ('socket-a','w1','role-operator','secret-wrong-role','private-detail');");
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let response = server.post(
+            &format!("/w/{}/messages", key.as_str()),
+            &json!({"request_id":"internal","source":"@planner inspect"}).to_string(),
+            &[],
+        );
+        assert_eq!(response.status, 500, "{}", response.body);
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.body).unwrap(),
+            json!({"error":"Message could not be sent."})
+        );
+        assert_eq!(f.message_rows(), (0, 0));
+    }
+
+    #[test]
+    fn store_busy_errors_are_safe_service_failures() {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let db = f.db();
+        db.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let response = server.post(
+            &format!("/w/{}/messages", key.as_str()),
+            &json!({"request_id":"busy","source":"@planner inspect"}).to_string(),
+            &[],
+        );
+        db.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(response.status, 503, "{}", response.body);
+        assert!(!response.body.contains("database"), "{}", response.body);
+        assert_eq!(f.message_rows(), (0, 0));
     }
 
     #[test]
