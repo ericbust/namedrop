@@ -29,6 +29,7 @@ import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
 
 const noRecipients: readonly string[] = [];
+const optionId = (list: string, index: number) => `${list}-${index}`;
 
 function Option({
   candidate,
@@ -132,6 +133,7 @@ export function Composer({
   const box = useRef<HTMLTextAreaElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const placedCaret = useRef<number | null>(null);
+  const fitted = useRef<string | null>(null);
   const typedAt = useRef<number | null>(null);
   const listId = useId();
 
@@ -165,7 +167,6 @@ export function Composer({
           0,
           candidates.findIndex((candidate) => insertion(candidate) !== null),
         );
-  const optionId = (index: number) => `${listId}-${index}`;
 
   useLayoutEffect(() => {
     if (placedCaret.current === null) return;
@@ -175,13 +176,17 @@ export function Composer({
   useLayoutEffect(() => {
     const element = box.current;
     if (!element) return;
+    // Chromium sizes an empty box to its wrapped placeholder, so both decide the height.
+    const shown = `${element.placeholder}\n${element.value}`;
+    if (fitted.current === shown) return;
+    fitted.current = shown;
     element.style.height = "auto";
     element.style.height = `${element.scrollHeight}px`;
-  }, [text]);
+  });
   useLayoutEffect(() => {
     const element = list.current;
     const option =
-      active < 0 ? null : document.getElementById(optionId(active));
+      active < 0 ? null : document.getElementById(optionId(listId, active));
     if (!element || !option) return;
     if (option.offsetTop < element.scrollTop)
       element.scrollTop = option.offsetTop;
@@ -284,7 +289,7 @@ export function Composer({
                       : "#all"
                 }
                 candidate={candidate}
-                id={optionId(index)}
+                id={optionId(listId, index)}
                 active={index === active}
                 onChoose={() => choose(index)}
               />
@@ -302,7 +307,9 @@ export function Composer({
           aria-autocomplete="list"
           aria-expanded={open}
           aria-controls={open ? listId : undefined}
-          aria-activedescendant={active < 0 ? undefined : optionId(active)}
+          aria-activedescendant={
+            active < 0 ? undefined : optionId(listId, active)
+          }
           placeholder={placeholder}
           value={text}
           readOnly={sending}
