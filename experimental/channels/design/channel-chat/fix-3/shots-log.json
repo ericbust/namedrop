@@ -1,102 +1,226 @@
 [
   {
+    "step": "offer-idle",
     "file": "offer-idle-390-light.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSend anyway",
+    "route": "@claude · build question · Working on it · Mentioned @codex, not sent · Send anyway",
+    "focus": null,
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-sending",
     "file": "offer-sending-390-light.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSending…",
+    "route": "@claude · build question · Working on it · Sending to @codex…",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-sent",
     "file": "offer-sent-390-light.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSent",
+    "route": "@claude · build question · Working on it · Sent to @codex",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-reached",
+    "file": null,
+    "route": "@claude, @codex · build question · @claude Working on it · @codex Delivered",
+    "focus": null,
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "offer-failed",
     "file": "offer-failed-390-light.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentCouldn't send to @codex. Try again",
+    "route": "@claude · build question · Working on it · Couldn't send to @codex · Try again",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "send-to-idle",
+    "file": null,
+    "route": "Couldn't check who this is for · Send to @codex, @claude",
+    "focus": null,
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "send-to-pressed",
+    "file": null,
+    "route": "Couldn't check who this is for · Send to @claude · Sending to @codex…",
+    "focus": "p1 @codex",
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "send-to-mixed",
     "file": "send-to-mixed-390-light.png",
-    "route": "Couldn't check who this is forSend to @codex Sent, Couldn't send to @claude. Try again",
+    "route": "Couldn't check who this is for · Sent to @codex · Couldn't send to @claude · Try again",
+    "focus": "p1 @claude",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-idle",
     "file": "offer-idle-1440-light.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSend anyway",
+    "route": "@claude · build question · Working on it · Mentioned @codex, not sent · Send anyway",
+    "focus": null,
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-sending",
     "file": "offer-sending-1440-light.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSending…",
+    "route": "@claude · build question · Working on it · Sending to @codex…",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-sent",
     "file": "offer-sent-1440-light.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSent",
+    "route": "@claude · build question · Working on it · Sent to @codex",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-reached",
+    "file": null,
+    "route": "@claude, @codex · build question · @claude Working on it · @codex Delivered",
+    "focus": null,
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "offer-failed",
     "file": "offer-failed-1440-light.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentCouldn't send to @codex. Try again",
+    "route": "@claude · build question · Working on it · Couldn't send to @codex · Try again",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "send-to-idle",
+    "file": null,
+    "route": "Couldn't check who this is for · Send to @codex, @claude",
+    "focus": null,
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "send-to-pressed",
+    "file": null,
+    "route": "Couldn't check who this is for · Send to @claude · Sending to @codex…",
+    "focus": "p1 @codex",
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "send-to-mixed",
     "file": "send-to-mixed-1440-light.png",
-    "route": "Couldn't check who this is forSend to @codex Sent, Couldn't send to @claude. Try again",
+    "route": "Couldn't check who this is for · Sent to @codex · Couldn't send to @claude · Try again",
+    "focus": "p1 @claude",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-idle",
     "file": "offer-idle-390-dark.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSend anyway",
+    "route": "@claude · build question · Working on it · Mentioned @codex, not sent · Send anyway",
+    "focus": null,
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-sending",
     "file": "offer-sending-390-dark.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSending…",
+    "route": "@claude · build question · Working on it · Sending to @codex…",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-sent",
     "file": "offer-sent-390-dark.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSent",
+    "route": "@claude · build question · Working on it · Sent to @codex",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-reached",
+    "file": null,
+    "route": "@claude, @codex · build question · @claude Working on it · @codex Delivered",
+    "focus": null,
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "offer-failed",
     "file": "offer-failed-390-dark.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentCouldn't send to @codex. Try again",
+    "route": "@claude · build question · Working on it · Couldn't send to @codex · Try again",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "send-to-idle",
+    "file": null,
+    "route": "Couldn't check who this is for · Send to @codex, @claude",
+    "focus": null,
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "send-to-pressed",
+    "file": null,
+    "route": "Couldn't check who this is for · Send to @claude · Sending to @codex…",
+    "focus": "p1 @codex",
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "send-to-mixed",
     "file": "send-to-mixed-390-dark.png",
-    "route": "Couldn't check who this is forSend to @codex Sent, Couldn't send to @claude. Try again",
+    "route": "Couldn't check who this is for · Sent to @codex · Couldn't send to @claude · Try again",
+    "focus": "p1 @claude",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-idle",
     "file": "offer-idle-1440-dark.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSend anyway",
+    "route": "@claude · build question · Working on it · Mentioned @codex, not sent · Send anyway",
+    "focus": null,
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-sending",
     "file": "offer-sending-1440-dark.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSending…",
+    "route": "@claude · build question · Working on it · Sending to @codex…",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-sent",
     "file": "offer-sent-1440-dark.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSent",
+    "route": "@claude · build question · Working on it · Sent to @codex",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "offer-reached",
+    "file": null,
+    "route": "@claude, @codex · build question · @claude Working on it · @codex Delivered",
+    "focus": null,
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "offer-failed",
     "file": "offer-failed-1440-dark.png",
-    "route": "@claudebuild questionWorking on itMentioned @codex, not sentCouldn't send to @codex. Try again",
+    "route": "@claude · build question · Working on it · Couldn't send to @codex · Try again",
+    "focus": "p1 @codex",
     "scroll": [0, 0, false]
   },
   {
+    "step": "send-to-idle",
+    "file": null,
+    "route": "Couldn't check who this is for · Send to @codex, @claude",
+    "focus": null,
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "send-to-pressed",
+    "file": null,
+    "route": "Couldn't check who this is for · Send to @claude · Sending to @codex…",
+    "focus": "p1 @codex",
+    "scroll": [0, 0, false]
+  },
+  {
+    "step": "send-to-mixed",
     "file": "send-to-mixed-1440-dark.png",
-    "route": "Couldn't check who this is forSend to @codex Sent, Couldn't send to @claude. Try again",
+    "route": "Couldn't check who this is for · Sent to @codex · Couldn't send to @claude · Try again",
+    "focus": "p1 @claude",
     "scroll": [0, 0, false]
   }
 ]
