@@ -89,9 +89,29 @@ fn dropping_a_fixture_stops_its_mailbox_and_status_workers() {
         .copied()
         .filter(|pid| unsafe { libc::kill(*pid, 0) } == 0)
         .collect();
-    for pid in &owned_pids {
+    for pid in &live {
         unsafe { libc::kill(*pid, libc::SIGKILL) };
     }
     drop(workers);
     assert!(live.is_empty(), "fixture drop left workers alive: {live:?}");
+}
+
+#[test]
+fn a_worker_does_not_recreate_a_deleted_state_directory() {
+    let f = xws::Fixture::new();
+    let state = f.state.clone();
+    fs::remove_dir_all(&state).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .args(["hook", "agent-status-worker"])
+        .env("HERDR_PLUGIN_STATE_DIR", &state)
+        .env("HERDR_SOCKET_PATH", "socket-a")
+        .env("HERDR_WORKSPACE_ID", "w1")
+        .env_remove("HERDR_PANE_ID")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        !state.exists(),
+        "a stale worker must leave the deleted state directory absent"
+    );
 }
