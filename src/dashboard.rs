@@ -1,4 +1,5 @@
 pub use crate::store::dashboard as rows;
+mod channel_delivery;
 mod channel_service;
 mod http;
 mod hub;

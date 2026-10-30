@@ -632,6 +632,10 @@ enum Route {
     Page,
     Session,
     Send(SpaceKey),
+    Deliver {
+        key: SpaceKey,
+        message_id: String,
+    },
     ThreadControl {
         key: SpaceKey,
         thread_id: String,
@@ -682,6 +686,14 @@ fn route(
         authenticate_mutation(request, session, host)?;
         if let Some(rest) = path.strip_prefix("/w/") {
             let segments: Vec<_> = rest.split('/').collect();
+            if let [key, "messages", message, "deliver"] = segments.as_slice() {
+                let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+                let message_id = decode_asset_path(message).ok_or(Status::NotFound)?;
+                if message_id.is_empty() || message_id.contains('/') {
+                    return Err(Status::NotFound);
+                }
+                return Ok(Route::Deliver { key, message_id });
+            }
             if let [key, "threads", thread, action] = segments.as_slice() {
                 let action = match *action {
                     "continue" => super::thread_controls::Action::Continue,
@@ -910,6 +922,43 @@ impl OperatorPost {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliverPost {
+    to: Vec<String>,
+}
+
+impl DeliverPost {
+    fn read(reader: &mut impl Read, request: &Request) -> Result<Self, Status> {
+        if request
+            .header("content-type")
+            .map(|value| value.split(';').next().unwrap_or("").trim())
+            != Some("application/json")
+        {
+            return Err(Status::BadRequest);
+        }
+        let length = request.header("content-length").ok_or(Status::BadRequest)?;
+        if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Status::BadRequest);
+        }
+        let length = length
+            .parse::<usize>()
+            .map_err(|_| Status::PayloadTooLarge)?;
+        if length > BODY_LIMIT {
+            return Err(Status::PayloadTooLarge);
+        }
+        let mut bytes = vec![0; length];
+        reader
+            .read_exact(&mut bytes)
+            .map_err(|_| Status::BadRequest)?;
+        let post: Self = serde_json::from_slice(&bytes).map_err(|_| Status::BadRequest)?;
+        if post.to.is_empty() {
+            return Err(Status::BadRequest);
+        }
+        Ok(post)
+    }
+}
+
 /// Cookies ignore ports, so the name carries it to keep two servers apart.
 fn cookie_name(port: u16) -> String {
     format!("namedrop_dashboard_{port}")
@@ -963,6 +1012,62 @@ fn serve_connection(
                 Err(status) => return respond_status(&mut writer, status),
             };
             send_operator_post(&mut writer, front, key, post)
+        }
+        Ok(Route::Deliver { key, message_id }) => {
+            let post = match DeliverPost::read(&mut reader, &request) {
+                Ok(post) => post,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            let admitted = match front.admit_mutation() {
+                Ok(guard) => guard,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+            match super::channel_delivery::apply(front.files.state(), &key, &message_id, &post.to) {
+                Ok((namespace, receipt)) => {
+                    let response = respond(
+                        &mut writer,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        receipt.to_string().as_bytes(),
+                    );
+                    drop(admitted);
+                    super::channel_service::drain(front.files.state(), &namespace);
+                    response
+                }
+                Err(error) => {
+                    use super::channel_delivery::DeliverError;
+                    use crate::store::channel_routing::ChannelDeliveryRefusal;
+                    let (status, message) = match error {
+                        DeliverError::Refused(ChannelDeliveryRefusal::NotFound) => {
+                            ("404 Not Found", "Channel post not found.")
+                        }
+                        DeliverError::Refused(ChannelDeliveryRefusal::InvalidMember) => (
+                            "400 Bad Request",
+                            "Choose current agent members of this channel.",
+                        ),
+                        DeliverError::Refused(ChannelDeliveryRefusal::Routing) => (
+                            "409 Conflict",
+                            "This post is still routing. Try again when routing finishes.",
+                        ),
+                        DeliverError::Refused(ChannelDeliveryRefusal::Stopped) => {
+                            ("409 Conflict", "This thread has stopped.")
+                        }
+                        DeliverError::Unavailable => (
+                            "503 Service Unavailable",
+                            "Channel delivery is unavailable.",
+                        ),
+                    };
+                    respond(
+                        &mut writer,
+                        status,
+                        "application/json",
+                        "",
+                        serde_json::json!({"error": message}).to_string().as_bytes(),
+                    )
+                }
+            }
         }
         Ok(Route::ThreadControl {
             key,
