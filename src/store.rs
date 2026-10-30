@@ -2599,12 +2599,12 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         message_id: &MessageId,
     ) -> Result<MessageRoute, StoreError> {
-        let (thread_id, author, grammar_version, source, author_kind, body, is_reply) = self
+        let (thread_id, author, grammar_version, source, author_kind, body, in_reply_to) = self
             .transaction
             .query_row(
                 "SELECT thread_id, author_address_id, author_alias_snapshot,
                         author_session_snapshot, grammar_version, authored_source,
-                        author_kind, body, in_reply_to IS NOT NULL
+                        author_kind, body, in_reply_to
                  FROM collaboration_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
                 params![
@@ -2627,7 +2627,7 @@ impl StateTransaction<'_> {
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
-                        row.get::<_, bool>(8)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 },
             )
@@ -2641,23 +2641,32 @@ impl StateTransaction<'_> {
             false,
         )?;
         let channel_thread = self.channel_thread(namespace, &thread_id)?;
-        let ask_source =
-            if channel_thread && is_reply && author_kind == ActorKind::AgentSession.as_str() {
-                &body
-            } else {
-                &source
-            };
-        let mentions = crate::message::context_mentions(ask_source);
+        let returned_to = match in_reply_to {
+            Some(parent_id)
+                if channel_thread && author_kind == ActorKind::AgentSession.as_str() =>
+            {
+                self.message_route(namespace, &MessageId::new(parent_id))?
+                    .asker_for(&author.address_id)
+                    .map(|asker| asker.address_id.clone())
+            }
+            _ => None,
+        };
+        let body_mentions = crate::message::context_mentions(&body);
+        let mentions = crate::message::context_mentions(&source);
         let operator_selection = author_kind == ActorKind::Human.as_str()
             && self.is_operator_address(namespace, &author.address_id)?
             && (channel_thread || self.channel_routing_state(namespace, message_id)?.is_some());
         let asked_addresses = recipients
             .iter()
             .filter(|recipient| {
-                operator_selection
-                    || mentions.iter().any(|mention| {
+                let named = |list: &[crate::message::BodyMention]| {
+                    list.iter().any(|mention| {
                         mention.workspace.is_none() && mention.alias == recipient.alias
                     })
+                };
+                operator_selection
+                    || named(&body_mentions)
+                    || (returned_to.as_ref() != Some(&recipient.address_id) && named(&mentions))
             })
             .map(|recipient| recipient.address_id.clone())
             .collect();

@@ -262,6 +262,44 @@ fn pulled_in_agent_answers_the_asker_without_repeating_its_name() {
 }
 
 #[test]
+fn leading_channel_asks_return_answers_to_the_asker() {
+    for source in [
+        "@operator @lead What is 6 times 7?",
+        "@operator, @lead, What is 6 times 7?",
+        "@operator: @lead: What is 6 times 7?",
+    ] {
+        let f = fixture();
+        let root = plain_root(&f, "leading-ask-root", "Please collaborate here.");
+        let question =
+            agent_reply(&f, "leading-ask-question", &root, "pane-1-planner", source).unwrap();
+        assert_eq!(recipient_aliases(&question), vec!["operator", "lead"]);
+        let answer = agent_reply(
+            &f,
+            "leading-ask-answer",
+            &question,
+            "pane-1-lead",
+            "@operator 42.",
+        )
+        .unwrap();
+        assert_eq!(
+            recipient_aliases(&answer),
+            vec!["operator", "planner"],
+            "{source}"
+        );
+        let report = agent_reply(
+            &f,
+            "leading-ask-report",
+            &answer,
+            "pane-1-planner",
+            r"@operator \@lead says 42.",
+        )
+        .unwrap();
+        assert_eq!(recipient_aliases(&report), vec!["operator"]);
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 3);
+    }
+}
+
+#[test]
 fn bound_answer_transport_recipient_does_not_turn_a_closing_report_into_an_ask() {
     let f = fixture();
     let root = plain_root(&f, "bound-root", "Please collaborate here.");
@@ -295,6 +333,56 @@ fn bound_answer_transport_recipient_does_not_turn_a_closing_report_into_an_ask()
     assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 3);
     assert_eq!(recipient_aliases(&report), vec!["operator"]);
     assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 1);
+}
+
+#[test]
+fn body_mention_of_the_return_address_establishes_a_new_ask() {
+    let f = fixture();
+    let root = plain_root(&f, "body-return-root", "Please collaborate here.");
+    let question = agent_reply(
+        &f,
+        "body-return-question",
+        &root,
+        "pane-1-planner",
+        "@operator @lead What is 6 times 7?",
+    )
+    .unwrap();
+    let counter_question = agent_reply(
+        &f,
+        "body-return-counter-question",
+        &question,
+        "pane-1-lead",
+        "@operator @planner Which base should I use, @planner?",
+    )
+    .unwrap();
+    assert_eq!(
+        recipient_aliases(&counter_question),
+        vec!["operator", "planner"]
+    );
+    let answer = agent_reply(
+        &f,
+        "body-return-answer",
+        &counter_question,
+        "pane-1-planner",
+        "@operator Base ten.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&answer), vec!["operator", "lead"]);
+    assert_eq!(
+        f.herdr.last_envelope("pane-1-lead")["untrusted_body"],
+        "Base ten."
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 4);
+    let report = agent_reply(
+        &f,
+        "body-return-report",
+        &answer,
+        "pane-1-lead",
+        "@operator The result is 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&report), vec!["operator"]);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 4);
 }
 
 #[test]
@@ -353,6 +441,19 @@ fn bound_answer_still_accepts_an_explicit_followup_question() {
     );
     assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 6);
     assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 3);
+    let second_answer = agent_reply(
+        &f,
+        "bound-leading-followup-answer",
+        &leading_followup,
+        "pane-1-lead",
+        "@operator 49.",
+    )
+    .unwrap();
+    assert_eq!(
+        recipient_aliases(&second_answer),
+        vec!["operator", "planner"]
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 7);
 }
 
 #[test]
