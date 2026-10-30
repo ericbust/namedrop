@@ -44,23 +44,28 @@ export function peekTargetOf(
 export const SLOW_AFTER_MS = 400;
 export const BUSY_AFTER_MS = 2000;
 export type Wait = "brief" | "slow" | "busy";
-type Shown = Readonly<{ screen: Screen; at: number }>;
+export type PeekSnapshot = Readonly<{ screen: Screen; at: number }>;
 export type PeekRead =
-  | { phase: "reading"; request: number; wait: Wait; shown: Shown | null }
-  | { phase: "shown"; request: number; shown: Shown }
+  | {
+      phase: "reading";
+      request: number;
+      wait: Wait;
+      shown: PeekSnapshot | null;
+    }
+  | { phase: "shown"; request: number; shown: PeekSnapshot }
   | {
       phase: "failed";
       request: number;
       failure: ScreenFailure;
-      shown: Shown | null;
+      shown: PeekSnapshot | null;
     };
 export type PeekReadEvent =
   | { type: "again" }
   | { type: "waited"; request: number; wait: Exclude<Wait, "brief"> }
   | { type: "settled"; request: number; result: ScreenResult; at: number };
 
-export function firstRead(): PeekRead {
-  return { phase: "reading", request: 1, wait: "brief", shown: null };
+export function firstRead(seed: PeekSnapshot | null = null): PeekRead {
+  return { phase: "reading", request: 1, wait: "brief", shown: seed };
 }
 const waitRank = { brief: 0, slow: 1, busy: 2 } satisfies Record<Wait, number>;
 export function peekReduce(read: PeekRead, event: PeekReadEvent): PeekRead {
@@ -94,7 +99,10 @@ export function peekReduce(read: PeekRead, event: PeekReadEvent): PeekRead {
             phase: "failed",
             request: read.request,
             failure: result.failure,
-            shown: read.shown,
+            shown:
+              result.failure === "busy" || result.failure === "unreachable"
+                ? read.shown
+                : null,
           };
     }
     default: {

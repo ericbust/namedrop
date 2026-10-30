@@ -11,7 +11,9 @@ import type { PeekTarget } from "../model.ts";
 import {
   BUSY_AFTER_MS,
   firstRead,
+  type PeekKey,
   type PeekNotice,
+  type PeekSnapshot,
   peekKey,
   peekReduce,
   peekView,
@@ -24,6 +26,41 @@ import { Icon } from "./Icons.tsx";
 import { measure } from "./measure.ts";
 import { useEscape } from "./useEscape.ts";
 
+type Retention = {
+  id: number;
+  snapshots: Map<PeekKey, PeekSnapshot>;
+};
+const retained = new WeakMap<ScreenReader, Retention>();
+let nextRetentionId = 0;
+const MAX_SCREENS = 8;
+const MAX_CHARACTERS = 512 * 1024;
+
+function retentionFor(reader: ScreenReader): Retention {
+  const existing = retained.get(reader);
+  if (existing) return existing;
+  const retention: Retention = { id: ++nextRetentionId, snapshots: new Map() };
+  retained.set(reader, retention);
+  return retention;
+}
+
+function retainSnapshot(
+  retention: Retention,
+  key: PeekKey,
+  snapshot: PeekSnapshot,
+) {
+  const { snapshots } = retention;
+  snapshots.delete(key);
+  if (snapshot.screen.text.length > MAX_CHARACTERS) return;
+  snapshots.set(key, snapshot);
+  let characters = 0;
+  for (const { screen } of snapshots.values()) characters += screen.text.length;
+  for (const [oldest, { screen }] of snapshots) {
+    if (snapshots.size <= MAX_SCREENS && characters <= MAX_CHARACTERS) break;
+    snapshots.delete(oldest);
+    characters -= screen.text.length;
+  }
+}
+
 type Props = {
   target: PeekTarget;
   who: PeekWho;
@@ -32,7 +69,15 @@ type Props = {
   paneId: string;
   onClose: () => void;
 };
-export function PeekDrawer({ target, who, paneId, onClose, ...rest }: Props) {
+export function PeekDrawer({
+  target,
+  who,
+  reader,
+  paneId,
+  onClose,
+  ...rest
+}: Props) {
+  const retention = retentionFor(reader);
   const pane = useRef<HTMLElement>(null);
   useEscape(pane, onClose);
   return (
@@ -43,18 +88,29 @@ export function PeekDrawer({ target, who, paneId, onClose, ...rest }: Props) {
       ref={pane}
     >
       <PeekScreen
-        key={peekKey(target)}
+        key={`${retention.id}/${peekKey(target)}`}
         target={target}
         who={who}
         onClose={onClose}
+        reader={reader}
+        retention={retention}
         {...rest}
       />
     </aside>
   );
 }
 
-function usePeekRead(target: PeekTarget, reader: ScreenReader) {
-  const [read, send] = useReducer(peekReduce, undefined, firstRead);
+function usePeekRead(
+  target: PeekTarget,
+  reader: ScreenReader,
+  retention: Retention,
+) {
+  const key = peekKey(target);
+  const [read, send] = useReducer(
+    peekReduce,
+    retention.snapshots.get(key) ?? null,
+    firstRead,
+  );
   const request = read.phase === "reading" ? read.request : null;
   useEffect(() => {
     if (request === null) return;
@@ -68,15 +124,23 @@ function usePeekRead(target: PeekTarget, reader: ScreenReader) {
       BUSY_AFTER_MS,
     );
     void reader(target, controller.signal).then((result) => {
-      if (!controller.signal.aborted)
-        send({ type: "settled", request, result, at: Date.now() });
+      if (controller.signal.aborted) return;
+      const at = Date.now();
+      if (result.kind === "text") {
+        retainSnapshot(retention, key, { screen: result.screen, at });
+      } else if (result.failure === "session") {
+        retention.snapshots.clear();
+      } else if (result.failure === "missing" || result.failure === "closed") {
+        retention.snapshots.delete(key);
+      }
+      send({ type: "settled", request, result, at });
     });
     return () => {
       controller.abort();
       clearTimeout(slow);
       clearTimeout(busy);
     };
-  }, [request, target, reader]);
+  }, [request, target, reader, retention, key]);
   const again = useCallback(() => send({ type: "again" }), []);
   return { read, again };
 }
@@ -115,8 +179,9 @@ function PeekScreen({
   reader,
   startedAt,
   onClose,
-}: Omit<Props, "paneId">) {
-  const { read, again } = usePeekRead(target, reader);
+  retention,
+}: Omit<Props, "paneId"> & { retention: Retention }) {
+  const { read, again } = usePeekRead(target, reader, retention);
   const view = peekView(read, who);
   const { body } = view;
   const screen = useRef<HTMLElement>(null);

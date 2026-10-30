@@ -3,7 +3,9 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname } from "node:path";
 import { after, before, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { build } from "vite";
 
 const key = (n) => n.toString(16).padStart(20, "0");
 const fixture = JSON.parse(
@@ -4633,7 +4635,7 @@ test("UI-4: a slow first read shows nothing for 400 ms, then names the screen, t
   assert.equal(await note.count(), 0);
 });
 
-test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and failures over text become a bar", async (t) => {
+test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and session failure replaces text", async (t) => {
   const answers = [
     { status: 410, body: "This participant's pane is no longer available.\n" },
     { status: 503, body: "Screen is temporarily unavailable.\n" },
@@ -4675,8 +4677,10 @@ test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and 
     /Read at \d/,
   );
   await bar.getByRole("button", { name: "Try again", exact: true }).click();
-  await bar.getByText("Session ended", { exact: true }).waitFor();
-  assert.equal(await bar.getByRole("button").count(), 0);
+  await failure.getByText("Session ended", { exact: true }).waitFor();
+  assert.equal(await failure.getByRole("button").count(), 0);
+  assert.equal(await screenText(ui).textContent(), "");
+  assert.equal(await bar.count(), 0);
   assert.equal(ui.screens.requests.length, 5);
 });
 
@@ -4814,6 +4818,458 @@ test("UI-4: the drawer is 480 wide at 1440 and 400 at 1024, opening a row select
   );
   assert.equal(await row.getAttribute("aria-expanded"), "false");
 });
+
+test("CL-K: reopening shows the last screen and original stamp before a fresh full response", async (t) => {
+  let release = () => {};
+  let reads = 0;
+  const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
+    onScreen: async () => {
+      const read = ++reads;
+      if (read === 2) await new Promise((resolve) => (release = resolve));
+      return { body: `full screen ${read}` };
+    },
+  });
+  t.after(() => release());
+  await ui.live();
+  await ui.page.clock.install({ time: new Date("2026-10-29T12:00:00Z") });
+  const chip = ui.page
+    .locator(".members")
+    .getByRole("button", { name: /@codex/ });
+  await chip.click();
+  await screenText(ui).getByText("full screen 1").waitFor();
+  const stamp = await drawer(ui).locator(".peek-where").textContent();
+  await ui.page.keyboard.press("Escape");
+  await drawer(ui).waitFor({ state: "detached" });
+  await ui.page.clock.setFixedTime(new Date("2026-10-29T12:02:00Z"));
+  await chip.click();
+  await until(
+    () => ui.screens.requests.length === 2,
+    "the fresh reopen request",
+  );
+  assert.equal(
+    await screenText(ui).textContent(),
+    "full screen 1",
+    "reopen retains successful text while the full read is pending",
+  );
+  assert.equal(
+    await drawer(ui).locator(".peek-where").textContent(),
+    stamp,
+    "reopen keeps the original read time",
+  );
+  assert.equal(
+    await drawer(ui)
+      .getByRole("button", { name: "Refresh" })
+      .getAttribute("aria-disabled"),
+    "true",
+  );
+  release();
+  await screenText(ui).getByText("full screen 2").waitFor();
+  assert.notEqual(await drawer(ui).locator(".peek-where").textContent(), stamp);
+  assert.deepEqual(
+    ui.screens.requests.map(({ key: channel, address }) => [channel, address]),
+    [
+      [key(1), "codex"],
+      [key(1), "codex"],
+    ],
+  );
+});
+
+let peekHarnessBuild;
+async function openPeekHarness(t) {
+  peekHarnessBuild ??= build({
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    configFile: false,
+    logLevel: "silent",
+    build: { write: false, rollupOptions: { input: "virtual:peek-harness" } },
+    plugins: [
+      {
+        name: "peek-harness",
+        resolveId(id) {
+          if (id === "virtual:peek-harness") return "\0peek-harness";
+        },
+        load(id) {
+          if (id !== "\0peek-harness") return;
+          return `
+          import { createElement } from "react";
+          import { createRoot } from "react-dom/client";
+          import { PeekDrawer } from "./src/ui/PeekDrawer.tsx";
+          const root = createRoot(document.getElementById("root"));
+          const requests = [];
+          const readers = Array.from({length: 2}, () => (target, signal) =>
+            new Promise(resolve => requests.push({ target, signal, resolve })));
+          const close = () => root.render(null);
+          window.peekHarness = {
+            requests,
+            close,
+            open(member = "codex", channel = "alpha", reader = 0) {
+              root.render(createElement(PeekDrawer, {
+                target: { channel, member, alias: "@" + member, kind: "agent" },
+                who: { alias: "@" + member, kind: "agent", activity: "working", channel: {label: "#" + channel, suffix: null} },
+                reader: readers[reader], startedAt: performance.now(), paneId: "peek", onClose: close,
+              }));
+            },
+            settle(index, text, failure = null) {
+              requests[index].resolve(failure === null
+                ? {kind: "text", screen: {text, earlierOmitted: false}}
+                : {kind: "failed", failure});
+            },
+          };
+        `;
+        },
+      },
+    ],
+  });
+  const bundle = await peekHarnessBuild;
+  const source = bundle.output.find((entry) => entry.type === "chunk").code;
+  const server = createServer((req, res) => {
+    res.writeHead(200, {
+      "Content-Type": req.url === "/peek.js" ? "text/javascript" : "text/html",
+    });
+    res.end(
+      req.url === "/peek.js"
+        ? source
+        : '<div id="root"></div><script type="module" src="/peek.js"></script>',
+    );
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  t.after(async () => {
+    await page.close();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    assert.deepEqual(errors, []);
+  });
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.waitForFunction(() => window.peekHarness !== undefined);
+  let reads = 0;
+  return {
+    page,
+    async show(member = "codex", channel = "alpha", reader = 0) {
+      await page.evaluate(
+        ([member, channel, reader]) =>
+          window.peekHarness.open(member, channel, reader),
+        [member, channel, reader],
+      );
+      await page.waitForFunction(
+        (count) => window.peekHarness.requests.length === count,
+        ++reads,
+      );
+    },
+    async close() {
+      await page.evaluate(() => window.peekHarness.close());
+      await page.locator("aside.peek").waitFor({ state: "detached" });
+    },
+    async settle(text, failure = null, index = reads - 1) {
+      await page.evaluate(
+        ([index, text, failure]) =>
+          window.peekHarness.settle(index, text, failure),
+        [index, text, failure],
+      );
+      if (failure === null) {
+        await page.waitForFunction(
+          () =>
+            document
+              .querySelector(".peek-refresh")
+              ?.getAttribute("aria-disabled") === null,
+        );
+      } else {
+        await page.locator('[role="status"]').waitFor();
+      }
+    },
+    text: () =>
+      page
+        .getByRole("region", { name: "Screen text", exact: true })
+        .textContent(),
+  };
+}
+
+test("CL-K: targets, channels and readers isolate retained text, including reader replacement while mounted", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show();
+  await ui.settle("alpha codex");
+  await ui.show("lead");
+  assert.equal(await ui.text(), "");
+  await ui.settle("alpha lead");
+  await ui.show("codex", "beta");
+  assert.equal(await ui.text(), "");
+  await ui.settle("beta codex");
+  await ui.show();
+  assert.equal(await ui.text(), "alpha codex");
+  await ui.settle("alpha codex fresh");
+  await ui.show("codex", "alpha", 1);
+  assert.equal(
+    await ui.text(),
+    "",
+    "replacing the reader resets mounted state",
+  );
+  await ui.settle("second reader");
+  await ui.show();
+  assert.equal(await ui.text(), "alpha codex fresh");
+  await ui.show("codex", "beta");
+  assert.equal(await ui.text(), "beta codex");
+  await ui.settle("", "session");
+  await ui.show("codex", "alpha", 1);
+  assert.equal(
+    await ui.text(),
+    "second reader",
+    "session failure clears only its reader scope",
+  );
+});
+
+test("CL-K: a late aborted completion cannot replace mounted text or retained snapshots", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show();
+  await ui.settle("accepted");
+  await ui.close();
+  await ui.show();
+  await ui.close();
+  await ui.show("lead");
+  await ui.settle("lead accepted");
+  assert.equal(
+    await ui.page.evaluate(() => window.peekHarness.requests[1].signal.aborted),
+    true,
+  );
+  await ui.page.evaluate(() => window.peekHarness.settle(1, "late aborted"));
+  assert.equal(await ui.text(), "lead accepted");
+  await ui.show();
+  assert.equal(
+    await ui.text(),
+    "accepted",
+    "the aborted completion never enters retention",
+  );
+  await ui.close();
+  await ui.page.evaluate(() => window.peekHarness.settle(3, "", "session"));
+  await ui.show("lead");
+  assert.equal(
+    await ui.text(),
+    "lead accepted",
+    "an aborted session failure cannot clear retention",
+  );
+});
+
+test("CL-K: successful empty reads replace prior retained text", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show();
+  await ui.settle("prior");
+  await ui.close();
+  await ui.show();
+  await ui.settle("");
+  await ui.page.getByText("The screen is empty.", { exact: true }).waitFor();
+  await ui.close();
+  await ui.show();
+  assert.equal(await ui.text(), "");
+  await ui.page.getByText("The screen is empty.", { exact: true }).waitFor();
+});
+
+test("CL-K: transient failures preserve retention, target failures remove one screen, and session failure clears the reader", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show("lead");
+  await ui.settle("lead retained");
+  for (const failure of [
+    "busy",
+    "unreachable",
+    "missing",
+    "closed",
+    "session",
+  ]) {
+    await ui.show();
+    await ui.settle("codex retained");
+    await ui.close();
+    await ui.show();
+    await ui.settle("", failure);
+    assert.equal(
+      await ui.text(),
+      failure === "busy" || failure === "unreachable" ? "codex retained" : "",
+      "only transient failures keep mounted text",
+    );
+    await ui.close();
+    await ui.show();
+    assert.equal(
+      await ui.text(),
+      failure === "busy" || failure === "unreachable" ? "codex retained" : "",
+    );
+    await ui.show("lead");
+    assert.equal(await ui.text(), failure === "session" ? "" : "lead retained");
+    await ui.close();
+  }
+});
+
+test("CL-K: retention holds at most eight screens and reads do not renew insertion order", async (t) => {
+  const ui = await openPeekHarness(t);
+  for (let n = 0; n < 8; n++) {
+    await ui.show(`member${n}`);
+    await ui.settle(`screen ${n}`);
+  }
+  await ui.show("member0");
+  assert.equal(await ui.text(), "screen 0");
+  await ui.show("member8");
+  await ui.settle("screen 8");
+  await ui.show("member0");
+  assert.equal(
+    await ui.text(),
+    "",
+    "a cache read does not prevent oldest-entry eviction",
+  );
+  await ui.show("member1");
+  assert.equal(await ui.text(), "screen 1");
+  await ui.settle("member1 updated");
+  await ui.show("member9");
+  await ui.settle("screen 9");
+  await ui.show("member2");
+  assert.equal(await ui.text(), "");
+  await ui.show("member1");
+  assert.equal(
+    await ui.text(),
+    "member1 updated",
+    "successful writes renew insertion order",
+  );
+});
+
+test("CL-K: character bounds evict old text and oversized success invalidates a prior snapshot", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show("oldest");
+  await ui.settle("old");
+  await ui.show("largest");
+  await ui.settle("x".repeat(512 * 1024));
+  await ui.show("oldest");
+  assert.equal(
+    await ui.text(),
+    "",
+    "total retained characters stay within 512 Ki",
+  );
+  await ui.show("largest");
+  assert.equal(
+    (await ui.text()).length,
+    512 * 1024,
+    "the exact character limit is retained",
+  );
+  await ui.settle("y".repeat(512 * 1024 + 1));
+  assert.equal(
+    (await ui.text()).length,
+    512 * 1024 + 1,
+    "oversized success still renders",
+  );
+  await ui.close();
+  await ui.show("largest");
+  assert.equal(
+    await ui.text(),
+    "",
+    "oversized success removes its previous snapshot",
+  );
+});
+
+for (const status of [404, 410, 401, 403]) {
+  test(`CL-K: HTTP ${status} invalidates retained text at the parsed failure boundary`, async (t) => {
+    let release = () => {};
+    const gate = new Promise((resolve) => (release = resolve));
+    const answers = {
+      codex: [{ body: "codex retained" }, { status }, null],
+      lead: [{ body: "lead retained" }, null],
+    };
+    const ui = await open(
+      t,
+      (client) => replay(client, busyTeam()),
+      undefined,
+      {
+        onScreen: async ({ address }) => {
+          const answer = answers[address].shift();
+          if (answer !== null) return answer;
+          await gate;
+          return { body: "fresh" };
+        },
+      },
+    );
+    t.after(() => release());
+    await ui.live();
+    const members = ui.page.locator(".members");
+    const codex = members.getByRole("button", { name: /@codex/ });
+    const lead = members.getByRole("button", { name: /@lead/ });
+    await codex.click();
+    await screenText(ui).getByText("codex retained").waitFor();
+    await lead.click();
+    await screenText(ui).getByText("lead retained").waitFor();
+    await codex.click();
+    await drawer(ui).locator(".peek-failure").waitFor();
+    assert.equal(await screenText(ui).textContent(), "");
+    await ui.page.keyboard.press("Escape");
+    await drawer(ui).waitFor({ state: "detached" });
+    await codex.click();
+    await until(
+      () => ui.screens.requests.length === 4,
+      "the uncached target read",
+    );
+    assert.equal(await screenText(ui).textContent(), "");
+    await lead.click();
+    await until(
+      () => ui.screens.requests.length === 5,
+      "the other target read",
+    );
+    assert.equal(
+      await screenText(ui).textContent(),
+      status === 401 || status === 403 ? "" : "lead retained",
+    );
+  });
+}
+
+for (const status of [404, 410, 401, 403]) {
+  test(`CL-K fix 1: HTTP ${status} replaces retained text and its old stamp after reopen`, async (t) => {
+    let release = () => {};
+    let reads = 0;
+    const gate = new Promise((resolve) => (release = resolve));
+    const ui = await open(
+      t,
+      (client) => replay(client, busyTeam()),
+      undefined,
+      {
+        onScreen: async () => {
+          if (++reads === 1) return { body: "old screen before pane closes" };
+          await gate;
+          return { status };
+        },
+      },
+    );
+    t.after(() => release());
+    await ui.live();
+    const chip = ui.page
+      .locator(".members")
+      .getByRole("button", { name: /@codex/ });
+    await chip.click();
+    await screenText(ui).getByText("old screen before pane closes").waitFor();
+    await ui.page.keyboard.press("Escape");
+    await drawer(ui).waitFor({ state: "detached" });
+    await chip.click();
+    await until(
+      () => ui.screens.requests.length === 2,
+      "the reopen screen request",
+    );
+    assert.equal(
+      await screenText(ui).textContent(),
+      "old screen before pane closes",
+    );
+    release();
+    await ui.page.waitForFunction(
+      () =>
+        document
+          .querySelector(".peek-refresh")
+          ?.getAttribute("aria-disabled") === null,
+    );
+    assert.equal(
+      await screenText(ui).textContent(),
+      "",
+      "failed target or session must remove retained screen text",
+    );
+    assert.equal(await drawer(ui).locator(".peek-bar").count(), 0);
+    assert.equal(await drawer(ui).locator(".peek-failure").count(), 1);
+    assert.doesNotMatch(
+      await drawer(ui).locator(".peek-where").textContent(),
+      /Read at/,
+    );
+    assert.equal(ui.screens.requests.length, 2);
+  });
+}
 
 function actionableAttention(kind = "reply") {
   const value = frame(1, "alpha", "needs_you");
