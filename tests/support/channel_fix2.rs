@@ -579,3 +579,71 @@ fn manually_delivered_router_followup_under_a_mention_root_keeps_agent_thread_mo
         .expect("manual delivery envelope for lead");
     assert_eq!(envelope["control"]["reply_mode"], "agent_thread");
 }
+
+#[test]
+fn bare_member_with_leading_punctuation_routes_without_a_model() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in ["planner, inspect", "planner: inspect"].iter().enumerate() {
+        let (status, receipt) = post(&server, &format!("bare-member-{index}"), source, None);
+        assert_eq!(status, 200, "{source}: {receipt}");
+        assert_eq!(
+            recipient_aliases(&receipt),
+            ["planner"],
+            "{source}: {receipt}"
+        );
+        assert!(receipt.get("channel").is_none());
+        let body: String = f
+            .db()
+            .query_row(
+                "SELECT body FROM collaboration_messages WHERE message_id=?1",
+                [receipt["message_id"].as_str().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(body, "inspect");
+    }
+    assert!(calls(&f).is_empty());
+}
+
+#[test]
+fn bound_channel_report_from_the_delivered_template_does_not_bounce() {
+    for report_body in [
+        r"\@lead says 6 times 7 is 42.",
+        r"\\@lead says 6 times 7 is 42.",
+    ] {
+        let f = fixture();
+        let root = plain_root(&f, "bound-template-root", "Please collaborate here.");
+        let question = agent_reply(
+            &f,
+            "bound-template-question",
+            &root,
+            "pane-1-planner",
+            "@operator Sure, asking now. @lead what is 6 times 7?",
+        )
+        .unwrap();
+        let reply_from_template = |pane: &str, body: &str| {
+            let envelope = f.herdr.last_envelope(pane);
+            let mut input = envelope["control"]["tool"]["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|operation| operation["token"] == "reply")
+                .unwrap()["input"]
+                .clone();
+            input["source"] = input["source"]
+                .as_str()
+                .unwrap()
+                .replace("<reply body>", body)
+                .into();
+            namedrop::execute_message_operation("reply", input, &f.runtime("w1", pane)).unwrap()
+        };
+        let answer = reply_from_template("pane-1-lead", "6 times 7 is 42.");
+        assert_eq!(recipient_aliases(&question), ["operator", "lead"]);
+        assert_eq!(recipient_aliases(&answer), ["operator", "planner"]);
+        let report = reply_from_template("pane-1-planner", report_body);
+        assert_eq!(recipient_aliases(&report), ["operator"], "{report_body}");
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 3);
+        assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 1);
+    }
+}
