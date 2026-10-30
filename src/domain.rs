@@ -237,6 +237,7 @@ pub struct ThreadControlState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActiveThreadResponse {
     pub attempt_id: DeliveryAttemptId,
+    pub binding_id: PaneBindingId,
     pub pane_id: String,
     pub agent_session_id: AgentSessionId,
     pub binding_active: bool,

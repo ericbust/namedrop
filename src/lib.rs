@@ -22,6 +22,7 @@ mod lifecycle;
 #[doc(hidden)]
 pub mod linux_sandbox;
 mod message;
+mod pane_effects;
 mod persona;
 mod ports;
 mod runtime;

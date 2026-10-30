@@ -1,8 +1,6 @@
 use super::snapshot::SpaceKey;
 pub(super) use super::snapshot::ThreadAction as Action;
-use crate::{
-    ActorKind, HerdrCommandExecutor, MutationAttribution, StateStore, StoreError, ThreadId,
-};
+use crate::{ActorKind, MutationAttribution, StateStore, StoreError, ThreadId};
 use serde_json::{Value, json};
 use std::{error::Error, path::Path};
 
@@ -23,12 +21,12 @@ fn store_error(error: StoreError) -> ControlError {
     }
 }
 
-pub(super) fn apply(
+pub(super) fn commit(
     state: &Path,
     key: &SpaceKey,
     thread_id: &str,
     action: Action,
-) -> Result<(crate::StateNamespace, Value), ControlError> {
+) -> Result<CommittedControl, ControlError> {
     let namespace = StateStore::open_read_only(state)
         .and_then(|store| store.map(|mut store| store.dashboard_spaces()).transpose())
         .map_err(store_error)?
@@ -61,63 +59,161 @@ pub(super) fn apply(
             }
         })
         .map_err(store_error)?;
-    drop(store);
-    let herdr =
-        crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
-    let mut receipt = json!({"state": control});
-    if let Some(stopped) = stopped {
-        let mut interrupted = Vec::new();
-        let mut warnings = Vec::new();
-        if !stopped.active_responses.is_empty() {
-            let live = crate::discover_worktree_for_workspace(&herdr, namespace.space_id.as_str());
-            let mut store = StateStore::open(state).map_err(store_error)?;
-            store
-                .transaction(|tx| {
-                    // Keep settlement and the next Namedrop dispatch behind the interrupt.
-                    let inflight = tx.inflight_delivery_attempts(&namespace)?;
-                    for response in &stopped.active_responses {
-                        let proven_running = response.binding_active
-                            && inflight.iter().any(|current| {
-                                current.attempt_id == response.attempt_id
-                                    && current.binding_active
-                                    && current.pane_id == response.pane_id
-                                    && current.agent_session_id == response.agent_session_id
-                                    && matches!(
-                                        current.state,
-                                        crate::DeliveryState::Submitted | crate::DeliveryState::Acknowledged
-                                    )
-                            })
-                            && live.as_ref().is_ok_and(|discovered| {
-                                discovered.workspace_id == namespace.space_id.as_str()
-                                    && discovered.panes.iter().any(|pane| {
-                                        pane.pane_id == response.pane_id
-                                            && pane.agent_session_id.as_ref()
-                                                == Some(&response.agent_session_id)
-                                            && pane.agent_status.as_deref() == Some("working")
-                                    })
-                            });
-                        if !proven_running {
-                            warnings.push(format!(
-                                "Did not interrupt {} because the stopped thread could not be proven to own its current response.",
-                                response.pane_id
-                            ));
-                            continue;
-                        }
-                        match herdr.execute(&["agent", "send-keys", &response.pane_id, "ctrl+c"]) {
-                            Ok(_) => interrupted.push(response.pane_id.clone()),
-                            Err(error) => warnings.push(format!(
-                                "Could not interrupt {} after stopping the thread: {error}",
-                                response.pane_id
-                            )),
-                        }
-                    }
-                    Ok(())
-                })
-                .map_err(store_error)?;
-        }
-        receipt["cancelled_delivery_ids"] = json!(stopped.cancelled_delivery_ids);
-        receipt["interrupted_pane_ids"] = json!(interrupted);
-        receipt["warnings"] = json!(warnings);
+    Ok(CommittedControl {
+        namespace,
+        control,
+        stopped,
+    })
+}
+
+pub(super) struct CommittedControl {
+    namespace: crate::StateNamespace,
+    control: crate::ThreadControlState,
+    stopped: Option<crate::ThreadStopResult>,
+}
+
+impl CommittedControl {
+    pub(super) fn respond<T>(
+        self,
+        state: &Path,
+        completion: CompletionPermit,
+        respond: impl FnOnce(&Value) -> T,
+        drain: impl FnOnce(&crate::StateNamespace),
+    ) -> T {
+        let (namespace, receipt) = self.finish(state);
+        drop(completion);
+        let result = respond(&receipt);
+        drain(&namespace);
+        result
     }
-    Ok((namespace, receipt))
+
+    fn finish(self, state: &Path) -> (crate::StateNamespace, Value) {
+        let Self {
+            namespace,
+            control,
+            stopped,
+        } = self;
+        let mut receipt = json!({"state": control});
+        if let Some(stopped) = stopped {
+            let herdr = crate::ProcessHerdr::default()
+                .with_socket(Some(namespace.session_socket_id.clone()));
+            let report = crate::pane_effects::interrupt_if_current(
+                state,
+                &namespace,
+                &stopped.active_responses,
+                &herdr,
+                None,
+            );
+            receipt["cancelled_delivery_ids"] = json!(stopped.cancelled_delivery_ids);
+            receipt["interrupted_pane_ids"] = json!(report.interrupted_pane_ids);
+            receipt["warnings"] = json!(report.warnings);
+        }
+        (namespace, receipt)
+    }
+}
+
+#[derive(Clone, Default)]
+pub(super) struct ControlEffects(std::sync::Arc<Completion>);
+
+#[derive(Default)]
+struct Completion {
+    count: std::sync::Mutex<usize>,
+    finished: std::sync::Condvar,
+}
+
+pub(super) struct CompletionPermit(std::sync::Arc<Completion>);
+
+impl ControlEffects {
+    pub(super) fn track(&self) -> CompletionPermit {
+        *self
+            .0
+            .count
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) += 1;
+        CompletionPermit(self.0.clone())
+    }
+
+    pub(super) fn wait(&self) {
+        drop(
+            self.0
+                .finished
+                .wait_while(
+                    self.0
+                        .count
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner()),
+                    |count| *count != 0,
+                )
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+    }
+}
+
+impl Drop for CompletionPermit {
+    fn drop(&mut self) {
+        let mut count = self
+            .0
+            .count
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *count -= 1;
+        self.0.finished.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn handoff_waits_for_effects_and_slow_response_releases_completion() {
+        let effects = ControlEffects::default();
+        let permit = effects.track();
+        let (waiting, entered) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let (responding, response_entered) = mpsc::channel();
+        let (release, response_release) = mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                waiting.send(()).unwrap();
+                effects.wait();
+                finished.send(()).unwrap();
+            });
+            entered.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(
+                done.recv_timeout(Duration::from_millis(50)).is_err(),
+                "handoff passed committed effects"
+            );
+            scope.spawn(move || {
+                let committed = CommittedControl {
+                    namespace: crate::StateNamespace::for_space("socket", "space"),
+                    control: crate::ThreadControlState {
+                        stopped: false,
+                        paused: false,
+                        reply_allowance: 10,
+                        reply_limit_paused: false,
+                    },
+                    stopped: None,
+                };
+                let result = committed.respond(
+                    Path::new("/nonexistent-namedrop-control-test"),
+                    permit,
+                    |_| {
+                        responding.send(()).unwrap();
+                        response_release.recv().unwrap();
+                        Err::<(), _>("disconnected response")
+                    },
+                    |namespace| assert_eq!(namespace.space_id.as_str(), "space"),
+                );
+                assert_eq!(result, Err("disconnected response"));
+            });
+            response_entered
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap();
+            let completed = done.recv_timeout(Duration::from_secs(1));
+            release.send(()).unwrap();
+            completed.expect("slow response retained control effects completion");
+        });
+    }
 }

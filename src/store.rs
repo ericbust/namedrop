@@ -3253,7 +3253,7 @@ impl StateTransaction<'_> {
         self.thread_control_state(namespace, thread_id)?;
         let active_responses = {
             let mut statement = self.transaction.prepare(
-                "SELECT a.attempt_id, b.pane_id, a.agent_session_id, b.active
+                "SELECT a.attempt_id, b.pane_id, a.agent_session_id, b.active, a.binding_id
                  FROM delivery_attempts a
                  JOIN delivery_attempt_state s USING (
                     session_socket_id, worktree_id, attempt_id, address_id
@@ -3284,6 +3284,7 @@ impl StateTransaction<'_> {
                             pane_id: row.get(1)?,
                             agent_session_id: crate::AgentSessionId::new(row.get::<_, String>(2)?),
                             binding_active: row.get(3)?,
+                            binding_id: crate::PaneBindingId::new(row.get::<_, String>(4)?),
                         })
                     },
                 )?

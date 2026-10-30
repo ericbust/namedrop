@@ -599,15 +599,21 @@ where
     // Immediately before dispatch: the pane must still hold the exact Agent
     // Session the popup was opened for, so a replacement session can never
     // receive the session-bound diagnostics of the one it replaced.
+    let effects = crate::pane_effects::PaneEffects::acquire(
+        runtime.state_directory,
+        runtime.session_socket_id,
+        pane_id,
+    )?;
     let live = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
     }
     let prompt = doctor_assistance_prompt(&report, pane_id, &live);
-    match runtime
-        .herdr
-        .execute(&["agent", "prompt", pane_id, &prompt])
-    {
+    match effects.prompt(
+        runtime.herdr,
+        &crate::pane_effects::InputOwner::Other,
+        &prompt,
+    ) {
         Ok(_) => Ok(()),
         Err(error)
             if runtime.herdr.classify_prompt_failure(&error)

@@ -255,6 +255,7 @@ fn run_server(
     let (hub, commands) = mpsc::channel();
     let mutations = Arc::new(std::sync::Mutex::new(()));
     let restarting = Arc::new(AtomicBool::new(false));
+    let control_effects = thread_controls::ControlEffects::default();
     let front = Arc::new(http::Front {
         port,
         files: ServerFiles::at(state)?,
@@ -266,6 +267,7 @@ fn run_server(
         restarting: restarting.clone(),
         mutations: mutations.clone(),
         channel_wake: channel_service.wake(),
+        control_effects: control_effects.clone(),
     });
     let stop = Arc::new(AtomicBool::new(false));
     let accept_stop = stop.clone();
@@ -279,6 +281,7 @@ fn run_server(
             .lock()
             .map_err(|_| "dashboard mutation lock poisoned".to_owned())?;
     }
+    control_effects.wait();
     channel_service.shutdown()?;
     match verdict {
         hub::Verdict::Handoff(_) => {
