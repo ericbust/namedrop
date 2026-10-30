@@ -138,6 +138,15 @@ export function evidenceReduce(
     }
   }
 }
+export function responderOf(
+  item: Attention,
+  members: ReadonlyMap<AddressId, Member>,
+): Member | null {
+  const response = item.response;
+  return response && "addressId" in response
+    ? (members.get(response.addressId) ?? null)
+    : null;
+}
 export function attentionConversation(
   item: Attention,
   channel: Pick<ChannelSnapshot, "messages">,

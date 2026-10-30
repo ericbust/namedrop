@@ -377,21 +377,23 @@ When the channel needs you, show a banner between the member strip and the
 timeline, 24px from the sides. It uses `--attention-bg`, a 1px `--attention-line`
 border, and `--radius-lg`. Each item is one row: a 16px drawn alert icon in
 `--blocked`, the title at 14px 600 in `--text`, the hint in 13px muted, and the
-age at the right, such as "4 min". A **Details** text button reveals the server's
+age at the right, such as "4 min". Under the hint, the item's actions sit on one
+wrapping row of 13px text buttons, 12px apart, such as "Show message · Reply to
+@quiet · Details". **Details** is always on that row; it reveals the server's
 full summary in 13px muted text. Show three items, then a "Show N more" button.
 The banner takes at most 40 percent of the window height and scrolls inside.
 Announce new items through a polite live region.
 
-| `source`                                | Title                                                                                                | Hint                                                 |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Open its pane in Herdr to answer.                    |
-| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.            |
-| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.          |
-| `coordination`                          | Coordination needs a decision                                                                        | Review the report and close it from the lead's pane. |
-| `context_grant`                         | Context request waiting                                                                              | Approve or decline it from the pane.                 |
-| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                 |
-| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                    |
-| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                   |
+| `source`                                | Title                                                                                                | Hint                                                |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                     |
+| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.           |
+| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.         |
+| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.              |
+| `context_grant`                         | Context request waiting                                                                              | Approve or decline it in the agent's pane in Herdr. |
+| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                |
+| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                   |
+| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                  |
 
 Never cut the server's summary mid-word into the visible line. When an
 `agent_status` summary is longer than 90 characters, use the `unknown` title and
@@ -401,7 +403,7 @@ When the item names its agent (`subject_alias`), the title names it too. For an
 unanswered request that reads "@codex didn't answer a request", with the hint
 "It ended its turn without replying." When the item names a message
 (`message_id`) that is loaded in the timeline, a **Show message** text button
-follows the hint. It scrolls the message to the middle of the timeline, tints it
+starts the action row. It scrolls the message to the middle of the timeline, tints it
 with `--bg-selected` for 1.5 seconds, and opens its thread. When that message is
 not loaded, the button is absent. A conversation the item opens in the thread
 pane marks its target the same way: `--bg-selected` for 1.5 seconds, then it
@@ -420,7 +422,26 @@ The tint never stays.
 | `unknown`                                  | "@codex needs you"                                                           |
 
 A short `agent_status` summary already names the agent, so it stays as the
-server wrote it. Hints keep their wording from the first table.
+server wrote it. Hints keep their wording from the first table, except where
+the item's response decides them below.
+
+**Response.** An item's `response` names the most direct answer the page can
+offer, and its button names the action and the person:
+
+| `response` | Button                 | What it does                                                         |
+| ---------- | ---------------------- | -------------------------------------------------------------------- |
+| `reply`    | "Reply to @quiet"      | Opens the conversation with the reply box addressed to that agent.   |
+| `message`  | "Message @claude"      | Opens the conversation and prepares a channel message to that agent. |
+| `pane`     | "See @worker's screen" | Opens the peek drawer for that agent.                                |
+| `local`    | none                   | Its setup step becomes the hint.                                     |
+
+A `pane` response is answered in Herdr, so its hint reads "Answer it in
+@worker's pane in Herdr." with the pane label, such as `w1:worker`, as the
+hint's tooltip. An `agent_status` item whose agent is known uses the same hint.
+A `local` response's hint reads "Open this workspace in Herdr and choose
+Namedrop setup from the command palette to repair the integration." for
+`integration_registration`, and "Open this workspace in Herdr and choose
+Namedrop Doctor to review this item." otherwise.
 
 **Reply limit.** A reply-limit item that names its thread (`thread_id`) and
 lists the actions the browser may take (`actions`) can be continued or stopped

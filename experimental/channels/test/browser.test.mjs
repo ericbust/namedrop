@@ -5681,7 +5681,7 @@ test("CL-A: explicit attention names its responsible member and focuses fetched 
   await ui.live();
   assert.equal(
     await ui.page
-      .getByRole("button", { name: "Respond to @current-owner", exact: true })
+      .getByRole("button", { name: "Reply to @current-owner", exact: true })
       .count(),
     1,
   );
@@ -5768,6 +5768,94 @@ test("DESIGN-R2 A7: a conversation that fails to load says so in the history-err
   assert.equal(await pane.getByRole("alert").count(), 0);
 });
 
+test("DESIGN-R2 A1-A3: each Needs-you card has one action row, 12px apart, that names the action and the person", async (t) => {
+  const { value, context } = actionableAttention();
+  const [reply] = value.frame.attention;
+  value.frame.participants[0].pane_label = {
+    text: "w1:codex",
+    truncated: false,
+  };
+  value.frame.attention.push(
+    {
+      ...reply,
+      source_kind: "coordination",
+      opened_at_ms: 5,
+      coordination_id: "decision-1",
+      response: { kind: "message", address_id: "codex" },
+    },
+    {
+      ...reply,
+      source_kind: "context_grant",
+      opened_at_ms: 6,
+      response: { kind: "pane", address_id: "codex" },
+    },
+  );
+  value.frame.health = { level: "needs_you", items: 3 };
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const cards = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  await cards.nth(2).waitFor();
+  const rows = () =>
+    cards.evaluateAll((items) =>
+      items.map((item) => {
+        const rows = item.querySelectorAll(".attention-actions");
+        const buttons = [...rows[0].querySelectorAll("button")];
+        return {
+          rows: rows.length,
+          labels: buttons.map((button) => button.textContent),
+          lines: new Set(buttons.map((button) => button.offsetTop)).size,
+          gap: getComputedStyle(rows[0]).columnGap,
+          sizes: [
+            ...new Set(
+              buttons.map((button) => getComputedStyle(button).fontSize),
+            ),
+          ],
+        };
+      }),
+    );
+  const expected = [
+    ["Show message", "Reply to @codex", "Details"],
+    ["Show message", "Message @codex", "Details"],
+    ["Show message", "See @codex's screen", "Details"],
+  ].map((labels) => ({
+    rows: 1,
+    labels,
+    lines: 1,
+    gap: "12px",
+    sizes: ["13px"],
+  }));
+  for (const [width, height] of [
+    [1440, 900],
+    [1024, 700],
+  ]) {
+    await ui.page.setViewportSize({ width, height });
+    assert.deepEqual(await rows(), expected, `${width}px`);
+  }
+  const hint = cards.nth(2).locator(".attention-hint");
+  assert.deepEqual(
+    [await hint.textContent(), await hint.getAttribute("title")],
+    ["Answer it in @codex's pane in Herdr.", "w1:codex"],
+  );
+  assert.equal(
+    await cards.locator(".attention-actions", { hasText: "in Herdr" }).count(),
+    0,
+  );
+  await cards
+    .nth(2)
+    .getByRole("button", { name: "See @codex's screen", exact: true })
+    .click();
+  await ui.page
+    .getByRole("complementary", { name: "Screen of @codex", exact: true })
+    .waitFor();
+});
+
 test("CL-A: Respond posts the exact attention target despite newer context and SSE replies", async (t) => {
   const { value, context } = actionableAttention();
   const ui = await open(
@@ -5777,7 +5865,9 @@ test("CL-A: Respond posts the exact attention target despite newer context and S
     { onContext: () => context },
   );
   await ui.live();
-  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  await ui.page
+    .getByRole("button", { name: "Reply to @codex", exact: true })
+    .click();
   const pane = ui.page.getByRole("complementary", {
     name: "Thread",
     exact: true,
@@ -5882,6 +5972,7 @@ test("CH-fix-2 item 3: Allow 10 more replies posts continue with the CSRF header
     "Show message",
     allowCopy.label,
     stopCopy.label,
+    "Details",
   ]);
   assert.equal(await limit.allow.getAttribute("title"), allowCopy.title);
   assert.equal(await limit.stop.getAttribute("title"), stopCopy.title);
@@ -5980,6 +6071,7 @@ test("CH-fix-2 item 3: Stop thread asks once inline, Cancel and Escape take it b
     threadControlCopy.confirm,
     threadControlCopy.confirmStop,
     threadControlCopy.cancel,
+    "Details",
   ]);
   assert.equal(await focusedText(ui), threadControlCopy.confirmStop);
   assert.equal(
@@ -6105,7 +6197,9 @@ test("CH-2: Respond targets its agent with the prefill, and plain text names eve
     { onContext: () => context },
   );
   await ui.live();
-  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  await ui.page
+    .getByRole("button", { name: "Reply to @codex", exact: true })
+    .click();
   const pane = ui.page.getByRole("complementary", {
     name: "Thread",
     exact: true,
@@ -6136,7 +6230,9 @@ test("CL-A: preparing an already prepared coordination response keeps the draft 
     { onContext: () => context },
   );
   await ui.live();
-  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  await ui.page
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
   const draft = ui.page.locator("main .composer").getByRole("combobox");
   await ui.page.waitForFunction(() =>
     document
@@ -6194,7 +6290,9 @@ test("DESIGN-R2 A4: the prepared message puts the caret after the plain words, s
     { onContext: () => context },
   );
   await ui.live();
-  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  await ui.page
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
   const draft = ui.page.locator("main .composer").getByRole("combobox");
   const first = "@codex About your coordination report: ";
   await eventually(

@@ -34,6 +34,11 @@ async function fixtures() {
 function text(markup: string): string {
   return markup.replace(/<[^>]*>/g, "");
 }
+function buttons(markup: string): string[] {
+  return [...markup.matchAll(/<button[^>]*>(.*?)<\/button>/gs)].map(
+    ([, inner]) => text(inner ?? "").replaceAll("&#x27;", "'"),
+  );
+}
 function space(value: unknown) {
   const event = parseEvent("space", JSON.stringify(value));
   assert.ok(event?.type === "space");
@@ -560,10 +565,19 @@ test("attention actions show historical evidence and safe responses for every so
         }),
       ),
     );
-    assert.ok(markup.includes("Show message"), source);
-    assert.equal(markup.includes(">Respond<"), !paneOnly, source);
-    assert.equal(markup.includes(">Peek<"), paneOnly, source);
-    if (paneOnly) assert.ok(markup.includes("Respond in @codex"), markup);
+    assert.deepEqual(
+      buttons(markup),
+      [
+        "Show message",
+        paneOnly
+          ? "See @codex's screen"
+          : source === "coordination"
+            ? "Message @codex"
+            : "Reply to @codex",
+      ],
+      source,
+    );
+    assert.doesNotMatch(markup, /Respond|Peek|in Herdr/, source);
     assert.equal(channel.messages.size, 0);
   }
   value.frame.attention = [
@@ -580,19 +594,81 @@ test("attention actions show historical evidence and safe responses for every so
   const local = renderToStaticMarkup(
     createElement(AttentionActions, { item, channel, onFocus() {}, onControl }),
   );
-  assert.ok(local.includes("Namedrop setup from the command palette"), local);
-  assert.equal(local.includes("Show message"), false);
-  assert.equal(local.includes(">Respond<"), false);
-  const missing = renderToStaticMarkup(
-    createElement(AttentionActions, {
-      item: { ...item, source: "coordination" },
-      channel,
-      onFocus() {},
-      onControl,
-    }),
+  assert.deepEqual(buttons(local), []);
+  assert.doesNotMatch(local, /Namedrop setup|Namedrop Doctor/);
+});
+
+test("a Needs-you item keeps Show message, its response and Details on one action row, and its hint says where to answer", async () => {
+  const { NeedsYou } = await load<typeof import("./ui/NeedsYou.tsx")>(
+    "/src/ui/NeedsYou.tsx",
   );
-  assert.ok(missing.includes("Namedrop Doctor"), missing);
-  assert.equal(missing.includes("repair the integration"), false);
+  const { PeekContext } = await load<typeof import("./ui/PeekContext.tsx")>(
+    "/src/ui/PeekContext.tsx",
+  );
+  const value = JSON.parse((await fixtures())[0] ?? "null");
+  const worker = value.frame.participants[0];
+  worker.alias = "@worker";
+  worker.pane_label = { text: "w1:worker", truncated: false };
+  const conversation = { thread_id: "t", message_id: "m" };
+  const item = (source: string, response: unknown, extra = {}) => ({
+    attention_id: source,
+    source_kind: source,
+    summary: {
+      text: `${"A long server summary ".repeat(6)}end`,
+      truncated: false,
+    },
+    opened_at_ms: 1,
+    conversation,
+    response,
+    ...extra,
+  });
+  value.frame.health = { level: "needs_you", items: 3 };
+  value.frame.attention = [
+    item("context_grant", { kind: "pane", address_id: worker.address_id }),
+    item(
+      "delivery_attempt",
+      { kind: "reply", ...conversation, address_id: worker.address_id },
+      { subject_alias: "quiet" },
+    ),
+    item("integration_registration", { kind: "local" }, { conversation: null }),
+  ];
+  const { channel } = space(value);
+  const markup = renderToStaticMarkup(
+    createElement(
+      PeekContext,
+      { value: { scope: channel.key, open() {} } },
+      createElement(NeedsYou, { channel, onFocus() {}, onControl }),
+    ),
+  );
+  const items = [
+    ...markup.matchAll(/<li class="attention-item">(.*?)<\/li>/gs),
+  ].map(([, inner]) => inner ?? "");
+  assert.equal(items.length, 3, markup);
+  const rows = items.map((inner) => [
+    ...inner.matchAll(/<div class="attention-actions">(.*?)<\/div>/gs),
+  ]);
+  assert.deepEqual(
+    rows.map((found) => found.map(([, row]) => buttons(row ?? ""))),
+    [
+      [["Show message", "See @worker's screen", "Details"]],
+      [["Show message", "Reply to @worker", "Details"]],
+      [["Details"]],
+    ],
+  );
+  const hint = (inner: string) =>
+    inner.match(/<p class="attention-hint"( title="[^"]*")?>(.*?)<\/p>/s);
+  assert.deepEqual(hint(items[0] ?? "")?.slice(1), [
+    ' title="w1:worker"',
+    "Answer it in @worker&#x27;s pane in Herdr.",
+  ]);
+  assert.deepEqual(hint(items[1] ?? "")?.slice(1), [
+    undefined,
+    "It ended its turn without replying.",
+  ]);
+  assert.deepEqual(hint(items[2] ?? "")?.slice(1), [
+    undefined,
+    "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.",
+  ]);
 });
 
 test("Activity reuses the attention evidence and response controls", async () => {
@@ -630,7 +706,7 @@ test("Activity reuses the attention evidence and response controls", async () =>
     }),
   );
   assert.ok(markup.includes("Show message"), markup);
-  assert.ok(markup.includes(">Respond<"), markup);
+  assert.ok(markup.includes(">Message @codex<"), markup);
 });
 
 test("focused tracked evidence exposes the channel response path without a rejected thread composer", async () => {

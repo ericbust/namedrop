@@ -760,8 +760,11 @@ button.member:not(.more):hover {
   grid-column: 2;
   display: flex;
   flex-wrap: wrap;
-  column-gap: var(--space-4);
+  column-gap: var(--space-3);
   margin-top: 2px;
+}
+.attention-actions:empty {
+  display: none;
 }
 .attention-confirm {
   font-size: var(--text-sm);

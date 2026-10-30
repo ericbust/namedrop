@@ -20,12 +20,14 @@ import {
   repliesCopy,
   replyLabel,
   replyPlaceholder,
+  responseCopy,
   routeCopy,
   runtimeName,
   sendErrorCopy,
   threadControlCopy,
 } from "./copy.ts";
 import type {
+  AddressId,
   Attention,
   DeliveryStage,
   Member,
@@ -228,11 +230,7 @@ test("a reply-limit item the browser can continue or stop says why the agents pa
 
 test("Needs-you copy gives every source a title and a hint and keeps the server text in details", () => {
   const table: [Attention["source"], string, string][] = [
-    [
-      "agent_status",
-      "Something needs you",
-      "Open its pane in Herdr to answer.",
-    ],
+    ["agent_status", "Something needs you", "Answer it in its pane in Herdr."],
     [
       "agent_disposition",
       "Unanswered request",
@@ -251,12 +249,12 @@ test("Needs-you copy gives every source a title and a hint and keeps the server 
     [
       "coordination",
       "Coordination needs a decision",
-      "Review the report and close it from the lead's pane.",
+      "Read the report, then answer the lead.",
     ],
     [
       "context_grant",
       "Context request waiting",
-      "Approve or decline it from the pane.",
+      "Approve or decline it in the agent's pane in Herdr.",
     ],
     [
       "pane_binding",
@@ -292,7 +290,7 @@ test("Needs-you copy names the subject agent for every source when the server se
       "agent_status",
       "@claude",
       "@claude needs you",
-      "Open its pane in Herdr to answer.",
+      "Answer it in @claude's pane in Herdr.",
     ],
     [
       "agent_disposition",
@@ -316,13 +314,13 @@ test("Needs-you copy names the subject agent for every source when the server se
       "coordination",
       "@claude",
       "@claude's coordination needs a decision",
-      "Review the report and close it from the lead's pane.",
+      "Read the report, then answer the lead.",
     ],
     [
       "context_grant",
       "@codex",
       "@codex is asking for context",
-      "Approve or decline it from the pane.",
+      "Approve or decline it in the agent's pane in Herdr.",
     ],
     [
       "pane_binding",
@@ -351,13 +349,12 @@ test("Needs-you copy names the subject agent for every source when the server se
 });
 
 test("agent status keeps a summary of 90 characters or fewer as the title and moves a longer one to details", () => {
-  const hint = "Open its pane in Herdr to answer.";
   const short = "@claude is waiting on an approval or question.";
   const exact = "x".repeat(90);
   const long = "y".repeat(91);
-  for (const [subjectAlias, needsYou] of [
-    [null, "Something needs you"],
-    ["@claude", "@claude needs you"],
+  for (const [subjectAlias, needsYou, hint] of [
+    [null, "Something needs you", "Answer it in its pane in Herdr."],
+    ["@claude", "@claude needs you", "Answer it in @claude's pane in Herdr."],
   ] as const) {
     for (const kept of [short, exact])
       assert.deepEqual(
@@ -378,6 +375,78 @@ test("agent status keeps a summary of 90 characters or fewer as the title and mo
       { title: needsYou, hint, details: `${short}…` },
     );
   }
+});
+
+test("a pane response's hint names the pane to answer in, a local response's hint is its setup step, and the table hint stays for the rest", () => {
+  const pane = { kind: "pane", addressId: "a" as AddressId } as const;
+  const hint = (
+    source: Attention["source"],
+    extra: Partial<Attention>,
+    responder: string | null = null,
+  ) => attentionCopy(attention(source, "Waiting", extra), responder).hint;
+  for (const source of [
+    "agent_status",
+    "context_grant",
+    "pane_binding",
+  ] as const) {
+    assert.equal(
+      hint(source, { response: pane }, "@worker"),
+      "Answer it in @worker's pane in Herdr.",
+      source,
+    );
+    assert.equal(
+      hint(source, { response: pane, subjectAlias: "@codex" }, "@worker"),
+      "Answer it in @worker's pane in Herdr.",
+      "the responder wins over the subject",
+    );
+    assert.equal(
+      hint(source, { response: pane, subjectAlias: "@codex" }),
+      "Answer it in @codex's pane in Herdr.",
+    );
+  }
+  assert.equal(
+    hint("context_grant", { response: pane }),
+    "Approve or decline it in the agent's pane in Herdr.",
+  );
+  assert.equal(
+    hint("integration_registration", { response: { kind: "local" } }),
+    "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.",
+  );
+  assert.equal(
+    hint("coordination", {
+      response: { kind: "local" },
+      subjectAlias: "@codex",
+    }),
+    "Open this workspace in Herdr and choose Namedrop Doctor to review this item.",
+  );
+  assert.equal(
+    hint(
+      "coordination",
+      { response: { kind: "message", addressId: "a" as AddressId } },
+      "@claude",
+    ),
+    "Read the report, then answer the lead.",
+  );
+  assert.equal(
+    hint(
+      "delivery_attempt",
+      { response: { kind: "message", addressId: "a" as AddressId } },
+      "@quiet",
+    ),
+    "An agent ended its turn without replying.",
+  );
+  assert.deepEqual(
+    {
+      reply: responseCopy.reply("@quiet"),
+      message: responseCopy.message("@claude"),
+      pane: responseCopy.pane("@worker"),
+    },
+    {
+      reply: "Reply to @quiet",
+      message: "Message @claude",
+      pane: "See @worker's screen",
+    },
+  );
 });
 
 test("health copy reads as words, leaves out zero parts, and never says in flight", () => {

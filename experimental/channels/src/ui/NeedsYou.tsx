@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { responderOf } from "../attention.ts";
 import { attentionCopy, relativeAge } from "../copy.ts";
 import type { Attention, ChannelSnapshot, SpaceKey } from "../model.ts";
 import {
@@ -55,7 +56,12 @@ function Item({
   onControl: ControlThread;
 }) {
   const [open, setOpen] = useState(false);
-  const copy = attentionCopy(item);
+  const responder = responderOf(item, channel.members);
+  const copy = attentionCopy(item, responder?.alias ?? null);
+  const pane =
+    item.response?.kind === "pane" && responder?.paneLabel
+      ? `${responder.paneLabel.text}${responder.paneLabel.truncated ? "…" : ""}`
+      : undefined;
   const opened = new Date(item.openedAt);
   return (
     <li className="attention-item">
@@ -67,15 +73,16 @@ function Item({
       >
         {relativeAge(item.openedAt, now)}
       </time>
-      <p className="attention-hint">{copy.hint}</p>
+      <p className="attention-hint" title={pane}>
+        {copy.hint}
+      </p>
       <AttentionActions
         item={item}
         channel={channel}
         onFocus={onFocus}
         onControl={onControl}
-      />
-      {copy.details !== null && (
-        <div className="attention-actions">
+      >
+        {copy.details !== null && (
           <button
             type="button"
             className="text-button"
@@ -84,8 +91,8 @@ function Item({
           >
             {open ? "Hide details" : "Details"}
           </button>
-        </div>
-      )}
+        )}
+      </AttentionActions>
       {copy.details !== null && open && (
         <p className="attention-details">{copy.details}</p>
       )}

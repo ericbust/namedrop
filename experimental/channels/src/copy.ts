@@ -5,6 +5,7 @@ import type { Delivery } from "./delivery.ts";
 import type {
   Activity,
   Attention,
+  AttentionResponse,
   ChannelSnapshot,
   DeliveryStage,
   Health,
@@ -129,7 +130,7 @@ const unanswered: AttentionRow = {
   namedHint: "It ended its turn without replying.",
 };
 const attentionTable: Record<Attention["source"], AttentionRow> = {
-  agent_status: { ...needsYou, hint: "Open its pane in Herdr to answer." },
+  agent_status: { ...needsYou, hint: "Answer it in its pane in Herdr." },
   agent_disposition: unanswered,
   delivery_attempt: unanswered,
   automatic_reply_limit: {
@@ -140,12 +141,12 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
   coordination: {
     title: "Coordination needs a decision",
     named: (alias) => `${alias}'s coordination needs a decision`,
-    hint: "Review the report and close it from the lead's pane.",
+    hint: "Read the report, then answer the lead.",
   },
   context_grant: {
     title: "Context request waiting",
     named: (alias) => `${alias} is asking for context`,
-    hint: "Approve or decline it from the pane.",
+    hint: "Approve or decline it in the agent's pane in Herdr.",
   },
   pane_binding: {
     title: "An agent's pane changed",
@@ -159,6 +160,34 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
   },
   unknown: { ...needsYou, hint: "Open Details for the full message." },
 };
+export const responseCopy = {
+  reply: (name: string) => `Reply to ${name}`,
+  message: (name: string) => `Message ${name}`,
+  pane: (name: string) => `See ${name}'s screen`,
+} satisfies Record<
+  Exclude<AttentionResponse["kind"], "local">,
+  (name: string) => string
+>;
+export function answerInPane(name: string | null): string {
+  return name === null
+    ? attentionTable.agent_status.hint
+    : `Answer it in ${name}'s pane in Herdr.`;
+}
+const localHint =
+  "Open this workspace in Herdr and choose Namedrop Doctor to review this item.";
+const localSetupHint =
+  "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.";
+function responseHint(item: Attention, responderAlias: string | null) {
+  const who = responderAlias ?? item.subjectAlias;
+  if (item.response?.kind === "local")
+    return item.source === "integration_registration"
+      ? localSetupHint
+      : localHint;
+  return who !== null &&
+    (item.response?.kind === "pane" || item.source === "agent_status")
+    ? answerInPane(who)
+    : null;
+}
 export const threadControlCopy = {
   continue: {
     label: "Allow 10 more replies",
@@ -183,25 +212,29 @@ export const threadControlCopy = {
 > &
   Record<string, unknown>;
 const pausedHint = "The agents paused after 10 replies in a row.";
-export function attentionCopy(item: Attention): AttentionCopy {
+export function attentionCopy(
+  item: Attention,
+  responderAlias: string | null = null,
+): AttentionCopy {
   const { text, truncated } = item.summary;
   const row =
     item.source === "automatic_reply_limit" && threadControls(item) !== null
       ? { ...attentionTable[item.source], hint: pausedHint }
       : attentionTable[item.source];
+  const hint = responseHint(item, responderAlias);
   if (
     item.source === "agent_status" &&
     !truncated &&
     text.trim() &&
     text.length <= SHORT_SUMMARY
   )
-    return { title: text, hint: row.hint, details: null };
+    return { title: text, hint: hint ?? row.hint, details: null };
   const details = `${text}${truncated ? "…" : ""}`;
   return item.subjectAlias === null
-    ? { title: row.title, hint: row.hint, details }
+    ? { title: row.title, hint: hint ?? row.hint, details }
     : {
         title: row.named(item.subjectAlias),
-        hint: row.namedHint ?? row.hint,
+        hint: hint ?? row.namedHint ?? row.hint,
         details,
       };
 }
