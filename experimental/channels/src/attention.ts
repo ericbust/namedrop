@@ -14,8 +14,12 @@ import type {
 } from "./model.ts";
 import { participant, roomOf, type ThreadGroup } from "./store.ts";
 
-export type ReplyIntent = Extract<AttentionResponse, { kind: "reply" }>;
+// `subject` is the card's name for the agent, for when it has left the frame.
+export type ReplyIntent = Extract<AttentionResponse, { kind: "reply" }> & {
+  subject: string | null;
+};
 export type MessageIntent = Extract<AttentionResponse, { kind: "message" }> & {
+  subject: string | null;
   reference: { kind: "coordination" | "message"; id: string };
   preparation: "idle" | "requested" | "prepared" | "preserved" | "unavailable";
 };
@@ -113,7 +117,8 @@ export function evidenceReduce(
       return state.kind === "ready" &&
         state.request.key === event.key &&
         state.request.response?.kind === "message" &&
-        state.request.response.preparation === "preserved"
+        (state.request.response.preparation === "preserved" ||
+          state.request.response.preparation === "unavailable")
         ? {
             ...state,
             request: {
@@ -219,6 +224,20 @@ export function attentionReplyTo(
         mentions: `${who.home.token} ${alias}`,
       };
 }
+// Why the agent a response is for can't take a message.
+export type Absence =
+  | { kind: "closed"; alias: string }
+  | { kind: "gone"; alias: string | null };
+export function absence(
+  intent: Pick<ReplyIntent, "addressId" | "subject">,
+  directory: Directory,
+): Absence {
+  const who = participant(directory, intent.addressId);
+  if (who.kind !== "member") return { kind: "gone", alias: intent.subject };
+  return who.member.activity === "retired"
+    ? { kind: "closed", alias: who.member.alias }
+    : { kind: "gone", alias: who.member.alias };
+}
 export function replyPrefill(
   draft: string,
   to: ReplyTo,
@@ -236,6 +255,7 @@ export function messageIntent(
   return item.response?.kind === "message"
     ? {
         ...item.response,
+        subject: item.subjectAlias,
         reference: item.coordinationId
           ? { kind: "coordination", id: item.coordinationId }
           : { kind: "message", id: target.messageId },
@@ -272,8 +292,7 @@ export function prepareChannelMessage(
   | { kind: "prepared"; text: string; caret: number }
   | { kind: "preserved" | "unavailable" } {
   const to = attentionReplyTo(intent, directory);
-  if (to === null)
-    return { kind: draft.length > 0 || pending ? "preserved" : "unavailable" };
+  if (to === null) return { kind: "unavailable" };
   const first = `${to.mentions} About ${anchorWords(intent.reference, context)}: `;
   const text = `${first}\nRef: ${intent.reference.id}`;
   return pending || (draft.length > 0 && draft !== text)

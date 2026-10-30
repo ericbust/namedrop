@@ -4,7 +4,7 @@ import { after, before, test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer, type ViteDevServer } from "vite";
-import type { AddressId, Draft, DraftKey } from "./model.ts";
+import type { Draft, DraftKey } from "./model.ts";
 import { exitFor, initialState, reduce, runsByMessage } from "./store.ts";
 import { parseEvent } from "./wire.ts";
 
@@ -662,8 +662,8 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
   const hint = (inner: string) =>
     inner.match(/<p class="attention-hint"( title="[^"]*")?>(.*?)<\/p>/s);
   assert.deepEqual(hint(items[0] ?? "")?.slice(1), [
-    ' title="w1:worker"',
-    "Approve or decline it in @worker&#x27;s pane in Herdr.",
+    undefined,
+    "Namedrop couldn&#x27;t capture it. Ask the sender to share it again.",
   ]);
   assert.deepEqual(hint(items[1] ?? "")?.slice(1), [
     undefined,
@@ -832,28 +832,50 @@ test("focused tracked evidence exposes the channel response path without a rejec
       buttons: [],
     },
   );
+  const responder = [...channel.members.values()][0];
+  assert.ok(responder);
+  assert.equal(responder.alias, "@codex");
   const reply = {
     kind: "reply",
     intent: {
       kind: "reply",
       threadId: "tracked",
       messageId: "tracked-message",
-      addressId: [...channel.members.keys()][0] ?? ("" as AddressId),
+      addressId: responder.id,
+      subject: null,
     },
   } as const;
-  const gone = renderToStaticMarkup(
-    createElement(ThreadPane, {
-      ...props,
-      directory: { ...directory, members: new Map() },
-      response: reply,
-    }),
-  );
-  assert.equal(gone.includes("textarea"), false);
-  assert.ok(
-    gone.includes(
-      '<p class="thread-answer" role="status">The responsible agent is no longer available. Use its pane in Herdr to respond.</p>',
-    ),
-    gone,
+  const unavailable = (
+    members: typeof channel.members,
+    subject: "@codex" | null,
+  ) => {
+    const markup = renderToStaticMarkup(
+      createElement(ThreadPane, {
+        ...props,
+        directory: { ...directory, members },
+        response: { ...reply, intent: { ...reply.intent, subject } },
+      }),
+    );
+    assert.equal(markup.includes("textarea"), false);
+    const line = markup.match(
+      /<p class="thread-answer" role="status">(.*?)<\/p>/s,
+    );
+    assert.ok(line, markup);
+    return (line[1] ?? "").replaceAll("&#x27;", "'");
+  };
+  const closed = new Map(channel.members);
+  closed.set(responder.id, { ...responder, activity: "retired" });
+  assert.deepEqual(
+    [
+      unavailable(closed, null),
+      unavailable(new Map(), "@codex"),
+      unavailable(new Map(), null),
+    ],
+    [
+      "@codex's pane is closed, so it can't take a message.",
+      "@codex isn't in this channel anymore.",
+      "That agent isn't in this channel anymore.",
+    ],
   );
   const kept = renderToStaticMarkup(
     createElement(ThreadPane, {

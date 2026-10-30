@@ -12,7 +12,7 @@ import {
   mentionedAgents,
   postSource,
 } from "./complete.ts";
-import type { ChannelSnapshot, SpaceKey } from "./model.ts";
+import type { AddressId, ChannelSnapshot, Member, SpaceKey } from "./model.ts";
 import { parseEvent } from "./wire.ts";
 
 function participant(
@@ -146,6 +146,12 @@ test("complete: an @ after a #channel lists that channel's members, else the cur
     "@reviewer",
   ]);
   assert.equal(complete("#beta @", 7, context)?.target, betaKey);
+  for (const text of ["#beta, @", "#beta: @"])
+    assert.equal(
+      complete(text, text.length, context)?.target,
+      betaKey,
+      `${text} completes beta's members: one trailing , or : is not part of the label`,
+    );
   assert.deepEqual(names(complete("#beta #alpha @c", 15, context)), [
     "@claude",
     "@codex",
@@ -374,7 +380,22 @@ test("complete: a post names its recipients only the way the server's grammar re
     ["#alpha", []],
     ["#42 fix the build", []],
     ["@Codex hi", []],
-    ["@codex, hi", []],
+    ["@codex, hi", ["@codex"]],
+    ["@codex: hi", ["@codex"]],
+    ["@codex,", ["@codex"]],
+    ["@claude, @codex, compare notes", ["@claude", "@codex"]],
+    ["@claude: @codex hi", ["@claude", "@codex"]],
+    ["#alpha @codex, x", ["@codex"]],
+    ["#alpha, @codex hi", ["@codex"]],
+    ["#alpha: #beta, @codex: hi", ["@codex"]],
+    ["@codex,, hi", []],
+    ["@codex:: hi", []],
+    ["@codex,: hi", []],
+    ["@codex; hi", []],
+    ["@codex. hi", []],
+    ["@codex,hi", []],
+    ["@codex @claude; hi", ["@codex"]],
+    ["#alpha,, @codex hi", []],
     ["@-codex hi", []],
     ["@co--dex hi", []],
     ["#alpha hi @codex", []],
@@ -464,6 +485,7 @@ test("complete: a channel post sends as typed, a thread reply needs agents or it
   assert.equal(postSource("  hello room ", channel), "hello room");
   assert.equal(postSource("can @codex look?", channel), "can @codex look?");
   assert.equal(postSource("@codex hi", channel), "@codex hi");
+  assert.equal(postSource("@codex, hi", channel), "@codex, hi");
   assert.equal(postSource("  \n ", channel), null);
   const agents = { kind: "thread", to: ["@lead · #alpha"] } as const;
   assert.equal(postSource(" thanks ", agents), "thanks", "never prefixed");
@@ -476,7 +498,14 @@ test("complete: a channel post sends as typed, a thread reply needs agents or it
   assert.equal(postSource("#alpha @shell ls", nobody), "#alpha @shell ls");
   assert.equal(postSource("   ", agents), null);
   for (const rule of [channel, agents, nobody])
-    for (const text of ["@codex", " @codex  ", "#alpha @codex @shell\n"])
+    for (const text of [
+      "@codex",
+      " @codex  ",
+      "#alpha @codex @shell\n",
+      "@codex,",
+      "@codex:",
+      "@claude, @codex:",
+    ])
       assert.equal(
         postSource(text, rule),
         null,
@@ -521,7 +550,10 @@ test("complete: the hint names leading text the server refuses, reading leading 
   const room = "Enter posts to the channel · Mention @name to bring someone in";
   const cases: [string, string][] = [
     ["@Codex quick check", "Names are lowercase: @codex"],
-    ["@Nobody hi there", "@Nobody isn't in this channel"],
+    ["@Codex hi", "Names are lowercase: @codex"],
+    ["@Nobody hi there", "Names are lowercase: @nobody"],
+    ["@Backend hi", "Names are lowercase: @backend"],
+    ["@Ghost come back", "@ghost's pane is closed"],
     ["@nobody hi there", "Enter sends only to @nobody"],
     ["@CODEX hi", "Names are lowercase: @codex"],
     ["  @Codex hi", "Names are lowercase: @codex"],
@@ -530,13 +562,26 @@ test("complete: the hint names leading text the server refuses, reading leading 
     ["@codex @Claude hi", "Names are lowercase: @claude"],
     ["@nobody @Codex hi", "Names are lowercase: @codex"],
     ["@codex @nobody hi", "Enter sends only to @codex, @nobody"],
-    ["@ghost come back", "Enter sends only to @ghost"],
-    ["@codex, hi", "Put a space after @codex"],
-    ["@codex: can you look", "Put a space after @codex"],
-    ["@Codex, hi", "Put a space after @codex"],
-    ["#alpha @codex, hi", "Put a space after @codex"],
+    ["@ghost come back", "@ghost's pane is closed"],
+    ["@codex, hi", "Enter sends only to @codex"],
+    ["@codex: hi", "Enter sends only to @codex"],
+    ["@codex: can you look", "Enter sends only to @codex"],
+    ["@claude, @codex, compare notes", "Enter sends only to @claude, @codex"],
+    ["#alpha @codex, x", "Enter sends only to @codex"],
+    ["#alpha: @codex hi", "Enter sends only to @codex"],
+    ["@codex @claude, hi", "Enter sends only to @codex, @claude"],
+    ["@Codex, hi", "Names are lowercase: @codex"],
+    ["@Codex: hi", "Names are lowercase: @codex"],
+    ["@codex, @Claude: hi", "Names are lowercase: @claude"],
+    ["@codex; hi", "Put a space after @codex"],
+    ["@codex. hi", "Put a space after @codex"],
+    ["@codex,, hi", "Put a space after @codex"],
+    ["@codex:: hi", "Put a space after @codex"],
+    ["@codex,: hi", "Put a space after @codex"],
+    ["#alpha @codex; hi", room],
+    ["#alpha @codex,, hi", room],
+    ["#alpha @codex_x hi", room],
     ["@codex_x hi", "@codex_x isn't in this channel"],
-    ["@codex @claude, hi", "Enter sends only to @codex"],
     ["@ hi", room],
     ["#alpha @Codex hi", "Names are lowercase: @codex"],
     ["#beta @Coder hi", "Names are lowercase: @coder"],
@@ -547,8 +592,93 @@ test("complete: the hint names leading text the server refuses, reading leading 
   ];
   for (const [text, expected] of cases)
     assert.equal(hint(text), expected, JSON.stringify(text));
-  for (const text of ["@Codex quick check", "@codex, hi", "@nobody hi there"])
+  for (const text of ["@Codex quick check", "@codex; hi", "@nobody hi there"])
     assert.equal(postSource(text, channel), text, "Enter still sends it");
+});
+
+test("complete: a leading name whose pane is closed says so, before its capitals, since the server refuses it either way", () => {
+  const closed = new Map(
+    [...alpha.members].map(([id, member]) => [
+      id,
+      member.alias === "@codex"
+        ? { ...member, activity: "retired" as const }
+        : member,
+    ]),
+  );
+  const hint = (text: string) =>
+    composerHint({ kind: "channel", agents: closed }, text);
+  const room = "Enter posts to the channel · Mention @name to bring someone in";
+  const cases: [string, string][] = [
+    ["@codex hi", "@codex's pane is closed"],
+    ["@Codex hi", "@codex's pane is closed"],
+    ["@CODEX, hi", "@codex's pane is closed"],
+    ["  @codex: hi", "@codex's pane is closed"],
+    ["@codex", "@codex's pane is closed"],
+    ["@claude @codex hi", "@codex's pane is closed"],
+    ["@codex @Claude hi", "@codex's pane is closed"],
+    ["@Claude @codex hi", "@codex's pane is closed"],
+    ["@ghost @codex hi", "@ghost's pane is closed"],
+    ["@Claude hi", "Names are lowercase: @claude"],
+    ["@claude hi", "Enter sends only to @claude"],
+    ["@codex; hi", "Put a space after @codex"],
+    ["@codex_x hi", "@codex_x isn't in this channel"],
+    ["#alpha @codex hi", "Enter sends only to @codex"],
+    ["#alpha @Codex hi", "Names are lowercase: @codex"],
+    ["can @codex look?", room],
+  ];
+  for (const [text, expected] of cases)
+    assert.equal(hint(text), expected, JSON.stringify(text));
+  const renamed = new Map(closed);
+  renamed.set("id-@codex-2" as AddressId, {
+    ...(alpha.members.get("id-@codex" as AddressId) as Member),
+    id: "id-@codex-2" as AddressId,
+  });
+  assert.equal(
+    composerHint({ kind: "channel", agents: renamed }, "@codex hi"),
+    "Enter sends only to @codex",
+    "a new pane took the name, so the name reaches it",
+  );
+  assert.equal(
+    composerHint({ kind: "thread", to: [] }, "@ghost hi"),
+    "Enter to send · Shift+Enter for a new line",
+  );
+});
+
+test("complete: a name right after a #label word names someone in that workspace, so it is no channel mention, as the server's workspace_label_before reads it", () => {
+  const channel = { kind: "channel", agents: alpha.members } as const;
+  const hint = (text: string) => composerHint(channel, text);
+  const named = (text: string) =>
+    mentionedAgents(text, alpha.members).map((member) => member.alias);
+  const room = "Enter posts to the channel · Mention @name to bring someone in";
+  const checks = (names: string) =>
+    `Enter posts to the channel · Namedrop checks if it's for ${names}`;
+  const cases: [string, string, string[]][] = [
+    ["#alpha @codex; hi", room, []],
+    ["see #alpha @codex", room, []],
+    ["#alpha @codex,, hi", room, []],
+    ["#alpha, @codex x", "Enter sends only to @codex", ["@codex"]],
+    ["see #alpha, @codex", checks("@codex"), ["@codex"]],
+    ["see #alpha: @codex", checks("@codex"), ["@codex"]],
+    ["see #all @codex", checks("@codex"), ["@codex"]],
+    ["see #ALL @codex", checks("@codex"), ["@codex"]],
+    ["see #all. @codex", room, []],
+    ["see #al!pha @codex", checks("@codex"), ["@codex"]],
+    ["see # @codex", checks("@codex"), ["@codex"]],
+    ["see #alpha\n\t@codex", room, []],
+    ["see #alpha @codex", room, []],
+    ["see #alpha@codex", room, []],
+    ["#alpha @codex; ask @claude", checks("@claude"), ["@claude"]],
+    ["see #alpha @codex @claude", room, []],
+    ["see #alpha @Codex @claude", room, []],
+    ["see #alpha @codex, @claude", checks("@claude"), ["@claude"]],
+    ["see #alpha @codex `x` @claude", checks("@claude"), ["@claude"]],
+    ["see #alpha `@codex` @claude", checks("@claude"), ["@claude"]],
+    ["see #beta @codex and @claude", checks("@claude"), ["@claude"]],
+  ];
+  for (const [text, expected, mentioned] of cases) {
+    assert.equal(hint(text), expected, JSON.stringify(text));
+    assert.deepEqual(named(text), mentioned, JSON.stringify(text));
+  }
 });
 
 test("complete: disabled copy follows the server reason despite sanitized or identical names", () => {

@@ -396,20 +396,26 @@ The banner takes at most 40 percent of the main column's height and scrolls
 inside (see App shell for the stacked layout).
 Announce new items through a polite live region.
 
-| `source`                                | Title                                                                                                | Hint                                                |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                     |
-| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.           |
-| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.         |
-| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.              |
-| `context_grant`                         | Context request waiting                                                                              | Approve or decline it in the agent's pane in Herdr. |
-| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                |
-| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                   |
-| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                  |
+| `source`                                | Title                                                                                                | Hint                                                            |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                                 |
+| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.                       |
+| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.                     |
+| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.                          |
+| `context_grant`                         | Shared context failed                                                                                | Namedrop couldn't capture it. Ask the sender to share it again. |
+| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                            |
+| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                               |
+| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                              |
 
 Never cut the server's summary mid-word into the visible line. When an
 `agent_status` summary is longer than 90 characters, use the `unknown` title and
 put the summary under **Details**.
+
+The server opens a `context_grant` item only when a context grant fails to
+activate ("Context Grant activation failed: …"), so its title and hint describe
+the failure, and the agent it names is the one the context was for. The fix is
+with the sender, who shares it again. **Details** keeps the server's text, and
+All activity names the item "Shared context failed".
 
 When the item names its agent (`subject_alias`), the title names it too. For an
 unanswered request that reads "@codex didn't answer a request", with the hint
@@ -428,7 +434,7 @@ The tint never stays.
 | `agent_status`, summary over 90 characters | "@claude needs you"                                                          |
 | `automatic_reply_limit`                    | "@codex hit the reply limit"                                                 |
 | `coordination`                             | "@claude's coordination needs a decision"                                    |
-| `context_grant`                            | "@codex is asking for context"                                               |
+| `context_grant`                            | "@codex didn't get its shared context"                                       |
 | `pane_binding`                             | "@codex's pane changed"                                                      |
 | `integration_registration`                 | "@codex isn't set up yet"                                                    |
 | `unknown`                                  | "@codex needs you"                                                           |
@@ -447,8 +453,25 @@ offer, and its button names the action and the person:
 | `pane`     | "See @worker's screen" | Opens the peek drawer for that agent.                                |
 | `local`    | none                   | Its setup step becomes the hint.                                     |
 
+When the agent a `reply` or `message` is for can't take a message, the first
+press says why in the place the answer would go: the channel composer's status
+row for `message`, and the thread pane's slot for `reply`. Its words match the
+member chip.
+
+| The agent                                    | The line                                               |
+| -------------------------------------------- | ------------------------------------------------------ |
+| Its pane is closed, the chip's "Pane closed" | "@codex's pane is closed, so it can't take a message." |
+| No longer in the frame, the card names it    | "@codex isn't in this channel anymore."                |
+| No longer in the frame, no name known        | "That agent isn't in this channel anymore."            |
+
+The card's name for an agent that left the frame is the item's subject. A
+`coordination` or `automatic_reply_limit` item has none, so it reads "That
+agent".
+
 A `pane` response is answered in Herdr, so its hint names the agent's pane,
-with the pane label, such as `w1:worker`, as the hint's tooltip. A `local`
+with the pane label, such as `w1:worker`, as the hint's tooltip. A failed
+`context_grant` is not fixed in that pane, so it keeps its own hint with no
+tooltip, and its "See @worker's screen" button stays. A `local`
 response's hint reads "Open this workspace in Herdr and choose Namedrop setup
 from the command palette to repair the integration." for
 `integration_registration`, and "Open this workspace in Herdr and choose
@@ -456,14 +479,14 @@ Namedrop Doctor to review this item." otherwise.
 
 **Which hint wins.** The first row that fits the item gives its hint:
 
-| Item                                                  | Hint                                                | Tooltip        |
-| ----------------------------------------------------- | --------------------------------------------------- | -------------- |
-| A `local` response                                    | Its setup step, as above                            | none           |
-| `automatic_reply_limit` with Continue or Stop on page | "The agents paused after 10 replies in a row."      | none           |
-| `context_grant` with a `pane` response                | "Approve or decline it in @worker's pane in Herdr." | the pane label |
-| Any other source with a `pane` response               | "Answer it in @worker's pane in Herdr."             | the pane label |
-| `agent_status` whose agent is known                   | "Answer it in @claude's pane in Herdr."             | none           |
-| Anything else, or no agent known                      | The first table's hint, or the named hint above     | none           |
+| Item                                                  | Hint                                                              | Tooltip        |
+| ----------------------------------------------------- | ----------------------------------------------------------------- | -------------- |
+| A `local` response                                    | Its setup step, as above                                          | none           |
+| `automatic_reply_limit` with Continue or Stop on page | "The agents paused after 10 replies in a row."                    | none           |
+| `context_grant`, with or without a `pane` response    | "Namedrop couldn't capture it. Ask the sender to share it again." | none           |
+| Any other source with a `pane` response               | "Answer it in @worker's pane in Herdr."                           | the pane label |
+| `agent_status` whose agent is known                   | "Answer it in @claude's pane in Herdr."                           | none           |
+| Anything else, or no agent known                      | The first table's hint, or the named hint above                   | none           |
 
 **Reply limit.** A reply-limit item that names its thread (`thread_id`) and
 lists the actions the browser may take (`actions`) can be continued or stopped
@@ -520,13 +543,15 @@ bottom. Only one place offers an action at a time. While the channel box shows
 its kept-draft notice, which names the card's button as the retry, the line has
 no button. Once the notice goes, the button comes back.
 
-| The item's answer               | The line                                                                          |
-| ------------------------------- | --------------------------------------------------------------------------------- |
-| A channel message, ready        | "Answer tracked work in the channel. Your message to @claude is ready there."     |
-| A channel message, not prepared | "Answer tracked work in the channel." then a **Message @claude** text button      |
-| A channel message, draft kept   | "Answer tracked work in the channel." alone                                       |
-| The agent's pane                | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip       |
-| A reply to an agent now gone    | "The responsible agent is no longer available. Use its pane in Herdr to respond." |
+| The item's answer                      | The line                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------- |
+| A channel message, ready               | "Answer tracked work in the channel. Your message to @claude is ready there." |
+| A channel message, not prepared        | "Answer tracked work in the channel." then a **Message @claude** text button  |
+| A channel message, draft kept          | "Answer tracked work in the channel." alone                                   |
+| The agent's pane                       | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip   |
+| A reply to an agent whose pane closed  | "@codex's pane is closed, so it can't take a message."                        |
+| A reply to an agent no longer in frame | "@codex isn't in this channel anymore."                                       |
+| The same, with no name known           | "That agent isn't in this channel anymore."                                   |
 
 When a reply's thread already holds a draft, the composer stays and its status
 row reads, 12px muted: "Your existing draft was kept. Send or clear it before
@@ -591,9 +616,14 @@ main column, under the timeline, and at the bottom of the thread pane.
   The notice stays until the next edit of the box, a send, or a clear; then the
   recipient guard and the hint return, so "@Codex hi" typed after it reads
   "Names are lowercase: @codex". The message that button prepared is not
-  another draft, so pressing it again never warns. When the agent is gone, the
-  same row reads "The responsible agent is no longer available. Use its pane
-  in Herdr to respond."
+  another draft, so pressing it again never warns. When the agent can't take a
+  message, the first press says why in the same row, whether or not the box
+  holds a draft, and the box keeps its text: "@codex's pane is closed, so it
+  can't take a message." or "@codex isn't in this channel anymore." (see
+  Response under Needs-you banner). Availability is checked before the draft,
+  so the operator never clears a draft only to learn the agent is gone. That
+  line also gives way at the next edit, so the hint and the guard explain the
+  text that follows.
 - The Jump to latest pill floats 16px above the composer, not above the
   timeline's bottom edge.
 
@@ -623,8 +653,8 @@ main column, under the timeline, and at the bottom of the thread pane.
   the hint line read "Start with @name to choose who gets this." in `--text`.
   Typing clears it, so it never nags while a recipient is still being typed. A
   channel post always sends, as Channel chat says.
-- Names with no message after them, as in `@codex` or `#alpha @codex`, never
-  send in any composer, because the server refuses them. After Enter the hint
+- Names with no message after them, as in `@codex`, `@codex,` or
+  `#alpha @codex`, never send in any composer, because the server refuses them. After Enter the hint
   line reads "Add a message after @codex." in `--text`, and typing clears it.
 - A refused draft remembers its latest attempt: the request id and the exact
   text and reply target it tried. Sending that same text again reuses the id,
@@ -867,11 +897,15 @@ uses the "Send to" form. Each offer is a text button in 12px 600
   through sending, sent and failed, because "Try again" is the same button.
   When the part goes while it has focus, focus moves to its message row, so the
   next Tab continues from there. When focus has moved elsewhere, it stays there.
-- One visually hidden polite live region for the whole page announces each
-  change: "Sending to @codex…", "Sent to @codex", or "Couldn't send to @codex".
-  It says "Sent to @codex" once per press, whichever of the answer and the
-  frame confirmed it. The parts have no live region of their own, so nothing
-  is announced twice.
+- The page announces each change through a pair of visually hidden polite
+  live regions: "Sending to @codex…", "Sent to @codex", or "Couldn't send to
+  @codex". The two take turns. Each new change goes into the empty one and the
+  other is cleared, so a change in the same words as the last, such as "Sent
+  to @codex" for another post, is a fresh insertion and is spoken again. A
+  change is new when the press's state changes, not when the words do. It
+  says "Sent to @codex" once per press, whichever of the answer and the frame
+  confirmed it. The parts have no live region of their own, so nothing is
+  announced twice.
 - The timeline, the thread pane, and a Needs-you conversation show one state
   for the same post and agent.
 
@@ -898,21 +932,46 @@ Enter sends:
   Mention @name to bring someone in".
 - Text that mentions agents but does not start with them: "Enter posts to the
   channel · Namedrop checks if it's for @codex", with at most two names, then
-  "+N".
+  "+N". A name right after a `#label` word, with only whitespace between them,
+  names someone in that workspace, as do the names that follow it with only
+  whitespace between, so the server counts none of them as a channel mention:
+  "see #alpha @codex" and "see #alpha @codex @claude" read "Enter posts to the
+  channel · Mention @name to bring someone in". A word with a mark after the
+  label, as in "see #alpha, @codex", is no label, and neither is `#all`, so
+  "see #all @codex" still reads "Namedrop checks if it's for @codex".
 - Text that starts with mentions: "Enter sends only to @codex", "Enter sends
   only to @codex, @shell", or "Enter sends only to @codex, @shell +2". The
-  names are the leading aliases as typed, without `#label` tokens.
+  names are the leading aliases as typed, without `#label` tokens. A leading
+  name or `#label` may end in one `,` or `:`, which is not part of it, so
+  "@codex, hi", "@codex: hi" and "@claude, @codex, compare notes" all start
+  with mentions.
 - Text that starts with something the server refuses, read the way the server
   reads leading names (after any `#label` words, each `@name` that is an alias
-  once its ASCII letters are lowercased), checked in the server's order:
-  - A first `@` word with punctuation stuck to a name: "Put a space after
-    @codex", for "@codex, hi" or "@codex: hi". The server reads whole words.
+  once one trailing `,` or `:` is dropped and its ASCII letters are
+  lowercased), checked in the server's order:
+  - A first `@` word with other punctuation stuck to a name, or two marks:
+    "Put a space after @codex", for "@codex; hi", "@codex. hi" or
+    "@codex,, hi". The server reads whole words.
   - Any other first `@` word that is no name at all: "@codex_x isn't in this
     channel", as typed.
-  - A name with capitals: "Names are lowercase: @codex", with the member's
-    alias, when its lowercase form is a current member or a `#label` names
-    another channel. Otherwise "@Nobody isn't in this channel", as typed.
-    Retired members are not current.
+  - After a `#label` run, neither of the two rules above applies: the server
+    posts "#alpha @codex; hi" to the channel as it is, so the hints for a
+    channel post apply. Its @codex follows the `#label` word, so the post
+    mentions no one: "Enter posts to the channel · Mention @name to bring
+    someone in".
+  - With no `#label` before it, a name whose lowercase form belongs to a
+    member of this channel whose pane is closed (the chip's "Pane closed"):
+    "@codex's pane is closed", for "@codex hi" and "@Codex hi" alike. The
+    server refuses both, so this comes before the capitals rule: lowercasing
+    the name would only lead to a second refusal. A name a current member has
+    taken since is not closed. With a `#label` first, the name belongs to that
+    workspace, so the rules below apply.
+  - A name with capitals: "Names are lowercase: @codex", the name with its
+    ASCII letters lowercased. The server refuses the capital before it looks
+    the name up, so this is the reason for a current member, a mention group
+    the page can't see, and an unknown name alike: "@Backend hi" reads "Names
+    are lowercase: @backend" and "@Nobody hi there" reads "Names are
+    lowercase: @nobody".
   - A lowercase name the page doesn't know keeps "Enter sends only to
     @name". It may be a group, which the page can't see, so the server
     decides.

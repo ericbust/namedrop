@@ -240,7 +240,7 @@ export function accept(
 
 const ALIAS = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const LABEL = /^#[A-Za-z0-9._-]+$/;
-// A name typed with punctuation stuck to it, as in "@codex," or "@codex:".
+// A name typed with punctuation stuck to it, as in "@codex;" or "@codex,,".
 const PUNCTUATED = /^@([A-Za-z0-9-]+)[,.:;!?]+$/;
 const TOKEN_CHAR = /[A-Za-z0-9_-]/;
 const EMBEDDED_AFTER = /[A-Za-z0-9_\\]/;
@@ -258,18 +258,41 @@ function spaceAfter(text: string, at: number): number {
   while (at < text.length && WHITESPACE.test(text.charAt(at))) at++;
   return at;
 }
-function serverMentions(text: string): Mentions {
+// A leading `#label` or `@name` word may end in one `,` or `:`, which is not part of it.
+function recipient(word: string): string {
+  return /[,:]$/.test(word) ? word.slice(0, -1) : word;
+}
+function afterLabels(text: string): number {
   let at = spaceAfter(text, 0);
-  while (LABEL.test(wordAt(text, at)))
+  while (LABEL.test(recipient(wordAt(text, at))))
     at = spaceAfter(text, at + wordAt(text, at).length);
+  return at;
+}
+// The server's workspace_label_before: an `@` after whitespace that follows a
+// `#label` word, `#all` aside, names someone in that workspace.
+function afterLabelWord(text: string, at: number): boolean {
+  let end = at;
+  while (end > 0 && WHITESPACE.test(text.charAt(end - 1))) end--;
+  if (end === at) return false;
+  let start = end;
+  while (start > 0 && !WHITESPACE.test(text.charAt(start - 1))) start--;
+  const word = text.slice(start, end);
+  return LABEL.test(word) && foldLabel(word.slice(1)) !== "all";
+}
+function serverMentions(text: string): Mentions {
+  let at = afterLabels(text);
   const leading = new Set<string>();
   let word = wordAt(text, at);
-  while (word.startsWith("@") && ALIAS.test(word.slice(1))) {
-    leading.add(word);
+  while (word.startsWith("@") && ALIAS.test(recipient(word).slice(1))) {
+    leading.add(recipient(word));
     at = spaceAfter(text, at + word.length);
     word = wordAt(text, at);
   }
+  // Channel mentions, as the server's context_mention_spans counts them. A name
+  // after a `#label` word, and each name after it with only whitespace between,
+  // belongs to that workspace, so it is not one.
   const anywhere = new Set<string>();
+  let qualifiedEnd: number | null = null;
   let cursor = 0;
   while (cursor < text.length) {
     const char = text.charAt(cursor);
@@ -284,8 +307,12 @@ function serverMentions(text: string): Mentions {
     ) {
       let end = cursor + 1;
       while (end < text.length && TOKEN_CHAR.test(text.charAt(end))) end++;
+      const qualified: boolean =
+        (qualifiedEnd !== null && spaceAfter(text, qualifiedEnd) === cursor) ||
+        afterLabelWord(text, cursor);
+      qualifiedEnd = qualified ? end : null;
       const alias = text.slice(cursor + 1, end);
-      if (ALIAS.test(alias)) anywhere.add(`@${alias}`);
+      if (!qualified && ALIAS.test(alias)) anywhere.add(`@${alias}`);
       cursor = end;
     } else cursor++;
   }
@@ -302,45 +329,53 @@ export function leadingMentions(text: string): readonly string[] {
 function asciiLower(text: string): string {
   return text.replace(/[A-Z]+/g, (upper) => upper.toLowerCase());
 }
+// The names whose panes are closed, unless a current member took the name.
+function closedNames(members: ReadonlyMap<AddressId, Member>): Set<string> {
+  const closed = new Set<string>();
+  const current = new Set<string>();
+  for (const member of members.values())
+    (member.activity === "retired" ? closed : current).add(member.alias);
+  for (const alias of current) closed.delete(alias);
+  return closed;
+}
 // The hint for leading text the server refuses, read in its order: after any
 // `#label` words, the first `@` word must be a whole name, and no leading name
-// may have capitals. A lowercase name the page doesn't know may be a group,
-// which the frame doesn't carry, so the server decides that one.
+// may have capitals. The server refuses a capital before it looks the name up,
+// so that is the reason whether or not the page knows the name. A lowercase
+// name the page doesn't know may be a group, which the frame doesn't carry, so
+// the server decides that one. Without a `#label`, a name whose pane is closed
+// comes before any capital: lowercasing it would only meet a second refusal.
 function refusedLeading(
   text: string,
   members: ReadonlyMap<AddressId, Member>,
 ): string | null {
-  let at = spaceAfter(text, 0);
-  const start = at;
-  while (LABEL.test(wordAt(text, at)))
-    at = spaceAfter(text, at + wordAt(text, at).length);
-  const labeled = at > start;
-  const first = wordAt(text, at);
-  if (first.length > 1 && first.startsWith("@")) {
-    if (!ALIAS.test(asciiLower(first.slice(1)))) {
-      const name = PUNCTUATED.exec(first)?.[1];
-      return name !== undefined && ALIAS.test(asciiLower(name))
-        ? composerCopy.spaceAfter(`@${asciiLower(name)}`)
-        : composerCopy.notMember(first);
-    }
+  let at = afterLabels(text);
+  const labelled = at > spaceAfter(text, 0);
+  let word = wordAt(text, at);
+  const isName = (token: string) =>
+    token.startsWith("@") && ALIAS.test(asciiLower(recipient(token).slice(1)));
+  if (word.length > 1 && word.startsWith("@") && !isName(word)) {
+    // Text that starts with a #label is never a leading mention to the server,
+    // so it posts to the channel as it is.
+    if (labelled) return null;
+    const name = PUNCTUATED.exec(word)?.[1];
+    return name !== undefined && ALIAS.test(asciiLower(name))
+      ? composerCopy.spaceAfter(`@${asciiLower(name)}`)
+      : composerCopy.notMember(word);
   }
   const names: string[] = [];
-  let word = first;
-  while (word.startsWith("@") && ALIAS.test(asciiLower(word.slice(1)))) {
-    names.push(word);
+  while (isName(word)) {
+    names.push(recipient(word));
     at = spaceAfter(text, at + word.length);
     word = wordAt(text, at);
   }
-  const capitalized = names.find((name) => name !== asciiLower(name));
-  if (capitalized === undefined) return null;
-  const alias = asciiLower(capitalized);
-  const current = new Set<string>();
-  for (const member of members.values())
-    if (member.kind.type !== "human" && member.activity !== "retired")
-      current.add(member.alias);
-  return labeled || current.has(alias)
-    ? composerCopy.lowercase(alias)
-    : composerCopy.notMember(capitalized);
+  const closed = labelled ? new Set<string>() : closedNames(members);
+  const closedName = names.map(asciiLower).find((name) => closed.has(name));
+  if (closedName !== undefined) return composerCopy.paneClosed(closedName);
+  const capital = names.find((name) => name !== asciiLower(name));
+  return capital === undefined
+    ? null
+    : composerCopy.lowercase(asciiLower(capital));
 }
 
 // The agents a channel post mentions, in the order the text first names them.

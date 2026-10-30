@@ -4854,6 +4854,76 @@ test("DESIGN-R2: an All activity row reads the item in plain words, with the ser
   );
 });
 
+const grantFailed =
+  "Context Grant activation failed: the pane's screen could not be read.";
+test("R3 U4: a failed context grant's card says the shared context failed and to ask the sender again, keeps See @codex's screen, and Details keeps the server text", async (t) => {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants = people();
+  value.frame.participants[0].pane_label = {
+    text: "w1:codex",
+    truncated: false,
+  };
+  value.frame.attention = [
+    {
+      source_kind: "context_grant",
+      summary: { text: grantFailed, truncated: false },
+      opened_at_ms: Date.now() - 60_000,
+      subject_alias: "codex",
+      message_id: null,
+      response: { kind: "pane", address_id: "codex" },
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const card = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  await card.waitFor();
+  const hint = card.locator(".attention-hint");
+  assert.deepEqual(
+    {
+      title: await card.locator(".attention-title").textContent(),
+      hint: await hint.textContent(),
+      tooltip: await hint.getAttribute("title"),
+      buttons: await card
+        .locator(".attention-actions button")
+        .allTextContents(),
+    },
+    {
+      title: "@codex didn't get its shared context",
+      hint: "Namedrop couldn't capture it. Ask the sender to share it again.",
+      tooltip: null,
+      buttons: ["See @codex's screen", "Details"],
+    },
+  );
+  await card.getByRole("button", { name: "Details" }).click();
+  await card.getByText(grantFailed, { exact: true }).waitFor();
+  await card
+    .getByRole("button", { name: "See @codex's screen", exact: true })
+    .click();
+  await ui.page
+    .getByRole("complementary", { name: "Screen of @codex", exact: true })
+    .waitFor();
+});
+
+test("R3 U4: All activity names a failed context grant Shared context failed, with the server's text in the tooltip", async (t) => {
+  const team = busyTeam();
+  const [item] = team[1].frame.attention;
+  item.source_kind = "context_grant";
+  item.summary = { text: grantFailed, truncated: false };
+  item.subject_summary = null;
+  const ui = await open(t, (client) => replay(client, team), undefined, {
+    path: "/?view=activity",
+  });
+  await ui.live();
+  const line = ui.page.locator(".activity-item .activity-text").first();
+  await line.waitFor();
+  assert.deepEqual(
+    [await line.textContent(), await line.getAttribute("title")],
+    ["Shared context failed", grantFailed],
+  );
+});
+
 test("UI-4: All activity lists blocked, then waiting, then working rows, and its URL survives reload and Back", async (t) => {
   const ui = await open(t, (client) => replay(client, busyTeam()));
   await ui.live();
@@ -6029,7 +6099,7 @@ test("DESIGN-R2 A1-A3: each Needs-you card has one action row, 12px apart, that 
     },
     {
       ...reply,
-      source_kind: "context_grant",
+      source_kind: "pane_binding",
       opened_at_ms: 6,
       response: { kind: "pane", address_id: "codex" },
     },
@@ -6101,7 +6171,7 @@ test("DESIGN-R2 A1-A3: each Needs-you card has one action row, 12px apart, that 
   const hint = cards.nth(2).locator(".attention-hint");
   assert.deepEqual(
     [await hint.textContent(), await hint.getAttribute("title")],
-    ["Approve or decline it in @codex's pane in Herdr.", "w1:codex"],
+    ["Answer it in @codex's pane in Herdr.", "w1:codex"],
   );
   assert.equal(
     await cards.locator(".attention-actions", { hasText: "in Herdr" }).count(),
@@ -6702,6 +6772,114 @@ test("DESIGN-R2 A5: a kept channel draft is named in the composer's status row, 
   );
   assert.equal(await notice.count(), 0);
 });
+
+test("R3 U3: when the responsible agent is gone, the first press of Message @codex says so and leaves the draft alone", async (t) => {
+  const { value, context } = actionableAttention("message");
+  value.frame.participants[0].activity = "retired";
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  await until(() => ui.contextRequests.length === 1, "the conversation");
+  await readsAs(
+    ui.page.locator("main .composer-status"),
+    "@codex's pane is closed, so it can't take a message.",
+  );
+  assert.equal(await draft.inputValue(), "my own words");
+  assert.equal(
+    await ui.page
+      .getByText("Your draft is still here.", { exact: false })
+      .count(),
+    0,
+  );
+  assert.equal(ui.posts.attempts.length, 0);
+  await draft.press("Control+a");
+  await ui.page.keyboard.type("@Codex hi");
+  await readsAs(
+    ui.page.locator("main .composer-status"),
+    "@codex's pane is closed",
+  );
+});
+
+for (const [subject, button, line] of [
+  ["codex", "Message @codex", "@codex isn't in this channel anymore."],
+  [null, "Message the agent", "That agent isn't in this channel anymore."],
+])
+  test(`R3 fix1 F4: when the responsible agent has left the frame, ${button} says ${line}`, async (t) => {
+    const { value, context } = actionableAttention("message");
+    value.frame.participants = value.frame.participants.filter(
+      (participant) => participant.address_id !== "codex",
+    );
+    value.frame.attention[0].subject_alias = subject;
+    const ui = await open(
+      t,
+      (client) => replay(client, [value]),
+      () => [],
+      { onContext: () => context },
+    );
+    await ui.live();
+    const draft = ui.page.locator("main .composer").getByRole("combobox");
+    await draft.fill("my own words");
+    await ui.page
+      .getByRole("region", { name: "Attention needed" })
+      .getByRole("button", { name: button, exact: true })
+      .click();
+    await until(() => ui.contextRequests.length === 1, "the conversation");
+    await readsAs(ui.page.locator("main .composer-status"), line);
+    assert.equal(await draft.inputValue(), "my own words");
+    assert.equal(ui.posts.attempts.length, 0);
+  });
+
+for (const [gone, line] of [
+  ["closed", "@codex's pane is closed, so it can't take a message."],
+  ["left", "@codex isn't in this channel anymore."],
+])
+  test(`R3 fix1 F4: in the thread pane, a reply whose agent ${gone === "closed" ? "has a closed pane" : "left the frame"} reads ${line} in the reply box's place`, async (t) => {
+    const { value, context } = actionableAttention("reply");
+    if (gone === "closed") {
+      value.frame.participants[0].activity = "retired";
+      value.frame.participants[0].recently_closed = true;
+    } else
+      value.frame.participants = value.frame.participants.filter(
+        (participant) => participant.address_id !== "codex",
+      );
+    value.frame.attention[0].subject_alias = "codex";
+    const ui = await open(
+      t,
+      (client) => replay(client, [value]),
+      () => [],
+      { onContext: () => context },
+    );
+    await ui.live();
+    await ui.page
+      .getByRole("region", { name: "Attention needed" })
+      .getByRole("button", { name: "Reply to @codex", exact: true })
+      .click();
+    const pane = ui.page.getByRole("complementary", {
+      name: "Thread",
+      exact: true,
+    });
+    await readsAs(pane.locator(".thread-answer"), line);
+    assert.equal(await pane.getByRole("combobox").count(), 0);
+    if (gone === "closed")
+      assert.equal(
+        await ui.page
+          .getByRole("list", { name: "Members" })
+          .getByText("Pane closed")
+          .count(),
+        1,
+        "the chip names the same state",
+      );
+  });
 
 test("DESIGN-R2 D2: the kept-draft notice lasts until the box changes, then the hint names a capitalized leading name again", async (t) => {
   const { value, context } = actionableAttention("message");
@@ -7706,13 +7884,21 @@ const unsent = () =>
     state: "unrouted",
     to: [],
   });
+// The page's delivery announcer: two polite regions that take turns, so at
+// most one of them holds text.
 const announcer = '.app-shell > [aria-live="polite"]';
+const announcement = (page) =>
+  page.$$eval(announcer, (regions) =>
+    regions.map((region) => region.textContent).join(""),
+  );
 // Every text the page's delivery announcer shows, in order, from now on.
 const recordAnnouncements = (page) =>
   page.evaluate((announcer) => {
     window.announced = [];
     new MutationObserver(() => {
-      const text = document.querySelector(announcer)?.textContent ?? "";
+      const text = [...document.querySelectorAll(announcer)]
+        .map((region) => region.textContent)
+        .join("");
       if (text !== "" && text !== window.announced.at(-1))
         window.announced.push(text);
     }).observe(document.body, {
@@ -7722,6 +7908,63 @@ const recordAnnouncements = (page) =>
     });
   }, announcer);
 const announced = (page) => page.evaluate(() => window.announced);
+// Every text newly put into one of the page's delivery announcer regions, from
+// now on. A region whose text stays the same puts nothing new, so a screen
+// reader has nothing to speak.
+const recordInsertions = (page) =>
+  page.evaluate((announcer) => {
+    window.inserted = [];
+    const regions = [...document.querySelectorAll(announcer)];
+    const shown = new Map(
+      regions.map((region) => [region, region.textContent]),
+    );
+    const observer = new MutationObserver(() => {
+      for (const region of regions) {
+        const text = region.textContent;
+        if (text !== shown.get(region) && text !== "")
+          window.inserted.push(text);
+        shown.set(region, text);
+      }
+    });
+    for (const region of regions)
+      observer.observe(region, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
+  }, announcer);
+
+test("R3 U5: two Send anyway presses on two posts are each announced, so the second Sent to @codex is spoken too", async (t) => {
+  const answers = { p1: held(), p2: held() };
+  const posts = ["p1", "p2"].map((id) =>
+    channelPost(id, `nice catch by @codex on ${id}`, {
+      state: "unrouted",
+      to: [],
+    }),
+  );
+  const { ui } = await chatRoom(t, posts, {
+    onDeliver: async (_asked, { path }) => {
+      await answers[path === deliverPath("p1") ? "p1" : "p2"].gate;
+      return { status: 200 };
+    },
+  });
+  await recordInsertions(ui.page);
+  for (const id of ["p1", "p2"]) {
+    const { route } = routeOf(ui, id);
+    await route.getByRole("button", { name: "Send this to @codex" }).click();
+    await readsAs(route, "Sending to @codex…");
+  }
+  for (const id of ["p1", "p2"]) {
+    answers[id].release();
+    await readsAs(routeOf(ui, id).route, "Sent to @codex");
+  }
+  assert.deepEqual(await ui.page.evaluate(() => window.inserted), [
+    "Sending to @codex…",
+    "Sending to @codex…",
+    "Sent to @codex",
+    "Sent to @codex",
+  ]);
+});
 
 test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the not-sent part for its own Sending to @codex… then Sent to @codex with focus on it, and the frame's leg replaces it", async (t) => {
   const answered = held();
@@ -7761,10 +8004,7 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
     focused: true,
     connected: true,
   });
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Sending to @codex…",
-  );
+  assert.equal(await announcement(ui.page), "Sending to @codex…");
   assert.equal(await threadPane(ui).count(), 0, "no thread opens");
   assert.equal(
     await ui.page.locator("main textarea").inputValue(),
@@ -7780,10 +8020,7 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
     connected: true,
   });
   await readsAs(route, "Sent to @codex");
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Sent to @codex",
-  );
+  assert.equal(await announcement(ui.page), "Sent to @codex");
   await button.click({ force: true });
   value.frame.messages = [reached(post, "codex")];
   ui.connections[0].send("space", value);
@@ -8030,11 +8267,16 @@ const recordLabels = (page, id) =>
 const recordAnnouncer = (page) =>
   page.evaluate((announcer) => {
     window.said = [];
-    const region = document.querySelector(announcer);
-    new MutationObserver(() => window.said.push(region.textContent)).observe(
-      region,
-      { subtree: true, childList: true, characterData: true },
+    const regions = [...document.querySelectorAll(announcer)];
+    const observer = new MutationObserver(() =>
+      window.said.push(regions.map((region) => region.textContent).join("")),
     );
+    for (const region of regions)
+      observer.observe(region, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
   }, announcer);
 // A Send anyway press whose answer waits for `answer()`, on a page whose clock
 // stands still, so the test runs the 1.5 s hold itself.
@@ -8225,10 +8467,7 @@ test("CH-fix-3 item 1: a refused delivery reads Couldn't send to @codex · Try a
     focused: true,
     connected: true,
   });
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Couldn't send to @codex",
-  );
+  assert.equal(await announcement(ui.page), "Couldn't send to @codex");
   assert.equal(
     await route
       .getByText("Couldn't send to @codex", { exact: true })
@@ -8261,10 +8500,7 @@ test("CH-fix-3 item 1: Try again's title says Couldn't reach Namedrop. when the 
     async () => (await offerState(button)).title === "HTTP 500",
     "the status in the title",
   );
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Couldn't send to @codex",
-  );
+  assert.equal(await announcement(ui.page), "Couldn't send to @codex");
 });
 
 test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @codex · Try again, says the name may belong to a different agent now, and Try again sends it", async (t) => {
@@ -8285,10 +8521,7 @@ test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @cod
     focused: true,
     connected: true,
   });
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Couldn't send to @codex",
-  );
+  assert.equal(await announcement(ui.page), "Couldn't send to @codex");
   await button.click();
   assert.equal((await offerReads(button, "Sent to @codex")).focused, true);
   await readsAs(route, "Sent to @codex");
@@ -8624,7 +8857,7 @@ test("CH-2: the channel composer says where Enter sends and posts plain text", a
   assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "hello room");
 });
 
-test("DESIGN-R2 B1: the channel hint names a capitalized or unknown leading name as you type, and Enter still sends it for the server to refuse", async (t) => {
+test("DESIGN-R2 B1, R3 U2: the channel hint names a capitalized leading name as lowercase as you type, known or not, and Enter still sends it for the server to refuse", async (t) => {
   const { ui } = await chatRoom(t, [], {
     onPost: ({ source }) => ({
       status: 400,
@@ -8647,8 +8880,8 @@ test("DESIGN-R2 B1: the channel hint names a capitalized or unknown leading name
   assert.deepEqual(hints, [
     "Names are lowercase: @codex",
     "Names are lowercase: @codex",
-    "@Nobody isn't in this channel",
-    "@Nobody isn't in this channel",
+    "Names are lowercase: @nobody",
+    "Names are lowercase: @nobody",
   ]);
   assert.equal(ui.posts.attempts.length, 0, "nothing is sent before Enter");
   await box.press("Enter");
@@ -8656,6 +8889,113 @@ test("DESIGN-R2 B1: the channel hint names a capitalized or unknown leading name
   assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@Nobody hi there");
   await status.getByText("unknown Mention: @Nobody").waitFor();
   assert.equal(await box.inputValue(), "@Nobody hi there", "the text stays");
+});
+
+test("R3 U1: a leading name may end in one comma or colon, so the hint says Enter sends only to it and Enter sends the text as typed", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const hints = [
+    ["@codex, hi", "Enter sends only to @codex"],
+    ["@codex: hi", "Enter sends only to @codex"],
+    ["@claude, @codex, compare notes", "Enter sends only to @claude, @codex"],
+    ["#alpha @codex, x", "Enter sends only to @codex"],
+    ["@codex,, hi", "Put a space after @codex"],
+    ["@codex; hi", "Put a space after @codex"],
+    ["@Codex, hi", "Names are lowercase: @codex"],
+  ];
+  for (const [text, hint] of hints) {
+    await box.fill(text);
+    assert.equal(await status.textContent(), hint, JSON.stringify(text));
+  }
+  await box.fill("@codex,");
+  await box.press("Enter");
+  await readsAs(status, "Add a message after @codex.");
+  assert.equal(await box.inputValue(), "@codex,", "a name alone never sends");
+  await box.fill("@claude, @codex, compare notes");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(
+    JSON.parse(ui.posts.attempts[0].raw).source,
+    "@claude, @codex, compare notes",
+  );
+});
+
+test("R3 fix1 F3: a leading name whose pane is closed says so as you type, in any case, and Enter still sends it for the server to refuse", async (t) => {
+  const value = team(1, "alpha");
+  value.frame.participants[0].activity = "retired";
+  value.frame.participants[0].recently_closed = true;
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onPost: ({ source }) => ({
+      status: 400,
+      error: `unknown Mention: ${source.split(" ")[0]}`,
+    }),
+  });
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const hints = [];
+  for (const text of ["@codex hi", "@Codex hi", "@claude, @codex: hi"]) {
+    await box.fill(text);
+    hints.push(await status.textContent());
+  }
+  await box.fill("@claude hi");
+  hints.push(await status.textContent());
+  assert.deepEqual(hints, [
+    "@codex's pane is closed",
+    "@codex's pane is closed",
+    "@codex's pane is closed",
+    "Enter sends only to @claude",
+  ]);
+  assert.equal(
+    await ui.page
+      .getByRole("list", { name: "Members" })
+      .getByText("Pane closed")
+      .count(),
+    1,
+    "the chip names the same state",
+  );
+  await box.fill("@codex hi");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  await status.getByText("unknown Mention: @codex").waitFor();
+  assert.equal(await box.inputValue(), "@codex hi", "the text stays");
+});
+
+test("R3 fix1 F1: a name right after a #label word is that workspace's, so the hint promises no check for it, and a #label with a mark or #all keeps the check", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const room = "Enter posts to the channel · Mention @name to bring someone in";
+  const hints = [
+    ["#alpha @codex; hi", room],
+    ["see #alpha @codex", room],
+    ["see #alpha @codex @claude", room],
+    [
+      "see #alpha, @codex",
+      "Enter posts to the channel · Namedrop checks if it's for @codex",
+    ],
+    [
+      "see #all @codex",
+      "Enter posts to the channel · Namedrop checks if it's for @codex",
+    ],
+    ["#alpha, @codex x", "Enter sends only to @codex"],
+  ];
+  for (const [text, hint] of hints) {
+    await box.fill(text);
+    assert.equal(await status.textContent(), hint, JSON.stringify(text));
+  }
+  await box.fill("#alpha @codex; hi");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(
+    JSON.parse(ui.posts.attempts[0].raw).source,
+    "#alpha @codex; hi",
+    "it posts to the channel as typed",
+  );
 });
 
 test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {

@@ -233,7 +233,11 @@ export function AttentionActions({
               if (response.kind === "reply")
                 onFocus(
                   channel.key,
-                  { kind: "context", target: response, response },
+                  {
+                    kind: "context",
+                    target: response,
+                    response: { ...response, subject: item.subjectAlias },
+                  },
                   event.currentTarget,
                 );
               else if (target !== null)

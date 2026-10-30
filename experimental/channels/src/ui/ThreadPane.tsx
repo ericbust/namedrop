@@ -8,12 +8,14 @@ import {
   useState,
 } from "react";
 import {
+  absence,
   attentionReplyTo,
   type ReplyIntent,
   replyPrefill,
 } from "../attention.ts";
 import type { CompletionContext } from "../complete.ts";
 import {
+  absenceCopy,
   answerInPane,
   repliesCopy,
   replyLabel,
@@ -248,8 +250,7 @@ export function ThreadPane({
       </div>
       {activeReply !== null && to === null && (
         <p className="thread-answer" role="status">
-          The responsible agent is no longer available. Use its pane in Herdr to
-          respond.
+          {absenceCopy(absence(activeReply, directory))}
         </p>
       )}
       {response?.kind === "pane" && (

@@ -1,4 +1,5 @@
 import type { ActivityGroupKind } from "./activity.ts";
+import type { Absence } from "./attention.ts";
 import type { DisabledReason } from "./complete.ts";
 import { threadControls } from "./control.ts";
 import type { Delivery } from "./delivery.ts";
@@ -146,9 +147,9 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
     hint: "Read the report, then answer the lead.",
   },
   context_grant: {
-    title: "Context request waiting",
-    named: (alias) => `${alias} is asking for context`,
-    hint: "Approve or decline it in the agent's pane in Herdr.",
+    title: "Shared context failed",
+    named: (alias) => `${alias} didn't get its shared context`,
+    hint: "Namedrop couldn't capture it. Ask the sender to share it again.",
   },
   pane_binding: {
     title: "An agent's pane changed",
@@ -170,6 +171,18 @@ export const responseCopy = {
   Exclude<AttentionResponse["kind"], "local">,
   (name: string) => string
 >;
+export function absenceCopy(absence: Absence): string {
+  switch (absence.kind) {
+    case "closed":
+      return `${absence.alias}'s pane is closed, so it can't take a message.`;
+    case "gone":
+      return `${absence.alias ?? "That agent"} isn't in this channel anymore.`;
+    default: {
+      const exhaustive: never = absence;
+      return exhaustive;
+    }
+  }
+}
 export function answerInPane(name: string | null): string {
   return name === null
     ? attentionTable.agent_status.hint
@@ -200,12 +213,15 @@ function responseHint(
     return { hint: pausedHint, hintTitle: null };
   const who = responder?.alias ?? item.subjectAlias;
   const pane = item.response?.kind === "pane";
-  if (who === null || !(pane || item.source === "agent_status")) return null;
+  // A context grant that failed is shared again by its sender, not fixed in the pane.
+  if (
+    who === null ||
+    item.source === "context_grant" ||
+    !(pane || item.source === "agent_status")
+  )
+    return null;
   return {
-    hint:
-      item.source === "context_grant"
-        ? `Approve or decline it in ${who}'s pane in Herdr.`
-        : answerInPane(who),
+    hint: answerInPane(who),
     hintTitle: pane ? paneLabelText(responder) : null,
   };
 }
@@ -406,6 +422,7 @@ export const composerCopy = {
   sendsOnlyTo: (names: readonly string[]) =>
     `Enter sends only to ${shortList(names)}`,
   lowercase: (alias: string) => `Names are lowercase: ${alias}`,
+  paneClosed: (alias: string) => `${alias}'s pane is closed`,
   notMember: (name: string) => `${name} isn't in this channel`,
   spaceAfter: (alias: string) => `Put a space after ${alias}`,
   sending: "Sending…",

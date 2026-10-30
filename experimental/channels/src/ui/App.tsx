@@ -11,19 +11,21 @@ import {
 } from "react";
 import { type ActivityList, activityOf } from "../activity.ts";
 import {
+  absence,
   evidenceReduce,
   evidenceThread,
   prepareChannelMessage,
 } from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
 import {
+  absenceCopy,
   channelMention,
   composerPlaceholder,
   paneLabelText,
   responseCopy,
   routeCopy,
 } from "../copy.ts";
-import { createDeliveries, deliveryOf } from "../delivery.ts";
+import { type Change, createDeliveries, deliveryOf } from "../delivery.ts";
 import type {
   ComposerId,
   Directory,
@@ -107,6 +109,26 @@ function measuredReduce(state: State, event: Event): State {
   performance.clearMarks("namedrop:frame-start");
   performance.clearMarks("namedrop:frame-end");
   return next;
+}
+// Two polite regions take turns: each new change goes into the empty one and
+// the other is cleared, so a change in the same words as the last, such as
+// "Sent to @codex" for another post, is still a fresh insertion to speak.
+function Announcer({ change }: { change: Change | null }) {
+  const [said, setSaid] = useState({ change, first: true });
+  if (said.change !== change) setSaid({ change, first: !said.first });
+  const words =
+    change &&
+    routeCopy.delivery.announce[change.state.kind](change.offer.alias);
+  return (
+    <>
+      <p className="sr-only" aria-live="polite">
+        {said.first ? words : null}
+      </p>
+      <p className="sr-only" aria-live="polite">
+        {said.first ? null : words}
+      </p>
+    </>
+  );
 }
 export function App() {
   const [state, dispatch] = useReducer(measuredReduce, undefined, () =>
@@ -904,8 +926,7 @@ export function App() {
                         </p>
                       ) : channelResponse?.preparation === "unavailable" ? (
                         <p className="composer-guard" role="status">
-                          The responsible agent is no longer available. Use its
-                          pane in Herdr to respond.
+                          {absenceCopy(absence(channelResponse, directory))}
                         </p>
                       ) : null
                     }
@@ -1043,12 +1064,7 @@ export function App() {
               onClose={closePeek}
             />
           )}
-          <p className="sr-only" aria-live="polite">
-            {deliveryChange &&
-              routeCopy.delivery.announce[deliveryChange.state.kind](
-                deliveryChange.offer.alias,
-              )}
-          </p>
+          <Announcer change={deliveryChange} />
         </div>
       </DeliveryContext>
     </PeekContext>

@@ -235,7 +235,7 @@ test("activity rows: an item the server describes in its own terms reads in plai
     ["agent_disposition", "Unanswered request"],
     ["delivery_attempt", "Unanswered request"],
     ["automatic_reply_limit", "Reply limit reached"],
-    ["context_grant", "Context request waiting"],
+    ["context_grant", "Shared context failed"],
     ["pane_binding", "An agent's pane changed"],
     ["integration_registration", "Agent setup incomplete"],
   ] satisfies [string, string][]) {
