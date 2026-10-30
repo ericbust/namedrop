@@ -20,7 +20,7 @@ fn plain_post_routes_verbatim_and_replay_does_not_call_router_again() {
     let f = fixture();
     let server = Server::start(
         &f,
-        r#"{"structured_output":{"to":["planner","ghost","lead","planner"],"reason":"needs a plan"},"usage":{"input_tokens":123,"output_tokens":12}}"#,
+        r#"{"result":"{\"to\":[\"planner\",\"ghost\",\"lead\",\"planner\"],\"reason\":\"needs a plan\"}","usage":{"input_tokens":123,"output_tokens":12}}"#,
         false,
     );
     let source = "Can @planner and @lead plan this?\nKeep @ghost literal.";
@@ -55,8 +55,25 @@ fn plain_post_routes_verbatim_and_replay_does_not_call_router_again() {
     );
     assert!(call["env"].get("CLAUDE_CODE_SESSION_ID").is_none());
     let args = call["args"].as_array().unwrap();
-    let schema_index = args.iter().position(|arg| arg == "--json-schema").unwrap() + 1;
-    let schema: Value = serde_json::from_str(args[schema_index].as_str().unwrap()).unwrap();
+    assert!(!args.iter().any(|arg| arg == "--json-schema"));
+    let prompt_index = args
+        .iter()
+        .position(|arg| arg == "--system-prompt")
+        .unwrap()
+        + 1;
+    let (_, schema) = args[prompt_index]
+        .as_str()
+        .unwrap()
+        .split_once("\nOutput JSON schema: ")
+        .expect("plain Claude receives the schema in its trusted system prompt");
+    let schema: Value = serde_json::from_str(schema).unwrap();
+    let mut aliases = schema["properties"]["to"]["items"]["enum"]
+        .as_array()
+        .unwrap()
+        .clone();
+    aliases.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    assert_eq!(aliases, vec![json!("lead"), json!("planner")]);
+    assert_eq!(schema["additionalProperties"], false);
     assert!(
         schema["properties"]["to"].get("uniqueItems").is_none(),
         "Codex strict output schemas reject uniqueItems; server validation deduplicates picks"

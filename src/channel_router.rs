@@ -5,7 +5,7 @@ use super::{
 use crate::{AgentRuntime, RoutingAddressSnapshot, store::dashboard::DashboardRows};
 use std::collections::HashSet;
 
-const DEADLINE: Duration = Duration::from_secs(8);
+const DEADLINE: Duration = Duration::from_secs(17);
 const MAX_POST_CHARS: usize = 4_000;
 const MAX_ROSTER: usize = 32;
 const MAX_INPUT_BYTES: usize = 12 * 1024;
@@ -121,7 +121,8 @@ pub(crate) fn route(request: RouterRequest<'_>) -> RouteRun {
             attempt: None,
         };
     };
-    run_input(input, DEADLINE, true)
+    let structured = input.host == "codex";
+    run_input(input, DEADLINE, structured)
 }
 
 fn run_input(input: RouterInput, deadline: Duration, structured: bool) -> RouteRun {
@@ -788,16 +789,21 @@ int main(int argc, char **argv) {
             let recorded = fs::read_to_string(record).unwrap();
             assert!(!recorded.contains("LEAKED<"), "{case}: {recorded}");
             assert!(!recorded.contains("synthetic-secret"), "{case}: {recorded}");
-            if matches!(case, "plainclaude" | "plaincodex") {
+            let codex = matches!(case, "codex" | "partial" | "missing" | "plaincodex");
+            if case != "eval" && (!codex || case == "plaincodex") {
                 assert!(!recorded.contains("ARG<--json-schema>"));
                 assert!(!recorded.contains("ARG<--output-schema>"));
                 assert!(recorded.contains("Output JSON schema:"));
                 assert!(recorded.contains("additionalProperties"));
             }
-            if matches!(case, "codex" | "partial" | "missing" | "plaincodex") {
+            if codex {
                 assert!(recorded.contains("ARG<gpt-5.6-luna>"));
                 assert!(recorded.contains("ARG<--json>"));
                 assert!(recorded.contains("ARG<--ignore-user-config>"));
+                if case != "plaincodex" {
+                    assert!(recorded.contains("ARG<--output-schema>"));
+                    assert!(!recorded.contains("Output JSON schema:"));
+                }
             } else {
                 assert!(recorded.contains("ARG<claude-haiku-4-5>"));
                 assert!(recorded.contains("ARG<--tools>\nARG<>"));
@@ -941,7 +947,7 @@ int main(int argc, char **argv) {
                         assert_eq!(router, CLAUDE_MODEL);
                     }
                     if matches!(case.as_str(), "timeout" | "partial") {
-                        assert!(started.elapsed() < Duration::from_secs(10));
+                        assert!(started.elapsed() < Duration::from_secs(20));
                     }
                 }
                 _ => {

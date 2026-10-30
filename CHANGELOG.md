@@ -7,6 +7,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Fixed
 
 - Dashboard delivery and unanswered-request warnings follow the recipient's current alias after a rename. Attention links load in one query instead of preparing a query for each warning.
+- Channel routing treats code, quoted instructions, and multi-step operator requests as normal post content. Measured routing policy uses plain JSON for Claude, structured output for Codex, and a 17-second deadline. A separate bounded dashboard journal records routing attempts and available usage, including failed calls.
 
 ### Added
 

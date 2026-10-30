@@ -167,7 +167,7 @@ else:
     fn raw(&self, request: &str) -> Response {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         stream.shutdown(Shutdown::Write).unwrap();

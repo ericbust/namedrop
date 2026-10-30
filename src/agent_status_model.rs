@@ -765,8 +765,6 @@ fn claude_plan(
     })
 }
 
-/// Polls the isolated worker until it exits or the caller cancels it. Silence
-/// alone is not failure: a provider request may take longer than expected.
 fn run_worker(
     host: &str,
     prompt: &WorkerPrompt,
@@ -829,8 +827,6 @@ fn capture_worker(
             "CODEX_SESSION_ID",
             "CODEX_THREAD_ID",
             "AI_AGENT",
-            // Live handles to the invoking session's own IPC. Measured harmless to
-            // latency, but an isolated worker has no business holding them.
             "CLAUDE_CODE_MESSAGING_SOCKET",
             "CLAUDE_CODE_MESSAGING_TOKEN",
             "CLAUDE_CODE_EXECPATH",
@@ -874,8 +870,6 @@ fn capture_worker(
                 failure = WorkerFailure::Cancelled;
                 return Err("agent status summary cancelled".to_owned());
             }
-            // Stop an oversized worker while it is still running, so the caps end
-            // the work rather than only rejecting its output afterwards.
             if oversized(&stdout) || oversized(&stderr) || plan.result_oversized() {
                 stop_process_group(&mut child);
                 failure = WorkerFailure::OutputLimit;
