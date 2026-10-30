@@ -128,24 +128,29 @@ export function routeLine(
           stage: message.legs.find((leg) => leg.to === id)?.stage ?? queued,
         }));
   // An agent the thread already reached, by this post or a later message, or
-  // who wrote in it, has the conversation, so it is not offered again.
+  // who wrote in it, has the conversation, so it is not offered again. Its
+  // press keeps its part while sending or Sent, so the line confirms it.
   const offers = () => {
-    const left = (message.routing?.mentioned ?? [])
-      .filter((alias) => {
-        const member = liveAgentNamed(directory, alias);
-        return (
-          member !== undefined &&
-          !room.joined.has(member.id) &&
-          !listed.includes(member.id)
-        );
-      })
-      .map((alias) => ({ alias, state: delivery(alias) }));
+    const named = (message.routing?.mentioned ?? []).flatMap((alias) => {
+      const member = liveAgentNamed(directory, alias);
+      return member === undefined
+        ? []
+        : [
+            {
+              alias,
+              state: delivery(alias),
+              joined: room.joined.has(member.id) || listed.includes(member.id),
+            },
+          ];
+    });
     return {
-      idle: left.flatMap(({ alias, state }) =>
-        state.kind === "idle" ? [alias] : [],
+      idle: named.flatMap(({ alias, state, joined }) =>
+        state.kind === "idle" && !joined ? [alias] : [],
       ),
-      pressed: left.flatMap(({ alias, state }): RoutePart[] =>
-        state.kind === "idle" ? [] : [{ kind: "delivery", alias, state }],
+      pressed: named.flatMap(({ alias, state, joined }): RoutePart[] =>
+        state.kind === "idle" || (state.kind === "failed" && joined)
+          ? []
+          : [{ kind: "delivery", alias, state }],
       ),
     };
   };

@@ -756,7 +756,8 @@ Names in it are peek buttons at 12px 600 in `--text`.
 | Post, `unrouted`, mentioning agents            | "Mentioned @codex, not sent · Send anyway"                              | inbox                  |
 | Post, `router_failed`                          | "Couldn't check who this is for · Send to @codex"                       | alert, `--failed-text` |
 | Post, Send anyway pressed, server not answered | "Sending to @codex…"                                                    | the post's icon        |
-| Post, delivery taken by the server             | "Sent to @codex", until the answer or a frame shows @codex reached      | the post's icon        |
+| Post, delivery confirmed, line names @codex    | "@codex · Queued · Sent to @codex", then "@codex · Queued" after 1.5 s  | arrow                  |
+| Post, delivery confirmed, no frame names it    | "Sent to @codex", until a frame names @codex                            | the post's icon        |
 | Post, delivery refused or not reached          | "Couldn't send to @codex · Try again"                                   | the post's icon        |
 | Post, `router_failed`, one of two pressed      | "Couldn't check who this is for · Send to @claude · Sending to @codex…" | alert, `--failed-text` |
 | Post, `router_failed`, Send to reached @codex  | "Couldn't check who this is for · @codex · Queued · Send to @claude"    | alert, `--failed-text` |
@@ -829,13 +830,23 @@ uses the "Send to" form. Each offer is a text button in 12px 600
   go.
 - Each pressed agent then has its own part, after the offer and in the order
   the post names the agents. The part is a text button in the same style:
-  - "Sending to @codex…", then "Sent to @codex", in `--text-muted` and inert,
-    until the server's answer or a frame shows the post reached the agent. The
-    line then names the agent with its receipt, and the part goes. A 2xx answer
-    carries the post's channel object, so when its `to` lists every agent it
-    delivered, the line names them at once. The page ignores that object when
-    the stored post already lists them, because a frame may be newer, and the
-    next frame is the final word.
+  - "Sending to @codex…", then "Sent to @codex", in `--text-muted` and inert.
+    The press is confirmed by whichever comes first: a 2xx answer that lists
+    the agent as delivered, or a frame, or the answer's channel object, that
+    shows the post reached the agent. From then on the same part reads "Sent
+    to @codex" for 1.5 seconds, while the line may already name the agent with
+    its receipt, as in "@codex · Queued · Sent to @codex". Then the part goes.
+    The hold is the same in either order, and it is not an animation, so
+    reduced motion changes nothing. A later answer changes nothing, even a
+    failure, because the frame is the final word that the agent has the post.
+  - When the answer confirms the press before anything names the agent, as
+    when its body is empty, the part keeps reading "Sent to @codex" after the
+    1.5 seconds, until a frame names the agent, so the line never offers the
+    agent again.
+  - A 2xx answer carries the post's channel object, so when its `to` lists
+    every agent it delivered, the line names them at once. The page ignores
+    that object when the stored post already lists them, because a frame may
+    be newer, and the next frame is the final word.
   - A failure reads "Couldn't send to @codex" in `--failed-text`, then a "Try
     again" button. Its tooltip is the server's message, "HTTP 500" when the
     server gives none, or "Couldn't reach Namedrop." when the request never
@@ -858,9 +869,9 @@ uses the "Send to" form. Each offer is a text button in 12px 600
   next Tab continues from there. When focus has moved elsewhere, it stays there.
 - One visually hidden polite live region for the whole page announces each
   change: "Sending to @codex…", "Sent to @codex", or "Couldn't send to @codex".
-  A screen reader hears "Sent to @codex" even when the answer names the agent
-  on the line at once and the part goes. The parts have no live region of their
-  own, so nothing is announced twice.
+  It says "Sent to @codex" once per press, whichever of the answer and the
+  frame confirmed it. The parts have no live region of their own, so nothing
+  is announced twice.
 - The timeline, the thread pane, and a Needs-you conversation show one state
   for the same post and agent.
 

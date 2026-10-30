@@ -56,6 +56,19 @@ test("delivery: a press sends once, the answer says sent or failed, and Try agai
   }
 });
 
+test("delivery: a frame that shows the agent reached confirms a press still sending, ends a failed one, and ends a sent one only once its hold is over", () => {
+  for (const held of [true, false])
+    assert.deepEqual(delivery(sending, { kind: "reached", held }), sent);
+  assert.equal(
+    delivery(sent, { kind: "reached", held: true }),
+    sent,
+    "Sent holds",
+  );
+  assert.deepEqual(delivery(sent, { kind: "reached", held: false }), idle);
+  assert.deepEqual(delivery(refused, { kind: "reached", held: false }), idle);
+  assert.equal(delivery(idle, { kind: "reached", held: false }), idle);
+});
+
 const key = "a".repeat(20) as SpaceKey;
 const codex: Offer = { key, messageId: "p1", alias: "@codex" };
 const claude: Offer = { key, messageId: "p1", alias: "@claude" };
@@ -190,7 +203,9 @@ test("deliveries: a 200 leaves the pressed agent Sent only when it lists the age
 function member(id: string, alias: `@${string}`): [AddressId, Member] {
   return [id as AddressId, { id: id as AddressId, alias } as unknown as Member];
 }
-function post(legs: readonly string[]): Message {
+// The post as a frame shows it: `legs` once the server delivered, and `to`,
+// as a deliver answer's channel object also does, once it queued the delivery.
+function post(legs: readonly string[], to: readonly Alias[] = []): Message {
   return {
     id: "p1",
     threadId: "p1",
@@ -198,12 +213,12 @@ function post(legs: readonly string[]): Message {
     at: 1,
     author: "human",
     kind: "mention",
-    body: { text: "nice catch by @codex", truncated: false },
+    body: { text: "nice catch by @codex and @claude", truncated: false },
     legs: legs.map((to) => ({
       to: to as AddressId,
       stage: { stage: "delivered" },
     })),
-    routing: null,
+    routing: { state: "unrouted", mentioned: ["@codex", "@claude"], to },
     woke: [],
   };
 }
@@ -222,27 +237,113 @@ function channels(message: Message | null) {
   ]);
 }
 
-test("deliveries: an offer's state ends once a frame shows the post reached that agent", async () => {
-  const { store, answer, of } = server();
+// What the page's announcer says, in order, as the latest change moves.
+function announcements(store: ReturnType<typeof createDeliveries>) {
+  const said: string[] = [];
+  let last = store.latest();
+  store.subscribe(() => {
+    const latest = store.latest();
+    if (latest !== last && latest !== null)
+      said.push(`${latest.state.kind} ${latest.offer.alias}`);
+    last = latest;
+  });
+  return said;
+}
+const outage: DeliverResult = {
+  kind: "failed",
+  cause: "refused",
+  status: 503,
+  message: "",
+};
+
+test("deliveries: a post that reached no one, or one outside the loaded window, keeps every press as it is", async () => {
+  const { store, answer } = server();
   store.deliver(codex);
   store.deliver(claude);
   await answer(claude, { kind: "done" });
   const before = store.snapshot();
   store.settle(channels(post([])));
   store.settle(channels(null));
-  assert.equal(
-    store.snapshot(),
-    before,
-    "a post that reached no one, or one outside the loaded window, keeps its states",
-  );
+  assert.equal(store.snapshot(), before);
+});
+
+test("deliveries: a frame that reaches the agent before the answer confirms the press, which reads Sent for 1.5 s and then ends, and the answer after it changes nothing", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { store, answer, of } = server();
+  const said = announcements(store);
+  store.deliver(codex);
   store.settle(channels(post(["codex"])));
-  assert.deepEqual([of(codex), of(claude)], [idle, sent]);
-  await answer(codex, { kind: "done" });
+  assert.deepEqual(of(codex), sent, "the frame confirms the press");
+  t.mock.timers.tick(1_499);
+  assert.deepEqual(of(codex), sent);
+  await answer(codex, outage);
   assert.deepEqual(
     of(codex),
-    idle,
-    "a late answer for a settled offer changes nothing",
+    sent,
+    "a failure after the frame changes nothing",
   );
+  t.mock.timers.tick(1);
+  assert.deepEqual(of(codex), idle, "the hold is over");
+  await answer(codex, { kind: "done" });
+  assert.deepEqual(of(codex), idle, "an answer after the hold changes nothing");
+  assert.deepEqual(said, ["sending @codex", "sent @codex"]);
+});
+
+test("deliveries: an answer that lists the agent confirms the press, which reads Sent for 1.5 s while the line already names the agent, then ends", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { store, answer, of } = server();
+  const said = announcements(store);
+  store.deliver(codex);
+  await answer(codex, { kind: "done" });
+  store.settle(channels(post([], ["@codex"])));
+  assert.deepEqual(of(codex), sent, "the channel object does not end it");
+  t.mock.timers.tick(1_000);
+  store.settle(channels(post(["codex"], ["@codex"])));
+  assert.deepEqual(of(codex), sent, "nor does the frame after it");
+  t.mock.timers.tick(499);
+  assert.deepEqual(of(codex), sent);
+  t.mock.timers.tick(1);
+  assert.equal(store.snapshot().size, 0, "the hold is over");
+  assert.deepEqual(said, ["sending @codex", "sent @codex"]);
+});
+
+test("deliveries: a Sent press the line does not name yet keeps reading Sent after its hold, and ends when a frame names the agent", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { store, answer, of } = server();
+  store.deliver(codex);
+  await answer(codex, { kind: "done" });
+  store.settle(channels(post([])));
+  t.mock.timers.tick(1_500);
+  assert.deepEqual(of(codex), sent, "never offered again before a frame");
+  store.settle(channels(post(["codex"])));
+  assert.deepEqual(of(codex), idle);
+});
+
+test("deliveries: a frame that reaches an agent whose press failed ends that press at once", async () => {
+  const { store, answer, of } = server();
+  store.deliver(codex);
+  await answer(codex, outage);
+  store.settle(channels(post(["codex"])));
+  assert.deepEqual(of(codex), idle);
+});
+
+test("deliveries: each press keeps its own hold, pressing Sent neither sends nor restarts it, and dispose stops every hold", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { store, requests, answer, of } = server();
+  store.deliver(codex);
+  await answer(codex, { kind: "done" });
+  t.mock.timers.tick(1_000);
+  store.deliver(claude);
   store.settle(channels(post(["codex", "claude"])));
-  assert.equal(store.snapshot().size, 0);
+  store.deliver(codex);
+  assert.deepEqual(requests, [codex, claude], "Sent never sends again");
+  t.mock.timers.tick(500);
+  assert.deepEqual(
+    [of(codex), of(claude)],
+    [idle, sent],
+    "@codex's hold started at its answer, @claude's at the frame",
+  );
+  store.dispose();
+  t.mock.timers.tick(1_500);
+  assert.deepEqual(of(claude), sent, "no hold runs after dispose");
 });

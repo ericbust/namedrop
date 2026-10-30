@@ -7808,13 +7808,13 @@ test("DESIGN-R2 B4: the deliver answer's channel object names @codex on the line
   });
   const { route, parts, icon } = routeOf(ui, "p1");
   await route.getByRole("button", { name: "Send this to @codex" }).click();
-  await readsAs(route, "@codex · Queued");
-  assert.deepEqual(await parts(), ["@codex", "Queued"]);
+  await readsAs(route, "@codex · Queued · Sent to @codex");
+  assert.deepEqual(await parts(), ["@codex", "Queued", "Sent to @codex"]);
   assert.deepEqual(await icon(), [iconShape.arrow]);
   assert.equal(
-    await route.locator("[data-offer]").count(),
+    await route.getByRole("button", { name: "Send this to @codex" }).count(),
     0,
-    "no offer and no Sent part",
+    "no offer",
   );
   assert.equal(ui.posts.deliveries.length, 1);
   assert.equal(ui.connections.length, 1, "no new frame or connection");
@@ -7982,12 +7982,15 @@ for (const [where, { move, focused }] of Object.entries(elsewhere))
         return { channel: { ...post.channel, to: ["codex"] } };
       },
     });
+    await ui.page.clock.install();
     await recordAnnouncements(ui.page);
     const { route } = routeOf(ui, "p1");
     await route.getByRole("button", { name: "Send this to @codex" }).click();
     await focusOn(ui.page, "p1 @codex", "Sending to @codex…");
     await move(ui);
     answered.release();
+    await readsAs(route, "@codex · Queued · Sent to @codex");
+    await ui.page.clock.runFor(1_500);
     await readsAs(route, "@codex · Queued");
     assert.equal(
       await ui.page.evaluate(focused),
@@ -8000,6 +8003,164 @@ for (const [where, { move, focused }] of Object.entries(elsewhere))
     ]);
   });
 
+// Every label the post's control for @codex shows, in order, from now on:
+// the offer, then the agent's own part, and "" once neither is on the line.
+const recordLabels = (page, id) =>
+  page.evaluate((id) => {
+    window.labels = [];
+    const record = () => {
+      const route = document.querySelector(
+        `main [data-message-id="${id}"] .route`,
+      );
+      const label =
+        (
+          route?.querySelector(`[data-offer="${id} @codex"]`) ??
+          route?.querySelector('[aria-label="Send this to @codex"]')
+        )?.textContent ?? "";
+      if (label !== window.labels.at(-1)) window.labels.push(label);
+    };
+    record();
+    new MutationObserver(record).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+  }, id);
+// Every write to the page's delivery announcer, so one said twice shows twice.
+const recordAnnouncer = (page) =>
+  page.evaluate((announcer) => {
+    window.said = [];
+    const region = document.querySelector(announcer);
+    new MutationObserver(() => window.said.push(region.textContent)).observe(
+      region,
+      { subtree: true, childList: true, characterData: true },
+    );
+  }, announcer);
+// A Send anyway press whose answer waits for `answer()`, on a page whose clock
+// stands still, so the test runs the 1.5 s hold itself.
+async function heldPress(t, outcome) {
+  const answered = held();
+  const post = unsent();
+  const { ui, value } = await chatRoom(t, [post], {
+    onDeliver: async () => {
+      await answered.gate;
+      return outcome(post);
+    },
+  });
+  await ui.page.clock.install();
+  await ui.page.clock.pauseAt(Date.now() + 1_000);
+  const { route } = routeOf(ui, "p1");
+  await recordLabels(ui.page, "p1");
+  await recordAnnouncer(ui.page);
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await focusOn(ui.page, "p1 @codex", "Sending to @codex…");
+  const button = await pressedOffer(route, "p1", "@codex");
+  return {
+    ui,
+    route,
+    button,
+    frame: () => {
+      value.frame.messages = [reached(post, "codex")];
+      ui.connections[0].send("space", value);
+    },
+    answer: async () => {
+      const finished = ui.page.waitForEvent("requestfinished", (request) =>
+        request.url().endsWith("/deliver"),
+      );
+      answered.release();
+      await finished;
+    },
+  };
+}
+const sentPart = {
+  text: "Sent to @codex",
+  disabled: "true",
+  title: null,
+  focused: true,
+  connected: true,
+};
+// The same button, still focused, reads Sent to @codex.
+async function readsSent(button) {
+  assert.deepEqual(await settled(() => offerState(button), sentPart), sentPart);
+}
+async function holdsThenLeaves({ ui, button }) {
+  await ui.page.clock.runFor(1_499);
+  assert.deepEqual(await offerState(button), sentPart, "Sent holds 1.5 s");
+  await ui.page.clock.runFor(1);
+  await eventually(
+    async () => !(await button.evaluate((element) => element.isConnected)),
+    "the part to leave once its 1.5 s are over",
+  );
+  assert.deepEqual(await focusedRow(ui.page), {
+    tag: "article",
+    id: "p1",
+    tabindex: "-1",
+    inPane: false,
+  });
+  assert.deepEqual(await ui.page.evaluate(() => window.labels), [
+    "Send anyway",
+    "Sending to @codex…",
+    "Sent to @codex",
+    "",
+  ]);
+  assert.deepEqual(await ui.page.evaluate(() => window.said), [
+    "Sending to @codex…",
+    "Sent to @codex",
+  ]);
+}
+
+test("DESIGN-R2 E2 (a): the frame that adds @codex before the deliver answer confirms the press, Sent to @codex holds 1.5 s beside @codex · Delivered, then focus moves to the row", async (t) => {
+  const press = await heldPress(t, (post) => ({
+    channel: { ...post.channel, to: ["codex"] },
+  }));
+  press.frame();
+  await readsSent(press.button);
+  await readsAs(press.route, "@codex · Delivered · Sent to @codex");
+  await press.answer();
+  assert.deepEqual(await offerState(press.button), sentPart);
+  await holdsThenLeaves(press);
+  await readsAs(press.route, "@codex · Delivered");
+});
+
+test("DESIGN-R2 E2 (b): the deliver answer with the channel object before the frame confirms the press, Sent to @codex holds 1.5 s beside @codex · Queued and then the frame's receipt, then focus moves to the row", async (t) => {
+  const press = await heldPress(t, (post) => ({
+    channel: { ...post.channel, to: ["codex"] },
+  }));
+  await press.answer();
+  await readsSent(press.button);
+  await readsAs(press.route, "@codex · Queued · Sent to @codex");
+  press.frame();
+  await readsAs(press.route, "@codex · Delivered · Sent to @codex");
+  assert.deepEqual(await offerState(press.button), sentPart);
+  await holdsThenLeaves(press);
+  await readsAs(press.route, "@codex · Delivered");
+});
+
+test("DESIGN-R2 E2 (c): the deliver answer with the channel object and no frame confirms the press, Sent to @codex holds 1.5 s beside @codex · Queued, then focus moves to the row", async (t) => {
+  const press = await heldPress(t, (post) => ({
+    channel: { ...post.channel, to: ["codex"] },
+  }));
+  await press.answer();
+  await readsSent(press.button);
+  await readsAs(press.route, "@codex · Queued · Sent to @codex");
+  await holdsThenLeaves(press);
+  await readsAs(press.route, "@codex · Queued");
+  assert.equal(press.ui.connections.length, 1, "no new frame or connection");
+});
+
+test("DESIGN-R2 E2 (d): a deliver answer of 503 after the frame confirmed the press changes nothing: Sent to @codex holds 1.5 s with no failure, then focus moves to the row", async (t) => {
+  const press = await heldPress(t, () => ({ status: 503 }));
+  press.frame();
+  await readsSent(press.button);
+  await press.answer();
+  assert.equal(press.ui.posts.deliveries[0].status, 503);
+  await readsAs(press.route, "@codex · Delivered · Sent to @codex");
+  assert.deepEqual(await offerState(press.button), sentPart);
+  assert.equal(await press.route.locator(".route-failed").count(), 0);
+  await holdsThenLeaves(press);
+  await readsAs(press.route, "@codex · Delivered");
+});
+
 test("DESIGN-R2 D1: a Send to on a router_failed post keeps who it reached, with the receipt, before the offers still left", async (t) => {
   const failed = { state: "router_failed" };
   const both = channelPost("p1", "can @codex and @claude look?", failed);
@@ -8009,10 +8170,16 @@ test("DESIGN-R2 D1: a Send to on a router_failed post keeps who it reached, with
       channel: { ...(path === deliverPath("p1") ? both : one).channel, to },
     }),
   });
+  await ui.page.clock.install();
   const first = routeOf(ui, "p1");
   await first.route
     .getByRole("button", { name: "Send this to @codex" })
     .click();
+  await readsAs(
+    first.route,
+    "Couldn't check who this is for · @codex · Queued · Send to @claude · Sent to @codex",
+  );
+  await ui.page.clock.runFor(1_500);
   await readsAs(
     first.route,
     "Couldn't check who this is for · @codex · Queued · Send to @claude",
@@ -8022,6 +8189,11 @@ test("DESIGN-R2 D1: a Send to on a router_failed post keeps who it reached, with
   await second.route
     .getByRole("button", { name: "Send this to @codex" })
     .click();
+  await readsAs(
+    second.route,
+    "Couldn't check who this is for · @codex · Queued · Sent to @codex",
+  );
+  await ui.page.clock.runFor(1_500);
   await readsAs(
     second.route,
     "Couldn't check who this is for · @codex · Queued",

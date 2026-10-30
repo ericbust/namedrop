@@ -385,36 +385,35 @@ test("route line: the not-sent group counts only idle agents, and each pressed a
     },
   );
 });
-test("route line: a pressed agent's part goes once the frame shows the post reached it", () => {
+test("route line: once the post reached the agent, a press in flight or reading Sent keeps its part after the receipt, and a failed one goes", () => {
   const chat = room(
     post("nice catch by @codex", { state: "unrouted", to: ["codex"] }, [
       "codex",
     ]),
   );
-  for (const state of [sending, sent, refused])
+  const reached = [
+    { kind: "names", ids: ids("codex") },
+    { kind: "receipt", id: "codex", named: false, stage: working },
+  ];
+  for (const state of [sending, sent])
     assert.deepEqual(
       chat.line("post", 0, { "@codex": state }),
       {
         icon: "arrow",
         tone: "muted",
         tip: null,
-        parts: [
-          { kind: "names", ids: ids("codex") },
-          { kind: "receipt", id: "codex", named: false, stage: working },
-        ],
+        parts: [...reached, { kind: "delivery", alias: "@codex", state }],
       },
       state.kind,
     );
+  for (const pressed of [{ "@codex": refused }, {}])
+    assert.deepEqual(chat.line("post", 0, pressed)?.parts, reached);
 });
 test("route line: an agent the post's channel lists in to before a frame brings its leg reads as reached and queued, and is not offered again", () => {
   const queued = { stage: "queued" } as const;
   for (const state of ["unrouted", "router_failed"] as const)
     assert.deepEqual(
-      room(post("nice catch by @codex", { state, to: ["codex"] })).line(
-        "post",
-        0,
-        { "@codex": sent },
-      ),
+      room(post("nice catch by @codex", { state, to: ["codex"] })).line(),
       state === "unrouted"
         ? {
             icon: "arrow",
@@ -487,7 +486,7 @@ test("route line: router_failed keeps the agents a Send to reached, with their r
       ),
     );
   const queued = { stage: "queued" } as const;
-  assert.deepEqual(failed(["codex"]).line("post", 0, { "@codex": sent }), {
+  assert.deepEqual(failed(["codex"]).line(), {
     icon: "alert",
     tone: "failed",
     tip: { kind: "unreachable" },
@@ -498,6 +497,17 @@ test("route line: router_failed keeps the agents a Send to reached, with their r
       { kind: "send", aliases: ["@claude"], form: "to" },
     ],
   });
+  assert.deepEqual(
+    failed(["codex"]).line("post", 0, { "@codex": sent })?.parts,
+    [
+      { kind: "state", state: "failed" },
+      { kind: "names", ids: ids("codex") },
+      { kind: "receipt", id: "codex", named: false, stage: queued },
+      { kind: "send", aliases: ["@claude"], form: "to" },
+      { kind: "delivery", alias: "@codex", state: sent },
+    ],
+    "the press that reached @codex reads Sent after the offers still left",
+  );
   assert.deepEqual(
     failed(["codex"], ["codex"]).line("post", 2)?.parts,
     [

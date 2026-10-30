@@ -661,6 +661,7 @@ export function App() {
     () => deliveries.settle(state.channels),
     [deliveries, state.channels],
   );
+  useEffect(() => deliveries.dispose, [deliveries]);
   const deliveryAccess = useMemo<DeliveryAccess | null>(
     () =>
       current === undefined
