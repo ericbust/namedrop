@@ -395,6 +395,30 @@ not loaded, the button is absent.
 A short `agent_status` summary already names the agent, so it stays as the
 server wrote it. Hints keep their wording from the first table.
 
+**Reply limit.** A reply-limit item that names its thread (`thread_id`) and
+lists the actions the browser may take (`actions`) can be continued or stopped
+from the page. Its hint reads "The agents paused after 10 replies in a row."
+Two 13px text buttons follow Show message on the item's action row, each only
+when its action is listed:
+
+| Button                  | Tooltip                                                   | Sends                                                |
+| ----------------------- | --------------------------------------------------------- | ---------------------------------------------------- |
+| "Allow 10 more replies" | "Lets the agents send 10 more replies in this thread."    | `POST /w/<key>/threads/<id>/continue`                |
+| "Stop thread"           | "Ends agent replies in this thread. You can't undo this." | `POST /w/<key>/threads/<id>/stop`, after the confirm |
+- Stop asks once, inline. The two buttons give way to "Stop this thread for
+  good?", then a "Stop" text button in `--failed-text` and a "Cancel" text
+  button. Focus moves to Stop. Cancel or Escape returns to the row and focuses
+  Stop thread. Only the confirm's Stop sends.
+- A press reads "Allowing…" or "Stopping…" on the pressed button, and every
+  action on the row is disabled. The item stays pending after the server
+  answers, until a frame drops it.
+- A refusal puts a 12px line in `--failed-text` under the row, with
+  `role="alert"` and the HTTP status as its tooltip: "Couldn't allow more
+  replies. Try again." or "Couldn't stop the thread. Try again." For 404 it
+  reads "This thread is no longer in this workspace." The buttons come back.
+- The same row shows in All activity. An item without a thread or actions
+  keeps the hint "Continue or stop this thread from its pane."
+
 ### Thread pane
 
 400px wide, with a 1px `--line` left border. The header is 52px: "Thread" at 15px
@@ -486,6 +510,9 @@ main column, under the timeline, and at the bottom of the thread pane.
   the hint line read "Start with @name to choose who gets this." in `--text`.
   Typing clears it, so it never nags while a recipient is still being typed. A
   channel post always sends, as Channel chat says.
+- Names with no message after them, as in `@codex` or `#alpha @codex`, never
+  send in any composer, because the server refuses them. After Enter the hint
+  line reads "Add a message after @codex." in `--text`, and typing clears it.
 - A refused draft remembers its latest attempt: the request id and the exact
   text and reply target it tried. Sending that same text again reuses the id,
   even after edits that end back at the same text, so retrying an attempt whose
@@ -520,7 +547,8 @@ agent's pane reaches that agent.
 - When the thread has no such agents, as when its only other member is a
   terminal, the reply must start with `@name`, so a terminal never runs text by
   accident. The box reads "Start with @name to choose who gets this."
-- The post carries `in_reply_to` with the latest message in the thread.
+- The post carries `in_reply_to` with the message Respond targets, else the
+  message a Send anyway reply answers, else the latest message in the thread.
 
 ### Channel chat
 
@@ -563,12 +591,22 @@ read like a room you talk in, not a ticket queue.
   them the post is for, and only those agents get it. The model picks only among
   the mentioned agents and never changes the text.
 - The agents a post mentions are the channel's agent members that are not
-  retired, in the order the text first names them. A mention is `@alias` at the
-  start of the text or after a character that is not a letter, digit, `_`, or
-  backslash. Terminals never count, because a terminal runs its text as a
-  command. The composer's hint and pending row find them in the text with this
-  rule. A stored post's route line reads them from the server's
-  `channel.mentioned`, which the server found with the same rule.
+  retired, in the order the text first names them. Terminals never count,
+  because a terminal runs its text as a command. A mention follows the
+  server's grammar in `src/message.rs`:
+  - A code span, a run of backticks up to the next run of the same backticks,
+    holds no mentions. An unclosed run hides the rest of the text.
+  - An `@` right after an ASCII letter or digit, `_`, or a backslash is text.
+    Any other character before it, a non-ASCII letter as in `é@claude`
+    included, allows a mention.
+  - The token after the `@` is its run of ASCII letters, digits, `-` and `_`.
+    It is a mention only when the whole token is a valid alias, so `@codex_x`
+    and `@Codex` are not, and `@codex.` and `@codex,` are.
+  - The leading mentions are any `#label` words, then whitespace-separated
+    `@alias` words, each once.
+
+  The composer's hint finds them with this rule. A stored post's route line
+  reads them from the server's `channel.mentioned`.
 
 **What reads as a conversation.** These threads show every message as its own
 row in the timeline, in time order. Nothing in them collapses into a reply
@@ -604,13 +642,19 @@ Names in it are peek buttons at 12px 600 in `--text`.
 | Post, `routed`, and a mentioned agent not sent | "@claude · build question · Mentioned @codex, not sent · Send anyway" | arrow                  |
 | Post, `unrouted`, mentioning agents            | "Mentioned @codex, not sent · Send anyway"                            | inbox                  |
 | Post, `router_failed`                          | "Couldn't check who this is for · Send to @codex"                     | alert, `--failed-text` |
-| Reply or follow-up that woke a member          | "@codex · pulled in"                                                  | arrow                  |
+| Reply or follow-up that woke a new member      | "@codex · pulled in"                                                  | arrow                  |
+| Answer to the agent that asked                 | "@claude"                                                             | arrow                  |
 | Follow-up sent to members                      | "@codex"                                                              | arrow                  |
 | Reply to the operator only                     | No line                                                               | none                   |
 - The names are the message's recipients: its legs, without the operator, all
-  of them, with no "+N". "pulled in" shows when the message's `woke` list is
-  not empty. An `unrouted` post that still has recipients reads like a routed
-  one with no reason. The line's accessible name is "Who got this".
+  of them, with no "+N". "pulled in" shows when the message woke a member who
+  joins the conversation with it: one that had not written in the thread or
+  been sent a message in it before. An `unrouted` post that still has
+  recipients reads like a routed one with no reason. The line's accessible name
+  is "Who got this".
+- An agent that pulls another in hears back. When @claude asks @codex, the
+  answer goes to the room and to @claude and reads "→ @claude", because
+  "pulled in" marks only members who join with that message.
 - The reason is the model's words: a topic of 2 to 4 words, such as "build
   question". Show them as plain text, in the model's case, on one line, at most
   60 characters. When the model names no topic, the server sends "General
@@ -619,8 +663,10 @@ Names in it are peek buttons at 12px 600 in `--text`.
   server's router name, when the server sends one.
 - Legs to the operator never show, in the route line or anywhere else in channel
   chat. The operator wrote the post and reads every reply in the room.
-- The server routes a post before it answers the send, so frames do not carry
-  `routing` today. The row stays for a server that stores first.
+- The server stores a post before it routes it, so a post that mentions an
+  agent first shows "Checking who this is for…". The router answers within 17
+  seconds, and the line then changes in place: the same row and line, with no
+  arrival animation. Offers appear only after the state leaves `routing`.
 - Receipts follow the names, with the receipt line's own rules and copy: the
   state alone for one recipient, as in "@claude · build question · Working on
   it", and "@claude Working on it · @codex Delivered" for several. They hide once
@@ -641,10 +687,19 @@ each name shows once, as its button. `router_failed` always uses the "Send to"
 form. Each offer is a
 text button in 12px 600 `--accent-text` with the accessible name "Send this to
 @codex". Activating one opens the post's thread in the thread pane and focuses
-its composer. When that thread's draft is empty, the box holds `@codex `, the
-post's text, and one space, with the caret at the end. The space keeps the caret
-out of a mention the post ends with, so the member list stays closed and Enter
-sends. The text can still change first. A draft that has text stays as it is.
+its composer. The post's text is never copied, because the page holds a display
+copy that the server cuts and redacts. The agent reads the post from its thread.
+
+- When that thread's draft is empty, the box holds "@codex Please read my
+  post." with "Please read my post." selected, so typing replaces the note and
+  Enter sends it as is.
+- The reply answers the post itself: its `in_reply_to` is the post until the
+  box is sent or emptied, so the room's reference line shows the post.
+- A draft that has text stays as it is. The box takes focus, and the status
+  row under it reads "Your draft is still here. Send or clear it, then press
+  Send anyway again." in 12px `--text`, until the next edit.
+- Inside an open Needs-you conversation on the same thread, the offer fills
+  that pane's box in place.
 
 **Replies in the timeline.**
 
@@ -674,10 +729,9 @@ Enter sends:
   only to @codex, @shell", or "Enter sends only to @codex, @shell +2". The
   names are the leading aliases as typed, without `#label` tokens.
 
-**Pending post.** While a channel post that mentions agents is sending, its
-pending row's receipt reads "Checking who this is for…" with the clock icon,
-because the server asks the model before it answers. Every other post keeps
-"Sending…".
+**Pending post.** A channel post's pending row reads "Sending…", then "Sent",
+like any post. The server answers before the router runs, so the stored post's
+route line, not the pending row, says "Checking who this is for…".
 
 ### Autocomplete
 
