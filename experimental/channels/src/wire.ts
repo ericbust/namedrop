@@ -6,6 +6,7 @@ import type {
   AttentionResponse,
   ChannelSnapshot,
   Conversation,
+  DeliverAnswer,
   DeliverResult,
   DeliveryStage,
   Health,
@@ -399,20 +400,22 @@ function routing(value: unknown): Routing | null {
       ? (value as Record<string, unknown>)
       : {};
   const mentioned = aliases(item.mentioned);
+  const to = aliases(item.to);
   switch (item.state) {
     case "routing":
     case "unrouted":
     case "router_failed":
-      return { state: item.state, mentioned };
+      return { state: item.state, mentioned, to };
     case "routed":
       return {
         state: item.state,
         mentioned,
+        to,
         reason: reasonText(item.reason),
         router: optionalIdentity(item.router),
       };
     default:
-      return { state: "unknown", mentioned };
+      return { state: "unknown", mentioned, to };
   }
 }
 const noAliases: readonly Alias[] = [];
@@ -638,38 +641,49 @@ export function parseReceipt(raw: unknown): string {
 export function parseSessionToken(raw: unknown): string {
   return identity(record(raw).csrf_token);
 }
-function deliveredList(answer: unknown): ReadonlySet<Alias> | null {
-  const value =
-    typeof answer === "object" && answer !== null && !Array.isArray(answer)
-      ? (answer as Record<string, unknown>).delivered
-      : undefined;
+function field(answer: unknown, name: string): unknown {
+  return typeof answer === "object" && answer !== null && !Array.isArray(answer)
+    ? (answer as Record<string, unknown>)[name]
+    : undefined;
+}
+function deliveredList(value: unknown): ReadonlySet<Alias> | null {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
     return null;
   return new Set(value.flatMap((item) => optionalAlias(item) ?? []));
 }
 // The 2xx status is the server's answer, so a body cut short or not JSON at all
 // reads as sent. A JSON body confirms only the agents its `delivered` names.
-export function parseDelivered(
+export function parseDeliverAnswer(
   body: string,
   to: readonly Alias[],
-): ReadonlyMap<Alias, DeliverResult> {
+): DeliverAnswer {
   let answer: unknown;
   try {
     answer = JSON.parse(body) as unknown;
   } catch {
-    return new Map(to.map((alias) => [alias, { kind: "done" }]));
+    return {
+      results: new Map(to.map((alias) => [alias, { kind: "done" }])),
+      channel: null,
+    };
   }
-  const delivered = deliveredList(answer);
-  return new Map(
-    to.map((alias): [Alias, DeliverResult] => [
-      alias,
-      delivered === null
-        ? { kind: "failed", cause: "unconfirmed" }
-        : delivered.has(alias)
-          ? { kind: "done" }
-          : { kind: "failed", cause: "left-out" },
-    ]),
-  );
+  const delivered = deliveredList(field(answer, "delivered"));
+  const channel = field(answer, "channel");
+  return {
+    results: new Map(
+      to.map((alias): [Alias, DeliverResult] => [
+        alias,
+        delivered === null
+          ? { kind: "failed", cause: "unconfirmed" }
+          : delivered.has(alias)
+            ? { kind: "done" }
+            : { kind: "failed", cause: "left-out" },
+      ]),
+    ),
+    channel:
+      typeof channel === "object" && channel !== null && !Array.isArray(channel)
+        ? routing(channel)
+        : null,
+  };
 }
 export function parseRefusal(body: string): string {
   try {

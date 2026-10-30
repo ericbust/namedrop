@@ -6751,7 +6751,7 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
   const { ui, value } = await chatRoom(t, [post], {
     onDeliver: async () => {
       await answered.gate;
-      return { status: 200, channel: { ...post.channel, to: ["codex"] } };
+      return { status: 200 };
     },
   });
   const { route, parts } = routeOf(ui, "p1");
@@ -6818,6 +6818,25 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
   );
   assert.equal(ui.posts.deliveries.length, 1, "Sent never sends again");
   assert.equal(ui.posts.attempts.length, 0, "no message is posted");
+});
+
+test("DESIGN-R2 B4: the deliver answer's channel object names @codex on the line right after the answer, with no frame", async (t) => {
+  const post = unsent();
+  const { ui } = await chatRoom(t, [post], {
+    onDeliver: () => ({ channel: { ...post.channel, to: ["codex"] } }),
+  });
+  const { route, parts, icon } = routeOf(ui, "p1");
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await readsAs(route, "@codex · Queued");
+  assert.deepEqual(await parts(), ["@codex", "Queued"]);
+  assert.deepEqual(await icon(), [iconShape.arrow]);
+  assert.equal(
+    await route.locator("[data-offer]").count(),
+    0,
+    "no offer and no Sent part",
+  );
+  assert.equal(ui.posts.deliveries.length, 1);
+  assert.equal(ui.connections.length, 1, "no new frame or connection");
 });
 
 test("CH-fix-3 item 1: a refused delivery reads Couldn't send to @codex · Try again with focus on Try again, its title is the server's message, and Try again delivers", async (t) => {

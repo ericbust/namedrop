@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Alias, Message } from "./model.ts";
 import {
-  parseDelivered,
+  parseDeliverAnswer,
   parseEvent,
   parseHistory,
   routeOf,
@@ -37,6 +37,7 @@ test("channel history preserves optional routing and wake metadata", () => {
   assert.deepEqual(message?.routing, {
     state: "routed",
     mentioned: ["@claude", "@codex"],
+    to: ["@claude"],
     reason: "build question",
     router: "claude-haiku",
   });
@@ -48,8 +49,8 @@ test("channel routing tolerates absent sidecar explanations and legacy rows", ()
     assert.deepEqual(
       parseHistory([{ ...channelRow, channel: { state, to: [] } }])[0]?.routing,
       state === "routed"
-        ? { state, mentioned: [], reason: null, router: null }
-        : { state, mentioned: [] },
+        ? { state, mentioned: [], to: [], reason: null, router: null }
+        : { state, mentioned: [], to: [] },
     );
   }
   const [legacy] = parseHistory([channelRow]);
@@ -63,29 +64,39 @@ test("channel routing keeps the row when its optional metadata is malformed", ()
   assert.deepEqual(read({ state: "invented", to: [] }), {
     state: "unknown",
     mentioned: [],
+    to: [],
   });
   assert.deepEqual(read({ state: "routed", to: [42] }), {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: null,
     router: null,
   });
   assert.deepEqual(read({ state: "routed", to: [], reason: 42 }), {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: null,
     router: null,
   });
   assert.deepEqual(read({ state: "routed", to: [], router: "" }), {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: null,
     router: null,
   });
   assert.deepEqual(read({ state: "unrouted", to: [], mentioned: [42] }), {
     state: "unrouted",
     mentioned: [],
+    to: [],
   });
+  assert.deepEqual(
+    read({ state: "unrouted", to: ["codex", "@claude", "", 7, null] })?.to,
+    ["@codex", "@claude"],
+  );
+  assert.deepEqual(read({ state: "unrouted", to: "codex" })?.to, []);
   assert.deepEqual(parseHistory([{ ...channelRow, woke: [42] }])[0]?.woke, []);
 });
 
@@ -247,6 +258,7 @@ test("channel: absent is an ordinary message, and each state the server sends pa
   assert.deepEqual(routingOf({ state: "routing", to: [] }), {
     state: "routing",
     mentioned: [],
+    to: [],
   });
   assert.deepEqual(
     routingOf({
@@ -258,6 +270,7 @@ test("channel: absent is an ordinary message, and each state the server sends pa
     {
       state: "routed",
       mentioned: [],
+      to: ["@claude"],
       reason: "build question",
       router: "claude-haiku",
     },
@@ -265,10 +278,12 @@ test("channel: absent is an ordinary message, and each state the server sends pa
   assert.deepEqual(routingOf({ state: "unrouted", to: [] }), {
     state: "unrouted",
     mentioned: [],
+    to: [],
   });
   assert.deepEqual(routingOf({ state: "router_failed" }), {
     state: "router_failed",
     mentioned: [],
+    to: [],
   });
 });
 test("channel: an unknown, missing or malformed state stays a channel post, and the frame survives", () => {
@@ -282,7 +297,7 @@ test("channel: an unknown, missing or malformed state stays a channel post, and 
   ])
     assert.deepEqual(
       routingOf(channel),
-      { state: "unknown", mentioned: [] },
+      { state: "unknown", mentioned: [], to: [] },
       JSON.stringify(channel),
     );
   const rows = framed(
@@ -297,6 +312,7 @@ test("channel: the reason is one line of at most 60 characters, and a blank reas
   assert.deepEqual(routed("  build\n\tquestion  "), {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: "build question",
     router: "claude-haiku",
   });
@@ -314,24 +330,28 @@ test("channel: the reason is one line of at most 60 characters, and a blank reas
   assert.deepEqual(routed("   ", "  "), {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: null,
     router: null,
   });
   assert.deepEqual(routed("General topic"), {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: null,
     router: "claude-haiku",
   });
   assert.deepEqual(routed("General topic question"), {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: "General topic question",
     router: "claude-haiku",
   });
   assert.deepEqual(routed(42, { name: "x" }), {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: null,
     router: null,
   });
@@ -356,6 +376,7 @@ test("history pages carry the channel state and woke", () => {
   assert.deepEqual(page?.routing, {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: "ci",
     router: "codex-luna",
   });
@@ -364,7 +385,7 @@ test("history pages carry the channel state and woke", () => {
 
 test("deliver answer: an alias the 200 lists was delivered, and any other named alias was left out", () => {
   const read = (body: unknown, to: readonly Alias[] = ["@codex"]) =>
-    Object.fromEntries(parseDelivered(JSON.stringify(body), to));
+    Object.fromEntries(parseDeliverAnswer(JSON.stringify(body), to).results);
   const done = { kind: "done" };
   const leftOut = { kind: "failed", cause: "left-out" };
   assert.deepEqual(read({ channel: {}, delivered: ["codex"] }), {
@@ -393,7 +414,8 @@ test("deliver answer: a 200 JSON body without a valid delivered list of strings 
   const to: readonly Alias[] = ["@codex", "@claude"];
   const unconfirmed = { kind: "failed", cause: "unconfirmed" };
   const none = { "@codex": unconfirmed, "@claude": unconfirmed };
-  const read = (body: string) => Object.fromEntries(parseDelivered(body, to));
+  const read = (body: string) =>
+    Object.fromEntries(parseDeliverAnswer(body, to).results);
   for (const body of [
     '{"channel":{"state":"unrouted","to":["codex"]}}',
     "{}",
@@ -411,7 +433,43 @@ test("deliver answer: a 200 JSON body without a valid delivered list of strings 
 test("deliver answer: an empty body or one that is not JSON reads as sent, because the 2xx status is the answer", () => {
   const to: readonly Alias[] = ["@codex", "@claude"];
   const all = { "@codex": { kind: "done" }, "@claude": { kind: "done" } };
-  const read = (body: string) => Object.fromEntries(parseDelivered(body, to));
+  const read = (body: string) =>
+    Object.fromEntries(parseDeliverAnswer(body, to).results);
   for (const body of ["", "Sent.", '{"delivered":["codex"'])
     assert.deepEqual(read(body), all, body);
+});
+test("deliver answer: a 2xx body's channel object parses like a frame's, and anything else is no channel", () => {
+  const channelOf = (body: string) =>
+    parseDeliverAnswer(body, ["@codex"]).channel;
+  assert.deepEqual(
+    channelOf(
+      JSON.stringify({
+        message_id: "p1",
+        channel: {
+          state: "routed",
+          to: ["claude", "codex"],
+          mentioned: ["codex"],
+          reason: "build question",
+          router: "claude-haiku",
+        },
+        delivered: ["codex"],
+      }),
+    ),
+    {
+      state: "routed",
+      mentioned: ["@codex"],
+      to: ["@claude", "@codex"],
+      reason: "build question",
+      router: "claude-haiku",
+    },
+  );
+  for (const body of [
+    '{"delivered":["codex"]}',
+    '{"channel":null,"delivered":["codex"]}',
+    '{"channel":"routed","delivered":["codex"]}',
+    '{"channel":["codex"],"delivered":["codex"]}',
+    "",
+    '{"channel":{"state":"routed"',
+  ])
+    assert.equal(channelOf(body), null, body);
 });

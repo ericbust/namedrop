@@ -95,7 +95,8 @@ function liveAgentNamed(
 }
 
 const unknown = { state: "unknown" } as const;
-const unknownStage: DeliveryStage = { stage: "unknown" };
+// The server lists an agent in `to` only once it has queued that delivery.
+const queued: DeliveryStage = { stage: "queued" };
 
 // The line under a channel-chat message: who got it and why, its receipts,
 // the mentioned agents it did not reach, and the post's reply count.
@@ -106,9 +107,14 @@ export function routeLine(
   replies: number,
   delivery: (alias: Alias) => Delivery,
 ): RouteLine | null {
-  const reached = recipients(message).filter(
+  const legs = recipients(message).filter(
     (id) => participant(directory, id).kind !== "operator",
   );
+  const listed = (message.routing?.to ?? []).flatMap((alias) => {
+    const member = liveAgentNamed(directory, alias);
+    return member === undefined || legs.includes(member.id) ? [] : [member.id];
+  });
+  const reached = [...legs, ...listed];
   const tail: readonly RoutePart[] =
     replies > 0 ? [{ kind: "replies", count: replies }] : [];
   const names: RoutePart = { kind: "names", ids: reached };
@@ -119,8 +125,7 @@ export function routeLine(
           kind: "receipt",
           id,
           named: reached.length > 1,
-          stage:
-            message.legs.find((leg) => leg.to === id)?.stage ?? unknownStage,
+          stage: message.legs.find((leg) => leg.to === id)?.stage ?? queued,
         }));
   // An agent the thread already reached, by this post or a later message, or
   // who wrote in it, has the conversation, so it is not offered again.
@@ -128,7 +133,11 @@ export function routeLine(
     const left = (message.routing?.mentioned ?? [])
       .filter((alias) => {
         const member = liveAgentNamed(directory, alias);
-        return member !== undefined && !room.joined.has(member.id);
+        return (
+          member !== undefined &&
+          !room.joined.has(member.id) &&
+          !listed.includes(member.id)
+        );
       })
       .map((alias) => ({ alias, state: delivery(alias) }));
     return {

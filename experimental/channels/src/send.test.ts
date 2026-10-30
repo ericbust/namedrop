@@ -229,11 +229,15 @@ test("deliver: posts the bare aliases for a stored post with the session token, 
   });
   const poster = createPoster(server.fetcher);
   assert.deepEqual(
-    Object.fromEntries(await poster.deliver(key, "post 1/a", ["@codex"])),
+    Object.fromEntries(
+      (await poster.deliver(key, "post 1/a", ["@codex"])).results,
+    ),
     { "@codex": { kind: "done" } },
   );
   assert.deepEqual(
-    Object.fromEntries(await poster.deliver(key, "p2", ["@codex", "@claude"])),
+    Object.fromEntries(
+      (await poster.deliver(key, "p2", ["@codex", "@claude"])).results,
+    ),
     { "@codex": { kind: "done" }, "@claude": { kind: "done" } },
   );
   assert.deepEqual(posts(server.seen), [
@@ -258,7 +262,7 @@ test("deliver: posts the bare aliases for a stored post with the session token, 
   ]);
 });
 
-test("deliver: a 200 that lists only some aliases sends the rest back as failed", async () => {
+test("deliver: a 200 that lists only some aliases sends the rest back as failed, with the post's channel object", async () => {
   const server = fakeServer(({ url }) =>
     url === "/api/session"
       ? json(200, { csrf_token: "t" })
@@ -267,17 +271,18 @@ test("deliver: a 200 that lists only some aliases sends the rest back as failed"
           delivered: ["codex"],
         }),
   );
+  const answer = await createPoster(server.fetcher).deliver(key, "p1", [
+    "@codex",
+    "@claude",
+  ]);
+  assert.deepEqual(Object.fromEntries(answer.results), {
+    "@codex": { kind: "done" },
+    "@claude": { kind: "failed", cause: "left-out" },
+  });
   assert.deepEqual(
-    Object.fromEntries(
-      await createPoster(server.fetcher).deliver(key, "p1", [
-        "@codex",
-        "@claude",
-      ]),
-    ),
-    {
-      "@codex": { kind: "done" },
-      "@claude": { kind: "failed", cause: "left-out" },
-    },
+    answer.channel,
+    { state: "unrouted", mentioned: [], to: ["@codex"] },
+    "the post's channel object comes back with the answer",
   );
 });
 
@@ -299,7 +304,8 @@ test("deliver: a 200 whose body never finishes or breaks still reads as sent, wi
     const started = Date.now();
     assert.deepEqual(
       Object.fromEntries(
-        await createPoster(server.fetcher, 50).deliver(key, "p1", ["@codex"]),
+        (await createPoster(server.fetcher, 50).deliver(key, "p1", ["@codex"]))
+          .results,
       ),
       { "@codex": { kind: "done" } },
     );
@@ -327,7 +333,8 @@ test("deliver: a 200 whose body stalls is aborted when the body wait ends, so th
     const started = Date.now();
     assert.deepEqual(
       Object.fromEntries(
-        await createPoster(fetcher, wait).deliver(key, "p1", ["@codex"]),
+        (await createPoster(fetcher, wait).deliver(key, "p1", ["@codex"]))
+          .results,
       ),
       { "@codex": { kind: "done" } },
       "the press still reads as sent",
@@ -373,10 +380,12 @@ test("deliver: a refusal carries the server's message, a network failure reads s
     });
     assert.deepEqual(
       Object.fromEntries(
-        await createPoster(server.fetcher).deliver(key, "p1", [
-          "@codex",
-          "@claude",
-        ]),
+        (
+          await createPoster(server.fetcher).deliver(key, "p1", [
+            "@codex",
+            "@claude",
+          ])
+        ).results,
       ),
       { "@codex": expected, "@claude": expected },
     );

@@ -1,5 +1,6 @@
 import type {
   Alias,
+  DeliverAnswer,
   DeliverFailure,
   DeliverResult,
   SendFailure,
@@ -7,7 +8,7 @@ import type {
   ThreadAction,
 } from "./model.ts";
 import {
-  parseDelivered,
+  parseDeliverAnswer,
   parseReceipt,
   parseRefusal,
   parseSessionToken,
@@ -137,14 +138,16 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
       key: SpaceKey,
       messageId: string,
       to: readonly Alias[],
-    ): Promise<ReadonlyMap<Alias, DeliverResult>> {
-      const each = (failure: DeliverFailure) =>
-        new Map(
+    ): Promise<DeliverAnswer> {
+      const each = (failure: DeliverFailure): DeliverAnswer => ({
+        results: new Map(
           to.map((alias): [Alias, DeliverResult] => [
             alias,
             { kind: "failed", ...failure },
           ]),
-        );
+        ),
+        channel: null,
+      });
       try {
         const request = new AbortController();
         const response = await postWithTokenRetry(
@@ -154,7 +157,7 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
         );
         const body = await bodyWithin(response, bodyWait, request);
         return response.ok
-          ? parseDelivered(body, to)
+          ? parseDeliverAnswer(body, to)
           : each({
               cause: "refused",
               status: response.status,

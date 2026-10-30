@@ -624,9 +624,11 @@ export function App() {
     [],
   );
   const [deliveries] = useState(() =>
-    createDeliveries(({ key, messageId, alias }) =>
-      poster.deliver(key, messageId, [alias]),
-    ),
+    createDeliveries(async ({ key, messageId, alias }) => {
+      const answer = await poster.deliver(key, messageId, [alias]);
+      dispatch({ type: "delivered", key, messageId, answer });
+      return answer.results;
+    }),
   );
   const shownDeliveries = useSyncExternalStore(
     deliveries.subscribe,

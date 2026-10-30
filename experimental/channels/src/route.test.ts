@@ -264,7 +264,7 @@ test("route line: an unrouted post that mentions agents says so with the inbox, 
     "in the order the text names them",
   );
   assert.deepEqual(
-    room(post("thanks @codex", routed(), [])).line(),
+    room(post("thanks @codex", { ...routed(), to: [] }, [])).line(),
     one,
     "routed with no one reached reads as unrouted",
   );
@@ -405,6 +405,54 @@ test("route line: a pressed agent's part goes once the frame shows the post reac
       },
       state.kind,
     );
+});
+test("route line: an agent the post's channel lists in to before a frame brings its leg reads as reached and queued, and is not offered again", () => {
+  const queued = { stage: "queued" } as const;
+  for (const state of ["unrouted", "router_failed"] as const)
+    assert.deepEqual(
+      room(post("nice catch by @codex", { state, to: ["codex"] })).line(
+        "post",
+        0,
+        { "@codex": sent },
+      ),
+      state === "unrouted"
+        ? {
+            icon: "arrow",
+            tone: "muted",
+            tip: null,
+            parts: [
+              { kind: "names", ids: ids("codex") },
+              { kind: "receipt", id: "codex", named: false, stage: queued },
+            ],
+          }
+        : {
+            icon: "alert",
+            tone: "failed",
+            tip: { kind: "unreachable" },
+            parts: [{ kind: "state", state: "failed" }],
+          },
+      state,
+    );
+  assert.deepEqual(
+    room(
+      post(
+        "can @claude and @codex look?",
+        { state: "routed", to: ["claude", "codex"] },
+        ["claude"],
+      ),
+    ).line()?.parts,
+    [
+      { kind: "names", ids: ids("claude", "codex") },
+      { kind: "receipt", id: "claude", named: true, stage: working },
+      { kind: "receipt", id: "codex", named: true, stage: queued },
+    ],
+    "the leg the frame has keeps its own stage",
+  );
+  assert.deepEqual(
+    room(post("ask @old", { state: "unrouted", to: ["old", "nobody"] })).line(),
+    null,
+    "a retired or unknown name in to reaches no one the line can show",
+  );
 });
 test("route line: router_failed is in the failed tone, always offers Send to, and explains itself", () => {
   assert.deepEqual(

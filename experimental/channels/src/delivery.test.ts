@@ -15,7 +15,7 @@ import type {
   Message,
   SpaceKey,
 } from "./model.ts";
-import { parseDelivered } from "./wire.ts";
+import { parseDeliverAnswer } from "./wire.ts";
 
 const idle: Delivery = { kind: "idle" };
 const sending: Delivery = { kind: "sending" };
@@ -152,8 +152,8 @@ test("deliveries: a 200 leaves the pressed agent Sent only when it lists the age
     ["", sent],
   ];
   for (const [body, expected] of cases) {
-    const store = createDeliveries(async ({ alias }) =>
-      parseDelivered(body, [alias]),
+    const store = createDeliveries(
+      async ({ alias }) => parseDeliverAnswer(body, [alias]).results,
     );
     store.deliver(codex);
     await settled();

@@ -644,7 +644,7 @@ Names in it are peek buttons at 12px 600 in `--text`.
 | Post, `unrouted`, mentioning agents            | "Mentioned @codex, not sent · Send anyway"                              | inbox                  |
 | Post, `router_failed`                          | "Couldn't check who this is for · Send to @codex"                       | alert, `--failed-text` |
 | Post, Send anyway pressed, server not answered | "Sending to @codex…"                                                    | the post's icon        |
-| Post, delivery taken by the server             | "Sent to @codex", until a frame shows the post reached @codex           | the post's icon        |
+| Post, delivery taken by the server             | "Sent to @codex", until the answer or a frame shows @codex reached      | the post's icon        |
 | Post, delivery refused or not reached          | "Couldn't send to @codex · Try again"                                   | the post's icon        |
 | Post, `router_failed`, one of two pressed      | "Couldn't check who this is for · Send to @claude · Sending to @codex…" | alert, `--failed-text` |
 | Reply or follow-up that woke a new member      | "@codex · pulled in"                                                    | arrow                  |
@@ -652,11 +652,13 @@ Names in it are peek buttons at 12px 600 in `--text`.
 | Follow-up sent to members                      | "@codex"                                                                | arrow                  |
 | Reply to the operator only                     | No line                                                                 | none                   |
 - The names are the message's recipients: its legs, without the operator, all
-  of them, with no "+N". "pulled in" shows when the message woke a member who
-  joins the conversation with it: one that had not written in the thread or
-  been sent a message in it before. An `unrouted` post that still has
-  recipients reads like a routed one with no reason. The line's accessible name
-  is "Who got this".
+  of them, with no "+N". An agent the post's `channel.to` lists before a frame
+  brings its leg, as right after Send anyway, is named too, with the receipt
+  Queued: the server lists it there only once it has queued the delivery.
+  "pulled in" shows when the message woke a member who joins the conversation
+  with it: one that had not written in the thread or been sent a message in it
+  before. An `unrouted` post that still has recipients reads like a routed one
+  with no reason. The line's accessible name is "Who got this".
 - An agent that pulls another in hears back. When @claude asks @codex, the
   answer goes to the room and to @claude and reads "→ @claude", because
   "pulled in" marks only members who join with that message.
@@ -709,8 +711,12 @@ uses the "Send to" form. Each offer is a text button in 12px 600
 - Each pressed agent then has its own part, after the offer and in the order
   the post names the agents. The part is a text button in the same style:
   - "Sending to @codex…", then "Sent to @codex", in `--text-muted` and inert,
-    until a frame shows the post reached the agent. The line then names the
-    agent with its receipt, and the part goes.
+    until the server's answer or a frame shows the post reached the agent. The
+    line then names the agent with its receipt, and the part goes. A 2xx answer
+    carries the post's channel object, so when its `to` lists every agent it
+    delivered, the line names them at once. The page ignores that object when
+    the stored post already lists them, because a frame may be newer, and the
+    next frame is the final word.
   - A failure reads "Couldn't send to @codex" in `--failed-text`, then a "Try
     again" button. Its tooltip is the server's message, "HTTP 500" when the
     server gives none, or "Couldn't reach Namedrop." when the request never
