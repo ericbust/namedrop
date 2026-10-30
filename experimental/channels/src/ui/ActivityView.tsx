@@ -6,6 +6,7 @@ import {
   lineDetail,
   lineText,
 } from "../activity.ts";
+import { responseAbsence } from "../attention.ts";
 import { activityCopy, presenceWord } from "../copy.ts";
 import type { Channel, Home, SpaceKey } from "../model.ts";
 import type { PeekKey } from "../peek.ts";
@@ -89,6 +90,10 @@ const Row = memo(function Row({
         <AttentionActions
           item={line.attention}
           channel={source}
+          absent={responseAbsence(line.attention, {
+            members: source.members,
+            homes,
+          })}
           onFocus={onFocus}
           onControl={onControl}
         />

@@ -196,6 +196,7 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
     const banner = renderToStaticMarkup(
       createElement(NeedsYou, {
         channel: event.channel,
+        directory: { members: event.channel.members, homes: new Map() },
         onFocus() {},
         onControl,
       }),
@@ -575,6 +576,7 @@ test("attention actions show historical evidence and safe responses for every so
         createElement(AttentionActions, {
           item,
           channel,
+          absent: null,
           onFocus() {},
           onControl,
         }),
@@ -607,7 +609,13 @@ test("attention actions show historical evidence and safe responses for every so
   const item = channel.attention[0];
   assert.ok(item);
   const local = renderToStaticMarkup(
-    createElement(AttentionActions, { item, channel, onFocus() {}, onControl }),
+    createElement(AttentionActions, {
+      item,
+      channel,
+      absent: null,
+      onFocus() {},
+      onControl,
+    }),
   );
   assert.deepEqual(buttons(local), []);
   assert.doesNotMatch(local, /Namedrop setup|Namedrop Doctor/);
@@ -653,7 +661,12 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
       createElement(
         PeekContext,
         { value: { scope: channel.key, open() {} } },
-        createElement(NeedsYou, { channel, onFocus() {}, onControl }),
+        createElement(NeedsYou, {
+          channel,
+          directory: { members: channel.members, homes: new Map() },
+          onFocus() {},
+          onControl,
+        }),
       ),
     );
     return [...markup.matchAll(/<li class="attention-item">(.*?)<\/li>/gs)].map(

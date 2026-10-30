@@ -844,6 +844,8 @@ export function App() {
   const messaged =
     (channelResponse && members.get(channelResponse.addressId)?.alias) ??
     "the agent";
+  const messageAbsence =
+    channelResponse === null ? null : absence(channelResponse, directory);
   let threadResponse: ThreadResponse | null = null;
   if (focused?.kind === "ready") {
     const response = focused.request.response;
@@ -852,17 +854,20 @@ export function App() {
         threadResponse = { kind: "reply", intent: response };
         break;
       case "message":
-        threadResponse = {
-          kind: "message",
-          name: messaged,
-          draft:
-            response.preparation === "preserved"
-              ? "kept"
-              : response.preparation === "prepared" && channelDraft !== ""
-                ? "prepared"
-                : "none",
-          prepare: prepareResponse,
-        };
+        threadResponse =
+          messageAbsence !== null
+            ? { kind: "absent", absence: messageAbsence }
+            : {
+                kind: "message",
+                name: messaged,
+                draft:
+                  response.preparation === "preserved"
+                    ? "kept"
+                    : response.preparation === "prepared" && channelDraft !== ""
+                      ? "prepared"
+                      : "none",
+                prepare: prepareResponse,
+              };
         break;
       case "pane": {
         const member = members.get(response.addressId);
@@ -948,6 +953,7 @@ export function App() {
                 <MemberStrip key={channel.key} members={channel.members} />
                 <NeedsYou
                   channel={channel}
+                  directory={directory}
                   onFocus={showAttention}
                   onControl={poster.control}
                 />
@@ -985,9 +991,10 @@ export function App() {
                           Your draft is still here. Send or clear it, then press{" "}
                           {responseCopy.message(messaged)} again.
                         </p>
-                      ) : channelResponse?.preparation === "unavailable" ? (
+                      ) : channelResponse?.preparation === "unavailable" &&
+                        messageAbsence !== null ? (
                         <p className="composer-guard" role="status">
-                          {absenceCopy(absence(channelResponse, directory))}
+                          {absenceCopy(messageAbsence)}
                         </p>
                       ) : null
                     }

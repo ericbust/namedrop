@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import {
+  type Absence,
   absence,
   attentionReplyTo,
   type ReplyIntent,
@@ -57,7 +58,8 @@ export type ThreadResponse =
       draft: "prepared" | "kept" | "none";
       prepare: () => void;
     }
-  | { kind: "pane"; name: string | null; pane: string | null };
+  | { kind: "pane"; name: string | null; pane: string | null }
+  | { kind: "absent"; absence: Absence };
 
 export function ThreadPane({
   channel,
@@ -129,6 +131,8 @@ export function ThreadPane({
       activeReply === null ? null : attentionReplyTo(activeReply, directory),
     [directory, activeReply],
   );
+  const replyAbsence =
+    activeReply === null ? null : absence(activeReply, directory);
   const rule = useMemo<Extract<SendRule, { kind: "thread" }>>(
     () => ({ kind: "thread", to: threadAgents(thread, directory) }),
     [thread, directory],
@@ -260,9 +264,14 @@ export function ThreadPane({
           <PendingMessage key={entry.requestId} entry={entry} />
         ))}
       </div>
-      {activeReply !== null && to === null && (
+      {replyAbsence !== null && (
         <p className="thread-answer" role="status">
-          {absenceCopy(absence(activeReply, directory))}
+          {absenceCopy(replyAbsence)}
+        </p>
+      )}
+      {response?.kind === "absent" && (
+        <p className="thread-answer" role="status">
+          {absenceCopy(response.absence)}
         </p>
       )}
       {response?.kind === "pane" && (

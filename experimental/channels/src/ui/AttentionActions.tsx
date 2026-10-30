@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import {
+  type Absence,
   type AttentionNavigation,
   attentionConversation,
   messageIntent,
@@ -74,12 +75,14 @@ function useWholeLabels(row: RefObject<HTMLElement | null>) {
 export function AttentionActions({
   item,
   channel,
+  absent,
   onFocus,
   onControl,
   children,
 }: {
   item: Attention;
   channel: Pick<ChannelSnapshot, "key" | "members" | "messages">;
+  absent: Absence | null;
   onFocus: FocusAttention;
   onControl: ControlThread;
   children?: ReactNode;
@@ -222,39 +225,40 @@ export function AttentionActions({
               )}
             </>
           ))}
-        {(response?.kind === "reply" ||
-          (response?.kind === "message" && target !== null)) && (
-          <button
-            type="button"
-            className="text-button"
-            aria-disabled={busy}
-            onClick={(event) => {
-              if (busy) return;
-              if (response.kind === "reply")
-                onFocus(
-                  channel.key,
-                  {
-                    kind: "context",
-                    target: response,
-                    response: { ...response, subject: item.subjectAlias },
-                  },
-                  event.currentTarget,
-                );
-              else if (target !== null)
-                onFocus(
-                  channel.key,
-                  {
-                    kind: "context",
-                    target,
-                    response: messageIntent(item, target, true),
-                  },
-                  event.currentTarget,
-                );
-            }}
-          >
-            {responseCopy[response.kind](responder)}
-          </button>
-        )}
+        {absent === null &&
+          (response?.kind === "reply" ||
+            (response?.kind === "message" && target !== null)) && (
+            <button
+              type="button"
+              className="text-button"
+              aria-disabled={busy}
+              onClick={(event) => {
+                if (busy) return;
+                if (response.kind === "reply")
+                  onFocus(
+                    channel.key,
+                    {
+                      kind: "context",
+                      target: response,
+                      response: { ...response, subject: item.subjectAlias },
+                    },
+                    event.currentTarget,
+                  );
+                else if (target !== null)
+                  onFocus(
+                    channel.key,
+                    {
+                      kind: "context",
+                      target,
+                      response: messageIntent(item, target, true),
+                    },
+                    event.currentTarget,
+                  );
+              }}
+            >
+              {responseCopy[response.kind](responder)}
+            </button>
+          )}
         {response?.kind === "pane" && peek !== null && member && (
           <PeekControl target={peek} className="text-button" fallback="none">
             {responseCopy.pane(member.alias)}

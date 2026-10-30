@@ -13,7 +13,7 @@ import {
   prepareChannelMessage,
   replyPrefill,
 } from "./attention.ts";
-import { absenceCopy, timeOfDay } from "./copy.ts";
+import { absenceCopy, attentionCopy, timeOfDay } from "./copy.ts";
 import type {
   AddressId,
   Attention,
@@ -293,6 +293,34 @@ test("H5: an agent whose workspace has no label Namedrop can mention is unreacha
     names: ["@lead · #beta"],
     mentions: "#beta @lead",
   });
+});
+test("H6: an agent that can take a message has no absence, and a card whose agent can't reads the absence line in place of its hint", () => {
+  const directory = { members: channel.members, homes: new Map() };
+  assert.ok(attentionReplyTo(reply, directory));
+  assert.equal(absence(reply, directory), null);
+  assert.equal(absence(envoy, leadHome("#beta")), null);
+  const item: Attention = {
+    rowKey: "decision",
+    source: "coordination",
+    response: { kind: "message", addressId: member.id },
+    conversation: target,
+    summary: { text: "Pick a plan", truncated: false },
+    subjectSummary: null,
+    openedAt: 1,
+    subjectAlias: member.alias,
+    messageId: null,
+    threadId: null,
+    actions: [],
+  };
+  const line = "@codex's pane is closed, so it can't take a message.";
+  assert.deepEqual(
+    attentionCopy(item, member, { kind: "closed", alias: "@codex" }),
+    { ...attentionCopy(item, member), hint: line, hintTitle: null },
+  );
+  assert.equal(
+    attentionCopy(item, member).hint,
+    "Read the report, then answer the lead.",
+  );
 });
 test("legacy attention links only to an available loaded message and does not invent a response", () => {
   const attention: Attention = {

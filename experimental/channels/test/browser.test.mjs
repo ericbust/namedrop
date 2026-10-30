@@ -6779,23 +6779,49 @@ test("DESIGN-R2 A5: a kept channel draft is named in the composer's status row, 
   assert.equal(await notice.count(), 0);
 });
 
-test("R3 U3: when the responsible agent is gone, the first press of Message @codex says so and leaves the draft alone", async (t) => {
-  const { value, context } = actionableAttention("message");
-  value.frame.participants[0].activity = "retired";
+// The agent leaves between the press and the conversation's arrival: the card
+// offered the press while the agent was live.
+function leavesAfterPress(kind, gone) {
+  const { value, context } = actionableAttention(kind);
+  const left = structuredClone(value);
+  if (gone === "closed") {
+    left.frame.participants[0].activity = "retired";
+    left.frame.participants[0].recently_closed = true;
+  } else
+    left.frame.participants = left.frame.participants.filter(
+      (participant) => participant.address_id !== "codex",
+    );
+  return { value, left, context };
+}
+
+test("R3 U3: when the responsible agent is gone by the time the conversation loads, the press of Message @codex says so and leaves the draft alone", async (t) => {
+  const { value, left, context } = leavesAfterPress("message", "closed");
+  const loaded = held();
   const ui = await open(
     t,
     (client) => replay(client, [value]),
     () => [],
-    { onContext: () => context },
+    {
+      onContext: async () => {
+        await loaded.gate;
+        return context;
+      },
+    },
   );
   await ui.live();
   const draft = ui.page.locator("main .composer").getByRole("combobox");
   await draft.fill("my own words");
-  await ui.page
-    .getByRole("region", { name: "Attention needed" })
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card
     .getByRole("button", { name: "Message @codex", exact: true })
     .click();
   await until(() => ui.contextRequests.length === 1, "the conversation");
+  ui.connections[0].send("space", left);
+  await readsAs(
+    card.locator(".attention-hint"),
+    "@codex's pane is closed, so it can't take a message.",
+  );
+  loaded.release();
   await readsAs(
     ui.page.locator("main .composer-status"),
     "@codex's pane is closed, so it can't take a message.",
@@ -6816,30 +6842,37 @@ test("R3 U3: when the responsible agent is gone, the first press of Message @cod
   );
 });
 
-for (const [subject, button, line] of [
-  ["codex", "Message @codex", "@codex isn't in this channel anymore."],
-  [null, "Message the agent", "That agent isn't in this channel anymore."],
+for (const [subject, line] of [
+  ["codex", "@codex isn't in this channel anymore."],
+  [null, "That agent isn't in this channel anymore."],
 ])
-  test(`R3 fix1 F4: when the responsible agent has left the frame, ${button} says ${line}`, async (t) => {
-    const { value, context } = actionableAttention("message");
-    value.frame.participants = value.frame.participants.filter(
-      (participant) => participant.address_id !== "codex",
-    );
-    value.frame.attention[0].subject_alias = subject;
+  test(`R3 fix1 F4: when the responsible agent has left the frame by the time the conversation loads, Message @codex says ${line}`, async (t) => {
+    const { value, left, context } = leavesAfterPress("message", "left");
+    for (const frame of [value, left])
+      frame.frame.attention[0].subject_alias = subject;
+    const loaded = held();
     const ui = await open(
       t,
       (client) => replay(client, [value]),
       () => [],
-      { onContext: () => context },
+      {
+        onContext: async () => {
+          await loaded.gate;
+          return context;
+        },
+      },
     );
     await ui.live();
     const draft = ui.page.locator("main .composer").getByRole("combobox");
     await draft.fill("my own words");
-    await ui.page
-      .getByRole("region", { name: "Attention needed" })
-      .getByRole("button", { name: button, exact: true })
+    const card = ui.page.getByRole("region", { name: "Attention needed" });
+    await card
+      .getByRole("button", { name: "Message @codex", exact: true })
       .click();
     await until(() => ui.contextRequests.length === 1, "the conversation");
+    ui.connections[0].send("space", left);
+    await readsAs(card.locator(".attention-hint"), line);
+    loaded.release();
     await readsAs(ui.page.locator("main .composer-status"), line);
     assert.equal(await draft.inputValue(), "my own words");
     assert.equal(ui.posts.attempts.length, 0);
@@ -6849,16 +6882,10 @@ for (const [gone, line] of [
   ["closed", "@codex's pane is closed, so it can't take a message."],
   ["left", "@codex isn't in this channel anymore."],
 ])
-  test(`R3 fix1 F4: in the thread pane, a reply whose agent ${gone === "closed" ? "has a closed pane" : "left the frame"} reads ${line} in the reply box's place`, async (t) => {
-    const { value, context } = actionableAttention("reply");
-    if (gone === "closed") {
-      value.frame.participants[0].activity = "retired";
-      value.frame.participants[0].recently_closed = true;
-    } else
-      value.frame.participants = value.frame.participants.filter(
-        (participant) => participant.address_id !== "codex",
-      );
-    value.frame.attention[0].subject_alias = "codex";
+  test(`R3 fix1 F4: in the thread pane, a reply whose agent ${gone === "closed" ? "closes its pane" : "leaves the frame"} after the press reads ${line} in the reply box's place`, async (t) => {
+    const { value, left, context } = leavesAfterPress("reply", gone);
+    for (const frame of [value, left])
+      frame.frame.attention[0].subject_alias = "codex";
     const ui = await open(
       t,
       (client) => replay(client, [value]),
@@ -6874,6 +6901,8 @@ for (const [gone, line] of [
       name: "Thread",
       exact: true,
     });
+    await pane.getByRole("combobox").waitFor();
+    ui.connections[0].send("space", left);
     await readsAs(pane.locator(".thread-answer"), line);
     assert.equal(await pane.getByRole("combobox").count(), 0);
     if (gone === "closed")
@@ -6885,6 +6914,94 @@ for (const [gone, line] of [
         1,
         "the chip names the same state",
       );
+  });
+
+// A Needs-you card whose agent can't take a message, and the frames that
+// bring the agent back.
+function absentAgent(gone, kind) {
+  const { value, context } = actionableAttention(kind);
+  const [item] = value.frame.attention;
+  item.subject_alias = gone === "unreachable" ? "lead" : "codex";
+  const beta = frame(2, "beta");
+  beta.frame.participants = [
+    { ...people()[0], address_id: "pane-9", alias: "@lead" },
+  ];
+  if (gone === "unreachable") {
+    item.response.address_id = "envoy:w2:pane-9";
+    const unlabelled = structuredClone(beta);
+    unlabelled.frame.space.addressable_label = null;
+    unlabelled.frame.space.not_addressable_reason = "missing_label";
+    return { context, absent: [value, unlabelled], back: [beta] };
+  }
+  const live = structuredClone(value);
+  if (gone === "closed") {
+    value.frame.participants[0].activity = "retired";
+    value.frame.participants[0].recently_closed = true;
+  } else
+    value.frame.participants = value.frame.participants.filter(
+      (participant) => participant.address_id !== "codex",
+    );
+  return { context, absent: [value], back: [live] };
+}
+const absentCases = [
+  {
+    gone: "closed",
+    kind: "reply",
+    button: "Reply to @codex",
+    line: "@codex's pane is closed, so it can't take a message.",
+  },
+  {
+    gone: "left",
+    kind: "message",
+    button: "Message @codex",
+    line: "@codex isn't in this channel anymore.",
+  },
+  {
+    gone: "unreachable",
+    kind: "message",
+    button: "Message @lead",
+    line: "@lead's workspace has no label Namedrop can mention, so it can't take a message from here.",
+  },
+];
+for (const { gone, kind, button, line } of absentCases)
+  test(`UI-R4 H6: a card whose agent ${gone === "closed" ? "has a closed pane" : gone === "left" ? "left the frame" : "is in a workspace with no label"} offers no ${button} and reads ${line} before any press, and ${button} comes back with the agent`, async (t) => {
+    const { context, absent, back } = absentAgent(gone, kind);
+    const ui = await open(
+      t,
+      (client) => replay(client, absent),
+      () => [],
+      { onContext: () => context },
+    );
+    await ui.live();
+    const card = ui.page.getByRole("region", { name: "Attention needed" });
+    await readsAs(card.locator(".attention-hint"), line);
+    assert.deepEqual(
+      await card.locator(".attention-actions button").allTextContents(),
+      ["Show message", "Details"],
+    );
+    const pane = ui.page.getByRole("complementary", {
+      name: "Thread",
+      exact: true,
+    });
+    if (kind === "message") {
+      await card.getByRole("button", { name: /^Show message/ }).click();
+      await readsAs(pane.locator(".thread-answer"), line);
+      assert.equal(
+        await pane.getByRole("button", { name: /^Message / }).count(),
+        0,
+      );
+    }
+    for (const value of back) ui.connections[0].send("space", value);
+    await card.getByRole("button", { name: button, exact: true }).waitFor();
+    assert.notEqual(await shownText(card.locator(".attention-hint")), line);
+    if (kind === "message")
+      await pane.getByRole("button", { name: /^Message / }).waitFor();
+    assert.equal(ui.posts.attempts.length, 0);
+    assert.equal(
+      await ui.page.locator("main textarea").inputValue(),
+      "",
+      "nothing was typed for the operator",
+    );
   });
 
 test("DESIGN-R2 D2: the kept-draft notice lasts until the box changes, then the hint names a capitalized leading name again", async (t) => {
