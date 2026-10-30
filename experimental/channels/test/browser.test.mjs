@@ -6133,27 +6133,52 @@ test("CH-2: the page fills the window in every view and width, and only the pane
   await ui.page.locator('[data-message-id="long-59"]').waitFor();
   const page = () =>
     ui.page.evaluate(() => {
-      window.scrollTo(0, 100_000);
+      window.scrollTo(100_000, 100_000);
+      const root = document.documentElement;
       return {
-        overflow:
-          document.documentElement.scrollHeight -
-          document.documentElement.clientHeight,
-        scrolled: window.scrollY,
+        overflow: [
+          root.scrollWidth - root.clientWidth,
+          root.scrollHeight - root.clientHeight,
+        ],
+        scrolled: [window.scrollX, window.scrollY],
       };
     });
+  const sizes = [
+    ["1440x900", 1440, 900],
+    ["1024x700", 1024, 700],
+    ["640x800", 640, 800],
+    ["390x844", 390, 844],
+    ["1440x900 at 125% zoom", 1152, 720],
+  ];
   const fits = async (view) => {
-    for (const [width, height] of [
-      [1440, 900],
-      [1024, 700],
-      [640, 800],
-      [390, 844],
-      [1152, 720],
-    ]) {
+    for (const [size, width, height] of sizes) {
       await ui.page.setViewportSize({ width, height });
       assert.deepEqual(
         await page(),
-        { overflow: 0, scrolled: 0 },
-        `${view} at ${width}x${height}`,
+        { overflow: [0, 0], scrolled: [0, 0] },
+        `${view} at ${size}`,
+      );
+    }
+    await ui.page.setViewportSize({ width: 1440, height: 900 });
+  };
+  // A mouse wheel over a pane scrolls the pane, at a wide and a phone width.
+  const wheels = async (selector, view) => {
+    for (const [size, width, height] of [sizes[0], sizes[3]]) {
+      await ui.page.setViewportSize({ width, height });
+      const pane = ui.page.locator(selector);
+      const box = await pane.boundingBox();
+      await ui.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      const before = await pane.evaluate((element) => element.scrollTop);
+      await ui.page.mouse.wheel(0, before > 0 ? -400 : 400);
+      await eventually(
+        async () =>
+          (await pane.evaluate((element) => element.scrollTop)) !== before,
+        `${view} to scroll on the wheel at ${size}`,
+      );
+      assert.deepEqual(
+        await ui.page.evaluate(() => [window.scrollX, window.scrollY]),
+        [0, 0],
+        `the wheel over ${view} never scrolls the page at ${size}`,
       );
     }
     await ui.page.setViewportSize({ width: 1440, height: 900 });
@@ -6171,12 +6196,14 @@ test("CH-2: the page fills the window in every view and width, and only the pane
   };
   await fits("the channel");
   await scrolls(".timeline", "the timeline");
+  await wheels(".timeline", "the timeline");
   await ui.page.locator('[data-message-id="long-59"] .reply-preview').click();
   await ui.page
     .getByRole("complementary", { name: "Thread", exact: true })
     .waitFor();
   await fits("an open thread");
   await scrolls(".thread-body", "the thread");
+  await wheels(".thread-body", "the thread");
   await ui.page.keyboard.press("Escape");
   await ui.page
     .locator(".members")
