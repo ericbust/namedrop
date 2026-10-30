@@ -263,6 +263,7 @@ fn stored_recipient_outlooks(
 ) -> Result<Vec<RecipientOutlook>, crate::StoreError> {
     let addresses = transaction.list_pane_addresses(namespace)?;
     let held = transaction.held_deliveries(namespace)?;
+    let reply_limit_blocked = transaction.reply_limit_blocked_mailbox_addresses(namespace)?;
     let mut outlooks = recipient_outlooks(aliases, &addresses);
     for outlook in &mut outlooks {
         if let Some(delivery) = addresses
@@ -277,6 +278,13 @@ fn stored_recipient_outlooks(
                 "@{}: an earlier held delivery ({}) blocks this mailbox. Queued deliveries wait until that hold is explicitly resolved; run namedrop doctor for recovery.",
                 outlook.alias,
                 delivery.delivery_id.as_str(),
+            );
+        } else if addresses.iter().any(|address| {
+            address.alias == outlook.alias && reply_limit_blocked.contains(&address.id)
+        }) {
+            outlook.statement = format!(
+                "@{}: the Automatic Reply Limit holds this mailbox. This message stays queued until the person selects Continue for that thread.",
+                outlook.alias,
             );
         }
     }
@@ -547,6 +555,12 @@ where
         )
         .into());
     }
+    if let Some(alias) = capitalized_leading_alias(source) {
+        return Err(SendError::Refused(RouteRefusal::UnknownMention {
+            alias: alias.to_owned(),
+        })
+        .into());
+    }
     let input = prepare_source_message(MessageOperationInput {
         request_id: required_nonempty(request_id.to_owned(), "request_id")
             .map_err(SendError::Input)?,
@@ -576,7 +590,22 @@ pub(crate) fn is_plain_channel_post(source: &str) -> bool {
     let leading_mention = leading
         .strip_prefix('@')
         .is_some_and(|rest| !rest.starts_with(char::is_whitespace));
-    !leading_mention && parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
+    !leading_mention
+        && capitalized_leading_alias(source).is_none()
+        && parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
+}
+
+fn capitalized_leading_alias(source: &str) -> Option<&str> {
+    for token in source[leading_labels(source).cursor..].split_whitespace() {
+        let alias = token.strip_prefix('@')?;
+        if validate_alias(&alias.to_ascii_lowercase()).is_err() {
+            return None;
+        }
+        if alias.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return Some(alias);
+        }
+    }
+    None
 }
 
 pub(crate) fn send_operator_channel_message_observing_commit<E, C, I, R>(
@@ -1171,7 +1200,6 @@ where
             transaction.pane_type(&namespace,&r.address_id).is_ok_and(|kind|kind==crate::PaneType::Terminal)) {
             return Err(crate::StoreError::invalid_input("terminal recipients accept new shell command requests without agent context attachments"));
         }
-        let outlook = routed_recipient_outlooks(transaction, &namespace, &recipients)?;
         let references = if channel_reply || preparation == MessagePreparation::OperatorPlain {
             Vec::new()
         } else {
@@ -1481,6 +1509,7 @@ where
                 }
             })
             .transpose()?;
+        let outlook = routed_recipient_outlooks(transaction, &namespace, &recipients)?;
         Ok(Committed {
             channel: transaction.channel_projection(&namespace,&draft.message_id)?,
             routed: crate::RoutedMessageReceipt {

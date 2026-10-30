@@ -3467,6 +3467,35 @@ impl StateTransaction<'_> {
         Ok(DeliveryState::Cancelled)
     }
 
+    pub(crate) fn reply_limit_blocked_mailbox_addresses(
+        &self,
+        namespace: &StateNamespace,
+    ) -> Result<Vec<PaneAddressId>, StoreError> {
+        let mut statement = self.transaction.prepare(
+            "SELECT d.address_id
+             FROM mailbox_deliveries d
+             JOIN collaboration_messages m USING (session_socket_id, worktree_id, message_id)
+             JOIN thread_controls c USING (session_socket_id, worktree_id, thread_id)
+             WHERE d.session_socket_id = ?1 AND d.worktree_id = ?2
+               AND d.state = 'queued' AND c.paused = 1 AND c.stopped = 0
+               AND c.reply_allowance = 0
+               AND NOT EXISTS (
+                   SELECT 1 FROM mailbox_deliveries earlier
+                   WHERE earlier.session_socket_id = d.session_socket_id
+                     AND earlier.worktree_id = d.worktree_id
+                     AND earlier.address_id = d.address_id
+                     AND earlier.mailbox_order < d.mailbox_order
+                     AND earlier.state NOT IN ('settled', 'failed', 'cancelled')
+               )",
+        )?;
+        statement
+            .query_map(namespace_params(namespace), |row| {
+                row.get::<_, String>(0).map(PaneAddressId::new)
+            })?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub(crate) fn held_deliveries(
         &self,
         namespace: &StateNamespace,

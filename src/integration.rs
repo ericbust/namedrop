@@ -548,20 +548,6 @@ where
             runtime,
         );
     }
-    let claimed = StateStore::open(runtime.state_directory)
-        .map_err(|error| error.to_string())?
-        .transaction(|transaction| {
-            transaction.claim_integration_challenge_prompt(
-                &namespace,
-                &challenge.registration_id,
-                &attribution,
-            )
-        })
-        .map_err(|error| error.to_string())?;
-    if !claimed {
-        return Ok(());
-    }
-
     let effects = crate::pane_effects::PaneEffects::acquire(
         runtime.state_directory,
         runtime.session_socket_id,
@@ -578,13 +564,7 @@ where
                 .is_some_and(|status| matches!(status, "idle" | "done"))
     });
     if !still_settled {
-        return finish_challenge_prompt(
-            runtime,
-            &namespace,
-            &challenge.registration_id,
-            TransitionKind::Challenged,
-            &attribution,
-        );
+        return Ok(());
     }
 
     let executable = collaboration_executable()?;
@@ -597,6 +577,19 @@ where
         agent_runtime,
         &challenge.nonce,
     )?;
+    let claimed = StateStore::open(runtime.state_directory)
+        .map_err(|error| error.to_string())?
+        .transaction(|transaction| {
+            transaction.claim_integration_challenge_prompt(
+                &namespace,
+                &challenge.registration_id,
+                &attribution,
+            )
+        })
+        .map_err(|error| error.to_string())?;
+    if !claimed {
+        return Ok(());
+    }
     match effects.prompt(
         runtime.herdr,
         &crate::pane_effects::InputOwner::Other,

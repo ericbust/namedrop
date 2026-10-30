@@ -20,6 +20,73 @@ fn leading_unknown_aliases_are_refused_instead_of_silent_room_posts() {
 }
 
 #[test]
+fn capitalized_leading_aliases_report_the_original_unknown_mention() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", true);
+    for (index, alias) in [
+        "Nobody",
+        "Codex",
+        "Planner",
+        "PLANNER",
+        "Mixed-Case",
+        "nobody",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(
+            &server,
+            &format!("capitalized-unknown-{index}"),
+            &format!("@{alias} inspect"),
+            None,
+        );
+        assert_eq!(status, 400, "{receipt}");
+        assert_eq!(receipt["error"], format!("unknown Mention: @{alias}"));
+    }
+    for (index, source) in [
+        "@planner_x inspect",
+        "@Planner! inspect",
+        "@-Planner inspect",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(&server, &format!("malformed-leading-{index}"), source, None);
+        assert_eq!(status, 400, "{receipt}");
+        assert_eq!(
+            receipt["error"],
+            "message must begin with one or more recipient Mentions"
+        );
+    }
+    let (status, mixed) = post(&server, "mixed-leading", "@planner @Codex inspect", None);
+    assert_eq!(status, 400, "{mixed}");
+    assert_eq!(mixed["error"], "unknown Mention: @Codex");
+    for (index, source) in ["#ws1 @Codex inspect", "#ws1 @planner @Codex inspect"]
+        .iter()
+        .enumerate()
+    {
+        let (status, scoped) = post(&server, &format!("scoped-leading-{index}"), source, None);
+        assert_eq!(status, 400, "{scoped}");
+        assert_eq!(scoped["error"], "unknown Mention: @Codex");
+    }
+    assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM mailbox_deliveries"), 0);
+    for (index, source) in [
+        "@planner Inspect @Codex",
+        "@planner @Codex! stays body text.",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(&server, &format!("capitalized-body-{index}"), source, None);
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(recipient_aliases(&receipt), ["planner"]);
+        assert_eq!(receipt["context_references"], json!([]));
+    }
+    assert!(calls(&f).is_empty());
+}
+
+#[test]
 fn post_is_visible_and_answers_before_router_finishes_then_survives_restart() {
     let f = fixture();
     let server = Server::start(&f, "delayed", false);
