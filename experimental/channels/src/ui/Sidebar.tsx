@@ -37,10 +37,20 @@ export function Sidebar({
 }: Props) {
   const sidebar = useRef<HTMLElement>(null);
   const focusedRow = useRef<HTMLButtonElement | null>(null);
+  const hiddenWithFocus = useRef(false);
   const connection = connectionStatus(state);
   const channels = sortedChannels(state);
   const modal = drawer?.open === true;
   const close = drawer?.onClose;
+  const phone = drawer !== null;
+  // The column hides as the window narrows to a phone, and the focus it held
+  // falls to the page. The button that opens the drawer takes it instead.
+  useLayoutEffect(() => {
+    if (!phone || !hiddenWithFocus.current) return;
+    hiddenWithFocus.current = false;
+    if (document.activeElement === document.body)
+      document.querySelector<HTMLElement>(".channels-toggle")?.focus();
+  }, [phone]);
   useLayoutEffect(() => {
     if (!modal) return;
     const element = sidebar.current;
@@ -156,8 +166,11 @@ export function Sidebar({
             ? target
             : null;
       }}
-      onBlurCapture={() => {
+      onBlurCapture={(event) => {
         focusedRow.current = null;
+        hiddenWithFocus.current =
+          event.relatedTarget === null &&
+          !event.currentTarget.checkVisibility({ visibilityProperty: true });
       }}
     >
       <header className="brand">
