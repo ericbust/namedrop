@@ -9783,3 +9783,80 @@ test("UI-R4 L3: in a window under 560 px tall the member strip folds to one row 
     "+N more still shows every member",
   );
 });
+
+test("UI-R4 review H Low 3: when the agent comes back after a press read it was gone, the absence line clears and the card offers Message @codex again", async (t) => {
+  const { value, left, context } = leavesAfterPress("message", "closed");
+  const loaded = held();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    {
+      onContext: async () => {
+        await loaded.gate;
+        return context;
+      },
+    },
+  );
+  await ui.live();
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  await until(() => ui.contextRequests.length === 1, "the conversation");
+  ui.connections[0].send("space", left);
+  loaded.release();
+  const status = ui.page.locator("main .composer-status");
+  await readsAs(status, "@codex's pane is closed, so it can't take a message.");
+  ui.connections[0].send("space", value);
+  await card
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .waitFor();
+  await eventually(
+    async () => !(await status.textContent()).includes("can't take a message"),
+    "the absence line clears",
+  );
+});
+
+test("UI-R4 review H Low 2: in a thread, a pasted U+FEFF before a leading name drops the To label, as Enter sends only to that name", async (t) => {
+  const now = Date.now();
+  const value = team(1, "alpha");
+  value.frame.messages = [
+    message("ask", "@codex check this", {
+      thread_id: "t1",
+      at_ms: now - 120_000,
+      legs: [{ to: "codex", stage: done() }],
+    }),
+    message("answer", "Checked", {
+      thread_id: "t1",
+      in_reply_to: "ask",
+      kind: "reply",
+      author: "codex",
+      at_ms: now - 60_000,
+    }),
+  ];
+  value.frame.threads = [
+    {
+      thread_id: "t1",
+      title: { text: "Check", truncated: false },
+      message_count: 2,
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from @codex/ })
+    .click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  await reply.fill("﻿@claude look too");
+  assert.equal(await pane.locator(".composer-to").count(), 0, "no To label");
+  await reply.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the reply");
+  assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@claude look too");
+});
