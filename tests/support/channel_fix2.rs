@@ -114,4 +114,88 @@ fn pulled_in_agent_answers_the_asker_without_repeating_its_name() {
         })
         .unwrap();
     assert_eq!(controls.reply_allowance, 8);
+    let report = agent_reply(
+        &f,
+        "asker-report",
+        &answer,
+        "pane-1-planner",
+        "@operator The answer from \\@lead is 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&report), vec!["operator"]);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 3);
+    assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 1);
+}
+
+#[test]
+fn leading_at_sign_followed_by_whitespace_is_plain_channel_text() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", true);
+    for (index, source) in ["@ room statement", "@\troom statement", "@\nroom statement"]
+        .iter()
+        .enumerate()
+    {
+        let (status, receipt) = post(&server, &format!("leading-at-{index}"), source, None);
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(receipt["channel"]["state"], "unrouted");
+        assert_eq!(receipt["recipients"], json!([]));
+    }
+    assert!(calls(&f).is_empty());
+}
+
+#[test]
+fn explicit_followup_still_wakes_the_answerer_when_the_answer_mentions_the_asker() {
+    let f = fixture();
+    let root = plain_root(&f, "followup-root", "Please collaborate here.");
+    let question = agent_reply(
+        &f,
+        "followup-question",
+        &root,
+        "pane-1-planner",
+        "@operator Asking @lead for the number.",
+    )
+    .unwrap();
+    let answer = agent_reply(
+        &f,
+        "followup-answer",
+        &question,
+        "pane-1-lead",
+        "@operator The number for @planner is 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&answer), vec!["operator", "planner"]);
+    let followup = agent_reply(
+        &f,
+        "followup-new-question",
+        &answer,
+        "pane-1-planner",
+        "@operator Can @lead explain the calculation?",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&followup), vec!["operator", "lead"]);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 4);
+}
+
+#[test]
+fn renamed_answerer_keeps_the_stored_ask_identity() {
+    let f = fixture();
+    let root = plain_root(&f, "rename-root", "Please collaborate here.");
+    let question = agent_reply(
+        &f,
+        "rename-question",
+        &root,
+        "pane-1-planner",
+        "@operator Asking @lead for the number.",
+    )
+    .unwrap();
+    f.rename("w1", "lead", "renamed");
+    let answer = agent_reply(
+        &f,
+        "rename-answer",
+        &question,
+        "pane-1-lead",
+        "@operator The number is 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&answer), vec!["operator", "planner"]);
 }
