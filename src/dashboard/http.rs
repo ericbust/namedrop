@@ -621,6 +621,11 @@ enum Route {
     Page,
     Session,
     Send(SpaceKey),
+    ThreadControl {
+        key: SpaceKey,
+        thread_id: String,
+        action: super::thread_controls::Action,
+    },
     Screen {
         key: SpaceKey,
         address_id: String,
@@ -664,6 +669,26 @@ fn route(
     if request.method == "POST" {
         authenticate_session(request, port, session)?;
         authenticate_mutation(request, session, host)?;
+        if let Some(rest) = path.strip_prefix("/w/") {
+            let segments: Vec<_> = rest.split('/').collect();
+            if let [key, "threads", thread, action] = segments.as_slice() {
+                let action = match *action {
+                    "continue" => super::thread_controls::Action::Continue,
+                    "stop" => super::thread_controls::Action::Stop,
+                    _ => return Err(Status::NotFound),
+                };
+                let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+                let thread_id = decode_asset_path(thread).ok_or(Status::NotFound)?;
+                if thread_id.is_empty() || thread_id.contains('/') {
+                    return Err(Status::NotFound);
+                }
+                return Ok(Route::ThreadControl {
+                    key,
+                    thread_id,
+                    action,
+                });
+            }
+        }
         let key = path
             .strip_prefix("/w/")
             .and_then(|rest| rest.strip_suffix("/messages"))
@@ -928,6 +953,32 @@ fn serve_connection(
             };
             send_operator_post(&mut writer, front, key, post)
         }
+        Ok(Route::ThreadControl {
+            key,
+            thread_id,
+            action,
+        }) => match super::thread_controls::apply(front.files.state(), &key, &thread_id, action) {
+            Ok((namespace, receipt)) => {
+                if let Err(error) =
+                    wake_mailboxes_after_send(front.files.state(), &namespace, &receipt)
+                {
+                    eprintln!("Thread control saved; could not wake delivery: {error}");
+                }
+                respond(
+                    &mut writer,
+                    "200 OK",
+                    "application/json",
+                    "",
+                    receipt.to_string().as_bytes(),
+                )
+            }
+            Err(super::thread_controls::ControlError::NotFound) => {
+                respond_status(&mut writer, Status::NotFound)
+            }
+            Err(super::thread_controls::ControlError::Unavailable) => {
+                respond_status(&mut writer, Status::Unavailable)
+            }
+        },
         Ok(Route::Screen { key, address_id }) => {
             let _permit = match screens.try_admit() {
                 Ok(permit) => permit,

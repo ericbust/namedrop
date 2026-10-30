@@ -695,6 +695,10 @@ pub struct TerminalRun {
 pub struct AttentionCard {
     pub attention_id: String,
     pub source_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<ThreadAction>,
     pub coordination_id: Option<String>,
     pub conversation: Option<Conversation>,
     pub response: AttentionResponse,
@@ -705,6 +709,13 @@ pub struct AttentionCard {
     pub opened_at_ms: i64,
     pub subject_alias: Option<String>,
     pub message_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadAction {
+    Continue,
+    Stop,
 }
 
 #[derive(Debug, Serialize)]
@@ -854,6 +865,13 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .map(|item| AttentionCard {
             attention_id: item.item.id.as_str().to_owned(),
             source_id: item.item.source_id.clone(),
+            thread_id: (item.item.source_kind == crate::AttentionSourceKind::AutomaticReplyLimit)
+                .then(|| item.item.source_id.clone()),
+            actions: if item.item.source_kind == crate::AttentionSourceKind::AutomaticReplyLimit {
+                vec![ThreadAction::Continue, ThreadAction::Stop]
+            } else {
+                Vec::new()
+            },
             coordination_id: (item.item.source_kind == crate::AttentionSourceKind::Coordination)
                 .then(|| item.item.source_id.clone()),
             conversation: item.conversation.as_ref().map(Conversation::from),
@@ -870,6 +888,8 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         blocked_on_user_at(address).map(|opened_at_ms| AttentionCard {
             attention_id: format!("agent-status-{}", address.address_id),
             source_id: address.address_id.clone(),
+            thread_id: None,
+            actions: Vec::new(),
             coordination_id: None,
             conversation: address
                 .blocked_conversation

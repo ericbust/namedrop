@@ -3,6 +3,7 @@ mod http;
 mod hub;
 mod server_files;
 pub mod snapshot;
+mod thread_controls;
 
 use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, StateNamespace};
 use serde_json::{Value, json};
