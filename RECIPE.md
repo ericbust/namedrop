@@ -78,7 +78,7 @@ In your app home's `layouts/namedrop-layout.json`, append this entry to the root
 
 Close the roster window if you want only the float. Side edges support `peek`; hover reveals the whole roster and leaving it tucks it back. The status dot sits on the edge that peeks. Dragging the float changes its edge and alignment. A floating copy has no Close button. Remove its layout entry to remove it.
 
-This shell assigns core labels and shows status. Sending mentions still requires the Namedrop binary's app-host integration. Core labels do not enforce alias uniqueness atomically, so simultaneous Name dialogs can race. This cross-dialog duplicate-alias race remains a known limit until HA-4 routes naming through the binary. No terminal text, Namedrop database, or other mod state is changed by these mods. App-owned window persistence belongs to Herdr.
+This shell assigns core labels and shows status. Sending mentions still requires the Namedrop binary's app-host integration. Core labels do not enforce alias uniqueness atomically, so simultaneous Name dialogs can race. This cross-dialog duplicate-alias race remains a known limit until a later Namedrop release routes naming through the binary. No terminal text, Namedrop database, or other mod state is changed by these mods. App-owned window persistence belongs to Herdr.
 
 `herdr-app check` passed for both mods on app 0.1.9 with core 0.1.14. The live lanes still wait for Weston. Live rendering, focus retention when opening Name, remote interaction, hot reload, and performance await those lanes. `preview.png` is intentionally absent until a real screenshot can be captured. The repository ignores the app-generated `gpui-kit.d.ts` and `jsconfig.json` files in each mod folder.
 
