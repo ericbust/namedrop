@@ -384,7 +384,7 @@ fn retiring_or_disabling_a_candidate_during_routing_prevents_delivery() {
 
 #[test]
 fn handoff_waits_for_admitted_mutation_then_cancels_router_before_successor() {
-    use std::io::Read;
+    use std::{io::Read, os::fd::AsRawFd};
     struct Gate(std::path::PathBuf);
     impl Drop for Gate {
         fn drop(&mut self) {
@@ -395,31 +395,48 @@ fn handoff_waits_for_admitted_mutation_then_cancels_router_before_successor() {
     let server = Server::start(&f, "delayed", false);
     let (_, pending) = support::raw_post(&server, "handoff-route", "Could @planner inspect?", None);
     until(|| calls(&f).len() == 1);
-    let gate = Gate(f.root.join("prompt-gate"));
-    fs::write(&gate.0, "").unwrap();
-    assert_eq!(
-        support::raw_post(&server, "admitted-send", "@lead Inspect.", None).0,
-        200
-    );
-    until(|| f.root.join("prompt-entered").exists());
     let mut stream = events(&server);
     let mut buffered = String::new();
     next_frame(&mut stream, &mut buffered);
     fs::create_dir_all(f.state.join("runtime")).unwrap();
-    fs::write(f.state.join("runtime/migration.json"), "{}").unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !buffered.contains("event: restarting") {
-        assert!(Instant::now() < deadline, "server did not begin handoff");
-        let mut bytes = [0u8; 8192];
-        let count = stream.read(&mut bytes).unwrap();
-        assert!(count > 0);
-        buffered.push_str(&String::from_utf8_lossy(&bytes[..count]));
-    }
-    assert_eq!(f.count("SELECT COUNT(*) FROM transition_facts WHERE actor_id='channel-router/v1' AND transition_kind='failed'"),0,"handoff cancelled routing before an admitted mutation finished");
-    drop(gate);
-    until(|| {
-        f.count("SELECT COUNT(*) FROM transition_facts WHERE actor_id='channel-router/v1' AND transition_kind='failed'")==1
+    let packages = fs::File::create(f.state.join("runtime/packages.lock")).unwrap();
+    fs::set_permissions(
+        f.state.join("runtime/packages.lock"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(packages.as_raw_fd(), libc::LOCK_EX) },
+        0
+    );
+    thread::scope(|scope| {
+        let gate = Gate(f.root.join("discovery-gate"));
+        fs::write(&gate.0, "").unwrap();
+        let admitted =
+            scope.spawn(|| support::raw_post(&server, "admitted-send", "@lead Inspect.", None));
+        until(|| f.root.join("discovery-entered").exists());
+        fs::write(f.state.join("runtime/migration.json"), "{}").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !buffered.contains("event: restarting") {
+            assert!(Instant::now() < deadline, "server did not begin handoff");
+            let mut bytes = [0u8; 8192];
+            let count = stream.read(&mut bytes).unwrap();
+            assert!(count > 0);
+            buffered.push_str(&String::from_utf8_lossy(&bytes[..count]));
+        }
+        assert_eq!(f.count("SELECT COUNT(*) FROM transition_facts WHERE actor_id='channel-router/v1' AND transition_kind='failed'"),0,"handoff cancelled routing before an admitted commit finished");
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM collaboration_messages WHERE request_id='admitted-send'"),
+            0
+        );
+        drop(gate);
+        let (status, receipt) = admitted.join().unwrap();
+        assert_eq!(status, 200, "{receipt}");
+        until(|| {
+            f.count("SELECT COUNT(*) FROM transition_facts WHERE actor_id='channel-router/v1' AND transition_kind='failed'")==1
+        });
     });
+    drop(packages);
     until(|| {
         f.state.join("dashboard/server.log").exists()
             && fs::read_to_string(f.state.join("dashboard/server.log"))

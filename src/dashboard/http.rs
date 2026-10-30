@@ -54,7 +54,7 @@ pub(crate) struct Front {
 impl Front {
     fn admit_mutation(&self) -> Result<std::sync::MutexGuard<'_, ()>, Status> {
         let guard = self.mutations.lock().map_err(|_| Status::Unavailable)?;
-        if self.restarting.load(Ordering::Acquire) {
+        if self.restarting.load(Ordering::Acquire) || self.files.restarting() {
             return Err(Status::Unavailable);
         }
         Ok(guard)
@@ -1155,10 +1155,10 @@ fn send_operator_post(
     key: SpaceKey,
     post: OperatorPost,
 ) -> io::Result<()> {
-    let _admitted = match front.admit_mutation() {
+    let mut admitted = Some(match front.admit_mutation() {
         Ok(guard) => guard,
         Err(status) => return respond_status(writer, status),
-    };
+    });
     let namespace = match StateStore::open_read_only(front.files.state())
         .and_then(|store| store.map(|mut store| store.dashboard_spaces()).transpose())
     {
@@ -1192,13 +1192,15 @@ fn send_operator_post(
     let observe_commit = |receipt: &serde_json::Value| {
         let mut receipt = receipt.clone();
         snapshot::channel_routing::finish_post(front.files.state(), &namespace, &mut receipt);
-        respond(
+        let response = respond(
             writer,
             "200 OK",
             "application/json",
             "",
             receipt.to_string().as_bytes(),
-        )
+        );
+        drop(admitted.take());
+        response
     };
     let sent = if crate::message::is_plain_channel_post(&post.source) {
         crate::message::send_operator_channel_message_observing_commit(
