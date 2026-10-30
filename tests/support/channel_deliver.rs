@@ -511,17 +511,34 @@ fn delivery_answers_with_eof_before_drain_and_keeps_original_operator_envelope()
 #[test]
 fn committed_delivery_drains_after_the_client_disconnects() {
     use std::io::Write;
-    use std::net::{Shutdown, TcpStream};
+    use std::net::TcpStream;
     use std::os::fd::AsRawFd;
+    use std::os::unix::fs::OpenOptionsExt;
     let f = fixture();
+    let (_, root) = {
+        let server = Server::start(&f, "not json", true);
+        post(
+            &server,
+            "disconnect-root",
+            "Stored disconnected request.",
+            None,
+        )
+    };
     let server = Server::start(&f, "not json", true);
-    let (_, root) = post(
-        &server,
-        "disconnect-root",
-        "Stored disconnected request.",
-        None,
-    );
     let gate = PromptGate::new(&f);
+    let routing_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC)
+        .open(f.state.join("dashboard/channel-routing.lock"))
+        .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(routing_lock.as_raw_fd(), libc::LOCK_EX) },
+        0
+    );
     let info: Value =
         serde_json::from_slice(&fs::read(f.state.join("dashboard/server.json")).unwrap()).unwrap();
     let port = info["port"].as_u64().unwrap() as u16;
@@ -533,6 +550,19 @@ fn committed_delivery_drains_after_the_client_disconnects() {
     .unwrap();
     let body = r#"{"to":["planner"]}"#;
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    stream.write_all(format!("POST {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",path("w1",&root),server.cookie,csrf["csrf_token"].as_str().unwrap(),body.len()).as_bytes()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while recipient_rows(&f, &root).len() != 1 {
+        assert!(
+            Instant::now() < deadline,
+            "delivery did not commit recipient"
+        );
+        thread::yield_now();
+    }
+    assert!(!f.root.join("prompt-entered").exists());
+    eprintln!(
+        "disconnect evidence: one recipient committed while routing lock held; fake prompt not entered before reset"
+    );
     let linger = libc::linger {
         l_onoff: 1,
         l_linger: 0,
@@ -549,9 +579,8 @@ fn committed_delivery_drains_after_the_client_disconnects() {
         },
         0
     );
-    stream.write_all(format!("POST {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",path("w1",&root),server.cookie,csrf["csrf_token"].as_str().unwrap(),body.len()).as_bytes()).unwrap();
-    stream.shutdown(Shutdown::Write).unwrap();
     drop(stream);
+    drop(routing_lock);
     gate.wait(&f);
     assert_eq!(recipient_rows(&f, &root).len(), 1);
     drop(gate);
@@ -559,6 +588,9 @@ fn committed_delivery_drains_after_the_client_disconnects() {
         &f,
         "SELECT COUNT(*) FROM delivery_attempt_state WHERE state IN ('submitted','acknowledged')",
         1,
+    );
+    eprintln!(
+        "disconnect evidence: fake prompt entered after reset and lock release; one submitted or acknowledged attempt"
     );
 }
 

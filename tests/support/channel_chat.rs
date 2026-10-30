@@ -105,7 +105,7 @@ import json, os, sys, time
 root = os.path.dirname(__file__)
 payload = sys.stdin.read()
 with open(os.path.join(root, 'router-calls.jsonl'), 'a') as log:
-    log.write(json.dumps({'args': sys.argv, 'env': dict(os.environ), 'stdin': payload}) + '\n')
+    log.write(json.dumps({'pid': os.getpid(), 'args': sys.argv, 'env': dict(os.environ), 'stdin': payload}) + '\n')
 with open(os.path.join(root, 'router-response.json')) as source:
     output = source.read()
 if output == 'timeout':

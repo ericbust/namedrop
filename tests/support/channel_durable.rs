@@ -126,25 +126,42 @@ fn four_workers_claim_four_processes_while_extra_posts_remain_durable() {
         receipts.push(receipt);
     }
     until(|| calls(&f).len() == 4);
+    let model_pids: std::collections::BTreeSet<_> = calls(&f)
+        .iter()
+        .map(|call| i32::try_from(call["pid"].as_u64().unwrap()).unwrap())
+        .collect();
+    assert_eq!(model_pids.len(), 4);
+    for pid in &model_pids {
+        assert_eq!(
+            unsafe { libc::kill(*pid, 0) },
+            0,
+            "blocked model process {pid} must still be running"
+        );
+    }
     assert_eq!(f.count("SELECT COUNT(*) FROM transition_facts WHERE actor_id='channel-router/v1' AND transition_kind='dispatching'"),4);
     assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 7);
-    let pid =
-        serde_json::from_slice::<Value>(&fs::read(f.state.join("dashboard/server.json")).unwrap())
-            .unwrap()["pid"]
+    assert_eq!(f.count("SELECT COUNT(*) FROM (SELECT transition_kind,ROW_NUMBER() OVER (PARTITION BY session_socket_id,worktree_id,entity_id ORDER BY worktree_order DESC) AS rank FROM transition_facts WHERE actor_id='channel-router/v1') WHERE rank=1 AND transition_kind='queued'"),3);
+    #[cfg(target_os = "linux")]
+    {
+        let pid = serde_json::from_slice::<Value>(
+            &fs::read(f.state.join("dashboard/server.json")).unwrap(),
+        )
+        .unwrap()["pid"]
             .as_u64()
             .unwrap();
-    let workers = fs::read_dir(format!("/proc/{pid}/task"))
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|task| {
-            fs::read_to_string(task.path().join("comm"))
-                .unwrap_or_default()
-                .starts_with("channel-router-")
-        })
-        .count();
-    assert_eq!(workers, 4);
+        let workers = fs::read_dir(format!("/proc/{pid}/task"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|task| {
+                fs::read_to_string(task.path().join("comm"))
+                    .unwrap_or_default()
+                    .starts_with("channel-router-")
+            })
+            .count();
+        assert_eq!(workers, 4);
+    }
     eprintln!(
-        "queue evidence: 7 committed posts, 4 blocked model calls, {workers} owned router threads, 3 jobs waiting"
+        "queue evidence: 7 committed posts, 4 distinct live blocked model processes {model_pids:?}, 4 dispatch claims, 3 jobs waiting"
     );
     fs::write(f.root.join("router-release"), "").unwrap();
     for (index, initial) in receipts.iter().enumerate() {
