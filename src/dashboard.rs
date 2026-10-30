@@ -25,10 +25,15 @@ pub fn open(
     runtime: &LifecycleRuntime<'_, impl Host, impl Clock, impl IdGenerator>,
     open_browser: bool,
 ) -> Result<Value, String> {
-    let workspace_id = runtime
-        .host
-        .space(runtime.space_locator(), None)?
-        .workspace_id;
+    let workspace_id = match runtime.workspace_id {
+        Some(id) => id.to_owned(),
+        None => {
+            runtime
+                .host
+                .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?
+                .workspace_id
+        }
+    };
     let key = SpaceKey::of(&StateNamespace::for_space(
         runtime.session_socket_id,
         &workspace_id,

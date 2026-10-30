@@ -490,11 +490,6 @@ fn fake_herdr(root: &Path) -> PathBuf {
         &herdr,
         r#"#!/bin/sh
 case "$1 $2" in
-  "worktree list")
-    [ "$3" = --workspace ] || exit 1
-    printf '{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"%s"}]}}' "$4"
-    ;;
-  "pane list") printf '%s\n' '{"result":{"panes":[]}}' ;;
   "workspace list")
     printf '%s\n' '{"result":{"workspaces":[
       {"workspace_id":"w0","number":0,"label":"label-w0"},
