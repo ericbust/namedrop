@@ -329,6 +329,30 @@ fn bound_answer_still_accepts_an_explicit_followup_question() {
     assert_eq!(recipient_aliases(&followup), vec!["operator", "lead"]);
     assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 4);
     assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 2);
+    let explanation = agent_reply(
+        &f,
+        "bound-followup-explanation",
+        &followup,
+        "pane-1-lead",
+        "@operator Six groups of seven total 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&explanation), vec!["operator", "planner"]);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 5);
+    let leading_followup = agent_reply(
+        &f,
+        "bound-leading-followup",
+        &explanation,
+        "pane-1-planner",
+        "@operator @lead What about seven times seven?",
+    )
+    .unwrap();
+    assert_eq!(
+        recipient_aliases(&leading_followup),
+        vec!["operator", "lead"]
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 6);
+    assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 3);
 }
 
 #[test]
