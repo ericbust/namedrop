@@ -327,3 +327,97 @@ fn checkout_ownership_uses_all_roots_and_rejects_multiple_spaces() {
     assert!(!space.worktree_attached);
     assert_eq!(space.worktree_id.as_str(), "hc-space:fixture-space");
 }
+
+#[test]
+fn release_and_removal_clear_name_mirrors_after_store_mutation() {
+    let fixture = Fixture::default();
+    let state = std::env::temp_dir().join(format!("namedrop-hc-release-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&state);
+    std::fs::create_dir_all(&state).unwrap();
+    let home = state.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let clock = namedrop::SystemClock;
+    let ids = namedrop::ProcessIds::default();
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&home),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    for remove in [true, false] {
+        let named = namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"alice", "pane_type":"terminal"}),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+            "alice"
+        );
+        assert_eq!(named["tab_label"]["status"], "unchanged");
+        let address_id = namedrop::StateStore::open(&state)
+            .unwrap()
+            .transaction(|transaction| {
+                Ok(transaction
+                    .list_pane_addresses(&namedrop::StateNamespace::for_space(
+                        "hc:fixture",
+                        "fixture-space",
+                    ))?
+                    .into_iter()
+                    .find(|address| address.alias == "alice")
+                    .unwrap()
+                    .id)
+            })
+            .unwrap();
+        if remove {
+            namedrop::execute_lifecycle_operation(
+                "address.remove",
+                json!({"address_id":address_id}),
+                &runtime,
+            )
+            .unwrap();
+        } else {
+            namedrop::execute_lifecycle_operation(
+                "address.retire",
+                json!({"address_id":address_id}),
+                &runtime,
+            )
+            .unwrap();
+            namedrop::execute_lifecycle_operation(
+                "address.release-alias",
+                json!({"alias":"alice"}),
+                &runtime,
+            )
+            .unwrap();
+        }
+        assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.name"], "");
+    }
+    std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn unknown_programs_and_reporting_shells_are_not_shell_recipients() {
+    let fixture = Fixture::default();
+    fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["vim"]);
+    assert_eq!(
+        HcHost::new(&fixture).panes(PaneScope::All).unwrap()[0]
+            .agent
+            .as_deref(),
+        Some("vim")
+    );
+    fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["bash"]);
+    fixture.terminals.borrow_mut()[0]["reported"] = json!(true);
+    assert_eq!(
+        HcHost::new(&fixture).panes(PaneScope::All).unwrap()[0]
+            .agent
+            .as_deref(),
+        Some("bash")
+    );
+}

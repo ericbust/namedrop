@@ -179,12 +179,12 @@ fn main() -> ExitCode {
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
-        return run_context_hook(state_directory, |input, runtime| {
+        return run_context_hook(state_directory, &cli.runtime, |input, runtime| {
             execute_user_prompt_submit_hook(input, runtime)
         });
     }
     if let Some(state_directory) = cli.session_start_hook_state_directory() {
-        return run_context_hook(state_directory, |input, runtime| {
+        return run_context_hook(state_directory, &cli.runtime, |input, runtime| {
             execute_session_start_hook(input, runtime)
         });
     }
@@ -614,12 +614,13 @@ fn run_operation(
 
 fn with_runtime_at<T>(
     state_directory: &Path,
+    options: &RuntimeOptions,
     action: impl FnOnce(&ProcessRuntime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     with_runtime_options(
         &RuntimeOptions {
             plugin_state: Some(state_directory.to_path_buf()),
-            ..Default::default()
+            ..options.clone()
         },
         action,
     )
@@ -711,6 +712,7 @@ fn with_runtime_options<T>(
 /// cannot run must not interrupt the person's turn.
 fn run_context_hook(
     state_directory: &Path,
+    options: &RuntimeOptions,
     execute: fn(&str, &ProcessRuntime<'_>) -> Option<serde_json::Value>,
 ) -> ExitCode {
     let mut input = String::new();
@@ -718,9 +720,36 @@ fn run_context_hook(
         return ExitCode::SUCCESS;
     }
     let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
-        with_runtime_at(state_directory, |runtime| Ok(execute(&input, runtime)))
-            .ok()
-            .flatten()
+        with_runtime_at(state_directory, options, |runtime| {
+            if let RuntimeHost::Hc(host) = runtime.host {
+                let Some(space) = runtime.workspace_id else {
+                    return Ok(None);
+                };
+                let namespace =
+                    namedrop::StateNamespace::for_space(runtime.session_socket_id, space);
+                let active = namedrop::StateStore::open(runtime.state_directory)
+                    .map_err(|error| error.to_string())?
+                    .transaction(|transaction| transaction.worktree_state(&namespace))
+                    .map_err(|error| error.to_string())?
+                    .is_some_and(|state| state.activated && !state.deactivated);
+                if !active {
+                    return Ok(None);
+                }
+                let event: serde_json::Value =
+                    serde_json::from_str(&input).map_err(|error| error.to_string())?;
+                if event["hook_event_name"] == "SessionStart"
+                    && let Some(session) = event["session_id"]
+                        .as_str()
+                        .filter(|session| !session.is_empty())
+                    && let Some(pane) = runtime.current_pane_id
+                {
+                    host.set_labels(pane, &[("namedrop.session", session)])?;
+                }
+            }
+            Ok(execute(&input, runtime))
+        })
+        .ok()
+        .flatten()
     });
     if serde_json::from_str::<serde_json::Value>(&input)
         .is_ok_and(|input| input["hook_event_name"] == "SessionStart")

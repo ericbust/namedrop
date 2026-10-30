@@ -61,6 +61,10 @@ pub struct LifecycleRuntime<'a, H, C, I> {
 }
 
 impl<H, C, I> LifecycleRuntime<'_, H, C, I> {
+    pub fn is_hc(&self) -> bool {
+        self.session_socket_id.starts_with("hc:")
+    }
+
     pub fn space_locator(&self) -> crate::SpaceLocator<'_> {
         match self.workspace_id {
             Some(workspace) => crate::SpaceLocator::Workspace(workspace),
@@ -737,23 +741,50 @@ where
             let input: ReleaseAliasInput = parse_input(input)?;
             require_activated(&mut store, &namespace)?;
             let alias = required_nonempty(input.alias, "alias")?;
+            let pane = store
+                .transaction(|transaction| {
+                    Ok(transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.alias == alias)
+                        .and_then(|address| address.pane_id))
+                })
+                .map_err(|error| error.to_string())?;
             store
                 .transaction(|transaction| {
                     transaction.release_alias(&namespace, &alias, &attribution)
                 })
                 .map_err(|error| error.to_string())?;
+            let pane = pane.or_else(|| {
+                discovered
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_label.as_deref() == Some(&format!("@{alias}")))
+                    .map(|pane| pane.pane_id.clone())
+            });
+            clear_hc_name(runtime, pane.as_deref())?;
             Ok(json!({"alias": alias, "released": true}))
         }
         "address.remove" => {
             let input: AddressInput = parse_input(input)?;
             require_activated(&mut store, &namespace)?;
             let address_id = PaneAddressId::new(required_nonempty(input.address_id, "address_id")?);
+            let pane = store
+                .transaction(|transaction| {
+                    Ok(transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .and_then(|address| address.pane_id))
+                })
+                .map_err(|error| error.to_string())?;
             let released_aliases = store
                 .transaction(|transaction| {
                     transaction.remove_pane_address(&namespace, &address_id, &attribution)
                 })
                 .map_err(|error| error.to_string())?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
+            clear_hc_name(runtime, pane.as_deref())?;
             Ok(json!({
                 "address_id": address_id,
                 "released_aliases": released_aliases,
@@ -832,6 +863,14 @@ where
                                 .into_iter()
                                 .find(|binding| binding.pane_id == pane_id);
                             if let Some(binding) = binding {
+                                if runtime.is_hc()
+                                    && event_worktree
+                                        .panes
+                                        .iter()
+                                        .any(|pane| pane.pane_id == pane_id)
+                                {
+                                    return Ok(None);
+                                }
                                 transaction.cancel_and_remove_pane_address(
                                     &event_namespace,
                                     &binding.address_id,
@@ -1243,7 +1282,7 @@ fn apply_managed_tab_label(
         })
     };
     let Some(current_label) = herdr.tab_label(tab_id) else {
-        return warning();
+        return json!({"status": "unchanged"});
     };
     let intent = store.transaction(|transaction| {
         let existing = transaction
@@ -1331,6 +1370,13 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    if discovered
+        .panes
+        .iter()
+        .all(|pane| runtime.host.tab_label(&pane.tab_id).is_none())
+    {
+        return Ok(());
+    }
     let managed = store
         .transaction(|transaction| transaction.managed_tab_labels(namespace))
         .map_err(|error| error.to_string())?;
@@ -1947,4 +1993,25 @@ fn reconcile_compacted_pane_bindings(
 struct PaneEventSession {
     #[serde(rename = "value")]
     _value: String,
+}
+
+fn clear_hc_name<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    pane: Option<&str>,
+) -> Result<(), String> {
+    if runtime.is_hc()
+        && let Some(pane) = pane
+    {
+        runtime.host.report_metadata(
+            pane,
+            &crate::PaneMetadata::Identity {
+                title: String::new(),
+                ready: String::new(),
+                working: String::new(),
+                blocked: String::new(),
+                unknown: String::new(),
+            },
+        )?;
+    }
+    Ok(())
 }

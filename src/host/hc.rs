@@ -171,7 +171,7 @@ impl Terminal {
                 "claude-code" | "claude" => Some("claude".to_owned()),
                 "codex" => Some("codex".to_owned()),
                 "sh" | "bash" | "zsh" | "fish" | "dash" | "nu" if !self.reported => None,
-                _ => app.map(str::to_owned),
+                _ => Some(name.to_owned()),
             }
         });
         DiscoveredPane {
