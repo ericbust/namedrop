@@ -421,7 +421,7 @@ async function open(
   });
   await page.goto(`http://127.0.0.1:${server.address().port}${path}`);
   const channels = page.getByRole("navigation", {
-    name: "Channels",
+    name: "Channel list",
     exact: true,
   });
   const row = (n) => channels.locator(`button[data-channel-key="${key(n)}"]`);
@@ -9580,7 +9580,7 @@ test("UI-R4 L2: on a phone the Channels button opens the sidebar as a modal draw
   assert.equal(await toggle.getAttribute("aria-expanded"), "false");
   assert.equal(
     await page
-      .getByRole("navigation", { name: "Channels", exact: true })
+      .getByRole("navigation", { name: "Channel list", exact: true })
       .count(),
     0,
     "the sidebar is not on screen",
@@ -9684,7 +9684,7 @@ test("UI-R4 L2: on a phone the Channels button opens the sidebar as a modal draw
     );
     assert.equal(
       await page
-        .getByRole("navigation", { name: "Channels", exact: true })
+        .getByRole("navigation", { name: "Channel list", exact: true })
         .count(),
       phone ? 0 : 1,
       `the sidebar column at ${width} px`,

@@ -56,7 +56,7 @@ server can serve assets with `npm run dev`, but it does not provide the authenti
 Namedrop API.
 
 [`DESIGN.md`](DESIGN.md) is the design contract, and `src/style.css` starts with
-its tokens. The **Channels** and **Needs you** navigation regions expose buttons
+its tokens. The **Channel list** and **Needs you** navigation regions expose buttons
 by workspace name. Display names have no mention prefix, and sidebar rows do not
 repeat the `#token`. The channel header shows the exact `#token`, or **No mention
 label**. Duplicate names add a muted suffix with the workspace ID and the full

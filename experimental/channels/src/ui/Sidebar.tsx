@@ -138,12 +138,14 @@ export function Sidebar({
   const needsYouTab = tabKey(needsYou);
   const channelsTab = tabKey(channels);
   return (
+    // biome-ignore lint/a11y/useAriaPropsSupportedByRole: aria-modal is set only while the role is dialog.
     <aside
       className="sidebar"
       id={id}
       ref={sidebar}
       role={modal ? "dialog" : undefined}
       aria-label={modal ? "Channels" : undefined}
+      aria-modal={modal ? true : undefined}
       tabIndex={modal ? -1 : undefined}
       onKeyDown={modal ? trap : undefined}
       onFocusCapture={(event) => {
@@ -221,7 +223,7 @@ export function Sidebar({
           </nav>
         )}
         <nav
-          aria-label="Channels"
+          aria-label="Channel list"
           className="nav-section channels-navigation"
           onKeyDown={move}
         >

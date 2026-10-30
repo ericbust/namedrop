@@ -172,7 +172,9 @@ the whole width.
   width.
 - The button opens the `Sidebar` itself as a drawer from the left,
   `min(280px, 100vw - 40px)` wide, over a `--scrim` backdrop. The drawer is a
-  dialog named "Channels". Focus moves to the selected row, Tab and Shift+Tab
+  modal dialog (`aria-modal="true"`) named "Channels". Its list of channels is
+  the "Channel list" navigation at every width, so no landmark in the drawer
+  repeats the dialog's name. Focus moves to the selected row, Tab and Shift+Tab
   stay inside, and everything behind it is inert.
 - Escape, a press on the backdrop, or choosing a channel or All activity closes
   it. Focus then returns to the Channels button. In the drawer, the arrow keys
