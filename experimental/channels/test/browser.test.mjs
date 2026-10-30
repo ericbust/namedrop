@@ -4852,9 +4852,32 @@ test("a recent retired member opens Pane closed, then leaves the strip after gra
   });
   await ui.live();
   const chip = ui.page.locator('.members li[data-address-id="codex"]');
-  await chip.getByText("Retired", { exact: true }).waitFor();
+  await chip.getByText("Pane closed", { exact: true }).waitFor();
+  assert.deepEqual(
+    await chip.evaluate((item) => {
+      const color = (name) => getComputedStyle(item.querySelector(name)).color;
+      return {
+        alias: color(".alias"),
+        dot: item.querySelector(".presence") !== null,
+      };
+    }),
+    {
+      alias: await ui.page
+        .locator('.members li[data-address-id="codex"] .status')
+        .evaluate((word) => getComputedStyle(word).color),
+      dot: false,
+    },
+    "a closed pane's alias is as quiet as its word, with no dot",
+  );
   await chip.getByRole("button").click();
-  await drawer(ui).getByText("Pane closed", { exact: true }).waitFor();
+  await drawer(ui)
+    .locator(".peek-failure")
+    .getByText("Pane closed", { exact: true })
+    .waitFor();
+  await drawer(ui)
+    .locator(".peek-presence")
+    .getByText("Pane closed", { exact: true })
+    .waitFor();
   assert.deepEqual(
     ui.screens.requests.map(({ address }) => address),
     ["codex"],

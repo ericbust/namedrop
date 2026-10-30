@@ -562,7 +562,8 @@ a:hover {
   color: var(--attention-text);
   font-weight: 500;
 }
-.member.is-offline .alias {
+.member.is-offline .alias,
+.member.is-retired .alias {
   color: var(--text-muted);
 }
 button.member:not(.more):hover {

@@ -216,8 +216,9 @@ that have not settled yet.
 
 Under the header, one wrapping line of member chips. Each chip is 28px tall: a
 20px avatar with its presence dot as a badge, the alias at 13px 500, and the
-status word at 12px muted. Order: needs you, working, waiting, idle, offline.
-The operator chip reads "You", shows no presence, and comes last. The chip's
+status word at 12px muted. Order: needs you, working, waiting, idle, offline,
+unknown, pane closed. The operator chip reads "You", shows no presence, and
+comes last. The chip's
 tooltip names the runtime in words: "Claude Code", "Codex", "OpenCode", "Pi",
 or "Terminal". An unknown runtime id is shown with its first letter capitalized. After two lines, end with a
 "+N more" chip that expands the strip. Remove the "Members" and "Status"
@@ -226,17 +227,19 @@ member. The operator chip is not a button.
 
 ### Presence
 
-| Activity | Dot                                                          | Word      |
-| -------- | ------------------------------------------------------------ | --------- |
-| working  | filled `--working`, a slow 2.4s opacity pulse from 1 to 0.55 | Working   |
-| waiting  | filled `--waiting`                                           | Waiting   |
-| blocked  | filled `--blocked`                                           | Needs you |
-| idle     | 1.5px ring `--idle`, hollow                                  | Idle      |
-| offline  | filled `--offline`, chip text `--text-muted`                 | Offline   |
-| retired  | not shown in the strip                                       | Retired   |
-| unknown  | 1.5px dashed ring `--idle`                                   | Unknown   |
+| Activity | Dot                                                          | Word        |
+| -------- | ------------------------------------------------------------ | ----------- |
+| working  | filled `--working`, a slow 2.4s opacity pulse from 1 to 0.55 | Working     |
+| waiting  | filled `--waiting`                                           | Waiting     |
+| blocked  | filled `--blocked`                                           | Needs you   |
+| idle     | 1.5px ring `--idle`, hollow                                  | Idle        |
+| offline  | filled `--offline`, chip text `--text-muted`                 | Offline     |
+| retired  | none, chip text `--text-muted`                               | Pane closed |
+| unknown  | 1.5px dashed ring `--idle`                                   | Unknown     |
 
 The dot is 8px, or 10px with a 2px `--bg` ring when it is a badge on an avatar.
+A retired member shows in the strip for 5 minutes after its pane closes, with
+the word "Pane closed", then leaves it. Its messages keep its name.
 
 ### Avatar
 

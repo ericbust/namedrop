@@ -30,7 +30,7 @@ export function Avatar({
       ) : (
         ([...alias.replace(/^@/, "")][0] ?? "?").toUpperCase()
       )}
-      {presence !== undefined && (
+      {presence !== undefined && presence !== "retired" && (
         <span className="presence" data-activity={presence} />
       )}
     </span>

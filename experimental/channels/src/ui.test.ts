@@ -285,7 +285,7 @@ test("design-b: member chips order by state, end with the operator as You withou
   assert.equal(markup.includes("claude-code"), false);
 });
 
-test("a recently closed member stays listed with retired presence and a Peek button", async () => {
+test("a recently closed member reads Pane closed, muted without a dot, last among agents before You, with a Peek button", async () => {
   const { MemberStrip } = await load<typeof import("./ui/MemberStrip.tsx")>(
     "/src/ui/MemberStrip.tsx",
   );
@@ -293,14 +293,18 @@ test("a recently closed member stays listed with retired presence and a Peek but
     "/src/ui/PeekContext.tsx",
   );
   const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  const agent = fixture.frame.participants[1];
   fixture.frame.participants = [
     {
-      ...fixture.frame.participants[1],
+      ...agent,
       address_id: "closed",
       alias: "@closed",
       activity: "retired",
       recently_closed: true,
     },
+    { ...agent, address_id: "off", alias: "@off", activity: "offline" },
+    { ...agent, address_id: "odd", alias: "@odd", activity: "mystery" },
+    { ...fixture.frame.participants[0], activity: "working" },
   ];
   const event = space(fixture);
   const markup = renderToStaticMarkup(
@@ -310,10 +314,15 @@ test("a recently closed member stays listed with retired presence and a Peek but
       createElement(MemberStrip, { members: event.channel.members }),
     ),
   );
+  assert.deepEqual(
+    [...markup.matchAll(/<li data-address-id="([^"]+)">/g)].map(([, id]) => id),
+    ["off", "odd", "closed", "human"],
+  );
   const chip = markup.match(/<li data-address-id="closed">(.*?)<\/li>/)?.[1];
   assert.ok(chip, markup);
-  assert.equal(text(chip), "C@closedRetired");
-  assert.ok(chip.includes('class="presence" data-activity="retired"'));
+  assert.equal(text(chip), "C@closedPane closed");
+  assert.equal(chip.includes("presence"), false, chip);
+  assert.ok(chip.includes('class="member is-retired"'), chip);
   assert.ok(chip.startsWith('<button type="button"'));
   assert.ok(chip.includes(`data-peek="${event.channel.key}/closed"`));
   assert.ok(chip.endsWith("</button>"));

@@ -241,7 +241,7 @@ export const presenceWord = {
   blocked: "Needs you",
   idle: "Idle",
   offline: "Offline",
-  retired: "Retired",
+  retired: "Pane closed",
   unknown: "Unknown",
 } satisfies Record<Activity, string>;
 

@@ -415,7 +415,7 @@ test("presence words, runtime names, ages and avatar hues", () => {
     blocked: "Needs you",
     idle: "Idle",
     offline: "Offline",
-    retired: "Retired",
+    retired: "Pane closed",
     unknown: "Unknown",
   });
   assert.equal(runtimeName("claude-code"), "Claude Code");
