@@ -301,6 +301,8 @@ enum Command {
     },
     /// Recover after a plugin restart; ambiguous in-flight delivery attempts are held.
     Reconcile,
+    /// Subscribe to hc lifecycle and status events.
+    Events,
     /// Handle one Herdr lifecycle event.
     Event {
         #[command(subcommand)]
@@ -358,6 +360,7 @@ impl Command {
             Self::Thread { command } => command.operation(),
             Self::Space { command } => command.operation(),
             Self::Reconcile => "reconcile",
+            Self::Events => "events",
             Self::Event { command } => command.operation(),
             Self::Dashboard(_) => "dashboard",
             Self::DashboardServer => "dashboard.server",

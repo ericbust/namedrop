@@ -421,3 +421,170 @@ fn unknown_programs_and_reporting_shells_are_not_shell_recipients() {
         Some("bash")
     );
 }
+
+#[test]
+fn events_reconcile_names_preserve_lost_aliases_and_clear_sessions() {
+    let fixture = Fixture::default();
+    let state = std::env::temp_dir().join(format!("namedrop-hc-events-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&state);
+    std::fs::create_dir_all(&state).unwrap();
+    let home = state.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let clock = namedrop::SystemClock;
+    let ids = namedrop::ProcessIds::default();
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&home),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    namedrop::execute_lifecycle_operation(
+        "name",
+        json!({"alias":"alice", "pane_type":"terminal"}),
+        &runtime,
+    )
+    .unwrap();
+    let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+    for line in include_str!("fixtures/hc/events.jsonl").lines() {
+        subscriber.handle_line(line, &runtime).unwrap();
+    }
+    let event = |kind: &str| {
+        json!({"jsonrpc":"2.0", "method":"event", "params":{"type":kind,"terminal":"t1", "data":{}}}).to_string()
+    };
+    fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("bad name");
+    subscriber.handle_line(&event("labels"), &runtime).unwrap();
+    assert_eq!(
+        fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+        "alice"
+    );
+    fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("bob");
+    subscriber.handle_line(&event("labels"), &runtime).unwrap();
+    let names = || {
+        namedrop::StateStore::open(&state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.list_pane_addresses(&namedrop::StateNamespace::for_space(
+                    "hc:fixture",
+                    "fixture-space",
+                ))
+            })
+            .unwrap()
+    };
+    assert_eq!(names()[0].alias, "bob");
+    for kind in ["lost", "restarted"] {
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("stale-session");
+        subscriber.handle_line(&event(kind), &runtime).unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            ""
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+            "bob"
+        );
+        assert_eq!(names()[0].alias, "bob");
+    }
+    for kind in [
+        "created",
+        "status",
+        "turn",
+        "foreground",
+        "size",
+        "title",
+        "doc",
+        "keep",
+    ] {
+        subscriber.handle_line(&event(kind), &runtime).unwrap();
+    }
+    subscriber
+        .handle_line(r#"{"method":"heartbeat","params":{"seq":9}}"#, &runtime)
+        .unwrap();
+    subscriber
+        .handle_line(
+            r#"{"method":"missed","params":{"seq":9,"terminals":[]}}"#,
+            &runtime,
+        )
+        .unwrap();
+    let address_id = names()[0].id.clone();
+    namedrop::execute_lifecycle_operation(
+        "address.remove",
+        json!({"address_id":address_id}),
+        &runtime,
+    )
+    .unwrap();
+    subscriber.handle_line(&event("labels"), &runtime).unwrap();
+    assert!(
+        names().is_empty(),
+        "a queued labels event must not resurrect a released name"
+    );
+    namedrop::execute_lifecycle_operation(
+        "name",
+        json!({"alias":"final", "pane_type":"terminal"}),
+        &runtime,
+    )
+    .unwrap();
+    fixture.terminals.borrow_mut()[0]["state"] = json!("finished");
+    subscriber
+        .handle_line(&event("finished"), &runtime)
+        .unwrap();
+    assert!(names().is_empty());
+    fixture.terminals.borrow_mut().clear();
+    subscriber.handle_line(&event("removed"), &runtime).unwrap();
+    std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn subscriber_start_is_idempotent_only_for_name_taken() {
+    struct StartTransport {
+        error: Option<&'static str>,
+    }
+    impl HerdrCommandExecutor for StartTransport {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            assert_eq!(
+                args,
+                [
+                    "run",
+                    "--bg",
+                    "--no-parent",
+                    "--rm",
+                    "--name",
+                    "namedrop-events",
+                    "--",
+                    "/namedrop",
+                    "--host",
+                    "hc",
+                    "--plugin-state",
+                    "/state",
+                    "events"
+                ]
+            );
+            match self.error {
+                Some(kind) => Err(json!({"error":{"kind":kind,"message":"rejected"}}).to_string()),
+                None => Ok(HerdrCommandOutput {
+                    stdout: "{}".into(),
+                }),
+            }
+        }
+    }
+    for (kind, success) in [
+        (None, true),
+        (Some("name_taken"), true),
+        (Some("invalid_params"), false),
+    ] {
+        assert_eq!(
+            namedrop::host::hc::events::start(
+                &HcHost::new(StartTransport { error: kind }),
+                Path::new("/namedrop"),
+                Path::new("/state")
+            )
+            .is_ok(),
+            success
+        );
+    }
+}

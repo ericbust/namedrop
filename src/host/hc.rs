@@ -1,3 +1,5 @@
+pub mod events;
+
 use super::*;
 use crate::{AgentSessionId, HerdrCommandExecutor, WorktreeId};
 use serde::{Deserialize, de::DeserializeOwned};

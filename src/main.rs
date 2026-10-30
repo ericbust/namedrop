@@ -156,6 +156,27 @@ fn main() -> ExitCode {
             }
         }
     }
+    if cli.operation() == "events" {
+        drop(command_guard.take());
+        let result = HostKind::from_environment(cli.runtime.host).and_then(|kind| {
+            if kind != HostKind::Hc {
+                return Err("events requires --host hc".to_owned());
+            }
+            let state = cli
+                .runtime
+                .plugin_state
+                .clone()
+                .or_else(|| env::var_os("NAMEDROP_STATE_DIR").map(PathBuf::from))
+                .map(Ok)
+                .unwrap_or_else(|| hc_state_directory(|key| env::var(key).ok()))?;
+            namedrop::host::hc::events::run(&state)
+        });
+        if let Err(error) = result {
+            eprintln!("{error}");
+            return ExitCode::from(65);
+        }
+        return ExitCode::SUCCESS;
+    }
     if cli.is_dashboard_server() {
         let Some(state) = selected_state else {
             eprintln!("dashboard-server requires --plugin-state");
