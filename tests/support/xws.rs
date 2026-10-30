@@ -652,8 +652,61 @@ impl Fixture {
     }
 }
 
+fn fixture_workers(state: &std::path::Path) -> Vec<i32> {
+    let output = std::process::Command::new("ps")
+        .args(["axeww", "-o", "pid=,args="])
+        .output()
+        .expect("list fixture workers");
+    assert!(output.status.success(), "could not list fixture workers");
+    let state = format!("HERDR_PLUGIN_STATE_DIR={}", state.display());
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            (line.contains("hook mailbox-wake") || line.contains("hook agent-status-worker"))
+                && line.split_whitespace().any(|entry| entry == state)
+        })
+        .map(|line| line.split_whitespace().next().unwrap().parse().unwrap())
+        .collect()
+}
+
+impl Fixture {
+    fn stop_workers(&self) {
+        use std::{
+            thread,
+            time::{Duration, Instant},
+        };
+        let queue = self.state.join("agent-status-reconciliation");
+        let mut known: BTreeSet<_> = fixture_workers(&self.state).into_iter().collect();
+        let _ = fs::remove_dir_all(&queue);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let stop_deadline = deadline + Duration::from_secs(5);
+        loop {
+            let workers = fixture_workers(&self.state);
+            known.extend(&workers);
+            for pid in &known {
+                unsafe { libc::waitpid(*pid, std::ptr::null_mut(), libc::WNOHANG) };
+            }
+            if workers.is_empty() {
+                return;
+            }
+            assert!(
+                Instant::now() < stop_deadline,
+                "fixture workers did not stop: {workers:?}"
+            );
+            if Instant::now() >= deadline {
+                for pid in &workers {
+                    unsafe { libc::kill(*pid, libc::SIGKILL) };
+                }
+            }
+            let _ = fs::remove_dir_all(&queue);
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
+        self.stop_workers();
         let _ = fs::remove_dir_all(&self.root);
     }
 }

@@ -35,6 +35,33 @@ impl Server {
         idle_ms: Option<u64>,
         after_publish: impl FnOnce(&mut Child),
     ) -> Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::create_dir_all(state.join("dashboard")).unwrap();
+        let credentials = ["token", "session"].map(|name| {
+            let path = state.join("dashboard").join(name);
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let mut bytes = [0; 32];
+                    fs::File::open("/dev/urandom")
+                        .unwrap()
+                        .read_exact(&mut bytes)
+                        .unwrap();
+                    let secret = namedrop::lower_hex(&bytes);
+                    file.write_all(secret.as_bytes()).unwrap();
+                    secret
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    fs::read_to_string(path).unwrap()
+                }
+                Err(error) => panic!("could not prepare dashboard {name}: {error}"),
+            }
+        });
+        let [token, session] = credentials;
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         command
             .arg("--plugin-state")
@@ -62,8 +89,8 @@ impl Server {
         Self {
             child,
             port: info["port"].as_u64().unwrap() as u16,
-            token: fs::read_to_string(state.join("dashboard/token")).unwrap(),
-            session: fs::read_to_string(state.join("dashboard/session")).unwrap(),
+            token,
+            session,
         }
     }
 

@@ -477,7 +477,8 @@ fn schedule_mailbox_workers(
     let mut workers = Vec::new();
     for space in namedrop::spaces_to_wake(state_directory, socket_id, here) {
         let scheduled = (|| -> Result<(), String> {
-            let directory = reconciliation_directory(state_directory, socket_id, &space)?;
+            let directory = reconciliation_directory(state_directory, socket_id, &space);
+            create_reconciliation_directory(&directory)?;
             queue_agent_status_reconciliation(
                 &directory,
                 &serde_json::json!({"operation":"mailbox-wake"}),
@@ -874,7 +875,9 @@ fn run_agent_status_changed_hook() -> ExitCode {
             return ExitCode::from(65);
         }
     };
-    if let Err(error) = queue_agent_status_reconciliation(&directory, &input) {
+    if let Err(error) = create_reconciliation_directory(&directory)
+        .and_then(|()| queue_agent_status_reconciliation(&directory, &input))
+    {
         eprintln!("could not queue Namedrop reconciliation: {error}");
         return ExitCode::from(65);
     }
@@ -914,22 +917,24 @@ fn agent_status_reconciliation_directory() -> Result<PathBuf, String> {
         env::var("HERDR_SOCKET_PATH").map_err(|_| "HERDR_SOCKET_PATH is required".to_owned())?;
     let space_id =
         env::var("HERDR_WORKSPACE_ID").map_err(|_| "HERDR_WORKSPACE_ID is required".to_owned())?;
-    reconciliation_directory(&state_directory, &socket_id, &space_id)
+    Ok(reconciliation_directory(
+        &state_directory,
+        &socket_id,
+        &space_id,
+    ))
 }
 
-fn reconciliation_directory(
-    state_directory: &Path,
-    socket_id: &str,
-    space_id: &str,
-) -> Result<PathBuf, String> {
+fn reconciliation_directory(state_directory: &Path, socket_id: &str, space_id: &str) -> PathBuf {
     let scope = namedrop::lower_hex(&Sha256::digest(format!("{socket_id}\0{space_id}")));
-    let directory = state_directory
+    state_directory
         .join("agent-status-reconciliation")
-        .join(scope);
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-        .map_err(|error| error.to_string())?;
-    Ok(directory)
+        .join(scope)
+}
+
+fn create_reconciliation_directory(directory: &Path) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())
 }
 
 fn queue_agent_status_reconciliation(
@@ -1098,11 +1103,12 @@ fn run_agent_status_worker() -> ExitCode {
 fn wait_for_marker_or_deadline(directory: &Path, due_ms: u64) {
     loop {
         let now = SystemClock.now_unix_ms();
-        if now >= due_ms
-            || pending_agent_status_reconciliations(directory)
-                .is_ok_and(|pending| !pending.is_empty())
-        {
+        if now >= due_ms {
             return;
+        }
+        match pending_agent_status_reconciliations(directory) {
+            Ok(pending) if pending.is_empty() => {}
+            _ => return,
         }
         thread::sleep(Duration::from_millis((due_ms - now).min(100)));
     }
