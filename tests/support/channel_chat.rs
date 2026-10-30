@@ -47,7 +47,11 @@ fn wait_for_start_claim(state: &Path, deadline: Instant) -> Result<(), String> {
             ));
         }
         match claim.try_lock() {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                return claim.unlock().map_err(|error| {
+                    format!("could not release probe {}: {error}", path.display())
+                });
+            }
             Err(fs::TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(20)),
             Err(error) => return Err(format!("could not probe {}: {error}", path.display())),
         }
