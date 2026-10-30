@@ -7,6 +7,7 @@ use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     os::unix::fs::PermissionsExt,
+    path::Path,
     process::{Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
@@ -22,6 +23,11 @@ pub(super) struct Server {
 pub(super) struct Response {
     pub(super) status: u16,
     pub(super) body: String,
+}
+
+fn publish_executable(path: &Path, contents: &str) -> std::io::Result<()> {
+    fs::write(path, contents)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
 impl Server {
@@ -43,7 +49,7 @@ impl Server {
         let responses_file = f.root.join("http-herdr-responses.json");
         fs::write(&responses_file, serde_json::to_vec(&responses).unwrap()).unwrap();
         let shim = f.root.join("http-herdr");
-        fs::write(
+        publish_executable(
             &shim,
             r#"#!/usr/bin/python3
 import json, os, sys, time
@@ -93,7 +99,6 @@ else:
 "#,
         )
         .unwrap();
-        fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         command
             .arg("--plugin-state")
@@ -111,7 +116,7 @@ else:
             .stderr(Stdio::null());
         let router = f.root.join("fake-router");
         fs::write(f.root.join("router-response.json"), response).unwrap();
-        fs::write(
+        publish_executable(
             &router,
             r#"#!/usr/bin/python3
 import json, os, sys, time
@@ -137,7 +142,6 @@ else:
 "#,
         )
         .unwrap();
-        fs::set_permissions(&router, fs::Permissions::from_mode(0o700)).unwrap();
         command
             .env("NAMEDROP_AGENT_STATUS_CLAUDE_BIN", &router)
             .env(
@@ -484,6 +488,29 @@ pub(super) fn context(server: &Server, message: &str) -> Value {
     );
     assert_eq!(response.status, 200, "{}", response.body);
     serde_json::from_str(&response.body).unwrap()
+}
+
+#[test]
+fn fixture_executable_can_be_replaced_while_its_previous_version_runs() {
+    let f = Fixture::new();
+    let executable = f.root.join("running-shim");
+    fs::copy("/bin/sleep", &executable).unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut previous = Command::new(&executable).arg("30").spawn().unwrap();
+    let published = publish_executable(&executable, "#!/bin/sh\nprintf 'replacement-version\\n'\n");
+    let replacement = published
+        .as_ref()
+        .ok()
+        .map(|_| Command::new(&executable).output());
+    let previous_running = previous.try_wait().unwrap().is_none();
+    let _ = previous.kill();
+    previous.wait().unwrap();
+
+    published.expect("publishing a replacement while the previous executable runs");
+    assert!(previous_running, "previous executable must still be running");
+    let replacement = replacement.unwrap().unwrap();
+    assert!(replacement.status.success());
+    assert_eq!(replacement.stdout, b"replacement-version\n");
 }
 
 #[test]
