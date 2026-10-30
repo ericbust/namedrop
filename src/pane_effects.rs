@@ -50,6 +50,31 @@ impl InputOwner {
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum AcquireError {
+    Contended,
+    Fault(io::Error),
+}
+
+impl From<io::Error> for AcquireError {
+    fn from(error: io::Error) -> Self {
+        Self::Fault(error)
+    }
+}
+
+impl std::fmt::Display for AcquireError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Contended => write!(
+                f,
+                "pane effects: {}",
+                io::Error::from_raw_os_error(libc::EWOULDBLOCK)
+            ),
+            Self::Fault(error) => write!(f, "pane effects: {error}"),
+        }
+    }
+}
+
 pub(crate) struct PaneEffects {
     _lock: File,
     directory: File,
@@ -95,12 +120,16 @@ fn open_at(directory: &File, name: &CString, flags: i32) -> io::Result<File> {
 }
 
 impl PaneEffects {
-    pub(crate) fn acquire(state: &Path, socket: &str, pane: &str) -> Result<Self, String> {
+    pub(crate) fn acquire(state: &Path, socket: &str, pane: &str) -> Result<Self, AcquireError> {
         Self::acquire_for(state, socket, pane, ACQUIRE_TIMEOUT)
-            .map_err(|e| format!("pane effects: {e}"))
     }
 
-    fn acquire_for(state: &Path, socket: &str, pane: &str, timeout: Duration) -> io::Result<Self> {
+    fn acquire_for(
+        state: &Path,
+        socket: &str,
+        pane: &str,
+        timeout: Duration,
+    ) -> Result<Self, AcquireError> {
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
@@ -114,7 +143,7 @@ impl PaneEffects {
         )?;
         let created = unsafe { libc::mkdirat(state.as_raw_fd(), c"pane-effects".as_ptr(), 0o700) };
         if created != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::last_os_error().into());
         }
         let fd = unsafe {
             libc::openat(
@@ -124,14 +153,14 @@ impl PaneEffects {
             )
         };
         if fd < 0 {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::last_os_error().into());
         }
         let directory = checked(unsafe { File::from_raw_fd(fd) }, true)?;
-        let key = Sha256::digest(serde_json::to_vec(&(socket, pane))?)
+        let key = Sha256::digest(serde_json::to_vec(&(socket, pane)).map_err(io::Error::from)?)
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let lock_name = CString::new(format!("{key}.lock"))?;
+        let lock_name = CString::new(format!("{key}.lock")).map_err(io::Error::from)?;
         let lock = open_at(&directory, &lock_name, libc::O_RDWR | libc::O_CREAT)?;
         let deadline = Instant::now() + timeout;
         loop {
@@ -139,15 +168,18 @@ impl PaneEffects {
                 break;
             }
             let error = io::Error::last_os_error();
-            if error.raw_os_error() != Some(libc::EWOULDBLOCK) || Instant::now() >= deadline {
-                return Err(error);
+            if ![Some(libc::EWOULDBLOCK), Some(libc::EAGAIN)].contains(&error.raw_os_error()) {
+                return Err(AcquireError::Fault(error));
+            }
+            if Instant::now() >= deadline {
+                return Err(AcquireError::Contended);
             }
             thread::sleep(Duration::from_millis(5));
         }
         Ok(Self {
             _lock: lock,
             directory,
-            marker: CString::new(format!("{key}.json"))?,
+            marker: CString::new(format!("{key}.json")).map_err(io::Error::from)?,
             pane: pane.into(),
         })
     }
@@ -252,7 +284,8 @@ pub(crate) fn interrupt_if_current(
     for response in responses {
         let result = (|| -> Result<(), String> {
             let effects =
-                PaneEffects::acquire(state, &namespace.session_socket_id, &response.pane_id)?;
+                PaneEffects::acquire(state, &namespace.session_socket_id, &response.pane_id)
+                    .map_err(|error| error.to_string())?;
             let live = match cwd {
                 Some(cwd) => crate::discover_worktree(herdr, cwd)?,
                 None => crate::discover_worktree_for_workspace(herdr, namespace.space_id.as_str())?,
@@ -419,6 +452,30 @@ mod tests {
             let mut release = String::new();
             io::stdin().lock().read_line(&mut release).unwrap();
         }
+    }
+
+    #[test]
+    fn only_flock_contention_is_retryable() {
+        let state = State::new();
+        let gate = PaneEffects::acquire(&state.0, "socket", "pane").unwrap();
+        assert!(matches!(
+            PaneEffects::acquire_for(&state.0, "socket", "pane", Duration::ZERO),
+            Err(AcquireError::Contended)
+        ));
+        drop(gate);
+        fs::set_permissions(
+            state.0.join("pane-effects"),
+            fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        assert!(matches!(
+            PaneEffects::acquire_for(&state.0, "socket", "pane", Duration::ZERO),
+            Err(AcquireError::Fault(error)) if error.to_string().contains("unsafe")
+        ));
+        assert!(matches!(
+            AcquireError::from(io::Error::from_raw_os_error(libc::EWOULDBLOCK)),
+            AcquireError::Fault(_)
+        ));
     }
 
     #[test]

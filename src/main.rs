@@ -370,8 +370,7 @@ fn drain_report(result: &serde_json::Value) -> Result<namedrop::DrainReport, Str
 }
 
 fn needs_mailbox_watcher(result: &serde_json::Value) -> bool {
-    drain_report(result)
-        .is_ok_and(|report| report.awaits_terminal() || report.next_grace_due_ms().is_some())
+    drain_report(result).is_ok_and(|report| report.needs_mailbox_worker())
 }
 
 #[cfg(test)]
@@ -379,6 +378,17 @@ mod drain_report_tests {
     use super::{drain_report, needs_mailbox_watcher};
     use namedrop::{DeliveryAttemptId, DrainReport, GraceDeadline};
     use serde_json::json;
+
+    #[test]
+    fn deferred_pane_locks_start_a_worker_but_settled_reports_do_not() {
+        let deferred = DrainReport {
+            pane_lock_deferred: vec![namedrop::PaneAddressId::new("address-1")],
+            ..DrainReport::default()
+        };
+        assert!(deferred.awaits_retry());
+        assert!(needs_mailbox_watcher(&json!({"drain": deferred})));
+        assert!(!needs_mailbox_watcher(&json!(DrainReport::default())));
+    }
 
     #[test]
     fn an_operation_result_carries_the_drain_report_it_serialized() {
@@ -402,7 +412,7 @@ mod drain_report_tests {
         };
         let result = json!({"drain": requeued});
         assert!(drain_report(&result).unwrap().awaits_retry());
-        assert!(!needs_mailbox_watcher(&result));
+        assert!(needs_mailbox_watcher(&result));
     }
 }
 
@@ -965,10 +975,16 @@ fn run_agent_status_worker() -> ExitCode {
                     wait_for_marker_or_deadline(&directory, due);
                     continue;
                 }
-                deadline_ms =
-                    with_runtime_options(&RuntimeOptions::default(), namedrop::drain_mailboxes)
-                        .ok()
-                        .and_then(|report| report.next_grace_due_ms());
+                if queue_agent_status_reconciliation(
+                    &directory,
+                    &serde_json::json!({"operation":"mailbox-wake"}),
+                )
+                .is_ok()
+                {
+                    deadline_ms = None;
+                } else {
+                    wait_for_reconciliation_retry(&mut failures);
+                }
                 continue;
             }
             let _ = lock.unlock();

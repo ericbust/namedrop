@@ -1369,7 +1369,7 @@ pub(super) fn wake_mailboxes_after_send(
 
     let needs_watcher = |value: &serde_json::Value| {
         serde_json::from_value::<crate::DrainReport>(value.clone())
-            .is_ok_and(|report| report.awaits_terminal() || report.next_grace_due_ms().is_some())
+            .is_ok_and(|report| report.needs_mailbox_worker())
     };
     let mut spaces = Vec::new();
     if needs_watcher(&receipt["drain"]) {

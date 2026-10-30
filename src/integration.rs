@@ -552,7 +552,8 @@ where
         runtime.state_directory,
         runtime.session_socket_id,
         &pane.pane_id,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     let current = integration_discovery(runtime)?;
     let still_settled = current.panes.iter().any(|current| {
         current.pane_id == pane.pane_id

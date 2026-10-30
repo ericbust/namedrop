@@ -603,7 +603,8 @@ where
         runtime.state_directory,
         runtime.session_socket_id,
         pane_id,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     let live = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());

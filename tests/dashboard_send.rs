@@ -1801,6 +1801,77 @@ else:
     }
 
     #[test]
+    fn grace_deadline_retries_a_contended_successor_without_another_event() {
+        use sha2::{Digest, Sha256};
+        use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+        use std::sync::atomic::Ordering;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let f = Fixture::new();
+        f.register_all();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        f.clock.0.store(now - 27_000, Ordering::Relaxed);
+        send_operator_message(
+            "grace-first",
+            "@planner inspect",
+            None,
+            &f.runtime("w1", "unused"),
+        )
+        .unwrap();
+        assert_eq!(
+            f.texts("SELECT state FROM mailbox_deliveries"),
+            ["acknowledged"]
+        );
+        let server = Server::start(&f, None);
+        let key = namedrop::lower_hex(&Sha256::digest(
+            serde_json::to_vec(&("socket-a", "pane-1-planner")).unwrap(),
+        ));
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(f.state.join("pane-effects").join(format!("{key}.lock")))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let response = server.post(
+            &format!("/w/{}/messages", key.as_str()),
+            &json!({"request_id":"grace-successor", "source":"@planner inspect again"}).to_string(),
+            &[],
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM mailbox_deliveries WHERE state='queued'"),
+            1
+        );
+        wait_until("grace deadline settles the first attempt", || {
+            f.count("SELECT COUNT(*) FROM mailbox_deliveries WHERE state='settled'") == 1
+        });
+        let metadata_calls = || {
+            fs::read_to_string(f.root.join("http-herdr-invocations.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|call| call["args"][0] == "pane" && call["args"][1] == "report-metadata")
+                .count()
+        };
+        let before = metadata_calls();
+        wait_until("grace drain finishes after the pane lock timeout", || {
+            metadata_calls() > before
+        });
+        assert!(prompts(&f).is_empty());
+        drop(lock);
+        wait_for_submitted(&f, 1);
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 2);
+    }
+
+    #[test]
     fn unsafe_pane_effects_directory_fails_with_a_durable_diagnostic() {
         let f = Fixture::new();
         f.register_all();
