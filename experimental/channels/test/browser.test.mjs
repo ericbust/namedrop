@@ -9812,6 +9812,41 @@ test("UI-R4 L2: the drawer is a modal dialog named Channels, and the list inside
     "the sidebar column is no modal",
   );
 });
+test("UI-R4 L1: while a thread covers the channel, or sits beside it, one Reconnecting bar shows above it", async (t) => {
+  const ui = await open(t, (client, n) => {
+    if (n === 1) replay(client, [layoutChannel()]);
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from/ })
+    .click();
+  await threadPane(ui).waitFor();
+  ui.connections[0].destroy();
+  const bar = ui.page.getByRole("status").filter({ hasText: "Reconnecting…" });
+  for (const [width, height] of [
+    [390, 844],
+    [640, 460],
+    [1440, 900],
+  ]) {
+    const at = `${width}x${height}`;
+    await resize(ui.page, width, height);
+    await bar.waitFor({ timeout: 3000 });
+    assert.equal(await bar.count(), 1, `one Reconnecting status at ${at}`);
+    const shown = await bar.evaluate((element) => {
+      const { top, bottom } = element.getBoundingClientRect();
+      const pane = document.querySelector(".slot").getBoundingClientRect();
+      return { top, bottom, pane: pane.top };
+    });
+    assert.ok(
+      shown.top >= 0 && shown.bottom <= shown.pane + 0.5,
+      `the bar sits above the thread at ${at}: ${JSON.stringify(shown)}`,
+    );
+    assert.ok(await threadPane(ui).isVisible(), `the thread stays at ${at}`);
+  }
+});
 async function phoneDrawer(t) {
   const ui = await open(t, (client) =>
     replay(client, [layoutChannel(), team(2, "beta"), team(3, "gamma")]),
