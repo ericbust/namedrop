@@ -32,6 +32,51 @@ fn publish_executable(path: &Path, contents: &str) -> std::io::Result<()> {
     fs::rename(staging, path)
 }
 
+fn wait_for_server(
+    child: &mut Child,
+    state: &Path,
+    stderr: &Path,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let deadline = Instant::now() + timeout;
+    let (reason, status) = loop {
+        let status = child.try_wait();
+        match status {
+            Ok(Some(_)) => break ("exited before startup", status),
+            Err(_) => break ("could not inspect startup process", status),
+            Ok(None) => {}
+        }
+        if let Ok(bytes) = fs::read(state.join("dashboard/server.json"))
+            && let Ok(info) = serde_json::from_slice::<Value>(&bytes)
+            && info["pid"] == child.id()
+        {
+            return Ok(info);
+        }
+        if Instant::now() >= deadline {
+            break ("timed out before startup", status);
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let kill = if matches!(status, Ok(Some(_))) {
+        None
+    } else {
+        Some(child.kill())
+    };
+    let reaped = child.wait();
+    let status = match status {
+        Ok(Some(status)) => status.to_string(),
+        Ok(None) => "running".to_owned(),
+        Err(error) => format!("unavailable ({error})"),
+    };
+    let output = fs::read_to_string(stderr)
+        .unwrap_or_else(|error| format!("could not read stderr: {error}"));
+    Err(format!(
+        "dashboard {reason}; pid={}; status before cleanup={status}; kill={kill:?}; reaped={reaped:?}; stderr ({}):\n{output}",
+        child.id(),
+        stderr.display(),
+    ))
+}
+
 impl Server {
     pub(super) fn start(f: &Fixture, response: &str, off: bool) -> Self {
         fs::create_dir_all(f.root.join("home/.codex")).unwrap();
@@ -101,6 +146,11 @@ else:
 "#,
         )
         .unwrap();
+        let stderr_path = f.root.join(format!(
+            "dashboard-server-{}.stderr",
+            ProcessIds::default().next_id("startup")
+        ));
+        let stderr = fs::File::create_new(&stderr_path).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         command
             .arg("--plugin-state")
@@ -115,7 +165,7 @@ else:
             .env_remove("HERDR_PLUGIN_STATE_DIR")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(stderr);
         let router = f.root.join("fake-router");
         fs::write(f.root.join("router-response.json"), response).unwrap();
         publish_executable(
@@ -163,21 +213,8 @@ else:
             command.env_remove("NAMEDROP_CHANNEL_ROUTER");
         }
         let mut child = command.spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let info = loop {
-            if let Ok(bytes) = fs::read(f.state.join("dashboard/server.json"))
-                && let Ok(info) = serde_json::from_slice::<Value>(&bytes)
-                && info["pid"] == child.id()
-            {
-                break info;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("dashboard did not start");
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
+        let info = wait_for_server(&mut child, &f.state, &stderr_path, Duration::from_secs(10))
+            .unwrap_or_else(|error| panic!("{error}"));
         let port = info["port"].as_u64().unwrap() as u16;
         let session = fs::read_to_string(f.state.join("dashboard/session")).unwrap();
         let mut server = Self {
@@ -490,6 +527,53 @@ pub(super) fn context(server: &Server, message: &str) -> Value {
     );
     assert_eq!(response.status, 200, "{}", response.body);
     serde_json::from_str(&response.body).unwrap()
+}
+
+#[test]
+fn startup_diagnostics_report_early_exit_and_stderr_without_waiting_for_timeout() {
+    let f = Fixture::new();
+    let stderr = f.root.join("early-exit.stderr");
+    let mut child = Command::new("/usr/bin/python3")
+        .args([
+            "-c",
+            "import os; os.write(2, b'x' * 262144); os.write(2, b'\\nstartup failure marker\\n'); raise SystemExit(69)",
+        ])
+        .stderr(fs::File::create_new(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let error = wait_for_server(&mut child, &f.state, &stderr, Duration::from_secs(10))
+        .expect_err("child exited before publishing server.json");
+    assert!(started.elapsed() < Duration::from_secs(5), "{error}");
+    assert!(error.contains("exited before startup"), "{error}");
+    assert!(
+        error.contains("status before cleanup=exit status: 69"),
+        "{error}"
+    );
+    assert!(error.contains("startup failure marker"), "{error}");
+    assert!(error.contains(&"x".repeat(262144)));
+    assert_eq!(child.wait().unwrap().code(), Some(69));
+}
+
+#[test]
+fn startup_diagnostics_distinguish_timeout_from_the_cleanup_signal_and_reap_child() {
+    let f = Fixture::new();
+    let stderr = f.root.join("timeout.stderr");
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf 'startup blocked marker\\n' >&2; exec /bin/sleep 30",
+        ])
+        .stderr(fs::File::create_new(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    let error = wait_for_server(&mut child, &f.state, &stderr, Duration::from_millis(200))
+        .expect_err("live child never published server.json");
+    assert!(error.contains("timed out before startup"), "{error}");
+    assert!(error.contains("status before cleanup=running"), "{error}");
+    assert!(error.contains("startup blocked marker"), "{error}");
+    assert!(error.contains("reaped=Ok("), "{error}");
+    assert!(!child.wait().unwrap().success());
 }
 
 #[test]
