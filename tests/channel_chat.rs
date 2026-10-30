@@ -1,5 +1,7 @@
 #[path = "support/channel_controls.rs"]
 mod channel_controls;
+#[path = "support/channel_deliver.rs"]
+mod channel_deliver;
 #[path = "support/channel_durable.rs"]
 mod channel_durable;
 #[path = "support/channel_fix2.rs"]
@@ -297,7 +299,7 @@ fn recap_is_explicitly_untrusted_and_bounded_across_channel_conversation() {
     assert!(!instruction.contains("recap-"));
     assert!(
         instruction
-            .contains("@name anywhere in your reply wakes that member (costs one reply); write \\@name to mention without waking; answer the asker by name")
+            .contains("Ask with plain @name to wake that member (costs one reply). Wait for their actual reply; never attribute an answer not received. \\@name only refers without asking.")
     );
     assert!(recap.lines().all(|line| line.chars().count() <= 194));
 }

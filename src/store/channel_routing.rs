@@ -29,6 +29,18 @@ pub(crate) struct ChannelProjection {
     mentioned: Vec<String>,
 }
 
+pub(crate) enum ChannelDelivery {
+    Delivered(ChannelProjection),
+    Refused(ChannelDeliveryRefusal),
+}
+
+pub(crate) enum ChannelDeliveryRefusal {
+    NotFound,
+    InvalidMember,
+    Routing,
+    Stopped,
+}
+
 pub(crate) struct ChannelClaim {
     pub namespace: StateNamespace,
     pub draft: MessageDraft,
@@ -48,6 +60,113 @@ fn attribution(now: u64) -> MutationAttribution {
 }
 
 impl StateTransaction<'_> {
+    pub(crate) fn deliver_channel_message(
+        &mut self,
+        ns: &StateNamespace,
+        message: &MessageId,
+        aliases: &[String],
+        actor: &MutationAttribution,
+    ) -> Result<ChannelDelivery, StoreError> {
+        use ChannelDelivery::{Delivered, Refused};
+        use ChannelDeliveryRefusal::{InvalidMember, NotFound, Routing, Stopped};
+        let stored = self
+            .transaction
+            .query_row(
+                "SELECT thread_id, thread_order, author_address_id, author_kind,
+                    grammar_version, in_reply_to IS NULL
+             FROM collaboration_messages
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+                params![ns.session_socket_id, ns.space_id.as_str(), message.as_str()],
+                |row| {
+                    Ok((
+                        ThreadId::new(row.get::<_, String>(0)?),
+                        from_i64(row.get(1)?)?,
+                        PaneAddressId::new(row.get::<_, String>(2)?),
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, bool>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((thread, order, author, kind, grammar, root)) = stored else {
+            return Ok(Refused(NotFound));
+        };
+        let routing = self.channel_routing_state(ns, message)?;
+        if kind != ActorKind::Human.as_str()
+            || !self.is_operator_address(ns, &author)?
+            || !(root && grammar == "channel/v1" || routing.is_some())
+        {
+            return Ok(Refused(NotFound));
+        }
+        if routing == Some(ChannelRoutingState::Routing) {
+            return Ok(Refused(Routing));
+        }
+        if aliases.is_empty() {
+            return Ok(Refused(InvalidMember));
+        }
+        let members = self.channel_members(ns)?;
+        let mut selected: Vec<&RoutingAddressSnapshot> = Vec::new();
+        for alias in aliases {
+            let Some(member) = members
+                .iter()
+                .find(|member| member.alias == *alias && alias != "operator")
+            else {
+                return Ok(Refused(InvalidMember));
+            };
+            if !selected
+                .iter()
+                .any(|previous| previous.address_id == member.address_id)
+            {
+                selected.push(member);
+            }
+        }
+        let existing = self.message_routing_snapshots(
+            ns,
+            message,
+            "message_recipients",
+            "recipient_order",
+            false,
+        )?;
+        selected.retain(|member| {
+            !existing
+                .iter()
+                .any(|old| old.alias == member.alias || old.address_id == member.address_id)
+        });
+        if !selected.is_empty() {
+            if self.thread_control_state(ns, &thread)?.stopped {
+                return Ok(Refused(Stopped));
+            }
+            let recipients: Vec<_> = selected
+                .into_iter()
+                .map(|member| crate::MessageRecipientDraft {
+                    delivery_id: crate::DeliveryId::new(crate::IdGenerator::next_id(
+                        &crate::ProcessIds::default(),
+                        "delivery",
+                    )),
+                    address_id: member.address_id.clone(),
+                    alias_snapshot: member.alias.clone(),
+                    agent_session_snapshot: member.agent_session_id.clone(),
+                })
+                .collect();
+            self.insert_recipient_deliveries(ns, message, &grammar, &recipients, actor)?;
+            for recipient in recipients {
+                self.ensure_thread_participant(
+                    ns,
+                    &thread,
+                    &recipient.address_id,
+                    order > 1,
+                    actor,
+                )?;
+            }
+        }
+        Ok(Delivered(
+            self.channel_projection(ns, message)?.ok_or_else(|| {
+                StoreError::invalid_input("eligible channel post has no projection")
+            })?,
+        ))
+    }
+
     pub(crate) fn append_pending_channel(
         &mut self,
         namespace: &StateNamespace,

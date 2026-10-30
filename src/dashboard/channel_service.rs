@@ -220,7 +220,7 @@ fn worker(state: &Path, cancel: &AtomicBool) {
     }
 }
 
-fn drain(state: &Path, namespace: &StateNamespace) {
+pub(super) fn drain(state: &Path, namespace: &StateNamespace) {
     let herdr =
         crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
     let ids = crate::ProcessIds::default();

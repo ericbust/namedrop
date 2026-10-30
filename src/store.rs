@@ -2880,7 +2880,55 @@ impl StateTransaction<'_> {
         thread_order: u64,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
-        for (recipient_order, recipient) in draft.recipients.iter().enumerate() {
+        self.insert_recipient_deliveries(
+            namespace,
+            &draft.message_id,
+            &draft.grammar_version,
+            &draft.recipients,
+            attribution,
+        )?;
+        self.forward_to_envoys(namespace, draft, attribution)?;
+        let mut participants = vec![draft.author_address_id.clone()];
+        participants.extend(
+            draft
+                .recipients
+                .iter()
+                .map(|recipient| recipient.address_id.clone()),
+        );
+        for participant in participants {
+            self.ensure_thread_participant(
+                namespace,
+                &draft.thread_id,
+                &participant,
+                thread_order > 1,
+                attribution,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn insert_recipient_deliveries(
+        &mut self,
+        namespace: &StateNamespace,
+        message: &MessageId,
+        grammar: &str,
+        recipients: &[crate::MessageRecipientDraft],
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let mut recipient_order: i64 = self.transaction.query_row(
+            "SELECT COALESCE(MAX(recipient_order), 0) FROM message_recipients
+             WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+            params![
+                namespace.session_socket_id,
+                namespace.space_id.as_str(),
+                message.as_str()
+            ],
+            |row| row.get(0),
+        )?;
+        for recipient in recipients {
+            recipient_order = recipient_order
+                .checked_add(1)
+                .ok_or_else(|| StoreError::invalid_input("recipient order overflow"))?;
             self.transaction.execute(
                 "INSERT INTO message_recipients (
                     session_socket_id, worktree_id, message_id, recipient_order,
@@ -2889,10 +2937,8 @@ impl StateTransaction<'_> {
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
-                    draft.message_id.as_str(),
-                    i64::try_from(recipient_order + 1).map_err(|_| StoreError::invalid_input(
-                        "recipient order overflow".to_owned()
-                    ))?,
+                    message.as_str(),
+                    recipient_order,
                     recipient.address_id.as_str(),
                     recipient.alias_snapshot,
                     recipient
@@ -2914,7 +2960,7 @@ impl StateTransaction<'_> {
                     recipient.delivery_id.as_str(),
                     recipient.address_id.as_str(),
                     to_i64(mailbox_order)?,
-                    draft.message_id.as_str(),
+                    message.as_str(),
                     to_i64(attribution.occurred_at_ms)?
                 ],
             )?;
@@ -2927,7 +2973,7 @@ impl StateTransaction<'_> {
             )?;
             if self.is_operator_address(namespace, &recipient.address_id)?
                 || (matches!(
-                    draft.grammar_version.as_str(),
+                    grammar,
                     "terminal-result/v1" | "result-set/v1" | "mention-return/v1"
                 ) && self.pane_type(namespace, &recipient.address_id)?
                     == crate::PaneType::Terminal)
@@ -2942,23 +2988,6 @@ impl StateTransaction<'_> {
                     attribution,
                 )?;
             }
-        }
-        self.forward_to_envoys(namespace, draft, attribution)?;
-        let mut participants = vec![draft.author_address_id.clone()];
-        participants.extend(
-            draft
-                .recipients
-                .iter()
-                .map(|recipient| recipient.address_id.clone()),
-        );
-        for participant in participants {
-            self.ensure_thread_participant(
-                namespace,
-                &draft.thread_id,
-                &participant,
-                thread_order > 1,
-                attribution,
-            )?;
         }
         Ok(())
     }
