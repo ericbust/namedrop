@@ -2599,12 +2599,12 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         message_id: &MessageId,
     ) -> Result<MessageRoute, StoreError> {
-        let (thread_id, author, grammar_version, source, author_kind) = self
+        let (thread_id, author, grammar_version, source, author_kind, body, in_reply_to) = self
             .transaction
             .query_row(
                 "SELECT thread_id, author_address_id, author_alias_snapshot,
                         author_session_snapshot, grammar_version, authored_source,
-                        author_kind
+                        author_kind, body, in_reply_to
                  FROM collaboration_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
                 params![
@@ -2626,6 +2626,8 @@ impl StateTransaction<'_> {
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
                         row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                        row.get::<_, Option<String>>(8)?,
                     ))
                 },
             )
@@ -2638,18 +2640,33 @@ impl StateTransaction<'_> {
             "recipient_order",
             false,
         )?;
-        let mentions = crate::message::context_mentions(&source);
         let channel_thread = self.channel_thread(namespace, &thread_id)?;
+        let returned_to = match in_reply_to {
+            Some(parent_id)
+                if channel_thread && author_kind == ActorKind::AgentSession.as_str() =>
+            {
+                self.message_route(namespace, &MessageId::new(parent_id))?
+                    .asker_for(&author.address_id)
+                    .map(|asker| asker.address_id.clone())
+            }
+            _ => None,
+        };
+        let body_mentions = crate::message::context_mentions(&body);
+        let mentions = crate::message::context_mentions(&source);
         let operator_selection = author_kind == ActorKind::Human.as_str()
             && self.is_operator_address(namespace, &author.address_id)?
             && (channel_thread || self.channel_routing_state(namespace, message_id)?.is_some());
         let asked_addresses = recipients
             .iter()
             .filter(|recipient| {
-                operator_selection
-                    || mentions.iter().any(|mention| {
+                let named = |list: &[crate::message::BodyMention]| {
+                    list.iter().any(|mention| {
                         mention.workspace.is_none() && mention.alias == recipient.alias
                     })
+                };
+                operator_selection
+                    || named(&body_mentions)
+                    || (returned_to.as_ref() != Some(&recipient.address_id) && named(&mentions))
             })
             .map(|recipient| recipient.address_id.clone())
             .collect();
@@ -8273,6 +8290,41 @@ mod tests {
                     assert!(
                         route.asker_for(&PaneAddressId::new("asker")).is_none(),
                         "{source}"
+                    );
+                }
+                for (id, thread_id, in_reply_to, grammar) in [
+                    ("new-ask", "thread", None, "delegated/v1"),
+                    (
+                        "agent-thread-ask",
+                        "mention-thread",
+                        Some("mention-root"),
+                        "mention/v1",
+                    ),
+                ] {
+                    let message = MessageDraft {
+                        thread_id: ThreadId::new(thread_id),
+                        message_id: MessageId::new(id),
+                        request_id: id.to_owned(),
+                        in_reply_to: in_reply_to.map(MessageId::new),
+                        grammar_version: grammar.to_owned(),
+                        author_address_id: PaneAddressId::new("asker"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "asker".to_owned(),
+                        authored_source: "@answerer What is six times seven?".to_owned(),
+                        body: "What is six times seven?".to_owned(),
+                        recipients: vec![crate::MessageRecipientDraft {
+                            delivery_id: crate::DeliveryId::new(format!("delivery-{id}")),
+                            ..recipient.clone()
+                        }],
+                        ..followup.clone()
+                    };
+                    tx.append_message(&ns, &message, &at)?;
+                    assert_eq!(
+                        tx.message_route(&ns, &message.message_id)?
+                            .asker_for(&PaneAddressId::new("answerer"))
+                            .map(|asker| asker.address_id.as_str()),
+                        Some("asker"),
+                        "{id}"
                     );
                 }
                 Ok(())

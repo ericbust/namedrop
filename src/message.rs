@@ -66,9 +66,10 @@ pub(crate) fn body_reference_aliases<E: crate::HerdrCommandExecutor>(
     parsed.context_reference_aliases(|label| live.contains(label))
 }
 
-/// Grammar: `[ws] ("#" label ws)* ("@" alias ws)+ body`. A `#` run counts only
-/// when at least one valid Mention follows it; otherwise the source addresses
-/// nobody and stays literal. A `#` token after the first Mention is body text.
+/// Grammar: `[ws] ("#" label ["," | ":"] ws)* ("@" alias ["," | ":"] ws)+ body`.
+/// A `#` run counts only when at least one valid Mention follows it; otherwise
+/// the source addresses nobody and stays literal. A `#` token after the first
+/// Mention is body text.
 pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
     let LeadingLabels {
         labels,
@@ -81,6 +82,7 @@ pub fn parse_mentions(source: &str) -> Result<ParsedMessage, String> {
         cursor = skip_whitespace(source, cursor);
         let token_end = token_end(source, cursor);
         let token = &source[cursor..token_end];
+        let token = token.strip_suffix([',', ':']).unwrap_or(token);
         let Some(alias) = token.strip_prefix('@') else {
             break;
         };
@@ -137,7 +139,9 @@ fn leading_labels(source: &str) -> LeadingLabels {
     let mut all = false;
     loop {
         let token_end = token_end(source, cursor);
-        let Some(token) = source[cursor..token_end].strip_prefix('#') else {
+        let token = &source[cursor..token_end];
+        let token = token.strip_suffix([',', ':']).unwrap_or(token);
+        let Some(token) = token.strip_prefix('#') else {
             break;
         };
         if token.eq_ignore_ascii_case("all") {
@@ -597,6 +601,7 @@ pub(crate) fn is_plain_channel_post(source: &str) -> bool {
 
 fn capitalized_leading_alias(source: &str) -> Option<&str> {
     for token in source[leading_labels(source).cursor..].split_whitespace() {
+        let token = token.strip_suffix([',', ':']).unwrap_or(token);
         let alias = token.strip_prefix('@')?;
         if validate_alias(&alias.to_ascii_lowercase()).is_err() {
             return None;
