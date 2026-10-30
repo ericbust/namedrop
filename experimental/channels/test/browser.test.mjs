@@ -4610,6 +4610,77 @@ const screenText = (ui) =>
 const focusedIn = (locator) =>
   locator.evaluate((element) => element.contains(document.activeElement));
 
+test("DESIGN-R2 A8: an All activity row with actions keeps its grid, with 12px actions under line 2 at the alias", async (t) => {
+  const team = busyTeam();
+  const [item] = team[1].frame.attention;
+  item.conversation = { thread_id: "t-claude", message_id: "m-claude" };
+  item.response = { kind: "message", address_id: "claude" };
+  const ui = await open(t, (client) => replay(client, team), undefined, {
+    path: "/?view=activity",
+  });
+  await ui.live();
+  const actions = ui.page.locator(".activity-item .attention-actions");
+  await actions.waitFor();
+  const layout = () =>
+    ui.page.evaluate(() => {
+      const box = (element) => element.getBoundingClientRect();
+      const row = (alias) =>
+        [...document.querySelectorAll(".activity-item")].find(
+          (item) =>
+            item.querySelector(".activity-alias").firstChild.textContent ===
+            alias,
+        );
+      const asking = row("@claude");
+      const working = row("@codex");
+      const buttons = [...asking.querySelectorAll(".attention-actions button")];
+      return {
+        avatar:
+          box(asking.querySelector(".avatar")).left ===
+          box(working.querySelector(".avatar")).left,
+        alias:
+          box(asking.querySelector(".activity-alias")).left ===
+          box(working.querySelector(".activity-alias")).left,
+        actions:
+          Math.abs(
+            box(asking.querySelector(".attention-actions")).left -
+              box(asking.querySelector(".activity-alias")).left,
+          ) < 0.5,
+        below:
+          box(asking.querySelector(".attention-actions")).top >=
+          box(asking.querySelector(".activity-line")).bottom,
+        labels: buttons.map((button) => button.textContent),
+        lines: new Set(buttons.map((button) => box(button).top)).size,
+        sizes: [
+          ...new Set(
+            buttons.map((button) => getComputedStyle(button).fontSize),
+          ),
+        ],
+        gap: getComputedStyle(asking.querySelector(".attention-actions"))
+          .columnGap,
+      };
+    });
+  for (const [width, height] of [
+    [1440, 900],
+    [1024, 700],
+  ]) {
+    await ui.page.setViewportSize({ width, height });
+    assert.deepEqual(
+      await layout(),
+      {
+        avatar: true,
+        alias: true,
+        actions: true,
+        below: true,
+        labels: ["Show message", "Message @claude"],
+        lines: 1,
+        sizes: ["12px"],
+        gap: "12px",
+      },
+      `${width}px`,
+    );
+  }
+});
+
 test("UI-4: All activity lists blocked, then waiting, then working rows, and its URL survives reload and Back", async (t) => {
   const ui = await open(t, (client) => replay(client, busyTeam()));
   await ui.live();

@@ -1555,7 +1555,7 @@ button.member:not(.more):hover {
   grid-template-columns:
     var(--space-3) auto var(--space-3) minmax(0, 1fr)
     var(--space-4) auto var(--space-3);
-  grid-template-rows: 9px auto auto 9px;
+  grid-template-rows: 9px auto auto auto auto 9px;
 }
 .activity-row {
   grid-column: 1 / -1;
@@ -1658,6 +1658,19 @@ button.member:not(.more):hover {
   color: var(--text);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+.activity-item .attention-actions,
+.activity-item .attention-failure {
+  grid-column: 4 / 7;
+  grid-row: 4;
+  margin-top: var(--space-1);
+}
+.activity-item .attention-failure {
+  grid-row: 5;
+}
+.activity-item .attention-actions .text-button,
+.activity-item .attention-confirm {
+  font-size: var(--text-xs);
 }
 
 .empty {

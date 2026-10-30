@@ -962,6 +962,9 @@ The one view that spans every channel. It answers "who is busy, and on what?"
     the oldest mailbox item arrived. It is absolute, so nothing ticks.
   - When that oldest item is held, or is queued in a paused channel, line 2 ends
     with the pause icon and "Held while paused" in `--held-text`.
+  - A Needs-you row whose item has actions shows them under line 2, in the text
+    column and aligned with the alias: the item's action row as 12px text
+    buttons, 12px apart. The avatar column and the alias never move.
 - A row is one button that opens the peek drawer, except for the channel
   button, which sits beside it, not inside it. The row whose drawer is open has
   the selected background. Hover is `--bg-hover`.
