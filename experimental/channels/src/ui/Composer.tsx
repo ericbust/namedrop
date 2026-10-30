@@ -371,7 +371,7 @@ export function Composer({
               ? composerCopy.needsMessage(leading)
               : composerCopy.needsRecipient}
           </p>
-        ) : draft?.kept ? (
+        ) : draft?.fillRefused ? (
           <p className="composer-guard" role="status">
             {composerCopy.draftKept}
           </p>

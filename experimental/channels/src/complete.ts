@@ -236,8 +236,6 @@ export function accept(
   };
 }
 
-// The server's mention grammar, src/message.rs: parse_mentions reads the
-// recipients a post starts with, and mention_anchors finds mentions anywhere.
 const ALIAS = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const LABEL = /^#[A-Za-z0-9._-]+$/;
 const TOKEN_CHAR = /[A-Za-z0-9_-]/;
@@ -256,10 +254,7 @@ function spaceAfter(text: string, at: number): number {
   while (at < text.length && WHITESPACE.test(text.charAt(at))) at++;
   return at;
 }
-// `leading` holds the `@alias` words after any `#label` words, once each, and
-// `rest` the text after them. `anywhere` holds every alias outside a code span
-// whose "@" follows no ASCII letter, digit, "_" or backslash, in order, once each.
-function scan(text: string): Mentions {
+function serverMentions(text: string): Mentions {
   let at = spaceAfter(text, 0);
   while (LABEL.test(wordAt(text, at)))
     at = spaceAfter(text, at + wordAt(text, at).length);
@@ -296,9 +291,8 @@ function scan(text: string): Mentions {
     anywhere: [...anywhere],
   };
 }
-// A post that starts with aliases goes only to them.
 export function leadingMentions(text: string): readonly string[] {
-  return scan(text).leading;
+  return serverMentions(text).leading;
 }
 
 // The agents a channel post mentions, in the order the text first names them.
@@ -310,14 +304,15 @@ export function mentionedAgents(
   for (const member of members.values())
     if (member.kind.type === "agent" && member.activity !== "retired")
       agents.set(member.alias, member);
-  return scan(text).anywhere.flatMap((alias) => agents.get(alias) ?? []);
+  return serverMentions(text).anywhere.flatMap(
+    (alias) => agents.get(alias) ?? [],
+  );
 }
 
-// The text Enter sends, or null when it must stay in the box. The server
-// refuses names with no message after them.
+// The text Enter sends, or null when it must stay in the box.
 export function postSource(text: string, rule: SendRule): string | null {
   const body = text.trim();
-  const { leading, rest } = scan(body);
+  const { leading, rest } = serverMentions(body);
   if (leading.length > 0) return rest.trim() === "" ? null : body;
   return body === "" || (rule.kind === "thread" && rule.to.length === 0)
     ? null

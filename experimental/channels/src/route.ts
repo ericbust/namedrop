@@ -74,8 +74,10 @@ function repliesOnly(tail: readonly RoutePart[]): RouteLine | null {
   return tail.length === 0 ? null : line(null, tail);
 }
 
-// The current agent with this alias. A retired pane's alias can be reused.
-function agentNamed(directory: Directory, alias: string): Member | undefined {
+function liveAgentNamed(
+  directory: Directory,
+  alias: string,
+): Member | undefined {
   for (const member of directory.members.values())
     if (
       member.alias === alias &&
@@ -117,16 +119,15 @@ export function routeLine(
   // who wrote in it, has the conversation, so it is not offered again.
   const offers = () =>
     (message.routing?.mentioned ?? []).filter((alias) => {
-      const member = agentNamed(directory, alias);
+      const member = liveAgentNamed(directory, alias);
       return member !== undefined && !room.joined.has(member.id);
     });
-  // A woken member is pulled in only when this message brings it into the
-  // conversation, so the asker hearing back reads as a plain recipient.
-  const pulledIn = message.woke.some((alias) => {
-    const member = agentNamed(directory, alias);
+  const pulledIn = reached.some((id) => {
+    const who = participant(directory, id);
     return (
-      member === undefined ||
-      (room.joined.get(member.id) ?? message.at) >= message.at
+      who.kind === "member" &&
+      message.woke.some((alias) => alias === who.member.alias) &&
+      room.joined.get(id) === message.at
     );
   });
   // A post the router answered: who it reached, then the mentions it did not.

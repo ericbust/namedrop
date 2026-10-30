@@ -76,11 +76,9 @@ const noRows: readonly TimelineRow[] = [];
 const noPending: readonly Outgoing[] = [];
 const noMembers: Directory["members"] = new Map();
 const POSTED_LIMIT = 200;
-// Where focus goes once an opened pane renders. The reply box selects the
-// prepared note, from `from` to its end, while it still holds that note.
 type PaneFocus =
   | { kind: "pane" }
-  | { kind: "composer"; note: string; from: number };
+  | { kind: "composer"; note: string; selectFrom: number };
 const MAIN_SCROLLER = "main .timeline, main .activity-list";
 function go(route: Route) {
   if (!sameRoute(routeOf(location), route))
@@ -633,7 +631,7 @@ export function App() {
   const sendTo = useCallback(
     (post: Message, alias: string, button: HTMLButtonElement) => {
       if (current === undefined) return;
-      const note = `${alias} ${routeCopy.note}`;
+      const note = `${alias} ${routeCopy.sendAnywayNote}`;
       dispatch({
         type: "fill",
         composer: { key: current, thread: post.threadId },
@@ -643,7 +641,7 @@ export function App() {
       const focus: PaneFocus = {
         kind: "composer",
         note,
-        from: alias.length + 1,
+        selectFrom: alias.length + 1,
       };
       // A loaded conversation pane already shows this thread, and the timeline may not hold it.
       if (
@@ -742,7 +740,7 @@ export function App() {
       if (pane === "thread" && intent.kind === "composer" && box) {
         const end = box.value.length;
         box.setSelectionRange(
-          box.value === intent.note ? intent.from : end,
+          box.value === intent.note ? intent.selectFrom : end,
           end,
         );
         box.focus();

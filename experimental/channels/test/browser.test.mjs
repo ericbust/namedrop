@@ -175,7 +175,6 @@ function postRoute(onPost) {
       receipts.set(post.request_id, { post, receipt });
       reply(200, receipt);
     },
-    // Mirrors POST /w/<key>/threads/<thread_id>/(continue|stop): the message POST's cookie and CSRF rules.
     async control(req, res, onControl, path) {
       const request = {
         method: req.method,
@@ -6243,9 +6242,7 @@ test("CH-2: routing reads Checking who this is for, then a live routed frame fil
   );
 });
 
-// Holds the same row and route line across a frame, so a test can tell an
-// update in place from a remount.
-async function sameNodes(ui, id) {
+async function remountProbe(ui, id) {
   const row = await ui.page.$(`main [data-message-id="${id}"]`);
   const route = await ui.page.$(`main [data-message-id="${id}"] .route`);
   return () =>
@@ -6297,7 +6294,7 @@ test("CH-fix-2 item 2: a post reads Sending… until the server answers, then Ch
   assert.deepEqual(await parts(), ["Checking who this is for…"]);
   assert.deepEqual(await icon(), [iconShape.clock]);
   assert.equal(await route.getByRole("button").count(), 0, "no offers yet");
-  const same = await sameNodes(ui, "posted-1");
+  const same = await remountProbe(ui, "posted-1");
   value.frame.messages = [
     committed(routed(), [{ to: "claude", stage: { stage: "delivered" } }]),
   ];
@@ -6332,7 +6329,7 @@ for (const [state, text, expected] of [
     await route.waitFor();
     assert.deepEqual(await parts(), ["Checking who this is for…"]);
     assert.equal(await route.getByRole("button").count(), 0, "no offers yet");
-    const same = await sameNodes(ui, "p1");
+    const same = await remountProbe(ui, "p1");
     value.frame.messages = [channelPost("p1", text, { state })];
     ui.connections[0].send("space", value);
     await route.getByRole("button", { name: "Send this to @codex" }).waitFor();

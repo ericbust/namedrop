@@ -783,7 +783,9 @@ function step(state: State, event: Event): State {
       if (
         known === undefined
           ? event.text === ""
-          : known.text === event.text && known.failure === null && !known.kept
+          : known.text === event.text &&
+            known.failure === null &&
+            !known.fillRefused
       )
         return state;
       const drafts = new Map(state.drafts);
@@ -794,7 +796,7 @@ function step(state: State, event: Event): State {
           ...event.composer,
           text: event.text,
           inReplyTo: event.text === "" ? null : (known?.inReplyTo ?? null),
-          kept: false,
+          fillRefused: false,
           attempt,
           failure: null,
         });
@@ -806,11 +808,14 @@ function step(state: State, event: Event): State {
       if (known !== undefined && known.text !== "") {
         const same =
           known.text === event.text && known.inReplyTo === event.inReplyTo;
-        return same || known.kept
+        return same || known.fillRefused
           ? state
           : {
               ...state,
-              drafts: new Map(state.drafts).set(at, { ...known, kept: true }),
+              drafts: new Map(state.drafts).set(at, {
+                ...known,
+                fillRefused: true,
+              }),
             };
       }
       return {
@@ -819,7 +824,7 @@ function step(state: State, event: Event): State {
           ...event.composer,
           text: event.text,
           inReplyTo: event.inReplyTo,
-          kept: false,
+          fillRefused: false,
           attempt: known?.attempt ?? null,
           failure: null,
         }),
@@ -871,7 +876,7 @@ function step(state: State, event: Event): State {
         ...known.composer,
         text: draft?.text ?? known.source,
         inReplyTo: draft?.inReplyTo ?? null,
-        kept: false,
+        fillRefused: false,
         attempt: {
           requestId: event.requestId,
           source: known.source,
@@ -958,12 +963,12 @@ export function connectionStatus(
 
 // The latest time each author wrote anything in a thread.
 export type Wrote = ReadonlyMap<AddressId | "human", number>;
-// A thread that reads as a conversation, every message its own row. Its first
-// loaded parent decides: a channel post makes a channel room, a first message
-// an agent wrote makes an agents room, and anything else is a request thread.
 // When each member first wrote or was sent a message in a thread: the time it
 // joined the conversation.
 export type Joined = ReadonlyMap<AddressId, number>;
+// A thread that reads as a conversation, every message its own row. Its first
+// loaded parent decides: a channel post makes a channel room, a first message
+// an agent wrote makes an agents room, and anything else is a request thread.
 export type Room =
   | { kind: "channel"; post: Message; wrote: Wrote; joined: Joined }
   | { kind: "agents"; root: Message; wrote: Wrote };

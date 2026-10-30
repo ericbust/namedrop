@@ -204,12 +204,10 @@ export type SendAttempt = {
 export type SendFailure = { status: number; message: string };
 // A refused draft keeps its attempt until a success, so the same post reuses
 // its id. The failure shows only until the next edit, and never without an attempt.
-// `inReplyTo` is the message a filled reply answers until the box is sent or
-// emptied; `kept` says a fill found text already here, until the next edit.
 export type Draft = ComposerId & {
   text: string;
   inReplyTo: string | null;
-  kept: boolean;
+  fillRefused: boolean;
 } & (
     | { attempt: null; failure: null }
     | { attempt: SendAttempt; failure: SendFailure | null }

@@ -144,7 +144,6 @@ export const threadControlCopy = {
   { label: string; pending: string; title: string; failed: string }
 > &
   Record<string, unknown>;
-// A reply-limit item the browser can continue or stop says why it paused.
 const pausedHint = "The agents paused after 10 replies in a row.";
 export function attentionCopy(item: Attention): AttentionCopy {
   const { text, truncated } = item.summary;
@@ -378,8 +377,7 @@ export const routeCopy = {
     string
   >,
   sendThis: (alias: string) => `Send this to ${alias}`,
-  // The reply Send anyway prepares: the agent reads the post from its thread.
-  note: "Please read my post.",
+  sendAnywayNote: "Please read my post.",
   tip: {
     router: (name: string) => `Picked by ${name}`,
     unreachable:

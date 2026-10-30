@@ -1,7 +1,5 @@
 import type { Attention, ThreadAction } from "./model.ts";
 
-// A thread control waits in `pending` after the server answers, because the
-// frame that drops the item is the proof it worked.
 export type ThreadControl =
   | { kind: "idle" }
   | { kind: "confirmingStop" }

@@ -2488,7 +2488,7 @@ test("drafts: each composer keeps its own text across switches, and an emptied d
         thread: null,
         text: "hello",
         inReplyTo: null,
-        kept: false,
+        fillRefused: false,
         attempt: null,
         failure: null,
       },
@@ -2497,7 +2497,7 @@ test("drafts: each composer keeps its own text across switches, and an emptied d
         thread: "t1",
         text: "half a reply",
         inReplyTo: null,
-        kept: false,
+        fillRefused: false,
         attempt: null,
         failure: null,
       },
@@ -2555,7 +2555,7 @@ test("drafts: a refused send returns to its composer's draft with the error and 
     thread: null,
     text: "@codex hi",
     inReplyTo: null,
-    kept: false,
+    fillRefused: false,
     attempt: attempt1,
     failure: { status: 400, message: "Nope" },
   });
@@ -2577,7 +2577,7 @@ test("drafts: a refused send returns to its composer's draft with the error and 
       thread: null,
       text: "@codex hi",
       inReplyTo: null,
-      kept: false,
+      fillRefused: false,
       attempt: attempt1,
       failure: null,
     },
@@ -2599,7 +2599,7 @@ test("drafts: a refused send returns to its composer's draft with the error and 
       thread: null,
       text: "@codex hi!",
       inReplyTo: null,
-      kept: false,
+      fillRefused: false,
       attempt: attempt1,
       failure: null,
     },
@@ -2622,7 +2622,7 @@ test("drafts: a refused draft keeps its attempt through edits that empty or rest
       thread: null,
       text: "",
       inReplyTo: null,
-      kept: false,
+      fillRefused: false,
       attempt: attempt1,
       failure: null,
     },
@@ -2648,7 +2648,7 @@ test("drafts: a refused draft keeps its attempt through edits that empty or rest
       thread: null,
       text: "@codex hi!",
       inReplyTo: null,
-      kept: false,
+      fillRefused: false,
       attempt: { requestId: "r2", source: "@codex hi!", inReplyTo: null },
       failure: { status: 503, message: "" },
     },
@@ -2723,7 +2723,7 @@ test("drafts: an accepted send clears its composer's draft, and a refusal with n
     thread: "t1",
     text: "#alpha @codex thanks",
     inReplyTo: null,
-    kept: false,
+    fillRefused: false,
     attempt: {
       requestId: "r2",
       source: "#alpha @codex thanks",
@@ -3540,7 +3540,7 @@ test("fill: writes an empty draft with the message it answers, and flags a draft
     ...fresh,
     text: "@codex hello",
     inReplyTo: "post",
-    kept: false,
+    fillRefused: false,
   });
   assert.equal(
     fill(filled, "@codex hello"),
@@ -3550,14 +3550,14 @@ test("fill: writes an empty draft with the message it answers, and flags a draft
   const other = fill(filled, "@claude hello");
   assert.deepEqual(
     draft(other),
-    { ...fresh, text: "@codex hello", inReplyTo: "post", kept: true },
+    { ...fresh, text: "@codex hello", inReplyTo: "post", fillRefused: true },
     "another fill keeps the text and says so",
   );
   assert.equal(fill(other, "@claude hello"), other, "and says it once");
   const typed = reduce(other, { type: "edit", composer, text: "@codex hi" });
   assert.deepEqual(
     draft(typed),
-    { ...fresh, text: "@codex hi", inReplyTo: "post", kept: false },
+    { ...fresh, text: "@codex hi", inReplyTo: "post", fillRefused: false },
     "the next edit clears the notice and keeps the message it answers",
   );
   assert.equal(
@@ -3589,7 +3589,7 @@ test("fill: writes an empty draft with the message it answers, and flags a draft
       ...composer,
       text: "@codex hi",
       inReplyTo: "post",
-      kept: false,
+      fillRefused: false,
       attempt,
       failure: { status: 500, message: "" },
     },
@@ -3600,7 +3600,7 @@ test("fill: writes an empty draft with the message it answers, and flags a draft
     ...composer,
     text: "",
     inReplyTo: null,
-    kept: false,
+    fillRefused: false,
     attempt,
     failure: null,
   });
@@ -3609,7 +3609,7 @@ test("fill: writes an empty draft with the message it answers, and flags a draft
     ...composer,
     text: "@codex hello",
     inReplyTo: "post-2",
-    kept: false,
+    fillRefused: false,
     attempt,
     failure: null,
   });

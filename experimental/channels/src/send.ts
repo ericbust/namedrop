@@ -40,8 +40,10 @@ export function createPoster(fetcher: typeof fetch = fetch) {
       body: JSON.stringify(body),
     });
   }
-  // A 403 means the token went stale, so it is read again once.
-  async function send(path: string, body: object): Promise<Response> {
+  async function postWithTokenRetry(
+    path: string,
+    body: object,
+  ): Promise<Response> {
     const used = token();
     const response = await attempt(path, body, await used);
     if (response.status !== 403) return response;
@@ -54,7 +56,7 @@ export function createPoster(fetcher: typeof fetch = fetch) {
     },
     async post(post: Post): Promise<PostResult> {
       try {
-        const response = await send(`/w/${post.key}/messages`, {
+        const response = await postWithTokenRetry(`/w/${post.key}/messages`, {
           request_id: post.requestId,
           source: post.source,
           ...(post.inReplyTo === null ? {} : { in_reply_to: post.inReplyTo }),
@@ -83,7 +85,7 @@ export function createPoster(fetcher: typeof fetch = fetch) {
       action: ThreadAction,
     ): Promise<ControlResult> {
       try {
-        const response = await send(
+        const response = await postWithTokenRetry(
           `/w/${key}/threads/${encodeURIComponent(threadId)}/${action}`,
           {},
         );
