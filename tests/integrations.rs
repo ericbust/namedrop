@@ -510,6 +510,122 @@ fn registration_input_from_prompt(prompt: &str) -> serde_json::Value {
     serde_json::from_str(serialized).unwrap()
 }
 
+fn registration_pane_lock(directory: &TestDirectory) -> fs::File {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    let effects = directory.path().join("pane-effects");
+    fs::DirBuilder::new().mode(0o700).create(&effects).unwrap();
+    let key = Sha256::digest(serde_json::to_vec(&("socket-a", "pane-agent")).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(effects.join(format!("{key}.lock")))
+        .unwrap()
+}
+
+#[test]
+fn registration_gate_timeout_keeps_the_same_challenge_retryable() {
+    use std::os::fd::AsRawFd;
+
+    let directory = TestDirectory::new();
+    setup_registered_address(&directory);
+    let herdr = ProductionHerdr::default();
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-agent"),
+        session_socket_id: "socket-a",
+        herdr: &herdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    let challenge = issue_registration_challenge(
+        &PaneAddressId::new("address-agent"),
+        AgentRuntime::Codex,
+        &runtime,
+    )
+    .unwrap();
+    let lock = registration_pane_lock(&directory);
+    assert_eq!(
+        unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+        0
+    );
+
+    let error = execute_lifecycle_operation(
+        "event.agent-status-changed",
+        status_event("codex"),
+        &runtime,
+    )
+    .unwrap_err();
+    assert!(error.contains("pane effects:"), "{error}");
+    assert!(herdr.prompts.lock().unwrap().is_empty());
+    let transitions = StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|transaction| transaction.transition_facts(&space_namespace()))
+        .unwrap();
+    assert_eq!(
+        transitions
+            .iter()
+            .rev()
+            .find(|fact| fact.entity_id == challenge.registration_id)
+            .unwrap()
+            .transition_kind,
+        namedrop::TransitionKind::Challenged,
+        "gate contention claimed a challenge without sending its prompt"
+    );
+
+    drop(lock);
+    for _ in 0..2 {
+        execute_lifecycle_operation(
+            "event.agent-status-changed",
+            status_event("codex"),
+            &runtime,
+        )
+        .unwrap();
+    }
+    let prompts = herdr.registration_prompts();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert_eq!(
+        registration_input_from_prompt(&prompts[0])["nonce"],
+        challenge.nonce
+    );
+    StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|transaction| {
+            let transitions = transaction.transition_facts(&space_namespace())?;
+            assert_eq!(
+                transitions
+                    .iter()
+                    .rev()
+                    .find(|fact| fact.entity_id == challenge.registration_id)
+                    .unwrap()
+                    .transition_kind,
+                namedrop::TransitionKind::Submitted
+            );
+            let bindings = transaction.active_pane_bindings(&space_namespace())?;
+            assert_eq!(bindings.len(), 1);
+            assert_eq!(bindings[0].id, PaneBindingId::new("binding-agent"));
+            let addresses = transaction.list_pane_addresses(&space_namespace())?;
+            assert_eq!(addresses.len(), 1);
+            assert_eq!(
+                addresses[0].agent_session_id,
+                Some(AgentSessionId::new("session-1"))
+            );
+            Ok(())
+        })
+        .unwrap();
+}
+
 #[test]
 fn production_onboarding_challenges_registers_and_drains_queued_work() {
     let directory = TestDirectory::new();
