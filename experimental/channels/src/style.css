@@ -757,7 +757,7 @@ button.member:not(.more):hover {
   white-space: pre-wrap;
 }
 .attention-actions {
-  grid-column: 2;
+  grid-column: 2 / 4;
   display: flex;
   flex-wrap: wrap;
   column-gap: var(--space-3);
