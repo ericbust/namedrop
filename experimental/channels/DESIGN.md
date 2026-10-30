@@ -828,9 +828,13 @@ uses the "Send to" form. Each offer is a text button in 12px 600
     aborts the request, so a stalled body never holds a connection.
 - Focus moves from the pressed offer to the agent's part and stays there
   through sending, sent and failed, because "Try again" is the same button.
-  When the part goes, nothing moves focus.
-- Each part sits in a polite status region, so a screen reader hears "Sent to
-  @codex" or the failure.
+  When the part goes while it has focus, focus moves to its message row, so the
+  next Tab continues from there. When focus has moved elsewhere, it stays there.
+- One visually hidden polite live region for the whole page announces each
+  change: "Sending to @codex…", "Sent to @codex", or "Couldn't send to @codex".
+  A screen reader hears "Sent to @codex" even when the answer names the agent
+  on the line at once and the part goes. The parts have no live region of their
+  own, so nothing is announced twice.
 - The timeline, the thread pane, and a Needs-you conversation show one state
   for the same post and agent.
 

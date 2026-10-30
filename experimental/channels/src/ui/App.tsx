@@ -21,6 +21,7 @@ import {
   composerPlaceholder,
   paneLabelText,
   responseCopy,
+  routeCopy,
 } from "../copy.ts";
 import { createDeliveries, deliveryOf } from "../delivery.ts";
 import type {
@@ -652,6 +653,10 @@ export function App() {
     deliveries.subscribe,
     deliveries.snapshot,
   );
+  const deliveryChange = useSyncExternalStore(
+    deliveries.subscribe,
+    deliveries.latest,
+  );
   useEffect(
     () => deliveries.settle(state.channels),
     [deliveries, state.channels],
@@ -1026,6 +1031,12 @@ export function App() {
               onClose={closePeek}
             />
           )}
+          <p className="sr-only" aria-live="polite">
+            {deliveryChange &&
+              routeCopy.delivery.announce[deliveryChange.state.kind](
+                deliveryChange.offer.alias,
+              )}
+          </p>
         </div>
       </DeliveryContext>
     </PeekContext>

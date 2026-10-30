@@ -338,6 +338,17 @@ function Reference({
     </button>
   );
 }
+// A delivery part that leaves while it has focus hands focus to its message
+// row, so the next Tab continues from there. React runs a ref's cleanup before
+// it takes the element off the page.
+function focusRowOnLeave(button: HTMLButtonElement) {
+  return () => {
+    if (document.activeElement !== button) return;
+    const row = button.closest<HTMLElement>("article");
+    row?.setAttribute("tabindex", "-1");
+    row?.focus({ preventScroll: true });
+  };
+}
 function partKey(part: RoutePart): string {
   switch (part.kind) {
     case "receipt":
@@ -454,27 +465,26 @@ function Route({
         const { alias, state } = part;
         return (
           <li>
-            <span role="status">
-              {state.kind === "failed" && (
-                <span className="route-failed">
-                  {routeCopy.delivery.failed(alias)}
-                </span>
-              )}
-              <button
-                type="button"
-                className="route-link"
-                data-offer={offerId(alias)}
-                aria-disabled={state.kind !== "failed" || undefined}
-                title={
-                  state.kind === "failed"
-                    ? routeCopy.delivery.why(state)
-                    : undefined
-                }
-                onClick={() => deliveries?.deliver(message, alias)}
-              >
-                {routeCopy.delivery.label[state.kind](alias)}
-              </button>
-            </span>
+            {state.kind === "failed" && (
+              <span className="route-failed">
+                {routeCopy.delivery.failed(alias)}
+              </span>
+            )}
+            <button
+              type="button"
+              className="route-link"
+              ref={focusRowOnLeave}
+              data-offer={offerId(alias)}
+              aria-disabled={state.kind !== "failed" || undefined}
+              title={
+                state.kind === "failed"
+                  ? routeCopy.delivery.why(state)
+                  : undefined
+              }
+              onClick={() => deliveries?.deliver(message, alias)}
+            >
+              {routeCopy.delivery.label[state.kind](alias)}
+            </button>
           </li>
         );
       }

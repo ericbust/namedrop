@@ -31,7 +31,8 @@ export function delivery(state: Delivery, event: DeliveryEvent): Delivery {
 }
 
 export type Offer = { key: SpaceKey; messageId: string; alias: Alias };
-export type Deliveries = ReadonlyMap<string, { offer: Offer; state: Delivery }>;
+export type Change = { offer: Offer; state: Delivery };
+export type Deliveries = ReadonlyMap<string, Change>;
 export const idle: Delivery = { kind: "idle" };
 function offerId({ key, messageId, alias }: Offer): string {
   return `${key}\n${messageId}\n${alias}`;
@@ -44,6 +45,7 @@ export function createDeliveries(
   send: (offer: Offer) => Promise<ReadonlyMap<Alias, DeliverResult>>,
 ) {
   let deliveries: Deliveries = new Map();
+  let latest: Change | null = null;
   const listeners = new Set<() => void>();
   function commit(next: Deliveries): void {
     deliveries = next;
@@ -57,18 +59,15 @@ export function createDeliveries(
       };
     },
     snapshot: (): Deliveries => deliveries,
+    latest: (): Change | null => latest,
     deliver(offer: Offer): void {
       const step = (alias: Alias, event: DeliveryEvent): boolean => {
         const target = { ...offer, alias };
         const before = deliveryOf(deliveries, target);
         const after = delivery(before, event);
         if (after === before) return false;
-        commit(
-          new Map(deliveries).set(offerId(target), {
-            offer: target,
-            state: after,
-          }),
-        );
+        latest = { offer: target, state: after };
+        commit(new Map(deliveries).set(offerId(target), latest));
         return true;
       };
       if (step(offer.alias, { kind: "start" }))

@@ -2911,13 +2911,13 @@ test("design-b: Needs you shows titles, hints and ages three at a time and annou
     0,
   );
   assert.equal(await ui.page.locator(".channel-header .health").count(), 0);
-  const live = ui.page.locator('[aria-live="polite"]');
+  const live = ui.page.locator('main [aria-live="polite"]');
   assert.equal(await live.textContent(), "");
   value.frame.attention.push(card("pane_binding", "Pane moved."));
   ui.connections[0].send("space", value);
   await ui.page.waitForFunction(
     () =>
-      document.querySelector('[aria-live="polite"]')?.textContent ===
+      document.querySelector('main [aria-live="polite"]')?.textContent ===
       "Needs you: An agent's pane changed",
   );
 });
@@ -7494,6 +7494,22 @@ const unsent = () =>
     state: "unrouted",
     to: [],
   });
+const announcer = '.app-shell > [aria-live="polite"]';
+// Every text the page's delivery announcer shows, in order, from now on.
+const recordAnnouncements = (page) =>
+  page.evaluate((announcer) => {
+    window.announced = [];
+    new MutationObserver(() => {
+      const text = document.querySelector(announcer)?.textContent ?? "";
+      if (text !== "" && text !== window.announced.at(-1))
+        window.announced.push(text);
+    }).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+  }, announcer);
+const announced = (page) => page.evaluate(() => window.announced);
 
 test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the not-sent part for its own Sending to @codex… then Sent to @codex with focus on it, and the frame's leg replaces it", async (t) => {
   const answered = held();
@@ -7534,7 +7550,7 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
     connected: true,
   });
   assert.equal(
-    await route.getByRole("status").textContent(),
+    await ui.page.locator(announcer).textContent(),
     "Sending to @codex…",
   );
   assert.equal(await threadPane(ui).count(), 0, "no thread opens");
@@ -7552,7 +7568,10 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
     connected: true,
   });
   await readsAs(route, "Sent to @codex");
-  assert.equal(await route.getByRole("status").textContent(), "Sent to @codex");
+  assert.equal(
+    await ui.page.locator(announcer).textContent(),
+    "Sent to @codex",
+  );
   await button.click({ force: true });
   value.frame.messages = [reached(post, "codex")];
   ui.connections[0].send("space", value);
@@ -7589,6 +7608,186 @@ test("DESIGN-R2 B4: the deliver answer's channel object names @codex on the line
   assert.equal(ui.connections.length, 1, "no new frame or connection");
 });
 
+const focusedRow = (page) =>
+  page.evaluate(() => {
+    const active = document.activeElement;
+    return {
+      tag: active.tagName.toLowerCase(),
+      id: active.getAttribute("data-message-id"),
+      tabindex: active.getAttribute("tabindex"),
+      inPane: active.closest(".slot") !== null,
+    };
+  });
+const deliverySurfaces = {
+  "the channel timeline": async (t, answered) => {
+    const post = unsent();
+    const { ui } = await chatRoom(t, [post], {
+      onDeliver: async () => {
+        await answered.gate;
+        return { channel: { ...post.channel, to: ["codex"] } };
+      },
+    });
+    return { ui, scope: ui.page.locator("main"), id: "p1", inPane: false };
+  },
+  "the thread pane": async (t, answered) => {
+    const at = Date.now() - 600_000;
+    const post = channelPost(
+      "p1",
+      "nice catch by @codex on the cache",
+      { state: "unrouted", to: [] },
+      { at_ms: at },
+    );
+    const reply = answer("r1", "p1", "p1", "claude", "agreed, nice one", {
+      at_ms: at + 60_000,
+      legs: [{ to: "human", stage: { stage: "delivered" } }],
+    });
+    const { ui } = await chatRoom(t, [post, reply], {
+      onDeliver: async () => {
+        await answered.gate;
+        return { channel: { ...post.channel, to: ["codex"] } };
+      },
+    });
+    await ui.page
+      .locator("main")
+      .getByRole("button", { name: "1 reply. Open thread" })
+      .click();
+    await threadPane(ui).getByRole("combobox").waitFor();
+    return { ui, scope: threadPane(ui), id: "p1", inPane: true };
+  },
+  "a Needs-you conversation pane": async (t, answered) => {
+    const value = frame(1, "alpha", "needs_you");
+    value.frame.participants = people();
+    const post = channelPost(
+      "far-post",
+      "the deploy notes @codex wrote last week were clear",
+      { state: "unrouted", to: [] },
+    );
+    const conversation = { thread_id: "far-post", message_id: "far-post" };
+    value.frame.attention = [
+      {
+        source_kind: "delivery_attempt",
+        summary: { text: "A response is needed.", truncated: false },
+        opened_at_ms: 4,
+        subject_alias: null,
+        message_id: "far-post",
+        conversation,
+        coordination_id: null,
+        response: { kind: "reply", ...conversation, address_id: "codex" },
+      },
+    ];
+    const ui = await open(
+      t,
+      (client) => replay(client, [value]),
+      () => [],
+      {
+        onContext: () => ({
+          thread_id: "far-post",
+          message_count: 1,
+          earlier_omitted: false,
+          messages: [post],
+        }),
+        onDeliver: async () => {
+          await answered.gate;
+          return { status: 200 };
+        },
+      },
+    );
+    await ui.live();
+    await ui.page
+      .getByRole("button", { name: "Show message from @codex", exact: true })
+      .click();
+    await threadPane(ui).getByRole("combobox").waitFor();
+    // The post is not in the room's frame, so the frame that brings its leg moves the line.
+    const reach = async () => {
+      await readsAs(threadPane(ui).locator(".route"), "Sent to @codex");
+      value.frame.messages = [reached(post, "codex")];
+      ui.connections[0].send("space", value);
+    };
+    return { ui, scope: threadPane(ui), id: "far-post", inPane: true, reach };
+  },
+};
+for (const [surface, setUp] of Object.entries(deliverySurfaces))
+  test(`DESIGN-R2 C2: in ${surface}, a sent delivery is announced once by the page, and when its part leaves, focus moves to the message row`, async (t) => {
+    const answered = held();
+    const { ui, scope, id, inPane, reach } = await setUp(t, answered);
+    await recordAnnouncements(ui.page);
+    const route = scope.locator(`[data-message-id="${id}"] .route`);
+    await route.getByRole("button", { name: "Send this to @codex" }).click();
+    await focusOn(ui.page, `${id} @codex`, "Sending to @codex…");
+    const ownRegions = await route
+      .locator('[role="status"], [aria-live]')
+      .count();
+    answered.release();
+    await reach?.();
+    await eventually(
+      async () => (await route.locator("[data-offer]").count()) === 0,
+      "the part to leave once the post reached @codex",
+    );
+    assert.deepEqual(await focusedRow(ui.page), {
+      tag: "article",
+      id,
+      tabindex: "-1",
+      inPane,
+    });
+    assert.deepEqual(await announced(ui.page), [
+      "Sending to @codex…",
+      "Sent to @codex",
+    ]);
+    assert.equal(ownRegions, 0, "the part held no live region of its own");
+    await ui.page.keyboard.press("Tab");
+    assert.equal(
+      await scope
+        .locator(`article[data-message-id="${id}"]`)
+        .evaluate(
+          (row) =>
+            row.contains(document.activeElement) ||
+            (row.compareDocumentPosition(document.activeElement) &
+              Node.DOCUMENT_POSITION_FOLLOWING) !==
+              0,
+        ),
+      true,
+      "the next Tab continues from the row",
+    );
+  });
+
+const elsewhere = {
+  "the channel box": {
+    move: (ui) => ui.page.locator("main textarea").focus(),
+    focused: () => document.activeElement?.matches("main textarea") === true,
+  },
+  nothing: {
+    move: (ui) => ui.page.evaluate(() => document.activeElement?.blur()),
+    focused: () => document.activeElement === document.body,
+  },
+};
+for (const [where, { move, focused }] of Object.entries(elsewhere))
+  test(`DESIGN-R2 C2: a delivery whose part leaves after focus moved to ${where} keeps focus there, and is still announced`, async (t) => {
+    const answered = held();
+    const post = unsent();
+    const { ui } = await chatRoom(t, [post], {
+      onDeliver: async () => {
+        await answered.gate;
+        return { channel: { ...post.channel, to: ["codex"] } };
+      },
+    });
+    await recordAnnouncements(ui.page);
+    const { route } = routeOf(ui, "p1");
+    await route.getByRole("button", { name: "Send this to @codex" }).click();
+    await focusOn(ui.page, "p1 @codex", "Sending to @codex…");
+    await move(ui);
+    answered.release();
+    await readsAs(route, "@codex · Queued");
+    assert.equal(
+      await ui.page.evaluate(focused),
+      true,
+      `focus stays on ${where}`,
+    );
+    assert.deepEqual(await announced(ui.page), [
+      "Sending to @codex…",
+      "Sent to @codex",
+    ]);
+  });
+
 test("CH-fix-3 item 1: a refused delivery reads Couldn't send to @codex · Try again with focus on Try again, its title is the server's message, and Try again delivers", async (t) => {
   const refusal = "@codex is not an agent in this workspace.";
   const outcomes = [{ status: 400, error: refusal }, { status: 200 }];
@@ -7608,8 +7807,8 @@ test("CH-fix-3 item 1: a refused delivery reads Couldn't send to @codex · Try a
     connected: true,
   });
   assert.equal(
-    await shownText(route.getByRole("status")),
-    "Couldn't send to @codex · Try again",
+    await ui.page.locator(announcer).textContent(),
+    "Couldn't send to @codex",
   );
   assert.equal(
     await route
@@ -7644,8 +7843,8 @@ test("CH-fix-3 item 1: Try again's title says Couldn't reach Namedrop. when the 
     "the status in the title",
   );
   assert.equal(
-    await shownText(route.getByRole("status")),
-    "Couldn't send to @codex · Try again",
+    await ui.page.locator(announcer).textContent(),
+    "Couldn't send to @codex",
   );
 });
 
@@ -7668,8 +7867,8 @@ test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @cod
     connected: true,
   });
   assert.equal(
-    await shownText(route.getByRole("status")),
-    "Couldn't send to @codex · Try again",
+    await ui.page.locator(announcer).textContent(),
+    "Couldn't send to @codex",
   );
   await button.click();
   assert.equal((await offerReads(button, "Sent to @codex")).focused, true);

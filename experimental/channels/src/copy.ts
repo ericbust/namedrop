@@ -444,6 +444,9 @@ export const disabledChannelCopy = {
 export function repliesCopy(count: number): string {
   return `${count} ${count === 1 ? "reply" : "replies"}`;
 }
+const sendingTo = (alias: string) => `Sending to ${alias}…`;
+const sentTo = (alias: string) => `Sent to ${alias}`;
+const couldNotSendTo = (alias: string) => `Couldn't send to ${alias}`;
 export const routeCopy = {
   label: "Who got this",
   state: {
@@ -462,14 +465,20 @@ export const routeCopy = {
   sendThis: (alias: string) => `Send this to ${alias}`,
   delivery: {
     label: {
-      sending: (alias: string) => `Sending to ${alias}…`,
-      sent: (alias: string) => `Sent to ${alias}`,
+      sending: sendingTo,
+      sent: sentTo,
       failed: () => "Try again",
     } satisfies Record<
       Exclude<Delivery["kind"], "idle">,
       (alias: string) => string
     >,
-    failed: (alias: string) => `Couldn't send to ${alias}`,
+    failed: couldNotSendTo,
+    announce: {
+      idle: () => "",
+      sending: sendingTo,
+      sent: sentTo,
+      failed: couldNotSendTo,
+    } satisfies Record<Delivery["kind"], (alias: string) => string>,
     why: (failure: Extract<Delivery, { kind: "failed" }>) => {
       switch (failure.cause) {
         case "refused":

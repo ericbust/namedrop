@@ -115,6 +115,32 @@ test("deliveries: a press sends once, each offer keeps its own state, and Try ag
   assert.deepEqual(of(claude), sending);
 });
 
+test("deliveries: the latest change names the agent and its new state, for the page to announce", async () => {
+  const { store, answer } = server();
+  assert.equal(store.latest(), null);
+  store.deliver(codex);
+  assert.deepEqual(store.latest(), { offer: codex, state: sending });
+  store.deliver(claude);
+  assert.deepEqual(store.latest(), { offer: claude, state: sending });
+  await answer(codex, { kind: "done" });
+  assert.deepEqual(store.latest(), { offer: codex, state: sent });
+  const latest = store.latest();
+  store.deliver(codex);
+  store.settle(channels(post(["codex"])));
+  assert.equal(
+    store.latest(),
+    latest,
+    "a press that sends nothing and a frame that ends an offer announce nothing",
+  );
+  await answer(claude, {
+    kind: "failed",
+    cause: "refused",
+    status: 400,
+    message: "@codex is not an agent here.",
+  });
+  assert.deepEqual(store.latest(), { offer: claude, state: refused });
+});
+
 test("deliveries: an answer moves each agent it names that was sending, and no other", async () => {
   const { store, requests, answer, of } = server();
   store.deliver(codex);
