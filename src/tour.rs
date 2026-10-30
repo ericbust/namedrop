@@ -373,12 +373,12 @@ pub fn reset(state_directory: &Path, id: &str) -> Result<bool, String> {
 }
 
 /// Opens the tour popup for `target` and returns Herdr's JSON result.
-pub fn open_popup<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn open_popup<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     target: &DiscoveredPane,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
 {
     let session = target
         .agent_session_id
@@ -414,13 +414,13 @@ where
 /// instead of each opening a popup, and a failed open keeps the marker because
 /// retrying a popup on every later event would be worse than missing it once;
 /// the shortcut reopens it any time.
-pub fn show_for_first_agent<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn show_for_first_agent<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     discovered: &DiscoveredWorktree,
     preferred_pane_id: Option<&str>,
 ) -> Value
 where
-    E: Host,
+    H: Host,
 {
     let not_shown =
         |reason: &str| json!({"shown": false, "presentation_id": CURRENT_ID, "reason": reason});

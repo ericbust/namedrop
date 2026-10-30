@@ -48,9 +48,9 @@ impl ParsedMessage {
     }
 }
 
-pub(crate) fn body_reference_aliases<E: crate::Host>(
+pub(crate) fn body_reference_aliases<H: crate::Host>(
     parsed: &ParsedMessage,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> Vec<String> {
     let mut live = Vec::new();
     for label in parsed
@@ -442,13 +442,13 @@ pub fn validate_message_input(operation: &str, input: Value) -> Result<(), Strin
     Ok(())
 }
 
-pub fn execute_message_operation<E, C, I>(
+pub fn execute_message_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -508,12 +508,12 @@ pub(crate) enum PromptMentionOutcome {
 /// Commits the verbatim leading-Mention shorthand used by native prompt hooks.
 /// `None` when the prompt's `#` run names no Herdr workspace: it never
 /// addressed anyone, so it stays the person's own prompt.
-pub(crate) fn persist_prompt_mention_operation<E, C, I>(
+pub(crate) fn persist_prompt_mention_operation<H, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Option<PromptMentionOutcome>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -542,12 +542,12 @@ where
     })
 }
 
-fn persist_prompt_mention<E, C, I>(
+fn persist_prompt_mention<H, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Vec<crate::store::ForwardedCopy>, SendError>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -586,13 +586,13 @@ where
 
 /// A `#` run naming no one is either prose, which stays the person's own
 /// text, or a workspace prompt, refused with the names in its scope.
-fn workspace_prompt_refusal<E, C, I>(
+fn workspace_prompt_refusal<H, C, I>(
     scope: SpaceScope,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> SendError
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -602,29 +602,23 @@ where
     }
 }
 
-fn names_in_prompt_scope<E, C, I>(
+fn names_in_prompt_scope<H, C, I>(
     scope: &SpaceScope,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> Result<Vec<ScopedName>, SendError>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     if !names_workspaces(scope, workspaces) {
         return Err(SendError::NotAMention);
     }
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), None)
-            .map_err(String::from)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)
-            .map_err(String::from)?,
-    };
+    let discovered = runtime
+        .host
+        .space(runtime.space_locator(), None)
+        .map_err(String::from)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let directory = crate::spaces::SpaceDirectory::load(
@@ -640,9 +634,9 @@ where
     crate::spaces::names_in_scope(scope, &directory).map_err(SendError::Refused)
 }
 
-fn names_workspaces<E: crate::Host>(
+fn names_workspaces<H: crate::Host>(
     scope: &SpaceScope,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> bool {
     match scope {
         SpaceScope::Named(labels) => labels
@@ -676,13 +670,13 @@ impl std::fmt::Display for SendError {
 
 type PersistedMessage = (Value, Vec<crate::store::ForwardedCopy>);
 
-fn persist_prepared_message_operation<E, C, I>(
+fn persist_prepared_message_operation<H, C, I>(
     input: PreparedMessageOperation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> Result<PersistedMessage, SendError>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -732,16 +726,10 @@ where
     let pane_id = runtime
         .current_pane_id
         .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())?;
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), None)
-            .map_err(String::from)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)
-            .map_err(String::from)?,
-    };
+    let discovered = runtime
+        .host
+        .space(runtime.space_locator(), None)
+        .map_err(String::from)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let replay = Replay {
@@ -1286,12 +1274,12 @@ impl Replay<'_> {
     }
 }
 
-fn sending_author<E, C, I>(
+fn sending_author<H, C, I>(
     transaction: &crate::StateTransaction<'_>,
     namespace: &StateNamespace,
     pane_id: &str,
     request: &Replay<'_>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<(crate::RoutingAddressSnapshot, MutationAttribution), crate::StoreError>
 where
     C: crate::Clock,
@@ -1338,15 +1326,15 @@ where
     Ok((author, attribution))
 }
 
-fn present_committed<E, C, I>(
+fn present_committed<H, C, I>(
     committed: Committed,
     store: &mut StateStore,
     namespace: &StateNamespace,
     disposition_attempt_id: &Option<crate::DeliveryAttemptId>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<PersistedMessage, SendError>
 where
-    E: crate::Host,
+    H: crate::Host,
 {
     let Committed {
         routed,
@@ -1395,12 +1383,12 @@ where
     Ok((response, forwarded))
 }
 
-fn present_relay_result<E, C, I>(
+fn present_relay_result<H, C, I>(
     relay: &RelayPresentation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Value
 where
-    E: crate::Host,
+    H: crate::Host,
 {
     let title = format!("@{} replied", relay.sender_alias);
     let summary = relay.body.lines().next().unwrap_or_default().trim();

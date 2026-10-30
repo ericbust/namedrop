@@ -68,9 +68,9 @@ pub struct HealthReport {
 }
 
 /// Inspect Namedrop without reconciling, retrying, cancelling, or changing state.
-pub fn diagnose_collaboration<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> HealthReport
+pub fn diagnose_collaboration<H, C, I>(runtime: &LifecycleRuntime<'_, H, C, I>) -> HealthReport
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -557,12 +557,12 @@ where
 /// `Ok` means only that the host accepted the prompt: nothing is repaired and
 /// no delivery is recorded. `Err` states, in its first words, why nothing was
 /// sent.
-pub fn request_doctor_assistance<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn request_doctor_assistance<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     expected_session_id: &str,
 ) -> Result<(), String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -612,8 +612,8 @@ where
     }
 }
 
-fn invoking_pane_is_served<E: Host, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn invoking_pane_is_served<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     space_id: &str,
     pane_id: &str,
 ) -> bool {
@@ -633,13 +633,13 @@ fn invoking_pane_is_served<E: Host, C, I>(
 
 /// The Agent Session live in `pane_id` right now, or why Doctor must not
 /// prompt that pane at all.
-fn live_agent_session<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn live_agent_session<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     space_id: &str,
     pane_id: &str,
 ) -> Result<AgentSessionId, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -686,22 +686,15 @@ struct HealthSnapshot {
     space_id: String,
 }
 
-fn load_health_snapshot<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn load_health_snapshot<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<HealthSnapshot, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let Some(mut store) =
         StateStore::open_read_only(runtime.state_directory).map_err(|error| error.to_string())?
@@ -888,9 +881,9 @@ fn issue(
     }
 }
 
-fn add_operation<E, C, I>(
+fn add_operation<H, C, I>(
     issue: &mut HealthIssue,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     space_id: &str,
     operation: &str,
     input: serde_json::Value,

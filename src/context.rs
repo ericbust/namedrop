@@ -249,40 +249,40 @@ enum ContextInvocation {
     Human,
 }
 
-pub fn execute_context_operation<E, C, I>(
+pub fn execute_context_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
     execute_context_operation_as(ContextInvocation::AgentSession, operation, input, runtime)
 }
 
-pub fn execute_human_context_operation<E, C, I>(
+pub fn execute_human_context_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
     execute_context_operation_as(ContextInvocation::Human, operation, input, runtime)
 }
 
-fn execute_context_operation_as<E, C, I>(
+fn execute_context_operation_as<H, C, I>(
     invocation: ContextInvocation,
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -308,12 +308,12 @@ where
     }
 }
 
-fn create_human_grant<E, C, I>(
+fn create_human_grant<H, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -357,12 +357,12 @@ where
     Ok(json!({"grants": grants}))
 }
 
-fn revoke_human_grant<E, C, I>(
+fn revoke_human_grant<H, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -388,12 +388,12 @@ where
     .map_err(|error| error.to_string())
 }
 
-fn publish_snapshot<E, C, I>(
+fn publish_snapshot<H, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -672,12 +672,12 @@ where
     })
 }
 
-pub(crate) fn record_snapshot_activation_failure<E, C, I>(
+pub(crate) fn record_snapshot_activation_failure<H, C, I>(
     grant_ids: &[String],
     error: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -708,13 +708,13 @@ pub(crate) fn record_snapshot_activation_failure<E, C, I>(
     }
 }
 
-fn inspect_context<E, C, I>(
+fn inspect_context<H, C, I>(
     input: Value,
     invocation: ContextInvocation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -859,13 +859,13 @@ where
         .map_err(|error| error.to_string())
 }
 
-fn read_context<E, C, I>(
+fn read_context<H, C, I>(
     input: Value,
     invocation: ContextInvocation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -1173,20 +1173,13 @@ fn absent_context_reference(
     ))
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn discover<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<(StateNamespace, crate::DiscoveredWorktree), String>
 where
-    E: Host,
+    H: Host,
 {
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     Ok((discovered.namespace(runtime.session_socket_id), discovered))
 }
 

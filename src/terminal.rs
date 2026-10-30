@@ -6,8 +6,8 @@ use std::{
     thread,
 };
 
-pub(crate) fn runner_command<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn runner_command<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     workspace: &str,
     pane: &str,
     attempt: &DeliveryAttemptId,
@@ -34,18 +34,11 @@ pub(crate) fn runner_command<E, C, I>(
 
 /// Runs inside the target terminal. The atomic claim rejects replay and binds
 /// execution to the physical terminal, not a potentially recycled pane label.
-pub fn execute_terminal<E: Host, C: Clock, I: IdGenerator>(
+pub fn execute_terminal<H: Host, C: Clock, I: IdGenerator>(
     attempt: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<i32, String> {
-    let discovered = match runtime.workspace_id {
-        Some(id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(id), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let ns = discovered.namespace(runtime.session_socket_id);
     let pane = discovered
         .panes
@@ -306,17 +299,10 @@ fn parent_pid(pid: u32) -> Option<u32> {
 }
 
 /// Detection never infers a terminal merely from a missing native session ID.
-pub fn detect_pane_type<E: Host, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn detect_pane_type<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Option<PaneType>, String> {
-    let discovered = match runtime.workspace_id {
-        Some(id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(id), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let pane = discovered
         .panes
         .iter()
@@ -340,17 +326,10 @@ pub fn detect_pane_type<E: Host, C, I>(
 
 /// Both naming surfaces retain a saved type before considering live detection.
 /// Opening/cancelling a prompt must not create or migrate persisted state.
-pub fn default_pane_type<E: Host, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn default_pane_type<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Option<PaneType>, String> {
-    let discovered = match runtime.workspace_id {
-        Some(id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(id), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     if let Some(mut store) =
         StateStore::open_read_only(runtime.state_directory).map_err(|e| e.to_string())?
         && let Some(kind) = store

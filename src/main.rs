@@ -406,7 +406,7 @@ fn wake_runtime_mailboxes(runtime: &TuiRuntime<'_>) -> Result<(), String> {
         None => {
             runtime
                 .host
-                .space(namedrop::SpaceLocator::Checkout(runtime.cwd), None)?
+                .space(runtime.space_locator(), None)?
                 .workspace_id
         }
     };
@@ -713,14 +713,13 @@ fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
 /// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
 fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
     let wake = || -> Result<(), String> {
-        let herdr = TuiHost::new(ProcessHerdr::default());
-        let socket_id = session_socket_id(None, &herdr);
+        let host = TuiHost::new(ProcessHerdr::default());
+        let socket_id = session_socket_id(None, &host);
         let space_id = match env::var("HERDR_WORKSPACE_ID") {
             Ok(space_id) => space_id,
             Err(_) => {
                 let cwd = env::current_dir().map_err(|error| error.to_string())?;
-                herdr
-                    .space(namedrop::SpaceLocator::Checkout(&cwd), None)?
+                host.space(namedrop::SpaceLocator::Checkout(&cwd), None)?
                     .workspace_id
             }
         };

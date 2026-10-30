@@ -182,8 +182,8 @@ impl ServedPanes {
 /// A Codex pane counts as served unless its foreground processes prove it runs
 /// in-process. When Herdr does not answer, it counts as served, because a
 /// server is running.
-pub(crate) fn served_codex_panes<E: Host, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn served_codex_panes<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     panes: &[DiscoveredPane],
 ) -> Option<ServedPanes> {
     let codex = panes

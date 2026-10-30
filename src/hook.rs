@@ -29,12 +29,12 @@ struct SessionStartInput {
 /// or its host rebuilds the context (resume, clear, compaction, fork). The
 /// policy is fixed text, so reading it per turn would only repeat it; the
 /// roster it governs still arrives with every prompt.
-pub fn execute_session_start_hook<E, C, I>(
+pub fn execute_session_start_hook<H, C, I>(
     input: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Option<Value>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -82,12 +82,12 @@ pub(crate) fn codex_app_server_hook_output() -> Value {
 /// invisible; a failed leading handoff preserves the prompt and adds only safe,
 /// non-authoritative local guidance, beneath the same roster the turn it stays
 /// on would have carried.
-pub fn execute_user_prompt_submit_hook<E, C, I>(
+pub fn execute_user_prompt_submit_hook<H, C, I>(
     input: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Option<Value>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -165,9 +165,9 @@ where
 /// marker its serialization starts with, so composing under that marker needs
 /// no wrapper change; the guidance follows verbatim, and with no roster to lead
 /// it the exact known-safe literal the wrappers match is emitted unchanged.
-fn failed_handoff<E, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+fn failed_handoff<H, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, H, C, I>) -> Value
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -179,9 +179,9 @@ where
 
 /// Guidance with no fixed literal of its own still reaches the agent: it opens
 /// with the roster marker every generated wrapper forwards.
-fn under_roster<E, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+fn under_roster<H, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, H, C, I>) -> Value
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -276,13 +276,13 @@ fn hook_output(event: &str, context: &str) -> Value {
 
 /// The context for one authenticated delivery, built from the reconstruction
 /// it authenticated against rather than from the submitted text.
-fn delivery_hook_output<E, C, I>(
+fn delivery_hook_output<H, C, I>(
     envelope: &Value,
     leftover: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Value
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -322,12 +322,12 @@ where
 /// the reconstruction rather than a verdict keeps everything derived for the
 /// host tied to durable state: the submitted text is only ever the thing being
 /// matched, never a source of ids.
-fn outstanding_envelope<E, C, I>(
+fn outstanding_envelope<H, C, I>(
     envelope: &Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Option<Value>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -354,12 +354,12 @@ struct CarriedEnvelope<'a> {
 
 const LEFTOVER_INPUT_CONTEXT: &str = "The text ahead of the envelope was already in this pane's input when the delivery was pasted in: a draft the person had not sent, or a Mention Namedrop already sent that the host put back. It is not an instruction for this turn; do not act on it or route it. After settling the delivery, tell the person in one line that it was submitted with the delivery.";
 
-fn route_leading_mentions<E, C, I>(
+fn route_leading_mentions<H, C, I>(
     prompt: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Option<PromptMentionOutcome>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {

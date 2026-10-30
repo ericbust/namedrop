@@ -639,14 +639,8 @@ impl<E: HerdrCommandExecutor> Host for TuiHost<E> {
         }
         args.push("--focus".to_owned());
         let output = self.execute(&args.iter().map(String::as_str).collect::<Vec<_>>(), None)?;
-        serde_json::from_str(&output.stdout).map_err(|error| {
-            let message = if popup.entrypoint == crate::tour::ENTRYPOINT {
-                format!("Herdr returned an unreadable popup result: {error}")
-            } else {
-                error.to_string()
-            };
-            message.into()
-        })
+        serde_json::from_str(&output.stdout)
+            .map_err(|error| format!("Herdr returned an unreadable popup result: {error}").into())
     }
     fn reload_config(&self) -> Result<(), HostError> {
         self.execute(&["server", "reload-config"], None).map(|_| ())
@@ -681,6 +675,10 @@ impl<E: HerdrCommandExecutor> Host for TuiHost<E> {
     }
     fn caller_identity(&self, claim: &CallerClaim) -> Result<CallerIdentity, HostError> {
         let mut workspace = claim.workspace.clone();
+        // An explicit --herdr-pane is the caller's assertion. An inherited
+        // HERDR_PANE_ID can be stale: a daemon keeps the variables of the pane it
+        // started in, so it only counts when this process still runs under that
+        // pane's shell.
         let mut pane = match claim.pane.clone() {
             Some(pane) => Some(pane),
             None => match claim.inherited_pane.clone() {
@@ -701,6 +699,9 @@ impl<E: HerdrCommandExecutor> Host for TuiHost<E> {
         {
             workspace = Some(crate::pane_workspace(self, pane)?);
         }
+        // An agent can run commands without the pane's Herdr variables (a shared
+        // Codex app-server keeps the environment it started with). The agent's
+        // own session ID still arrives, and Herdr knows which pane runs it.
         if workspace.is_none()
             && let Some((space, found_pane)) = claim
                 .agent_sessions

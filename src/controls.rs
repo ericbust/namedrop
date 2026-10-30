@@ -45,24 +45,17 @@ struct AcknowledgeDeliveryInput {
     confirmed: bool,
 }
 
-pub fn execute_control_operation<E, C, I>(
+pub fn execute_control_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution =
         MutationAttribution::new(ActorKind::Human, "local-human", runtime.clock.now_unix_ms());
@@ -213,14 +206,7 @@ where
                 .map_err(|error| error.to_string())?;
             let mut interrupted_pane_ids = Vec::new();
             let mut warnings = Vec::new();
-            let live_discovered = match runtime.workspace_id {
-                Some(workspace_id) => runtime
-                    .host
-                    .space(crate::SpaceLocator::Workspace(workspace_id), None),
-                None => runtime
-                    .host
-                    .space(crate::SpaceLocator::Checkout(runtime.cwd), None),
-            };
+            let live_discovered = runtime.host.space(runtime.space_locator(), None);
             let live_discovered = match live_discovered {
                 Ok(live_discovered) => Some(live_discovered),
                 Err(error) => {

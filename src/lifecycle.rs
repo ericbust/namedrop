@@ -59,6 +59,15 @@ pub struct LifecycleRuntime<'a, H, C, I> {
     pub ids: &'a I,
 }
 
+impl<H, C, I> LifecycleRuntime<'_, H, C, I> {
+    pub fn space_locator(&self) -> crate::SpaceLocator<'_> {
+        match self.workspace_id {
+            Some(workspace) => crate::SpaceLocator::Workspace(workspace),
+            None => crate::SpaceLocator::Checkout(self.cwd),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EmptyInput {}
@@ -226,24 +235,17 @@ struct PaneEventInfo {
     tokens: std::collections::BTreeMap<String, String>,
 }
 
-pub fn execute_lifecycle_operation<E, C, I>(
+pub fn execute_lifecycle_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let (actor_kind, actor_id) = if operation.starts_with("event.") || operation == "reconcile" {
         (ActorKind::Plugin, "herdr")
@@ -1139,14 +1141,14 @@ impl PaneLabel {
     }
 }
 
-pub(crate) fn publish_pane_address_metadata<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn publish_pane_address_metadata<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     pane_id: &str,
     alias: &str,
     label: PaneLabel,
 ) -> Result<(), String>
 where
-    E: Host,
+    H: Host,
 {
     let title = format!("@{alias}");
     let hint = label.hint(alias);
@@ -1173,16 +1175,16 @@ struct WorktreeReconciliation {
     installation: crate::IntegrationPackageInstallation,
 }
 
-fn reconcile_worktree<E, C, I>(
+fn reconcile_worktree<H, C, I>(
     store: &mut StateStore,
     namespace: &StateNamespace,
     discovered: &DiscoveredWorktree,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     attribution: &MutationAttribution,
     after_restart: bool,
 ) -> Result<WorktreeReconciliation, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -1317,14 +1319,14 @@ fn tab_label_owner<'a>(
     candidates.next().is_none().then_some(owner)
 }
 
-fn reconcile_managed_tab_labels<E, C, I>(
+fn reconcile_managed_tab_labels<H, C, I>(
     store: &mut StateStore,
     namespace: &StateNamespace,
     discovered: &DiscoveredWorktree,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<(), String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -1591,13 +1593,13 @@ enum AllWorkspaces {
     All,
 }
 
-fn every_workspace_addresses<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn every_workspace_addresses<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     here: &str,
     store: &mut StateStore,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {

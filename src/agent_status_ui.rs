@@ -172,8 +172,8 @@ impl namedrop::Budget for BoundedReads<'_> {
 /// Rereads the pane the popup was opened for. A different physical terminal or
 /// a different agent session means the popup is now looking at someone else's
 /// work, so results collected for the original identity must be discarded.
-pub(crate) fn latest_identity<E: Host, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn latest_identity<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     workspace: &str,
     pane: &str,
     terminal: &str,
@@ -1797,4 +1797,23 @@ fn array(value: Option<&Value>, key: &str) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn identity_budget_and_timeout_message() {
+        assert_eq!(IDENTITY_BUDGET, Duration::from_millis(1_500));
+        let cancelled = AtomicBool::new(false);
+        let reads = BoundedReads {
+            deadline: Instant::now() - Duration::from_millis(1),
+            cancelled: &cancelled,
+        };
+        assert_eq!(
+            namedrop::Budget::remaining(&reads).unwrap_err(),
+            "confirming the invoking pane ran out of time"
+        );
+    }
 }

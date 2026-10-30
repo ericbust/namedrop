@@ -92,14 +92,14 @@ const REQUESTS_UNKNOWN: &str =
 /// `origin`, `observed_at_ms`, `panes`, `waits`, `handoffs_available`,
 /// `warnings` and `omitted_panes`. `waits` rows also carry the recipient
 /// `alias` so the panel can name a recipient whose pane is gone.
-pub fn collect_agent_status<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn collect_agent_status<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     expected_terminal: &str,
     expected_session: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<Value, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -183,25 +183,19 @@ where
     }))
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn discover<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     reads: &Deadline<'_, C>,
 ) -> Result<DiscoveredWorktree, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
-    match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), Some(reads))
-            .map_err(String::from),
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), Some(reads))
-            .map_err(String::from),
-    }
+    runtime
+        .host
+        .space(runtime.space_locator(), Some(reads))
+        .map_err(String::from)
 }
 
 /// Spends one collection budget across every read, so a slow pane cannot
@@ -344,15 +338,15 @@ fn visible_panes<'a>(
 /// bound to panes, and the origin's outstanding requests. Either half can be
 /// unavailable on its own, and an unavailable half is reported rather than
 /// rendered as emptiness.
-fn read_state<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn read_state<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     discovered: &DiscoveredWorktree,
     origin: &DiscoveredPane,
     reads: &Deadline<'_, C>,
     warnings: &mut Vec<String>,
 ) -> (Vec<PaneAddressRecord>, Option<Vec<Value>>)
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -618,15 +612,15 @@ fn wait_first_order<'a>(
 /// the excerpt cap and the remaining budget allow. Each row carries the exact
 /// identity its excerpt was read under, which is what [`verified_rows`] checks
 /// afterwards.
-fn pane_rows<E, C>(
-    pane_host: &E,
+fn pane_rows<H, C>(
+    pane_host: &H,
     ordered: &[&DiscoveredPane],
     addresses: &[PaneAddressRecord],
     reads: &Deadline<'_, C>,
     warnings: &mut Vec<String>,
 ) -> Vec<Value>
 where
-    E: Host,
+    H: Host,
     C: Clock,
 {
     let listed = ordered.len().min(MAX_PANE_ROWS);
@@ -863,16 +857,6 @@ mod budget_tests {
         assert_eq!(
             host.read("pane", 40, Some(&excerpt)).unwrap_err().message,
             "Herdr read cancelled"
-        );
-        let identity_source = include_str!("agent_status_ui.rs");
-        assert!(
-            identity_source
-                .contains("const IDENTITY_BUDGET: Duration = Duration::from_millis(1_500);")
-        );
-        assert!(
-            identity_source.contains(
-                "return Err(\"confirming the invoking pane ran out of time\".to_owned());"
-            )
         );
     }
 }

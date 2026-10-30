@@ -324,13 +324,13 @@ pub struct IntegrationRegistration {
     pub active: bool,
 }
 
-pub fn issue_registration_challenge<E, C, I>(
+pub fn issue_registration_challenge<H, C, I>(
     address_id: &PaneAddressId,
     agent_runtime: AgentRuntime,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<IntegrationChallenge, String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -383,12 +383,12 @@ where
         .map_err(|error| error.to_string())
 }
 
-pub(crate) fn onboard_settled_integrations<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn onboard_settled_integrations<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     discovered: &DiscoveredWorktree,
 ) -> Result<crate::IntegrationPackageInstallation, String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -424,14 +424,14 @@ where
     Ok(installation)
 }
 
-fn onboard_settled_integration<E, C, I>(
+fn onboard_settled_integration<H, C, I>(
     address_id: &PaneAddressId,
     pane: &DiscoveredPane,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     installation: &crate::IntegrationPackageInstallation,
 ) -> Result<(), String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -606,15 +606,15 @@ where
     }
 }
 
-fn automatically_register_integration<E, C, I>(
+fn automatically_register_integration<H, C, I>(
     address_id: &PaneAddressId,
     agent_session_id: &AgentSessionId,
     agent_runtime: AgentRuntime,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     namespace: &StateNamespace,
 ) -> Result<(), String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -878,15 +878,15 @@ pub(crate) fn registration_command(
     ))
 }
 
-fn finish_challenge_prompt<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn finish_challenge_prompt<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     namespace: &StateNamespace,
     registration_id: &str,
     outcome: TransitionKind,
     attribution: &MutationAttribution,
 ) -> Result<(), String>
 where
-    E: crate::Host,
+    H: crate::Host,
 {
     StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
@@ -932,13 +932,13 @@ fn shell_argument(value: &str) -> String {
     }
 }
 
-pub fn execute_integration_operation<E, C, I>(
+pub fn execute_integration_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1032,13 +1032,13 @@ where
     Ok(response)
 }
 
-fn record_registration_failure<E, C, I>(
+fn record_registration_failure<H, C, I>(
     nonce: &str,
     error: &str,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<(), String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1062,13 +1062,13 @@ where
         .map_err(|store_error| store_error.to_string())
 }
 
-fn execute_attempt_operation<E, C, I>(
+fn execute_attempt_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1179,12 +1179,12 @@ fn authorized_delivery_session(
 /// from the shared construction path, so a recovered envelope carries the
 /// current trusted instruction and tool metadata over durable message and
 /// attempt facts rather than the original prompt's bytes.
-fn execute_delivery_inbox<E, C, I>(
+fn execute_delivery_inbox<H, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1282,20 +1282,13 @@ fn validate_registration_input(input: &RegistrationInput) -> Result<(), String> 
     Ok(())
 }
 
-fn integration_discovery<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn integration_discovery<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<DiscoveredWorktree, String>
 where
-    E: crate::Host,
+    H: crate::Host,
 {
-    Ok(match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    })
+    Ok(runtime.host.space(runtime.space_locator(), None)?)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

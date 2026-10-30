@@ -103,9 +103,9 @@ pub fn spaces_to_wake(
     spaces
 }
 
-pub(crate) fn drain_receipt<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+pub(crate) fn drain_receipt<H, C, I>(runtime: &LifecycleRuntime<'_, H, C, I>) -> Value
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -241,12 +241,12 @@ fn observe_agent_attempt(
     }
 }
 
-pub(crate) fn publish_status_metadata<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn publish_status_metadata<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     discovered: &crate::DiscoveredWorktree,
 ) -> Result<(), String>
 where
-    E: Host,
+    H: Host,
 {
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
@@ -294,11 +294,11 @@ where
     Ok(())
 }
 
-pub fn drain_mailboxes<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn drain_mailboxes<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<DrainReport, String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -637,22 +637,16 @@ where
     Ok(report)
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn discover<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<crate::DiscoveredWorktree, String>
 where
-    E: Host,
+    H: Host,
 {
-    match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), None)
-            .map_err(String::from),
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)
-            .map_err(String::from),
-    }
+    runtime
+        .host
+        .space(runtime.space_locator(), None)
+        .map_err(String::from)
 }
 
 fn live_candidate_matches(

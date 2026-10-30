@@ -66,9 +66,9 @@ struct ActivatedSpace {
 /// activation. A hook is a convenience at a session or prompt boundary, so
 /// anything unavailable — the state directory, Herdr, the space — leaves the
 /// turn untouched rather than interrupting the person with a diagnostic.
-fn activated_space<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Option<ActivatedSpace>
+fn activated_space<H, C, I>(runtime: &LifecycleRuntime<'_, H, C, I>) -> Option<ActivatedSpace>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -78,15 +78,7 @@ where
     // first because it is one local file: where Namedrop was never set up,
     // every prompt skips the Herdr discovery below instead of paying for it.
     let mut store = StateStore::open_read_only(runtime.state_directory).ok()??;
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace_id), None),
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None),
-    }
-    .ok()?;
+    let discovered = runtime.host.space(runtime.space_locator(), None).ok()?;
     let setup = crate::lifecycle::load_collaboration_setup_from_store(
         &discovered,
         runtime.session_socket_id,
@@ -109,9 +101,9 @@ where
 /// The policy a session reads once, or `None` where no roster will ever follow
 /// it. It is gated on activation rather than on a named agent, because naming
 /// happens after activation and often after the session has started.
-pub(crate) fn session_policy<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Option<String>
+pub(crate) fn session_policy<H, C, I>(runtime: &LifecycleRuntime<'_, H, C, I>) -> Option<String>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -123,11 +115,11 @@ where
 /// resolved space, no activation, or no named agent at all. A lone agent still
 /// gets its own row: its persona is its default role guidance whether or not a
 /// peer exists.
-pub(crate) fn workspace_context<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn workspace_context<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Option<WorkspaceContext>
 where
-    E: Host,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {

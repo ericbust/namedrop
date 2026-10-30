@@ -42,13 +42,13 @@ struct PreviewInput {
 }
 
 /// Read request progress and replies without running recovery or dispatch.
-pub fn execute_handoff_operation<E, C, I>(
+pub fn execute_handoff_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -89,14 +89,7 @@ where
         }
         _ => return Err(format!("unsupported handoff operation: {operation}")),
     };
-    let discovered = match runtime.workspace_id {
-        Some(workspace) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
         .current_pane_id
@@ -153,9 +146,9 @@ where
     }).map_err(|e| e.to_string())
 }
 
-fn preview<E, C, I>(input: Value, runtime: &LifecycleRuntime<'_, E, C, I>) -> Result<Value, String>
+fn preview<H, C, I>(input: Value, runtime: &LifecycleRuntime<'_, H, C, I>) -> Result<Value, String>
 where
-    E: crate::Host,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -176,14 +169,7 @@ where
     }
     // The Space is resolved before the context block is previewed, so the
     // preview answers for the same context root the send would capture against.
-    let discovered = match runtime.workspace_id {
-        Some(workspace) => runtime
-            .host
-            .space(crate::SpaceLocator::Workspace(workspace), None)?,
-        None => runtime
-            .host
-            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let context = input
         .context
         .map(|c| crate::context::preview_message_context(c, &discovered))

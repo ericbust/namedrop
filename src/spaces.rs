@@ -68,13 +68,13 @@ fn is_label_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
 }
 
-pub(crate) struct HerdrWorkspaces<'a, E> {
-    herdr: &'a E,
+pub(crate) struct HerdrWorkspaces<'a, H> {
+    herdr: &'a H,
     listed: std::cell::OnceCell<Vec<crate::ListedWorkspace>>,
 }
 
-impl<'a, E: crate::Host> HerdrWorkspaces<'a, E> {
-    pub(crate) fn new(herdr: &'a E) -> Self {
+impl<'a, H: crate::Host> HerdrWorkspaces<'a, H> {
+    pub(crate) fn new(herdr: &'a H) -> Self {
         Self {
             herdr,
             listed: std::cell::OnceCell::new(),
@@ -137,9 +137,9 @@ impl SpaceEntry {
 }
 
 impl SpaceDirectory {
-    pub(crate) fn load<E: crate::Host>(
+    pub(crate) fn load<H: crate::Host>(
         store: &mut crate::StateStore,
-        workspaces: &HerdrWorkspaces<'_, E>,
+        workspaces: &HerdrWorkspaces<'_, H>,
         socket: &str,
         here: &SpaceId,
         run: &RecipientRun,
@@ -325,8 +325,8 @@ impl LiveSpaces {
 
     /// Reads each listed workspace once. An empty list issues no Herdr
     /// command, so work that stays in one workspace reads exactly what it did.
-    pub(crate) fn load<E: crate::Host>(
-        herdr: &E,
+    pub(crate) fn load<H: crate::Host>(
+        herdr: &H,
         here: crate::DiscoveredWorktree,
         spaces: &[SpaceId],
     ) -> Self {
@@ -467,9 +467,9 @@ impl RoutePlan {
     }
 }
 
-pub(crate) fn route<E: crate::Host>(
+pub(crate) fn route<H: crate::Host>(
     store: &mut crate::StateStore,
-    workspaces: &HerdrWorkspaces<'_, E>,
+    workspaces: &HerdrWorkspaces<'_, H>,
     namespace: &StateNamespace,
     (author, in_reply_to): (&crate::PaneAddressId, Option<&crate::MessageId>),
     run: &RecipientRun,

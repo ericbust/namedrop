@@ -230,6 +230,66 @@ fn naming_shortcut_has_a_real_popup_entrypoint() {
 }
 
 #[test]
+fn every_popup_launch_preserves_the_full_ordered_argv() {
+    let f = Fixture::new();
+    for (mode, entrypoint, width, height) in [
+        ("name", "naming", "72", "20"),
+        ("manage", "management", "72", "24"),
+        ("doctor", "doctor", "72", "24"),
+        ("status", "agent-status", "84", "24"),
+        ("tour", "tour", "72", "24"),
+    ] {
+        let output = f
+            .command()
+            .args([
+                "--herdr-workspace",
+                "w1",
+                "--herdr-pane",
+                "p1",
+                "ui",
+                "launch",
+                mode,
+            ])
+            .env("TEST_AGENT", "1")
+            .env("TEST_AGENT_SESSION", "origin-session")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let args = fs::read_to_string(f.0.join("args")).unwrap();
+        let state = format!("HERDR_PLUGIN_STATE_DIR={}", f.0.join("state").display());
+        let expected = [
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            "namedrop",
+            "--entrypoint",
+            entrypoint,
+            "--placement",
+            "popup",
+            "--width",
+            width,
+            "--height",
+            height,
+            "--env",
+            "NAMEDROP_TARGET_WORKSPACE=w1",
+            "--env",
+            "NAMEDROP_TARGET_PANE=p1",
+            "--env",
+            "NAMEDROP_TARGET_TERMINAL=t1",
+            "--env",
+            "NAMEDROP_TARGET_SESSION=origin-session",
+            "--env",
+            &state,
+            "--env",
+            "HERDR_SOCKET_PATH=test-socket",
+            "--focus",
+        ];
+        assert_eq!(args.lines().collect::<Vec<_>>(), expected, "{mode}");
+    }
+}
+
+#[test]
 fn status_launch_preserves_origin_and_never_prompts_it() {
     let f = Fixture::new();
     let output = f
