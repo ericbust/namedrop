@@ -319,19 +319,27 @@ click.
 
 ### Receipt copy
 
-| Wire stage                   | Shown as              | Icon               | Tone                       |
-| ---------------------------- | --------------------- | ------------------ | -------------------------- |
-| `queued`                     | Queued                | clock              | muted                      |
-| `delivered`                  | Delivered             | check              | muted                      |
-| `working`                    | Working on it         | half-filled circle | `--working` icon           |
-| `replied`                    | Replied               | reply arrow        | muted, links to the thread |
-| `completed`, kind `settled`  | Done                  | check-circle       | muted                      |
-| `completed`, kind `no_reply` | Done, no reply needed | check-circle       | muted                      |
-| `completed`, any other kind  | Done                  | check-circle       | muted, raw kind in `title` |
-| `held`                       | Held while paused     | pause              | `--held-text`              |
-| `failed`                     | Not delivered         | alert              | `--failed-text`            |
-| `cancelled`                  | Cancelled             | slash-circle       | muted                      |
-| `unknown`                    | Status unknown        | dashed circle      | muted                      |
+| Wire stage                                 | Shown as                | Icon               | Tone                       |
+| ------------------------------------------ | ----------------------- | ------------------ | -------------------------- |
+| `queued`                                   | Queued                  | clock              | muted                      |
+| `delivered`                                | Delivered               | check              | muted                      |
+| `working`                                  | Working on it           | half-filled circle | `--working` icon           |
+| `replied`                                  | Replied                 | reply arrow        | muted, links to the thread |
+| `completed`, kind `settled`, to an agent   | Ended without an answer | dashed circle      | muted                      |
+| `completed`, kind `settled`, to a terminal | Done                    | check-circle       | muted                      |
+| `completed`, kind `no_reply`               | Done, no reply needed   | check-circle       | muted                      |
+| `completed`, any other kind                | Done                    | check-circle       | muted, raw kind in `title` |
+| `held`                                     | Held while paused       | pause              | `--held-text`              |
+| `failed`                                   | Not delivered           | alert              | `--failed-text`            |
+| `cancelled`                                | Cancelled               | slash-circle       | muted                      |
+| `unknown`                                  | Status unknown          | dashed circle      | muted                      |
+
+`settled` means the recipient's turn ended without closing the request. For an
+agent that is an interruption or a forgotten answer, which Needs-you reports as
+"didn't answer a request", so the receipt never says Done. For a terminal the
+command finished. An agent in another workspace, or an id the page cannot
+place, counts as an agent; the operator and a member of a kind the page does
+not know read Done.
 
 ### Report card
 

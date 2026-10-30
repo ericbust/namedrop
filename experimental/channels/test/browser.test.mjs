@@ -1311,7 +1311,7 @@ test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t
     [{ stage: "delivered" }, "Delivered", null],
     [{ stage: "working", acked_at_ms: 100 }, "Working on it", null],
     [{ stage: "replied", reply_id: "reply" }, "Replied", null],
-    [{ stage: "completed", kind: "settled" }, "Done", null],
+    [{ stage: "completed", kind: "settled" }, "Ended without an answer", null],
     [{ stage: "completed", kind: "no_reply" }, "Done, no reply needed", null],
     [{ stage: "completed", kind: "success" }, "Done", "success"],
     [{ stage: "held" }, "Held while paused", null],
@@ -1329,7 +1329,11 @@ test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t
         { to: "human", stage: { stage: "working", acked_at_ms: 100 } },
       ],
     }),
+    message("command", "ls", {
+      legs: [{ to: "shell", stage: { stage: "completed", kind: "settled" } }],
+    }),
   );
+  value.frame.participants = people();
   const ui = await open(t, (client) => replay(client, [value]));
   await ui.live();
   for (const [index, [, label, title]] of stages.entries()) {
@@ -1345,7 +1349,14 @@ test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t
     await ui.page
       .locator('[data-message-id="several"] .receipt li')
       .allTextContents(),
-    ["an unknown agentDone", "YouWorking on it"],
+    ["an unknown agentEnded without an answer", "YouWorking on it"],
+  );
+  assert.equal(
+    await ui.page
+      .locator('[data-message-id="command"] .receipt li')
+      .textContent(),
+    "Done",
+    "a terminal's settled command is done",
   );
   assert.equal(
     await ui.page.getByText(/settled|no_reply|Completed/).count(),

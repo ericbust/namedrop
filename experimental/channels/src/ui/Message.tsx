@@ -258,7 +258,11 @@ function Receipts({
   return (
     <ul className="receipt" aria-label="Delivery">
       {message.legs.map((leg) => {
-        const copy = receiptCopy(leg.stage, paused);
+        const copy = receiptCopy(
+          leg.stage,
+          participant(directory, leg.to),
+          paused,
+        );
         return (
           <li
             key={leg.to}
@@ -402,7 +406,11 @@ function Route({
       case "pulled-in":
         return <li>{routeCopy.pulledIn}</li>;
       case "receipt": {
-        const copy = receiptCopy(part.stage, paused);
+        const copy = receiptCopy(
+          part.stage,
+          participant(directory, part.id),
+          paused,
+        );
         return (
           <li
             data-stage={part.stage.stage}

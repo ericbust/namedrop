@@ -60,12 +60,49 @@ const stageCopy = {
   unknown: { label: "Status unknown", icon: "unknown", tone: "muted" },
 } satisfies Record<Exclude<DeliveryStage["stage"], "completed">, ReceiptCopy>;
 const completedCopy: ReadonlyMap<string, ReceiptCopy> = new Map([
-  ["settled", done],
   ["no_reply", { ...done, label: "Done, no reply needed" }],
 ]);
-export function receiptCopy(stage: DeliveryStage, paused = false): ReceiptCopy {
+const ended: ReceiptCopy = {
+  label: "Ended without an answer",
+  icon: "unknown",
+  tone: "muted",
+};
+// A settled turn closed no request. An agent's turn should have answered, as
+// Needs-you says; a terminal's command just finished.
+function settledCopy(recipient: Participant): ReceiptCopy {
+  switch (recipient.kind) {
+    case "operator":
+      return done;
+    case "envoy":
+    case "unknown":
+      return ended;
+    case "member":
+      switch (recipient.member.kind.type) {
+        case "agent":
+          return ended;
+        case "terminal":
+        case "human":
+        case "unknown":
+          return done;
+        default: {
+          const exhaustive: never = recipient.member.kind;
+          return exhaustive;
+        }
+      }
+    default: {
+      const exhaustive: never = recipient;
+      return exhaustive;
+    }
+  }
+}
+export function receiptCopy(
+  stage: DeliveryStage,
+  recipient: Participant,
+  paused = false,
+): ReceiptCopy {
   if (paused && stage.stage === "queued") return stageCopy.held;
   if (stage.stage !== "completed") return stageCopy[stage.stage];
+  if (stage.kind === "settled") return settledCopy(recipient);
   return completedCopy.get(stage.kind) ?? { ...done, title: stage.kind };
 }
 

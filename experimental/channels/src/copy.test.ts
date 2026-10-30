@@ -25,8 +25,31 @@ import {
   sendErrorCopy,
   threadControlCopy,
 } from "./copy.ts";
-import type { Attention, DeliveryStage, Member } from "./model.ts";
+import type {
+  Attention,
+  DeliveryStage,
+  Member,
+  MemberKind,
+  Participant,
+} from "./model.ts";
 import { parseEvent } from "./wire.ts";
+
+function recipient(kind: MemberKind): Participant {
+  return {
+    kind: "member",
+    member: {
+      id: "id-x" as Member["id"],
+      alias: "@x",
+      kind,
+      activity: "idle",
+      recentlyClosed: false,
+      role: null,
+      paneLabel: null,
+    },
+    home: null,
+  };
+}
+const agentRecipient = recipient({ type: "agent", runtime: "codex" });
 
 test("receipt copy covers every stage and completed kind in plain words", () => {
   const cases: [DeliveryStage, string, string, string, string | undefined][] = [
@@ -48,8 +71,8 @@ test("receipt copy covers every stage and completed kind in plain words", () => 
     ],
     [
       { stage: "completed", kind: "settled" },
-      "Done",
-      "done",
+      "Ended without an answer",
+      "unknown",
       "muted",
       undefined,
     ],
@@ -80,7 +103,7 @@ test("receipt copy covers every stage and completed kind in plain words", () => 
     [{ stage: "unknown" }, "Status unknown", "unknown", "muted", undefined],
   ];
   for (const [stage, label, icon, tone, title] of cases) {
-    const copy = receiptCopy(stage);
+    const copy = receiptCopy(stage, agentRecipient);
     assert.deepEqual(
       {
         label: copy.label,
@@ -93,6 +116,48 @@ test("receipt copy covers every stage and completed kind in plain words", () => 
     );
     assert.doesNotMatch(copy.label, /settled|no_reply|_/);
   }
+});
+
+test("a settled turn reads Ended without an answer for an agent, and Done for a terminal whose command finished", () => {
+  const settled: DeliveryStage = { stage: "completed", kind: "settled" };
+  const ended = {
+    label: "Ended without an answer",
+    icon: "unknown",
+    tone: "muted",
+  };
+  const done = { label: "Done", icon: "done", tone: "muted" };
+  const cases: [string, Participant, object][] = [
+    ["an agent", agentRecipient, ended],
+    [
+      "an agent with no runtime",
+      recipient({ type: "agent", runtime: null }),
+      ended,
+    ],
+    [
+      "an agent in another workspace",
+      { kind: "envoy", id: "envoy:w2:x" as Member["id"], home: null },
+      ended,
+    ],
+    [
+      "an id the page cannot place",
+      { kind: "unknown", id: "x" as Member["id"] },
+      ended,
+    ],
+    ["a terminal", recipient({ type: "terminal" }), done],
+    [
+      "a member of a kind the page does not know",
+      recipient({ type: "unknown" }),
+      done,
+    ],
+    ["the operator", { kind: "operator" }, done],
+  ];
+  for (const [who, to, shown] of cases)
+    assert.deepEqual(receiptCopy(settled, to), shown, who);
+  for (const to of [agentRecipient, recipient({ type: "terminal" })])
+    assert.equal(
+      receiptCopy({ stage: "completed", kind: "no_reply" }, to).label,
+      "Done, no reply needed",
+    );
 });
 
 function attention(
@@ -411,13 +476,19 @@ test("send errors show the server's words as a sentence for 400, 404 and 409 and
 });
 
 test("a queued leg in a paused channel reads Held while paused, other stages keep their words", () => {
-  assert.deepEqual(receiptCopy({ stage: "queued" }, true), {
+  assert.deepEqual(receiptCopy({ stage: "queued" }, agentRecipient, true), {
     label: "Held while paused",
     icon: "pause",
     tone: "held",
   });
-  assert.equal(receiptCopy({ stage: "queued" }, false).label, "Queued");
-  assert.equal(receiptCopy({ stage: "delivered" }, true).label, "Delivered");
+  assert.equal(
+    receiptCopy({ stage: "queued" }, agentRecipient, false).label,
+    "Queued",
+  );
+  assert.equal(
+    receiptCopy({ stage: "delivered" }, agentRecipient, true).label,
+    "Delivered",
+  );
   assert.deepEqual(pendingCopy, {
     sending: { label: "Sending…", icon: "clock" },
     sent: { label: "Sent", icon: "check" },
