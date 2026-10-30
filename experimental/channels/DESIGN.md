@@ -363,6 +363,14 @@ A nudge or hook is one 13px muted line. The avatar column holds a 16px drawn ico
 a bell for a nudge, a plug for a hook. The text reads "Nudge" or "Hook" in 600,
 then the body on the same line. System rows have no receipts unless one failed.
 
+A nudge never shows a raw id. "Coordination coordination-… (revision 3)
+remains open." reads "This coordination (revision 3) remains open.", and each
+"Assignment assignment-… revision 4: needs_continuation." reads "Assignment 1,
+revision 4: needs continuation.", numbered in order of appearance. Any other
+id (`coordination-`, `assignment-`, `message-`, `thread-`, `delivery-`,
+`attempt-`, `delivery-attempt-` or `request-`, then three digit groups) is
+dropped with the space around it. The server's text is the body's tooltip.
+
 ### Needs-you banner
 
 When the channel needs you, show a banner between the member strip and the

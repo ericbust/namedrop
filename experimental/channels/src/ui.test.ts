@@ -394,6 +394,47 @@ test("an escaped mention reads as the plain name in prose, and stays literal in 
   assert.ok(markup.includes("write \\@codex here"), markup);
 });
 
+test("a nudge shows tracked work in plain words and keeps the server's text in the tooltip", async () => {
+  const { Message } = await load<typeof import("./ui/Message.tsx")>(
+    "/src/ui/Message.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  const raw =
+    "Coordination coordination-1793308769836090626-2129769-1 (revision 3) remains open.\nAssignment assignment-1793308772078455575-2130363-4 revision 4: needs_continuation.";
+  const row = (kind: string, text: string) => {
+    fixture.frame.messages = [
+      {
+        ...fixture.frame.messages[0],
+        kind,
+        body: { text, truncated: false },
+      },
+    ];
+    const { channel } = space(fixture);
+    const message = [...channel.messages.values()][0];
+    assert.ok(message);
+    return renderToStaticMarkup(
+      createElement(Message, {
+        message,
+        directory: { members: channel.members, homes: new Map() },
+        recipients: [],
+        exit: undefined,
+      }),
+    );
+  };
+  const nudge = row("nudge", raw);
+  const body = nudge.match(
+    /<span class="body"( title="[^"]*")?>(.*?)<\/span>/s,
+  );
+  assert.ok(body, nudge);
+  assert.equal(
+    text(body[2] ?? ""),
+    "This coordination (revision 3) remains open.\nAssignment 1, revision 4: needs continuation.",
+  );
+  assert.equal(body[1], ` title="${raw}"`);
+  assert.doesNotMatch(row("nudge", "Please continue"), /title=/);
+  assert.ok(row("hook", raw).includes(raw), "a hook keeps its text");
+});
+
 test("a terminal run for the request decides Exit over the code in the result body", async () => {
   const { Message } = await load<typeof import("./ui/Message.tsx")>(
     "/src/ui/Message.tsx",

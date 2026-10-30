@@ -27,6 +27,7 @@ import type {
   TerminalResult,
   TerminalRun,
 } from "../model.ts";
+import { plainNudge } from "../nudge.ts";
 import { peekTargetOf } from "../peek.ts";
 import {
   type Chat,
@@ -560,7 +561,8 @@ function SystemRow({
   paused: boolean;
 }) {
   const failed = message.legs.some((leg) => leg.stage.stage === "failed");
-  const { text, truncated } = message.body;
+  const { text: raw, truncated } = message.body;
+  const text = message.kind === "nudge" ? plainNudge(raw) : raw;
   return (
     <article
       className={`system${arrive ? " arrive" : ""}${located ? " located" : ""}`}
@@ -571,7 +573,7 @@ function SystemRow({
       <div className="msg-content">
         <p>
           <strong>{message.kind === "hook" ? "Hook" : "Nudge"}</strong>
-          <span className="body">
+          <span className="body" title={text === raw ? undefined : raw}>
             {formattedText(text, previewLimit(text))}
             {text.length > PREVIEW || truncated ? "…" : null}
           </span>
