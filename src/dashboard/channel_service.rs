@@ -313,26 +313,38 @@ mod tests {
     #[test]
     fn one_notification_wakes_every_waiter() {
         let wake = ChannelWake::default();
-        let ready = Arc::new(std::sync::Barrier::new(5));
+        let (parked, parking) = std::sync::mpsc::channel();
         let (sent, received) = std::sync::mpsc::channel();
         let workers: Vec<_> = (0..4)
             .map(|_| {
                 let wake = wake.clone();
-                let ready = ready.clone();
+                let parked = parked.clone();
                 let sent = sent.clone();
                 thread::spawn(move || {
-                    let generation = wake.generation();
-                    ready.wait();
-                    wake.wait(generation, &AtomicBool::new(false), Duration::from_secs(2));
+                    let generation = wake.0.generation.lock().unwrap();
+                    let observed = *generation;
+                    parked.send(()).unwrap();
+                    drop(
+                        wake.0
+                            .ready
+                            .wait_timeout_while(generation, Duration::from_secs(2), |generation| {
+                                *generation == observed
+                            })
+                            .unwrap(),
+                    );
                     sent.send(()).unwrap();
                 })
             })
             .collect();
-        ready.wait();
-        thread::sleep(Duration::from_millis(100));
-        wake.notify();
         for _ in 0..4 {
-            received.recv_timeout(Duration::from_secs(1)).unwrap();
+            parking.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        wake.notify();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        for _ in 0..4 {
+            received
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap();
         }
         for worker in workers {
             worker.join().unwrap();
