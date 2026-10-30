@@ -136,6 +136,21 @@ fn input_uses_explicit_host_and_only_supplied_candidates() {
 }
 
 #[test]
+fn response_caps_topic_words_without_changing_recipients() {
+    let input = test_input(&rows(), "ask several");
+    let (to, reason) = validate_response(
+        &json!({
+            "to": ["codex", "ghost", "claude", "codex"],
+            "reason": "Parser regression test review request",
+        }),
+        &input.aliases,
+    )
+    .unwrap();
+    assert_eq!(to, ["codex", "claude"]);
+    assert_eq!(reason, "Parser regression test review");
+}
+
+#[test]
 fn response_only_selects_unique_roster_aliases_and_caps_its_reason() {
     let input = test_input(&rows(), "ask several");
     let (to, reason) = validate_response(
