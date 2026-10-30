@@ -12,7 +12,13 @@ import {
   replyPrefill,
 } from "../attention.ts";
 import type { CompletionContext } from "../complete.ts";
-import { repliesCopy, replyLabel, replyPlaceholder } from "../copy.ts";
+import {
+  answerInPane,
+  repliesCopy,
+  replyLabel,
+  replyPlaceholder,
+  responseCopy,
+} from "../copy.ts";
 import { idle } from "../delivery.ts";
 import type {
   Channel,
@@ -41,8 +47,8 @@ import { useEscape } from "./useEscape.ts";
 
 export type ThreadResponse =
   | { kind: "reply"; intent: ReplyIntent }
-  | { kind: "message"; prepare: () => void }
-  | { kind: "pane"; name: string };
+  | { kind: "message"; name: string; ready: boolean; prepare: () => void }
+  | { kind: "pane"; name: string | null; pane: string | null };
 
 export function ThreadPane({
   channel,
@@ -233,33 +239,35 @@ export function ThreadPane({
           <PendingMessage key={entry.requestId} entry={entry} />
         ))}
       </div>
-      {replyIntent !== null && draftPreserved && (
-        <p className="earlier-thread" role="status">
-          Your existing draft was kept. Send or clear it before preparing this
-          reply.
-        </p>
-      )}
       {activeReply !== null && to === null && (
-        <p className="earlier-thread" role="status">
+        <p className="thread-answer" role="status">
           The responsible agent is no longer available. Use its pane in Herdr to
           respond.
         </p>
       )}
       {response?.kind === "pane" && (
-        <p className="earlier-thread" role="status">
-          Respond in {response.name} in Herdr.
+        <p
+          className="thread-answer"
+          role="status"
+          title={response.pane ?? undefined}
+        >
+          {answerInPane(response.name)}
         </p>
       )}
       {response?.kind === "message" && (
-        <p className="earlier-thread" role="status">
-          Respond in the channel.{" "}
-          <button
-            type="button"
-            className="text-button"
-            onClick={response.prepare}
-          >
-            Prepare response
-          </button>
+        <p className="thread-answer" role="status">
+          Answer tracked work in the channel.{" "}
+          {response.ready ? (
+            `Your message to ${response.name} is ready there.`
+          ) : (
+            <button
+              type="button"
+              className="text-button"
+              onClick={response.prepare}
+            >
+              {responseCopy.message(response.name)}
+            </button>
+          )}
         </p>
       )}
       {(response === null || response.kind === "reply") &&
@@ -274,6 +282,14 @@ export function ThreadPane({
             placeholder={replyPlaceholder(rule.to)}
             label={replyLabel(rule.to)}
             rule={rule}
+            notice={
+              replyIntent !== null && draftPreserved ? (
+                <p role="status">
+                  Your existing draft was kept. Send or clear it before
+                  preparing this reply.
+                </p>
+              ) : null
+            }
             onEdit={(text) => onEdit(composer, text)}
             onSend={(source, startedAt) =>
               onSend(

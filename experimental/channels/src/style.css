@@ -817,7 +817,8 @@ button.member:not(.more):hover {
   font-size: var(--text-xs);
   color: var(--text-muted);
 }
-.thread-error .text-button {
+.thread-error .text-button,
+.thread-answer .text-button {
   font-size: var(--text-xs);
 }
 .divider {
@@ -1842,6 +1843,17 @@ code.inline {
 }
 .composer-guard {
   color: var(--text);
+}
+.thread-answer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  flex: none;
+  padding: 0 var(--space-5) var(--space-3);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  color: var(--text-muted);
 }
 .composer-error {
   display: flex;

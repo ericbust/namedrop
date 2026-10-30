@@ -4,6 +4,7 @@ import { after, before, test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer, type ViteDevServer } from "vite";
+import type { AddressId, Draft, DraftKey } from "./model.ts";
 import { exitFor, initialState, reduce, runsByMessage } from "./store.ts";
 import { parseEvent } from "./wire.ts";
 
@@ -757,21 +758,92 @@ test("focused tracked evidence exposes the channel response path without a rejec
   } satisfies Parameters<typeof ThreadPane>[0];
   const ordinary = renderToStaticMarkup(createElement(ThreadPane, props));
   assert.ok(ordinary.includes("textarea"));
-  const markup = renderToStaticMarkup(
+  const answer = (response: Parameters<typeof ThreadPane>[0]["response"]) => {
+    const markup = renderToStaticMarkup(
+      createElement(ThreadPane, { ...props, response }),
+    );
+    assert.equal(markup.includes("textarea"), false);
+    const line = markup.match(
+      /<p class="thread-answer" role="status"( title="[^"]*")?>(.*?)<\/p>/s,
+    );
+    assert.ok(line, markup);
+    return {
+      text: text(line[2] ?? "").replaceAll("&#x27;", "'"),
+      title: line[1],
+      buttons: buttons(line[2] ?? ""),
+    };
+  };
+  assert.deepEqual(
+    answer({ kind: "message", name: "@codex", ready: false, prepare() {} }),
+    {
+      text: "Answer tracked work in the channel. Message @codex",
+      title: undefined,
+      buttons: ["Message @codex"],
+    },
+  );
+  assert.deepEqual(
+    answer({ kind: "message", name: "@codex", ready: true, prepare() {} }),
+    {
+      text: "Answer tracked work in the channel. Your message to @codex is ready there.",
+      title: undefined,
+      buttons: [],
+    },
+  );
+  assert.deepEqual(
+    answer({ kind: "pane", name: "@terminal", pane: "w1:term" }),
+    {
+      text: "Answer it in @terminal's pane in Herdr.",
+      title: ' title="w1:term"',
+      buttons: [],
+    },
+  );
+  const reply = {
+    kind: "reply",
+    intent: {
+      kind: "reply",
+      threadId: "tracked",
+      messageId: "tracked-message",
+      addressId: [...channel.members.keys()][0] ?? ("" as AddressId),
+    },
+  } as const;
+  const gone = renderToStaticMarkup(
     createElement(ThreadPane, {
       ...props,
-      response: { kind: "message", prepare() {} },
+      directory: { ...directory, members: new Map() },
+      response: reply,
     }),
   );
-  assert.ok(markup.includes("Respond in the channel"));
-  assert.ok(markup.includes("Prepare response"));
-  assert.equal(markup.includes("textarea"), false);
-  const pane = renderToStaticMarkup(
+  assert.equal(gone.includes("textarea"), false);
+  assert.ok(
+    gone.includes(
+      '<p class="thread-answer" role="status">The responsible agent is no longer available. Use its pane in Herdr to respond.</p>',
+    ),
+    gone,
+  );
+  const kept = renderToStaticMarkup(
     createElement(ThreadPane, {
       ...props,
-      response: { kind: "pane", name: "@terminal" },
+      drafts: new Map<DraftKey, Draft>([
+        [
+          "thread:tracked",
+          {
+            key: channel.key,
+            thread: "tracked",
+            text: "my words",
+            attempt: null,
+            failure: null,
+          },
+        ],
+      ]),
+      response: reply,
     }),
   );
-  assert.ok(pane.includes("Respond in @terminal in Herdr"));
-  assert.equal(pane.includes("textarea"), false);
+  assert.ok(kept.includes("textarea"), kept);
+  assert.ok(
+    kept.includes(
+      '<div class="composer-status"><p role="status">Your existing draft was kept. Send or clear it before preparing this reply.</p></div>',
+    ),
+    kept,
+  );
+  assert.equal(kept.includes("thread-answer"), false);
 });

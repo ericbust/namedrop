@@ -492,6 +492,21 @@ reply preview. The pane slides in from 16px right with a fade over `--duration`.
 Below 860px of window width, the pane stacks under the timeline instead of
 beside it.
 
+A Needs-you conversation that is answered somewhere else says where, in the
+composer's place: one 12px muted line, 20px from the sides and 12px from the
+bottom. Only one place offers an action at a time.
+
+| The item's answer               | The line                                                                          |
+| ------------------------------- | --------------------------------------------------------------------------------- |
+| A channel message, ready        | "Answer tracked work in the channel. Your message to @claude is ready there."     |
+| A channel message, not prepared | "Answer tracked work in the channel." then a **Message @claude** text button      |
+| The agent's pane                | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip       |
+| A reply to an agent now gone    | "The responsible agent is no longer available. Use its pane in Herdr to respond." |
+
+When a reply's thread already holds a draft, the composer stays and its status
+row reads, 12px muted: "Your existing draft was kept. Send or clear it before
+preparing this reply."
+
 ### History window
 
 The timeline keeps at most 600 loaded rows. A channel is in one of two modes.
@@ -542,6 +557,14 @@ main column, under the timeline, and at the bottom of the thread pane.
 - **Hint**: while the box has focus, a 12px muted line under it says where Enter
   sends the text. In the thread pane it reads "Enter to send · Shift+Enter for
   a new line". The channel composer's hints are in Channel chat below.
+- **Kept draft**: when a Needs-you **Message @claude** finds the channel box
+  already holding other text, the text stays and the status row under the box
+  reads, in 12px `--text` like the recipient guard: "Your draft is still here.
+  Send or clear it, then press Message @claude again.", with the pressed
+  button's own label. There is no link in it; the card's button is the retry.
+  The message that button prepared is not another draft, so pressing it again
+  never warns. When the agent is gone, the same row reads "The responsible
+  agent is no longer available. Use its pane in Herdr to respond."
 - The Jump to latest pill floats 16px above the composer, not above the
   timeline's bottom edge.
 

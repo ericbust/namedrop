@@ -16,7 +16,7 @@ import {
   prepareChannelMessage,
 } from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
-import { channelMention, composerPlaceholder } from "../copy.ts";
+import { channelMention, composerPlaceholder, responseCopy } from "../copy.ts";
 import { createDeliveries, deliveryOf } from "../delivery.ts";
 import type {
   ComposerId,
@@ -766,6 +766,14 @@ export function App() {
         composerId !== null &&
         (state.drafts.get(draftKey(composerId))?.text.length ?? 0) === 0,
     });
+  const channelDraft =
+    composerId === null
+      ? ""
+      : (state.drafts.get(draftKey(composerId))?.text ?? "");
+  const messaged =
+    channelResponse === null
+      ? null
+      : (members.get(channelResponse.addressId)?.alias ?? "the agent");
   let threadResponse: ThreadResponse | null = null;
   if (focused?.kind === "ready") {
     const response = focused.request.response;
@@ -776,15 +784,22 @@ export function App() {
       case "message":
         threadResponse = {
           kind: "message",
+          name: messaged ?? "the agent",
+          ready: response.preparation === "prepared" && channelDraft !== "",
           prepare: prepareResponse,
         };
         break;
-      case "pane":
+      case "pane": {
+        const member = members.get(response.addressId);
         threadResponse = {
           kind: "pane",
-          name: members.get(response.addressId)?.alias ?? response.addressId,
+          name: member?.alias ?? null,
+          pane: member?.paneLabel
+            ? `${member.paneLabel.text}${member.paneLabel.truncated ? "…" : ""}`
+            : null,
         };
         break;
+      }
       case undefined:
         break;
       default: {
@@ -858,25 +873,6 @@ export function App() {
                     dispatch({ type: "follow", key, atBottom })
                   }
                 />
-                {channelResponse?.preparation === "preserved" && (
-                  <p className="earlier-thread" role="status">
-                    Your channel draft or pending send was kept. Send or clear
-                    it, then retry.{" "}
-                    <button
-                      type="button"
-                      className="text-button"
-                      onClick={prepareResponse}
-                    >
-                      Prepare response
-                    </button>
-                  </p>
-                )}
-                {channelResponse?.preparation === "unavailable" && (
-                  <p className="earlier-thread" role="status">
-                    The responsible agent is no longer available. Use its pane
-                    in Herdr to respond.
-                  </p>
-                )}
                 {completion && composerId && (
                   <Composer
                     key={`composer:${channel.key}`}
@@ -887,6 +883,19 @@ export function App() {
                     placeholder={composerPlaceholder(channel)}
                     label={composerPlaceholder(channel)}
                     rule={channelRule}
+                    notice={
+                      channelResponse?.preparation === "preserved" ? (
+                        <p className="composer-guard" role="status">
+                          Your draft is still here. Send or clear it, then press{" "}
+                          {responseCopy.message(messaged ?? "the agent")} again.
+                        </p>
+                      ) : channelResponse?.preparation === "unavailable" ? (
+                        <p className="composer-guard" role="status">
+                          The responsible agent is no longer available. Use its
+                          pane in Herdr to respond.
+                        </p>
+                      ) : null
+                    }
                     onEdit={(text) => edit(composerId, text)}
                     onSend={(source, startedAt) => {
                       if (channel.viewMode === "browsing")

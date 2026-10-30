@@ -272,6 +272,31 @@ test("tracked response prepares plain words on the first line, the caret at its 
   assert.deepEqual(
     prepareChannelMessage(
       intent,
+      directory,
+      `${first}\nRef: coordination-1`,
+      false,
+      context,
+    ),
+    {
+      kind: "prepared",
+      text: `${first}\nRef: coordination-1`,
+      caret: first.length,
+    },
+    "the message this item prepared is not someone else's draft",
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      directory,
+      `${first}ship it\nRef: coordination-1`,
+      false,
+      context,
+    ),
+    { kind: "preserved" },
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
       { ...directory, members: new Map() },
       "",
       false,

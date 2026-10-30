@@ -133,6 +133,7 @@ export function Composer({
   placeholder,
   label,
   rule,
+  notice = null,
   onEdit,
   onSend,
 }: {
@@ -143,6 +144,7 @@ export function Composer({
   placeholder: string;
   label: string;
   rule: SendRule;
+  notice?: ReactNode;
   onEdit: (text: string) => void;
   onSend: (source: string, startedAt: number) => void;
 }) {
@@ -365,6 +367,8 @@ export function Composer({
           </p>
         ) : sending ? (
           <p>{composerCopy.sending}</p>
+        ) : notice !== null ? (
+          notice
         ) : guarded && source === null && text.trim() !== "" ? (
           <p className="composer-guard">
             {leading.length > 0

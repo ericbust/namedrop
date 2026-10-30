@@ -6319,22 +6319,34 @@ test("CL-A: preparing an already prepared coordination response keeps the draft 
     name: "Thread",
     exact: true,
   });
-  await pane
-    .getByRole("button", { name: "Prepare response", exact: true })
-    .click();
+  const answer = pane.locator(".thread-answer");
+  await answer
+    .getByText("Your message to @codex is ready there.", { exact: false })
+    .waitFor();
+  assert.equal(
+    await answer.getByRole("button").count(),
+    0,
+    "a ready message is never offered again in the pane",
+  );
+  const card = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true });
+  await card.click();
+  await until(() => ui.contextRequests.length === 2, "the second load");
+  await answer
+    .getByText("Your message to @codex is ready there.", { exact: false })
+    .waitFor();
   assert.equal(await draft.inputValue(), prepared);
   assert.equal(
     await ui.page
-      .getByText("Your channel draft or pending send was kept.", {
-        exact: false,
-      })
+      .getByText("Your draft is still here.", { exact: false })
       .count(),
     0,
   );
   assert.equal(ui.posts.attempts.length, 0);
   await draft.fill("");
-  await pane
-    .getByRole("button", { name: "Prepare response", exact: true })
+  await answer
+    .getByRole("button", { name: "Message @codex", exact: true })
     .click();
   await ui.page.waitForFunction(() =>
     document
@@ -6344,12 +6356,123 @@ test("CL-A: preparing an already prepared coordination response keeps the draft 
   assert.equal(await draft.inputValue(), prepared);
   assert.equal(
     await ui.page
-      .getByText("Your channel draft or pending send was kept.", {
-        exact: false,
-      })
+      .getByText("Your draft is still here.", { exact: false })
       .count(),
     0,
   );
+});
+
+test("DESIGN-R2 A5: a kept channel draft is named in the composer's status row, in 12px text, with the card's button as the retry", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  const card = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true });
+  await card.click();
+  const status = ui.page.locator("main .composer-status");
+  const notice = status.getByRole("status");
+  await notice.waitFor();
+  assert.deepEqual(
+    await notice.evaluate((line) => {
+      const probe = document.body.appendChild(document.createElement("p"));
+      probe.style.color = "var(--text)";
+      const text = getComputedStyle(probe).color;
+      probe.remove();
+      const box = line
+        .closest(".composer")
+        .querySelector(".composer-box")
+        .getBoundingClientRect();
+      return {
+        text: line.textContent,
+        size: getComputedStyle(line).fontSize,
+        color: getComputedStyle(line).color === text,
+        under: line.getBoundingClientRect().top >= box.bottom,
+        buttons: line.querySelectorAll("button").length,
+      };
+    }),
+    {
+      text: "Your draft is still here. Send or clear it, then press Message @codex again.",
+      size: "12px",
+      color: true,
+      under: true,
+      buttons: 0,
+    },
+  );
+  assert.equal(await draft.inputValue(), "my own words");
+  assert.equal(await ui.page.locator("main .earlier-thread").count(), 0);
+  await draft.fill("");
+  await card.click();
+  await eventually(
+    async () => (await draft.inputValue()).includes("Ref: decision-1"),
+    "the prepared message after the draft is cleared",
+  );
+  assert.equal(await notice.count(), 0);
+});
+
+test("DESIGN-R2 A6: a tracked conversation says where to answer on one 12px muted line in the composer's place", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  await ui.page.getByRole("button", { name: /^Show message/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const answer = pane.locator(".thread-answer");
+  await answer.waitFor();
+  const look = () =>
+    answer.evaluate((line) => {
+      const probe = document.body.appendChild(document.createElement("p"));
+      probe.style.color = "var(--text-muted)";
+      const muted = getComputedStyle(probe).color;
+      probe.remove();
+      const style = getComputedStyle(line);
+      const slot = line.closest("aside").getBoundingClientRect();
+      return {
+        text: line.textContent,
+        size: style.fontSize,
+        muted: style.color === muted,
+        insets: [style.paddingLeft, style.paddingRight, style.paddingBottom],
+        last: line === line.closest("aside").lastElementChild,
+        bottom: Math.round(slot.bottom - line.getBoundingClientRect().bottom),
+        composer: line.closest("aside").querySelector(".composer") !== null,
+      };
+    });
+  const at = {
+    size: "12px",
+    muted: true,
+    insets: ["20px", "20px", "12px"],
+    last: true,
+    bottom: 0,
+    composer: false,
+  };
+  assert.deepEqual(await look(), {
+    ...at,
+    text: "Answer tracked work in the channel. Message @codex",
+  });
+  await answer
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  await answer
+    .getByText("Your message to @codex is ready there.", { exact: false })
+    .waitFor();
+  assert.deepEqual(await look(), {
+    ...at,
+    text: "Answer tracked work in the channel. Your message to @codex is ready there.",
+  });
 });
 
 test("DESIGN-R2 A4: the prepared message puts the caret after the plain words, so typing lands above the Ref line", async (t) => {
