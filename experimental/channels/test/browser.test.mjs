@@ -3095,6 +3095,62 @@ test("Needs you: Show message on a live arrival does not replay its arrival when
   );
 });
 
+test("DESIGN-R2 A9: a conversation pane tints its target like Show message for 1.5 s, then clears it, with or without motion", async (t) => {
+  const { value, context } = actionableAttention();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const show = ui.page.getByRole("button", { name: /^Show message/ });
+  const target = ui.page
+    .getByRole("complementary", { name: "Thread", exact: true })
+    .locator('[data-message-id="attention-target"]');
+  const selected = await ui.page.evaluate(() => {
+    const probe = document.body.appendChild(document.createElement("div"));
+    probe.style.backgroundColor = "var(--bg-selected)";
+    const color = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return color;
+  });
+  const cleared = () =>
+    ui.page.waitForFunction(
+      () =>
+        !document
+          .querySelector('.thread [data-message-id="attention-target"]')
+          .classList.contains("located"),
+    );
+  let pressed = Date.now();
+  await show.click();
+  await target.waitFor();
+  assert.equal((await tint(target)).animation, "located");
+  await cleared();
+  assert.ok(Date.now() - pressed >= 1400, "the tint holds for 1.5 s");
+  assert.deepEqual(await tint(target), {
+    located: false,
+    animation: "none",
+    background: "rgba(0, 0, 0, 0)",
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  pressed = Date.now();
+  await show.click();
+  await ui.page.waitForFunction(() =>
+    document
+      .querySelector('.thread [data-message-id="attention-target"]')
+      ?.classList.contains("located"),
+  );
+  assert.deepEqual(await tint(target), {
+    located: true,
+    animation: "none",
+    background: selected,
+  });
+  await cleared();
+  assert.ok(Date.now() - pressed >= 1400, "reduced motion holds 1.5 s too");
+  assert.equal((await tint(target)).background, "rgba(0, 0, 0, 0)");
+});
+
 test("thread pane: a thread with no replies reads No replies yet, and one with unloaded replies keeps its count", async (t) => {
   const value = locatedChannel();
   value.frame.threads = [

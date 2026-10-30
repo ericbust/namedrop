@@ -1,4 +1,11 @@
-import { useContext, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   attentionReplyTo,
   type ReplyIntent,
@@ -130,6 +137,12 @@ export function ThreadPane({
     row?.setAttribute("tabindex", "-1");
     row?.focus({ preventScroll: true });
   }, [target]);
+  const [tinted, setTinted] = useState(target?.messageId ?? null);
+  useEffect(() => {
+    if (tinted === null) return;
+    const done = setTimeout(() => setTinted(null), 1500);
+    return () => clearTimeout(done);
+  }, [tinted]);
   const shownPending = useRef(pending);
   useLayoutEffect(() => {
     const earlier = new Set(
@@ -177,7 +190,7 @@ export function ThreadPane({
           <Message
             key={message.id}
             message={message}
-            located={message.id === target?.messageId}
+            located={message.id === tinted}
             directory={directory}
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}
@@ -200,7 +213,7 @@ export function ThreadPane({
           <Message
             key={message.id}
             message={message}
-            located={message.id === target?.messageId}
+            located={message.id === tinted}
             directory={directory}
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}

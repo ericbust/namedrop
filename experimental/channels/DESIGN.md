@@ -403,7 +403,10 @@ unanswered request that reads "@codex didn't answer a request", with the hint
 (`message_id`) that is loaded in the timeline, a **Show message** text button
 follows the hint. It scrolls the message to the middle of the timeline, tints it
 with `--bg-selected` for 1.5 seconds, and opens its thread. When that message is
-not loaded, the button is absent.
+not loaded, the button is absent. A conversation the item opens in the thread
+pane marks its target the same way: `--bg-selected` for 1.5 seconds, then it
+fades. Under reduced motion the tint holds still and leaves after 1.5 seconds.
+The tint never stays.
 
 | `source`                                   | Title when the item names its agent                                          |
 | ------------------------------------------ | ---------------------------------------------------------------------------- |
