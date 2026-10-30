@@ -795,7 +795,7 @@ test("focused tracked evidence exposes the channel response path without a rejec
     };
   };
   assert.deepEqual(
-    answer({ kind: "message", name: "@codex", ready: false, prepare() {} }),
+    answer({ kind: "message", name: "@codex", draft: "none", prepare() {} }),
     {
       text: "Answer tracked work in the channel. Message @codex",
       title: undefined,
@@ -803,12 +803,26 @@ test("focused tracked evidence exposes the channel response path without a rejec
     },
   );
   assert.deepEqual(
-    answer({ kind: "message", name: "@codex", ready: true, prepare() {} }),
+    answer({
+      kind: "message",
+      name: "@codex",
+      draft: "prepared",
+      prepare() {},
+    }),
     {
       text: "Answer tracked work in the channel. Your message to @codex is ready there.",
       title: undefined,
       buttons: [],
     },
+  );
+  assert.deepEqual(
+    answer({ kind: "message", name: "@codex", draft: "kept", prepare() {} }),
+    {
+      text: "Answer tracked work in the channel.",
+      title: undefined,
+      buttons: [],
+    },
+    "the channel's kept-draft notice names the card's button as the retry",
   );
   assert.deepEqual(
     answer({ kind: "pane", name: "@terminal", pane: "w1:term" }),

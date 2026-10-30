@@ -48,7 +48,12 @@ import { useEscape } from "./useEscape.ts";
 
 export type ThreadResponse =
   | { kind: "reply"; intent: ReplyIntent }
-  | { kind: "message"; name: string; ready: boolean; prepare: () => void }
+  | {
+      kind: "message";
+      name: string;
+      draft: "prepared" | "kept" | "none";
+      prepare: () => void;
+    }
   | { kind: "pane"; name: string | null; pane: string | null };
 
 export function ThreadPane({
@@ -258,17 +263,20 @@ export function ThreadPane({
       )}
       {response?.kind === "message" && (
         <p className="thread-answer" role="status">
-          Answer tracked work in the channel.{" "}
-          {response.ready ? (
-            `Your message to ${response.name} is ready there.`
-          ) : (
-            <button
-              type="button"
-              className="text-button"
-              onClick={response.prepare}
-            >
-              {responseCopy.message(response.name)}
-            </button>
+          Answer tracked work in the channel.
+          {response.draft === "prepared" &&
+            ` Your message to ${response.name} is ready there.`}
+          {response.draft === "none" && (
+            <>
+              {" "}
+              <button
+                type="button"
+                className="text-button"
+                onClick={response.prepare}
+              >
+                {responseCopy.message(response.name)}
+              </button>
+            </>
           )}
         </p>
       )}

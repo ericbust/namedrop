@@ -794,7 +794,12 @@ export function App() {
         threadResponse = {
           kind: "message",
           name: messaged,
-          ready: response.preparation === "prepared" && channelDraft !== "",
+          draft:
+            response.preparation === "preserved"
+              ? "kept"
+              : response.preparation === "prepared" && channelDraft !== ""
+                ? "prepared"
+                : "none",
           prepare: prepareResponse,
         };
         break;

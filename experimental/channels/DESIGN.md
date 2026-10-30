@@ -516,12 +516,15 @@ beside it.
 
 A Needs-you conversation that is answered somewhere else says where, in the
 composer's place: one 12px muted line, 20px from the sides and 12px from the
-bottom. Only one place offers an action at a time.
+bottom. Only one place offers an action at a time. While the channel box shows
+its kept-draft notice, which names the card's button as the retry, the line has
+no button. Once the notice goes, the button comes back.
 
 | The item's answer               | The line                                                                          |
 | ------------------------------- | --------------------------------------------------------------------------------- |
 | A channel message, ready        | "Answer tracked work in the channel. Your message to @claude is ready there."     |
 | A channel message, not prepared | "Answer tracked work in the channel." then a **Message @claude** text button      |
+| A channel message, draft kept   | "Answer tracked work in the channel." alone                                       |
 | The agent's pane                | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip       |
 | A reply to an agent now gone    | "The responsible agent is no longer available. Use its pane in Herdr to respond." |
 

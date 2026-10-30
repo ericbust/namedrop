@@ -6831,6 +6831,51 @@ test("DESIGN-R2 A6: a tracked conversation says where to answer on one 12px mute
   });
 });
 
+test("DESIGN-R2 D5: while the kept-draft notice names the card's button as the retry, the thread pane offers no second Message @codex", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  const notice = ui.page
+    .locator("main .composer-status")
+    .getByText("Your draft is still here.", { exact: false });
+  await notice.waitFor();
+  const answer = ui.page
+    .getByRole("complementary", { name: "Thread", exact: true })
+    .locator(".thread-answer");
+  await readsAs(answer, "Answer tracked work in the channel.");
+  const offers = ui.page.getByRole("button", {
+    name: "Message @codex",
+    exact: true,
+  });
+  assert.equal(await answer.getByRole("button").count(), 0);
+  assert.equal(await offers.count(), 1, "only the card's button is offered");
+  await draft.fill("");
+  await notice.waitFor({ state: "detached" });
+  await readsAs(answer, "Answer tracked work in the channel. Message @codex");
+  await answer
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  await readsAs(
+    answer,
+    "Answer tracked work in the channel. Your message to @codex is ready there.",
+  );
+  assert.equal(
+    await draft.inputValue(),
+    "@codex About your coordination report: \nRef: decision-1",
+  );
+});
+
 test("DESIGN-R2 A4: the prepared message puts the caret after the plain words, so typing lands above the Ref line", async (t) => {
   const { value, context } = actionableAttention("message");
   const ui = await open(
