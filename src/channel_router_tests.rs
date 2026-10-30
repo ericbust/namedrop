@@ -275,6 +275,7 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
     for index in 0..10 {
         rows.messages.push(MessageRow {
             channel_to: None,
+            channel_state: None,
             channel_mentioned: None,
             woke: Vec::new(),
             message_id: index.to_string(),
@@ -298,6 +299,7 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
     }
     rows.messages.push(MessageRow {
         channel_to: None,
+        channel_state: None,
         channel_mentioned: None,
         woke: Vec::new(),
         message_id: "unrelated".to_owned(),

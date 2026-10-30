@@ -27,7 +27,7 @@ fn post_is_visible_and_answers_before_router_finishes_then_survives_restart() {
     let (early, visible) = thread::scope(|scope| {
         scope.spawn(|| {
             sender
-                .send(post(
+                .send(support::raw_post(
                     &server,
                     "store-first",
                     "Could @planner inspect this?",

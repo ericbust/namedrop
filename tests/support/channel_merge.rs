@@ -18,7 +18,7 @@ fn plain_channel_post_reaches_eof_before_prompt_drain() {
     thread::scope(|scope| {
         scope.spawn(|| {
             sender
-                .send(post(
+                .send(support::raw_post(
                     &server,
                     "merge-order",
                     "Could @planner review the parser?",
@@ -35,15 +35,17 @@ fn plain_channel_post_reaches_eof_before_prompt_drain() {
         assert_eq!(status, 200, "{receipt}");
         assert!(receipt.get("drain").is_none(), "{receipt}");
         assert!(receipt.get("_channel_routing_note").is_none(), "{receipt}");
-        assert_eq!(receipt["channel"]["reason"], "review request");
-        assert_eq!(receipt["channel"]["to"], json!(["planner"]));
+        assert_eq!(receipt["channel"]["state"], "routing");
+        assert_eq!(receipt["channel"]["to"], json!([]));
         let deadline = Instant::now() + Duration::from_secs(3);
         while !f.root.join("prompt-entered").exists() && Instant::now() < deadline {
             thread::yield_now();
         }
         assert!(f.root.join("prompt-entered").exists());
         assert!(gate.0.exists());
-        assert_eq!(history(&server)[0]["channel"], receipt["channel"]);
+        let row = history(&server)[0].clone();
+        assert_eq!(row["channel"]["state"], "routed");
+        assert_eq!(row["channel"]["to"], json!(["planner"]));
         drop(gate);
     });
     let deadline = Instant::now() + Duration::from_secs(3);

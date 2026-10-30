@@ -1,4 +1,5 @@
 pub use crate::store::dashboard as rows;
+mod channel_service;
 mod http;
 mod hub;
 mod server_files;
@@ -239,6 +240,7 @@ fn run_server(
     let listener = bind(files.info().map(|info| info.port))?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let instance = server_files::random_hex(16)?;
+    let mut channel_service = channel_service::ChannelService::start(state)?;
     files.publish(
         &claim,
         &ServerInfo {
@@ -250,6 +252,7 @@ fn run_server(
         },
     )?;
     let (hub, commands) = mpsc::channel();
+    let mutations = Arc::new(std::sync::Mutex::new(()));
     let restarting = Arc::new(AtomicBool::new(false));
     let front = Arc::new(http::Front {
         port,
@@ -260,6 +263,7 @@ fn run_server(
         hub,
         assets,
         restarting: restarting.clone(),
+        mutations: mutations.clone(),
     });
     let stop = Arc::new(AtomicBool::new(false));
     let accept_stop = stop.clone();
@@ -267,6 +271,13 @@ fn run_server(
     eprintln!("dashboard: serving 127.0.0.1:{port}");
     let verdict = hub::run(&files, &instance, idle(), commands);
     eprintln!("dashboard: stopping: {}", verdict.reason());
+    restarting.store(true, Ordering::Release);
+    {
+        let _admitted = mutations
+            .lock()
+            .map_err(|_| "dashboard mutation lock poisoned".to_owned())?;
+    }
+    channel_service.shutdown()?;
     match verdict {
         hub::Verdict::Handoff(_) => {
             restarting.store(true, Ordering::Release);

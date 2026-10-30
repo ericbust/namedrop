@@ -48,6 +48,7 @@ pub(crate) struct Front {
     pub hub: Sender<HubCommand>,
     pub assets: Assets,
     pub restarting: Arc<AtomicBool>,
+    pub mutations: Arc<Mutex<()>>,
 }
 
 pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<AtomicBool>) {
@@ -1138,6 +1139,12 @@ fn send_operator_post(
     key: SpaceKey,
     post: OperatorPost,
 ) -> io::Result<()> {
+    let Ok(_admitted) = front.mutations.lock() else {
+        return respond_status(writer, Status::Unavailable);
+    };
+    if front.restarting.load(Ordering::Acquire) {
+        return respond_status(writer, Status::Unavailable);
+    }
     let namespace = match StateStore::open_read_only(front.files.state())
         .and_then(|store| store.map(|mut store| store.dashboard_spaces()).transpose())
     {
@@ -1220,7 +1227,7 @@ fn send_operator_post(
     }
 }
 
-fn wake_mailboxes_after_send(
+pub(super) fn wake_mailboxes_after_send(
     state: &Path,
     namespace: &crate::StateNamespace,
     receipt: &serde_json::Value,

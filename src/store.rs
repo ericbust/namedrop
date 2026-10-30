@@ -42,6 +42,7 @@ UPDATE pane_addresses SET persona = (
 "#;
 
 mod bridge;
+pub(crate) mod channel_routing;
 pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
 pub(crate) use groups::addressed_recipients;
 mod coordination;
@@ -2675,6 +2676,17 @@ impl StateTransaction<'_> {
         attribution: &MutationAttribution,
         bridged_from: Option<&bridge::BridgeOrigin<'_>>,
     ) -> Result<MessageReceipt, StoreError> {
+        self.append_message_mode(namespace, draft, attribution, bridged_from, false)
+    }
+
+    fn append_message_mode(
+        &mut self,
+        namespace: &StateNamespace,
+        draft: &MessageDraft,
+        attribution: &MutationAttribution,
+        bridged_from: Option<&bridge::BridgeOrigin<'_>>,
+        pending_channel: bool,
+    ) -> Result<MessageReceipt, StoreError> {
         let fingerprint = serde_json::to_string(&serde_json::json!({
             "in_reply_to": draft.in_reply_to.as_ref().map(MessageId::as_str),
             "author_address_id": draft.author_address_id.as_str(),
@@ -2717,8 +2729,8 @@ impl StateTransaction<'_> {
             return self.message_receipt(namespace, &MessageId::new(message_id), true);
         }
         if draft.recipients.is_empty()
-            && !(draft.grammar_version == "channel/v1"
-                && draft.in_reply_to.is_none()
+            && !((pending_channel
+                || (draft.grammar_version == "channel/v1" && draft.in_reply_to.is_none()))
                 && draft.author_kind == ActorKind::Human
                 && self.is_operator_address(namespace, &draft.author_address_id)?)
         {
@@ -2818,6 +2830,56 @@ impl StateTransaction<'_> {
         if let Some(origin) = bridged_from {
             self.record_bridged_message(namespace, &draft.message_id, origin)?;
         }
+        for (reference_order, reference) in draft.context_references.iter().enumerate() {
+            self.transaction.execute(
+                "INSERT INTO context_references (
+                    session_socket_id, worktree_id, message_id, reference_order,
+                    address_id, alias_snapshot, binding_snapshot, session_snapshot
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    draft.message_id.as_str(),
+                    i64::try_from(reference_order + 1).map_err(|_| {
+                        StoreError::invalid_input("context reference order overflow")
+                    })?,
+                    reference.address_id.as_str(),
+                    reference.alias_snapshot,
+                    reference
+                        .pane_binding_snapshot
+                        .as_ref()
+                        .map(crate::PaneBindingId::as_str),
+                    reference
+                        .agent_session_snapshot
+                        .as_ref()
+                        .map(crate::AgentSessionId::as_str)
+                ],
+            )?;
+        }
+        self.insert_message_recipients(namespace, draft, thread_order, attribution)?;
+        self.append_transition(
+            namespace,
+            TransitionEntityKind::CollaborationMessage,
+            draft.message_id.as_str(),
+            TransitionKind::Created,
+            attribution,
+        )?;
+        if is_agent_reply {
+            for (peer, peer_thread) in self.paired_threads(namespace, &draft.thread_id)? {
+                self.charge_agent_reply(&peer, &peer_thread, attribution)?;
+            }
+            self.charge_agent_reply(namespace, &draft.thread_id, attribution)?;
+        }
+        self.message_receipt(namespace, &draft.message_id, false)
+    }
+
+    fn insert_message_recipients(
+        &mut self,
+        namespace: &StateNamespace,
+        draft: &MessageDraft,
+        thread_order: u64,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
         for (recipient_order, recipient) in draft.recipients.iter().enumerate() {
             self.transaction.execute(
                 "INSERT INTO message_recipients (
@@ -2881,32 +2943,6 @@ impl StateTransaction<'_> {
                 )?;
             }
         }
-        for (reference_order, reference) in draft.context_references.iter().enumerate() {
-            self.transaction.execute(
-                "INSERT INTO context_references (
-                    session_socket_id, worktree_id, message_id, reference_order,
-                    address_id, alias_snapshot, binding_snapshot, session_snapshot
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                params![
-                    namespace.session_socket_id,
-                    namespace.space_id.as_str(),
-                    draft.message_id.as_str(),
-                    i64::try_from(reference_order + 1).map_err(|_| {
-                        StoreError::invalid_input("context reference order overflow")
-                    })?,
-                    reference.address_id.as_str(),
-                    reference.alias_snapshot,
-                    reference
-                        .pane_binding_snapshot
-                        .as_ref()
-                        .map(crate::PaneBindingId::as_str),
-                    reference
-                        .agent_session_snapshot
-                        .as_ref()
-                        .map(crate::AgentSessionId::as_str)
-                ],
-            )?;
-        }
         self.forward_to_envoys(namespace, draft, attribution)?;
         let mut participants = vec![draft.author_address_id.clone()];
         participants.extend(
@@ -2924,20 +2960,7 @@ impl StateTransaction<'_> {
                 attribution,
             )?;
         }
-        self.append_transition(
-            namespace,
-            TransitionEntityKind::CollaborationMessage,
-            draft.message_id.as_str(),
-            TransitionKind::Created,
-            attribution,
-        )?;
-        if is_agent_reply {
-            for (peer, peer_thread) in self.paired_threads(namespace, &draft.thread_id)? {
-                self.charge_agent_reply(&peer, &peer_thread, attribution)?;
-            }
-            self.charge_agent_reply(namespace, &draft.thread_id, attribution)?;
-        }
-        self.message_receipt(namespace, &draft.message_id, false)
+        Ok(())
     }
 
     fn charge_agent_reply(

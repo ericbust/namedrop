@@ -120,6 +120,7 @@ pub(crate) struct RouteRun {
     pub attempt: Option<RouterAttempt>,
 }
 
+#[cfg(test)]
 pub(crate) fn route(request: RouterRequest<'_>) -> RouteRun {
     route_with_cancel(request, &AtomicBool::new(false))
 }

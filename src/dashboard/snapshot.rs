@@ -556,16 +556,12 @@ pub struct MessageRow {
     pub legs: Vec<DeliveryLeg>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ChannelRoutingState {
-    Routed,
-    Unrouted,
-    RouterFailed,
-}
+pub use crate::store::channel_routing::ChannelRoutingState;
 
 #[derive(Debug, Serialize)]
 pub struct ChannelRouting {
+    #[serde(skip)]
+    pub(crate) durable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mentioned: Option<Vec<String>>,
     pub state: ChannelRoutingState,
@@ -993,12 +989,13 @@ fn health(state: SpaceState, attention: usize, in_flight: usize, working: usize)
 pub(crate) fn message(row: &rows::MessageRow, legs: &[rows::LegRow]) -> MessageRow {
     MessageRow {
         channel: row.channel_to.as_ref().map(|to| ChannelRouting {
+            durable: row.channel_state.is_some(),
             mentioned: row.channel_mentioned.clone(),
-            state: if to.is_empty() {
+            state: row.channel_state.unwrap_or(if to.is_empty() {
                 ChannelRoutingState::Unrouted
             } else {
                 ChannelRoutingState::Routed
-            },
+            }),
             to: to.clone(),
             reason: None,
             router: None,

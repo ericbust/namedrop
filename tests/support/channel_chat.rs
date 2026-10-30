@@ -250,7 +250,7 @@ pub(super) fn fixture() -> Fixture {
     f
 }
 
-pub(super) fn post(
+pub(super) fn raw_post(
     server: &Server,
     request: &str,
     source: &str,
@@ -270,6 +270,30 @@ pub(super) fn post(
         response.status,
         serde_json::from_str(&response.body).unwrap(),
     )
+}
+
+pub(super) fn post(
+    server: &Server,
+    request: &str,
+    source: &str,
+    parent: Option<&str>,
+) -> (u16, Value) {
+    let (status, mut receipt) = raw_post(server, request, source, parent);
+    if status != 200 {
+        return (status, receipt);
+    }
+    let replay = receipt["idempotent_replay"].clone();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while receipt["channel"]["state"] == "routing" {
+        assert!(
+            Instant::now() < deadline,
+            "routing did not finish: {receipt}"
+        );
+        thread::sleep(Duration::from_millis(10));
+        receipt = raw_post(server, request, source, parent).1;
+    }
+    receipt["idempotent_replay"] = replay;
+    (status, receipt)
 }
 
 pub(super) fn calls(f: &Fixture) -> Vec<Value> {
