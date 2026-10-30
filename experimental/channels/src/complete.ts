@@ -236,27 +236,70 @@ export function accept(
   };
 }
 
-// The server's send grammar: any `#label` tokens, then at least one valid `@alias`.
-const LEADING = /^\s*(?:#[\w.-]+\s+)*((?:@[a-z0-9]+(?:-[a-z0-9]+)*(?:\s+|$))+)/;
-
-// The aliases a post starts with, as typed, and the message after them.
-function leadingRun(text: string): {
-  aliases: readonly string[];
+// The server's mention grammar, src/message.rs: parse_mentions reads the
+// recipients a post starts with, and mention_anchors finds mentions anywhere.
+const ALIAS = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LABEL = /^#[A-Za-z0-9._-]+$/;
+const TOKEN_CHAR = /[A-Za-z0-9_-]/;
+const EMBEDDED_AFTER = /[A-Za-z0-9_\\]/;
+type Mentions = {
+  leading: readonly string[];
   rest: string;
-} {
-  const match = LEADING.exec(text);
-  const run = match?.[1];
-  return match === null || run === undefined
-    ? { aliases: [], rest: text }
-    : { aliases: run.trim().split(/\s+/), rest: text.slice(match[0].length) };
+  anywhere: readonly string[];
+};
+function wordAt(text: string, at: number): string {
+  let end = at;
+  while (end < text.length && !WHITESPACE.test(text.charAt(end))) end++;
+  return text.slice(at, end);
+}
+function spaceAfter(text: string, at: number): number {
+  while (at < text.length && WHITESPACE.test(text.charAt(at))) at++;
+  return at;
+}
+// `leading` holds the `@alias` words after any `#label` words, once each, and
+// `rest` the text after them. `anywhere` holds every alias outside a code span
+// whose "@" follows no ASCII letter, digit, "_" or backslash, in order, once each.
+function scan(text: string): Mentions {
+  let at = spaceAfter(text, 0);
+  while (LABEL.test(wordAt(text, at)))
+    at = spaceAfter(text, at + wordAt(text, at).length);
+  const leading = new Set<string>();
+  let word = wordAt(text, at);
+  while (word.startsWith("@") && ALIAS.test(word.slice(1))) {
+    leading.add(word);
+    at = spaceAfter(text, at + word.length);
+    word = wordAt(text, at);
+  }
+  const anywhere = new Set<string>();
+  let cursor = 0;
+  while (cursor < text.length) {
+    const char = text.charAt(cursor);
+    if (char === "`") {
+      const open = cursor;
+      while (text.charAt(cursor) === "`") cursor++;
+      const close = text.indexOf(text.slice(open, cursor), cursor);
+      cursor = close < 0 ? text.length : close + cursor - open;
+    } else if (
+      char === "@" &&
+      !(cursor > 0 && EMBEDDED_AFTER.test(text.charAt(cursor - 1)))
+    ) {
+      let end = cursor + 1;
+      while (end < text.length && TOKEN_CHAR.test(text.charAt(end))) end++;
+      const alias = text.slice(cursor + 1, end);
+      if (ALIAS.test(alias)) anywhere.add(`@${alias}`);
+      cursor = end;
+    } else cursor++;
+  }
+  return {
+    leading: [...leading],
+    rest: leading.size === 0 ? text : text.slice(at),
+    anywhere: [...anywhere],
+  };
 }
 // A post that starts with aliases goes only to them.
 export function leadingMentions(text: string): readonly string[] {
-  return leadingRun(text).aliases;
+  return scan(text).leading;
 }
-
-// A mention anywhere: not inside a word or an email address, not escaped, and not the start of a longer alias.
-const MENTION = /(?<![\p{L}\p{N}_\\])@[a-z0-9]+(?:-[a-z0-9]+)*(?![a-z0-9-])/gu;
 
 // The agents a channel post mentions, in the order the text first names them.
 export function mentionedAgents(
@@ -267,20 +310,15 @@ export function mentionedAgents(
   for (const member of members.values())
     if (member.kind.type === "agent" && member.activity !== "retired")
       agents.set(member.alias, member);
-  const mentioned = new Set<Member>();
-  for (const [alias] of text.matchAll(MENTION)) {
-    const member = agents.get(alias);
-    if (member !== undefined) mentioned.add(member);
-  }
-  return [...mentioned];
+  return scan(text).anywhere.flatMap((alias) => agents.get(alias) ?? []);
 }
 
 // The text Enter sends, or null when it must stay in the box. The server
 // refuses names with no message after them.
 export function postSource(text: string, rule: SendRule): string | null {
   const body = text.trim();
-  const { aliases, rest } = leadingRun(body);
-  if (aliases.length > 0) return rest.trim() === "" ? null : body;
+  const { leading, rest } = scan(body);
+  if (leading.length > 0) return rest.trim() === "" ? null : body;
   return body === "" || (rule.kind === "thread" && rule.to.length === 0)
     ? null
     : body;

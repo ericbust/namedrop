@@ -403,6 +403,59 @@ test("complete: a channel post mentions the agents it names anywhere, once each,
   assert.deepEqual(named("é@codex and ü @codex"), ["@codex"]);
 });
 
+test("complete: the hint finds mentions the way the server does, in code spans, after other characters, and in whole tokens", () => {
+  const { members } = alpha;
+  const named = (text: string) =>
+    mentionedAgents(text, members).map((member) => member.alias);
+  const cases: [string, string[]][] = [
+    ["can @claude ask @codex, then @claude again?", ["@claude", "@codex"]],
+    ["`@codex` stays code", []],
+    ["``say `@codex` here`` and @claude", ["@claude"]],
+    ["`` a ` @codex `` then @claude", ["@claude"]],
+    ["```@codex``` @claude", ["@claude"]],
+    ["unclosed `code @codex and @claude", []],
+    ["unclosed ``code` @codex", []],
+    ["x@codex 1@codex _@codex \\@codex X@claude", []],
+    ["é@claude", ["@claude"]],
+    ["日本@codex", ["@codex"]],
+    ["-@codex (@claude)", ["@codex", "@claude"]],
+    ["@@codex", ["@codex"]],
+    ["@codex@claude", ["@codex"]],
+    ["@codex_x and @codex-x and @co--dex and @codex-", []],
+    ["@Codex and @CODEX", []],
+    ["@codex. @claude,", ["@codex", "@claude"]],
+    ["@codex: look", ["@codex"]],
+    ["mail me at ops@codex", []],
+    ["@shell ls and @ghost and @you", []],
+  ];
+  for (const [text, expected] of cases)
+    assert.deepEqual(named(text), expected, JSON.stringify(text));
+  const leading: [string, string[]][] = [
+    ["@codex @codex hi", ["@codex"]],
+    ["#ALL @codex hi", ["@codex"]],
+    ["#al!pha @codex hi", []],
+    ["@codex_x hi", []],
+    ["@codex. hi", []],
+    ["`@codex` hi", []],
+    ["\t#alpha\n@codex\u00a0@claude hi", ["@codex", "@claude"]],
+  ];
+  for (const [text, expected] of leading)
+    assert.deepEqual(leadingMentions(text), expected, JSON.stringify(text));
+  const channel = { kind: "channel", agents: members } as const;
+  assert.equal(
+    composerHint(channel, "ask `@codex` about it"),
+    "Enter posts to the channel · Mention @name to bring someone in",
+  );
+  assert.equal(
+    composerHint(channel, "é@claude look"),
+    "Enter posts to the channel · Namedrop checks if it's for @claude",
+  );
+  assert.equal(
+    composerHint(channel, "@codex @codex hi"),
+    "Enter sends only to @codex",
+  );
+});
+
 test("complete: a channel post sends as typed, a thread reply needs agents or its own mentions", () => {
   const channel = { kind: "channel", agents: alpha.members } as const;
   assert.equal(postSource("  hello room ", channel), "hello room");
