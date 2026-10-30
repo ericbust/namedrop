@@ -176,6 +176,8 @@ export function absenceCopy(absence: Absence): string {
   switch (absence.kind) {
     case "closed":
       return `${absence.alias}'s pane is closed, so it can't take a message.`;
+    case "unreachable":
+      return `${absence.alias}'s workspace has no label Namedrop can mention, so it can't take a message from here.`;
     case "gone":
       return `${absence.alias ?? "That agent"} isn't in this channel anymore.`;
     default: {

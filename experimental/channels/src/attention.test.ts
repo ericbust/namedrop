@@ -13,8 +13,14 @@ import {
   prepareChannelMessage,
   replyPrefill,
 } from "./attention.ts";
-import { timeOfDay } from "./copy.ts";
-import type { Attention, Directory, MessageContext } from "./model.ts";
+import { absenceCopy, timeOfDay } from "./copy.ts";
+import type {
+  AddressId,
+  Attention,
+  Directory,
+  Member,
+  MessageContext,
+} from "./model.ts";
 import { parseEvent, parseMessageContext } from "./wire.ts";
 
 const raw = JSON.parse(
@@ -253,6 +259,40 @@ test("an unreachable response says why: its pane is closed, or it left the frame
     messageIntent({ ...item, subjectAlias: null }, target, true)?.subject,
     null,
   );
+});
+const envoy = {
+  addressId: "envoy:w2:pane-9" as AddressId,
+  subject: "@lead",
+};
+const lead: Member = { ...member, id: "pane-9" as AddressId, alias: "@lead" };
+const leadHome = (token: string | null): Directory => ({
+  members: channel.members,
+  homes: new Map([
+    [
+      "w2",
+      {
+        key: channel.key,
+        name: "beta",
+        token,
+        members: new Map([[lead.id, lead]]),
+      },
+    ],
+  ]),
+});
+test("H5: an agent whose workspace has no label Namedrop can mention is unreachable, not gone", () => {
+  assert.equal(attentionReplyTo(envoy, leadHome(null)), null);
+  assert.deepEqual(absence(envoy, leadHome(null)), {
+    kind: "unreachable",
+    alias: "@lead",
+  });
+  assert.equal(
+    absenceCopy({ kind: "unreachable", alias: "@codex" }),
+    "@codex's workspace has no label Namedrop can mention, so it can't take a message from here.",
+  );
+  assert.deepEqual(attentionReplyTo(envoy, leadHome("#beta")), {
+    names: ["@lead · #beta"],
+    mentions: "#beta @lead",
+  });
 });
 test("legacy attention links only to an available loaded message and does not invent a response", () => {
   const attention: Attention = {

@@ -227,6 +227,7 @@ export function attentionReplyTo(
 // Why the agent a response is for can't take a message.
 export type Absence =
   | { kind: "closed"; alias: string }
+  | { kind: "unreachable"; alias: string }
   | { kind: "gone"; alias: string | null };
 export function absence(
   intent: Pick<ReplyIntent, "addressId" | "subject">,
@@ -234,8 +235,10 @@ export function absence(
 ): Absence {
   const who = participant(directory, intent.addressId);
   if (who.kind !== "member") return { kind: "gone", alias: intent.subject };
-  return who.member.activity === "retired"
-    ? { kind: "closed", alias: who.member.alias }
+  if (who.member.activity === "retired")
+    return { kind: "closed", alias: who.member.alias };
+  return who.home?.token === null
+    ? { kind: "unreachable", alias: who.member.alias }
     : { kind: "gone", alias: who.member.alias };
 }
 export function replyPrefill(
