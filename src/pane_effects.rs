@@ -10,7 +10,7 @@ use std::{
     io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     },
     path::Path,
     sync::atomic::{AtomicU64, Ordering},
@@ -101,6 +101,10 @@ impl PaneEffects {
     }
 
     fn acquire_for(state: &Path, socket: &str, pane: &str, timeout: Duration) -> io::Result<Self> {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(state)?;
         let state = checked(
             OpenOptions::new()
                 .read(true)
@@ -506,6 +510,17 @@ mod tests {
             "physical input occurred after failed marker write"
         );
         assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Reject);
+    }
+
+    #[test]
+    fn first_input_creates_private_state_without_initializing_a_database() {
+        let state = State::new();
+        let uninitialized = state.0.join("new/namedrop");
+        let gate = PaneEffects::acquire(&uninitialized, "socket", "pane").unwrap();
+        gate.record(&delivery()).unwrap();
+        assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Match);
+        assert_eq!(fs::metadata(&uninitialized).unwrap().mode() & 0o777, 0o700);
+        assert!(!uninitialized.join("namedrop.sqlite3").exists());
     }
 
     #[test]
