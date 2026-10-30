@@ -23,6 +23,8 @@ pub struct DrainReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pane_lock_deferred: Vec<crate::PaneAddressId>,
     pub requeued: Vec<DeliveryAttemptId>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_without_event: bool,
     pub failed: Vec<DeliveryAttemptId>,
     pub settled: Vec<DeliveryAttemptId>,
     pub held: Vec<DeliveryAttemptId>,
@@ -47,6 +49,7 @@ impl Default for DrainReport {
             submitted: Vec::new(),
             pane_lock_deferred: Vec::new(),
             requeued: Vec::new(),
+            retry_without_event: false,
             failed: Vec::new(),
             settled: Vec::new(),
             held: Vec::new(),
@@ -63,6 +66,7 @@ impl DrainReport {
 
     pub fn needs_mailbox_worker(&self) -> bool {
         !self.pane_lock_deferred.is_empty()
+            || self.retry_without_event
             || self.awaits_terminal()
             || self.next_grace_due_ms().is_some()
     }
@@ -478,8 +482,8 @@ where
             Ok(effects) => effects,
             Err(error) => {
                 let summary = format!(
-                    "Could not acquire pane input gate for {}: {error}. Check the state directory permissions and available file descriptors, then retry this delivery.",
-                    address_id.as_str(),
+                    "Could not send to @{}. {error}. Check the state directory permissions and available file descriptors, then send the message again.",
+                    second.alias,
                 );
                 let failed = store
                     .transaction(|transaction| {
@@ -623,6 +627,8 @@ where
             // A runner's durable claim/result outranks a late transport error.
             continue;
         }
+        let prompt_result =
+            prompt_result.map_err(|error| runtime.herdr.classify_prompt_failure(&error));
         match prompt_result {
             Ok(_) => {
                 store
@@ -656,10 +662,7 @@ where
                     .map_err(|error| error.to_string())?;
                 report.submitted.push(leased.attempt_id);
             }
-            Err(error)
-                if runtime.herdr.classify_prompt_failure(&error)
-                    == PromptFailureKind::TemporaryPreInvocation =>
-            {
+            Err(kind) if kind.is_temporary_pre_invocation() => {
                 store
                     .transaction(|transaction| {
                         transaction.return_delivery_attempt_to_queue(
@@ -670,11 +673,10 @@ where
                     })
                     .map_err(|error| error.to_string())?;
                 report.requeued.push(leased.attempt_id);
+                report.retry_without_event |=
+                    kind == PromptFailureKind::TemporaryPreInvocationWithoutEvent;
             }
-            Err(error)
-                if runtime.herdr.classify_prompt_failure(&error)
-                    == PromptFailureKind::DefinitiveNonRetryable =>
-            {
+            Err(PromptFailureKind::DefinitiveNonRetryable) => {
                 store
                     .transaction(|transaction| {
                         transaction.transition_delivery_attempt(

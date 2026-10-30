@@ -610,6 +610,36 @@ fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
 }
 
 #[test]
+fn temporary_prompt_failures_only_request_polling_without_a_guaranteed_event() {
+    use namedrop::{HerdrCommandExecutor, ProcessHerdr, PromptFailureKind};
+    let herdr = ProcessHerdr::default();
+    for (codes, expected) in [
+        (
+            &["server_busy", "conflict", "agent_not_ready"][..],
+            PromptFailureKind::TemporaryPreInvocationWithoutEvent,
+        ),
+        (
+            &[
+                "agent_busy",
+                "agent_blocked",
+                "agent_not_found",
+                "pane_not_found",
+            ][..],
+            PromptFailureKind::TemporaryPreInvocation,
+        ),
+    ] {
+        for code in codes {
+            let kind = herdr
+                .classify_prompt_failure(&serde_json::json!({"error": {"code": code}}).to_string());
+            assert_eq!(kind, expected, "{code}");
+            assert!(kind.is_temporary_pre_invocation());
+        }
+    }
+    assert!(!PromptFailureKind::AmbiguousInvocation.is_temporary_pre_invocation());
+    assert!(!PromptFailureKind::DefinitiveNonRetryable.is_temporary_pre_invocation());
+}
+
+#[test]
 fn doctor_exit_codes_match_the_json_health_report() {
     let fixture = Fixture::new();
     let check = |args: &[&str], expected_code, expected_status| {
@@ -1216,7 +1246,7 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
     assert_eq!(inbox[0]["untrusted_body"], "review", "{code}");
     let completed = fixture
         .command()
-        .args(["complete", "--input-json"])
+        .args(["complete", "--no-reply", "--input-json"])
         .arg(serde_json::json!({"attempt_id":inbox[0]["control"]["attempt_id"]}).to_string())
         .output()
         .unwrap();

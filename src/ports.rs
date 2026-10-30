@@ -14,12 +14,23 @@ pub enum PromptFailureKind {
     /// refusal may pass. Nothing reached the recipient, so returning the
     /// delivery to the queue cannot duplicate an invocation.
     TemporaryPreInvocation,
+    /// The host refused input temporarily without a guaranteed wake event.
+    TemporaryPreInvocationWithoutEvent,
     /// The host rejected the call itself — an identical retry cannot succeed.
     DefinitiveNonRetryable,
     /// It cannot be established that the input never arrived. The conservative
     /// default, and the only safe answer for anything unrecognized: such work
     /// is held for a human and is never resent automatically.
     AmbiguousInvocation,
+}
+
+impl PromptFailureKind {
+    pub fn is_temporary_pre_invocation(self) -> bool {
+        matches!(
+            self,
+            Self::TemporaryPreInvocation | Self::TemporaryPreInvocationWithoutEvent
+        )
+    }
 }
 
 pub trait HerdrCommandExecutor {

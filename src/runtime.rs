@@ -210,10 +210,12 @@ impl HerdrCommandExecutor for ProcessHerdr {
             // blocked, submission is rejected with `agent_blocked` before any
             // input is sent." Like `agent_busy`, the recipient never saw the
             // prompt, so requeueing cannot duplicate an invocation.
-            Some(
-                "agent_not_found" | "pane_not_found" | "agent_not_ready" | "agent_busy"
-                | "agent_blocked" | "conflict" | "server_busy",
-            ) => crate::PromptFailureKind::TemporaryPreInvocation,
+            Some("agent_not_found" | "pane_not_found" | "agent_busy" | "agent_blocked") => {
+                crate::PromptFailureKind::TemporaryPreInvocation
+            }
+            Some("agent_not_ready" | "conflict" | "server_busy") => {
+                crate::PromptFailureKind::TemporaryPreInvocationWithoutEvent
+            }
             Some(
                 "invalid_request" | "invalid_args" | "invalid_input" | "unsupported"
                 | "unknown_command",

@@ -3,7 +3,7 @@ use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
 use crate::{
     AgentSessionId, AttentionSourceKind, Clock, HerdrCommandExecutor, IdGenerator,
-    LifecycleRuntime, PaneAddressLifecycle, PromptFailureKind, StateStore, discover_worktree,
+    LifecycleRuntime, PaneAddressLifecycle, StateStore, discover_worktree,
     discover_worktree_for_workspace,
 };
 use serde::{Deserialize, Serialize};
@@ -617,8 +617,10 @@ where
     ) {
         Ok(_) => Ok(()),
         Err(error)
-            if runtime.herdr.classify_prompt_failure(&error)
-                == PromptFailureKind::TemporaryPreInvocation =>
+            if runtime
+                .herdr
+                .classify_prompt_failure(&error)
+                .is_temporary_pre_invocation() =>
         {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }

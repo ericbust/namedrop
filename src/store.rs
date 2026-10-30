@@ -4810,6 +4810,7 @@ impl StateTransaction<'_> {
             |row| from_i64(row.get(0)?),
         )?;
         Ok(Some(DispatchCandidate {
+            alias: address.alias,
             delivery_id: crate::DeliveryId::new(head_delivery_id),
             pane_type: address.pane_type,
             address_id: address_id.clone(),
