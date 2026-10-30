@@ -49,6 +49,15 @@ impl Server {
 import json, os, sys, time
 args = sys.argv[1:]
 root = os.path.dirname(__file__)
+if args == ['pane', 'list', '--workspace', 'w1']:
+    gate = os.path.join(root, 'discovery-gate')
+    if os.path.exists(gate):
+        open(os.path.join(root, 'discovery-entered'), 'w').close()
+        deadline = time.monotonic() + 15
+        while os.path.exists(gate):
+            if time.monotonic() >= deadline:
+                sys.exit('discovery gate timed out')
+            time.sleep(0.01)
 with open(os.path.join(root, 'http-herdr-responses.json')) as source:
     responses = json.load(source)
 key = ' '.join(args)

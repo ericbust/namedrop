@@ -209,3 +209,96 @@ fn browser_controls_stop_interrupts_only_the_proven_current_thread_response_once
         }
     }
 }
+
+struct DiscoveryGate(std::path::PathBuf);
+
+impl Drop for DiscoveryGate {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn browser_controls_stop_does_not_interrupt_a_later_thread_in_the_same_session() {
+    let f = fixture();
+    let parent = plain_root(&f, "original-thread", "Please inspect.");
+    let attempt = f.text("SELECT attempt_id FROM delivery_attempts").unwrap();
+    let session = xws::session("pane-1-planner");
+    f.status("pane-1-planner", "working");
+    let server = Server::start(&f, "not json", true);
+    let gate = DiscoveryGate(f.root.join("discovery-gate"));
+    fs::write(&gate.0, "").unwrap();
+    thread::scope(|scope| {
+        let stop = scope.spawn(|| server.post(&control_path("w1", &parent, "stop"), "{}", &[]));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !f.root.join("discovery-entered").exists() {
+            assert!(Instant::now() < deadline, "stop did not enter discovery");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(controls(&f, &parent)["stopped"], true);
+        StateStore::open(&f.state)
+            .unwrap()
+            .transaction(|tx| {
+                let namespace = StateNamespace::for_space("socket-a", "w1");
+                let attribution = namedrop::MutationAttribution::new(
+                    namedrop::ActorKind::AgentSession,
+                    &session,
+                    43,
+                );
+                let attempt = namedrop::DeliveryAttemptId::new(&attempt);
+                tx.acknowledge_delivery_attempt(
+                    &namespace,
+                    &attempt,
+                    "original-ack",
+                    &namedrop::AgentSessionId::new(&session),
+                    &attribution,
+                )?;
+                tx.transition_delivery_attempt(
+                    &namespace,
+                    &attempt,
+                    namedrop::DeliveryState::Settled,
+                    &attribution,
+                )
+            })
+            .unwrap();
+        f.status("pane-1-planner", "idle");
+        f.clock.0.store(
+            namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let unrelated = namedrop::send_operator_message(
+            "unrelated-thread",
+            "@planner Work on a different task.",
+            None,
+            &f.runtime("w1", "pane-1-lead"),
+        )
+        .unwrap();
+        assert_ne!(unrelated["thread_id"], parent["thread_id"]);
+        assert_eq!(
+            f.count(
+                "SELECT COUNT(*) FROM delivery_attempt_state WHERE active=1 AND state IN ('submitted','acknowledged')"
+            ),
+            1,
+            "{unrelated}"
+        );
+        assert_eq!(f.text("SELECT a.agent_session_id FROM delivery_attempts a JOIN delivery_attempt_state s USING(session_socket_id,worktree_id,attempt_id,address_id) WHERE s.active=1"), Some(session));
+        f.status("pane-1-planner", "working");
+        drop(gate);
+        let response = stop.join().unwrap();
+        assert_eq!(response.status, 200, "{}", response.body);
+        let receipt: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(receipt["interrupted_pane_ids"], json!([]), "{receipt}");
+        assert_eq!(receipt["warnings"].as_array().unwrap().len(), 1);
+    });
+    let calls = fs::read_to_string(f.root.join("http-herdr-invocations.jsonl")).unwrap_or_default();
+    assert!(
+        !calls
+            .lines()
+            .any(|line| { serde_json::from_str::<Value>(line).unwrap()["args"][1] == "send-keys" }),
+        "interrupted unrelated work: {calls}"
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM delivery_attempt_state WHERE active=1 AND state IN ('submitted','acknowledged')"),
+        1
+    );
+}
