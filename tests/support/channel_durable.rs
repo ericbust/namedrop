@@ -27,6 +27,78 @@ fn stop_routing_thread(server: &Server, receipt: &Value) {
 }
 
 #[test]
+fn settlement_failure_retries_original_decision_without_another_model_call() {
+    let f = fixture();
+    let server = Server::start(&f, "delayed", false);
+    let (status, initial) =
+        support::raw_post(&server, "settlement-retry", "Could @planner inspect?", None);
+    assert_eq!(status, 200, "{initial}");
+    until(|| calls(&f).len() == 1);
+    f.db().execute_batch("CREATE TRIGGER reject_router_settlement BEFORE INSERT ON transition_facts WHEN NEW.actor_id='channel-router/v1' AND NEW.transition_kind='settled' BEGIN SELECT RAISE(ABORT,'synthetic settlement failure'); END;").unwrap();
+    fs::write(f.root.join("router-release"), "").unwrap();
+    until(|| attempt_records(&f).len() == 1);
+    thread::sleep(Duration::from_millis(250));
+    assert_eq!(calls(&f).len(), 1);
+    assert_eq!(f.count("SELECT COUNT(*) FROM transition_facts WHERE actor_id='channel-router/v1' AND transition_kind='settled'"), 0);
+    f.db()
+        .execute_batch("DROP TRIGGER reject_router_settlement")
+        .unwrap();
+    let (status, receipt) = post(&server, "settlement-retry", "Could @planner inspect?", None);
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["message_id"], initial["message_id"]);
+    assert_eq!(receipt["channel"]["state"], "routed");
+    assert_eq!(calls(&f).len(), 1);
+}
+
+#[test]
+fn context_projection_error_settles_original_post_without_calling_model() {
+    let f = fixture();
+    let server = Server::start(&f, r#"{"to":["planner"],"reason":"review request"}"#, false);
+    thread::sleep(Duration::from_millis(150));
+    f.db()
+        .execute_batch("ALTER TABLE attention_items RENAME TO hidden_attention_items")
+        .unwrap();
+    let (status, receipt) = post(&server, "context-error", "Could @planner inspect?", None);
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["channel"]["state"], "router_failed");
+    assert_eq!(receipt["recipients"], json!([]));
+    assert_eq!(calls(&f).len(), 0);
+    f.db()
+        .execute_batch("ALTER TABLE hidden_attention_items RENAME TO attention_items")
+        .unwrap();
+    let (status, replay) = post(&server, "context-error", "Could @planner inspect?", None);
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(replay["message_id"], receipt["message_id"]);
+    assert_eq!(replay["channel"]["state"], "router_failed");
+    assert_eq!(calls(&f).len(), 0);
+}
+
+#[test]
+fn committing_post_wakes_all_parked_router_workers_before_fallback() {
+    let f = fixture();
+    let server = Server::start(&f, "delayed", false);
+    thread::sleep(Duration::from_millis(150));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    for index in 0..4 {
+        let (status, receipt) = support::raw_post(
+            &server,
+            &format!("wake-{index}"),
+            "Could @planner inspect?",
+            None,
+        );
+        assert_eq!(status, 200, "{receipt}");
+    }
+    while calls(&f).len() < 4 {
+        assert!(
+            Instant::now() < deadline,
+            "committed posts must wake all four workers before the five-second fallback"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(f.root.join("router-release"), "").unwrap();
+}
+
+#[test]
 fn stop_during_routing_prevents_selected_and_baseline_deliveries_and_releases_mailbox() {
     for with_baseline in [false, true] {
         let f = fixture();
@@ -126,25 +198,42 @@ fn four_workers_claim_four_processes_while_extra_posts_remain_durable() {
         receipts.push(receipt);
     }
     until(|| calls(&f).len() == 4);
+    let model_pids: std::collections::BTreeSet<_> = calls(&f)
+        .iter()
+        .map(|call| i32::try_from(call["pid"].as_u64().unwrap()).unwrap())
+        .collect();
+    assert_eq!(model_pids.len(), 4);
+    for pid in &model_pids {
+        assert_eq!(
+            unsafe { libc::kill(*pid, 0) },
+            0,
+            "blocked model process {pid} must still be running"
+        );
+    }
     assert_eq!(f.count("SELECT COUNT(*) FROM transition_facts WHERE actor_id='channel-router/v1' AND transition_kind='dispatching'"),4);
     assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 7);
-    let pid =
-        serde_json::from_slice::<Value>(&fs::read(f.state.join("dashboard/server.json")).unwrap())
-            .unwrap()["pid"]
+    assert_eq!(f.count("SELECT COUNT(*) FROM (SELECT transition_kind,ROW_NUMBER() OVER (PARTITION BY session_socket_id,worktree_id,entity_id ORDER BY worktree_order DESC) AS rank FROM transition_facts WHERE actor_id='channel-router/v1') WHERE rank=1 AND transition_kind='queued'"),3);
+    #[cfg(target_os = "linux")]
+    {
+        let pid = serde_json::from_slice::<Value>(
+            &fs::read(f.state.join("dashboard/server.json")).unwrap(),
+        )
+        .unwrap()["pid"]
             .as_u64()
             .unwrap();
-    let workers = fs::read_dir(format!("/proc/{pid}/task"))
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|task| {
-            fs::read_to_string(task.path().join("comm"))
-                .unwrap_or_default()
-                .starts_with("channel-router-")
-        })
-        .count();
-    assert_eq!(workers, 4);
+        let workers = fs::read_dir(format!("/proc/{pid}/task"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|task| {
+                fs::read_to_string(task.path().join("comm"))
+                    .unwrap_or_default()
+                    .starts_with("channel-router-")
+            })
+            .count();
+        assert_eq!(workers, 4);
+    }
     eprintln!(
-        "queue evidence: 7 committed posts, 4 blocked model calls, {workers} owned router threads, 3 jobs waiting"
+        "queue evidence: 7 committed posts, 4 distinct live blocked model processes {model_pids:?}, 4 dispatch claims, 3 jobs waiting"
     );
     fs::write(f.root.join("router-release"), "").unwrap();
     for (index, initial) in receipts.iter().enumerate() {
@@ -241,7 +330,7 @@ fn failed_and_empty_followups_preserve_baseline_deliveries_and_all_projections_w
 }
 
 #[test]
-fn restart_fails_both_queued_and_dispatching_posts_without_mutating_fingerprints() {
+fn restart_fails_only_dispatching_and_routes_queued_without_mutating_fingerprints() {
     let f = fixture();
     let server = Server::start(&f, "delayed", false);
     for index in 0..6 {
@@ -268,16 +357,25 @@ fn restart_fails_both_queued_and_dispatching_posts_without_mutating_fingerprints
         .collect::<Result<_, _>>()
         .unwrap();
     drop(server);
-    let server = Server::start(&f, "not json", false);
+    let server = Server::start(&f, r#"{"to":["planner"],"reason":"review request"}"#, false);
+    until(|| calls(&f).len() == 6);
+    for index in 0..6 {
+        let (status, receipt) = post(
+            &server,
+            &format!("recover-{index}"),
+            "Could @planner inspect?",
+            None,
+        );
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(
+            receipt["channel"]["state"],
+            if index < 4 { "router_failed" } else { "routed" }
+        );
+        assert_eq!(receipt["idempotent_replay"], true);
+    }
     let page = history(&server);
     assert_eq!(page.as_array().unwrap().len(), 6);
-    assert!(
-        page.as_array()
-            .unwrap()
-            .iter()
-            .all(|m| m["channel"]["state"] == "router_failed")
-    );
-    assert_eq!(calls(&f).len(), 4);
+    assert_eq!(calls(&f).len(), 6);
     let after: Vec<(String, String)> = f
         .db()
         .prepare(
@@ -289,7 +387,7 @@ fn restart_fails_both_queued_and_dispatching_posts_without_mutating_fingerprints
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(before, after);
-    assert_eq!(f.count("SELECT COUNT(*) FROM message_recipients"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM message_recipients"), 2);
 }
 
 #[cfg(target_os = "linux")]

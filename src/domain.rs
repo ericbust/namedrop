@@ -237,6 +237,7 @@ pub struct ThreadControlState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActiveThreadResponse {
     pub attempt_id: DeliveryAttemptId,
+    pub binding_id: PaneBindingId,
     pub pane_id: String,
     pub agent_session_id: AgentSessionId,
     pub binding_active: bool,
@@ -544,6 +545,43 @@ pub(crate) struct MessageRoute {
     /// Namedrop wrote the message itself, under the recipient's own address
     /// and the sender name `namedrop`, so its sender is no one to reply to.
     pub from_namedrop: bool,
+    asker: RoutingAddressSnapshot,
+    asked_addresses: Vec<PaneAddressId>,
+}
+
+impl MessageRoute {
+    pub(crate) fn new(
+        thread_id: ThreadId,
+        asker: RoutingAddressSnapshot,
+        recipients: Vec<RoutingAddressSnapshot>,
+        reply_mode: DeliveryReplyMode,
+        from_namedrop: bool,
+        asked_addresses: Vec<PaneAddressId>,
+    ) -> Self {
+        let mut participants = vec![asker.clone()];
+        for recipient in recipients {
+            if !participants
+                .iter()
+                .any(|p| p.address_id == recipient.address_id)
+            {
+                participants.push(recipient);
+            }
+        }
+        Self {
+            thread_id,
+            participants,
+            reply_mode,
+            from_namedrop,
+            asker,
+            asked_addresses,
+        }
+    }
+
+    pub(crate) fn asker_for(&self, replier: &PaneAddressId) -> Option<&RoutingAddressSnapshot> {
+        self.asked_addresses
+            .contains(replier)
+            .then_some(&self.asker)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

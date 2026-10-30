@@ -49,6 +49,8 @@ pub(crate) struct Front {
     pub assets: Assets,
     pub restarting: Arc<AtomicBool>,
     pub mutations: Arc<Mutex<()>>,
+    pub channel_wake: super::channel_service::ChannelWake,
+    pub control_effects: super::thread_controls::ControlEffects,
 }
 
 impl Front {
@@ -1079,23 +1081,33 @@ fn serve_connection(
                 Err(status) => return respond_status(&mut writer, status),
             };
             writer.set_write_timeout(Some(Duration::from_secs(1)))?;
-            match super::thread_controls::apply(front.files.state(), &key, &thread_id, action) {
-                Ok((namespace, receipt)) => {
-                    let response = respond(
-                        &mut writer,
-                        "200 OK",
-                        "application/json",
-                        "",
-                        receipt.to_string().as_bytes(),
-                    );
+            let completion = front.control_effects.track();
+            match super::thread_controls::commit(front.files.state(), &key, &thread_id, action) {
+                Ok(committed) => {
                     drop(admitted);
-                    super::channel_service::drain(front.files.state(), &namespace);
-                    response
+                    committed.respond(
+                        front.files.state(),
+                        completion,
+                        |receipt| {
+                            respond(
+                                &mut writer,
+                                "200 OK",
+                                "application/json",
+                                "",
+                                receipt.to_string().as_bytes(),
+                            )
+                        },
+                        |namespace| super::channel_service::drain(front.files.state(), namespace),
+                    )
                 }
                 Err(super::thread_controls::ControlError::NotFound) => {
+                    drop(completion);
+                    drop(admitted);
                     respond_status(&mut writer, Status::NotFound)
                 }
                 Err(super::thread_controls::ControlError::Unavailable) => {
+                    drop(completion);
+                    drop(admitted);
                     respond_status(&mut writer, Status::Unavailable)
                 }
             }
@@ -1294,6 +1306,7 @@ fn send_operator_post(
     let target = post.in_reply_to.map(crate::MessageId::new);
     writer.set_write_timeout(Some(Duration::from_secs(1)))?;
     let observe_commit = |receipt: &serde_json::Value| {
+        front.channel_wake.notify();
         let mut receipt = receipt.clone();
         snapshot::channel_routing::finish_post(front.files.state(), &namespace, &mut receipt);
         let response = respond(

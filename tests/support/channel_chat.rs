@@ -51,7 +51,13 @@ args = sys.argv[1:]
 root = os.path.dirname(__file__)
 if args == ['pane', 'list', '--workspace', 'w1']:
     gate = os.path.join(root, 'discovery-gate')
-    if os.path.exists(gate):
+    block = os.path.exists(gate)
+    if block and os.path.exists(os.path.join(root, 'discovery-single')):
+        try:
+            os.close(os.open(os.path.join(root, 'discovery-entered'), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        except FileExistsError:
+            block = False
+    if block:
         open(os.path.join(root, 'discovery-entered'), 'w').close()
         deadline = time.monotonic() + 15
         while os.path.exists(gate):
@@ -69,6 +75,13 @@ elif args[:2] == ['worktree', 'list']:
 elif args[:2] in [['agent', 'prompt'], ['agent', 'send-keys'], ['pane', 'report-metadata'], ['notification', 'show']]:
     with open(os.path.join(root, 'http-herdr-invocations.jsonl'), 'a') as log:
         log.write(json.dumps({'args': args, 'socket': os.environ.get('HERDR_SOCKET_PATH')}) + '\n')
+    if args[:2] == ['agent', 'send-keys'] and os.path.exists(os.path.join(root, 'keys-gate')):
+        open(os.path.join(root, 'keys-entered'), 'w').close()
+        while os.path.exists(os.path.join(root, 'keys-gate')):
+            time.sleep(0.01)
+    if args[:2] == ['agent', 'send-keys'] and os.path.exists(os.path.join(root, 'keys-error')):
+        sys.stderr.write('ambiguous interrupt transport failure')
+        sys.exit(1)
     if args[:2] == ['agent', 'prompt'] and os.path.exists(os.path.join(root, 'prompt-gate')):
         open(os.path.join(root, 'prompt-entered'), 'w').close()
         while os.path.exists(os.path.join(root, 'prompt-gate')):
@@ -105,7 +118,7 @@ import json, os, sys, time
 root = os.path.dirname(__file__)
 payload = sys.stdin.read()
 with open(os.path.join(root, 'router-calls.jsonl'), 'a') as log:
-    log.write(json.dumps({'args': sys.argv, 'env': dict(os.environ), 'stdin': payload}) + '\n')
+    log.write(json.dumps({'pid': os.getpid(), 'args': sys.argv, 'env': dict(os.environ), 'stdin': payload}) + '\n')
 with open(os.path.join(root, 'router-response.json')) as source:
     output = source.read()
 if output == 'timeout':
@@ -299,7 +312,8 @@ pub(super) fn post(
 pub(super) fn calls(f: &Fixture) -> Vec<Value> {
     fs::read_to_string(f.root.join("router-calls.jsonl"))
         .unwrap_or_default()
-        .lines()
+        .split_inclusive('\n')
+        .filter(|line| line.ends_with('\n'))
         .map(|line| serde_json::from_str(line).unwrap())
         .collect()
 }
@@ -470,4 +484,21 @@ pub(super) fn context(server: &Server, message: &str) -> Value {
     );
     assert_eq!(response.status, 200, "{}", response.body);
     serde_json::from_str(&response.body).unwrap()
+}
+
+#[test]
+fn fake_router_observation_waits_for_a_complete_jsonl_record() {
+    let f = fixture();
+    let path = f.root.join("router-calls.jsonl");
+    let first = json!({"request_id":"complete"});
+    let body = "x".repeat(8192);
+    fs::write(&path, format!("{first}\n{{\"body\":\"{body}")).unwrap();
+    assert_eq!(calls(&f), vec![first.clone()]);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(b"\"}\n")
+        .unwrap();
+    assert_eq!(calls(&f), vec![first, json!({"body":body})]);
 }

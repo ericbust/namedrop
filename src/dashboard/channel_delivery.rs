@@ -37,8 +37,8 @@ pub(super) fn apply(
         })
         .map_err(|_| DeliverError::Unavailable)?;
     match result {
-        ChannelDelivery::Delivered(channel) => {
-            let mut receipt = json!({"message_id": message, "channel": channel});
+        ChannelDelivery::Delivered(result) => {
+            let mut receipt = json!({"message_id": message, "channel": result.channel, "delivered": result.delivered});
             super::snapshot::channel_routing::finish_post(state, &namespace, &mut receipt);
             Ok((namespace, receipt))
         }

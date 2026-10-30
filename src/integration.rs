@@ -562,6 +562,11 @@ where
         return Ok(());
     }
 
+    let effects = crate::pane_effects::PaneEffects::acquire(
+        runtime.state_directory,
+        runtime.session_socket_id,
+        &pane.pane_id,
+    )?;
     let current = integration_discovery(runtime)?;
     let still_settled = current.panes.iter().any(|current| {
         current.pane_id == pane.pane_id
@@ -592,10 +597,11 @@ where
         agent_runtime,
         &challenge.nonce,
     )?;
-    match runtime
-        .herdr
-        .execute(&["agent", "prompt", &pane.pane_id, &prompt])
-    {
+    match effects.prompt(
+        runtime.herdr,
+        &crate::pane_effects::InputOwner::Other,
+        &prompt,
+    ) {
         Ok(_) => finish_challenge_prompt(
             runtime,
             &namespace,

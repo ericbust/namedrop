@@ -413,6 +413,11 @@ where
         }
 
         runtime.clock.wait_ms(first.settled_delay_ms);
+        let effects = crate::pane_effects::PaneEffects::acquire(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            &first.pane_id,
+        )?;
         let second_discovery = discover(runtime)?;
         if second_discovery.workspace_id != namespace.space_id.as_str() {
             continue;
@@ -524,14 +529,16 @@ where
             report.failed.push(leased.attempt_id);
             continue;
         };
+        let owner = crate::pane_effects::InputOwner::delivery(
+            &namespace,
+            &leased.attempt_id,
+            &second.binding_id,
+            &leased.agent_session_id,
+        );
         let prompt_result = if second.pane_type == crate::PaneType::Terminal {
-            runtime
-                .herdr
-                .execute(&["pane", "run", &second.pane_id, &prompt])
+            effects.run_terminal(runtime.herdr, &owner, &prompt)
         } else {
-            runtime
-                .herdr
-                .execute(&["agent", "prompt", &second.pane_id, &prompt])
+            effects.prompt(runtime.herdr, &owner, &prompt)
         };
         let attribution = MutationAttribution::new(
             ActorKind::Plugin,
