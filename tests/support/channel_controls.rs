@@ -212,6 +212,23 @@ fn browser_controls_stop_interrupts_only_the_proven_current_thread_response_once
 
 struct DiscoveryGate(std::path::PathBuf);
 
+impl DiscoveryGate {
+    fn new(f: &Fixture) -> Self {
+        let gate = Self(f.root.join("discovery-gate"));
+        fs::write(&gate.0, "").unwrap();
+        gate
+    }
+
+    fn wait(&self) {
+        let entered = self.0.with_file_name("discovery-entered");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !entered.exists() {
+            assert!(Instant::now() < deadline, "stop did not enter discovery");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
 impl Drop for DiscoveryGate {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
@@ -226,15 +243,10 @@ fn browser_controls_stop_does_not_interrupt_a_later_thread_in_the_same_session()
     let session = xws::session("pane-1-planner");
     f.status("pane-1-planner", "working");
     let server = Server::start(&f, "not json", true);
-    let gate = DiscoveryGate(f.root.join("discovery-gate"));
-    fs::write(&gate.0, "").unwrap();
+    let gate = DiscoveryGate::new(&f);
     thread::scope(|scope| {
         let stop = scope.spawn(|| server.post(&control_path("w1", &parent, "stop"), "{}", &[]));
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !f.root.join("discovery-entered").exists() {
-            assert!(Instant::now() < deadline, "stop did not enter discovery");
-            thread::sleep(Duration::from_millis(10));
-        }
+        gate.wait();
         assert_eq!(controls(&f, &parent)["stopped"], true);
         StateStore::open(&f.state)
             .unwrap()
@@ -301,4 +313,30 @@ fn browser_controls_stop_does_not_interrupt_a_later_thread_in_the_same_session()
         f.count("SELECT COUNT(*) FROM delivery_attempt_state WHERE active=1 AND state IN ('submitted','acknowledged')"),
         1
     );
+}
+
+#[test]
+fn browser_controls_stop_rechecks_the_binding_after_discovery() {
+    let f = fixture();
+    let parent = plain_root(&f, "retired-binding", "Please inspect.");
+    f.status("pane-1-planner", "working");
+    let server = Server::start(&f, "not json", true);
+    let gate = DiscoveryGate::new(&f);
+    thread::scope(|scope| {
+        let stop = scope.spawn(|| server.post(&control_path("w1", &parent, "stop"), "{}", &[]));
+        gate.wait();
+        assert_eq!(controls(&f, &parent)["stopped"], true);
+        f.db()
+            .execute(
+                "UPDATE pane_bindings SET active=0 WHERE pane_id='pane-1-planner'",
+                [],
+            )
+            .unwrap();
+        drop(gate);
+        let response = stop.join().unwrap();
+        assert_eq!(response.status, 200, "{}", response.body);
+        let receipt: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(receipt["interrupted_pane_ids"], json!([]), "{receipt}");
+        assert_eq!(receipt["warnings"].as_array().unwrap().len(), 1);
+    });
 }

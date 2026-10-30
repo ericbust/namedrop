@@ -83,32 +83,50 @@ pub(super) fn apply(
         let mut warnings = Vec::new();
         if !stopped.active_responses.is_empty() {
             let live = crate::discover_worktree_for_workspace(&herdr, namespace.space_id.as_str());
-            for response in &stopped.active_responses {
-                let proven_running = response.binding_active
-                    && live.as_ref().is_ok_and(|discovered| {
-                        discovered.workspace_id == namespace.space_id.as_str()
-                            && discovered.panes.iter().any(|pane| {
-                                pane.pane_id == response.pane_id
-                                    && pane.agent_session_id.as_ref()
-                                        == Some(&response.agent_session_id)
-                                    && pane.agent_status.as_deref() == Some("working")
+            let mut store = StateStore::open(state).map_err(store_error)?;
+            store
+                .transaction(|tx| {
+                    // Keep settlement and the next Namedrop dispatch behind the interrupt.
+                    let inflight = tx.inflight_delivery_attempts(&namespace)?;
+                    for response in &stopped.active_responses {
+                        let proven_running = response.binding_active
+                            && inflight.iter().any(|current| {
+                                current.attempt_id == response.attempt_id
+                                    && current.binding_active
+                                    && current.pane_id == response.pane_id
+                                    && current.agent_session_id == response.agent_session_id
+                                    && matches!(
+                                        current.state,
+                                        crate::DeliveryState::Submitted | crate::DeliveryState::Acknowledged
+                                    )
                             })
-                    });
-                if !proven_running {
-                    warnings.push(format!(
-                        "Did not interrupt {} because the stopped thread could not be proven to own its current response.",
-                        response.pane_id
-                    ));
-                    continue;
-                }
-                match herdr.execute(&["agent", "send-keys", &response.pane_id, "ctrl+c"]) {
-                    Ok(_) => interrupted.push(response.pane_id.clone()),
-                    Err(error) => warnings.push(format!(
-                        "Could not interrupt {} after stopping the thread: {error}",
-                        response.pane_id
-                    )),
-                }
-            }
+                            && live.as_ref().is_ok_and(|discovered| {
+                                discovered.workspace_id == namespace.space_id.as_str()
+                                    && discovered.panes.iter().any(|pane| {
+                                        pane.pane_id == response.pane_id
+                                            && pane.agent_session_id.as_ref()
+                                                == Some(&response.agent_session_id)
+                                            && pane.agent_status.as_deref() == Some("working")
+                                    })
+                            });
+                        if !proven_running {
+                            warnings.push(format!(
+                                "Did not interrupt {} because the stopped thread could not be proven to own its current response.",
+                                response.pane_id
+                            ));
+                            continue;
+                        }
+                        match herdr.execute(&["agent", "send-keys", &response.pane_id, "ctrl+c"]) {
+                            Ok(_) => interrupted.push(response.pane_id.clone()),
+                            Err(error) => warnings.push(format!(
+                                "Could not interrupt {} after stopping the thread: {error}",
+                                response.pane_id
+                            )),
+                        }
+                    }
+                    Ok(())
+                })
+                .map_err(store_error)?;
         }
         receipt["cancelled_delivery_ids"] = json!(stopped.cancelled_delivery_ids);
         receipt["interrupted_pane_ids"] = json!(interrupted);
