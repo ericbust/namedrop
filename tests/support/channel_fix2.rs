@@ -77,3 +77,38 @@ fn post_is_visible_and_answers_before_router_finishes_then_survives_restart() {
     assert_eq!(replay["message_id"], receipt["message_id"]);
     assert_eq!(calls(&f).len(), 1);
 }
+
+#[test]
+fn pulled_in_agent_answers_the_asker_without_repeating_its_name() {
+    let f = fixture();
+    let root = plain_root(&f, "asker-root", "Please collaborate here.");
+    let question = agent_reply(
+        &f,
+        "asker-question",
+        &root,
+        "pane-1-planner",
+        "@operator Asking @lead for the number.",
+    )
+    .unwrap();
+    let answer = agent_reply(
+        &f,
+        "asker-answer",
+        &question,
+        "pane-1-lead",
+        "@operator The number is 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&answer), vec!["operator", "planner"]);
+    let envelope = f.herdr.last_envelope("pane-1-planner");
+    assert_eq!(envelope["untrusted_body"], "The number is 42.");
+    let mut store = StateStore::open(&f.state).unwrap();
+    let controls = store
+        .transaction(|tx| {
+            tx.thread_control_state(
+                &StateNamespace::for_space("socket-a", "w1"),
+                &namedrop::ThreadId::new(root["thread_id"].as_str().unwrap()),
+            )
+        })
+        .unwrap();
+    assert_eq!(controls.reply_allowance, 8);
+}

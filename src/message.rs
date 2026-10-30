@@ -578,7 +578,8 @@ where
 }
 
 pub(crate) fn is_plain_channel_post(source: &str) -> bool {
-    parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
+    !source.trim_start().starts_with('@')
+        && parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
 }
 
 pub(crate) fn send_operator_channel_message_observing_commit<E, C, I, R>(
@@ -1217,7 +1218,15 @@ where
             }
         }
         if channel_reply {
-            for member in transaction.channel_members(&namespace)? {
+            let asker = reply_route.as_ref().and_then(|route| route.participants.first());
+            let members = transaction.channel_members(&namespace)?;
+            if let Some(member) = members.iter().find(|member| {
+                asker.is_some_and(|asker| asker.address_id == member.address_id)
+                    && member.address_id != author.address_id
+            }) && !recipients.iter().any(|recipient| recipient.address_id == member.address_id) {
+                recipients.push(member.clone());
+            }
+            for member in members {
                 if member.address_id != author.address_id && member.alias != "operator"
                     && parsed.context_mentions.iter().any(|mention| mention.workspace.is_none() && mention.alias == member.alias)
                     && !recipients.iter().any(|recipient| recipient.address_id == member.address_id) {

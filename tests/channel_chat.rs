@@ -219,7 +219,11 @@ fn channel_replies_keep_the_existing_ten_reply_allowance_and_attention() {
             &format!("reply-{index}"),
             &parent,
             pane,
-            &format!("@operator Please ask @{mention} next."),
+            &if index == 0 {
+                format!("@operator Please ask @{mention} next.")
+            } else {
+                "@operator Continue the exchange.".to_owned()
+            },
         )
         .unwrap();
     }
