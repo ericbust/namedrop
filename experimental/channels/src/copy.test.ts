@@ -801,7 +801,7 @@ test("channel chat words: the route line, its offers and tooltips, reply counts 
   assert.equal(routeCopy.tip.router("claude-haiku"), "Picked by claude-haiku");
   assert.equal(
     routeCopy.tip.unreachable,
-    "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+    "Namedrop couldn't reach its router, so it didn't pick who gets this post. The post is saved.",
   );
   assert.equal(repliesCopy(1), "1 reply");
   assert.equal(repliesCopy(3), "3 replies");

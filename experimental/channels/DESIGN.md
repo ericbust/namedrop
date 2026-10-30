@@ -799,8 +799,9 @@ Names in it are peek buttons at 12px 600 in `--text`.
   button in 12px 600 `--accent-text` that opens the thread pane. Its accessible
   name is "3 replies. Open thread". A post with no line shows the count alone.
 - `router_failed` colors the icon and its words in `--failed-text`, because the
-  post reached no one it named and the operator should act. Its tooltip reads
-  "Namedrop couldn't reach its router. The post is saved, and no one got it."
+  router reached no one the post named and the operator should act. Its
+  tooltip reads "Namedrop couldn't reach its router, so it didn't pick who gets
+  this post. The post is saved." It stays true after a Send to.
 - A `router_failed` post that a Send to reached keeps its state part, then
   names the agents reached with their receipts, as a routed line does, then
   the offers still left: "Couldn't check who this is for · @codex · Queued ·

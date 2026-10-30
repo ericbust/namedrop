@@ -7398,7 +7398,7 @@ test("CH-2: router_failed reads in --failed-text, explains itself, and offers Se
   assert.deepEqual(await icon(), [iconShape.alert]);
   assert.equal(
     await route.getAttribute("title"),
-    "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+    "Namedrop couldn't reach its router, so it didn't pick who gets this post. The post is saved.",
   );
   const failed = await tokenColor(ui.page, "--failed-text");
   assert.equal(

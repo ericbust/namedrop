@@ -517,7 +517,7 @@ export const routeCopy = {
   tip: {
     router: (name: string) => `Picked by ${name}`,
     unreachable:
-      "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+      "Namedrop couldn't reach its router, so it didn't pick who gets this post. The post is saved.",
   } satisfies Record<RouteTip["kind"], unknown>,
   openReplies: (count: number) => `${repliesCopy(count)}. Open thread`,
 };
