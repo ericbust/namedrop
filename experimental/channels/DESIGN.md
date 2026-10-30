@@ -411,7 +411,8 @@ when its action is listed:
   Stop thread. Only the confirm's Stop sends.
 - A press reads "Allowing…" or "Stopping…" on the pressed button, and every
   action on the row is disabled. The item stays pending after the server
-  answers, until a frame drops it.
+  answers, until a frame drops it. When the item leaves first, the page
+  cancels the request, so a slow server never holds a connection.
 - A refusal puts a 12px line in `--failed-text` under the row, with
   `role="alert"` and the HTTP status as its tooltip: "Couldn't allow more
   replies. Try again." or "Couldn't stop the thread. Try again." For 404 it
@@ -548,7 +549,7 @@ agent's pane reaches that agent.
   terminal, the reply must start with `@name`, so a terminal never runs text by
   accident. The box reads "Start with @name to choose who gets this."
 - The post carries `in_reply_to` with the message Respond targets, else the
-  message a Send anyway reply answers, else the latest message in the thread.
+  latest message in the thread.
 
 ### Channel chat
 
@@ -686,20 +687,27 @@ anyway". Several read "Mentioned 2 agents, not sent · Send to @codex, @lead", s
 each name shows once, as its button. `router_failed` always uses the "Send to"
 form. Each offer is a
 text button in 12px 600 `--accent-text` with the accessible name "Send this to
-@codex". Activating one opens the post's thread in the thread pane and focuses
-its composer. The post's text is never copied, because the page holds a display
-copy that the server cuts and redacts. The agent reads the post from its thread.
+@codex".
 
-- When that thread's draft is empty, the box holds "@codex Please read my
-  post." with "Please read my post." selected, so typing replaces the note and
-  Enter sends it as is.
-- The reply answers the post itself: its `in_reply_to` is the post until the
-  box is sent or emptied, so the room's reference line shows the post.
-- A draft that has text stays as it is. The box takes focus, and the status
-  row under it reads "Your draft is still here. Send or clear it, then press
-  Send anyway again." in 12px `--text`, until the next edit.
-- Inside an open Needs-you conversation on the same thread, the offer fills
-  that pane's box in place.
+- One click delivers the post itself to that agent, as the operator's request,
+  the same way the router would have sent it
+  (`POST /w/<key>/messages/<id>/deliver`). Nothing opens, nothing is typed in a
+  composer, and focus stays on the button. The room never shows a copy: the
+  agent gets the stored post, not the page's display copy, which the server
+  cuts and redacts.
+- The button reads "Sending…", then "Sent", in `--text-muted` and inert, until
+  a frame shows the post reached the agent. The line then names the agent with
+  its receipt, and the offer goes. In the "Send to" form the name stays before
+  the label, as in "Send to @codex Sent, @lead".
+- A failure reads "Couldn't send to @codex." in `--failed-text`, then a "Try
+  again" text button. Its tooltip is the server's message, "HTTP 500" when the
+  server gives none, or "Couldn't reach Namedrop." when the request never
+  reached it.
+- The offer sits in a polite status region, so a screen reader hears
+  "Sending…", "Sent", or the failure.
+- Each agent after "Send to" keeps its own state. The timeline, the thread
+  pane, and a Needs-you conversation show one state for the same post and
+  agent.
 
 **Replies in the timeline.**
 
