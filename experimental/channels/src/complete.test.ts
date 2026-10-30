@@ -146,6 +146,12 @@ test("complete: an @ after a #channel lists that channel's members, else the cur
     "@reviewer",
   ]);
   assert.equal(complete("#beta @", 7, context)?.target, betaKey);
+  for (const text of ["#beta, @", "#beta: @"])
+    assert.equal(
+      complete(text, text.length, context)?.target,
+      betaKey,
+      `${text} completes beta's members: one trailing , or : is not part of the label`,
+    );
   assert.deepEqual(names(complete("#beta #alpha @c", 15, context)), [
     "@claude",
     "@codex",
