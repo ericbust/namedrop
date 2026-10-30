@@ -2031,7 +2031,7 @@ code.inline {
 .channels-toggle .dot,
 .channels-toggle .connection-dot {
   position: absolute;
-  right: 3px;
+  right: 1px;
   border: 2px solid var(--bg);
 }
 .channels-toggle .dot {

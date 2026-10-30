@@ -9489,3 +9489,54 @@ test("UI-R4 L2: on a phone the Channels button opens the sidebar as a modal draw
     );
   }
 });
+
+test("UI-R4 L3: in a short window with no pane, the Needs-you banner shrinks and scrolls inside before the timeline gives up its three lines", async (t) => {
+  const value = layoutChannel();
+  value.frame.health = { level: "needs_you", items: 8 };
+  value.frame.attention = Array.from({ length: 8 }, (_, n) => ({
+    source_kind: "agent_status",
+    summary: {
+      text: `@codex is waiting on an approval or question ${n + 1}.`,
+      truncated: false,
+    },
+    opened_at_ms: Date.now() - 60 * 60_000,
+  }));
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Show 5 more", exact: true })
+    .click();
+  for (const [width, height] of [
+    [390, 460],
+    [640, 460],
+    [1024, 600],
+  ]) {
+    await resize(ui.page, width, height);
+    const shown = await ui.page.evaluate(() => {
+      const box = (selector) =>
+        document.querySelector(selector).getBoundingClientRect();
+      const banner = document.querySelector("main .attention");
+      return {
+        banner: box("main .attention").height,
+        scrolls: banner.scrollHeight > banner.clientHeight,
+        gap: box("main .timeline").top - box("main .attention").bottom,
+        timeline: box("main .timeline").height,
+        composer: box("main .composer").bottom,
+        height: innerHeight,
+      };
+    });
+    const at = `${width}x${height}: ${JSON.stringify(shown)}`;
+    assert.ok(
+      shown.timeline >= 112 - 0.5,
+      `the timeline keeps 112 px at ${at}`,
+    );
+    assert.ok(shown.scrolls, `the banner scrolls inside at ${at}`);
+    assert.ok(shown.gap >= 12 - 0.5, `12 px under the banner at ${at}`);
+    assert.ok(
+      shown.composer <= shown.height + 0.5,
+      `the composer is whole at ${at}`,
+    );
+  }
+});
