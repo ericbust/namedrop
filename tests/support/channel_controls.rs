@@ -106,6 +106,92 @@ fn browser_controls_continue_and_stop_release_the_reply_limit_mailbox_hold() {
 }
 
 #[test]
+fn browser_followup_receipt_reports_reply_limit_hold_until_continue() {
+    let f = fixture();
+    let parent = held_thread(&f);
+    let server = Server::start(&f, "not json", true);
+    let source = "Continue the discussion.";
+    let (status, receipt) = post(
+        &server,
+        "held-followup",
+        source,
+        parent["message_id"].as_str(),
+    );
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(controls(&f, &parent)["reply_limit_paused"], true);
+    assert_eq!(recipient_aliases(&receipt), ["planner", "lead"]);
+    for outlook in receipt["delivery_outlook"].as_array().unwrap() {
+        assert_eq!(outlook["agent_status"], "idle");
+        assert_eq!(outlook["lifecycle"], "occupied");
+        let statement = outlook["statement"].as_str().unwrap();
+        assert!(statement.contains("Continue"), "{statement}");
+        assert!(statement.contains("queued"), "{statement}");
+        assert!(!statement.contains("imminent"), "{statement}");
+    }
+    assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='held-followup')"), 0);
+    let (status, replay) = post(
+        &server,
+        "held-followup",
+        source,
+        parent["message_id"].as_str(),
+    );
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(replay["idempotent_replay"], true);
+    assert_eq!(replay["delivery_outlook"], receipt["delivery_outlook"]);
+    let response = server.post(&control_path("w1", &parent, "continue"), "{}", &[]);
+    assert_eq!(response.status, 200, "{}", response.body);
+    let (status, resumed) = post(
+        &server,
+        "held-followup",
+        source,
+        parent["message_id"].as_str(),
+    );
+    assert_eq!(status, 200, "{resumed}");
+    assert_eq!(resumed["idempotent_replay"], true);
+    assert_eq!(resumed["message_id"], receipt["message_id"]);
+    for outlook in resumed["delivery_outlook"].as_array().unwrap() {
+        assert!(
+            !outlook["statement"].as_str().unwrap().contains("Continue"),
+            "{outlook}"
+        );
+    }
+    let (status, ordinary) = post(&server, "ordinary-idle", "@lead A new task.", None);
+    assert_eq!(status, 200, "{ordinary}");
+    assert!(
+        ordinary["delivery_outlook"][0]["statement"]
+            .as_str()
+            .unwrap()
+            .contains("imminent"),
+        "{ordinary}"
+    );
+}
+
+#[test]
+fn browser_receipt_reports_an_earlier_reply_limit_mailbox_head() {
+    let f = fixture();
+    let parent = held_thread(&f);
+    let server = Server::start(&f, "not json", true);
+    let (status, receipt) = post(&server, "behind-limit", "@planner Later task.", None);
+    assert_eq!(status, 200, "{receipt}");
+    assert_ne!(receipt["thread_id"], parent["thread_id"]);
+    let statement = receipt["delivery_outlook"][0]["statement"]
+        .as_str()
+        .unwrap();
+    assert!(statement.contains("Continue"), "{statement}");
+    assert!(!statement.contains("imminent"), "{statement}");
+    assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='behind-limit')"), 0);
+    let (status, unrelated) = post(&server, "unrelated-idle", "@lead Another task.", None);
+    assert_eq!(status, 200, "{unrelated}");
+    assert!(
+        unrelated["delivery_outlook"][0]["statement"]
+            .as_str()
+            .unwrap()
+            .contains("imminent"),
+        "{unrelated}"
+    );
+}
+
+#[test]
 fn browser_thread_controls_enforce_message_post_auth_and_workspace_scope() {
     let f = fixture();
     let parent = held_thread(&f);
