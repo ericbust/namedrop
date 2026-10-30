@@ -129,13 +129,56 @@ sidebar list, the Needs-you details, the timeline, the thread, the activity list
 and the screen text. Each of them is the containing block of what it scrolls, so
 hidden text inside it never stretches the page.
 
-Below 860px of window width, an open thread pane or peek drawer stacks under
-the main column, and each gets half the window's height. Nothing in the main
-column paints outside it. The Needs-you banner takes at most 40 percent of the
-main column. When the column is short, the timeline shrinks first, down to
-nothing, and then the banner, which scrolls inside itself. The composer always
-stays whole. Side by side, from 860px up, the banner's cap is 40 percent of the
-window's height.
+The window's size decides where an open pane (the thread pane or the peek
+drawer) goes:
+
+| Window                                                         | Pane                                                                                                                 |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Over 860px wide                                                | Beside the main column.                                                                                              |
+| 601 to 860px wide and at least 900px tall, such as a tablet    | Stacked under the main column. Each gets half the window's height.                                                   |
+| 860px wide or less and under 900px tall, or 600px wide or less | In the main column's place. The channel stays mounted under it, hidden, so its draft, scroll and deliveries survive. |
+
+When the pane takes the channel's place, its header's "in #alpha" is the only
+context, and its close button or Escape is the way back. There is no back
+button. Focus returns where it does in the other layouts: to the thread button,
+or to the chip, name or row that opened the screen. The breakpoints are media
+queries in `style.css`. The one fact JavaScript reads is the 600px phone width,
+in `ui/measure.ts`, because it decides where the connection dot is and whether
+the sidebar is a modal drawer.
+
+In every layout the timeline keeps at least 112px, about three message lines.
+When the main column is short, the Needs-you banner gives way first: it
+shrinks, down to 56px, and scrolls inside itself. 12px (`--space-3`) always
+separate it from the timeline. Its cap is 40 percent of the window's height, or
+40 percent of the main column when stacked. The composer always stays whole.
+The Jump to latest pill lies inside the timeline, so with the timeline's floor
+it never covers the banner, the member strip or the composer. Nothing in the
+main column paints outside it.
+
+### Phone drawer
+
+At 600px wide or less the sidebar column goes away and the main column takes
+the whole width.
+
+- A 32px **Channels** button starts the header that is on screen: the channel
+  header, the All activity header, the bar above an empty or loading view, or
+  the pane's header when a pane covers the channel. It shows a drawn menu icon,
+  three lines. Its accessible name is "Channels". When channels need you, a red
+  dot sits at its top right and the name reads "Channels, 1 needs you", or
+  "Channels, 2 need you". The connection dot sits at its bottom right, because
+  the sidebar's footer is off screen. Each dot has a 2px ring in the header's
+  background, like a presence badge. Exactly one connection dot exists at every
+  width.
+- The button opens the `Sidebar` itself as a drawer from the left,
+  `min(280px, 100vw - 40px)` wide, over a `--scrim` backdrop. The drawer is a
+  dialog named "Channels". Focus moves to the selected row, Tab and Shift+Tab
+  stay inside, and everything behind it is inert.
+- Escape, a press on the backdrop, or choosing a channel or All activity closes
+  it. Focus then returns to the Channels button. In the drawer, the arrow keys
+  only move focus between rows, and Enter chooses.
+- The drawer slides in over `--duration` and the backdrop fades in. With
+  reduced motion it appears in place.
+- Over 600px nothing changes: no button, and the sidebar column stays.
 
 ### Landing and navigation
 
@@ -195,7 +238,7 @@ window's height.
 - Only the Channels row of the selected channel gets the selected background.
   Its Needs-you row stays unselected.
 - **Footer**, 40px: the connection dot and "Live", "Connecting…", or
-  "Reconnecting…".
+  "Reconnecting…". On a phone the dot moves to the Channels button.
 - Section labels are 12px 600 `--text-muted`, sentence case, with the count in
   tabular numerals. They are not headings. Each `nav` carries the section name
   as its `aria-label`, so the channel title is the page's first heading.
@@ -392,8 +435,9 @@ full summary in 13px muted text. On a narrow window the row wraps between
 buttons, never inside a label, and a button never shrinks below its label. Only
 a label wider than the whole column ends in an ellipsis, with the full label as
 its tooltip. Show three items, then a "Show N more" button.
-The banner takes at most 40 percent of the main column's height and scrolls
-inside (see App shell for the stacked layout).
+The banner takes at most 40 percent of the window's height, shrinks before the
+timeline would drop under 112px, and scrolls inside. 12px separate it from the
+timeline. See App shell for each layout.
 Announce new items through a polite live region.
 
 | `source`                                | Title                                                                                                | Hint                                                            |
@@ -534,8 +578,8 @@ the parent message, a divider that reads "1 reply" with hairlines on both sides,
 and the replies. When the thread has no replies and the server knows of none, the
 divider reads "No replies yet". Replies use the message component without a
 reply preview. The pane slides in from 16px right with a fade over `--duration`.
-Below 860px of window width, the pane stacks under the timeline instead of
-beside it.
+On a narrow window the pane stacks under the timeline or takes the main
+column's place; see App shell.
 
 A Needs-you conversation that is answered somewhere else says where, in the
 composer's place: one 12px muted line, 20px from the sides and 12px from the
@@ -1133,8 +1177,8 @@ reads only when it opens and when the reader asks: never on a timer.
 - **Slot**: the thread pane's slot, `clamp(400px, 36vw, 480px)` wide, which is
   480px at 1440 and 400px at 1024. Opening the drawer closes the thread pane,
   and opening a thread closes the drawer. Picking another channel or All
-  activity closes it. Below 860px it stacks under the main column, like the
-  thread pane. Its accessible name is "Screen of @codex".
+  activity closes it. On a narrow window it stacks under the main column or
+  takes its place, like the thread pane. Its accessible name is "Screen of @codex".
 - **Header**, 60px, two lines. Line 1: a 20px avatar with its presence badge,
   the alias at 15px 600, and the presence word in 12px muted. Line 2, 12px
   muted: "in #alpha · Read at 10:42 PM". The stamp updates with every read and
@@ -1189,6 +1233,8 @@ Motion shows state and nothing else.
 - A presence dot changes color over 180ms. A working dot pulses slowly.
 - The thread pane and the peek drawer enter over 180ms.
 - The Needs-you banner expands and fades over 180ms when it appears.
+- The phone drawer slides in from the left over 180ms while its backdrop fades
+  in.
 - Under `prefers-reduced-motion: reduce`, remove the pulse and every movement,
   and keep only color changes.
 
@@ -1221,7 +1267,8 @@ Namedrop." when the server never answered. The pane header keeps "in #alpha".
 - The sidebar keeps its arrow-key navigation. The timeline scroller stays
   focusable. Escape closes the thread pane and returns focus to the thread button.
   Escape closes the peek drawer and returns focus to the chip, name, or row that
-  opened it. When that control is gone, focus moves to the timeline, or to the
+  opened it. On a phone, Escape closes the channels drawer and returns focus to
+  the Channels button. When that control is gone, focus moves to the timeline, or to the
   activity list in All activity.
 - Every presence dot, receipt icon, and avatar has a text equivalent. Decorative
   icons are `aria-hidden`.
