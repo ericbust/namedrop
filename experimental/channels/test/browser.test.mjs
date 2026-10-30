@@ -9783,6 +9783,30 @@ test("UI-R4 L3: in a window under 560 px tall the member strip folds to one row 
     "+N more still shows every member",
   );
 });
+test("UI-R4 L2: typing in the composer leaves the page's media queries subscribed once", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.live();
+  await ui.page.evaluate(() => {
+    window.mediaListeners = { added: 0, removed: 0 };
+    const { addEventListener, removeEventListener } = MediaQueryList.prototype;
+    MediaQueryList.prototype.addEventListener = function (...args) {
+      window.mediaListeners.added += 1;
+      return addEventListener.apply(this, args);
+    };
+    MediaQueryList.prototype.removeEventListener = function (...args) {
+      window.mediaListeners.removed += 1;
+      return removeEventListener.apply(this, args);
+    };
+  });
+  await ui.page
+    .getByRole("main")
+    .getByRole("combobox")
+    .pressSequentially("hello there");
+  assert.deepEqual(await ui.page.evaluate(() => window.mediaListeners), {
+    added: 0,
+    removed: 0,
+  });
+});
 
 test("UI-R4 review H Low 3: when the agent comes back after a press read it was gone, the absence line clears and the card offers Message @codex again", async (t) => {
   const { value, left, context } = leavesAfterPress("message", "closed");
