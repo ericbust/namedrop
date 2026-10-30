@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  type After,
   createDeliveries,
   type Delivery,
   delivery,
@@ -73,7 +74,25 @@ const key = "a".repeat(20) as SpaceKey;
 const codex: Offer = { key, messageId: "p1", alias: "@codex" };
 const claude: Offer = { key, messageId: "p1", alias: "@claude" };
 const settled = () => new Promise((resolve) => setImmediate(resolve));
-function server() {
+// A clock the test moves by hand.
+function fakeClock() {
+  let now = 0;
+  const due = new Set<{ at: number; run: () => void }>();
+  const after: After = (ms, run) => {
+    const timer = { at: now + ms, run };
+    due.add(timer);
+    return () => {
+      due.delete(timer);
+    };
+  };
+  const tick = (ms: number) => {
+    now += ms;
+    for (const timer of [...due].sort((a, b) => a.at - b.at))
+      if (timer.at <= now && due.delete(timer)) timer.run();
+  };
+  return { after, tick };
+}
+function server(wait?: After) {
   const requests: Offer[] = [];
   const answers = new Map<
     string,
@@ -85,6 +104,7 @@ function server() {
         requests.push(offer);
         answers.set(offer.alias, resolve);
       }),
+    wait,
   );
   const answer = async (
     offer: Offer,
@@ -267,14 +287,14 @@ test("deliveries: a post that reached no one, or one outside the loaded window, 
   assert.equal(store.snapshot(), before);
 });
 
-test("deliveries: a frame that reaches the agent before the answer confirms the press, which reads Sent for 1.5 s and then ends, and the answer after it changes nothing", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const { store, answer, of } = server();
+test("deliveries: a frame that reaches the agent before the answer confirms the press, which reads Sent for 1.5 s and then ends, and the answer after it changes nothing", async () => {
+  const clock = fakeClock();
+  const { store, answer, of } = server(clock.after);
   const said = announcements(store);
   store.deliver(codex);
   store.settle(channels(post(["codex"])));
   assert.deepEqual(of(codex), sent, "the frame confirms the press");
-  t.mock.timers.tick(1_499);
+  clock.tick(1_499);
   assert.deepEqual(of(codex), sent);
   await answer(codex, outage);
   assert.deepEqual(
@@ -282,38 +302,38 @@ test("deliveries: a frame that reaches the agent before the answer confirms the 
     sent,
     "a failure after the frame changes nothing",
   );
-  t.mock.timers.tick(1);
+  clock.tick(1);
   assert.deepEqual(of(codex), idle, "the hold is over");
   await answer(codex, { kind: "done" });
   assert.deepEqual(of(codex), idle, "an answer after the hold changes nothing");
   assert.deepEqual(said, ["sending @codex", "sent @codex"]);
 });
 
-test("deliveries: an answer that lists the agent confirms the press, which reads Sent for 1.5 s while the line already names the agent, then ends", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const { store, answer, of } = server();
+test("deliveries: an answer that lists the agent confirms the press, which reads Sent for 1.5 s while the line already names the agent, then ends", async () => {
+  const clock = fakeClock();
+  const { store, answer, of } = server(clock.after);
   const said = announcements(store);
   store.deliver(codex);
   await answer(codex, { kind: "done" });
   store.settle(channels(post([], ["@codex"])));
   assert.deepEqual(of(codex), sent, "the channel object does not end it");
-  t.mock.timers.tick(1_000);
+  clock.tick(1_000);
   store.settle(channels(post(["codex"], ["@codex"])));
   assert.deepEqual(of(codex), sent, "nor does the frame after it");
-  t.mock.timers.tick(499);
+  clock.tick(499);
   assert.deepEqual(of(codex), sent);
-  t.mock.timers.tick(1);
+  clock.tick(1);
   assert.equal(store.snapshot().size, 0, "the hold is over");
   assert.deepEqual(said, ["sending @codex", "sent @codex"]);
 });
 
-test("deliveries: a Sent press the line does not name yet keeps reading Sent after its hold, and ends when a frame names the agent", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const { store, answer, of } = server();
+test("deliveries: a Sent press the line does not name yet keeps reading Sent after its hold, and ends when a frame names the agent", async () => {
+  const clock = fakeClock();
+  const { store, answer, of } = server(clock.after);
   store.deliver(codex);
   await answer(codex, { kind: "done" });
   store.settle(channels(post([])));
-  t.mock.timers.tick(1_500);
+  clock.tick(1_500);
   assert.deepEqual(of(codex), sent, "never offered again before a frame");
   store.settle(channels(post(["codex"])));
   assert.deepEqual(of(codex), idle);
@@ -327,23 +347,23 @@ test("deliveries: a frame that reaches an agent whose press failed ends that pre
   assert.deepEqual(of(codex), idle);
 });
 
-test("deliveries: each press keeps its own hold, pressing Sent neither sends nor restarts it, and dispose stops every hold", async (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  const { store, requests, answer, of } = server();
+test("deliveries: each press keeps its own hold, pressing Sent neither sends nor restarts it, and dispose stops every hold", async () => {
+  const clock = fakeClock();
+  const { store, requests, answer, of } = server(clock.after);
   store.deliver(codex);
   await answer(codex, { kind: "done" });
-  t.mock.timers.tick(1_000);
+  clock.tick(1_000);
   store.deliver(claude);
   store.settle(channels(post(["codex", "claude"])));
   store.deliver(codex);
   assert.deepEqual(requests, [codex, claude], "Sent never sends again");
-  t.mock.timers.tick(500);
+  clock.tick(500);
   assert.deepEqual(
     [of(codex), of(claude)],
     [idle, sent],
     "@codex's hold started at its answer, @claude's at the frame",
   );
   store.dispose();
-  t.mock.timers.tick(1_500);
+  clock.tick(1_500);
   assert.deepEqual(of(claude), sent, "no hold runs after dispose");
 });

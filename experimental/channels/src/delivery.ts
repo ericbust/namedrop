@@ -82,15 +82,23 @@ function reachedIn(channels: Channels, offer: Offer): boolean {
   );
 }
 
+// Runs `run` after `ms` and returns what cancels it. Tests pass a clock they
+// move by hand, so they never mock the timers the whole process shares.
+export type After = (ms: number, run: () => void) => () => void;
+const after: After = (ms, run) => {
+  const timer = setTimeout(run, ms);
+  return () => clearTimeout(timer);
+};
 export function createDeliveries(
   send: (offer: Offer) => Promise<ReadonlyMap<Alias, DeliverResult>>,
+  wait: After = after,
 ) {
   let deliveries: Deliveries = new Map();
   let latest: Change | null = null;
   // What the page last showed, for a hold that ends between frames.
   let shown: Channels = new Map();
   // One timer per sent press. While it runs, the press keeps reading Sent.
-  const holds = new Map<string, ReturnType<typeof setTimeout>>();
+  const holds = new Map<string, () => void>();
   const listeners = new Set<() => void>();
   function apply(moves: readonly (readonly [Offer, DeliveryEvent])[]): boolean {
     let next: Map<string, Change> | null = null;
@@ -116,10 +124,10 @@ export function createDeliveries(
   function hold(id: string): void {
     holds.set(
       id,
-      setTimeout(() => {
+      wait(SENT_HOLD_MS, () => {
         holds.delete(id);
         settle(shown);
-      }, SENT_HOLD_MS),
+      }),
     );
   }
   function settle(channels: Channels): void {
@@ -154,7 +162,7 @@ export function createDeliveries(
     },
     settle,
     dispose(): void {
-      for (const timer of holds.values()) clearTimeout(timer);
+      for (const cancel of holds.values()) cancel();
       holds.clear();
     },
   };
