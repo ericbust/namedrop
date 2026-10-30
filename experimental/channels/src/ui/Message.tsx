@@ -343,7 +343,6 @@ function Route({
   expanded: boolean;
 }) {
   const deliveries = useContext(DeliveryContext);
-  // The button stays the same element through every state, so focus stays on it.
   const offer = (alias: Alias, text: string, named: boolean) => {
     if (deliveries === null) return text;
     const state = deliveries.of(message.id, alias);

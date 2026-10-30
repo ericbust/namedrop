@@ -77,8 +77,6 @@ export function AttentionActions({
   const stopButton = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
   const shown = useRef(control.kind);
-  // A press the frame answers by dropping the item never hears back, so its
-  // request ends when the item leaves instead of holding a connection.
   const press = useRef<AbortController | null>(null);
   useEffect(() => () => press.current?.abort(), []);
   useLayoutEffect(() => {

@@ -1,15 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  type Deliveries,
+  createDeliveries,
   type Delivery,
   delivery,
   deliveryOf,
-  noDeliveries,
-  settleDeliveries,
-  stepDelivery,
+  type Offer,
 } from "./delivery.ts";
 import type { AddressId, Member, Message, SpaceKey } from "./model.ts";
+import type { DeliverResult } from "./send.ts";
 
 const idle: Delivery = { kind: "idle" };
 const sending: Delivery = { kind: "sending" };
@@ -44,26 +43,54 @@ test("delivery: a press sends once, the answer says sent or failed, and Try agai
 });
 
 const key = "a".repeat(20) as SpaceKey;
-const codex = { key, messageId: "p1", alias: "@codex" } as const;
-const claude = { key, messageId: "p1", alias: "@claude" } as const;
+const codex: Offer = { key, messageId: "p1", alias: "@codex" };
+const claude: Offer = { key, messageId: "p1", alias: "@claude" };
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+function server() {
+  const requests: Offer[] = [];
+  const answers = new Map<string, (result: DeliverResult) => void>();
+  const store = createDeliveries(
+    (offer) =>
+      new Promise((resolve) => {
+        requests.push(offer);
+        answers.set(offer.alias, resolve);
+      }),
+  );
+  const answer = async (offer: Offer, result: DeliverResult) => {
+    answers.get(offer.alias)?.(result);
+    await settled();
+  };
+  const of = (offer: Offer) => deliveryOf(store.snapshot(), offer);
+  return { store, requests, answer, of };
+}
 
-test("deliveries: each offer keeps its own state, and an unchanged step keeps the same map", () => {
-  assert.deepEqual(deliveryOf(noDeliveries, codex), idle);
-  const started = stepDelivery(noDeliveries, codex, { kind: "start" });
-  assert.deepEqual(deliveryOf(started, codex), sending);
-  assert.deepEqual(deliveryOf(started, claude), idle);
-  assert.equal(stepDelivery(started, codex, { kind: "start" }), started);
-  assert.equal(stepDelivery(started, claude, { kind: "done" }), started);
-  const both = stepDelivery(
-    stepDelivery(started, codex, { kind: "done" }),
-    claude,
-    { kind: "start" },
-  );
+test("deliveries: a press sends once, each offer keeps its own state, and Try again sends again", async () => {
+  const { store, requests, answer, of } = server();
+  let changes = 0;
+  store.subscribe(() => changes++);
+  store.deliver(codex);
+  store.deliver(codex);
   assert.deepEqual(
-    [deliveryOf(both, codex), deliveryOf(both, claude)],
-    [sent, sending],
+    requests,
+    [codex],
+    "a second press while sending sends nothing",
   );
-  assert.deepEqual(deliveryOf(started, codex), sending, "steps never mutate");
+  assert.equal(changes, 1);
+  assert.deepEqual([of(codex), of(claude)], [sending, idle]);
+  store.deliver(claude);
+  await answer(codex, { kind: "done" });
+  assert.deepEqual([of(codex), of(claude)], [sent, sending]);
+  store.deliver(codex);
+  assert.equal(requests.length, 2, "Sent never sends again");
+  await answer(claude, {
+    kind: "failed",
+    status: 400,
+    message: "@codex is not an agent here.",
+  });
+  assert.deepEqual(of(claude), refused);
+  store.deliver(claude);
+  assert.deepEqual(requests, [codex, claude, claude]);
+  assert.deepEqual(of(claude), sending);
 });
 
 function member(id: string, alias: `@${string}`): [AddressId, Member] {
@@ -101,32 +128,27 @@ function channels(message: Message | null) {
   ]);
 }
 
-test("deliveries: an offer's state ends once a frame shows the post reached that agent", () => {
-  const both: Deliveries = stepDelivery(
-    stepDelivery(stepDelivery(noDeliveries, codex, { kind: "start" }), codex, {
-      kind: "done",
-    }),
-    claude,
-    { kind: "start" },
-  );
-  assert.equal(settleDeliveries(both, channels(post([]))), both);
+test("deliveries: an offer's state ends once a frame shows the post reached that agent", async () => {
+  const { store, answer, of } = server();
+  store.deliver(codex);
+  store.deliver(claude);
+  await answer(claude, { kind: "done" });
+  const before = store.snapshot();
+  store.settle(channels(post([])));
+  store.settle(channels(null));
   assert.equal(
-    settleDeliveries(both, channels(null)),
-    both,
-    "a post outside the loaded window keeps its state",
+    store.snapshot(),
+    before,
+    "a post that reached no one, or one outside the loaded window, keeps its states",
   );
-  const reached = settleDeliveries(both, channels(post(["codex"])));
+  store.settle(channels(post(["codex"])));
+  assert.deepEqual([of(codex), of(claude)], [idle, sent]);
+  await answer(codex, { kind: "done" });
   assert.deepEqual(
-    [deliveryOf(reached, codex), deliveryOf(reached, claude)],
-    [idle, sending],
-  );
-  assert.equal(
-    stepDelivery(reached, codex, { kind: "done" }),
-    reached,
+    of(codex),
+    idle,
     "a late answer for a settled offer changes nothing",
   );
-  assert.equal(
-    settleDeliveries(reached, channels(post(["codex", "claude"]))).size,
-    0,
-  );
+  store.settle(channels(post(["codex", "claude"])));
+  assert.equal(store.snapshot().size, 0);
 });

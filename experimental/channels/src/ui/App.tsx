@@ -7,6 +7,7 @@ import {
   useReducer,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { type ActivityList, activityOf } from "../activity.ts";
 import {
@@ -16,15 +17,7 @@ import {
 } from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
 import { composerPlaceholder } from "../copy.ts";
-import {
-  type Deliveries,
-  type DeliveryEvent,
-  deliveryOf,
-  noDeliveries,
-  type Offer,
-  settleDeliveries,
-  stepDelivery,
-} from "../delivery.ts";
+import { createDeliveries, deliveryOf } from "../delivery.ts";
 import type {
   ComposerId,
   Directory,
@@ -630,35 +623,31 @@ export function App() {
     },
     [],
   );
-  // The ref steps each offer at once, so a second click before the render
-  // that disables the button sends nothing.
-  const deliveries = useRef(noDeliveries);
-  const [shownDeliveries, showDeliveries] = useState(noDeliveries);
-  const commitDeliveries = useCallback((next: Deliveries) => {
-    const changed = next !== deliveries.current;
-    deliveries.current = next;
-    showDeliveries(next);
-    return changed;
-  }, []);
-  useEffect(() => {
-    commitDeliveries(settleDeliveries(deliveries.current, state.channels));
-  }, [state.channels, commitDeliveries]);
-  const deliveryAccess = useMemo<DeliveryAccess | null>(() => {
-    if (current === undefined) return null;
-    const step = (offer: Offer, event: DeliveryEvent) =>
-      commitDeliveries(stepDelivery(deliveries.current, offer, event));
-    return {
-      of: (messageId, alias) =>
-        deliveryOf(shownDeliveries, { key: current, messageId, alias }),
-      deliver(post, alias) {
-        const offer = { key: current, messageId: post.id, alias };
-        if (step(offer, { kind: "start" }))
-          void poster
-            .deliver(current, post.id, [alias])
-            .then((result) => step(offer, result));
-      },
-    };
-  }, [current, shownDeliveries, commitDeliveries, poster]);
+  const [deliveries] = useState(() =>
+    createDeliveries(({ key, messageId, alias }) =>
+      poster.deliver(key, messageId, [alias]),
+    ),
+  );
+  const shownDeliveries = useSyncExternalStore(
+    deliveries.subscribe,
+    deliveries.snapshot,
+  );
+  useEffect(
+    () => deliveries.settle(state.channels),
+    [deliveries, state.channels],
+  );
+  const deliveryAccess = useMemo<DeliveryAccess | null>(
+    () =>
+      current === undefined
+        ? null
+        : {
+            of: (messageId, alias) =>
+              deliveryOf(shownDeliveries, { key: current, messageId, alias }),
+            deliver: (post, alias) =>
+              deliveries.deliver({ key: current, messageId: post.id, alias }),
+          },
+    [current, shownDeliveries, deliveries],
+  );
   const [located, locate] = useState<Located | null>(null);
   useEffect(() => {
     if (located === null) return;

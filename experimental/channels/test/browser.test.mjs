@@ -6661,13 +6661,6 @@ function held() {
   return { gate, release: () => release() };
 }
 const deliverPath = (id) => `/w/${key(1)}/messages/${id}/deliver`;
-const deliverRequest = ({ method, path, csrf, type, body }) => ({
-  method,
-  path,
-  csrf,
-  type,
-  body,
-});
 function reached(post, ...to) {
   return {
     ...post,
@@ -6710,13 +6703,17 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, reads Sending… th
   const button = await offer.elementHandle();
   await offer.click();
   await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
-  assert.deepEqual(deliverRequest(ui.posts.deliveries[0]), {
-    method: "POST",
-    path: deliverPath("p1"),
-    csrf: "csrf-1",
-    type: "application/json",
-    body: '{"to":["codex"]}',
-  });
+  const [{ method, path, csrf, type, body }] = ui.posts.deliveries;
+  assert.deepEqual(
+    { method, path, csrf, type, body },
+    {
+      method: "POST",
+      path: deliverPath("p1"),
+      csrf: "csrf-1",
+      type: "application/json",
+      body: '{"to":["codex"]}',
+    },
+  );
   assert.deepEqual(await offerReads(button, "Sending…"), {
     text: "Sending…",
     disabled: "true",
