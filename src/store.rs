@@ -2599,92 +2599,128 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         message_id: &MessageId,
     ) -> Result<MessageRoute, StoreError> {
-        let (thread_id, author, grammar_version, source, author_kind, body, in_reply_to) = self
-            .transaction
-            .query_row(
-                "SELECT thread_id, author_address_id, author_alias_snapshot,
+        struct RouteMessage {
+            message_id: MessageId,
+            thread_id: ThreadId,
+            author: RoutingAddressSnapshot,
+            grammar_version: String,
+            source: String,
+            author_kind: String,
+            body: String,
+            in_reply_to: Option<MessageId>,
+        }
+
+        let mut ancestors = Vec::new();
+        let mut current_id = message_id.clone();
+        loop {
+            let message = self
+                .transaction
+                .query_row(
+                    "SELECT thread_id, author_address_id, author_alias_snapshot,
                         author_session_snapshot, grammar_version, authored_source,
                         author_kind, body, in_reply_to
                  FROM collaboration_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
-                params![
-                    namespace.session_socket_id,
-                    namespace.space_id.as_str(),
-                    message_id.as_str()
-                ],
-                |row| {
-                    Ok((
-                        ThreadId::new(row.get::<_, String>(0)?),
-                        RoutingAddressSnapshot {
-                            address_id: PaneAddressId::new(row.get::<_, String>(1)?),
-                            alias: row.get(2)?,
-                            pane_binding_id: None,
-                            agent_session_id: row
-                                .get::<_, Option<String>>(3)?
-                                .map(crate::AgentSessionId::new),
-                        },
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, String>(7)?,
-                        row.get::<_, Option<String>>(8)?,
-                    ))
-                },
-            )
-            .optional()?
-            .ok_or_else(|| StoreError::invalid_input("reply target message does not exist"))?;
-        let recipients = self.message_routing_snapshots(
-            namespace,
-            message_id,
-            "message_recipients",
-            "recipient_order",
-            false,
-        )?;
-        let channel_thread = self.channel_thread(namespace, &thread_id)?;
-        let returned_to = match in_reply_to {
-            Some(parent_id)
-                if channel_thread && author_kind == ActorKind::AgentSession.as_str() =>
-            {
-                self.message_route(namespace, &MessageId::new(parent_id))?
-                    .asker_for(&author.address_id)
-                    .map(|asker| asker.address_id.clone())
+                    params![
+                        namespace.session_socket_id,
+                        namespace.space_id.as_str(),
+                        current_id.as_str()
+                    ],
+                    |row| {
+                        Ok(RouteMessage {
+                            message_id: current_id.clone(),
+                            thread_id: ThreadId::new(row.get::<_, String>(0)?),
+                            author: RoutingAddressSnapshot {
+                                address_id: PaneAddressId::new(row.get::<_, String>(1)?),
+                                alias: row.get(2)?,
+                                pane_binding_id: None,
+                                agent_session_id: row
+                                    .get::<_, Option<String>>(3)?
+                                    .map(crate::AgentSessionId::new),
+                            },
+                            grammar_version: row.get(4)?,
+                            source: row.get(5)?,
+                            author_kind: row.get(6)?,
+                            body: row.get(7)?,
+                            in_reply_to: row.get::<_, Option<String>>(8)?.map(MessageId::new),
+                        })
+                    },
+                )
+                .optional()?
+                .ok_or_else(|| StoreError::invalid_input("reply target message does not exist"))?;
+            let recipients = self.message_routing_snapshots(
+                namespace,
+                &current_id,
+                "message_recipients",
+                "recipient_order",
+                false,
+            )?;
+            let channel_thread = self.channel_thread(namespace, &message.thread_id)?;
+            let parent_id = message.in_reply_to.clone().filter(|_| {
+                channel_thread && message.author_kind == ActorKind::AgentSession.as_str()
+            });
+            ancestors.push((message, recipients, channel_thread));
+            match parent_id {
+                Some(parent_id) => current_id = parent_id,
+                None => break,
             }
-            _ => None,
-        };
-        let body_mentions = crate::message::context_mentions(&body);
-        let mentions = crate::message::context_mentions(&source);
-        let operator_selection = author_kind == ActorKind::Human.as_str()
-            && self.is_operator_address(namespace, &author.address_id)?
-            && (channel_thread || self.channel_routing_state(namespace, message_id)?.is_some());
-        let asked_addresses = recipients
-            .iter()
-            .filter(|recipient| {
-                let named = |list: &[crate::message::BodyMention]| {
-                    list.iter().any(|mention| {
-                        mention.workspace.is_none() && mention.alias == recipient.alias
-                    })
-                };
-                operator_selection
-                    || named(&body_mentions)
-                    || (returned_to.as_ref() != Some(&recipient.address_id) && named(&mentions))
-            })
-            .map(|recipient| recipient.address_id.clone())
-            .collect();
-        let mut reply_mode = crate::DeliveryReplyMode::for_message_grammar(&grammar_version);
-        if reply_mode == crate::DeliveryReplyMode::AgentThread && channel_thread {
-            reply_mode = crate::DeliveryReplyMode::Channel;
         }
-        Ok(MessageRoute::new(
-            thread_id,
-            author,
-            recipients,
-            reply_mode,
-            matches!(
-                grammar_version.as_str(),
-                "coordination-nudge/v1" | "coordination-report/v1" | "result-set/v1"
-            ),
-            asked_addresses,
-        ))
+
+        let mut parent_route: Option<MessageRoute> = None;
+        for (message, recipients, channel_thread) in ancestors.into_iter().rev() {
+            let RouteMessage {
+                message_id,
+                thread_id,
+                author,
+                grammar_version,
+                source,
+                author_kind,
+                body,
+                ..
+            } = message;
+            let returned_to = parent_route
+                .as_ref()
+                .and_then(|route| route.asker_for(&author.address_id))
+                .map(|asker| asker.address_id.clone());
+            let body_mentions = crate::message::context_mentions(&body);
+            let mentions = crate::message::context_mentions(&source);
+            let operator_selection = author_kind == ActorKind::Human.as_str()
+                && self.is_operator_address(namespace, &author.address_id)?
+                && (channel_thread
+                    || self
+                        .channel_routing_state(namespace, &message_id)?
+                        .is_some());
+            let asked_addresses = recipients
+                .iter()
+                .filter(|recipient| {
+                    let named = |list: &[crate::message::BodyMention]| {
+                        list.iter().any(|mention| {
+                            mention.workspace.is_none() && mention.alias == recipient.alias
+                        })
+                    };
+                    operator_selection
+                        || named(&body_mentions)
+                        || (returned_to.as_ref() != Some(&recipient.address_id) && named(&mentions))
+                })
+                .map(|recipient| recipient.address_id.clone())
+                .collect();
+            let mut reply_mode = crate::DeliveryReplyMode::for_message_grammar(&grammar_version);
+            if reply_mode == crate::DeliveryReplyMode::AgentThread && channel_thread {
+                reply_mode = crate::DeliveryReplyMode::Channel;
+            }
+            parent_route = Some(MessageRoute::new(
+                thread_id,
+                author,
+                recipients,
+                reply_mode,
+                matches!(
+                    grammar_version.as_str(),
+                    "coordination-nudge/v1" | "coordination-report/v1" | "result-set/v1"
+                ),
+                asked_addresses,
+            ));
+        }
+        Ok(parent_route.expect("the requested message is present in the ancestor chain"))
     }
 
     pub fn append_message(
