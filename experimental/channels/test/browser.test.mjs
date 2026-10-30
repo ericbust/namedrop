@@ -9751,3 +9751,35 @@ test("UI-R4 L3: in a short window with no pane, the Needs-you banner shrinks and
     );
   }
 });
+test("UI-R4 L3: in a window under 560 px tall the member strip folds to one row with +N more, and a taller window gets its two rows back", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.live();
+  const strip = () =>
+    ui.page.evaluate(() => {
+      const items = [...document.querySelectorAll("main .members > li")];
+      return {
+        rows: new Set(items.map((item) => item.offsetTop)).size,
+        chips: items.map((item) => item.textContent),
+      };
+    });
+  await resize(ui.page, 390, 460);
+  const short = await strip();
+  assert.equal(short.rows, 1, `one row at 390x460: ${JSON.stringify(short)}`);
+  assert.match(short.chips.at(-1), /^\+\d+ more$/);
+  await resize(ui.page, 390, 844);
+  const tall = await strip();
+  assert.equal(tall.rows, 2, `two rows at 390x844: ${JSON.stringify(tall)}`);
+  assert.ok(
+    tall.chips.every((chip) => !/more$/.test(chip)),
+    `every member shows at 390x844: ${JSON.stringify(tall)}`,
+  );
+  await resize(ui.page, 390, 460);
+  await ui.page
+    .locator("main .members")
+    .getByRole("button", { name: /^\+\d+ more$/ })
+    .click();
+  assert.ok(
+    (await strip()).chips.every((chip) => !/more$/.test(chip)),
+    "+N more still shows every member",
+  );
+});
