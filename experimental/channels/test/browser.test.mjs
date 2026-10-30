@@ -9812,6 +9812,78 @@ test("UI-R4 L2: the drawer is a modal dialog named Channels, and the list inside
     "the sidebar column is no modal",
   );
 });
+async function phoneDrawer(t) {
+  const ui = await open(t, (client) =>
+    replay(client, [layoutChannel(), team(2, "beta"), team(3, "gamma")]),
+  );
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  const page = ui.page;
+  return {
+    page,
+    toggle: page.getByRole("button", { name: /^Channels/ }),
+    dialog: page.getByRole("dialog", { name: "Channels" }),
+    heading: page.getByRole("main").getByRole("heading", { level: 1 }),
+    focused: () => page.evaluate(() => document.activeElement?.textContent),
+  };
+}
+test("UI-R4 L2: in the drawer the arrow keys, Home and End only move focus between rows, and Enter chooses", async (t) => {
+  const { page, toggle, dialog, heading, focused } = await phoneDrawer(t);
+  await toggle.click();
+  await dialog.waitFor();
+  const rows = await dialog
+    .getByRole("navigation", { name: "Channel list" })
+    .getByRole("button")
+    .allTextContents();
+  assert.equal(rows.length, 3);
+  let at = rows.indexOf("alpha");
+  assert.equal(await focused(), "alpha", "focus starts on the selected row");
+  for (const key of ["ArrowDown", "ArrowDown", "ArrowUp", "End", "Home"]) {
+    await page.keyboard.press(key);
+    at =
+      key === "Home"
+        ? 0
+        : key === "End"
+          ? rows.length - 1
+          : (at + (key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length;
+    assert.equal(
+      await focused(),
+      rows[at],
+      `${key} moves focus to ${rows[at]}`,
+    );
+    assert.ok(await dialog.isVisible(), `${key} keeps the drawer open`);
+    assert.equal(
+      await heading.textContent(),
+      "alpha",
+      `${key} chooses nothing`,
+    );
+  }
+  await page.keyboard.press("ArrowDown");
+  const chosen = await focused();
+  assert.notEqual(chosen, "alpha");
+  await page.keyboard.press("Enter");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await heading.textContent(), chosen, "Enter chooses the row");
+});
+test("UI-R4 L2: a drawer open when the window grows past 600 px closes, and stays closed back on a phone", async (t) => {
+  const { page, toggle, dialog } = await phoneDrawer(t);
+  await toggle.click();
+  await dialog.waitFor();
+  await resize(page, 700, 844);
+  assert.equal(await dialog.count(), 0, "no dialog at 700 px");
+  assert.equal(await page.locator(".drawer-backdrop").count(), 0);
+  assert.equal(
+    await page.evaluate(() => document.querySelector("main").inert),
+    false,
+    "nothing is inert at 700 px",
+  );
+  await resize(page, 390, 844);
+  assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(await dialog.count(), 0, "the drawer stays closed at 390 px");
+  await toggle.click();
+  await dialog.waitFor();
+});
 test("UI-R4 L2: typing in the composer leaves the page's media queries subscribed once", async (t) => {
   const ui = await open(t, (client) => replay(client, [layoutChannel()]));
   await ui.live();
