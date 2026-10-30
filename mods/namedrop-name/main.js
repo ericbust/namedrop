@@ -4,9 +4,8 @@ import { focused, terminals, hc, props, closeOverlay, theme } from "herdr";
 import { normalizeAlias, aliasTaken } from "./alias.js";
 
 export default class NameTerminal extends View {
-  init(_props, cx) {
+  init() {
     this.address = focused()?.terminal ?? null;
-    this.handle = cx.focus_handle();
     this.state = { kind: this.address ? "editing" : "unavailable", error: null };
     if (!this.address) return;
     const name = terminals().find((terminal) => terminal.address === this.address)?.labels?.["namedrop.name"] ?? "";
@@ -19,9 +18,6 @@ export default class NameTerminal extends View {
     });
     this.input.on("submit", (_e, cx) => this.submit(cx));
     this.input.focus();
-    cx.timer.after(600, () => {
-      if (this.state.kind === "editing") this.input.focus();
-    });
   }
 
   dismiss() {
@@ -42,7 +38,6 @@ export default class NameTerminal extends View {
       return;
     }
     this.state = { kind: "saving", alias: result.alias };
-    this.handle.focus();
     cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -65,11 +60,8 @@ export default class NameTerminal extends View {
   render() {
     const t = theme();
     const saving = this.state.kind === "saving";
-    const root = v_flex().id("root").track_focus(this.handle).w_full().p(18).gap(12)
+    const root = v_flex().id("root").w_full().p(18).gap(12)
       .bg(t.popover).text_color(t.foreground)
-      .on_key_down((event, cx) => {
-        if (event.key === "escape") { this.dismiss(); cx.stop_propagation(); }
-      })
       .child(div().text_size(15).font_semibold().child("Name this terminal"));
     if (this.state.kind === "unavailable") {
       return root.child(div().text_size(12).text_color(t.muted)

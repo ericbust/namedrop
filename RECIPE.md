@@ -33,7 +33,7 @@ Alt+Shift+S opens the roster on any layout. Opening it again replaces the window
 
 Alt+N opens the Name dialog on any layout. It captures the focused terminal when it opens, so a later focus change does not retarget a save. Enter and Save name use the same action. While saving, the input becomes a static display of the submitted alias. `Code Reviewer` becomes `code-reviewer`. ASCII letters and digits are accepted. ASCII spaces, tabs, line breaks, form feeds, carriage returns, hyphens, and underscores become single separators. Leading and trailing separators disappear. Empty names and other characters show the Rust alias error text.
 
-Another live terminal with that alias in the same space prevents saving. Two terminals without a space label share that duplicate check. Other spaces and finished terminals do not reserve the alias. Saving writes `namedrop.name=<alias>` through core. A nonzero result shows its stderr. A successful save closes the dialog. Cancel and Escape close without starting a save. An already started core command can still finish after the dialog closes.
+Another live terminal with that alias in the same space prevents saving. Two terminals without a space label share that duplicate check. Other spaces and finished terminals do not reserve the alias. Saving writes `namedrop.name=<alias>` through core. A nonzero result shows its stderr. A successful save closes the dialog. Cancel closes without starting a save. The app's Escape binding also closes the dialog. An already started core command can still finish after the dialog closes.
 
 ## Built from
 
@@ -41,10 +41,10 @@ This build targets Herdr app **0.1.9** at `c235143` and herdr-core **0.1.14**. I
 
 - `mods/namedrop/mod.json` sets `place` to `none` and requests a `window` overlay with key `namedrop-roster`, `keep: true`, and width 300.
 - `mods/namedrop/roster.js` exports `roster(terminals, panes, spaces)`. It returns `{ alias, address, status, program, shown, where }` rows, joins pane visibility and space and tab names, and sorts by status and alias. Remote terminal addresses qualify the machine-local space and tab labels for the name lookup.
-- `mods/namedrop/main.js` renders those rows with `View`, `div`, `Button`, `h_flex`, and `v_flex`. Icons come from each program's `icon` and `tint` fields through `svg` or `image`. The root reports its size with `on_size_change`. A floating copy puts its status dot on the edge named by `placement()?.edge`.
+- `mods/namedrop/main.js` renders those rows with `View`, `div`, `Button`, `h_flex`, and `v_flex`. Icons come from each program's `icon` and `tint` fields through `svg` or `image`. A floating copy puts its status dot on the edge named by `placement()?.edge`.
 - `mods/namedrop-name/mod.json` sets `place` to `none` and requests a `dialog` overlay of width 360.
 - `mods/namedrop-name/alias.js` exports `normalizeAlias(input)` and `aliasTaken(terminals, alias, address)`. The first ports `normalize_alias` and `validate_alias` from Namedrop's `src/domain.rs`. Both pure modules import nothing.
-- `mods/namedrop-name/main.js` captures `focused()?.terminal` in `init`, owns an `InputState`, and renders `Input` and native buttons. It checks a fresh terminal snapshot before saving. Its editing and saving states prevent duplicate submission while a save is pending.
+- `mods/namedrop-name/main.js` captures `focused()?.terminal` in `init`, owns an `InputState`, and renders `Input` and native buttons. The app supplies the dialog frame's focus and Escape binding. The mod focuses its input immediately and again after a failed save. It checks a fresh terminal snapshot before saving. Its editing and saving states prevent duplicate submission while a save is pending.
 - `keys.json` binds `alt-n` to `mod.open:namedrop-name` and `alt-shift-s` to `mod.open:namedrop` in `global`.
 - `.github/workflows/mod.yml` runs `node --test mods/*/*.test.js` on Node 22 for pushes and pull requests that change `mods/**` or the workflow.
 

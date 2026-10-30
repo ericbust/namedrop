@@ -50,8 +50,7 @@ export default class Namedrop extends View {
     const t = theme();
     const rows = roster(terminals(), panes(), spaces());
     const edge = placement()?.edge ?? "right";
-    return v_flex().id("root").w_full().min_w(280).p(8).gap(4).text_color(t.foreground)
-      .on_size_change((size, cx) => { this.size = size; cx.notify(); })
+    return v_flex().w_full().min_w(280).p(8).gap(4).text_color(t.foreground)
       .child(h_flex().px(10).py(6).items_center().gap(8)
         .child(div().flex_1().text_size(14).font_semibold().child("Namedrop"))
         .when(Boolean(props()?.overlay), (el) => el.child(Button.new("close-roster").px(6).h(26)
