@@ -42,7 +42,9 @@ fn post_is_visible_and_answers_before_router_finishes_then_survives_restart() {
         let early = receiver.recv_timeout(Duration::from_secs(2));
         let visible =
             f.count("SELECT COUNT(*) FROM collaboration_messages WHERE request_id='store-first'");
-        fs::write(f.root.join("router-release"), "").unwrap();
+        if early.is_err() {
+            fs::write(f.root.join("router-release"), "").unwrap();
+        }
         (early, visible)
     });
     assert_eq!(visible, 1, "post was not committed while router ran");
@@ -60,9 +62,10 @@ fn post_is_visible_and_answers_before_router_finishes_then_survives_restart() {
         .find(|row| row["message_id"] == id)
         .cloned()
         .unwrap();
-    assert_ne!(
-        row["channel"]["state"], "routing",
-        "restart left post permanently routing"
+    fs::write(f.root.join("router-release"), "").unwrap();
+    assert_eq!(
+        row["channel"]["state"], "router_failed",
+        "restart must fail the interrupted route"
     );
     assert_eq!(
         f.count("SELECT COUNT(*) FROM collaboration_messages WHERE request_id='store-first'"),
