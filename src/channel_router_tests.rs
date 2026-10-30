@@ -162,6 +162,7 @@ fn response_only_selects_unique_roster_aliases_and_caps_its_reason() {
     )
     .unwrap();
     assert_eq!(to, ["claude", "codex"]);
+    assert_eq!(reason, format!("{} topic", "é".repeat(54)));
     assert_eq!(reason.chars().count(), 60);
     assert!(!reason.chars().any(char::is_control));
     assert!(
@@ -173,12 +174,74 @@ fn response_only_selects_unique_roster_aliases_and_caps_its_reason() {
         .0
         .is_empty()
     );
-    for invalid in [
-        json!({"to":"claude","reason":"wrong"}),
-        json!({"to":[null],"reason":"wrong"}),
-        json!({"to":[]}),
+    for (invalid, error) in [
+        (json!(null), "invalid router response"),
+        (json!({"reason":"wrong"}), "missing router picks"),
+        (
+            json!({"to":"claude","reason":"wrong"}),
+            "missing router picks",
+        ),
+        (
+            json!({"to":[null],"reason":"wrong"}),
+            "invalid router alias",
+        ),
+        (json!({"to":[]}), "missing router reason"),
+        (json!({"to":[],"reason":null}), "missing router reason"),
+        (json!({"to":[],"reason":7}), "missing router reason"),
     ] {
-        assert!(validate_response(&invalid, &input.aliases).is_err());
+        assert_eq!(
+            validate_response(&invalid, &input.aliases).unwrap_err(),
+            error
+        );
+    }
+}
+
+#[test]
+fn response_normalizes_empty_single_word_unicode_and_control_topics_idempotently() {
+    let input = test_input(&rows(), "ask several");
+    for (raw, expected) in [
+        ("".to_owned(), "General topic".to_owned()),
+        (" \n\t ".to_owned(), "General topic".to_owned()),
+        ("?!...---".to_owned(), "General topic".to_owned()),
+        ("Review".to_owned(), "Review topic".to_owned()),
+        ("é".repeat(80), format!("{} topic", "é".repeat(54))),
+        (
+            format!("{} second", "é".repeat(80)),
+            format!("{} topic", "é".repeat(54)),
+        ),
+        (
+            format!("{} second", "é".repeat(59)),
+            format!("{} topic", "é".repeat(54)),
+        ),
+        (
+            format!("Review {}", "é".repeat(80)),
+            format!("Review {}", "é".repeat(53)),
+        ),
+        (
+            "  Parser\tregression\nTEST\0review!!! request ".to_owned(),
+            "Parser regression TEST review".to_owned(),
+        ),
+        (
+            "review-build/test,request followup".to_owned(),
+            "review build test request".to_owned(),
+        ),
+        (
+            "Claude review request".to_owned(),
+            "Claude review request".to_owned(),
+        ),
+    ] {
+        let response = json!({"to": ["codex", "ghost", "claude", "codex"], "reason": raw});
+        let (to, reason) = validate_response(&response, &input.aliases).unwrap();
+        assert_eq!(to, ["codex", "claude"]);
+        assert_eq!(reason, expected, "raw topic: {raw:?}");
+        assert!(reason.chars().count() <= 60);
+        assert!((2..=4).contains(&topic_words(&reason).count()));
+        assert!(!reason.chars().any(char::is_control));
+        let normalized = json!({"to": to, "reason": reason});
+        assert_eq!(
+            validate_response(&normalized, &input.aliases).unwrap(),
+            (to, reason)
+        );
     }
 }
 
@@ -465,20 +528,36 @@ fn fake_cli_routes_with_isolation_receipts_and_deadline() {
             }));
             for record in &records {
                 let topic = &record["topic_compliance"];
+                let display_topic = &record["display_topic_compliance"];
+                assert_eq!(display_topic["char_bounds_match"], true);
+                assert_eq!(display_topic["word_bounds_match"], true);
                 match record["id"].as_str().unwrap() {
                     "request-with-code" => {
                         assert_eq!(record["matches"], true);
                         assert_eq!(record["topic_matches"], false);
                         assert_eq!(topic["word_bounds_match"], false);
                         assert_eq!(topic["names_omitted"], true);
+                        assert_eq!(record["display_topic_matches"], true);
+                        assert_eq!(
+                            record["raw_reason"],
+                            "Please investigate the failed test and suggest a fix"
+                        );
+                        assert_eq!(record["reason"], "Please investigate the failed");
+                        assert_eq!(topic["word_count"], 9);
+                        assert_eq!(display_topic["word_count"], 4);
                     }
                     "quoted-instructions" => {
                         assert_eq!(record["matches"], true);
                         assert_eq!(record["topic_matches"], false);
                         assert_eq!(topic["word_bounds_match"], true);
                         assert_eq!(topic["names_omitted"], false);
+                        assert_eq!(display_topic["names_omitted"], false);
+                        assert_eq!(record["display_topic_matches"], false);
                     }
-                    _ => assert_eq!(record["topic_matches"], true),
+                    _ => {
+                        assert_eq!(record["topic_matches"], true);
+                        assert_eq!(record["display_topic_matches"], true);
+                    }
                 }
             }
             return;

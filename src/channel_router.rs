@@ -375,6 +375,26 @@ fn recap(rows: &DashboardRows) -> Vec<String> {
     lines
 }
 
+fn topic_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+}
+
+fn normalize_topic(reason: &str) -> String {
+    let sanitized = sanitize_text(reason);
+    let topic = topic_words(&sanitized)
+        .take(4)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let topic = truncate_chars(&topic, 60);
+    let topic = topic.trim();
+    match topic_words(topic).count() {
+        0 => "General topic".to_owned(),
+        1 => format!("{} topic", truncate_chars(topic, 54)),
+        _ => topic.to_owned(),
+    }
+}
+
 fn validate_response(
     response: &Value,
     aliases: &[String],
@@ -395,7 +415,7 @@ fn validate_response(
             to.push(alias.to_owned());
         }
     }
-    Ok((to, truncate_chars(&sanitize_text(reason), 60)))
+    Ok((to, normalize_topic(reason)))
 }
 
 #[cfg(test)]

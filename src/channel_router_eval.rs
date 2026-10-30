@@ -23,15 +23,10 @@ struct TopicExpectation {
 struct TopicCompliance {
     word_count: usize,
     word_bounds_match: bool,
+    char_count: usize,
+    char_bounds_match: bool,
     names_omitted: bool,
     matches: bool,
-}
-
-fn topic_words(text: &str) -> Vec<String> {
-    text.split(|character: char| !character.is_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
-        .collect()
 }
 
 fn topic_compliance(
@@ -39,23 +34,27 @@ fn topic_compliance(
     expected: &TopicExpectation,
     aliases: &[String],
 ) -> TopicCompliance {
-    let words = topic_words(topic);
+    let words: Vec<_> = topic_words(topic).map(str::to_lowercase).collect();
     let word_count = words.len();
     let word_bounds_match = (expected.min_words..=expected.max_words).contains(&word_count);
+    let char_count = topic.chars().count();
+    let char_bounds_match = char_count <= 60;
     let names_omitted = !expected.omit_names
         || !aliases
             .iter()
             .map(String::as_str)
             .chain(["claude", "codex"])
             .any(|name| {
-                let name = topic_words(name);
+                let name: Vec<_> = topic_words(name).map(str::to_lowercase).collect();
                 !name.is_empty() && words.windows(name.len()).any(|window| window == name)
             });
     TopicCompliance {
         word_count,
         word_bounds_match,
+        char_count,
+        char_bounds_match,
         names_omitted,
-        matches: word_bounds_match && names_omitted,
+        matches: word_bounds_match && char_bounds_match && names_omitted,
     }
 }
 
@@ -86,7 +85,12 @@ fn topic_checker_accepts_short_topics_and_detects_ticket_reasons_and_names() {
     );
     assert!(!verbose.word_bounds_match);
     assert!(verbose.names_omitted);
-    for topic in ["Claude review request", "ask @CODEX", "build-helper review"] {
+    for topic in [
+        "Claude review request",
+        "ask @CODEX",
+        "BUILD helper review",
+        "build-helper review",
+    ] {
         let result = topic_compliance(topic, &expected, &aliases);
         assert!(result.word_bounds_match, "{topic}");
         assert!(!result.names_omitted, "{topic}");
@@ -98,6 +102,11 @@ fn topic_checker_accepts_short_topics_and_detects_ticket_reasons_and_names() {
             "{topic}"
         );
     }
+    let long = topic_compliance(&format!("{} topic", "é".repeat(80)), &expected, &aliases);
+    assert_eq!(long.char_count, 86);
+    assert!(long.word_bounds_match);
+    assert!(!long.char_bounds_match);
+    assert!(!long.matches);
 }
 
 #[test]
@@ -202,10 +211,18 @@ pub(super) fn real_host_router_corpus() {
                         .as_ref()
                         .err()
                         .map(|error| bounded_text(error, 400));
-                    let parsed = capture
-                        .result
-                        .and_then(|raw| extract_response(&raw, "to"))
-                        .and_then(|response| validate_response(&response, &input.aliases));
+                    let response = capture.result.and_then(|raw| extract_response(&raw, "to"));
+                    let raw_reason = response
+                        .as_ref()
+                        .ok()
+                        .and_then(|response| response.get("reason"))
+                        .and_then(Value::as_str);
+                    let topic_compliance = raw_reason.map(|reason| {
+                        topic_compliance(reason, &case.expected_topic, &input.aliases)
+                    });
+                    let raw_reason = raw_reason.map(|reason| bounded_text(reason, 400));
+                    let parsed =
+                        response.and_then(|response| validate_response(&response, &input.aliases));
                     let (actual, reason, error) = match parsed {
                         Ok((to, reason)) => (Some(to), Some(reason), None),
                         Err(error) => (None, None, Some(bounded_text(&error, 400))),
@@ -231,11 +248,14 @@ pub(super) fn real_host_router_corpus() {
                         actual.sort();
                         actual == expected
                     });
-                    let topic_compliance = reason.as_deref().map(|reason| {
-                        topic_compliance(reason, &case.expected_topic, &input.aliases)
+                    let display_topic_compliance = reason.as_deref().map(|reason| {
+                        self::topic_compliance(reason, &case.expected_topic, &input.aliases)
                     });
                     let topic_matches =
                         topic_compliance.as_ref().is_some_and(|topic| topic.matches);
+                    let display_topic_matches = display_topic_compliance
+                        .as_ref()
+                        .is_some_and(|topic| topic.matches);
                     let provider_envelope = serde_json::from_str::<Value>(&capture.raw_stdout).ok();
                     let provider_duration_api_ms = provider_envelope
                         .as_ref()
@@ -245,7 +265,10 @@ pub(super) fn real_host_router_corpus() {
                         "candidates": input.aliases, "expected": case.expected, "actual": actual,
                         "matches": matches, "outcome": outcome, "reason": reason, "error": error,
                         "expected_topic": case.expected_topic,
+                        "raw_reason": raw_reason,
                         "topic_matches": topic_matches, "topic_compliance": topic_compliance,
+                        "display_topic_matches": display_topic_matches,
+                        "display_topic_compliance": display_topic_compliance,
                         "worker_error": worker_error, "error_category": metrics.outcome,
                         "metrics": metrics, "provider_usage": worker_usage(&capture.raw_stdout),
                         "provider_stdout": bounded_text(&capture.raw_stdout, 4096),
