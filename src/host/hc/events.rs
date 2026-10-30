@@ -112,7 +112,7 @@ impl Subscriber {
                                 "pane_id":pane, "terminal_id":pane, "workspace_id":space, "tab_id":terminal.labels.get("herdr.tab").cloned().unwrap_or_default(), "focused":false, "agent_status":terminal.status.as_ref().map(|status| status.state.as_str()).unwrap_or("unknown"), "revision":0
                             }}), &scoped)?;
                         }
-                        self.operation("reconcile", json!({}), &scoped)
+                        self.operation("event.reconcile", json!({}), &scoped)
                     }
                     Kind::Lost | Kind::Finished | Kind::Removed => {
                         let kind = if matches!(event.kind, Kind::Removed) { "pane_closed" } else { "pane_exited" };
@@ -211,7 +211,7 @@ impl Subscriber {
                 self.spaces.insert(terminal.address.clone(), space.clone());
                 self.reconcile_name(&terminal.address, &scoped)?;
             }
-            self.operation("reconcile", json!({}), &scoped)?;
+            self.operation("event.reconcile", json!({}), &scoped)?;
         }
         Ok(())
     }

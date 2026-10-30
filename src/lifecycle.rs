@@ -839,7 +839,7 @@ where
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
             Ok(json!({"address_id": address_id, "lifecycle": "retired"}))
         }
-        "reconcile" => {
+        "reconcile" | "event.reconcile" => {
             parse_input::<EmptyInput>(input)?;
             require_activated(&mut store, &namespace)?;
             let reconciliation = reconcile_worktree(
@@ -848,7 +848,7 @@ where
                 &discovered,
                 runtime,
                 &attribution,
-                true,
+                operation == "reconcile",
             )?;
             Ok(json!({
                 "space_id": discovered.workspace_id,

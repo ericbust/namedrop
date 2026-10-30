@@ -27,8 +27,7 @@ pub struct DrainReport {
     pub pending_grace: Vec<GraceDeadline>,
 }
 
-/// An idle submitted or acknowledged attempt still inside the acknowledgement
-/// grace. The drain observes it again at `due_at_ms`.
+/// The next lease or acknowledgement deadline for an inflight attempt.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GraceDeadline {
     pub attempt_id: DeliveryAttemptId,
@@ -230,6 +229,11 @@ fn observe_agent_attempt(
     match attempt.state {
         _ if !same_session => Observation::Hold,
         DeliveryState::Dispatching if restart || lease_expired => Observation::Hold,
+        DeliveryState::Dispatching => Observation::PendingGrace {
+            due_at_ms: attempt
+                .lease_expires_at_ms
+                .expect("unexpired lease checked"),
+        },
         DeliveryState::Submitted if restart || idle_past_grace => Observation::Hold,
         DeliveryState::Acknowledged if idle_past_grace => Observation::Settle,
         DeliveryState::Submitted | DeliveryState::Acknowledged if session_is_settled => {
