@@ -572,8 +572,11 @@ where
 }
 
 pub(crate) fn is_plain_channel_post(source: &str) -> bool {
-    !source.trim_start().starts_with('@')
-        && parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
+    let leading = source.trim_start();
+    let leading_mention = leading
+        .strip_prefix('@')
+        .is_some_and(|rest| !rest.starts_with(char::is_whitespace));
+    !leading_mention && parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
 }
 
 pub(crate) fn send_operator_channel_message_observing_commit<E, C, I, R>(
@@ -1148,7 +1151,7 @@ where
             candidates
         } else { false };
         if channel_reply {
-            let asker = reply_route.as_ref().and_then(|route| route.participants.first());
+            let asker = reply_route.as_ref().and_then(|route| route.asker_for(&author.address_id));
             let members = transaction.channel_members(&namespace)?;
             if let Some(member) = members.iter().find(|member| {
                 asker.is_some_and(|asker| asker.address_id == member.address_id)

@@ -2599,11 +2599,12 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         message_id: &MessageId,
     ) -> Result<MessageRoute, StoreError> {
-        let (thread_id, author, grammar_version) = self
+        let (thread_id, author, grammar_version, source, author_kind) = self
             .transaction
             .query_row(
                 "SELECT thread_id, author_address_id, author_alias_snapshot,
-                        author_session_snapshot, grammar_version
+                        author_session_snapshot, grammar_version, authored_source,
+                        author_kind
                  FROM collaboration_messages
                  WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
                 params![
@@ -2623,41 +2624,50 @@ impl StateTransaction<'_> {
                                 .map(crate::AgentSessionId::new),
                         },
                         row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
                     ))
                 },
             )
             .optional()?
             .ok_or_else(|| StoreError::invalid_input("reply target message does not exist"))?;
-        let mut participants = vec![author];
-        for recipient in self.message_routing_snapshots(
+        let recipients = self.message_routing_snapshots(
             namespace,
             message_id,
             "message_recipients",
             "recipient_order",
             false,
-        )? {
-            if !participants
-                .iter()
-                .any(|participant| participant.address_id == recipient.address_id)
-            {
-                participants.push(recipient);
-            }
-        }
+        )?;
+        let mentions = crate::message::context_mentions(&source);
+        let channel_thread = self.channel_thread(namespace, &thread_id)?;
+        let operator_selection = author_kind == ActorKind::Human.as_str()
+            && self.is_operator_address(namespace, &author.address_id)?
+            && (channel_thread || self.channel_routing_state(namespace, message_id)?.is_some());
+        let asked_addresses = recipients
+            .iter()
+            .filter(|recipient| {
+                operator_selection
+                    || mentions.iter().any(|mention| {
+                        mention.workspace.is_none() && mention.alias == recipient.alias
+                    })
+            })
+            .map(|recipient| recipient.address_id.clone())
+            .collect();
         let mut reply_mode = crate::DeliveryReplyMode::for_message_grammar(&grammar_version);
-        if reply_mode == crate::DeliveryReplyMode::AgentThread
-            && self.channel_thread(namespace, &thread_id)?
-        {
+        if reply_mode == crate::DeliveryReplyMode::AgentThread && channel_thread {
             reply_mode = crate::DeliveryReplyMode::Channel;
         }
-        Ok(MessageRoute {
+        Ok(MessageRoute::new(
             thread_id,
-            participants,
+            author,
+            recipients,
             reply_mode,
-            from_namedrop: matches!(
+            matches!(
                 grammar_version.as_str(),
                 "coordination-nudge/v1" | "coordination-report/v1" | "result-set/v1"
             ),
-        })
+            asked_addresses,
+        ))
     }
 
     pub fn append_message(
@@ -8070,6 +8080,174 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn channel_asks_use_stored_recipient_identity_and_operator_selections() {
+        let directory = TestDirectory::new();
+        let mut store = StateStore::open(&directory.0).unwrap();
+        let ns = StateNamespace::for_space("socket", "workspace");
+        let at = MutationAttribution::new(ActorKind::Human, "test", 1);
+        store
+            .transaction(|tx| {
+                tx.activate_worktree(&ns, &at)?;
+                tx.ensure_operator_author(&ns, &at)?;
+                for alias in ["asker", "answerer", "replacement"] {
+                    tx.create_pane_address(
+                        &ns,
+                        &PaneAddressDraft {
+                            id: PaneAddressId::new(alias),
+                            role_id: crate::PaneRoleId::new(alias),
+                            role_name: alias.to_owned(),
+                            role_description: alias.to_owned(),
+                            alias: alias.to_owned(),
+                        },
+                        &at,
+                    )?;
+                }
+                let root = MessageDraft {
+                    thread_id: ThreadId::new("thread"),
+                    message_id: MessageId::new("root"),
+                    in_reply_to: None,
+                    author_address_id: PaneAddressId::new("operator:local"),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: "operator".to_owned(),
+                    author_agent_session_snapshot: None,
+                    request_id: "root".to_owned(),
+                    authored_source: "A room statement.".to_owned(),
+                    body: "A room statement.".to_owned(),
+                    grammar_version: "channel/v1".to_owned(),
+                    recipients: Vec::new(),
+                    context_references: Vec::new(),
+                };
+                tx.create_thread(&ns, &root.thread_id, "test", &at)?;
+                tx.append_message(&ns, &root, &at)?;
+                assert!(matches!(
+                    tx.deliver_channel_message(
+                        &ns,
+                        &root.message_id,
+                        &["answerer".to_owned()],
+                        &at
+                    )?,
+                    channel_routing::ChannelDelivery::Delivered(_)
+                ));
+                assert_eq!(
+                    tx.message_route(&ns, &root.message_id)?
+                        .asker_for(&PaneAddressId::new("answerer"))
+                        .map(|asker| asker.address_id.as_str()),
+                    Some("operator:local")
+                );
+                let recipient = crate::MessageRecipientDraft {
+                    address_id: PaneAddressId::new("answerer"),
+                    alias_snapshot: "answerer".to_owned(),
+                    agent_session_snapshot: None,
+                    delivery_id: crate::DeliveryId::new("followup-delivery"),
+                };
+                let followup = MessageDraft {
+                    message_id: MessageId::new("followup"),
+                    request_id: "followup".to_owned(),
+                    in_reply_to: Some(root.message_id.clone()),
+                    grammar_version: "mention/v1".to_owned(),
+                    recipients: vec![recipient.clone()],
+                    ..root.clone()
+                };
+                tx.append_message(&ns, &followup, &at)?;
+                assert!(
+                    tx.channel_routing_state(&ns, &followup.message_id)?
+                        .is_none()
+                );
+                assert_eq!(
+                    tx.message_route(&ns, &followup.message_id)?
+                        .asker_for(&PaneAddressId::new("answerer"))
+                        .map(|asker| asker.address_id.as_str()),
+                    Some("operator:local")
+                );
+                let mention_root = MessageDraft {
+                    thread_id: ThreadId::new("mention-thread"),
+                    message_id: MessageId::new("mention-root"),
+                    request_id: "mention-root".to_owned(),
+                    in_reply_to: None,
+                    recipients: vec![crate::MessageRecipientDraft {
+                        delivery_id: crate::DeliveryId::new("mention-root-delivery"),
+                        ..recipient.clone()
+                    }],
+                    ..followup.clone()
+                };
+                tx.create_thread(&ns, &mention_root.thread_id, "mention test", &at)?;
+                tx.append_message(&ns, &mention_root, &at)?;
+                let routed_followup = MessageDraft {
+                    message_id: MessageId::new("routed-followup"),
+                    request_id: "routed-followup".to_owned(),
+                    in_reply_to: Some(mention_root.message_id.clone()),
+                    authored_source: "Please ask @replacement.".to_owned(),
+                    body: "Please ask @replacement.".to_owned(),
+                    recipients: Vec::new(),
+                    ..mention_root
+                };
+                tx.append_pending_channel(&ns, &routed_followup, &at)?;
+                let claim = tx.claim_channel(2)?.unwrap();
+                assert!(tx.finish_channel(&claim, &[], false, 3)?);
+                let route = tx.message_route(&ns, &routed_followup.message_id)?;
+                assert_eq!(route.reply_mode, crate::DeliveryReplyMode::AgentThread);
+                assert_eq!(
+                    route
+                        .asker_for(&PaneAddressId::new("answerer"))
+                        .map(|asker| asker.address_id.as_str()),
+                    Some("operator:local")
+                );
+                assert!(
+                    route
+                        .asker_for(&PaneAddressId::new("replacement"))
+                        .is_none()
+                );
+                tx.replace_alias(&ns, &PaneAddressId::new("answerer"), "renamed", &at)?;
+                tx.release_alias(&ns, "answerer", &at)?;
+                tx.replace_alias(&ns, &PaneAddressId::new("replacement"), "answerer", &at)?;
+                for (index, source, asked) in [
+                    (0, "@operator Ask @answerer.", true),
+                    (1, r"@operator Report from \@answerer.", false),
+                    (2, "@operator Report from `@answerer`.", false),
+                    (3, "@operator Report from #remote @answerer.", false),
+                    (4, "@operator The number is 42.", false),
+                    (5, "@operator Ask @replacement.", false),
+                ] {
+                    let message = MessageDraft {
+                        message_id: MessageId::new(format!("question-{index}")),
+                        request_id: format!("question-{index}"),
+                        author_address_id: PaneAddressId::new("asker"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "asker".to_owned(),
+                        authored_source: source.to_owned(),
+                        body: source.to_owned(),
+                        recipients: vec![crate::MessageRecipientDraft {
+                            delivery_id: crate::DeliveryId::new(format!("delivery-{index}")),
+                            ..recipient.clone()
+                        }],
+                        ..followup.clone()
+                    };
+                    tx.append_message(&ns, &message, &at)?;
+                    let route = tx.message_route(&ns, &message.message_id)?;
+                    assert_eq!(
+                        route
+                            .asker_for(&PaneAddressId::new("answerer"))
+                            .map(|asker| asker.address_id.as_str()),
+                        asked.then_some("asker"),
+                        "{source}"
+                    );
+                    assert!(
+                        route
+                            .asker_for(&PaneAddressId::new("replacement"))
+                            .is_none(),
+                        "{source}"
+                    );
+                    assert!(
+                        route.asker_for(&PaneAddressId::new("asker")).is_none(),
+                        "{source}"
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
