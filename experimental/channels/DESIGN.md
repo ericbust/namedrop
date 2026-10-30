@@ -781,16 +781,20 @@ Enter sends:
 - Text that starts with mentions: "Enter sends only to @codex", "Enter sends
   only to @codex, @shell", or "Enter sends only to @codex, @shell +2". The
   names are the leading aliases as typed, without `#label` tokens.
-- Text that starts with a name the server refuses, read the way the server
+- Text that starts with something the server refuses, read the way the server
   reads leading names (after any `#label` words, each `@name` that is an alias
   once its ASCII letters are lowercased), checked in the server's order:
+  - A first `@` word with punctuation stuck to a name: "Put a space after
+    @codex", for "@codex, hi" or "@codex: hi". The server reads whole words.
+  - Any other first `@` word that is no name at all: "@codex_x isn't in this
+    channel", as typed.
   - A name with capitals: "Names are lowercase: @codex", with the member's
     alias, when its lowercase form is a current member or a `#label` names
-    another channel.
-  - Otherwise a name that is not a current member, with or without capitals:
-    "@Nobody isn't in this channel", as typed. Retired members are not
-    current. After a `#label`, only the capitals rule applies, because the
-    names belong to that channel.
+    another channel. Otherwise "@Nobody isn't in this channel", as typed.
+    Retired members are not current.
+  - A lowercase name the page doesn't know keeps "Enter sends only to
+    @name". It may be a group, which the page can't see, so the server
+    decides.
 
   Enter still sends such text. The server stays the authority, and its
   refusal shows under the box with the text kept. Names later in the text keep

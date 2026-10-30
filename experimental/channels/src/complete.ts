@@ -240,6 +240,8 @@ export function accept(
 
 const ALIAS = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const LABEL = /^#[A-Za-z0-9._-]+$/;
+// A name typed with punctuation stuck to it, as in "@codex," or "@codex:".
+const PUNCTUATED = /^@([A-Za-z0-9-]+)[,.:;!?]+$/;
 const TOKEN_CHAR = /[A-Za-z0-9_-]/;
 const EMBEDDED_AFTER = /[A-Za-z0-9_\\]/;
 type Mentions = {
@@ -300,10 +302,10 @@ export function leadingMentions(text: string): readonly string[] {
 function asciiLower(text: string): string {
   return text.replace(/[A-Z]+/g, (upper) => upper.toLowerCase());
 }
-// The hint for a leading name the server refuses, checked in its order: after
-// any `#label` words, each `@name` that is an alias once lowercased, first for
-// capitals, then for a name that is not a current member. Names after a label
-// belong to that channel, so only their case is checked.
+// The hint for leading text the server refuses, read in its order: after any
+// `#label` words, the first `@` word must be a whole name, and no leading name
+// may have capitals. A lowercase name the page doesn't know may be a group,
+// which the frame doesn't carry, so the server decides that one.
 function refusedLeading(
   text: string,
   members: ReadonlyMap<AddressId, Member>,
@@ -313,28 +315,32 @@ function refusedLeading(
   while (LABEL.test(wordAt(text, at)))
     at = spaceAfter(text, at + wordAt(text, at).length);
   const labeled = at > start;
+  const first = wordAt(text, at);
+  if (first.length > 1 && first.startsWith("@")) {
+    if (!ALIAS.test(asciiLower(first.slice(1)))) {
+      const name = PUNCTUATED.exec(first)?.[1];
+      return name !== undefined && ALIAS.test(asciiLower(name))
+        ? composerCopy.spaceAfter(`@${asciiLower(name)}`)
+        : composerCopy.notMember(first);
+    }
+  }
   const names: string[] = [];
-  let word = wordAt(text, at);
+  let word = first;
   while (word.startsWith("@") && ALIAS.test(asciiLower(word.slice(1)))) {
     names.push(word);
     at = spaceAfter(text, at + word.length);
     word = wordAt(text, at);
   }
+  const capitalized = names.find((name) => name !== asciiLower(name));
+  if (capitalized === undefined) return null;
+  const alias = asciiLower(capitalized);
   const current = new Set<string>();
   for (const member of members.values())
     if (member.kind.type !== "human" && member.activity !== "retired")
       current.add(member.alias);
-  const capitalized = names.find((name) => name !== asciiLower(name));
-  if (capitalized !== undefined) {
-    const alias = asciiLower(capitalized);
-    return labeled || current.has(alias)
-      ? composerCopy.lowercase(alias)
-      : composerCopy.notMember(capitalized);
-  }
-  const unknown = labeled
-    ? undefined
-    : names.find((name) => !current.has(name));
-  return unknown === undefined ? null : composerCopy.notMember(unknown);
+  return labeled || current.has(alias)
+    ? composerCopy.lowercase(alias)
+    : composerCopy.notMember(capitalized);
 }
 
 // The agents a channel post mentions, in the order the text first names them.

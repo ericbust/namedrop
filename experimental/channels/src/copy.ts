@@ -346,6 +346,7 @@ export const composerCopy = {
     `Enter sends only to ${shortList(names)}`,
   lowercase: (alias: string) => `Names are lowercase: ${alias}`,
   notMember: (name: string) => `${name} isn't in this channel`,
+  spaceAfter: (alias: string) => `Put a space after ${alias}`,
   sending: "Sending…",
   send: "Send",
   everyWorkspace: "every workspace",

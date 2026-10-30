@@ -505,8 +505,8 @@ test("complete: the hint says where Enter sends the text", () => {
     "Enter sends only to @codex, @shell",
   );
   assert.equal(
-    hint("@codex @shell @claude hi"),
-    "Enter sends only to @codex, @shell +1",
+    hint("@codex @shell @lead @claude hi"),
+    "Enter sends only to @codex, @shell +2",
   );
   for (const to of [[], ["@codex"]])
     assert.equal(
@@ -515,23 +515,29 @@ test("complete: the hint says where Enter sends the text", () => {
     );
 });
 
-test("complete: the hint names a leading name the server refuses, reading leading names the way the server does", () => {
+test("complete: the hint names leading text the server refuses, reading leading names the way the server does", () => {
   const channel = { kind: "channel", agents: alpha.members } as const;
   const hint = (text: string) => composerHint(channel, text);
   const room = "Enter posts to the channel · Mention @name to bring someone in";
   const cases: [string, string][] = [
     ["@Codex quick check", "Names are lowercase: @codex"],
     ["@Nobody hi there", "@Nobody isn't in this channel"],
-    ["@nobody hi there", "@nobody isn't in this channel"],
+    ["@nobody hi there", "Enter sends only to @nobody"],
     ["@CODEX hi", "Names are lowercase: @codex"],
     ["  @Codex hi", "Names are lowercase: @codex"],
     ["@Shell ls", "Names are lowercase: @shell"],
     ["@Codex", "Names are lowercase: @codex"],
     ["@codex @Claude hi", "Names are lowercase: @claude"],
     ["@nobody @Codex hi", "Names are lowercase: @codex"],
-    ["@codex @nobody hi", "@nobody isn't in this channel"],
-    ["@codex @shell @lead @claude hi", "@lead isn't in this channel"],
-    ["@ghost come back", "@ghost isn't in this channel"],
+    ["@codex @nobody hi", "Enter sends only to @codex, @nobody"],
+    ["@ghost come back", "Enter sends only to @ghost"],
+    ["@codex, hi", "Put a space after @codex"],
+    ["@codex: can you look", "Put a space after @codex"],
+    ["@Codex, hi", "Put a space after @codex"],
+    ["#alpha @codex, hi", "Put a space after @codex"],
+    ["@codex_x hi", "@codex_x isn't in this channel"],
+    ["@codex @claude, hi", "Enter sends only to @codex"],
+    ["@ hi", room],
     ["#alpha @Codex hi", "Names are lowercase: @codex"],
     ["#beta @Coder hi", "Names are lowercase: @coder"],
     ["#beta @coder hi", "Enter sends only to @coder"],
@@ -541,7 +547,7 @@ test("complete: the hint names a leading name the server refuses, reading leadin
   ];
   for (const [text, expected] of cases)
     assert.equal(hint(text), expected, JSON.stringify(text));
-  for (const text of ["@Codex quick check", "@nobody hi there"])
+  for (const text of ["@Codex quick check", "@codex, hi", "@nobody hi there"])
     assert.equal(postSource(text, channel), text, "Enter still sends it");
 });
 
