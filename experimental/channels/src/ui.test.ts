@@ -602,7 +602,6 @@ test("focused tracked evidence exposes the channel response path without a rejec
     posted: new Set<string>(),
     onEdit() {},
     onSend() {},
-    onSendTo() {},
     onClose() {},
     paneId: "tracked-pane",
   } satisfies Parameters<typeof ThreadPane>[0];

@@ -1,4 +1,4 @@
-import { Fragment, memo, type ReactNode, useState } from "react";
+import { Fragment, memo, type ReactNode, useContext, useState } from "react";
 import {
   overflowCopy,
   type ParticipantCopy,
@@ -12,6 +12,7 @@ import {
 } from "../copy.ts";
 import type {
   AddressId,
+  Alias,
   Directory,
   Message as MessageRow,
   Outgoing,
@@ -29,6 +30,7 @@ import {
 import { participant, type ReplyReference } from "../store.ts";
 import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
+import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { PeekControl, usePeek } from "./PeekContext.tsx";
 
@@ -280,11 +282,6 @@ function variantFor(
     : "text";
 }
 
-export type SendToHandler = (
-  post: MessageRow,
-  alias: string,
-  button: HTMLButtonElement,
-) => void;
 type ThreadOpener = (threadId: string, button: HTMLButtonElement) => void;
 function Reference({
   reference,
@@ -334,7 +331,6 @@ function Route({
   directory,
   paused,
   onThread,
-  onSendTo,
   paneId,
   expanded,
 }: {
@@ -343,24 +339,44 @@ function Route({
   directory: Directory;
   paused: boolean;
   onThread: ThreadOpener | undefined;
-  onSendTo: SendToHandler | undefined;
   paneId: string | undefined;
   expanded: boolean;
 }) {
-  const offer = (alias: string, text: string) =>
-    onSendTo === undefined ? (
-      text
-    ) : (
-      <button
-        type="button"
-        className="route-link"
-        data-thread-id={message.threadId}
-        aria-label={routeCopy.sendThis(alias)}
-        onClick={(event) => onSendTo(message, alias, event.currentTarget)}
-      >
-        {text}
-      </button>
+  const deliveries = useContext(DeliveryContext);
+  // The button stays the same element through every state, so focus stays on it.
+  const offer = (alias: Alias, text: string, named: boolean) => {
+    if (deliveries === null) return text;
+    const state = deliveries.of(message.id, alias);
+    return (
+      <>
+        {state.kind === "failed" ? (
+          <>
+            <span className="route-failed">
+              {routeCopy.delivery.failed(alias)}
+            </span>{" "}
+          </>
+        ) : named && state.kind !== "idle" ? (
+          `${alias} `
+        ) : null}
+        <button
+          type="button"
+          className="route-link"
+          aria-label={
+            state.kind === "idle" ? routeCopy.sendThis(alias) : undefined
+          }
+          aria-disabled={
+            state.kind === "sending" || state.kind === "sent" || undefined
+          }
+          title={
+            state.kind === "failed" ? routeCopy.delivery.why(state) : undefined
+          }
+          onClick={() => deliveries.deliver(message, alias)}
+        >
+          {state.kind === "idle" ? text : routeCopy.delivery.label[state.kind]}
+        </button>
+      </>
     );
+  };
   function part(part: RoutePart): ReactNode {
     switch (part.kind) {
       case "state":
@@ -403,21 +419,23 @@ function Route({
       case "send":
         return (
           <li>
-            {part.form === "anyway"
-              ? part.aliases.map((alias) => (
-                  <Fragment key={alias}>
-                    {offer(alias, routeCopy.send.anyway)}
-                  </Fragment>
-                ))
-              : [
-                  `${routeCopy.send.to} `,
-                  ...part.aliases.map((alias, index) => (
+            <span role="status">
+              {part.form === "anyway"
+                ? part.aliases.map((alias) => (
                     <Fragment key={alias}>
-                      {index > 0 && ", "}
-                      {offer(alias, alias)}
+                      {offer(alias, routeCopy.send.anyway, false)}
                     </Fragment>
-                  )),
-                ]}
+                  ))
+                : [
+                    `${routeCopy.send.to} `,
+                    ...part.aliases.map((alias, index) => (
+                      <Fragment key={alias}>
+                        {index > 0 && ", "}
+                        {offer(alias, alias, true)}
+                      </Fragment>
+                    )),
+                  ]}
+            </span>
           </li>
         );
       case "replies":
@@ -487,7 +505,6 @@ type MessageProps = {
   replyExit?: TerminalRun | undefined;
   chat?: Chat | null;
   onThread?: ThreadOpener;
-  onSendTo?: SendToHandler;
   paneId?: string;
   threadExpanded?: boolean;
   arrive?: boolean;
@@ -628,7 +645,6 @@ export const Message = memo(
     replyExit,
     chat = null,
     onThread,
-    onSendTo,
     paneId,
     threadExpanded = false,
     arrive = false,
@@ -750,7 +766,6 @@ export const Message = memo(
                   directory={directory}
                   paused={paused}
                   onThread={onThread}
-                  onSendTo={onSendTo}
                   paneId={paneId}
                   expanded={threadExpanded}
                 />
@@ -770,7 +785,6 @@ export const Message = memo(
               directory={directory}
               paused={paused}
               onThread={onThread}
-              onSendTo={onSendTo}
               paneId={paneId}
               expanded={threadExpanded}
             />
@@ -803,7 +817,6 @@ export const Message = memo(
     before.replyExit === after.replyExit &&
     sameChat(before.chat ?? null, after.chat ?? null) &&
     before.onThread === after.onThread &&
-    before.onSendTo === after.onSendTo &&
     before.paneId === after.paneId &&
     before.threadExpanded === after.threadExpanded &&
     before.arrive === after.arrive &&

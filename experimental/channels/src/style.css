@@ -1077,6 +1077,14 @@ button.member:not(.more):hover {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+.route-link[aria-disabled="true"] {
+  color: var(--text-muted);
+  text-decoration: none;
+  cursor: default;
+}
+.route-failed {
+  color: var(--failed-text);
+}
 /* The padding gives a 32px hit target. The ring hugs the 12px text instead, so
    it never covers the line above. */
 .route-link:focus-visible {

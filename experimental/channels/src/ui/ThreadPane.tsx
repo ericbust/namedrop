@@ -27,7 +27,7 @@ import {
 } from "../store.ts";
 import { Composer } from "./Composer.tsx";
 import { Icon } from "./Icons.tsx";
-import { Message, PendingMessage, type SendToHandler } from "./Message.tsx";
+import { Message, PendingMessage } from "./Message.tsx";
 import { useEscape } from "./useEscape.ts";
 
 export type ThreadResponse =
@@ -46,7 +46,6 @@ export function ThreadPane({
   posted,
   onEdit,
   onSend,
-  onSendTo,
   onClose,
   paneId,
   response = null,
@@ -66,7 +65,6 @@ export function ThreadPane({
     outgoing: Pick<Outgoing, "composer" | "source" | "inReplyTo">,
     startedAt: number,
   ) => void;
-  onSendTo: SendToHandler;
   onClose: () => void;
   paneId: string;
   response?: ThreadResponse | null;
@@ -188,7 +186,6 @@ export function ThreadPane({
               directory,
               replies: 0,
             })}
-            onSendTo={onSendTo}
           />
         ))}
         <p className="divider">
@@ -211,7 +208,6 @@ export function ThreadPane({
               directory,
               replies: 0,
             })}
-            onSendTo={onSendTo}
             arrive={message.at > openedAt && !posted.has(message.id)}
           />
         ))}

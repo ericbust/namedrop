@@ -16,7 +16,7 @@ import {
   type TimelineRow,
 } from "../store.ts";
 import { Icon } from "./Icons.tsx";
-import { Message, PendingMessage, type SendToHandler } from "./Message.tsx";
+import { Message, PendingMessage } from "./Message.tsx";
 
 // A new object per activation, so showing the same message again re-scrolls.
 export type Located = { messageId: string };
@@ -64,7 +64,6 @@ export function Timeline({
   unsentReplies,
   expandedThread,
   onThread,
-  onSendTo,
   paneId,
   onOlder,
   onLatest,
@@ -80,7 +79,6 @@ export function Timeline({
   unsentReplies: ReadonlySet<string>;
   expandedThread: string | null;
   onThread: (threadId: string, button: HTMLButtonElement) => void;
-  onSendTo: SendToHandler;
   paneId: string;
   onOlder: (key: SpaceKey) => void;
   onLatest: (key: SpaceKey) => void;
@@ -302,7 +300,6 @@ export function Timeline({
                   replyExit={exitFor(runs, latestReply)}
                   chat={chats[index]}
                   onThread={onThread}
-                  onSendTo={onSendTo}
                   paneId={paneId}
                   threadExpanded={expandedThread === thread.id}
                   arrive={message.at > shownAt && !posted.has(message.id)}

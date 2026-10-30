@@ -1,5 +1,6 @@
 import type {
   AddressId,
+  Alias,
   DeliveryStage,
   Directory,
   Member,
@@ -23,7 +24,7 @@ export type RoutePart =
   | { kind: "pulled-in" }
   | { kind: "receipt"; id: AddressId; named: boolean; stage: DeliveryStage }
   | { kind: "mentioned"; aliases: readonly string[] }
-  | { kind: "send"; aliases: readonly string[]; form: SendForm }
+  | { kind: "send"; aliases: readonly Alias[]; form: SendForm }
   | { kind: "replies"; count: number };
 export type RouteTip =
   | { kind: "router"; name: string }

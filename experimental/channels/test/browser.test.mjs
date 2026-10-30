@@ -90,6 +90,7 @@ function postRoute(onPost) {
   const session = { secret: "session-1", csrf: "csrf-1", tokenReads: 0 };
   const attempts = [];
   const controls = [];
+  const deliveries = [];
   const receipts = new Map();
   const authorized = (req) =>
     (req.headers.cookie ?? "")
@@ -99,6 +100,7 @@ function postRoute(onPost) {
     session,
     attempts,
     controls,
+    deliveries,
     receipts,
     cookie: `${COOKIE}=${session.secret}; Path=/; HttpOnly; SameSite=Strict`,
     rotate() {
@@ -194,6 +196,30 @@ function postRoute(onPost) {
       const { status = 200 } = await onControl(request);
       reply(status, status === 200 ? {} : { error: "Refused." });
     },
+    async deliver(req, res, onDeliver, path) {
+      const request = {
+        method: req.method,
+        path,
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        type: req.headers["content-type"] ?? null,
+        body: await readBody(req),
+        status: 0,
+      };
+      deliveries.push(request);
+      const reply = (status, value) => {
+        request.status = status;
+        sendJson(res, status, value);
+      };
+      if (!authorized(req)) return reply(401, { error: "No session." });
+      if (request.csrf !== session.csrf) return reply(403, {});
+      const outcome = await onDeliver(JSON.parse(request.body), request);
+      if (outcome.drop) return req.socket.destroy();
+      const { status = 200, error, channel = {} } = outcome;
+      if (status === 200) return reply(200, { channel });
+      if (error !== undefined) return reply(status, { error });
+      request.status = status;
+      res.writeHead(status).end();
+    },
     postedRow(requestId, at = Date.now()) {
       const { post, receipt } = receipts.get(requestId);
       return message(receipt.message_id, post.source, {
@@ -246,6 +272,7 @@ async function open(
     onScreen = () => ({ body: "" }),
     onContext = null,
     onControl = () => ({ status: 200 }),
+    onDeliver = () => ({ status: 200 }),
     observeLanding = false,
   } = {},
 ) {
@@ -284,6 +311,11 @@ async function open(
       return posts.post(req, res, postKey);
     if (/^\/w\/[^/]+\/threads\/[^/]+\/(continue|stop)$/.test(url.pathname))
       return posts.control(req, res, onControl, url.pathname);
+    if (
+      req.method === "POST" &&
+      /^\/w\/[^/]+\/messages\/[^/]+\/deliver$/.test(url.pathname)
+    )
+      return posts.deliver(req, res, onDeliver, url.pathname);
     if (/^\/w\/[^/]+\/messages$/.test(url.pathname)) {
       historyRequests.push(url);
       try {
@@ -5832,66 +5864,6 @@ test("CH-2: Respond targets its agent with the prefill, and plain text names eve
   );
 });
 
-test("CH-2: Send anyway in a conversation outside the timeline fills that pane's reply box", async (t) => {
-  const value = frame(1, "alpha", "needs_you");
-  value.frame.participants = people();
-  const post = channelPost(
-    "far-post",
-    "the deploy notes @codex wrote last week were clear",
-    { state: "unrouted", to: [] },
-  );
-  const conversation = { thread_id: "far-post", message_id: "far-post" };
-  value.frame.attention = [
-    {
-      source_kind: "delivery_attempt",
-      summary: { text: "A response is needed.", truncated: false },
-      opened_at_ms: 4,
-      subject_alias: null,
-      message_id: "far-post",
-      conversation,
-      coordination_id: null,
-      response: { kind: "reply", ...conversation, address_id: "codex" },
-    },
-  ];
-  const ui = await open(
-    t,
-    (client) => replay(client, [value]),
-    () => [],
-    {
-      onContext: () => ({
-        thread_id: "far-post",
-        message_count: 1,
-        earlier_omitted: false,
-        messages: [post],
-      }),
-    },
-  );
-  await ui.live();
-  await ui.page
-    .getByRole("button", { name: "Show message from @codex", exact: true })
-    .click();
-  const pane = ui.page.getByRole("complementary", {
-    name: "Thread",
-    exact: true,
-  });
-  await pane.getByRole("button", { name: "Send this to @codex" }).click();
-  const reply = pane.getByRole("combobox");
-  await eventually(
-    async () =>
-      (await reply.count()) === 1 &&
-      (await reply.inputValue()) === "@codex Please read my post.",
-    "the filled reply box in the conversation pane",
-  );
-  assert.deepEqual(
-    await reply.evaluate((box) => [
-      box.selectionStart,
-      box.selectionEnd,
-      box === document.activeElement,
-    ]),
-    ["@codex ".length, "@codex Please read my post.".length, true],
-  );
-});
-
 test("CL-A: preparing an already prepared coordination response keeps the draft without a warning", async (t) => {
   const { value, context } = actionableAttention("message");
   const ui = await open(
@@ -6632,143 +6604,373 @@ for (const woke of [["claude"], []])
     );
   });
 
-const NOTE = "@codex Please read my post.";
 const threadPane = (ui) =>
   ui.page.getByRole("complementary", { name: "Thread", exact: true });
-const boxState = (box) =>
-  box.evaluate((element) => [
-    element.value,
-    element.selectionStart,
-    element.selectionEnd,
-    document.activeElement === element,
-  ]);
+function held() {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  return { gate, release: () => release() };
+}
+const deliverPath = (id) => `/w/${key(1)}/messages/${id}/deliver`;
+const deliverRequest = ({ method, path, csrf, type, body }) => ({
+  method,
+  path,
+  csrf,
+  type,
+  body,
+});
+function reached(post, ...to) {
+  return {
+    ...post,
+    channel: { ...post.channel, to },
+    legs: to.map((id) => ({ to: id, stage: { stage: "delivered" } })),
+  };
+}
+const offerState = (button) =>
+  button.evaluate((element) => ({
+    text: element.textContent,
+    disabled: element.getAttribute("aria-disabled"),
+    title: element.getAttribute("title"),
+    focused: document.activeElement === element,
+    connected: element.isConnected,
+  }));
+async function offerReads(button, text) {
+  await eventually(
+    async () => (await offerState(button)).text === text,
+    `the offer to read ${text}`,
+  );
+  return offerState(button);
+}
+const unsent = () =>
+  channelPost("p1", "nice catch by @codex on the cache", {
+    state: "unrouted",
+    to: [],
+  });
 
-test("CH-fix-2 item 1: Send anyway selects a short note in the thread box and replies to the post itself", async (t) => {
+test("CH-fix-3 item 1: Send anyway delivers the post itself, reads Sending… then Sent, and the frame's leg replaces the offer", async (t) => {
+  const answered = held();
+  const post = unsent();
+  const { ui, value } = await chatRoom(t, [post], {
+    onDeliver: async () => {
+      await answered.gate;
+      return { status: 200, channel: { ...post.channel, to: ["codex"] } };
+    },
+  });
+  const { route, parts } = routeOf(ui, "p1");
+  const offer = route.getByRole("button", { name: "Send this to @codex" });
+  const button = await offer.elementHandle();
+  await offer.click();
+  await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
+  assert.deepEqual(deliverRequest(ui.posts.deliveries[0]), {
+    method: "POST",
+    path: deliverPath("p1"),
+    csrf: "csrf-1",
+    type: "application/json",
+    body: '{"to":["codex"]}',
+  });
+  assert.deepEqual(await offerReads(button, "Sending…"), {
+    text: "Sending…",
+    disabled: "true",
+    title: null,
+    focused: true,
+    connected: true,
+  });
+  assert.equal(await route.getByRole("status").textContent(), "Sending…");
+  assert.equal(await threadPane(ui).count(), 0, "no thread opens");
+  assert.equal(
+    await ui.page.locator("main textarea").inputValue(),
+    "",
+    "nothing is typed in the channel box",
+  );
+  answered.release();
+  assert.deepEqual(await offerReads(button, "Sent"), {
+    text: "Sent",
+    disabled: "true",
+    title: null,
+    focused: true,
+    connected: true,
+  });
+  assert.equal(await route.getByRole("status").textContent(), "Sent");
+  await button.click({ force: true });
+  value.frame.messages = [reached(post, "codex")];
+  ui.connections[0].send("space", value);
+  await eventually(
+    async () => !(await button.evaluate((element) => element.isConnected)),
+    "the offer to leave once the post reached @codex",
+  );
+  assert.deepEqual(await parts(), ["@codex", "Delivered"]);
+  assert.equal(
+    await ui.page.locator("main article[data-message-id]").count(),
+    1,
+    "the room shows the post once",
+  );
+  assert.equal(ui.posts.deliveries.length, 1, "Sent never sends again");
+  assert.equal(ui.posts.attempts.length, 0, "no message is posted");
+});
+
+test("CH-fix-3 item 1: a refused delivery says so in --failed-text, Try again carries the server's message, and Try again delivers", async (t) => {
+  const refusal = "@codex is not an agent in this workspace.";
+  const outcomes = [{ status: 400, error: refusal }, { status: 200 }];
+  const { ui } = await chatRoom(t, [unsent()], {
+    onDeliver: () => outcomes.shift(),
+  });
+  const { route, parts } = routeOf(ui, "p1");
+  const offer = route.getByRole("button", { name: "Send this to @codex" });
+  const button = await offer.elementHandle();
+  await offer.click();
+  assert.deepEqual(await offerReads(button, "Try again"), {
+    text: "Try again",
+    disabled: null,
+    title: refusal,
+    focused: true,
+    connected: true,
+  });
+  assert.deepEqual(await parts(), [
+    "Mentioned @codex, not sent",
+    "Couldn't send to @codex. Try again",
+  ]);
+  assert.equal(
+    await route.getByRole("status").textContent(),
+    "Couldn't send to @codex. Try again",
+  );
+  assert.equal(
+    await route
+      .getByText("Couldn't send to @codex.", { exact: true })
+      .evaluate((element) => getComputedStyle(element).color),
+    await tokenColor(ui.page, "--failed-text"),
+  );
+  await button.click();
+  assert.equal((await offerReads(button, "Sent")).focused, true);
+  assert.deepEqual(await parts(), ["Mentioned @codex, not sent", "Sent"]);
+  assert.deepEqual(
+    ui.posts.deliveries.map(({ path, body, status }) => [path, body, status]),
+    [
+      [deliverPath("p1"), '{"to":["codex"]}', 400],
+      [deliverPath("p1"), '{"to":["codex"]}', 200],
+    ],
+  );
+});
+
+test("CH-fix-3 item 1: Try again's title says Couldn't reach Namedrop. when the request never lands, and the HTTP status when a refusal has no message", async (t) => {
+  let outcome = { drop: true };
+  const { ui } = await chatRoom(t, [unsent()], { onDeliver: () => outcome });
+  const { route } = routeOf(ui, "p1");
+  const offer = route.getByRole("button", { name: "Send this to @codex" });
+  const button = await offer.elementHandle();
+  await offer.click();
+  assert.equal(
+    (await offerReads(button, "Try again")).title,
+    "Couldn't reach Namedrop.",
+  );
+  outcome = { status: 500 };
+  await button.click();
+  await eventually(
+    async () => (await offerState(button)).title === "HTTP 500",
+    "the status in the title",
+  );
+  assert.equal(
+    await route.getByRole("status").textContent(),
+    "Couldn't send to @codex. Try again",
+  );
+});
+
+test("CH-fix-3 item 1: Send to after router_failed keeps a state for each agent", async (t) => {
+  const refusal = "@claude is not an agent in this workspace.";
+  const { ui } = await chatRoom(
+    t,
+    [
+      channelPost("p1", "can @codex and @claude look at the flaky test?", {
+        state: "router_failed",
+      }),
+    ],
+    {
+      onDeliver: ({ to: [alias] }) =>
+        alias === "codex" ? { status: 200 } : { status: 400, error: refusal },
+    },
+  );
+  const { route, parts } = routeOf(ui, "p1");
+  const codex = await route
+    .getByRole("button", { name: "Send this to @codex" })
+    .elementHandle();
+  const claude = await route
+    .getByRole("button", { name: "Send this to @claude" })
+    .elementHandle();
+  await codex.click();
+  await offerReads(codex, "Sent");
+  assert.deepEqual(await parts(), [
+    "Couldn't check who this is for",
+    "Send to @codex Sent, @claude",
+  ]);
+  await claude.click();
+  assert.deepEqual(await offerReads(claude, "Try again"), {
+    text: "Try again",
+    disabled: null,
+    title: refusal,
+    focused: true,
+    connected: true,
+  });
+  assert.deepEqual(await parts(), [
+    "Couldn't check who this is for",
+    "Send to @codex Sent, Couldn't send to @claude. Try again",
+  ]);
+  assert.equal((await offerState(codex)).text, "Sent");
+  assert.deepEqual(
+    ui.posts.deliveries.map(({ path, body }) => [path, JSON.parse(body)]),
+    [
+      [deliverPath("p1"), { to: ["codex"] }],
+      [deliverPath("p1"), { to: ["claude"] }],
+    ],
+  );
+});
+
+test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, and the timeline's offer shows the same state", async (t) => {
   const at = Date.now() - 600_000;
   const post = channelPost(
     "p1",
-    `${"a long post the server cuts for display ".repeat(60)}then @codex`,
+    "nice catch by @codex on the cache",
     { state: "unrouted", to: [] },
-    {
-      at_ms: at,
-      body: { text: "a long post the server cut", truncated: true },
-    },
+    { at_ms: at },
   );
   const reply = answer("r1", "p1", "p1", "claude", "agreed, nice one", {
     at_ms: at + 60_000,
     legs: [{ to: "human", stage: { stage: "delivered" } }],
   });
-  const { ui, value } = await chatRoom(t, [post, reply]);
-  const offer = ui.page
-    .locator("main")
-    .getByRole("button", { name: "Send this to @codex" });
-  await offer.click();
-  const pane = threadPane(ui);
-  const box = pane.getByRole("combobox");
-  await box.waitFor();
-  assert.deepEqual(
-    await boxState(box),
-    [NOTE, "@codex ".length, NOTE.length, true],
-    "the note after the name is selected",
-  );
-  assert.equal(await ui.page.getByRole("listbox").count(), 0, "no member list");
-  assert.equal(
-    await pane.locator(".composer-to").count(),
-    0,
-    "the leading mention replaces the To label",
-  );
-  await box.press("Enter");
-  await until(() => ui.posts.attempts.length === 1, "the sent note");
-  const posted = JSON.parse(ui.posts.attempts[0].raw);
-  assert.equal(posted.source, NOTE, "Enter sends the note as is");
-  assert.equal(
-    posted.in_reply_to,
-    "p1",
-    "the reply answers the post, not the thread's latest message",
-  );
-  value.frame.messages = [
-    post,
-    reply,
-    {
-      ...ui.posts.postedRow(posted.request_id, at + 120_000),
-      author: "human",
+  const answered = held();
+  const { ui } = await chatRoom(t, [post, reply], {
+    onDeliver: async () => {
+      await answered.gate;
+      return { status: 200 };
     },
-  ];
-  ui.connections[0].send("space", value);
+  });
   await ui.page
     .locator("main")
-    .getByRole("button", {
-      name: "Reply to You: a long post the server cut. Open thread",
-    })
-    .waitFor();
-});
-
-test("CH-fix-2 item 1: Send anyway keeps a draft that has text and says so until the next edit, and a name alone stays in the box", async (t) => {
-  const { ui } = await chatRoom(t, [
-    channelPost("p1", "nice catch by @codex on the cache", {
-      state: "unrouted",
-      to: [],
-    }),
-  ]);
-  const offer = ui.page
-    .locator("main")
-    .getByRole("button", { name: "Send this to @codex" });
+    .getByRole("button", { name: "1 reply. Open thread" })
+    .click();
   const pane = threadPane(ui);
   const box = pane.getByRole("combobox");
-  const status = pane.locator(".composer-status");
-  await offer.click();
   await box.waitFor();
-  await box.fill("my own words");
-  await ui.page.keyboard.press("Escape");
-  await pane.waitFor({ state: "detached" });
-  assert.equal(
-    await offer.evaluate((element) => document.activeElement === element),
-    true,
-    "focus returns to the offer",
-  );
+  const offer = pane.getByRole("button", { name: "Send this to @codex" });
+  const button = await offer.elementHandle();
   await offer.click();
-  await box.waitFor();
-  assert.deepEqual(
-    await boxState(box),
-    ["my own words", 12, 12, true],
-    "the draft stays, focused, with the caret at its end",
+  await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
+  assert.equal(ui.posts.deliveries[0].path, deliverPath("p1"));
+  assert.equal((await offerReads(button, "Sending…")).focused, true);
+  const inTimeline = routeOf(ui, "p1");
+  assert.deepEqual(await inTimeline.parts(), [
+    "Mentioned @codex, not sent",
+    "Sending…",
+    "1 reply",
+  ]);
+  answered.release();
+  assert.equal((await offerReads(button, "Sent")).focused, true);
+  assert.deepEqual(await inTimeline.parts(), [
+    "Mentioned @codex, not sent",
+    "Sent",
+    "1 reply",
+  ]);
+  assert.equal(await box.inputValue(), "", "nothing is typed in the reply box");
+  assert.equal(ui.posts.attempts.length, 0, "no reply is posted");
+});
+
+test("CH-fix-3 item 1: Send anyway in a Needs-you conversation pane delivers the post and leaves the reply box alone", async (t) => {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants = people();
+  const post = channelPost(
+    "far-post",
+    "the deploy notes @codex wrote last week were clear",
+    { state: "unrouted", to: [] },
   );
-  const notice = status.getByRole("status");
-  assert.equal(
-    await notice.textContent(),
-    "Your draft is still here. Send or clear it, then press Send anyway again.",
+  const conversation = { thread_id: "far-post", message_id: "far-post" };
+  value.frame.attention = [
+    {
+      source_kind: "delivery_attempt",
+      summary: { text: "A response is needed.", truncated: false },
+      opened_at_ms: 4,
+      subject_alias: null,
+      message_id: "far-post",
+      conversation,
+      coordination_id: null,
+      response: { kind: "reply", ...conversation, address_id: "codex" },
+    },
+  ];
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    {
+      onContext: () => ({
+        thread_id: "far-post",
+        message_count: 1,
+        earlier_omitted: false,
+        messages: [post],
+      }),
+    },
   );
-  assert.deepEqual(
-    await notice.evaluate((element) => [
-      getComputedStyle(element).fontSize,
-      getComputedStyle(element).color,
-    ]),
-    ["12px", await tokenColor(ui.page, "--text")],
-  );
-  await box.press("!");
-  assert.equal(
-    await status.textContent(),
-    "Enter to send · Shift+Enter for a new line",
-    "the next edit clears the notice",
-  );
-  await box.fill("");
+  await ui.live();
+  await ui.page
+    .getByRole("button", { name: "Show message from @codex", exact: true })
+    .click();
+  const pane = threadPane(ui);
+  const reply = pane.getByRole("combobox");
+  await reply.waitFor();
+  const before = await reply.inputValue();
+  const offer = pane.getByRole("button", { name: "Send this to @codex" });
+  const button = await offer.elementHandle();
   await offer.click();
-  await eventually(
-    async () => (await box.inputValue()) === NOTE,
-    "an empty draft takes the note",
+  assert.equal((await offerReads(button, "Sent")).focused, true);
+  assert.deepEqual(
+    ui.posts.deliveries.map(({ path, body }) => [path, body]),
+    [[deliverPath("far-post"), '{"to":["codex"]}']],
   );
-  await box.pressSequentially("can you check?");
-  assert.equal(
-    await box.inputValue(),
-    "@codex can you check?",
-    "typing replaces the note",
+  assert.equal(await reply.inputValue(), before, "the reply box is untouched");
+  assert.equal(ui.posts.attempts.length, 0);
+});
+
+test("CH-fix-3 item 1: a double click on Send anyway sends one delivery", async (t) => {
+  const answered = held();
+  const { ui } = await chatRoom(t, [unsent()], {
+    onDeliver: async () => {
+      await answered.gate;
+      return { status: 200 };
+    },
+  });
+  const offer = routeOf(ui, "p1").route.getByRole("button", {
+    name: "Send this to @codex",
+  });
+  const button = await offer.elementHandle();
+  await offer.dblclick();
+  await until(() => ui.posts.deliveries.length > 0, "the deliver POST");
+  answered.release();
+  await offerReads(button, "Sent");
+  assert.equal(ui.posts.deliveries.length, 1);
+});
+
+test("thread reply: a name with no message after it stays in the box and says what is missing", async (t) => {
+  const at = Date.now() - 600_000;
+  const post = channelPost(
+    "p1",
+    "nice catch by @codex on the cache",
+    { state: "unrouted", to: [] },
+    { at_ms: at },
   );
+  const reply = answer("r1", "p1", "p1", "claude", "agreed, nice one", {
+    at_ms: at + 60_000,
+    legs: [{ to: "human", stage: { stage: "delivered" } }],
+  });
+  const { ui } = await chatRoom(t, [post, reply]);
+  await ui.page
+    .locator("main")
+    .getByRole("button", { name: "1 reply. Open thread" })
+    .click();
+  const pane = threadPane(ui);
+  const box = pane.getByRole("combobox");
   await box.fill("@codex ");
   await box.press("Enter");
   assert.equal(
-    await status.textContent(),
+    await pane.locator(".composer-status").textContent(),
     "Add a message after @codex.",
-    "a name alone says what is missing",
   );
   assert.equal(
     await pane.getByRole("button", { name: "Send", exact: true }).isDisabled(),

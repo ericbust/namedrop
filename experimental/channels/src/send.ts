@@ -1,4 +1,4 @@
-import type { SendFailure, SpaceKey, ThreadAction } from "./model.ts";
+import type { Alias, SendFailure, SpaceKey, ThreadAction } from "./model.ts";
 import { parseReceipt, parseRefusal, parseSessionToken } from "./wire.ts";
 
 export type Post = {
@@ -13,6 +13,9 @@ export type PostResult =
 export type ControlResult =
   | { kind: "done" }
   | { kind: "failed"; status: number };
+export type DeliverResult =
+  | { kind: "done" }
+  | ({ kind: "failed" } & SendFailure);
 
 export function createPoster(fetcher: typeof fetch = fetch) {
   let session: Promise<string | null> | null = null;
@@ -94,6 +97,27 @@ export function createPoster(fetcher: typeof fetch = fetch) {
           : { kind: "failed", status: response.status };
       } catch {
         return { kind: "failed", status: 0 };
+      }
+    },
+    async deliver(
+      key: SpaceKey,
+      messageId: string,
+      to: readonly Alias[],
+    ): Promise<DeliverResult> {
+      try {
+        const response = await postWithTokenRetry(
+          `/w/${key}/messages/${encodeURIComponent(messageId)}/deliver`,
+          { to: to.map((alias) => alias.slice(1)) },
+        );
+        return response.ok
+          ? { kind: "done" }
+          : {
+              kind: "failed",
+              status: response.status,
+              message: parseRefusal(await response.text()),
+            };
+      } catch {
+        return { kind: "failed", status: 0, message: "" };
       }
     },
   };

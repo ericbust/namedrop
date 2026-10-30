@@ -1,6 +1,7 @@
 import type { ActivityGroupKind } from "./activity.ts";
 import type { DisabledReason } from "./complete.ts";
 import { threadControls } from "./control.ts";
+import type { Delivery } from "./delivery.ts";
 import type {
   Activity,
   Attention,
@@ -378,6 +379,20 @@ export const routeCopy = {
   >,
   sendThis: (alias: string) => `Send this to ${alias}`,
   sendAnywayNote: "Please read my post.",
+  delivery: {
+    label: {
+      sending: "Sending…",
+      sent: "Sent",
+      failed: "Try again",
+    } satisfies Record<Exclude<Delivery["kind"], "idle">, string>,
+    failed: (alias: string) => `Couldn't send to ${alias}.`,
+    why: ({ status, message }: SendFailure) =>
+      status === 0
+        ? "Couldn't reach Namedrop."
+        : message === ""
+          ? `HTTP ${status}`
+          : message,
+  },
   tip: {
     router: (name: string) => `Picked by ${name}`,
     unreachable:
