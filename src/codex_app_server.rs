@@ -552,6 +552,7 @@ mod tests {
             agent: Some(agent.to_owned()),
             occupant_label: None,
             agent_status: None,
+            status_reported: None,
             idle_state_label: None,
         }
     }

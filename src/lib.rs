@@ -15,8 +15,8 @@ mod handoff;
 mod health;
 pub mod host;
 pub use host::{
-    Budget, CallerClaim, CallerIdentity, Host, HostError, ListedWorkspace, PaneMetadata, PaneScope,
-    Popup, Process, ProcessInfo, PromptFailure, SpaceLocator, TuiHost,
+    Budget, CallerClaim, CallerIdentity, HcHost, Host, HostError, ListedWorkspace, PaneMetadata,
+    PaneScope, Popup, Process, ProcessInfo, PromptFailure, RuntimeHost, SpaceLocator, TuiHost,
 };
 mod hook;
 mod install;

@@ -294,6 +294,7 @@ impl<E: HerdrCommandExecutor> TuiHost<E> {
                 agent: pane.agent.clone(),
                 occupant_label: pane.display_agent.or(pane.agent),
                 agent_status: pane.agent_status,
+                status_reported: None,
                 idle_state_label: pane
                     .state_labels
                     .and_then(|mut labels| labels.remove("idle")),

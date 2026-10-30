@@ -74,6 +74,8 @@ const MAX_HERDR_TIMEOUT_MS: u64 = 60_000;
 
 pub struct ProcessHerdr {
     binary: String,
+    host: HostKind,
+    remove_env: Vec<String>,
     timeout: Duration,
     socket: Option<String>,
 }
@@ -81,6 +83,8 @@ pub struct ProcessHerdr {
 impl Default for ProcessHerdr {
     fn default() -> Self {
         Self {
+            host: HostKind::Tui,
+            remove_env: Vec::new(),
             binary: env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned()),
             socket: None,
             timeout: Duration::from_millis(
@@ -96,6 +100,27 @@ impl Default for ProcessHerdr {
 }
 
 impl ProcessHerdr {
+    pub fn for_host(host: HostKind) -> Self {
+        let mut executor = Self::default();
+        executor.host = host;
+        if host == HostKind::Hc {
+            executor.binary = env::var("HC_BIN_PATH").unwrap_or_else(|_| "hc".to_owned());
+            executor.remove_env = vec!["HC_TERMINAL_ID".into(), "HC_TERMINAL_SOCKET".into()];
+        }
+        executor
+    }
+
+    pub fn command(&self) -> Command {
+        let mut command = Command::new(&self.binary);
+        for key in &self.remove_env {
+            command.env_remove(key);
+        }
+        if let Some(socket) = &self.socket {
+            command.env("HERDR_SOCKET_PATH", socket);
+        }
+        command
+    }
+
     pub fn with_socket(mut self, socket: Option<String>) -> Self {
         self.socket = socket;
         self
@@ -162,12 +187,13 @@ impl ProcessHerdr {
         if cancelled.load(Ordering::Relaxed) {
             return Err("Herdr read cancelled".to_owned());
         }
-        let mut command = Command::new(&self.binary);
+        let mut command = self.command();
         command.args(args).process_group(0);
-        if let Some(socket) = &self.socket {
-            command.env("HERDR_SOCKET_PATH", socket);
-        }
-        let timeout = timeout.min(self.timeout);
+        let timeout = if self.host == HostKind::Hc {
+            timeout
+        } else {
+            timeout.min(self.timeout)
+        };
         let stdout = self.output_file("stdout")?;
         let stderr = self.output_file("stderr")?;
         let mut child = command
@@ -342,9 +368,45 @@ mod bounded_read_tests {
     use super::*;
 
     #[test]
+    fn hc_commands_remove_terminal_identity_but_retain_core_routing() {
+        let executor = ProcessHerdr::for_host(HostKind::Hc);
+        let command = executor.command();
+        let removals: Vec<_> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_str().unwrap(), value))
+            .collect();
+        assert_eq!(
+            removals,
+            vec![("HC_TERMINAL_ID", None), ("HC_TERMINAL_SOCKET", None)]
+        );
+    }
+
+    #[test]
+    fn hc_bounded_reads_use_the_remaining_budget() {
+        let executor = ProcessHerdr {
+            binary: "/bin/sh".into(),
+            host: HostKind::Hc,
+            remove_env: Vec::new(),
+            timeout: Duration::from_millis(10),
+            socket: None,
+        };
+        let output = executor
+            .execute_bounded(
+                &["-c", "sleep 0.05; printf done"],
+                Duration::from_secs(1),
+                &AtomicBool::new(false),
+                100,
+            )
+            .unwrap();
+        assert_eq!(output.stdout, "done");
+    }
+
+    #[test]
     fn bounded_reads_enforce_output_deadline_and_cancellation() {
         let executor = ProcessHerdr {
             binary: "/bin/sh".to_owned(),
+            host: HostKind::Tui,
+            remove_env: Vec::new(),
             timeout: Duration::from_secs(2),
             socket: None,
         };

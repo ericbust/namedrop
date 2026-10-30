@@ -3,14 +3,17 @@ mod agent_status_ui;
 mod naming_ui;
 mod popup_input;
 use namedrop::{
-    Clock, CommandResult, Host, LifecycleRuntime, ProcessHerdr, ProcessIds, SystemClock, TuiHost,
+    Clock, CommandResult, Host, LifecycleRuntime, ProcessHerdr, ProcessIds, RuntimeHost,
+    SystemClock,
     cli::{Cli, RuntimeOptions},
     describe_operations, diagnose_collaboration, execute_context_operation,
     execute_control_operation, execute_group_operation, execute_handoff_operation,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
     execute_session_start_hook, execute_user_prompt_submit_hook, is_context_operation,
     is_control_operation, is_integration_operation, is_lifecycle_operation, is_message_operation,
-    render_command_result_to_text, validate_message_input,
+    render_command_result_to_text,
+    runtime::{HostKind, hc_state_directory},
+    validate_message_input,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -24,7 +27,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-type TuiRuntime<'a> = LifecycleRuntime<'a, TuiHost<&'a ProcessHerdr>, SystemClock, ProcessIds>;
+type ProcessRuntime<'a> =
+    LifecycleRuntime<'a, RuntimeHost<&'a ProcessHerdr>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
     if env::args_os().skip(1).eq(["--runtime-info"]) {
@@ -404,7 +408,7 @@ mod drain_report_tests {
     }
 }
 
-fn wake_runtime_mailboxes(runtime: &TuiRuntime<'_>) -> Result<(), String> {
+fn wake_runtime_mailboxes(runtime: &ProcessRuntime<'_>) -> Result<(), String> {
     let here = match runtime.workspace_id {
         Some(id) => id.to_owned(),
         None => {
@@ -437,7 +441,7 @@ fn choose_name_type(cli: &Cli) -> Result<Option<namedrop::PaneType>, String> {
     if cli.name_pane_type().is_some() || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Ok(cli.name_pane_type());
     }
-    let default = with_runtime_options(&cli.runtime, |runtime: &TuiRuntime<'_>| {
+    let default = with_runtime_options(&cli.runtime, |runtime: &ProcessRuntime<'_>| {
         namedrop::default_pane_type(runtime)
     })?;
     loop {
@@ -610,7 +614,7 @@ fn run_operation(
 
 fn with_runtime_at<T>(
     state_directory: &Path,
-    action: impl FnOnce(&TuiRuntime<'_>) -> Result<T, String>,
+    action: impl FnOnce(&ProcessRuntime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     with_runtime_options(
         &RuntimeOptions {
@@ -623,28 +627,52 @@ fn with_runtime_at<T>(
 
 fn with_runtime_options<T>(
     options: &RuntimeOptions,
-    action: impl FnOnce(&TuiRuntime<'_>) -> Result<T, String>,
+    action: impl FnOnce(&ProcessRuntime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
+    let kind = HostKind::from_environment(options.host)?;
     let state_directory = options
         .plugin_state
         .clone()
-        .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
-        .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())?;
+        .or_else(|| env::var_os("NAMEDROP_STATE_DIR").map(PathBuf::from))
+        .or_else(|| {
+            (kind == HostKind::Tui)
+                .then(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
+                .flatten()
+        })
+        .map(Ok)
+        .unwrap_or_else(|| match kind {
+            HostKind::Hc => hc_state_directory(|key| env::var(key).ok()),
+            HostKind::Tui => Err("HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned()),
+        })?;
     let home_directory = env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute());
     let claude_config = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let codex_config = env::var_os("CODEX_HOME").map(PathBuf::from);
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
-    let transport = ProcessHerdr::default().with_socket(options.herdr_socket.clone());
-    let host = TuiHost::new(&transport);
+    let transport = ProcessHerdr::for_host(kind).with_socket(if kind == HostKind::Tui {
+        options.herdr_socket.clone()
+    } else {
+        None
+    });
+    let host = RuntimeHost::new(kind, &transport);
     let identity = host.caller_identity(&namedrop::CallerClaim {
-        workspace: options
-            .herdr_workspace
-            .clone()
-            .or_else(|| env::var("HERDR_WORKSPACE_ID").ok()),
-        pane: options.herdr_pane.clone(),
-        inherited_pane: env::var("HERDR_PANE_ID").ok(),
+        workspace: match kind {
+            HostKind::Tui => options
+                .herdr_workspace
+                .clone()
+                .or_else(|| env::var("HERDR_WORKSPACE_ID").ok()),
+            HostKind::Hc => options.hc_space.clone(),
+        },
+        pane: match kind {
+            HostKind::Tui => options.herdr_pane.clone(),
+            HostKind::Hc => options.hc_terminal.clone(),
+        },
+        inherited_pane: env::var(match kind {
+            HostKind::Tui => "HERDR_PANE_ID",
+            HostKind::Hc => "HC_TERMINAL_ID",
+        })
+        .ok(),
         agent_sessions: ["CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
             .into_iter()
             .filter_map(|key| env::var(key).ok())
@@ -653,7 +681,12 @@ fn with_runtime_options<T>(
     })?;
     let workspace_id = identity.workspace;
     let pane_id = identity.pane;
-    let socket_id = session_socket_id(options.herdr_socket.clone(), &host);
+    let socket_id = match kind {
+        HostKind::Tui => session_socket_id(options.herdr_socket.clone(), &host),
+        HostKind::Hc => host
+            .socket_id()
+            .ok_or_else(|| "hc did not report its core identity".to_owned())?,
+    };
     let clock = SystemClock;
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
@@ -678,7 +711,7 @@ fn with_runtime_options<T>(
 /// cannot run must not interrupt the person's turn.
 fn run_context_hook(
     state_directory: &Path,
-    execute: fn(&str, &TuiRuntime<'_>) -> Option<serde_json::Value>,
+    execute: fn(&str, &ProcessRuntime<'_>) -> Option<serde_json::Value>,
 ) -> ExitCode {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
@@ -721,7 +754,7 @@ fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
 fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
     let wake = || -> Result<(), String> {
         let transport = ProcessHerdr::default();
-        let host = TuiHost::new(&transport);
+        let host = RuntimeHost::new(HostKind::Tui, &transport);
         let socket_id = session_socket_id(None, &host);
         let space_id = match env::var("HERDR_WORKSPACE_ID") {
             Ok(space_id) => space_id,

@@ -37,6 +37,7 @@ pub struct DiscoveredPane {
     pub agent: Option<String>,
     pub occupant_label: Option<String>,
     pub agent_status: Option<String>,
+    pub status_reported: Option<bool>,
     /// The label Herdr currently shows for this pane while it is idle.
     pub idle_state_label: Option<String>,
 }

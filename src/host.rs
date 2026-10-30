@@ -5,7 +5,11 @@ use std::{
     time::Duration,
 };
 
+pub mod hc;
+pub mod runtime;
 pub mod tui;
+pub use hc::HcHost;
+pub use runtime::RuntimeHost;
 pub use tui::TuiHost;
 
 #[derive(Debug)]

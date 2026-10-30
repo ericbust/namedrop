@@ -700,6 +700,7 @@ mod observation_tests {
             agent: None,
             occupant_label: None,
             agent_status: Some(status.to_owned()),
+            status_reported: None,
             idle_state_label: None,
         }
     }

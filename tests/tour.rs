@@ -333,6 +333,7 @@ fn pane(id: &str, agent: Option<&str>) -> DiscoveredPane {
         agent: agent.map(str::to_owned),
         occupant_label: None,
         agent_status: agent.map(|_| "idle".to_owned()),
+        status_reported: None,
         idle_state_label: None,
     }
 }

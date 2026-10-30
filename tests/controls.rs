@@ -1216,6 +1216,7 @@ fn ambiguous_binding_recovery_opens_one_attention_item_until_an_explicit_rebind(
                         agent: None,
                         occupant_label: None,
                         agent_status: Some("idle".to_owned()),
+                        status_reported: None,
                         idle_state_label: None,
                     },
                     namedrop::DiscoveredPane {
@@ -1229,6 +1230,7 @@ fn ambiguous_binding_recovery_opens_one_attention_item_until_an_explicit_rebind(
                         agent: None,
                         occupant_label: None,
                         agent_status: Some("idle".to_owned()),
+                        status_reported: None,
                         idle_state_label: None,
                     },
                 ],

@@ -1,0 +1,1 @@
+Recorded by the HA-2 owner from isolated herdr-core 0.1.14, session lane-ha2-build, on 2026-10-30. Original receipts live in reports/HA-2-fixtures under the namedrop-herdr-app orchestration state. The fixture files are copied verbatim. Tests derive variations explicitly in memory. No test connects to a live core.

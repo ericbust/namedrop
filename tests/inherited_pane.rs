@@ -525,3 +525,50 @@ fn a_session_start_inside_codex_s_shared_app_server_gets_its_notice_without_a_ru
     let prompt = r#"{"hook_event_name":"UserPromptSubmit","prompt":"hello","session_id":"s1"}"#;
     assert_eq!(hook("user-prompt-submit", prompt, true), "");
 }
+
+#[test]
+fn hc_binary_verifies_inherited_identity() {
+    let f = Fixture::new("hc");
+    let hc = f.0.join("hc");
+    let record = f.0.join("hc-terminal.json");
+    let mut terminal: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
+    terminal["pid"] = serde_json::json!(4_000_000_000u32);
+    fs::write(&record, terminal.to_string()).unwrap();
+    fs::write(&hc, format!(r#"#!/bin/sh
+case "$1" in
+  get) cat '{}' ;;
+  ls) printf '{{"terminals":[{{"address":"t1","state":"live"}}]}}' ;;
+  server) printf '{{"core":{{"id":"test-core"}}}}' ;;
+  send) test -z "${{HC_TERMINAL_ID+x}}" && test -z "${{HC_TERMINAL_SOCKET+x}}" && test "$HC_SESSION" = fixture-session && test "$HC_SOCKET" = fixture-socket || exit 1; printf '{{}}' ;;
+  *) exit 1 ;;
+esac
+"#, record.display())).unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
+    let run = |session: Option<&str>| {
+        let mut command = f.namedrop_command(&[
+            "--host",
+            "hc",
+            "--hc-space",
+            "fixture-space",
+            "address",
+            "list",
+        ]);
+        command.env("HC_BIN_PATH", &hc).env("HC_TERMINAL_ID", "t1");
+        if let Some(session) = session {
+            command.env("CLAUDE_CODE_SESSION_ID", session);
+        }
+        command.output().unwrap()
+    };
+    let refused = text(&run(None));
+    assert!(refused.contains("HC_TERMINAL_ID is stale"), "{refused}");
+    let recovered = text(&run(Some("fixture-session")));
+    assert!(
+        !recovered.contains("HC_TERMINAL_ID is stale"),
+        "{recovered}"
+    );
+    assert!(!recovered.contains("unexpected Herdr call"), "{recovered}");
+    terminal["pid"] = serde_json::json!(std::process::id());
+    fs::write(&record, terminal.to_string()).unwrap();
+    assert!(!text(&run(None)).contains("HC_TERMINAL_ID is stale"));
+}
