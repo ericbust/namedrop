@@ -2,6 +2,74 @@ use super::*;
 use std::sync::mpsc;
 
 #[test]
+fn leading_punctuation_posts_explicitly_without_router_calls() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in [
+        "@planner, inspect \\@lead,",
+        "@planner: inspect \\@lead,",
+        "#ws1, @planner: inspect \\@lead,",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(&server, &format!("punctuation-{index}"), source, None);
+        assert_eq!(status, 200, "{source}: {receipt}");
+        assert_eq!(recipient_aliases(&receipt), ["planner"]);
+        assert_eq!(receipt["context_references"], json!([]));
+        assert!(receipt.get("channel").is_none());
+    }
+    assert!(calls(&f).is_empty());
+}
+
+#[test]
+fn leading_punctuation_keeps_capitalized_alias_refusals_consistent() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in [
+        "@Codex, inspect",
+        "@Codex: inspect",
+        "#ws1, @planner: @Codex, inspect",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(
+            &server,
+            &format!("punctuation-capital-{index}"),
+            source,
+            None,
+        );
+        assert_eq!(status, 400, "{source}: {receipt}");
+        assert_eq!(receipt["error"], "unknown Mention: @Codex");
+    }
+    for (index, source) in [
+        "@Codex,, inspect",
+        "@Codex:: inspect",
+        "@Codex; inspect",
+        "@planner,, inspect",
+        "@planner; inspect",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(
+            &server,
+            &format!("punctuation-invalid-{index}"),
+            source,
+            None,
+        );
+        assert_eq!(status, 400, "{source}: {receipt}");
+        assert_eq!(
+            receipt["error"],
+            "message must begin with one or more recipient Mentions"
+        );
+    }
+    assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 0);
+    assert!(calls(&f).is_empty());
+}
+
+#[test]
 fn leading_unknown_aliases_are_refused_instead_of_silent_room_posts() {
     let f = fixture();
     let server = Server::start(&f, "not json", false);
@@ -191,6 +259,100 @@ fn pulled_in_agent_answers_the_asker_without_repeating_its_name() {
         assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 3);
         assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 1);
     }
+}
+
+#[test]
+fn bound_answer_transport_recipient_does_not_turn_a_closing_report_into_an_ask() {
+    let f = fixture();
+    let root = plain_root(&f, "bound-root", "Please collaborate here.");
+    let question = agent_reply(
+        &f,
+        "bound-question",
+        &root,
+        "pane-1-planner",
+        "@operator Asking @lead what 6 times 7 is.",
+    )
+    .unwrap();
+    let answer = agent_reply(
+        &f,
+        "bound-answer",
+        &question,
+        "pane-1-lead",
+        "@operator @planner 6 times 7 is 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&answer), vec!["operator", "planner"]);
+    let envelope = f.herdr.last_envelope("pane-1-planner");
+    assert_eq!(envelope["untrusted_body"], "6 times 7 is 42.");
+    let report = agent_reply(
+        &f,
+        "bound-report",
+        &answer,
+        "pane-1-planner",
+        r"@operator \@lead says 6 times 7 is 42.",
+    )
+    .unwrap();
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 3);
+    assert_eq!(recipient_aliases(&report), vec!["operator"]);
+    assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 1);
+}
+
+#[test]
+fn bound_answer_still_accepts_an_explicit_followup_question() {
+    let f = fixture();
+    let root = plain_root(&f, "bound-followup-root", "Please collaborate here.");
+    let question = agent_reply(
+        &f,
+        "bound-followup-question",
+        &root,
+        "pane-1-planner",
+        "@operator Asking @lead what 6 times 7 is.",
+    )
+    .unwrap();
+    let answer = agent_reply(
+        &f,
+        "bound-followup-answer",
+        &question,
+        "pane-1-lead",
+        "@operator @planner 6 times 7 is 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&answer), vec!["operator", "planner"]);
+    let followup = agent_reply(
+        &f,
+        "bound-followup-new-question",
+        &answer,
+        "pane-1-planner",
+        "@operator Can @lead explain the calculation?",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&followup), vec!["operator", "lead"]);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 4);
+    assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 2);
+    let explanation = agent_reply(
+        &f,
+        "bound-followup-explanation",
+        &followup,
+        "pane-1-lead",
+        "@operator Six groups of seven total 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&explanation), vec!["operator", "planner"]);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 5);
+    let leading_followup = agent_reply(
+        &f,
+        "bound-leading-followup",
+        &explanation,
+        "pane-1-planner",
+        "@operator @lead What about seven times seven?",
+    )
+    .unwrap();
+    assert_eq!(
+        recipient_aliases(&leading_followup),
+        vec!["operator", "lead"]
+    );
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 6);
+    assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 3);
 }
 
 #[test]
