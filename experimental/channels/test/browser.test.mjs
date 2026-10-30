@@ -9316,6 +9316,13 @@ async function resize(page, width, height) {
       ),
   );
 }
+const shortSizes = [
+  [844, 300],
+  [640, 340],
+  [390, 360],
+  [1024, 372],
+  [320, 260],
+];
 const layoutSizes = [
   [390, 844],
   [390, 460],
@@ -9331,6 +9338,7 @@ const layoutSizes = [
 function layoutFacts(page) {
   return page.evaluate(() => {
     const regions = {
+      reconnect: ".reconnect",
       header: "main .channel-header",
       members: "main .members",
       banner: "main .attention",
@@ -9364,19 +9372,26 @@ function layoutFacts(page) {
       mainShown: document
         .querySelector("main")
         .checkVisibility({ visibilityProperty: true }),
+      scrolling: [...document.querySelectorAll("main, .slot")]
+        .filter((column) => column.scrollHeight > column.clientHeight)
+        .map((column) => column.className),
       dots: [...document.querySelectorAll(".connection-dot")].map((dot) =>
         dot.checkVisibility({ visibilityProperty: true }),
       ),
     };
   });
 }
-function layoutProblems(shown, at, expect) {
+// A window under 420 px tall lowers the floors, and the composer may scroll
+// into view inside its column instead of being whole.
+function layoutProblems(shown, at, expect, { floor = 96, whole = true } = {}) {
   const { facts } = shown;
   const [width, height] = shown.viewport;
   const problems = [];
   const round = (n) => Math.round(n * 10) / 10;
   if (shown.scroll[0] > width || shown.scroll[1] > height)
     problems.push(`${at}: the page overflows to ${shown.scroll.join("x")}`);
+  if (whole && shown.scrolling.length > 0)
+    problems.push(`${at}: ${shown.scrolling.join(" and ")} scroll as a whole`);
   if (shown.dots.length !== 1 || !shown.dots[0])
     problems.push(`${at}: connection dots shown ${JSON.stringify(shown.dots)}`);
   for (const name of expect)
@@ -9394,7 +9409,7 @@ function layoutProblems(shown, at, expect) {
     if (
       facts[name] !== undefined &&
       (facts[name].rendered || expect.has(name)) &&
-      facts[name].height < 96
+      facts[name].height < floor - 0.5
     )
       problems.push(`${at}: ${name} is ${round(facts[name].height)} px tall`);
   if (facts.banner?.shown) {
@@ -9405,6 +9420,7 @@ function layoutProblems(shown, at, expect) {
   }
   for (const name of ["composer", "threadComposer"])
     if (
+      whole &&
       facts[name]?.shown &&
       (facts[name].top < -0.5 || facts[name].bottom > height + 0.5)
     )
@@ -9489,6 +9505,86 @@ test("UI-R4 L4: at every size, with a banner, a thread open or the drawer open, 
   assert.deepEqual(problems, []);
 });
 
+test("UI-R4 L4: in a window under 420 px tall, with a banner, a thread open or the Reconnecting bar, nothing overlaps, the timeline keeps 48 px, and the composer is whole or scrolls into view in its column", async (t) => {
+  const ui = await open(t, (client, n) => {
+    if (n === 1) replay(client, [layoutChannel()]);
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const problems = [];
+  async function check(at, composer, expect) {
+    problems.push(
+      ...layoutProblems(await layoutFacts(ui.page), at, new Set(expect), {
+        floor: 48,
+        whole: false,
+      }),
+    );
+    const reach = await ui.page.locator(composer).evaluate((element) => {
+      const column = element.closest(".main, .slot");
+      const before = element.getBoundingClientRect();
+      element.scrollIntoView({ block: "nearest" });
+      const after = element.getBoundingClientRect();
+      const box = column.getBoundingClientRect();
+      const page = document.scrollingElement;
+      const reached = {
+        column: box.height,
+        wholeAtFirst: before.top >= -0.5 && before.bottom <= innerHeight + 0.5,
+        whole:
+          after.top >= Math.max(box.top, 0) - 0.5 &&
+          after.bottom <= Math.min(box.bottom, innerHeight) + 0.5,
+        pageScroll: [page.scrollTop, page.scrollHeight - innerHeight],
+      };
+      column.scrollTop = 0;
+      return reached;
+    });
+    if (!reach.whole || reach.pageScroll.some((n) => n > 0))
+      problems.push(
+        `${at}: ${composer} is out of reach ${JSON.stringify(reach)}`,
+      );
+    if (reach.column >= 299.5 && !reach.wholeAtFirst)
+      problems.push(
+        `${at}: ${composer} is not whole in a ${reach.column} px column`,
+      );
+  }
+  for (const reconnecting of [false, true]) {
+    if (reconnecting) {
+      ui.connections[0].destroy();
+      await ui.page
+        .getByRole("status")
+        .filter({ hasText: "Reconnecting…" })
+        .waitFor({ timeout: 3000 });
+    }
+    for (const [width, height] of shortSizes) {
+      const at = `${width}x${height}${reconnecting ? " reconnecting" : ""}`;
+      await resize(ui.page, width, height);
+      await check(`${at} with a banner`, "main .composer", [
+        ...(reconnecting ? ["reconnect"] : []),
+        "header",
+        "members",
+        "banner",
+        "timeline",
+        "composer",
+      ]);
+      // The Jump pill can cover most of a timeline this short, so the keyboard
+      // opens the thread.
+      await timeline
+        .getByRole("button", { name: /^1 reply from/ })
+        .press("Enter");
+      await threadPane(ui).waitFor();
+      await check(`${at} with a thread open`, ".slot .composer", [
+        "slotHeader",
+        "threadBody",
+        "threadComposer",
+      ]);
+      await threadPane(ui)
+        .getByRole("button", { name: "Close thread" })
+        .click();
+      await threadPane(ui).waitFor({ state: "detached" });
+    }
+  }
+  assert.deepEqual(problems, []);
+});
 test("UI-R4 L1: on a phone or a short narrow window, the thread and the screen take the channel's place, and closing them brings back the channel with its draft, scroll and focus", async (t) => {
   const ui = await open(t, (client) => replay(client, [layoutChannel()]));
   await ui.page.emulateMedia({ reducedMotion: "reduce" });
