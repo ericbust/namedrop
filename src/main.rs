@@ -412,7 +412,7 @@ mod drain_report_tests {
         };
         let result = json!({"drain": requeued});
         assert!(drain_report(&result).unwrap().awaits_retry());
-        assert!(needs_mailbox_watcher(&result));
+        assert!(!needs_mailbox_watcher(&result));
     }
 }
 

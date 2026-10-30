@@ -62,7 +62,9 @@ impl DrainReport {
     }
 
     pub fn needs_mailbox_worker(&self) -> bool {
-        self.awaits_retry() || self.next_grace_due_ms().is_some()
+        !self.pane_lock_deferred.is_empty()
+            || self.awaits_terminal()
+            || self.next_grace_due_ms().is_some()
     }
 
     pub fn awaits_terminal(&self) -> bool {
