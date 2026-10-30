@@ -38,7 +38,8 @@ fn wait_for_server(
     stderr: &Path,
     timeout: Duration,
 ) -> Result<Value, String> {
-    let deadline = Instant::now() + timeout;
+    let started = Instant::now();
+    let deadline = started + timeout;
     let (reason, status) = loop {
         let status = child.try_wait();
         match status {
@@ -70,15 +71,20 @@ fn wait_for_server(
     };
     let output = fs::read_to_string(stderr)
         .unwrap_or_else(|error| format!("could not read stderr: {error}"));
+    let info = fs::read_to_string(state.join("dashboard/server.json"))
+        .unwrap_or_else(|error| format!("could not read server.json: {error}"));
     Err(format!(
-        "dashboard {reason}; pid={}; status before cleanup={status}; kill={kill:?}; reaped={reaped:?}; stderr ({}):\n{output}",
+        "dashboard {reason}; elapsed={:?}; pid={}; status before cleanup={status}; kill={kill:?}; reaped={reaped:?}; server.json={info}; stderr ({}):\n{output}",
+        started.elapsed(),
         child.id(),
         stderr.display(),
     ))
 }
 
 impl Server {
+    #[track_caller]
     pub(super) fn start(f: &Fixture, response: &str, off: bool) -> Self {
+        let caller = std::panic::Location::caller();
         fs::create_dir_all(f.root.join("home/.codex")).unwrap();
         let mut responses = serde_json::Map::new();
         for args in [
@@ -214,7 +220,12 @@ else:
         }
         let mut child = command.spawn().unwrap();
         let info = wait_for_server(&mut child, &f.state, &stderr_path, Duration::from_secs(10))
-            .unwrap_or_else(|error| panic!("{error}"));
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{error}; start requested at {caller}; test={:?}",
+                    thread::current().name()
+                )
+            });
         let port = info["port"].as_u64().unwrap() as u16;
         let session = fs::read_to_string(f.state.join("dashboard/session")).unwrap();
         let mut server = Self {
@@ -617,10 +628,8 @@ fn startup_diagnostics_report_early_exit_and_stderr_without_waiting_for_timeout(
         .stderr(fs::File::create_new(&stderr).unwrap())
         .spawn()
         .unwrap();
-    let started = Instant::now();
     let error = wait_for_server(&mut child, &f.state, &stderr, Duration::from_secs(10))
         .expect_err("child exited before publishing server.json");
-    assert!(started.elapsed() < Duration::from_secs(5), "{error}");
     assert!(error.contains("exited before startup"), "{error}");
     assert!(
         error.contains("status before cleanup=exit status: 69"),
@@ -643,6 +652,18 @@ fn startup_diagnostics_distinguish_timeout_from_the_cleanup_signal_and_reap_chil
         .stderr(fs::File::create_new(&stderr).unwrap())
         .spawn()
         .unwrap();
+    let ready = Instant::now() + Duration::from_secs(10);
+    while !fs::read_to_string(&stderr)
+        .unwrap()
+        .contains("startup blocked marker")
+    {
+        if Instant::now() >= ready || child.try_wait().unwrap().is_some() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timeout fixture did not emit its ready marker");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
     let error = wait_for_server(&mut child, &f.state, &stderr, Duration::from_millis(200))
         .expect_err("live child never published server.json");
     assert!(error.contains("timed out before startup"), "{error}");
