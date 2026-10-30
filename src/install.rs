@@ -181,7 +181,10 @@ pub(crate) fn user_hook_activation_guidance(
     guidance
 }
 
-pub(crate) fn native_session_setup(runtime: AgentRuntime) -> Value {
+pub(crate) fn native_session_setup(runtime: AgentRuntime, hc: bool) -> Value {
+    if hc {
+        return json!({"status":"session_identity_missing", "explanation":"Namedrop has no SessionStart label for this terminal. Activate Namedrop to install its hooks, then start a new agent session. Start Codex with --no-daemon so its hooks run in this terminal."});
+    }
     let host_runtime = match runtime {
         AgentRuntime::Codex => "codex",
         AgentRuntime::ClaudeCode => "claude",

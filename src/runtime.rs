@@ -101,13 +101,15 @@ impl Default for ProcessHerdr {
 
 impl ProcessHerdr {
     pub fn for_host(host: HostKind) -> Self {
-        let mut executor = Self::default();
-        executor.host = host;
-        if host == HostKind::Hc {
-            executor.binary = env::var("HC_BIN_PATH").unwrap_or_else(|_| "hc".to_owned());
-            executor.remove_env = vec!["HC_TERMINAL_ID".into(), "HC_TERMINAL_SOCKET".into()];
+        match host {
+            HostKind::Tui => Self::default(),
+            HostKind::Hc => Self {
+                host,
+                binary: env::var("HC_BIN_PATH").unwrap_or_else(|_| "hc".to_owned()),
+                remove_env: vec!["HC_TERMINAL_ID".into(), "HC_TERMINAL_SOCKET".into()],
+                ..Self::default()
+            },
         }
-        executor
     }
 
     pub fn command(&self) -> Command {

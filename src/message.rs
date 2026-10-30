@@ -1665,3 +1665,21 @@ fn workspace_label_before(text: &str, anchor: usize) -> Option<WorkspaceLabel> {
 fn is_mention_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
 }
+
+#[cfg(test)]
+mod hc_status_tests {
+    #[test]
+    fn hc_status_words_describe_delivery_readiness() {
+        for word in crate::host::hc::testing::WORDS {
+            let outlook = super::recipient_outlook(&crate::host::hc::testing::address(word));
+            assert_eq!(
+                outlook.statement.contains("delivery is imminent"),
+                matches!(word, Some("idle" | "done")),
+                "{word:?}"
+            );
+            if word.is_none() {
+                assert!(outlook.statement.contains("unknown"));
+            }
+        }
+    }
+}

@@ -588,3 +588,69 @@ fn subscriber_start_is_idempotent_only_for_name_taken() {
         );
     }
 }
+
+#[test]
+fn doctor_reports_only_observed_unreported_codex_and_uses_hc_repairs() {
+    let fixture = Fixture::default();
+    let state = std::env::temp_dir().join(format!("namedrop-hc-doctor-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&state);
+    std::fs::create_dir_all(&state).unwrap();
+    let clock = namedrop::SystemClock;
+    let ids = namedrop::ProcessIds::default();
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&state),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    namedrop::StateStore::open(&state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.activate_worktree(
+                &namedrop::StateNamespace::for_space("hc:fixture", "fixture-space"),
+                &namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "test", 1),
+            )
+        })
+        .unwrap();
+    fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["codex"]);
+    for (reported, status, note) in [
+        (false, Value::Null, true),
+        (true, Value::Null, false),
+        (true, json!({"app":"codex","state":"idle"}), false),
+    ] {
+        fixture.terminals.borrow_mut()[0]["reported"] = json!(reported);
+        fixture.terminals.borrow_mut()[0]["status"] = status;
+        let report = namedrop::diagnose_collaboration(&runtime);
+        assert_eq!(report.host, "herdr-core");
+        assert_eq!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-HC-CODEX-001"),
+            note
+        );
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-HC-SPACE-001")
+        );
+        for command in report
+            .issues
+            .iter()
+            .filter_map(|issue| issue.repair.command.as_ref())
+        {
+            assert!(
+                !command.iter().any(|arg| arg.starts_with("--herdr-")),
+                "{command:?}"
+            );
+        }
+    }
+    std::fs::remove_dir_all(state).unwrap();
+}

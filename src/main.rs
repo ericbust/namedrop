@@ -325,8 +325,7 @@ fn main() -> ExitCode {
             );
         }
         let report =
-            match with_runtime_options(&cli.runtime, |runtime| Ok(diagnose_collaboration(runtime)))
-            {
+            match with_runtime_options(&cli.runtime, |runtime| Ok(diagnose_runtime(runtime))) {
                 Ok(report) => report,
                 Err(error) => {
                     return write_result(
@@ -652,6 +651,14 @@ fn run_operation(
         OperationKind::Message => execute_message_operation(operation, input, runtime),
         OperationKind::Integration => execute_integration_operation(operation, input, runtime),
     })
+}
+
+fn diagnose_runtime(runtime: &ProcessRuntime<'_>) -> namedrop::HealthReport {
+    let mut report = diagnose_collaboration(runtime);
+    if let RuntimeHost::Hc(host) = runtime.host {
+        report.host_version = host.version().ok();
+    }
+    report
 }
 
 fn with_runtime_at<T>(

@@ -606,7 +606,8 @@ assert os.environ['HC_SOCKET'] == 'hook-socket'
 with (root / 'hc-calls').open('a') as out:
     out.write(json.dumps(args) + '\n')
 record = json.loads((root / 'record.json').read_text())
-if args[0] == 'get': print(json.dumps(record))
+if args[0] == '--version': print('herdr-core 0.1.14')
+elif args[0] == 'get': print(json.dumps(record))
 elif args[0] == 'ls': print(json.dumps({'terminals':[record]}))
 elif args[0] == 'server': print(json.dumps({'core':{'id':'hook-test'}}))
 elif args[0] == 'label':
@@ -716,4 +717,18 @@ else: raise AssertionError(args)
         result["data"]["registered"], true,
         "the ordinary native naming path registers this session"
     );
+    let doctor = command(&[
+        "--host",
+        "hc",
+        "--hc-terminal",
+        "t1",
+        "--hc-space",
+        "fixture-space",
+        "doctor",
+    ])
+    .output()
+    .unwrap();
+    let diagnosis: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
+    assert_eq!(diagnosis["data"]["host"], "herdr-core");
+    assert_eq!(diagnosis["data"]["host_version"], "herdr-core 0.1.14");
 }

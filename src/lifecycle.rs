@@ -456,7 +456,7 @@ where
                 "type_override": "name <alias> --type terminal|agent",
                 "pane_id": pane_id,
                 "agent_session_id": agent_session_id,
-                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none() && served.is_none()).map(crate::install::native_session_setup),
+                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none() && served.is_none()).map(|agent| crate::install::native_session_setup(agent, runtime.is_hc())),
                 "codex_app_server": served.as_ref().map(crate::codex_app_server::ServedPanes::advice),
                 "runtime": agent_runtime,
                 "activated": true,

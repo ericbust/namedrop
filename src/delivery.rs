@@ -706,6 +706,50 @@ mod observation_tests {
     }
 
     #[test]
+    fn hc_status_words_gate_observation_and_dispatch() {
+        for word in crate::host::hc::testing::WORDS {
+            let pane = crate::host::hc::testing::pane(word);
+            let settled = matches!(word, Some("idle" | "done"));
+            let mut attempt = attempt(DeliveryState::Acknowledged);
+            attempt.pane_id = pane.pane_id.clone();
+            attempt.agent_session_id = pane.agent_session_id.clone().unwrap();
+            assert_eq!(
+                observe_agent_attempt(&attempt, Some(&pane), false, 40_000),
+                if settled {
+                    Observation::Settle
+                } else {
+                    Observation::Unchanged
+                },
+                "{word:?}"
+            );
+            let candidate = DispatchCandidate {
+                pane_type: crate::PaneType::Agent,
+                address_id: attempt.address_id.clone(),
+                binding_id: attempt.binding_id.clone(),
+                pane_id: pane.pane_id.clone(),
+                agent_session_id: attempt.agent_session_id.clone(),
+                registration_id: "registration".into(),
+                message_id: crate::MessageId::new("message"),
+                retry_of_attempt_id: None,
+                settled_delay_ms: 500,
+            };
+            let discovered = crate::DiscoveredWorktree {
+                worktree_id: crate::WorktreeId::new("hc-space:fixture-space"),
+                workspace_id: "fixture-space".into(),
+                worktree_attached: false,
+                label: None,
+                branch: None,
+                panes: vec![pane],
+            };
+            assert_eq!(
+                live_candidate_matches(&candidate, &discovered),
+                settled,
+                "{word:?}"
+            );
+        }
+    }
+
+    #[test]
     fn an_inflight_attempt_is_observed_against_its_session_and_the_grace() {
         let pending = Observation::PendingGrace {
             due_at_ms: CREATED_AT_MS + ACKNOWLEDGEMENT_GRACE_MS,

@@ -229,14 +229,7 @@ where
                             .iter()
                             .find(|pane| pane.pane_id == response.pane_id)
                     });
-                let proven_running = response.binding_active
-                    && live.is_some_and(|pane| {
-                        pane.agent_session_id.as_ref() == Some(&response.agent_session_id)
-                            && pane
-                                .agent_status
-                                .as_deref()
-                                .is_some_and(|status| status == "working")
-                    });
+                let proven_running = owns_running_response(response, live);
                 if !proven_running {
                     warnings.push(format!(
                         "Did not interrupt {} because the stopped thread could not be proven to own its current response.",
@@ -295,5 +288,43 @@ fn required(value: String, field: &str) -> Result<String, String> {
         Err(format!("{field} is required"))
     } else {
         Ok(value)
+    }
+}
+
+fn owns_running_response(
+    response: &crate::ActiveThreadResponse,
+    pane: Option<&crate::DiscoveredPane>,
+) -> bool {
+    response.binding_active
+        && pane.is_some_and(|pane| {
+            pane.agent_session_id.as_ref() == Some(&response.agent_session_id)
+                && pane.agent_status.as_deref() == Some("working")
+        })
+}
+
+#[cfg(test)]
+mod hc_status_tests {
+    #[test]
+    fn hc_status_words_allow_interrupt_only_for_the_owned_working_session() {
+        for word in crate::host::hc::testing::WORDS {
+            let pane = crate::host::hc::testing::pane(word);
+            let mut response = crate::ActiveThreadResponse {
+                attempt_id: crate::DeliveryAttemptId::new("attempt"),
+                pane_id: pane.pane_id.clone(),
+                agent_session_id: pane.agent_session_id.clone().unwrap(),
+                binding_active: true,
+            };
+            assert_eq!(
+                super::owns_running_response(&response, Some(&pane)),
+                word == Some("working"),
+                "{word:?}"
+            );
+            assert!(!super::owns_running_response(&response, None));
+            response.binding_active = false;
+            assert!(!super::owns_running_response(&response, Some(&pane)));
+            response.binding_active = true;
+            response.agent_session_id = crate::AgentSessionId::new("replaced-session");
+            assert!(!super::owns_running_response(&response, Some(&pane)));
+        }
     }
 }

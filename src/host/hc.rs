@@ -608,3 +608,102 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         })
     }
 }
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    pub(crate) const WORDS: [Option<&str>; 6] = [
+        Some("idle"),
+        Some("working"),
+        Some("done"),
+        Some("blocked"),
+        Some("error"),
+        None,
+    ];
+
+    pub(crate) fn pane(word: Option<&str>) -> DiscoveredPane {
+        let mut record: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/hc/get-labeled.stdout"))
+                .unwrap();
+        record["status"] = word
+            .map(|state| serde_json::json!({"state":state,"app":"codex"}))
+            .unwrap_or_default();
+        record["reported"] = serde_json::json!(word.is_some());
+        serde_json::from_value::<Terminal>(record).unwrap().pane()
+    }
+
+    pub(crate) fn address(word: Option<&str>) -> crate::PaneAddressRecord {
+        let pane = pane(word);
+        crate::PaneAddressRecord {
+            pane_type: crate::PaneType::Agent,
+            id: crate::PaneAddressId::new("address"),
+            role_id: crate::PaneRoleId::new("role"),
+            role_name: "agent".into(),
+            role_description: String::new(),
+            persona: None,
+            alias: "agent".into(),
+            lifecycle: crate::PaneAddressLifecycle::Occupied,
+            pane_id: Some(pane.pane_id),
+            pane_label: None,
+            agent_session_id: pane.agent_session_id,
+            occupant_label: pane.occupant_label,
+            agent_status: pane.agent_status,
+            retired: false,
+            collaboration_disabled: false,
+            remote_commands: false,
+        }
+    }
+
+    #[test]
+    fn golden_argv() {
+        #[derive(Default)]
+        struct Executor(std::cell::RefCell<Vec<Vec<String>>>);
+        impl HerdrCommandExecutor for Executor {
+            fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
+                self.0
+                    .borrow_mut()
+                    .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                let stdout = match args {
+                    ["ls", "--json"] => include_str!("../../tests/fixtures/hc/ls.stdout"),
+                    ["get", ..] => include_str!("../../tests/fixtures/hc/get-labeled.stdout"),
+                    ["read", ..] => include_str!("../../tests/fixtures/hc/read.stdout"),
+                    ["server", "status", "--json"] => {
+                        include_str!("../../tests/fixtures/hc/server-status.stdout")
+                    }
+                    _ => "{}",
+                }
+                .to_owned();
+                Ok(crate::HerdrCommandOutput { stdout })
+            }
+        }
+        let executor = Executor::default();
+        let host = HcHost::new(&executor);
+        host.panes(PaneScope::All).unwrap();
+        host.read("t1", 40, None).unwrap();
+        host.read("t1", 1000, None).unwrap();
+        host.prompt("t1", "hello").unwrap();
+        host.run_in_pane("t1", "command").unwrap();
+        host.interrupt("t1").unwrap();
+        host.set_labels("t1", &[("namedrop.session", "next-session")])
+            .unwrap();
+        assert!(host.socket_id().is_some());
+        assert_eq!(
+            *executor.0.borrow(),
+            vec![
+                vec!["ls", "--json"],
+                vec!["get", "t1", "--json"],
+                vec!["get", "t1", "--json"],
+                vec!["read", "t1", "--json"],
+                vec!["get", "t1", "--json"],
+                vec!["read", "t1", "--lines", "1000", "--json"],
+                vec!["send", "t1", "hello", "--json"],
+                vec!["send", "t1", "command", "--json"],
+                vec!["interrupt", "t1", "--timeout", "2", "--json"],
+                vec!["get", "t1", "--json"],
+                vec!["label", "t1", "namedrop.session=next-session", "--json"],
+                vec!["server", "status", "--json"],
+            ]
+        );
+    }
+}

@@ -173,7 +173,7 @@ fn doctor_prompt(
     let _input_mode = InputMode::enter()?;
     let mut notice = String::new();
     'refresh: loop {
-        let diagnosis = diagnose_collaboration(runtime);
+        let diagnosis = diagnose_runtime(runtime);
         let has_issues = diagnosis
             .issues
             .iter()
