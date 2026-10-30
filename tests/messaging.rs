@@ -10,6 +10,81 @@ use std::{path::Path, sync::atomic::AtomicU64};
 use support::{FakeHerdr, FixedClock, SequenceIds, TestDirectory, setup_addresses};
 
 #[test]
+fn leading_punctuation_routes_mentions_and_preserves_literals() {
+    for (source, aliases, scope, body) in [
+        ("@codex, hi", vec!["codex"], SpaceScope::Unqualified, "hi"),
+        ("@codex: hi", vec!["codex"], SpaceScope::Unqualified, "hi"),
+        (
+            "@claude, @codex, x",
+            vec!["claude", "codex"],
+            SpaceScope::Unqualified,
+            "x",
+        ),
+        (
+            "#ws3 @codex, x",
+            vec!["codex"],
+            SpaceScope::Named(vec![WorkspaceLabel::from_token("ws3").unwrap()]),
+            "x",
+        ),
+        (
+            "#ws3, @codex: x",
+            vec!["codex"],
+            SpaceScope::Named(vec![WorkspaceLabel::from_token("ws3").unwrap()]),
+            "x",
+        ),
+        (
+            "#ws3: @codex, x",
+            vec!["codex"],
+            SpaceScope::Named(vec![WorkspaceLabel::from_token("ws3").unwrap()]),
+            "x",
+        ),
+        ("#all, @codex: x", vec!["codex"], SpaceScope::All, "x"),
+        (
+            "@claude: report \\@codex,",
+            vec!["claude"],
+            SpaceScope::Unqualified,
+            "report \\@codex,",
+        ),
+    ] {
+        let parsed = parse_mentions(source).unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        assert_eq!(parsed.recipients.aliases, aliases, "{source:?}");
+        assert_eq!(parsed.recipients.scope, scope, "{source:?}");
+        assert_eq!(parsed.body, body, "{source:?}");
+        assert!(parsed.context_mentions.is_empty(), "{source:?}");
+        let prompt = parse_prompt_mentions(source).unwrap();
+        assert_eq!(prompt.recipients, parsed.recipients);
+        assert_eq!(prompt.body, source);
+    }
+}
+
+#[test]
+fn leading_punctuation_rejects_extra_marks_and_requires_a_body() {
+    for token in [
+        "@codex,,",
+        "@codex::",
+        "@codex,:",
+        "@codex:,",
+        "@codex;",
+        "@codex,x",
+        "#ws3,, @codex",
+        "#ws3:: @codex",
+        "#ws3; @codex",
+    ] {
+        let source = format!("{token} hi");
+        assert!(parse_mentions(&source).is_err(), "{source:?}");
+        assert!(parse_prompt_mentions(&source).is_err(), "{source:?}");
+    }
+    for source in ["@codex,", "@codex:", "#ws3, @codex:"] {
+        assert_eq!(
+            parse_mentions(source).unwrap_err(),
+            "collaboration message body is required",
+            "{source:?}"
+        );
+        assert!(carries_leading_mentions(source));
+    }
+}
+
+#[test]
 fn mention_parser_separates_recipients_context_and_literals() {
     let source = "  @reviewer @code-reviewer Please inspect foo@bar, \\@planner, \
 `@inline`, and ```\n@fenced\n``` then @planner.";
@@ -29,7 +104,7 @@ fn mention_parser_rejects_missing_recipients_and_empty_bodies() {
     for source in [
         "ordinary native text @reviewer",
         "@reviewer",
-        "@reviewer, body",
+        "@reviewer,, body",
         "@TODO the first token is not a recipient",
     ] {
         assert!(parse_mentions(source).is_err(), "{source:?} should fail");
@@ -168,7 +243,7 @@ fn explicit_send_resolves_and_atomically_fans_out_with_a_visible_receipt() {
     };
     let input = serde_json::json!({
         "request_id": "request-1",
-        "source": "@reviewer @planner Please inspect @researcher."
+        "source": "@reviewer, @planner: Please inspect @researcher."
     });
 
     let first = execute_message_operation("send", input.clone(), &runtime).unwrap();

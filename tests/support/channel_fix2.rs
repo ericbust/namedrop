@@ -2,6 +2,74 @@ use super::*;
 use std::sync::mpsc;
 
 #[test]
+fn leading_punctuation_posts_explicitly_without_router_calls() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in [
+        "@planner, inspect \\@lead,",
+        "@planner: inspect \\@lead,",
+        "#ws1, @planner: inspect \\@lead,",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(&server, &format!("punctuation-{index}"), source, None);
+        assert_eq!(status, 200, "{source}: {receipt}");
+        assert_eq!(recipient_aliases(&receipt), ["planner"]);
+        assert_eq!(receipt["context_references"], json!([]));
+        assert!(receipt.get("channel").is_none());
+    }
+    assert!(calls(&f).is_empty());
+}
+
+#[test]
+fn leading_punctuation_keeps_capitalized_alias_refusals_consistent() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in [
+        "@Codex, inspect",
+        "@Codex: inspect",
+        "#ws1, @planner: @Codex, inspect",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(
+            &server,
+            &format!("punctuation-capital-{index}"),
+            source,
+            None,
+        );
+        assert_eq!(status, 400, "{source}: {receipt}");
+        assert_eq!(receipt["error"], "unknown Mention: @Codex");
+    }
+    for (index, source) in [
+        "@Codex,, inspect",
+        "@Codex:: inspect",
+        "@Codex; inspect",
+        "@planner,, inspect",
+        "@planner; inspect",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(
+            &server,
+            &format!("punctuation-invalid-{index}"),
+            source,
+            None,
+        );
+        assert_eq!(status, 400, "{source}: {receipt}");
+        assert_eq!(
+            receipt["error"],
+            "message must begin with one or more recipient Mentions"
+        );
+    }
+    assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 0);
+    assert!(calls(&f).is_empty());
+}
+
+#[test]
 fn leading_unknown_aliases_are_refused_instead_of_silent_room_posts() {
     let f = fixture();
     let server = Server::start(&f, "not json", false);
