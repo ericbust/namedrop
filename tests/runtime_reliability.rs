@@ -1200,7 +1200,18 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
         thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(fixture.prompt_counts(), (2, 1), "{code}");
-    let inbox = fixture.inbox();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let inbox = loop {
+        let inbox = fixture.inbox();
+        if !inbox.is_empty() {
+            break inbox;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{code}: accepted prompt was not recorded in the inbox"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
     assert_eq!(inbox.len(), 1, "{code}");
     assert_eq!(inbox[0]["untrusted_body"], "review", "{code}");
     let completed = fixture
