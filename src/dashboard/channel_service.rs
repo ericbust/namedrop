@@ -493,6 +493,11 @@ mod tests {
         assert_eq!(result, 0, "{error}");
         drop(claim);
         claim_from_process(false);
+        std::fs::rename(root.join("saved.sqlite3"), &database).unwrap();
+        let mut successor = ChannelService::start(&root).unwrap();
+        assert!(successor.ownership.is_some());
+        successor.shutdown().unwrap();
+        assert!(successor.ownership.is_none());
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
     }
