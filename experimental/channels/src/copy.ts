@@ -146,9 +146,9 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
     hint: "Read the report, then answer the lead.",
   },
   context_grant: {
-    title: "Context request waiting",
-    named: (alias) => `${alias} is asking for context`,
-    hint: "Approve or decline it in the agent's pane in Herdr.",
+    title: "Shared context failed",
+    named: (alias) => `${alias} didn't get its shared context`,
+    hint: "Namedrop couldn't capture it. Ask the sender to share it again.",
   },
   pane_binding: {
     title: "An agent's pane changed",
@@ -200,12 +200,15 @@ function responseHint(
     return { hint: pausedHint, hintTitle: null };
   const who = responder?.alias ?? item.subjectAlias;
   const pane = item.response?.kind === "pane";
-  if (who === null || !(pane || item.source === "agent_status")) return null;
+  // A context grant that failed is shared again by its sender, not fixed in the pane.
+  if (
+    who === null ||
+    item.source === "context_grant" ||
+    !(pane || item.source === "agent_status")
+  )
+    return null;
   return {
-    hint:
-      item.source === "context_grant"
-        ? `Approve or decline it in ${who}'s pane in Herdr.`
-        : answerInPane(who),
+    hint: answerInPane(who),
     hintTitle: pane ? paneLabelText(responder) : null,
   };
 }

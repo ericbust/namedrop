@@ -4854,6 +4854,76 @@ test("DESIGN-R2: an All activity row reads the item in plain words, with the ser
   );
 });
 
+const grantFailed =
+  "Context Grant activation failed: the pane's screen could not be read.";
+test("R3 U4: a failed context grant's card says the shared context failed and to ask the sender again, keeps See @codex's screen, and Details keeps the server text", async (t) => {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants = people();
+  value.frame.participants[0].pane_label = {
+    text: "w1:codex",
+    truncated: false,
+  };
+  value.frame.attention = [
+    {
+      source_kind: "context_grant",
+      summary: { text: grantFailed, truncated: false },
+      opened_at_ms: Date.now() - 60_000,
+      subject_alias: "codex",
+      message_id: null,
+      response: { kind: "pane", address_id: "codex" },
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const card = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  await card.waitFor();
+  const hint = card.locator(".attention-hint");
+  assert.deepEqual(
+    {
+      title: await card.locator(".attention-title").textContent(),
+      hint: await hint.textContent(),
+      tooltip: await hint.getAttribute("title"),
+      buttons: await card
+        .locator(".attention-actions button")
+        .allTextContents(),
+    },
+    {
+      title: "@codex didn't get its shared context",
+      hint: "Namedrop couldn't capture it. Ask the sender to share it again.",
+      tooltip: null,
+      buttons: ["See @codex's screen", "Details"],
+    },
+  );
+  await card.getByRole("button", { name: "Details" }).click();
+  await card.getByText(grantFailed, { exact: true }).waitFor();
+  await card
+    .getByRole("button", { name: "See @codex's screen", exact: true })
+    .click();
+  await ui.page
+    .getByRole("complementary", { name: "Screen of @codex", exact: true })
+    .waitFor();
+});
+
+test("R3 U4: All activity names a failed context grant Shared context failed, with the server's text in the tooltip", async (t) => {
+  const team = busyTeam();
+  const [item] = team[1].frame.attention;
+  item.source_kind = "context_grant";
+  item.summary = { text: grantFailed, truncated: false };
+  item.subject_summary = null;
+  const ui = await open(t, (client) => replay(client, team), undefined, {
+    path: "/?view=activity",
+  });
+  await ui.live();
+  const line = ui.page.locator(".activity-item .activity-text").first();
+  await line.waitFor();
+  assert.deepEqual(
+    [await line.textContent(), await line.getAttribute("title")],
+    ["Shared context failed", grantFailed],
+  );
+});
+
 test("UI-4: All activity lists blocked, then waiting, then working rows, and its URL survives reload and Back", async (t) => {
   const ui = await open(t, (client) => replay(client, busyTeam()));
   await ui.live();
@@ -6029,7 +6099,7 @@ test("DESIGN-R2 A1-A3: each Needs-you card has one action row, 12px apart, that 
     },
     {
       ...reply,
-      source_kind: "context_grant",
+      source_kind: "pane_binding",
       opened_at_ms: 6,
       response: { kind: "pane", address_id: "codex" },
     },
@@ -6101,7 +6171,7 @@ test("DESIGN-R2 A1-A3: each Needs-you card has one action row, 12px apart, that 
   const hint = cards.nth(2).locator(".attention-hint");
   assert.deepEqual(
     [await hint.textContent(), await hint.getAttribute("title")],
-    ["Approve or decline it in @codex's pane in Herdr.", "w1:codex"],
+    ["Answer it in @codex's pane in Herdr.", "w1:codex"],
   );
   assert.equal(
     await cards.locator(".attention-actions", { hasText: "in Herdr" }).count(),

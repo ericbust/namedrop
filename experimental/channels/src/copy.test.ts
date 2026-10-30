@@ -254,8 +254,8 @@ test("Needs-you copy gives every source a title and a hint and keeps the server 
     ],
     [
       "context_grant",
-      "Context request waiting",
-      "Approve or decline it in the agent's pane in Herdr.",
+      "Shared context failed",
+      "Namedrop couldn't capture it. Ask the sender to share it again.",
     ],
     [
       "pane_binding",
@@ -321,8 +321,8 @@ test("Needs-you copy names the subject agent for every source when the server se
     [
       "context_grant",
       "@codex",
-      "@codex is asking for context",
-      "Approve or decline it in the agent's pane in Herdr.",
+      "@codex didn't get its shared context",
+      "Namedrop couldn't capture it. Ask the sender to share it again.",
     ],
     [
       "pane_binding",
@@ -407,10 +407,14 @@ test("with a pane response, the hint names the responder's pane with its label a
     hint: "Answer it in @worker's pane in Herdr.",
     hintTitle: "w1:worker",
   };
-  assert.deepEqual(copy("context_grant"), {
-    hint: "Approve or decline it in @worker's pane in Herdr.",
-    hintTitle: "w1:worker",
-  });
+  assert.deepEqual(
+    copy("context_grant"),
+    {
+      hint: "Namedrop couldn't capture it. Ask the sender to share it again.",
+      hintTitle: null,
+    },
+    "a failed context grant is fixed by its sender, so no pane hint and no pane tooltip",
+  );
   assert.deepEqual(
     copy("automatic_reply_limit", {
       threadId: "t1",
@@ -449,14 +453,14 @@ test("with a pane response, the hint names the responder's pane with its label a
     },
     {
       subject: {
-        title: "@codex is asking for context",
-        hint: "Approve or decline it in @codex's pane in Herdr.",
+        title: "@codex didn't get its shared context",
+        hint: "Namedrop couldn't capture it. Ask the sender to share it again.",
         hintTitle: null,
         details: "Waiting",
       },
-      nobody: "Approve or decline it in the agent's pane in Herdr.",
+      nobody: "Namedrop couldn't capture it. Ask the sender to share it again.",
     },
-    "the subject names the pane when the responder is unknown, and with no one known the table row stands",
+    "the subject names the agent in the title, and the hint names the sender either way",
   );
 });
 test("a pane response's hint names the pane to answer in, a local response's hint is its setup step, and the table hint stays for the rest", () => {
@@ -487,8 +491,12 @@ test("a pane response's hint names the pane to answer in, a local response's hin
     );
   }
   assert.equal(
-    hint("context_grant", { response: pane }),
-    "Approve or decline it in the agent's pane in Herdr.",
+    hint(
+      "context_grant",
+      { response: pane, subjectAlias: "@codex" },
+      "@worker",
+    ),
+    "Namedrop couldn't capture it. Ask the sender to share it again.",
   );
   assert.equal(
     hint("integration_registration", { response: { kind: "local" } }),

@@ -396,20 +396,26 @@ The banner takes at most 40 percent of the main column's height and scrolls
 inside (see App shell for the stacked layout).
 Announce new items through a polite live region.
 
-| `source`                                | Title                                                                                                | Hint                                                |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
-| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                     |
-| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.           |
-| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.         |
-| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.              |
-| `context_grant`                         | Context request waiting                                                                              | Approve or decline it in the agent's pane in Herdr. |
-| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                |
-| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                   |
-| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                  |
+| `source`                                | Title                                                                                                | Hint                                                            |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                                 |
+| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.                       |
+| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.                     |
+| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.                          |
+| `context_grant`                         | Shared context failed                                                                                | Namedrop couldn't capture it. Ask the sender to share it again. |
+| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                            |
+| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                               |
+| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                              |
 
 Never cut the server's summary mid-word into the visible line. When an
 `agent_status` summary is longer than 90 characters, use the `unknown` title and
 put the summary under **Details**.
+
+The server opens a `context_grant` item only when a context grant fails to
+activate ("Context Grant activation failed: …"), so its title and hint describe
+the failure, and the agent it names is the one the context was for. The fix is
+with the sender, who shares it again. **Details** keeps the server's text, and
+All activity names the item "Shared context failed".
 
 When the item names its agent (`subject_alias`), the title names it too. For an
 unanswered request that reads "@codex didn't answer a request", with the hint
@@ -428,7 +434,7 @@ The tint never stays.
 | `agent_status`, summary over 90 characters | "@claude needs you"                                                          |
 | `automatic_reply_limit`                    | "@codex hit the reply limit"                                                 |
 | `coordination`                             | "@claude's coordination needs a decision"                                    |
-| `context_grant`                            | "@codex is asking for context"                                               |
+| `context_grant`                            | "@codex didn't get its shared context"                                       |
 | `pane_binding`                             | "@codex's pane changed"                                                      |
 | `integration_registration`                 | "@codex isn't set up yet"                                                    |
 | `unknown`                                  | "@codex needs you"                                                           |
@@ -448,7 +454,9 @@ offer, and its button names the action and the person:
 | `local`    | none                   | Its setup step becomes the hint.                                     |
 
 A `pane` response is answered in Herdr, so its hint names the agent's pane,
-with the pane label, such as `w1:worker`, as the hint's tooltip. A `local`
+with the pane label, such as `w1:worker`, as the hint's tooltip. A failed
+`context_grant` is not fixed in that pane, so it keeps its own hint with no
+tooltip, and its "See @worker's screen" button stays. A `local`
 response's hint reads "Open this workspace in Herdr and choose Namedrop setup
 from the command palette to repair the integration." for
 `integration_registration`, and "Open this workspace in Herdr and choose
@@ -456,14 +464,14 @@ Namedrop Doctor to review this item." otherwise.
 
 **Which hint wins.** The first row that fits the item gives its hint:
 
-| Item                                                  | Hint                                                | Tooltip        |
-| ----------------------------------------------------- | --------------------------------------------------- | -------------- |
-| A `local` response                                    | Its setup step, as above                            | none           |
-| `automatic_reply_limit` with Continue or Stop on page | "The agents paused after 10 replies in a row."      | none           |
-| `context_grant` with a `pane` response                | "Approve or decline it in @worker's pane in Herdr." | the pane label |
-| Any other source with a `pane` response               | "Answer it in @worker's pane in Herdr."             | the pane label |
-| `agent_status` whose agent is known                   | "Answer it in @claude's pane in Herdr."             | none           |
-| Anything else, or no agent known                      | The first table's hint, or the named hint above     | none           |
+| Item                                                  | Hint                                                              | Tooltip        |
+| ----------------------------------------------------- | ----------------------------------------------------------------- | -------------- |
+| A `local` response                                    | Its setup step, as above                                          | none           |
+| `automatic_reply_limit` with Continue or Stop on page | "The agents paused after 10 replies in a row."                    | none           |
+| `context_grant`, with or without a `pane` response    | "Namedrop couldn't capture it. Ask the sender to share it again." | none           |
+| Any other source with a `pane` response               | "Answer it in @worker's pane in Herdr."                           | the pane label |
+| `agent_status` whose agent is known                   | "Answer it in @claude's pane in Herdr."                           | none           |
+| Anything else, or no agent known                      | The first table's hint, or the named hint above                   | none           |
 
 **Reply limit.** A reply-limit item that names its thread (`thread_id`) and
 lists the actions the browser may take (`actions`) can be continued or stopped

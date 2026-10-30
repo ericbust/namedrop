@@ -662,8 +662,8 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
   const hint = (inner: string) =>
     inner.match(/<p class="attention-hint"( title="[^"]*")?>(.*?)<\/p>/s);
   assert.deepEqual(hint(items[0] ?? "")?.slice(1), [
-    ' title="w1:worker"',
-    "Approve or decline it in @worker&#x27;s pane in Herdr.",
+    undefined,
+    "Namedrop couldn&#x27;t capture it. Ask the sender to share it again.",
   ]);
   assert.deepEqual(hint(items[1] ?? "")?.slice(1), [
     undefined,
