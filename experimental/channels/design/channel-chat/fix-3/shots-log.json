@@ -1,0 +1,102 @@
+[
+  {
+    "file": "offer-idle-390-light.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSend anyway",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-sending-390-light.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSending…",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-sent-390-light.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSent",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-failed-390-light.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentCouldn't send to @codex. Try again",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "send-to-mixed-390-light.png",
+    "route": "Couldn't check who this is forSend to @codex Sent, Couldn't send to @claude. Try again",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-idle-1440-light.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSend anyway",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-sending-1440-light.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSending…",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-sent-1440-light.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSent",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-failed-1440-light.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentCouldn't send to @codex. Try again",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "send-to-mixed-1440-light.png",
+    "route": "Couldn't check who this is forSend to @codex Sent, Couldn't send to @claude. Try again",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-idle-390-dark.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSend anyway",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-sending-390-dark.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSending…",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-sent-390-dark.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSent",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-failed-390-dark.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentCouldn't send to @codex. Try again",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "send-to-mixed-390-dark.png",
+    "route": "Couldn't check who this is forSend to @codex Sent, Couldn't send to @claude. Try again",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-idle-1440-dark.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSend anyway",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-sending-1440-dark.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSending…",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-sent-1440-dark.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentSent",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "offer-failed-1440-dark.png",
+    "route": "@claudebuild questionWorking on itMentioned @codex, not sentCouldn't send to @codex. Try again",
+    "scroll": [0, 0, false]
+  },
+  {
+    "file": "send-to-mixed-1440-dark.png",
+    "route": "Couldn't check who this is forSend to @codex Sent, Couldn't send to @claude. Try again",
+    "scroll": [0, 0, false]
+  }
+]
