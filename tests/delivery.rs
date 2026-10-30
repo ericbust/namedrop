@@ -447,7 +447,7 @@ fn a_contended_pane_defers_only_its_mailbox_until_the_next_drain() {
         mailbox_state(),
         vec![
             (blocked.id.as_str().into(), "queued".into(), 0),
-            (free.id.as_str().into(), "submitted".into(), 1),
+            (free.id.as_str().into(), "acknowledged".into(), 1),
         ]
     );
     let envelopes = || {
@@ -482,8 +482,8 @@ fn a_contended_pane_defers_only_its_mailbox_until_the_next_drain() {
     assert_eq!(
         mailbox_state(),
         vec![
-            (blocked.id.as_str().into(), "submitted".into(), 1),
-            (free.id.as_str().into(), "submitted".into(), 1),
+            (blocked.id.as_str().into(), "acknowledged".into(), 1),
+            (free.id.as_str().into(), "acknowledged".into(), 1),
         ]
     );
     let submitted = envelopes();
