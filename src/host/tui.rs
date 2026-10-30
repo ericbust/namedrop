@@ -524,6 +524,8 @@ impl<E: HerdrCommandExecutor> Host for TuiHost<E> {
             })
     }
     fn interrupt(&self, pane: &str) -> Result<(), HostError> {
+        // Herdr key-combo syntax joins a modifier to its key with
+        // `+`; it answers `ctrl-c` with `invalid_key`.
         self.execute(&["agent", "send-keys", pane, "ctrl+c"], None)
             .map(|_| ())
     }

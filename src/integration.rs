@@ -682,8 +682,8 @@ where
 #[test]
 fn concurrent_native_registration_completes_one_profile() {
     use crate::{Clock, HerdrCommandExecutor, HerdrCommandOutput};
-    struct Host;
-    impl HerdrCommandExecutor for Host {
+    struct FakeHerdr;
+    impl HerdrCommandExecutor for FakeHerdr {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
             let value = match args {
                 ["workspace", "list"] => {
@@ -761,7 +761,7 @@ fn concurrent_native_registration_completes_one_profile() {
         workspace_id: Some("space"),
         current_pane_id: Some("pane"),
         session_socket_id: "socket",
-        host: crate::TuiHost::new(&Host),
+        host: crate::TuiHost::new(&FakeHerdr),
         clock: &crate::SystemClock,
         ids: &crate::ProcessIds::default(),
     };

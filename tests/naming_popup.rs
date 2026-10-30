@@ -82,6 +82,10 @@ elif [ "$1 $2" = "plugin pane" ]; then
     case "$arg" in --workspace|--target-pane) echo 'overlay and popup plugin panes target the active pane' >&2; exit 1;; esac
   done
   printf '%s\n' "$@" > "$TEST_ARGS"
+  if [ "$3" = open ] && [ "$TEST_POPUP_INVALID_JSON" = 1 ]; then
+    printf '%s\n' 'not JSON'
+    exit 0
+  fi
   printf '%s\n' '{"result":{"pane_id":"popup"}}'
 else printf '%s\n' '{}'; fi
 "#).unwrap();
@@ -227,6 +231,32 @@ fn naming_shortcut_has_a_real_popup_entrypoint() {
     ] {
         assert!(manifest.contains(expected), "missing {expected}");
     }
+}
+
+#[test]
+fn popup_launch_reports_an_unreadable_host_result() {
+    let f = Fixture::new();
+    let output = f
+        .command()
+        .args([
+            "--human",
+            "--herdr-workspace",
+            "w1",
+            "--herdr-pane",
+            "p1",
+            "ui",
+            "launch",
+            "name",
+        ])
+        .env("TEST_POPUP_INVALID_JSON", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Herdr returned an unreadable popup result: "),
+        "{error}"
+    );
 }
 
 #[test]

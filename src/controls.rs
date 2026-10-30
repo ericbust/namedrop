@@ -244,12 +244,7 @@ where
                     ));
                     continue;
                 }
-                match runtime
-                    .host
-                    // Herdr key-combo syntax joins a modifier to its key with
-                    // `+`; it answers `ctrl-c` with `invalid_key`.
-                    .interrupt(&response.pane_id)
-                {
+                match runtime.host.interrupt(&response.pane_id) {
                     Ok(_) => interrupted_pane_ids.push(response.pane_id.clone()),
                     Err(error) => warnings.push(format!(
                         "Could not interrupt {} after stopping the thread: {error}",
