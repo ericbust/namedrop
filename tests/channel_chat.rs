@@ -1,3 +1,5 @@
+#[path = "support/channel_fix2.rs"]
+mod channel_fix2;
 #[path = "support/channel_merge.rs"]
 mod channel_merge;
 #[path = "support/channel_router_attempts.rs"]
