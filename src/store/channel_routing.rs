@@ -194,6 +194,10 @@ impl StateTransaction<'_> {
             .optional()?)
     }
 
+    pub(crate) fn has_pending_channel(&self) -> Result<bool, StoreError> {
+        Ok(self.pending_channel(false)?.is_some())
+    }
+
     pub(crate) fn claim_channel(&mut self, now: u64) -> Result<Option<ChannelClaim>, StoreError> {
         while let Some((ns, message)) = self.pending_channel(false)? {
             self.append_transition(
@@ -408,6 +412,13 @@ mod tests {
             crate::IdGenerator::next_id(&crate::ProcessIds::default(), "test")
         ));
         let mut store = StateStore::open(&root).unwrap();
+        assert!(
+            !StateStore::open_read_only(&root)
+                .unwrap()
+                .unwrap()
+                .transaction(|tx| tx.has_pending_channel())
+                .unwrap()
+        );
         let ns = StateNamespace::for_space("synthetic", "w1");
         let actor = MutationAttribution::new(ActorKind::Human, "test", 1);
         let draft = MessageDraft {
@@ -469,10 +480,24 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        assert!(
+            StateStore::open_read_only(&root)
+                .unwrap()
+                .unwrap()
+                .transaction(|tx| tx.has_pending_channel())
+                .unwrap()
+        );
         let claim = store
             .transaction(|tx| tx.claim_channel(2))
             .unwrap()
             .unwrap();
+        assert!(
+            !StateStore::open_read_only(&root)
+                .unwrap()
+                .unwrap()
+                .transaction(|tx| tx.has_pending_channel())
+                .unwrap()
+        );
         assert!(
             store
                 .transaction(|tx| tx.claim_channel(3))

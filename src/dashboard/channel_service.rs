@@ -98,6 +98,12 @@ impl Drop for ChannelService {
 }
 
 fn recover(state: &Path) -> Result<(), String> {
+    if StateStore::open_read_only(state)
+        .map_err(|e| e.to_string())?
+        .is_none()
+    {
+        return Ok(());
+    }
     let namespaces = StateStore::open(state)
         .and_then(|mut store| {
             store.transaction(|tx| tx.fail_abandoned_channels(crate::SystemClock.now_unix_ms()))
@@ -111,8 +117,18 @@ fn recover(state: &Path) -> Result<(), String> {
 
 fn worker(state: &Path, cancel: &AtomicBool) {
     while !cancel.load(Ordering::Acquire) {
-        let claim = StateStore::open(state).and_then(|mut store| {
-            store.transaction(|tx| tx.claim_channel(crate::SystemClock.now_unix_ms()))
+        let claim = StateStore::open_read_only(state).and_then(|store| {
+            let Some(mut store) = store else {
+                return Ok(None);
+            };
+            let pending = store.transaction(|tx| tx.has_pending_channel())?;
+            drop(store);
+            if !pending {
+                return Ok(None);
+            }
+            StateStore::open(state).and_then(|mut store| {
+                store.transaction(|tx| tx.claim_channel(crate::SystemClock.now_unix_ms()))
+            })
         });
         let claim = match claim {
             Ok(Some(claim)) => claim,
@@ -231,6 +247,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn unused_service_does_not_initialize_database() {
+        let root = std::env::temp_dir().join(format!(
+            "channel-unused-{}-{}",
+            std::process::id(),
+            crate::IdGenerator::next_id(&crate::ProcessIds::default(), "test")
+        ));
+        std::fs::create_dir_all(root.join("dashboard")).unwrap();
+        let mut service = ChannelService::start(&root).unwrap();
+        assert!(StateStore::open_read_only(&root).unwrap().is_none());
+        service.shutdown().unwrap();
+        assert!(StateStore::open_read_only(&root).unwrap().is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn recovery_error_still_releases_manager_ownership() {
         let root = std::env::temp_dir().join(format!(
             "channel-manager-{}-{}",
@@ -238,10 +269,11 @@ mod tests {
             crate::IdGenerator::next_id(&crate::ProcessIds::default(), "test")
         ));
         std::fs::create_dir_all(root.join("dashboard")).unwrap();
+        drop(StateStore::open(&root).unwrap());
         let mut service = ChannelService::start(&root).unwrap();
         let database = root.join("namedrop.sqlite3");
         std::fs::rename(&database, root.join("saved.sqlite3")).unwrap();
-        std::fs::create_dir(&database).unwrap();
+        std::fs::write(&database, b"invalid database").unwrap();
         assert!(service.shutdown().is_err());
         assert!(service.ownership.is_none());
         let claim = OpenOptions::new()
