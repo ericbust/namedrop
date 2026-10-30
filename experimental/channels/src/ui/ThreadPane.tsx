@@ -102,14 +102,8 @@ export function ThreadPane({
     [directory, activeReply],
   );
   const rule = useMemo<Extract<SendRule, { kind: "thread" }>>(
-    () => ({
-      kind: "thread",
-      to:
-        activeReply === null
-          ? threadAgents(thread, directory)
-          : (to?.names ?? []),
-    }),
-    [thread, directory, activeReply, to],
+    () => ({ kind: "thread", to: threadAgents(thread, directory) }),
+    [thread, directory],
   );
   const prefilled = useRef<ReplyIntent | null>(null);
   useLayoutEffect(() => {

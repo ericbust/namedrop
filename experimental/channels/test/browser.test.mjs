@@ -3084,6 +3084,13 @@ async function until(check, what) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+async function eventually(check, what) {
+  const deadline = Date.now() + 5000;
+  while (!(await check())) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting for ${what}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 function requestIds(ui) {
   return ui.posts.attempts.map((attempt) => JSON.parse(attempt.raw).request_id);
 }
@@ -5521,6 +5528,105 @@ test("CL-A: Respond posts the exact attention target despite newer context and S
   assert.equal(
     ui.posts.attempts[0].body.source,
     "@codex Keep the selected decision",
+  );
+});
+
+test("CH-2: Respond targets its agent with the prefill, and plain text names every agent the reply reaches", async (t) => {
+  const { value, context } = actionableAttention();
+  value.frame.participants.push({
+    ...value.frame.participants[0],
+    address_id: "claude",
+    alias: "@claude",
+    kind: { type: "agent", runtime: "claude" },
+  });
+  for (const row of [value.frame.messages[0], context.messages[0]])
+    row.legs = [
+      { to: "codex", stage: { stage: "delivered" } },
+      { to: "claude", stage: { stage: "delivered" } },
+    ];
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox");
+  await pane.locator('[data-message-id="attention-target"]').waitFor();
+  await eventually(
+    async () => (await reply.inputValue()) === "@codex ",
+    "the Respond prefill",
+  );
+  await reply.fill("ok go ahead");
+  assert.equal(
+    await pane.locator(".composer-to").textContent(),
+    "To @codex, @claude",
+  );
+  assert.equal(
+    await reply.getAttribute("aria-label"),
+    "Reply to @codex, @claude",
+  );
+});
+
+test("CH-2: Send anyway in a conversation outside the timeline fills that pane's reply box", async (t) => {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants = people();
+  const post = channelPost(
+    "far-post",
+    "the deploy notes @codex wrote last week were clear",
+    { state: "unrouted", to: [] },
+  );
+  const conversation = { thread_id: "far-post", message_id: "far-post" };
+  value.frame.attention = [
+    {
+      source_kind: "delivery_attempt",
+      summary: { text: "A response is needed.", truncated: false },
+      opened_at_ms: 4,
+      subject_alias: null,
+      message_id: "far-post",
+      conversation,
+      coordination_id: null,
+      response: { kind: "reply", ...conversation, address_id: "codex" },
+    },
+  ];
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    {
+      onContext: () => ({
+        thread_id: "far-post",
+        message_count: 1,
+        earlier_omitted: false,
+        messages: [post],
+      }),
+    },
+  );
+  await ui.live();
+  await ui.page
+    .getByRole("button", { name: "Show message from @codex", exact: true })
+    .click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await pane.getByRole("button", { name: "Send this to @codex" }).click();
+  const reply = pane.getByRole("combobox");
+  await eventually(
+    async () =>
+      (await reply.count()) === 1 &&
+      (await reply.inputValue()) ===
+        "@codex the deploy notes @codex wrote last week were clear ",
+    "the filled reply box in the conversation pane",
+  );
+  assert.equal(
+    await reply.evaluate((box) => box === document.activeElement),
+    true,
   );
 });
 

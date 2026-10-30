@@ -636,9 +636,18 @@ export function App() {
         composer: { key: current, thread: post.threadId },
         text: `${alias} ${post.body.text} `,
       });
+      // A loaded conversation pane already shows this thread, and the timeline may not hold it.
+      if (
+        focused?.kind === "ready" &&
+        focused.context.threadId === post.threadId
+      ) {
+        focusIntent.current = "composer";
+        requestFocus();
+        return;
+      }
       openThread(post.threadId, button, "composer");
     },
-    [current, openThread],
+    [current, focused, openThread],
   );
   const [located, locate] = useState<Located | null>(null);
   useEffect(() => {
