@@ -1,6 +1,6 @@
 use super::xws::{self, Fixture};
 use namedrop::dashboard::snapshot::SpaceKey;
-use namedrop::{HerdrCommandExecutor, StateNamespace, StateStore};
+use namedrop::{HerdrCommandExecutor, IdGenerator, ProcessIds, StateNamespace, StateStore};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -26,8 +26,10 @@ pub(super) struct Response {
 }
 
 fn publish_executable(path: &Path, contents: &str) -> std::io::Result<()> {
-    fs::write(path, contents)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+    let staging = path.with_extension(ProcessIds::default().next_id("publish"));
+    fs::write(&staging, contents)?;
+    fs::set_permissions(&staging, fs::Permissions::from_mode(0o700))?;
+    fs::rename(staging, path)
 }
 
 impl Server {
@@ -507,7 +509,10 @@ fn fixture_executable_can_be_replaced_while_its_previous_version_runs() {
     previous.wait().unwrap();
 
     published.expect("publishing a replacement while the previous executable runs");
-    assert!(previous_running, "previous executable must still be running");
+    assert!(
+        previous_running,
+        "previous executable must still be running"
+    );
     let replacement = replacement.unwrap().unwrap();
     assert!(replacement.status.success());
     assert_eq!(replacement.stdout, b"replacement-version\n");
