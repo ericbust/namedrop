@@ -5909,6 +5909,22 @@ test("DESIGN-R2 A1-A3: each Needs-you card has one action row, 12px apart, that 
     await ui.page.setViewportSize({ width, height });
     assert.deepEqual(await rows(), expected, `${width}px`);
   }
+  await ui.page.setViewportSize({ width: 390, height: 844 });
+  assert.deepEqual(
+    await cards.evaluateAll((items) =>
+      items.map(
+        (item) =>
+          new Set(
+            [...item.querySelectorAll(".attention-actions button")].map(
+              (button) => button.offsetHeight,
+            ),
+          ).size,
+      ),
+    ),
+    [1, 1, 1],
+    "a narrow row wraps between labels, never inside one",
+  );
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
   const hint = cards.nth(2).locator(".attention-hint");
   assert.deepEqual(
     [await hint.textContent(), await hint.getAttribute("title")],
