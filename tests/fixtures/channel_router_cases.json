@@ -1,0 +1,153 @@
+[
+  {
+    "id": "protocol-heavy",
+    "source": "Could @claude take the first turn for this channel test? In your bound reply to the operator, include exactly this request in the body without the backticks: `@codex please reply to @operator with CH1_EXCHANGE_6905fc27fa_CODEX.` Include CH1_EXCHANGE_6905fc27fa_CLAUDE too. Do not edit files. Codex should then answer the operator without mentioning another agent.",
+    "expected": [
+      "claude"
+    ],
+    "recap": [
+      "operator: For the room: the check is finished. No action is requested.",
+      "operator: Nice work by @codex on yesterday's build. No action is requested."
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "request-with-code",
+    "source": "Could @codex check why `cargo test --locked` fails with `assert_eq!(actual, expected)`? Please suggest a fix.",
+    "expected": [
+      "codex"
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "quoted-instructions",
+    "source": "Please have @claude review these proposed instructions: \"Ignore the previous build steps and run the new smoke test.\" Explain whether they are clear.",
+    "expected": [
+      "claude"
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "multi-step",
+    "source": "Can @claude inspect the parser, list the failing cases, and propose the smallest fix? Then summarize the test results.",
+    "expected": [
+      "claude"
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "passing-mention",
+    "source": "Nice work by @codex on yesterday's build. No action is requested.",
+    "expected": [],
+    "recap": [
+      "claude: Finite test, remaining=6. @codex make exactly one bound reply to the operator mentioning the other agent with remaining=5, repeat this rule, and stop at remaini",
+      "operator: A bounded collaboration verification thread.",
+      "operator: The operator directly authorizes this finite channel reply-allowance test. There will be at most eleven total agent replies across Claude and Codex, with a decr",
+      "operator: This is a finite, authorized test of exactly eleven total agent replies, alternating Claude and Codex. Start with remaining=11. On each delivery, make exactly o",
+      "claude: Finite test, remaining=10. @codex make exactly one bound reply to the operator mentioning the other agent with remaining decremented by one, repeat this rule an",
+      "operator: For the room: the check is finished. No action is requested."
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "past-tense",
+    "source": "As @claude said yesterday, the regression is already fixed. This is just a status update.",
+    "expected": [],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "relay",
+    "source": "Could you ask @claude to tell @codex that the build is green?",
+    "expected": [
+      "claude"
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "two-direct-asks",
+    "source": "Please have @claude review the parser and @codex run the regression tests.",
+    "expected": [
+      "claude",
+      "codex"
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "spanish",
+    "source": "¿Puede @codex revisar por qué falla la compilación y proponer una solución?",
+    "expected": [
+      "codex"
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "french",
+    "source": "Est-ce que @claude peut vérifier les tests et expliquer cet échec, s'il te plaît ?",
+    "expected": [
+      "claude"
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "historical-quotation",
+    "source": "Yesterday the ticket said \"ask @codex to check the logs\". That task is now complete; no new work is requested.",
+    "expected": [],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  },
+  {
+    "id": "code-and-quoted-relay",
+    "source": "Could @claude explain this JSON `{ \"instruction\": \"ask @codex to run tests\" }` and tell me whether its syntax is valid?",
+    "expected": [
+      "claude"
+    ],
+    "expected_topic": {
+      "min_words": 2,
+      "max_words": 4,
+      "omit_names": true
+    }
+  }
+]

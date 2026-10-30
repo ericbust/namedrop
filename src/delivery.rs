@@ -20,6 +20,8 @@ pub struct DrainReport {
     #[serde(skip_deserializing)]
     pub delivery_notice: &'static str,
     pub submitted: Vec<DeliveryAttemptId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pane_lock_deferred: Vec<crate::PaneAddressId>,
     pub requeued: Vec<DeliveryAttemptId>,
     pub failed: Vec<DeliveryAttemptId>,
     pub settled: Vec<DeliveryAttemptId>,
@@ -43,6 +45,7 @@ impl Default for DrainReport {
             terminal_running: Vec::new(),
             delivery_notice: "Best-effort after a Settled Observation; the router records receipt and one terminal disposition is required.",
             submitted: Vec::new(),
+            pane_lock_deferred: Vec::new(),
             requeued: Vec::new(),
             failed: Vec::new(),
             settled: Vec::new(),
@@ -413,6 +416,18 @@ where
         }
 
         runtime.clock.wait_ms(first.settled_delay_ms);
+        let effects = match crate::pane_effects::PaneEffects::acquire(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            &first.pane_id,
+        ) {
+            Ok(effects) => effects,
+            Err(error) => {
+                eprintln!("mailbox drain deferred {}: {error}", address_id.as_str());
+                report.pane_lock_deferred.push(address_id);
+                continue;
+            }
+        };
         let second_discovery = discover(runtime)?;
         if second_discovery.workspace_id != namespace.space_id.as_str() {
             continue;
@@ -524,14 +539,16 @@ where
             report.failed.push(leased.attempt_id);
             continue;
         };
+        let owner = crate::pane_effects::InputOwner::delivery(
+            &namespace,
+            &leased.attempt_id,
+            &second.binding_id,
+            &leased.agent_session_id,
+        );
         let prompt_result = if second.pane_type == crate::PaneType::Terminal {
-            runtime
-                .herdr
-                .execute(&["pane", "run", &second.pane_id, &prompt])
+            effects.run_terminal(runtime.herdr, &owner, &prompt)
         } else {
-            runtime
-                .herdr
-                .execute(&["agent", "prompt", &second.pane_id, &prompt])
+            effects.prompt(runtime.herdr, &owner, &prompt)
         };
         let attribution = MutationAttribution::new(
             ActorKind::Plugin,

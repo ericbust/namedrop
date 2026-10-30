@@ -237,6 +237,7 @@ pub struct ThreadControlState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActiveThreadResponse {
     pub attempt_id: DeliveryAttemptId,
+    pub binding_id: PaneBindingId,
     pub pane_id: String,
     pub agent_session_id: AgentSessionId,
     pub binding_active: bool,
@@ -500,6 +501,7 @@ pub struct MessageReceipt {
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryReplyMode {
     AgentThread,
+    Channel,
     ReturnToSource,
     ReportToHuman,
 }
@@ -508,6 +510,7 @@ impl DeliveryReplyMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AgentThread => "agent_thread",
+            Self::Channel => "channel",
             Self::ReturnToSource => "return_to_source",
             Self::ReportToHuman => "report_to_human",
         }
@@ -515,6 +518,7 @@ impl DeliveryReplyMode {
 
     pub(crate) fn for_message_grammar(grammar_version: &str) -> Self {
         match grammar_version {
+            "channel/v1" => Self::Channel,
             "mention-hook/v1" => Self::ReturnToSource,
             "coordination-report/v1"
             | "mention-return/v1"
@@ -541,6 +545,43 @@ pub(crate) struct MessageRoute {
     /// Namedrop wrote the message itself, under the recipient's own address
     /// and the sender name `namedrop`, so its sender is no one to reply to.
     pub from_namedrop: bool,
+    asker: RoutingAddressSnapshot,
+    asked_addresses: Vec<PaneAddressId>,
+}
+
+impl MessageRoute {
+    pub(crate) fn new(
+        thread_id: ThreadId,
+        asker: RoutingAddressSnapshot,
+        recipients: Vec<RoutingAddressSnapshot>,
+        reply_mode: DeliveryReplyMode,
+        from_namedrop: bool,
+        asked_addresses: Vec<PaneAddressId>,
+    ) -> Self {
+        let mut participants = vec![asker.clone()];
+        for recipient in recipients {
+            if !participants
+                .iter()
+                .any(|p| p.address_id == recipient.address_id)
+            {
+                participants.push(recipient);
+            }
+        }
+        Self {
+            thread_id,
+            participants,
+            reply_mode,
+            from_namedrop,
+            asker,
+            asked_addresses,
+        }
+    }
+
+    pub(crate) fn asker_for(&self, replier: &PaneAddressId) -> Option<&RoutingAddressSnapshot> {
+        self.asked_addresses
+            .contains(replier)
+            .then_some(&self.asker)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

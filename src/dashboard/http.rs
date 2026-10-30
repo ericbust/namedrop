@@ -48,6 +48,19 @@ pub(crate) struct Front {
     pub hub: Sender<HubCommand>,
     pub assets: Assets,
     pub restarting: Arc<AtomicBool>,
+    pub mutations: Arc<Mutex<()>>,
+    pub channel_wake: super::channel_service::ChannelWake,
+    pub control_effects: super::thread_controls::ControlEffects,
+}
+
+impl Front {
+    fn admit_mutation(&self) -> Result<std::sync::MutexGuard<'_, ()>, Status> {
+        let guard = self.mutations.lock().map_err(|_| Status::Unavailable)?;
+        if self.restarting.load(Ordering::Acquire) || self.files.restarting() {
+            return Err(Status::Unavailable);
+        }
+        Ok(guard)
+    }
 }
 
 pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<AtomicBool>) {
@@ -621,6 +634,15 @@ enum Route {
     Page,
     Session,
     Send(SpaceKey),
+    Deliver {
+        key: SpaceKey,
+        message_id: String,
+    },
+    ThreadControl {
+        key: SpaceKey,
+        thread_id: String,
+        action: super::thread_controls::Action,
+    },
     Screen {
         key: SpaceKey,
         address_id: String,
@@ -664,6 +686,34 @@ fn route(
     if request.method == "POST" {
         authenticate_session(request, port, session)?;
         authenticate_mutation(request, session, host)?;
+        if let Some(rest) = path.strip_prefix("/w/") {
+            let segments: Vec<_> = rest.split('/').collect();
+            if let [key, "messages", message, "deliver"] = segments.as_slice() {
+                let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+                let message_id = decode_asset_path(message).ok_or(Status::NotFound)?;
+                if message_id.is_empty() || message_id.contains('/') {
+                    return Err(Status::NotFound);
+                }
+                return Ok(Route::Deliver { key, message_id });
+            }
+            if let [key, "threads", thread, action] = segments.as_slice() {
+                let action = match *action {
+                    "continue" => super::thread_controls::Action::Continue,
+                    "stop" => super::thread_controls::Action::Stop,
+                    _ => return Err(Status::NotFound),
+                };
+                let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+                let thread_id = decode_asset_path(thread).ok_or(Status::NotFound)?;
+                if thread_id.is_empty() || thread_id.contains('/') {
+                    return Err(Status::NotFound);
+                }
+                return Ok(Route::ThreadControl {
+                    key,
+                    thread_id,
+                    action,
+                });
+            }
+        }
         let key = path
             .strip_prefix("/w/")
             .and_then(|rest| rest.strip_suffix("/messages"))
@@ -874,6 +924,43 @@ impl OperatorPost {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DeliverPost {
+    to: Vec<String>,
+}
+
+impl DeliverPost {
+    fn read(reader: &mut impl Read, request: &Request) -> Result<Self, Status> {
+        if request
+            .header("content-type")
+            .map(|value| value.split(';').next().unwrap_or("").trim())
+            != Some("application/json")
+        {
+            return Err(Status::BadRequest);
+        }
+        let length = request.header("content-length").ok_or(Status::BadRequest)?;
+        if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(Status::BadRequest);
+        }
+        let length = length
+            .parse::<usize>()
+            .map_err(|_| Status::PayloadTooLarge)?;
+        if length > BODY_LIMIT {
+            return Err(Status::PayloadTooLarge);
+        }
+        let mut bytes = vec![0; length];
+        reader
+            .read_exact(&mut bytes)
+            .map_err(|_| Status::BadRequest)?;
+        let post: Self = serde_json::from_slice(&bytes).map_err(|_| Status::BadRequest)?;
+        if post.to.is_empty() {
+            return Err(Status::BadRequest);
+        }
+        Ok(post)
+    }
+}
+
 /// Cookies ignore ports, so the name carries it to keep two servers apart.
 fn cookie_name(port: u16) -> String {
     format!("namedrop_dashboard_{port}")
@@ -927,6 +1014,103 @@ fn serve_connection(
                 Err(status) => return respond_status(&mut writer, status),
             };
             send_operator_post(&mut writer, front, key, post)
+        }
+        Ok(Route::Deliver { key, message_id }) => {
+            let post = match DeliverPost::read(&mut reader, &request) {
+                Ok(post) => post,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            let admitted = match front.admit_mutation() {
+                Ok(guard) => guard,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+            match super::channel_delivery::apply(front.files.state(), &key, &message_id, &post.to) {
+                Ok((namespace, receipt)) => {
+                    let response = respond(
+                        &mut writer,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        receipt.to_string().as_bytes(),
+                    );
+                    drop(admitted);
+                    super::channel_service::drain(front.files.state(), &namespace);
+                    response
+                }
+                Err(error) => {
+                    use super::channel_delivery::DeliverError;
+                    use crate::store::channel_routing::ChannelDeliveryRefusal;
+                    let (status, message) = match error {
+                        DeliverError::Refused(ChannelDeliveryRefusal::NotFound) => {
+                            ("404 Not Found", "Channel post not found.")
+                        }
+                        DeliverError::Refused(ChannelDeliveryRefusal::InvalidMember) => (
+                            "400 Bad Request",
+                            "Choose current agent members of this channel.",
+                        ),
+                        DeliverError::Refused(ChannelDeliveryRefusal::Routing) => (
+                            "409 Conflict",
+                            "This post is still routing. Try again when routing finishes.",
+                        ),
+                        DeliverError::Refused(ChannelDeliveryRefusal::Stopped) => {
+                            ("409 Conflict", "This thread has stopped.")
+                        }
+                        DeliverError::Unavailable => (
+                            "503 Service Unavailable",
+                            "Channel delivery is unavailable.",
+                        ),
+                    };
+                    respond(
+                        &mut writer,
+                        status,
+                        "application/json",
+                        "",
+                        serde_json::json!({"error": message}).to_string().as_bytes(),
+                    )
+                }
+            }
+        }
+        Ok(Route::ThreadControl {
+            key,
+            thread_id,
+            action,
+        }) => {
+            let admitted = match front.admit_mutation() {
+                Ok(guard) => guard,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+            let completion = front.control_effects.track();
+            match super::thread_controls::commit(front.files.state(), &key, &thread_id, action) {
+                Ok(committed) => {
+                    drop(admitted);
+                    committed.respond(
+                        front.files.state(),
+                        completion,
+                        |receipt| {
+                            respond(
+                                &mut writer,
+                                "200 OK",
+                                "application/json",
+                                "",
+                                receipt.to_string().as_bytes(),
+                            )
+                        },
+                        |namespace| super::channel_service::drain(front.files.state(), namespace),
+                    )
+                }
+                Err(super::thread_controls::ControlError::NotFound) => {
+                    drop(completion);
+                    drop(admitted);
+                    respond_status(&mut writer, Status::NotFound)
+                }
+                Err(super::thread_controls::ControlError::Unavailable) => {
+                    drop(completion);
+                    drop(admitted);
+                    respond_status(&mut writer, Status::Unavailable)
+                }
+            }
         }
         Ok(Route::Screen { key, address_id }) => {
             let _permit = match screens.try_admit() {
@@ -1015,14 +1199,20 @@ fn serve_connection(
                     .dashboard_history(&namespace, before.as_deref(), limit)
                     .map_err(|_| Status::Unavailable)?
                     .ok_or(Status::NotFound)
+                    .map(|rows| (namespace, rows))
             })();
             match result {
-                Ok(rows) => {
-                    let messages: Vec<_> = rows
+                Ok((namespace, rows)) => {
+                    let mut messages: Vec<_> = rows
                         .messages
                         .iter()
                         .map(|row| snapshot::message(row, &rows.legs))
                         .collect();
+                    snapshot::channel_routing::merge(
+                        front.files.state(),
+                        &namespace,
+                        &mut messages,
+                    );
                     let body = serde_json::to_vec(&messages).map_err(io::Error::other)?;
                     respond(&mut writer, "200 OK", "application/json", "", &body)
                 }
@@ -1044,15 +1234,21 @@ fn serve_connection(
                     .dashboard_thread_context(&namespace, &message_id)
                     .map_err(|_| Status::Unavailable)?
                     .ok_or(Status::NotFound)
+                    .map(|context| (namespace, context))
             })();
             match result {
-                Ok(context) => {
-                    let messages: Vec<_> = context
+                Ok((namespace, context)) => {
+                    let mut messages: Vec<_> = context
                         .history
                         .messages
                         .iter()
                         .map(|row| snapshot::message(row, &context.history.legs))
                         .collect();
+                    snapshot::channel_routing::merge(
+                        front.files.state(),
+                        &namespace,
+                        &mut messages,
+                    );
                     let body = serde_json::to_vec(&serde_json::json!({
                         "thread_id": context.thread_id,
                         "message_count": context.message_count,
@@ -1075,6 +1271,10 @@ fn send_operator_post(
     key: SpaceKey,
     post: OperatorPost,
 ) -> io::Result<()> {
+    let mut admitted = Some(match front.admit_mutation() {
+        Ok(guard) => guard,
+        Err(status) => return respond_status(writer, status),
+    });
     let namespace = match StateStore::open_read_only(front.files.state())
         .and_then(|store| store.map(|mut store| store.dashboard_spaces()).transpose())
     {
@@ -1105,21 +1305,38 @@ fn send_operator_post(
     };
     let target = post.in_reply_to.map(crate::MessageId::new);
     writer.set_write_timeout(Some(Duration::from_secs(1)))?;
-    match crate::message::send_operator_message_observing_commit(
-        &post.request_id,
-        &post.source,
-        target.as_ref(),
-        &runtime,
-        |receipt| {
-            respond(
-                writer,
-                "200 OK",
-                "application/json",
-                "",
-                receipt.to_string().as_bytes(),
-            )
-        },
-    ) {
+    let observe_commit = |receipt: &serde_json::Value| {
+        front.channel_wake.notify();
+        let mut receipt = receipt.clone();
+        snapshot::channel_routing::finish_post(front.files.state(), &namespace, &mut receipt);
+        let response = respond(
+            writer,
+            "200 OK",
+            "application/json",
+            "",
+            receipt.to_string().as_bytes(),
+        );
+        drop(admitted.take());
+        response
+    };
+    let sent = if crate::message::is_plain_channel_post(&post.source) {
+        crate::message::send_operator_channel_message_observing_commit(
+            &post.request_id,
+            &post.source,
+            target.as_ref(),
+            &runtime,
+            observe_commit,
+        )
+    } else {
+        crate::message::send_operator_message_observing_commit(
+            &post.request_id,
+            &post.source,
+            target.as_ref(),
+            &runtime,
+            observe_commit,
+        )
+    };
+    match sent {
         Ok((receipt, response)) => {
             if let Err(error) = wake_mailboxes_after_send(front.files.state(), &namespace, &receipt)
             {
@@ -1143,7 +1360,7 @@ fn send_operator_post(
     }
 }
 
-fn wake_mailboxes_after_send(
+pub(super) fn wake_mailboxes_after_send(
     state: &Path,
     namespace: &crate::StateNamespace,
     receipt: &serde_json::Value,

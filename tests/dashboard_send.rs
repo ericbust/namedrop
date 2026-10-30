@@ -1139,6 +1139,9 @@ else:
                 .arg(&f.state)
                 .arg("dashboard-server")
                 .env("HERDR_BIN_PATH", &shim)
+                .env("HOME", f.root.join("home"))
+                .env("CODEX_HOME", f.root.join("home/.codex"))
+                .env("NAMEDROP_CHANNEL_ROUTER", "off")
                 .env_remove("HERDR_SOCKET_PATH")
                 .env_remove("HERDR_WORKSPACE_ID")
                 .env_remove("HERDR_PANE_ID")
@@ -1527,7 +1530,7 @@ else:
         let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
         let path = format!("/w/{}/messages", key.as_str());
         for (source, reply, expected) in [
-            ("plain text", None, "Mention"),
+            ("@planner", None, "body"),
             ("@ghost inspect", None, "ghost"),
             ("#missing @planner inspect", None, "missing"),
             ("@planner inspect", Some("missing-message"), "message"),

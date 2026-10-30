@@ -1,0 +1,1067 @@
+use super::*;
+use namedrop::HerdrCommandExecutor;
+use namedrop::dashboard::snapshot::SpaceKey;
+
+fn held_thread(f: &Fixture) -> Value {
+    f.clock.0.store(
+        namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let mut parent = plain_root(f, "controls-root", "Please collaborate.");
+    for index in 0..10 {
+        let (pane, mention) = if index % 2 == 0 {
+            ("pane-1-planner", "lead")
+        } else {
+            ("pane-1-lead", "planner")
+        };
+        parent = agent_reply(
+            f,
+            &format!("controls-reply-{index}"),
+            &parent,
+            pane,
+            &format!("@operator Ask @{mention} next."),
+        )
+        .unwrap();
+    }
+    parent
+}
+
+fn control_path(workspace: &str, thread: &Value, action: &str) -> String {
+    let key = SpaceKey::of(&StateNamespace::for_space("socket-a", workspace));
+    format!(
+        "/w/{}/threads/{}/{action}",
+        key.as_str(),
+        thread["thread_id"].as_str().unwrap()
+    )
+}
+
+fn controls(f: &Fixture, parent: &Value) -> Value {
+    let mut store = StateStore::open(&f.state).unwrap();
+    serde_json::to_value(
+        store
+            .transaction(|tx| {
+                tx.thread_control_state(
+                    &StateNamespace::for_space("socket-a", "w1"),
+                    &namedrop::ThreadId::new(parent["thread_id"].as_str().unwrap()),
+                )
+            })
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn wait_for(description: &str, ready: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready() {
+        assert!(Instant::now() < deadline, "{description}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn browser_controls_continue_and_stop_release_the_reply_limit_mailbox_hold() {
+    for action in ["continue", "stop"] {
+        let f = fixture();
+        let parent = held_thread(&f);
+        assert_eq!(controls(&f, &parent)["reply_limit_paused"], true);
+        let server = Server::start(&f, "not json", false);
+        let (status, later) = post(&server, "later-thread", "@planner Later task.", None);
+        assert_eq!(status, 200, "{later}");
+        assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='later-thread')"), 0);
+        let response = server.post(&control_path("w1", &parent, action), "{}", &[]);
+        assert_eq!(response.status, 200, "{}", response.body);
+        let released_request = if action == "continue" {
+            "controls-reply-9"
+        } else {
+            "later-thread"
+        };
+        wait_for("released mailbox head was not acknowledged", || {
+            f.db().query_row(
+                "SELECT count(*) FROM delivery_attempt_state a JOIN delivery_attempts USING(session_socket_id,worktree_id,attempt_id,address_id) JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) JOIN collaboration_messages m USING(session_socket_id,worktree_id,message_id) WHERE m.request_id=?1 AND a.state='acknowledged'",
+                [released_request],
+                |row| row.get::<_, i64>(0),
+            ).unwrap() == 1
+        });
+        let before_replay = f.count("SELECT count(*) FROM transition_facts");
+        let replay = server.post(&control_path("w1", &parent, action), "{}", &[]);
+        assert_eq!(replay.status, 200, "{}", replay.body);
+        assert_eq!(
+            f.count("SELECT count(*) FROM transition_facts"),
+            before_replay
+        );
+        if action == "continue" {
+            assert_eq!(controls(&f, &parent)["reply_allowance"], 10);
+            assert_eq!(controls(&f, &parent)["paused"], false);
+            assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='controls-reply-9')"), 1);
+        } else {
+            assert_eq!(controls(&f, &parent)["stopped"], true);
+            assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='later-thread')"), 1);
+            let continued = server.post(&control_path("w1", &parent, "continue"), "{}", &[]);
+            assert_eq!(continued.status, 200, "{}", continued.body);
+            assert_eq!(controls(&f, &parent)["stopped"], true);
+            assert_eq!(controls(&f, &parent)["reply_allowance"], 0);
+        }
+        assert_eq!(f.count("SELECT count(*) FROM attention_items WHERE source_kind='automatic_reply_limit' AND resolved_at_ms IS NULL"), 0);
+    }
+}
+
+#[test]
+fn browser_followup_receipt_reports_reply_limit_hold_until_continue() {
+    let f = fixture();
+    let parent = held_thread(&f);
+    assert!(
+        parent["delivery_outlook"][0]["statement"]
+            .as_str()
+            .unwrap()
+            .contains("Continue"),
+        "the reply that exhausts the allowance must report its own hold: {parent}"
+    );
+    let server = Server::start(&f, "not json", true);
+    let source = "Continue the discussion.";
+    let (status, receipt) = post(
+        &server,
+        "held-followup",
+        source,
+        parent["message_id"].as_str(),
+    );
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(controls(&f, &parent)["reply_limit_paused"], true);
+    assert_eq!(recipient_aliases(&receipt), ["planner", "lead"]);
+    for outlook in receipt["delivery_outlook"].as_array().unwrap() {
+        assert_eq!(outlook["agent_status"], "idle");
+        assert_eq!(outlook["lifecycle"], "occupied");
+        let statement = outlook["statement"].as_str().unwrap();
+        assert!(statement.contains("Continue"), "{statement}");
+        assert!(statement.contains("queued"), "{statement}");
+        assert!(!statement.contains("imminent"), "{statement}");
+    }
+    assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='held-followup')"), 0);
+    let (status, replay) = post(
+        &server,
+        "held-followup",
+        source,
+        parent["message_id"].as_str(),
+    );
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(replay["idempotent_replay"], true);
+    assert_eq!(replay["delivery_outlook"], receipt["delivery_outlook"]);
+    let response = server.post(&control_path("w1", &parent, "continue"), "{}", &[]);
+    assert_eq!(response.status, 200, "{}", response.body);
+    let (status, resumed) = post(
+        &server,
+        "held-followup",
+        source,
+        parent["message_id"].as_str(),
+    );
+    assert_eq!(status, 200, "{resumed}");
+    assert_eq!(resumed["idempotent_replay"], true);
+    assert_eq!(resumed["message_id"], receipt["message_id"]);
+    for outlook in resumed["delivery_outlook"].as_array().unwrap() {
+        assert!(
+            !outlook["statement"].as_str().unwrap().contains("Continue"),
+            "{outlook}"
+        );
+    }
+    let (status, ordinary) = post(&server, "ordinary-idle", "@lead A new task.", None);
+    assert_eq!(status, 200, "{ordinary}");
+    assert!(
+        ordinary["delivery_outlook"][0]["statement"]
+            .as_str()
+            .unwrap()
+            .contains("imminent"),
+        "{ordinary}"
+    );
+}
+
+#[test]
+fn browser_receipt_reports_an_earlier_reply_limit_mailbox_head() {
+    let f = fixture();
+    let parent = held_thread(&f);
+    let server = Server::start(&f, "not json", true);
+    let (status, receipt) = post(&server, "behind-limit", "@planner Later task.", None);
+    assert_eq!(status, 200, "{receipt}");
+    assert_ne!(receipt["thread_id"], parent["thread_id"]);
+    let statement = receipt["delivery_outlook"][0]["statement"]
+        .as_str()
+        .unwrap();
+    assert!(statement.contains("Continue"), "{statement}");
+    assert!(!statement.contains("imminent"), "{statement}");
+    assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='behind-limit')"), 0);
+    let (status, unrelated) = post(&server, "unrelated-idle", "@lead Another task.", None);
+    assert_eq!(status, 200, "{unrelated}");
+    assert!(
+        unrelated["delivery_outlook"][0]["statement"]
+            .as_str()
+            .unwrap()
+            .contains("imminent"),
+        "{unrelated}"
+    );
+}
+
+#[test]
+fn browser_thread_controls_enforce_message_post_auth_and_workspace_scope() {
+    let f = fixture();
+    let parent = held_thread(&f);
+    let server = Server::start(&f, "not json", false);
+    for action in ["continue", "stop"] {
+        let path = control_path("w1", &parent, action);
+        assert_eq!(server.request("POST", &path, &[], "{}").status, 401);
+        assert_eq!(
+            server
+                .request("POST", &path, &[("Cookie", &server.cookie)], "{}")
+                .status,
+            403
+        );
+        for headers in [
+            vec![("Host", "evil.example")],
+            vec![("Origin", "https://evil.example")],
+            vec![("Sec-Fetch-Site", "cross-site")],
+        ] {
+            assert_eq!(server.post(&path, "{}", &headers).status, 403);
+        }
+        assert_eq!(
+            server
+                .post(&control_path("w2", &parent, action), "{}", &[])
+                .status,
+            404
+        );
+        assert_eq!(
+            server
+                .post(
+                    &path.replace(parent["thread_id"].as_str().unwrap(), "missing"),
+                    "{}",
+                    &[]
+                )
+                .status,
+            404
+        );
+    }
+    assert_eq!(controls(&f, &parent)["reply_limit_paused"], true);
+    assert_eq!(controls(&f, &parent)["stopped"], false);
+}
+
+#[test]
+fn browser_controls_attention_exposes_thread_and_actions() {
+    let f = fixture();
+    let parent = held_thread(&f);
+    let server = Server::start(&f, "not json", false);
+    let mut events = events(&server);
+    let frame = next_frame(&mut events, &mut String::new());
+    let item = frame["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["source_kind"] == "automatic_reply_limit")
+        .unwrap();
+    assert_eq!(item["thread_id"], parent["thread_id"]);
+    assert_eq!(item["actions"], json!(["continue", "stop"]));
+}
+
+#[test]
+fn browser_controls_stop_wins_a_concurrent_continue() {
+    let f = fixture();
+    let parent = held_thread(&f);
+    let server = Server::start(&f, "not json", false);
+    thread::scope(|scope| {
+        let continued =
+            scope.spawn(|| server.post(&control_path("w1", &parent, "continue"), "{}", &[]));
+        let stopped = scope.spawn(|| server.post(&control_path("w1", &parent, "stop"), "{}", &[]));
+        for response in [continued.join().unwrap(), stopped.join().unwrap()] {
+            assert_eq!(response.status, 200, "{}", response.body);
+        }
+    });
+    assert_eq!(controls(&f, &parent)["stopped"], true);
+    let retry = server.post(&control_path("w1", &parent, "continue"), "{}", &[]);
+    assert_eq!(retry.status, 200, "{}", retry.body);
+    assert_eq!(controls(&f, &parent)["stopped"], true);
+}
+
+#[test]
+fn browser_controls_stop_interrupts_only_the_proven_current_thread_response_once() {
+    for state in ["working", "idle", "new-session", "inactive-binding"] {
+        let f = fixture();
+        let parent = plain_root(&f, "interrupt-root", "Please inspect.");
+        f.herdr.statuses.lock().unwrap().insert(
+            "pane-1-planner".into(),
+            if state == "idle" { "idle" } else { "working" }.into(),
+        );
+        if state == "new-session" {
+            f.herdr
+                .sessions
+                .lock()
+                .unwrap()
+                .insert("pane-1-planner".into(), "replacement-session".into());
+        }
+        if state == "inactive-binding" {
+            f.db()
+                .execute(
+                    "UPDATE pane_bindings SET active=0 WHERE pane_id='pane-1-planner'",
+                    [],
+                )
+                .unwrap();
+        }
+        let server = Server::start(&f, "not json", false);
+        for _ in 0..2 {
+            let response = server.post(&control_path("w1", &parent, "stop"), "{}", &[]);
+            assert_eq!(response.status, 200, "{}", response.body);
+        }
+        let interrupts: Vec<Value> =
+            fs::read_to_string(f.root.join("http-herdr-invocations.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|call| call["args"][1] == "send-keys")
+                .collect();
+        if state == "working" {
+            assert_eq!(interrupts.len(), 1);
+            assert_eq!(
+                interrupts[0]["args"],
+                json!(["agent", "send-keys", "pane-1-planner", "ctrl+c"])
+            );
+        } else {
+            assert!(interrupts.is_empty(), "{state}: {interrupts:?}");
+        }
+    }
+}
+
+struct PromptGate(std::path::PathBuf);
+
+impl Drop for PromptGate {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+struct DiscoveryGate(std::path::PathBuf);
+
+impl DiscoveryGate {
+    fn new(f: &Fixture) -> Self {
+        let gate = Self(f.root.join("discovery-gate"));
+        fs::write(&gate.0, "").unwrap();
+        gate
+    }
+
+    fn wait(&self) {
+        let entered = self.0.with_file_name("discovery-entered");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !entered.exists() {
+            assert!(Instant::now() < deadline, "stop did not enter discovery");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for DiscoveryGate {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn browser_controls_stop_does_not_interrupt_a_later_thread_in_the_same_session() {
+    let f = fixture();
+    let parent = plain_root(&f, "original-thread", "Please inspect.");
+    let attempt = f.text("SELECT attempt_id FROM delivery_attempts").unwrap();
+    let session = xws::session("pane-1-planner");
+    f.status("pane-1-planner", "working");
+    let server = Server::start(&f, "not json", true);
+    let gate = DiscoveryGate::new(&f);
+    thread::scope(|scope| {
+        let stop = scope.spawn(|| server.post(&control_path("w1", &parent, "stop"), "{}", &[]));
+        gate.wait();
+        assert_eq!(controls(&f, &parent)["stopped"], true);
+        StateStore::open(&f.state)
+            .unwrap()
+            .transaction(|tx| {
+                let namespace = StateNamespace::for_space("socket-a", "w1");
+                let attribution = namedrop::MutationAttribution::new(
+                    namedrop::ActorKind::AgentSession,
+                    &session,
+                    43,
+                );
+                let attempt = namedrop::DeliveryAttemptId::new(&attempt);
+                tx.acknowledge_delivery_attempt(
+                    &namespace,
+                    &attempt,
+                    "original-ack",
+                    &namedrop::AgentSessionId::new(&session),
+                    &attribution,
+                )?;
+                tx.transition_delivery_attempt(
+                    &namespace,
+                    &attempt,
+                    namedrop::DeliveryState::Settled,
+                    &attribution,
+                )
+            })
+            .unwrap();
+        f.status("pane-1-planner", "idle");
+        f.clock.0.store(
+            namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let unrelated = scope.spawn(|| {
+            namedrop::send_operator_message(
+                "unrelated-thread",
+                "@planner Work on a different task.",
+                None,
+                &f.runtime("w1", "pane-1-lead"),
+            )
+            .unwrap()
+        });
+        wait_for(
+            "later message did not commit while discovery was blocked",
+            || {
+                f.count("SELECT count(*) FROM collaboration_messages WHERE request_id='unrelated-thread'") == 1
+            },
+        );
+        assert_eq!(
+            f.count("SELECT count(*) FROM delivery_attempt_state WHERE active=1"),
+            0
+        );
+        drop(gate);
+        let unrelated = unrelated.join().unwrap();
+        assert_ne!(unrelated["thread_id"], parent["thread_id"]);
+        assert_eq!(f.count("SELECT count(*) FROM delivery_attempt_state WHERE active=1 AND state IN ('submitted','acknowledged')"), 1);
+        assert_eq!(f.text("SELECT a.agent_session_id FROM delivery_attempts a JOIN delivery_attempt_state s USING(session_socket_id,worktree_id,attempt_id,address_id) WHERE s.active=1"), Some(session));
+        let response = stop.join().unwrap();
+        assert_eq!(response.status, 200, "{}", response.body);
+        let receipt: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(receipt["interrupted_pane_ids"], json!([]), "{receipt}");
+        assert_eq!(receipt["warnings"].as_array().unwrap().len(), 1);
+    });
+    let calls = fs::read_to_string(f.root.join("http-herdr-invocations.jsonl")).unwrap_or_default();
+    assert!(
+        !calls
+            .lines()
+            .any(|line| { serde_json::from_str::<Value>(line).unwrap()["args"][1] == "send-keys" }),
+        "interrupted unrelated work: {calls}"
+    );
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM delivery_attempt_state WHERE active=1 AND state IN ('submitted','acknowledged')"),
+        1
+    );
+}
+
+#[test]
+fn browser_controls_stop_rechecks_the_binding_after_discovery() {
+    for replace_identity in [false, true] {
+        let f = fixture();
+        let parent = plain_root(&f, "retired-binding", "Please inspect.");
+        f.status("pane-1-planner", "working");
+        let server = Server::start(&f, "not json", true);
+        let gate = DiscoveryGate::new(&f);
+        thread::scope(|scope| {
+            let stop = scope.spawn(|| server.post(&control_path("w1", &parent, "stop"), "{}", &[]));
+            gate.wait();
+            assert_eq!(controls(&f, &parent)["stopped"], true);
+            if replace_identity {
+                f.db()
+                    .execute(
+                        "UPDATE pane_bindings SET active=0 WHERE pane_id='pane-1-planner'",
+                        [],
+                    )
+                    .unwrap();
+                StateStore::open(&f.state)
+                    .unwrap()
+                    .transaction(|tx| {
+                        tx.bind_pane(
+                            &StateNamespace::for_space("socket-a", "w1"),
+                            &namedrop::PaneBindingId::new("later-binding"),
+                            &namedrop::PaneAddressId::new("address-w1-planner"),
+                            "pane-1-planner",
+                            &namedrop::MutationAttribution::new(
+                                namedrop::ActorKind::Human,
+                                "rebind",
+                                43,
+                            ),
+                        )
+                    })
+                    .unwrap();
+            } else {
+                f.db()
+                    .execute(
+                        "UPDATE pane_bindings SET active=0 WHERE pane_id='pane-1-planner'",
+                        [],
+                    )
+                    .unwrap();
+            }
+            drop(gate);
+            let response = stop.join().unwrap();
+            assert_eq!(response.status, 200, "{}", response.body);
+            let receipt: Value = serde_json::from_str(&response.body).unwrap();
+            assert_eq!(receipt["interrupted_pane_ids"], json!([]), "{receipt}");
+            assert_eq!(receipt["warnings"].as_array().unwrap().len(), 1);
+        });
+    }
+}
+
+#[test]
+fn browser_thread_controls_refuse_mutations_during_handoff() {
+    use std::{io::Read, os::fd::AsRawFd, sync::mpsc};
+    for action in ["stop", "continue"] {
+        let f = fixture();
+        let server = Server::start(&f, "not json", true);
+        let gate = PromptGate(f.root.join("prompt-gate"));
+        fs::write(&gate.0, "").unwrap();
+        let (_, parent) = support::raw_post(&server, "handoff-control", "@planner Inspect.", None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !f.root.join("prompt-entered").exists() {
+            assert!(Instant::now() < deadline, "mutation did not enter drain");
+            thread::yield_now();
+        }
+        fs::create_dir_all(f.state.join("runtime")).unwrap();
+        let packages = fs::File::create(f.state.join("runtime/packages.lock")).unwrap();
+        fs::set_permissions(
+            f.state.join("runtime/packages.lock"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(packages.as_raw_fd(), libc::LOCK_EX) },
+            0
+        );
+        let mut stream = events(&server);
+        let mut buffered = String::new();
+        next_frame(&mut stream, &mut buffered);
+        fs::write(f.state.join("runtime/migration.json"), "{}").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !buffered.contains("event: restarting") {
+            assert!(Instant::now() < deadline, "server did not start handoff");
+            let mut bytes = [0u8; 8192];
+            let count = stream.read(&mut bytes).unwrap();
+            assert!(count > 0);
+            buffered.push_str(&String::from_utf8_lossy(&bytes[..count]));
+        }
+        let (sender, receiver) = mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                sender
+                    .send(server.post(&control_path("w1", &parent, action), "{}", &[]))
+                    .unwrap()
+            });
+            let early = receiver.recv_timeout(Duration::from_millis(200));
+            drop(gate);
+            let response =
+                early.unwrap_or_else(|_| receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+            assert_eq!(response.status, 503, "{action}: {}", response.body);
+            assert_eq!(controls(&f, &parent)["stopped"], false);
+        });
+        drop(packages);
+    }
+}
+
+fn queue_unrelated_delivery(f: &Fixture, alias: &str) {
+    let namespace = StateNamespace::for_space("socket-a", "w1");
+    let thread = namedrop::ThreadId::new("unrelated-control-drain");
+    let author = f.text("SELECT author_address_id FROM collaboration_messages WHERE author_kind='human' LIMIT 1").unwrap();
+    StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            let at = namedrop::MutationAttribution::new(
+                namedrop::ActorKind::Human,
+                "test",
+                namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
+            );
+            tx.create_thread(&namespace, &thread, "Unrelated task", &at)?;
+            tx.append_message(
+                &namespace,
+                &namedrop::MessageDraft {
+                    thread_id: thread.clone(),
+                    message_id: namedrop::MessageId::new("unrelated-control-post"),
+                    in_reply_to: None,
+                    author_address_id: namedrop::PaneAddressId::new(&author),
+                    author_kind: namedrop::ActorKind::Human,
+                    author_alias_snapshot: "operator".into(),
+                    author_agent_session_snapshot: None,
+                    request_id: "after-held".into(),
+                    authored_source: format!("@{alias} A different task."),
+                    body: "A different task.".into(),
+                    grammar_version: "mention/v1".into(),
+                    recipients: vec![namedrop::MessageRecipientDraft {
+                        address_id: namedrop::PaneAddressId::new(format!("address-w1-{alias}")),
+                        alias_snapshot: alias.into(),
+                        agent_session_snapshot: Some(namedrop::AgentSessionId::new(xws::session(
+                            &format!("pane-1-{alias}"),
+                        ))),
+                        delivery_id: namedrop::DeliveryId::new("unrelated-control-delivery"),
+                    }],
+                    context_references: vec![],
+                },
+                &at,
+            )
+        })
+        .unwrap();
+}
+
+#[test]
+fn controls_answer_before_their_delivery_drain_finishes() {
+    use std::sync::mpsc;
+    let mut observed = Vec::new();
+    for action in ["continue", "stop"] {
+        let f = fixture();
+        let parent = held_thread(&f);
+        let server = Server::start(&f, "not json", true);
+        if action == "stop" {
+            queue_unrelated_delivery(&f, "planner");
+        }
+        let (sender, receiver) = mpsc::channel();
+        let early = thread::scope(|scope| {
+            let gate = PromptGate(f.root.join("prompt-gate"));
+            fs::write(&gate.0, "").unwrap();
+            scope.spawn(|| {
+                sender
+                    .send(server.post(&control_path("w1", &parent, action), "{}", &[]))
+                    .unwrap()
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !f.root.join("prompt-entered").exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "{action}: drain did not reach prompt gate"
+                );
+                thread::yield_now();
+            }
+            let early = receiver.recv_timeout(Duration::from_secs(2));
+            if early.is_ok() {
+                assert!(gate.0.exists());
+                assert_eq!(
+                    controls(&f, &parent)["reply_allowance"],
+                    if action == "continue" { 10 } else { 0 }
+                );
+                let (admission_sender, admission_receiver) = mpsc::channel();
+                let server = &server;
+                let missing = control_path("w1", &parent, action)
+                    .replace(parent["thread_id"].as_str().unwrap(), "missing");
+                scope.spawn(move || {
+                    admission_sender
+                        .send(server.post(&missing, "{}", &[]))
+                        .unwrap();
+                });
+                let admission = admission_receiver.recv_timeout(Duration::from_secs(2));
+                drop(gate);
+                assert_eq!(
+                    admission
+                        .expect("control drain held mutation admission")
+                        .status,
+                    404
+                );
+            } else {
+                drop(gate);
+            }
+            if early.is_err() {
+                let _ = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            early
+        });
+        eprintln!(
+            "{action}: HTTP completed while drain blocked = {}",
+            early.is_ok()
+        );
+        observed.push((action, early));
+    }
+    for (action, early) in observed {
+        let response =
+            early.unwrap_or_else(|error| panic!("{action}: response waited for drain: {error}"));
+        assert_eq!(response.status, 200, "{}", response.body);
+        let receipt: Value = serde_json::from_str(&response.body).unwrap();
+        assert!(receipt.get("drain").is_none(), "{receipt}");
+        assert_eq!(receipt["state"]["stopped"], action == "stop");
+    }
+}
+
+#[test]
+fn browser_continue_grants_ten_more_replies_then_holds_again() {
+    let f = fixture();
+    let mut parent = held_thread(&f);
+    let server = Server::start(&f, "not json", true);
+    let response = server.post(&control_path("w1", &parent, "continue"), "{}", &[]);
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(controls(&f, &parent)["reply_allowance"], 10);
+    for index in 10..20 {
+        let (pane, mention) = if index % 2 == 0 {
+            ("pane-1-planner", "lead")
+        } else {
+            ("pane-1-lead", "planner")
+        };
+        parent = agent_reply(
+            &f,
+            &format!("controls-reply-{index}"),
+            &parent,
+            pane,
+            &format!("@operator Ask @{mention} next."),
+        )
+        .unwrap();
+        assert_eq!(controls(&f, &parent)["reply_allowance"], 19 - index);
+    }
+    assert_eq!(controls(&f, &parent)["reply_limit_paused"], true);
+    assert_eq!(f.count("SELECT count(*) FROM attention_items WHERE source_kind='automatic_reply_limit' AND resolved_at_ms IS NULL"), 1);
+    assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='controls-reply-19')"), 0);
+}
+
+#[test]
+fn committed_stop_drains_after_the_client_disconnects() {
+    use std::{io::Write, net::TcpStream, os::fd::AsRawFd};
+    let f = fixture();
+    let parent = plain_root(&f, "disconnect-stop", "Please inspect.");
+    f.status("pane-1-planner", "working");
+    let server = Server::start(&f, "not json", true);
+    queue_unrelated_delivery(&f, "lead");
+    let discovery = DiscoveryGate::new(&f);
+    let prompt_gate = PromptGate(f.root.join("prompt-gate"));
+    fs::write(&prompt_gate.0, "").unwrap();
+    let session = server.request("GET", "/api/session", &[("Cookie", &server.cookie)], "");
+    let csrf = serde_json::from_str::<Value>(&session.body).unwrap()["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let port: u16 = server
+        .cookie
+        .strip_prefix("namedrop_dashboard_")
+        .unwrap()
+        .split('=')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(stream, "POST {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {}\r\nX-Namedrop-Csrf: {csrf}\r\nContent-Length: 2\r\n\r\n{{}}", control_path("w1", &parent, "stop"), server.cookie).unwrap();
+    discovery.wait();
+    assert_eq!(controls(&f, &parent)["stopped"], true);
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                &linger as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&linger) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    drop(stream);
+    drop(discovery);
+    wait_for(
+        "committed Stop did not drain after client disconnect",
+        || f.root.join("prompt-entered").exists(),
+    );
+    drop(prompt_gate);
+    wait_for("unrelated delivery was not acknowledged", || {
+        f.count("SELECT count(*) FROM delivery_attempt_state a JOIN delivery_attempts USING(session_socket_id,worktree_id,attempt_id,address_id) JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.delivery_id='unrelated-control-delivery' AND a.state='acknowledged'") == 1
+    });
+}
+
+fn assert_unrelated_post_and_writer_progress(f: &Fixture, server: &Server, request: &str) {
+    f.db()
+        .execute_batch("BEGIN IMMEDIATE; ROLLBACK;")
+        .expect("Stop held a SQLite writer reservation across Herdr");
+    let (status, receipt) = support::raw_post(server, request, "Room note while Stop waits.", None);
+    assert_eq!(
+        status, 200,
+        "Stop held global mutation admission: {receipt}"
+    );
+    assert_eq!(
+        f.count(&format!(
+            "SELECT count(*) FROM collaboration_messages WHERE request_id='{request}'"
+        )),
+        1
+    );
+}
+
+struct KeysGate(std::path::PathBuf);
+impl KeysGate {
+    fn new(f: &Fixture) -> Self {
+        let path = f.root.join("keys-gate");
+        fs::write(&path, "").unwrap();
+        Self(path)
+    }
+    fn wait(&self) {
+        wait_for("Stop did not reach send-keys", || {
+            self.0.with_file_name("keys-entered").exists()
+        });
+    }
+}
+impl Drop for KeysGate {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn stop_releases_global_admission_and_sqlite_before_discovery_and_keys() {
+    for phase in ["discovery", "keys"] {
+        let f = fixture();
+        let parent = plain_root(&f, "stop-lock-boundaries", "Please inspect.");
+        f.status("pane-1-planner", "working");
+        let server = Server::start(&f, "not json", true);
+        fs::write(f.root.join("discovery-single"), "").unwrap();
+        let discovery = (phase == "discovery").then(|| DiscoveryGate::new(&f));
+        let keys = (phase == "keys").then(|| KeysGate::new(&f));
+        thread::scope(|scope| {
+            let stopped =
+                scope.spawn(|| server.post(&control_path("w1", &parent, "stop"), "{}", &[]));
+            if let Some(gate) = &discovery {
+                gate.wait();
+            }
+            if let Some(gate) = &keys {
+                gate.wait();
+            }
+            assert_eq!(controls(&f, &parent)["stopped"], true);
+            assert_unrelated_post_and_writer_progress(&f, &server, &format!("during-{phase}"));
+            drop(discovery);
+            drop(keys);
+            let response = stopped.join().unwrap();
+            assert_eq!(response.status, 200, "{}", response.body);
+            let receipt: Value = serde_json::from_str(&response.body).unwrap();
+            assert_eq!(receipt["interrupted_pane_ids"], json!(["pane-1-planner"]));
+            assert_eq!(receipt["warnings"], json!([]));
+        });
+    }
+}
+
+#[test]
+fn later_input_waits_until_stops_proven_interrupt_finishes() {
+    let f = fixture();
+    let parent = plain_root(&f, "stop-first", "Please inspect.");
+    f.status("pane-1-planner", "working");
+    let server = Server::start(&f, "not json", true);
+    let gate = KeysGate::new(&f);
+    thread::scope(|scope| {
+        let stopped = scope.spawn(|| server.post(&control_path("w1", &parent, "stop"), "{}", &[]));
+        gate.wait();
+        let attempt = f.text("SELECT attempt_id FROM delivery_attempts").unwrap();
+        StateStore::open(&f.state)
+            .unwrap()
+            .transaction(|tx| {
+                tx.transition_delivery_attempt(
+                    &StateNamespace::for_space("socket-a", "w1"),
+                    &namedrop::DeliveryAttemptId::new(&attempt),
+                    namedrop::DeliveryState::Settled,
+                    &namedrop::MutationAttribution::new(
+                        namedrop::ActorKind::AgentSession,
+                        xws::session("pane-1-planner"),
+                        namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
+                    ),
+                )
+            })
+            .unwrap();
+        f.clock.0.store(
+            namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        f.status("pane-1-planner", "idle");
+        let later = scope.spawn(|| {
+            namedrop::send_operator_message(
+                "after-keys",
+                "@planner Later task.",
+                None,
+                &f.runtime("w1", "pane-1-lead"),
+            )
+            .unwrap()
+        });
+        wait_for("later task did not commit", || {
+            f.count("SELECT count(*) FROM collaboration_messages WHERE request_id='after-keys'")
+                == 1
+        });
+        assert_eq!(
+            f.count("SELECT count(*) FROM delivery_attempts"),
+            1,
+            "later dispatch crossed a held pane effect"
+        );
+        assert_unrelated_post_and_writer_progress(&f, &server, "other-pane-progress");
+        assert_eq!(
+            f.count("SELECT count(*) FROM delivery_attempts"),
+            1,
+            "later dispatch crossed a held interrupt while unrelated HTTP progressed"
+        );
+        drop(gate);
+        let response = stopped.join().unwrap();
+        assert_eq!(response.status, 200, "{}", response.body);
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.body).unwrap()["interrupted_pane_ids"],
+            json!(["pane-1-planner"])
+        );
+        assert_ne!(later.join().unwrap()["thread_id"], parent["thread_id"]);
+        assert_eq!(f.count("SELECT count(*) FROM delivery_attempts"), 2);
+        assert_eq!(f.herdr.envelopes("pane-1-planner").len(), 1);
+    });
+}
+
+#[test]
+fn later_doctor_prompt_invalidates_an_old_active_mailbox_stop() {
+    use std::sync::{Mutex, mpsc};
+    struct BlockInput<'a> {
+        herdr: &'a xws::FakeHerdr,
+        entered: mpsc::Sender<()>,
+        release: Mutex<mpsc::Receiver<()>>,
+    }
+    impl HerdrCommandExecutor for BlockInput<'_> {
+        fn execute(&self, args: &[&str]) -> Result<namedrop::HerdrCommandOutput, String> {
+            if args.starts_with(&["agent", "prompt"]) {
+                self.entered.send(()).unwrap();
+                self.release.lock().unwrap().recv().unwrap();
+            }
+            self.herdr.execute(args)
+        }
+    }
+    let f = fixture();
+    let parent = plain_root(&f, "doctor-later", "Please inspect.");
+    let session = xws::session("pane-1-planner");
+    f.status("pane-1-planner", "working");
+    let server = Server::start(&f, "not json", true);
+    let (entered, input_entered) = mpsc::channel();
+    let (release, input_release) = mpsc::channel();
+    let blocked = BlockInput {
+        herdr: &f.herdr,
+        entered,
+        release: Mutex::new(input_release),
+    };
+    let base = f.runtime("w1", "pane-1-planner");
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: base.state_directory,
+        home_directory: base.home_directory,
+        agent_config: base.agent_config,
+        cwd: base.cwd,
+        workspace_id: base.workspace_id,
+        current_pane_id: base.current_pane_id,
+        session_socket_id: base.session_socket_id,
+        herdr: &blocked,
+        clock: base.clock,
+        ids: base.ids,
+    };
+    let (responded, response) = mpsc::channel();
+    thread::scope(|scope| {
+        let doctor = scope.spawn(|| namedrop::request_doctor_assistance(&runtime, &session));
+        input_entered.recv_timeout(Duration::from_secs(2)).unwrap();
+        scope.spawn(|| {
+            responded
+                .send(server.post(&control_path("w1", &parent, "stop"), "{}", &[]))
+                .unwrap()
+        });
+        wait_for("Stop did not commit behind later input", || {
+            controls(&f, &parent)["stopped"] == true
+        });
+        let early = response.recv_timeout(Duration::from_millis(50));
+        release.send(()).unwrap();
+        doctor.join().unwrap().unwrap();
+        assert!(
+            early.is_err(),
+            "Stop bypassed the later input's physical pane gate"
+        );
+        let response = response.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(response.status, 200, "{}", response.body);
+        let receipt: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(receipt["interrupted_pane_ids"], json!([]));
+        assert_eq!(receipt["warnings"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            f.count("SELECT count(*) FROM delivery_attempt_state WHERE active=1"),
+            1
+        );
+    });
+}
+
+#[test]
+fn handoff_keeps_worker_ownership_until_committed_interrupt_effects_finish() {
+    use std::{io::Read, os::fd::AsRawFd};
+    let f = fixture();
+    let parent = plain_root(&f, "handoff-effect", "Please inspect.");
+    f.status("pane-1-planner", "working");
+    let server = Server::start(&f, "not json", true);
+    let gate = KeysGate::new(&f);
+    fs::create_dir_all(f.state.join("runtime")).unwrap();
+    let packages = fs::File::create(f.state.join("runtime/packages.lock")).unwrap();
+    fs::set_permissions(
+        f.state.join("runtime/packages.lock"),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    assert_eq!(
+        unsafe { libc::flock(packages.as_raw_fd(), libc::LOCK_EX) },
+        0
+    );
+    thread::scope(|scope| {
+        let stopped = scope.spawn(|| server.post(&control_path("w1", &parent, "stop"), "{}", &[]));
+        gate.wait();
+        let mut stream = events(&server);
+        let mut buffered = String::new();
+        next_frame(&mut stream, &mut buffered);
+        fs::write(f.state.join("runtime/migration.json"), "{}").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !buffered.contains("event: restarting") {
+            assert!(Instant::now() < deadline, "handoff not announced");
+            let mut bytes = [0; 8192];
+            let count = stream.read(&mut bytes).unwrap();
+            assert!(count > 0);
+            buffered.push_str(&String::from_utf8_lossy(&bytes[..count]));
+        }
+        assert_eq!(
+            server
+                .post(&control_path("w1", &parent, "continue"), "{}", &[])
+                .status,
+            503
+        );
+        let retired_hub = server.request("GET", "/api/spaces", &[("Cookie", &server.cookie)], "");
+        assert_eq!(retired_hub.status, 200);
+        assert_eq!(retired_hub.body, "[]", "hub has not retired");
+        let manager = fs::File::open(f.state.join("dashboard/channel-manager.lock")).unwrap();
+        let observed_until = Instant::now() + Duration::from_millis(150);
+        loop {
+            let acquired =
+                unsafe { libc::flock(manager.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            assert_ne!(
+                acquired, 0,
+                "handoff retired workers while a committed Ctrl+C was still blocked"
+            );
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::EWOULDBLOCK)
+            );
+            if Instant::now() >= observed_until {
+                break;
+            }
+            thread::yield_now();
+        }
+        drop(gate);
+        assert_eq!(stopped.join().unwrap().status, 200);
+        wait_for(
+            "completed effects did not release worker ownership for handoff",
+            || (unsafe { libc::flock(manager.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }) == 0,
+        );
+    });
+    drop(server);
+    drop(packages);
+}
+
+#[test]
+fn failed_interrupt_reports_committed_stop_with_an_unconfirmed_warning() {
+    let f = fixture();
+    let parent = plain_root(&f, "failed-interrupt", "Please inspect.");
+    f.status("pane-1-planner", "working");
+    let server = Server::start(&f, "not json", true);
+    fs::write(f.root.join("keys-error"), "").unwrap();
+    let response = server.post(&control_path("w1", &parent, "stop"), "{}", &[]);
+    assert_eq!(response.status, 200, "{}", response.body);
+    let receipt: Value = serde_json::from_str(&response.body).unwrap();
+    assert_eq!(receipt["state"]["stopped"], true);
+    assert_eq!(controls(&f, &parent)["stopped"], true);
+    assert_eq!(receipt["interrupted_pane_ids"], json!([]));
+    let warnings = receipt["warnings"].as_array().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .contains("Could not confirm interruption")
+    );
+    assert!(
+        warnings[0]
+            .as_str()
+            .unwrap()
+            .contains("ambiguous interrupt transport failure")
+    );
+}

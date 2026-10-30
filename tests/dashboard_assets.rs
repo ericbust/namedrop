@@ -648,11 +648,10 @@ fn old_embedded_metadata_defaults_to_embedded_and_stale_metadata_does_not_choose
     dashboard.open(None);
     let mut info = dashboard.info();
     info.as_object_mut().unwrap().remove("ui");
-    fs::write(
-        dashboard.state().join("dashboard/server.json"),
-        serde_json::to_vec(&info).unwrap(),
-    )
-    .unwrap();
+    let metadata = dashboard.state().join("dashboard/server.json");
+    let staged_metadata = metadata.with_extension("json.tmp");
+    fs::write(&staged_metadata, serde_json::to_vec(&info).unwrap()).unwrap();
+    fs::rename(staged_metadata, metadata).unwrap();
     assert_eq!(dashboard.open(None)["server"], "running");
     let ui = dashboard.ui("custom");
     assert!(
@@ -1410,7 +1409,17 @@ fn fix_forward_stalled_asset_writer_times_out() {
         .unwrap();
     dashboard.open(Some(&ui));
     let pid = dashboard.info()["pid"].as_u64().unwrap();
-    let thread_count = || fs::read_dir(format!("/proc/{pid}/task")).unwrap().count();
+    let thread_count = || {
+        fs::read_dir(format!("/proc/{pid}/task"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|task| {
+                !fs::read_to_string(task.path().join("comm"))
+                    .unwrap_or_default()
+                    .starts_with("channel-router-")
+            })
+            .count()
+    };
     eventually(|| (thread_count() == 2).then_some(())).expect("initial health workers finish");
     let mut stream = connect(dashboard.port(), "/large.bin", &[]);
     let mut byte = [0];
