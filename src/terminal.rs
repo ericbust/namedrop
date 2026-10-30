@@ -1,10 +1,5 @@
-use crate::lifecycle::locate_agent_session_pane;
 use crate::{ActorKind, Clock, DeliveryAttemptId, IdGenerator, MutationAttribution, StateStore};
-use crate::{
-    HerdrCommandExecutor, LifecycleRuntime, PaneType, discover_worktree,
-    discover_worktree_for_workspace,
-};
-use serde::Deserialize;
+use crate::{Host, LifecycleRuntime, PaneType};
 use std::{
     io::{Read, Write},
     process::{Command, Stdio},
@@ -39,13 +34,17 @@ pub(crate) fn runner_command<E, C, I>(
 
 /// Runs inside the target terminal. The atomic claim rejects replay and binds
 /// execution to the physical terminal, not a potentially recycled pane label.
-pub fn execute_terminal<E: HerdrCommandExecutor, C: Clock, I: IdGenerator>(
+pub fn execute_terminal<E: Host, C: Clock, I: IdGenerator>(
     attempt: &str,
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<i32, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(id), None)?,
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
     };
     let ns = discovered.namespace(runtime.session_socket_id);
     let pane = discovered
@@ -56,7 +55,7 @@ pub fn execute_terminal<E: HerdrCommandExecutor, C: Clock, I: IdGenerator>(
     if pane.agent.is_some() || pane.agent_session_id.is_some() {
         return Err("terminal pane now contains an agent; command was not executed".to_owned());
     }
-    if !process_info(runtime.herdr, &pane.pane_id).is_some_and(|p| {
+    if !runtime.host.process_info(&pane.pane_id).is_some_and(|p| {
         p.foreground_processes
             .iter()
             .any(|p| p.pid == std::process::id())
@@ -151,91 +150,10 @@ fn copy_output(mut reader: impl Read, mut writer: impl Write) -> Result<String, 
     Ok(text)
 }
 
-#[derive(Deserialize)]
-struct ProcessInfo {
-    shell_pid: u64,
-    foreground_process_group_id: u64,
-    #[serde(default)]
-    foreground_processes: Vec<Process>,
-}
-#[derive(Deserialize)]
-struct Process {
-    pid: u32,
-}
-
-pub(crate) fn shell_is_available(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> bool {
-    process_info(herdr, pane_id)
-        .is_some_and(|p| p.shell_pid > 0 && p.shell_pid == p.foreground_process_group_id)
-}
-
-fn process_info(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Option<ProcessInfo> {
+pub(crate) fn shell_is_available(herdr: &impl Host, pane_id: &str) -> bool {
     herdr
-        .execute(&["pane", "process-info", "--pane", pane_id])
-        .ok()
-        .and_then(|out| parse_process_info(&out.stdout))
-}
-
-fn parse_process_info(stdout: &str) -> Option<ProcessInfo> {
-    serde_json::from_str::<serde_json::Value>(stdout)
-        .ok()
-        .and_then(|v| {
-            serde_json::from_value::<ProcessInfo>(v["result"]["process_info"].clone()).ok()
-        })
-}
-
-/// A pane ID inherited from the environment only identifies this process when
-/// the process runs inside that pane, under its shell, or its agent session is
-/// the one Herdr says runs in that pane (Claude Code's Bash can sit outside the
-/// shell's process tree). A daemon keeps the variables of the pane it was first
-/// started from, so the inherited value can name a pane the caller left long
-/// ago. Acting as that pane is a silent identity error, so the check refuses
-/// instead of falling back. When Herdr does not answer, nothing was learned
-/// about the pane, so its own error is the reason given.
-pub fn verify_inherited_pane(
-    herdr: &impl HerdrCommandExecutor,
-    pane_id: &str,
-    agent_session_ids: &[&str],
-) -> Result<(), String> {
-    let remedy = "Pass --herdr-pane <pane-id> to say which pane this command acts for.";
-    let output = herdr
-        .execute(&["pane", "process-info", "--pane", pane_id])
-        .map_err(|error| {
-            format!("could not verify the inherited HERDR_PANE_ID={pane_id}: {error} {remedy}")
-        })?;
-    let shell_pid = parse_process_info(&output.stdout)
-        .map(|p| p.shell_pid)
-        .filter(|pid| *pid > 0)
-        .ok_or_else(|| {
-            format!(
-                "HERDR_PANE_ID={pane_id} was inherited from the environment, but Herdr reports \
-                 no shell for pane {pane_id}, so the pane could not be verified. {remedy}"
-            )
-        })?;
-    let caller = std::process::id();
-    if ancestor_pids(caller).any(|pid| u64::from(pid) == shell_pid) {
-        return Ok(());
-    }
-    if agent_session_ids.iter().any(|session| {
-        locate_agent_session_pane(herdr, session).is_some_and(|(_, pane)| pane == pane_id)
-    }) {
-        return Ok(());
-    }
-    let sessions = if agent_session_ids.is_empty() {
-        "There is no CODEX_SESSION_ID or CLAUDE_CODE_SESSION_ID in the environment to vouch \
-         for it."
-            .to_owned()
-    } else {
-        format!(
-            "None of the {} agent session ID(s) in the environment runs in pane {pane_id}.",
-            agent_session_ids.len()
-        )
-    };
-    Err(format!(
-        "HERDR_PANE_ID={pane_id} was inherited from the environment, but this process (pid \
-         {caller}) is not running inside pane {pane_id}: the pane's shell (pid {shell_pid}) is \
-         not one of its ancestors. {sessions} A background daemon keeps the pane variables it \
-         was started with. {remedy}"
-    ))
+        .process_info(pane_id)
+        .is_some_and(|p| p.shell_pid > 0 && p.shell_pid == p.foreground_process_group_id)
 }
 
 /// The ancestors of `pid`, nearest first, at most 1024 of them.
@@ -245,11 +163,9 @@ pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
 
 /// The pids Herdr reports in a pane's foreground process group, or `None` when
 /// Herdr does not answer.
-pub(crate) fn foreground_process_ids(
-    herdr: &impl HerdrCommandExecutor,
-    pane_id: &str,
-) -> Option<Vec<u32>> {
-    process_info(herdr, pane_id)
+pub(crate) fn foreground_process_ids(herdr: &impl Host, pane_id: &str) -> Option<Vec<u32>> {
+    herdr
+        .process_info(pane_id)
         .map(|info| info.foreground_processes.iter().map(|p| p.pid).collect())
 }
 
@@ -390,12 +306,16 @@ fn parent_pid(pid: u32) -> Option<u32> {
 }
 
 /// Detection never infers a terminal merely from a missing native session ID.
-pub fn detect_pane_type<E: HerdrCommandExecutor, C, I>(
+pub fn detect_pane_type<E: Host, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Option<PaneType>, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(id), None)?,
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
     };
     let pane = discovered
         .panes
@@ -405,7 +325,9 @@ pub fn detect_pane_type<E: HerdrCommandExecutor, C, I>(
     if pane.agent.is_some() || pane.agent_session_id.is_some() {
         return Ok(Some(PaneType::Agent));
     }
-    Ok(process_info(runtime.herdr, &pane.pane_id)
+    Ok(runtime
+        .host
+        .process_info(&pane.pane_id)
         .is_some_and(|p| {
             p.shell_pid > 0
                 && (p.shell_pid == p.foreground_process_group_id
@@ -418,12 +340,16 @@ pub fn detect_pane_type<E: HerdrCommandExecutor, C, I>(
 
 /// Both naming surfaces retain a saved type before considering live detection.
 /// Opening/cancelling a prompt must not create or migrate persisted state.
-pub fn default_pane_type<E: HerdrCommandExecutor, C, I>(
+pub fn default_pane_type<E: Host, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Option<PaneType>, String> {
     let discovered = match runtime.workspace_id {
-        Some(id) => discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(id) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(id), None)?,
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
     };
     if let Some(mut store) =
         StateStore::open_read_only(runtime.state_directory).map_err(|e| e.to_string())?

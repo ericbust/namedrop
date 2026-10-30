@@ -717,7 +717,7 @@ pub(crate) fn refresh_user_integration_packages<E, C, I>(
     discovered: &DiscoveredWorktree,
 ) -> Result<IntegrationPackageInstallation, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {

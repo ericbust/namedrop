@@ -49,6 +49,26 @@ pub trait HerdrCommandExecutor {
     }
 }
 
+impl<T: HerdrCommandExecutor + ?Sized> HerdrCommandExecutor for &T {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        (**self).execute(args)
+    }
+
+    fn execute_bounded(
+        &self,
+        args: &[&str],
+        timeout: std::time::Duration,
+        cancelled: &std::sync::atomic::AtomicBool,
+        max_output_bytes: usize,
+    ) -> Result<HerdrCommandOutput, String> {
+        (**self).execute_bounded(args, timeout, cancelled, max_output_bytes)
+    }
+
+    fn classify_prompt_failure(&self, error: &str) -> PromptFailureKind {
+        (**self).classify_prompt_failure(error)
+    }
+}
+
 pub trait Clock {
     fn now_unix_ms(&self) -> u64;
 

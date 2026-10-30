@@ -1,7 +1,7 @@
 use crate::{
     AgentSessionId, DeliveryAttemptId, DiscoveredPane, DiscoveredWorktree, LifecycleRuntime,
     MessageId, MutationAttribution, PaneAddressId, PromptFailureKind, StateNamespace, StateStore,
-    ThreadId, TransitionKind, discover_worktree, discover_worktree_for_workspace,
+    ThreadId, TransitionKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -330,7 +330,7 @@ pub fn issue_registration_challenge<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<IntegrationChallenge, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -388,7 +388,7 @@ pub(crate) fn onboard_settled_integrations<E, C, I>(
     discovered: &DiscoveredWorktree,
 ) -> Result<crate::IntegrationPackageInstallation, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -431,7 +431,7 @@ fn onboard_settled_integration<E, C, I>(
     installation: &crate::IntegrationPackageInstallation,
 ) -> Result<(), String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -585,10 +585,7 @@ where
         agent_runtime,
         &challenge.nonce,
     )?;
-    match runtime
-        .herdr
-        .execute(&["agent", "prompt", &pane.pane_id, &prompt])
-    {
+    match runtime.host.prompt(&pane.pane_id, &prompt) {
         Ok(_) => finish_challenge_prompt(
             runtime,
             &namespace,
@@ -596,10 +593,7 @@ where
             TransitionKind::Submitted,
             &attribution,
         ),
-        Err(error)
-            if runtime.herdr.classify_prompt_failure(&error)
-                == PromptFailureKind::TemporaryPreInvocation =>
-        {
+        Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {
             finish_challenge_prompt(
                 runtime,
                 &namespace,
@@ -608,7 +602,7 @@ where
                 &attribution,
             )
         }
-        Err(error) => record_registration_failure(&challenge.nonce, &error, runtime),
+        Err(error) => record_registration_failure(&challenge.nonce, &error.message, runtime),
     }
 }
 
@@ -620,7 +614,7 @@ fn automatically_register_integration<E, C, I>(
     namespace: &StateNamespace,
 ) -> Result<(), String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -767,7 +761,7 @@ fn concurrent_native_registration_completes_one_profile() {
         workspace_id: Some("space"),
         current_pane_id: Some("pane"),
         session_socket_id: "socket",
-        herdr: &Host,
+        host: &crate::TuiHost::new(&Host),
         clock: &crate::SystemClock,
         ids: &crate::ProcessIds::default(),
     };
@@ -892,7 +886,7 @@ fn finish_challenge_prompt<E, C, I>(
     attribution: &MutationAttribution,
 ) -> Result<(), String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
 {
     StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
@@ -944,7 +938,7 @@ pub fn execute_integration_operation<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1044,7 +1038,7 @@ fn record_registration_failure<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<(), String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1074,7 +1068,7 @@ fn execute_attempt_operation<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1190,7 +1184,7 @@ fn execute_delivery_inbox<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -1292,11 +1286,15 @@ fn integration_discovery<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<DiscoveredWorktree, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
 {
     Ok(match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(workspace_id), None)?,
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
     })
 }
 

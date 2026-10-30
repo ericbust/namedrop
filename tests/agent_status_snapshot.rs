@@ -475,7 +475,7 @@ fn runtime<'a>(
     clock: &'a TestClock,
     ids: &'a SequenceIds,
     pane_id: &'a str,
-) -> LifecycleRuntime<'a, FakeHerdr, TestClock, SequenceIds> {
+) -> LifecycleRuntime<'a, namedrop::TuiHost<&'a FakeHerdr>, TestClock, SequenceIds> {
     LifecycleRuntime {
         state_directory: &directory.state,
         home_directory: Some(&directory.home),
@@ -484,7 +484,7 @@ fn runtime<'a>(
         workspace_id: Some("workspace-1"),
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        herdr,
+        host: Box::leak(Box::new(namedrop::TuiHost::new(herdr))),
         clock,
         ids,
     }
@@ -493,7 +493,7 @@ fn runtime<'a>(
 fn register(
     address_id: &str,
     agent_runtime: AgentRuntime,
-    runtime: &LifecycleRuntime<'_, FakeHerdr, TestClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, TestClock, SequenceIds>,
 ) {
     let challenge =
         issue_registration_challenge(&PaneAddressId::new(address_id), agent_runtime, runtime)
@@ -515,7 +515,7 @@ fn register(
 /// which `collect_agent_status` reads from the environment, is set under one
 /// lock rather than concurrently with another test's reading.
 fn collect(
-    runtime: &LifecycleRuntime<'_, FakeHerdr, TestClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, TestClock, SequenceIds>,
     expected_terminal: &str,
     expected_session: Option<&str>,
     panel_pane: Option<&str>,

@@ -1,6 +1,5 @@
 use crate::{
     ActorKind, LifecycleRuntime, MutationAttribution, PaneAddressId, StateStore, ThreadId,
-    discover_worktree, discover_worktree_for_workspace,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -52,13 +51,17 @@ pub fn execute_control_operation<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(workspace_id), None)?,
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution =
@@ -211,8 +214,12 @@ where
             let mut interrupted_pane_ids = Vec::new();
             let mut warnings = Vec::new();
             let live_discovered = match runtime.workspace_id {
-                Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id),
-                None => discover_worktree(runtime.herdr, runtime.cwd),
+                Some(workspace_id) => runtime
+                    .host
+                    .space(crate::SpaceLocator::Workspace(workspace_id), None),
+                None => runtime
+                    .host
+                    .space(crate::SpaceLocator::Checkout(runtime.cwd), None),
             };
             let live_discovered = match live_discovered {
                 Ok(live_discovered) => Some(live_discovered),
@@ -252,10 +259,10 @@ where
                     continue;
                 }
                 match runtime
-                    .herdr
+                    .host
                     // Herdr key-combo syntax joins a modifier to its key with
                     // `+`; it answers `ctrl-c` with `invalid_key`.
-                    .execute(&["agent", "send-keys", &response.pane_id, "ctrl+c"])
+                    .interrupt(&response.pane_id)
                 {
                     Ok(_) => interrupted_pane_ids.push(response.pane_id.clone()),
                     Err(error) => warnings.push(format!(

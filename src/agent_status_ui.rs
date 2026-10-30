@@ -6,10 +6,7 @@
 //! delivery state. Pane transcripts reach this module as untrusted text and are
 //! stripped of terminal control sequences before they are ever printed.
 use super::popup_input::InputMode;
-use namedrop::{
-    HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime, cli::RuntimeOptions,
-    discover_worktree_for_workspace,
-};
+use namedrop::{Host, LifecycleRuntime, cli::RuntimeOptions};
 use serde_json::Value;
 use std::{
     env,
@@ -151,27 +148,31 @@ pub(crate) enum Identity {
 /// ones. That call makes up to two Herdr requests on the default ten-second
 /// timeout; here they share one short deadline and the pass's cancellation
 /// flag, so closing the popup ends the recheck instead of waiting it out.
-struct BoundedReads<'a, E> {
-    inner: &'a E,
+struct BoundedReads<'a> {
     deadline: Instant,
     cancelled: &'a AtomicBool,
 }
 
-impl<E: HerdrCommandExecutor> HerdrCommandExecutor for BoundedReads<'_, E> {
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+impl namedrop::Budget for BoundedReads<'_> {
+    fn remaining(&self) -> Result<Duration, String> {
         let remaining = self.deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err("confirming the invoking pane ran out of time".to_owned());
         }
-        self.inner
-            .execute_bounded(args, remaining, self.cancelled, MAX_IDENTITY_OUTPUT_BYTES)
+        Ok(remaining)
+    }
+    fn cancelled(&self) -> &AtomicBool {
+        self.cancelled
+    }
+    fn max_output_bytes(&self) -> usize {
+        MAX_IDENTITY_OUTPUT_BYTES
     }
 }
 
 /// Rereads the pane the popup was opened for. A different physical terminal or
 /// a different agent session means the popup is now looking at someone else's
 /// work, so results collected for the original identity must be discarded.
-pub(crate) fn latest_identity<E: HerdrCommandExecutor, C, I>(
+pub(crate) fn latest_identity<E: Host, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
     workspace: &str,
     pane: &str,
@@ -180,11 +181,13 @@ pub(crate) fn latest_identity<E: HerdrCommandExecutor, C, I>(
     cancelled: &AtomicBool,
 ) -> Identity {
     let reads = BoundedReads {
-        inner: runtime.herdr,
         deadline: Instant::now() + IDENTITY_BUDGET,
         cancelled,
     };
-    let panes = match discover_worktree_for_workspace(&reads, workspace) {
+    let panes = match runtime
+        .host
+        .space(namedrop::SpaceLocator::Workspace(workspace), Some(&reads))
+    {
         Ok(worktree) => worktree.panes,
         Err(error) => {
             return Identity::Unconfirmed(format!("Could not confirm the invoking pane: {error}"));

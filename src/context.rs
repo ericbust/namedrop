@@ -1,9 +1,8 @@
 use crate::{
     ActorKind, AgentSessionId, Clock, ContextGrantDraft, ContextGrantId, ContextGrantRecord,
-    ContextGrantState, ContextSnapshotId, EvidenceKind, EvidencePointer, HerdrCommandExecutor,
-    IdGenerator, LifecycleRuntime, MessageId, MutationAttribution, PaneAddressId, StateNamespace,
-    StateStore, StoreError, StoreErrorKind, ThreadId, discover_worktree,
-    discover_worktree_for_workspace,
+    ContextGrantState, ContextSnapshotId, EvidenceKind, EvidencePointer, Host, IdGenerator,
+    LifecycleRuntime, MessageId, MutationAttribution, PaneAddressId, StateNamespace, StateStore,
+    StoreError, StoreErrorKind, ThreadId,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -256,7 +255,7 @@ pub fn execute_context_operation<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -269,7 +268,7 @@ pub fn execute_human_context_operation<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -283,7 +282,7 @@ fn execute_context_operation_as<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -314,7 +313,7 @@ fn create_human_grant<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -363,7 +362,7 @@ fn revoke_human_grant<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -394,7 +393,7 @@ fn publish_snapshot<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -678,7 +677,7 @@ pub(crate) fn record_snapshot_activation_failure<E, C, I>(
     error: &str,
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -715,7 +714,7 @@ fn inspect_context<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -866,7 +865,7 @@ fn read_context<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -961,17 +960,8 @@ where
                         })
                 })
                 .map_err(|error| error.to_string())?;
-            let lines = max_lines.to_string();
-            let output = runtime.herdr.execute(&[
-                "pane",
-                "read",
-                &source,
-                "--source",
-                "recent-unwrapped",
-                "--lines",
-                &lines,
-            ])?;
-            Value::String(redact_disclosure_text(&output.stdout))
+            let output = runtime.host.read(&source, *max_lines, None)?;
+            Value::String(redact_disclosure_text(&output))
         }
         EvidenceSelection::File {
             locator,
@@ -1187,11 +1177,15 @@ fn discover<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<(StateNamespace, crate::DiscoveredWorktree), String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace_id) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(workspace_id), None)?,
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
     };
     Ok((discovered.namespace(runtime.session_socket_id), discovered))
 }

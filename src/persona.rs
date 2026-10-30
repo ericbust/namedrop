@@ -9,7 +9,7 @@
 //! fork), so a turn pays only for the rows.
 
 use crate::{
-    AgentRuntime, Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, PaneAddressLifecycle,
+    AgentRuntime, Clock, Host, IdGenerator, LifecycleRuntime, PaneAddressLifecycle,
     PaneAddressRecord, PaneType, StateStore,
 };
 
@@ -68,7 +68,7 @@ struct ActivatedSpace {
 /// turn untouched rather than interrupting the person with a diagnostic.
 fn activated_space<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Option<ActivatedSpace>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -79,8 +79,12 @@ where
     // every prompt skips the Herdr discovery below instead of paying for it.
     let mut store = StateStore::open_read_only(runtime.state_directory).ok()??;
     let discovered = match runtime.workspace_id {
-        Some(workspace_id) => crate::discover_worktree_for_workspace(runtime.herdr, workspace_id),
-        None => crate::discover_worktree(runtime.herdr, runtime.cwd),
+        Some(workspace_id) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(workspace_id), None),
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None),
     }
     .ok()?;
     let setup = crate::lifecycle::load_collaboration_setup_from_store(
@@ -107,7 +111,7 @@ where
 /// happens after activation and often after the session has started.
 pub(crate) fn session_policy<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Option<String>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -123,7 +127,7 @@ pub(crate) fn workspace_context<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Option<WorkspaceContext>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {

@@ -6,10 +6,9 @@ use namedrop::{
     HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, LeaseDraft, LifecycleRuntime,
     MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft,
     PaneAddressId, PaneAddressLifecycle, PaneBindingId, PaneRoleId, PaneRolePreset, StateNamespace,
-    StateStore, StoreErrorKind, ThreadId, WorktreeId, discover_worktree,
-    discover_worktree_for_workspace, execute_lifecycle_operation, execute_message_operation,
-    locate_agent_session_pane, normalize_alias, package_directory, pane_workspace,
-    reconcile_discovered_panes, validate_alias,
+    StateStore, StoreErrorKind, ThreadId, WorktreeId, execute_lifecycle_operation,
+    execute_message_operation, normalize_alias, package_directory, reconcile_discovered_panes,
+    validate_alias,
 };
 use rusqlite::Connection;
 use std::{
@@ -165,7 +164,7 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &NameClock,
         ids: &ids,
     };
@@ -267,7 +266,7 @@ fn name_leaves_a_tab_shared_by_two_agents_unchanged() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &MultiPaneHerdr,
+        host: &namedrop::TuiHost::new(&MultiPaneHerdr),
         clock: &MultiPaneClock,
         ids: &ids,
     };
@@ -349,7 +348,7 @@ fn name_succeeds_with_a_warning_when_the_cosmetic_tab_label_cannot_be_applied() 
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &RenameFailureClock,
         ids: &ids,
     };
@@ -474,7 +473,7 @@ fn managed_singleton_tab_labels_restore_only_while_the_plugin_still_owns_them() 
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &ManagedLabelClock,
         ids: &ids,
     };
@@ -627,7 +626,7 @@ fn assert_native_session_events(events: &[(Option<&'static str>, serde_json::Val
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &PendingSessionClock,
         ids: &ids,
     };
@@ -763,7 +762,7 @@ fn name_upgrades_an_existing_address_to_zero_turn_registration() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &UpgradeClock,
         ids: &ids,
     };
@@ -921,7 +920,7 @@ fn restart_reconciliation_refreshes_panes_before_delivery_drain() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -1006,7 +1005,7 @@ fn activation_keeps_dispatch_gated_when_initial_reconciliation_fails() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: &namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -1200,7 +1199,13 @@ fn herdr_discovery_and_restart_reconciliation_fail_closed() {
         }
     }
 
-    let discovered = discover_worktree(&FakeHerdr, Path::new("/repo")).unwrap();
+    let discovered = namedrop::Host::space(
+        &namedrop::TuiHost::new(&FakeHerdr),
+        namedrop::SpaceLocator::Checkout(Path::new("/repo")),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap();
     assert_eq!(discovered.worktree_id, WorktreeId::new("/repo"));
     assert_eq!(discovered.workspace_id, "workspace-1");
     assert_eq!(discovered.panes.len(), 1);
@@ -1313,7 +1318,13 @@ fn workspace_discovery_rejects_successful_snapshots_that_omit_the_requested_spac
         }
     }
 
-    let error = discover_worktree_for_workspace(&MismatchedHerdr, "space-a").unwrap_err();
+    let error = namedrop::Host::space(
+        &namedrop::TuiHost::new(&MismatchedHerdr),
+        namedrop::SpaceLocator::Workspace("space-a"),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap_err();
     assert!(error.contains("does not contain space space-a"), "{error}");
 }
 
@@ -1336,7 +1347,13 @@ fn workspace_discovery_attaches_a_second_space_on_the_source_checkout() {
         }
     }
 
-    let discovered = discover_worktree_for_workspace(&SharedCheckoutHerdr, "space-b").unwrap();
+    let discovered = namedrop::Host::space(
+        &namedrop::TuiHost::new(&SharedCheckoutHerdr),
+        namedrop::SpaceLocator::Workspace("space-b"),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap();
     assert_eq!(discovered.workspace_id, "space-b");
     assert_eq!(discovered.worktree_id, WorktreeId::new("/repo"));
     assert!(discovered.worktree_attached);
@@ -1365,7 +1382,13 @@ fn workspace_discovery_keeps_failing_closed_when_source_names_another_space() {
         }
     }
 
-    let error = discover_worktree_for_workspace(&LinkedDuplicateHerdr, "space-b").unwrap_err();
+    let error = namedrop::Host::space(
+        &namedrop::TuiHost::new(&LinkedDuplicateHerdr),
+        namedrop::SpaceLocator::Workspace("space-b"),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap_err();
     assert!(error.contains("does not contain space space-b"), "{error}");
 }
 
@@ -1393,11 +1416,17 @@ fn agent_session_lookup_needs_one_exact_herdr_pane() {
     }
 
     assert_eq!(
-        locate_agent_session_pane(&PanesHerdr, "solo"),
+        namedrop::locate_agent_session_pane(&namedrop::TuiHost::new(&PanesHerdr), "solo"),
         Some(("w1".to_owned(), "w1:p1".to_owned()))
     );
-    assert_eq!(locate_agent_session_pane(&PanesHerdr, "twice"), None);
-    assert_eq!(locate_agent_session_pane(&PanesHerdr, "missing"), None);
+    assert_eq!(
+        namedrop::locate_agent_session_pane(&namedrop::TuiHost::new(&PanesHerdr), "twice"),
+        None
+    );
+    assert_eq!(
+        namedrop::locate_agent_session_pane(&namedrop::TuiHost::new(&PanesHerdr), "missing"),
+        None
+    );
 }
 
 /// Herdr with checkout `/repo` (of repository `/repo/.git`, linked when
@@ -1469,7 +1498,13 @@ fn cwd_discovery_refuses_a_checkout_two_spaces_share() {
         listings: vec![("space-a", Ok(SECOND_SPACE_ON_REPO))],
     };
 
-    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    let error = namedrop::Host::space(
+        &namedrop::TuiHost::new(&herdr),
+        namedrop::SpaceLocator::Checkout(Path::new("/repo")),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap_err();
     assert!(error.contains("/repo"), "{error}");
     assert!(error.contains("(space-a, space-b)"), "{error}");
     assert!(error.contains("--herdr-workspace"), "{error}");
@@ -1492,7 +1527,13 @@ fn cwd_discovery_ignores_spaces_on_other_checkouts_or_none() {
         ],
     };
 
-    let discovered = discover_worktree(&herdr, Path::new("/repo")).unwrap();
+    let discovered = namedrop::Host::space(
+        &namedrop::TuiHost::new(&herdr),
+        namedrop::SpaceLocator::Checkout(Path::new("/repo")),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap();
     assert_eq!(discovered.workspace_id, "space-a");
     assert_eq!(discovered.worktree_id, WorktreeId::new("/repo"));
 }
@@ -1506,7 +1547,13 @@ fn cwd_discovery_fails_closed_when_a_space_cannot_be_read() {
         listings: vec![("space-b", Err("herdr: connection reset"))],
     };
 
-    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    let error = namedrop::Host::space(
+        &namedrop::TuiHost::new(&herdr),
+        namedrop::SpaceLocator::Checkout(Path::new("/repo")),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap_err();
     assert_eq!(error, "herdr: connection reset");
 }
 
@@ -1524,7 +1571,13 @@ fn cwd_discovery_refuses_a_linked_checkout_a_second_space_may_share() {
         listings: vec![("space-b", Ok(SECOND_SPACE_ON_LINKED))],
     };
 
-    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    let error = namedrop::Host::space(
+        &namedrop::TuiHost::new(&herdr),
+        namedrop::SpaceLocator::Checkout(Path::new("/repo")),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap_err();
     assert!(error.contains("/repo"), "{error}");
     assert!(error.contains("space-a"), "{error}");
     assert!(error.contains("space-b"), "{error}");
@@ -1540,7 +1593,13 @@ fn cwd_discovery_treats_an_unreported_checkout_kind_as_linked() {
         listings: vec![("space-b", Ok(SECOND_SPACE_ON_LINKED))],
     };
 
-    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    let error = namedrop::Host::space(
+        &namedrop::TuiHost::new(&herdr),
+        namedrop::SpaceLocator::Checkout(Path::new("/repo")),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap_err();
     assert!(error.contains("space-b"), "{error}");
 }
 
@@ -1553,7 +1612,13 @@ fn cwd_discovery_counts_a_space_herdr_stamped_on_the_checkout() {
         listings: vec![],
     };
 
-    let error = discover_worktree(&herdr, Path::new("/repo")).unwrap_err();
+    let error = namedrop::Host::space(
+        &namedrop::TuiHost::new(&herdr),
+        namedrop::SpaceLocator::Checkout(Path::new("/repo")),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap_err();
     assert!(error.contains("(space-a, space-b)"), "{error}");
 }
 
@@ -1567,9 +1632,14 @@ fn cwd_discovery_places_an_unreported_space_off_a_root_checkout() {
     };
 
     assert_eq!(
-        discover_worktree(&herdr, Path::new("/repo"))
-            .unwrap()
-            .workspace_id,
+        namedrop::Host::space(
+            &namedrop::TuiHost::new(&herdr),
+            namedrop::SpaceLocator::Checkout(Path::new("/repo")),
+            None
+        )
+        .map_err(String::from)
+        .unwrap()
+        .workspace_id,
         "space-a"
     );
 }
@@ -1603,9 +1673,14 @@ fn cwd_discovery_skips_spaces_that_cannot_own_a_linked_checkout() {
     };
 
     assert_eq!(
-        discover_worktree(&herdr, Path::new("/repo"))
-            .unwrap()
-            .workspace_id,
+        namedrop::Host::space(
+            &namedrop::TuiHost::new(&herdr),
+            namedrop::SpaceLocator::Checkout(Path::new("/repo")),
+            None
+        )
+        .map_err(String::from)
+        .unwrap()
+        .workspace_id,
         "space-a"
     );
 }
@@ -1622,8 +1697,12 @@ fn a_known_pane_names_its_space() {
         }
     }
 
-    assert_eq!(pane_workspace(&PanesHerdr, "w2:p1").unwrap(), "w2");
-    let error = pane_workspace(&PanesHerdr, "w9:p1").unwrap_err();
+    assert_eq!(
+        namedrop::pane_workspace(&namedrop::TuiHost::new(&PanesHerdr), "w2:p1").unwrap(),
+        "w2"
+    );
+    let error =
+        namedrop::pane_workspace(&namedrop::TuiHost::new(&PanesHerdr), "w9:p1").unwrap_err();
     assert!(error.contains("w9:p1"), "{error}");
     assert!(error.contains("--herdr-workspace"), "{error}");
 }
@@ -1693,7 +1772,7 @@ fn only_proven_same_worktree_moves_preserve_a_binding() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &MoveHerdr,
+        host: &namedrop::TuiHost::new(&MoveHerdr),
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -1825,7 +1904,7 @@ fn lifecycle_operations_activate_create_bind_and_list_through_one_contract() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: &namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1924,7 +2003,7 @@ fn lifecycle_operations_mutate_addresses_without_losing_identity() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: &namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2025,7 +2104,7 @@ fn strict_inputs_and_activation_confirmation_fail_before_mutation() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: &namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &FixedIds,
     };
@@ -2147,7 +2226,7 @@ fn agent_status_events_replace_and_clear_the_current_occupant() {
         workspace_id: None,
         current_pane_id: Some("pane-live"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2292,7 +2371,7 @@ fn tab_close_cancels_outstanding_delivery_and_removes_every_attached_mention() {
         workspace_id: None,
         current_pane_id: Some("pane-lead"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &ClosingTabClock,
         ids: &ids,
     };
@@ -2549,7 +2628,7 @@ fn agent_status_event_reconciles_every_replaced_session_before_onboarding() {
         workspace_id: None,
         current_pane_id: Some("pane-first"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2736,7 +2815,7 @@ fn remove_unbinds_retires_and_releases_every_alias_atomically() {
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &FixedSetupClock,
         ids: &ids,
     };
@@ -2913,7 +2992,7 @@ fn agent_tab_runtime<'a>(
     directory: &'a TestDirectory,
     herdr: &'a AgentTabHerdr,
     ids: &'a FixedIds,
-) -> LifecycleRuntime<'a, AgentTabHerdr, FixedClock, FixedIds> {
+) -> LifecycleRuntime<'a, namedrop::TuiHost<&'a AgentTabHerdr>, FixedClock, FixedIds> {
     LifecycleRuntime {
         state_directory: directory.path(),
         home_directory: Some(directory.home()),
@@ -2922,7 +3001,7 @@ fn agent_tab_runtime<'a>(
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr,
+        host: Box::leak(Box::new(namedrop::TuiHost::new(herdr))),
         clock: &FixedClock,
         ids,
     }
@@ -3085,7 +3164,7 @@ fn tour_runtime<'a>(
     directory: &'a TestDirectory,
     herdr: &'a TourHerdr,
     ids: &'a TourIds,
-) -> LifecycleRuntime<'a, TourHerdr, TourClock, TourIds> {
+) -> LifecycleRuntime<'a, namedrop::TuiHost<&'a TourHerdr>, TourClock, TourIds> {
     LifecycleRuntime {
         state_directory: directory.path(),
         home_directory: Some(directory.home()),
@@ -3094,7 +3173,7 @@ fn tour_runtime<'a>(
         workspace_id: None,
         current_pane_id: None,
         session_socket_id: "socket-a",
-        herdr,
+        host: Box::leak(Box::new(namedrop::TuiHost::new(herdr))),
         clock: &TourClock,
         ids,
     }
@@ -3283,7 +3362,7 @@ fn name_refuses_a_retired_or_renamed_away_alias_with_a_clear_message() {
         workspace_id: None,
         current_pane_id: Some("pane-first"),
         session_socket_id: "socket-a",
-        herdr: &ThreePaneHerdr,
+        host: &namedrop::TuiHost::new(&ThreePaneHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3295,7 +3374,7 @@ fn name_refuses_a_retired_or_renamed_away_alias_with_a_clear_message() {
         current_pane_id: Some("pane-third"),
         ..first
     };
-    let name = |runtime: &LifecycleRuntime<'_, _, _, _>, alias: &str| {
+    let name = |runtime: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ _>, _, _>, alias: &str| {
         execute_lifecycle_operation(
             "name",
             serde_json::json!({"alias": alias, "pane_type": "terminal"}),

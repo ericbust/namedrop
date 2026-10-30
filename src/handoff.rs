@@ -1,4 +1,4 @@
-use crate::{LifecycleRuntime, StateStore, discover_worktree, discover_worktree_for_workspace};
+use crate::{LifecycleRuntime, StateStore};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -48,7 +48,7 @@ pub fn execute_handoff_operation<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -90,8 +90,12 @@ where
         _ => return Err(format!("unsupported handoff operation: {operation}")),
     };
     let discovered = match runtime.workspace_id {
-        Some(workspace) => discover_worktree_for_workspace(runtime.herdr, workspace)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(workspace), None)?,
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
@@ -103,7 +107,7 @@ where
     let remote = store
         .transaction(|tx| tx.queued_remote_seat_spaces(&namespace))
         .map_err(|e| e.to_string())?;
-    let live = crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &remote);
+    let live = crate::spaces::LiveSpaces::load(runtime.host, discovered.clone(), &remote);
     store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx, &namespace, pane, &discovered)?;
         if let Some(id) = coordination_id { return tx.coordination_report(&namespace,&id,&author); }
@@ -151,7 +155,7 @@ where
 
 fn preview<E, C, I>(input: Value, runtime: &LifecycleRuntime<'_, E, C, I>) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -173,8 +177,12 @@ where
     // The Space is resolved before the context block is previewed, so the
     // preview answers for the same context root the send would capture against.
     let discovered = match runtime.workspace_id {
-        Some(workspace) => discover_worktree_for_workspace(runtime.herdr, workspace)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(workspace), None)?,
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
     };
     let context = input
         .context
@@ -189,7 +197,7 @@ where
         .ok_or("Namedrop has no saved state")?;
     let reference_aliases = crate::message::body_reference_aliases(
         &parsed,
-        &crate::spaces::HerdrWorkspaces::new(runtime.herdr),
+        &crate::spaces::HerdrWorkspaces::new(runtime.host),
     );
     store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx,&namespace,pane,&discovered)?;

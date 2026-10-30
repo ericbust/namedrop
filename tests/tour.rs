@@ -352,7 +352,7 @@ fn runtime<'a>(
     state: &'a Path,
     herdr: &'a PopupHerdr,
     ids: &'a SequentialIds,
-) -> LifecycleRuntime<'a, PopupHerdr, FixedClock, SequentialIds> {
+) -> LifecycleRuntime<'a, namedrop::TuiHost<&'a PopupHerdr>, FixedClock, SequentialIds> {
     LifecycleRuntime {
         state_directory: state,
         home_directory: None,
@@ -361,7 +361,7 @@ fn runtime<'a>(
         workspace_id: Some("workspace-1"),
         current_pane_id: None,
         session_socket_id: "/run/herdr.sock",
-        herdr,
+        host: Box::leak(Box::new(namedrop::TuiHost::new(herdr))),
         clock: &FixedClock,
         ids,
     }

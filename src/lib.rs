@@ -13,6 +13,11 @@ mod domain;
 mod groups;
 mod handoff;
 mod health;
+pub mod host;
+pub use host::{
+    Budget, CallerClaim, CallerIdentity, Host, HostError, ListedWorkspace, PaneMetadata, PaneScope,
+    Popup, Process, ProcessInfo, PromptFailure, SpaceLocator, TuiHost,
+};
 mod hook;
 mod install;
 mod installed_runtime;
@@ -34,7 +39,7 @@ mod terminal;
 pub mod tour;
 #[doc(hidden)]
 pub mod update_check;
-pub use terminal::{default_pane_type, detect_pane_type, execute_terminal, verify_inherited_pane};
+pub use terminal::{default_pane_type, detect_pane_type, execute_terminal};
 
 pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integration-package-";
 
@@ -76,9 +81,8 @@ pub use integration::{
 };
 pub(crate) use integration::{collaboration_executable, tool_environment};
 pub use lifecycle::{
-    DiscoveredPane, DiscoveredWorktree, LifecycleRuntime, discover_worktree,
-    discover_worktree_for_workspace, execute_lifecycle_operation, locate_agent_session_pane,
-    pane_workspace, reconcile_discovered_panes,
+    DiscoveredPane, DiscoveredWorktree, LifecycleRuntime, execute_lifecycle_operation,
+    locate_agent_session_pane, pane_workspace, reconcile_discovered_panes,
 };
 pub use message::{
     BodyMention, ParsedMessage, RecipientOutlook, RecipientRun, carries_leading_mentions,

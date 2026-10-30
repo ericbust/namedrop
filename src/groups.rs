@@ -1,4 +1,4 @@
-use crate::{LifecycleRuntime, StateStore, discover_worktree, discover_worktree_for_workspace};
+use crate::{LifecycleRuntime, StateStore};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -23,13 +23,17 @@ pub fn execute_group_operation<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    E: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     let discovered = match runtime.workspace_id {
-        Some(workspace) => discover_worktree_for_workspace(runtime.herdr, workspace)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+        Some(workspace) => runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(workspace), None)?,
+        None => runtime
+            .host
+            .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?,
     };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = if operation == "group.list" {

@@ -3,9 +3,7 @@
 //! here only reads: config.toml, the server's pid file and the process table.
 
 use crate::integration::pane_agent_runtime;
-use crate::{
-    AgentConfigDirectories, AgentRuntime, DiscoveredPane, HerdrCommandExecutor, LifecycleRuntime,
-};
+use crate::{AgentConfigDirectories, AgentRuntime, DiscoveredPane, Host, LifecycleRuntime};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -184,7 +182,7 @@ impl ServedPanes {
 /// A Codex pane counts as served unless its foreground processes prove it runs
 /// in-process. When Herdr does not answer, it counts as served, because a
 /// server is running.
-pub(crate) fn served_codex_panes<E: HerdrCommandExecutor, C, I>(
+pub(crate) fn served_codex_panes<E: Host, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
     panes: &[DiscoveredPane],
 ) -> Option<ServedPanes> {
@@ -201,7 +199,7 @@ pub(crate) fn served_codex_panes<E: HerdrCommandExecutor, C, I>(
     };
     let pane_ids = codex
         .into_iter()
-        .filter(|pane| !pane_runs_in_process(runtime.herdr, &pane.pane_id))
+        .filter(|pane| !pane_runs_in_process(runtime.host, &pane.pane_id))
         .map(|pane| pane.pane_id.clone())
         .collect::<Vec<_>>();
     (!pane_ids.is_empty()).then_some(ServedPanes { server, pane_ids })
@@ -213,7 +211,7 @@ pub(crate) fn runs_inside_server() -> bool {
 
 const IN_PROCESS_FLAGS: [&str; 2] = ["--no-daemon", "--dangerously-bypass-hook-trust"];
 
-fn pane_runs_in_process(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> bool {
+fn pane_runs_in_process(herdr: &impl Host, pane_id: &str) -> bool {
     // No answer from Herdr proves nothing, so the pane stays served.
     let Some(pids) = crate::terminal::foreground_process_ids(herdr, pane_id) else {
         return false;
@@ -248,6 +246,7 @@ fn is_server_binary(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::HerdrCommandExecutor;
     use crate::HerdrCommandOutput;
     use std::{
         cell::RefCell,
@@ -566,7 +565,7 @@ mod tests {
             workspace_id: Some("w1"),
             current_pane_id: None,
             session_socket_id: "default",
-            herdr,
+            host: &crate::TuiHost::new(herdr),
             clock: &(),
             ids: &(),
         };

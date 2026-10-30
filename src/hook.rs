@@ -1,6 +1,6 @@
 use crate::message::PromptMentionOutcome;
 use crate::spaces::{RouteRefusal, ScopedName, SpaceScope, UnplacedName};
-use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime};
+use crate::{Clock, Host, IdGenerator, LifecycleRuntime};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -34,7 +34,7 @@ pub fn execute_session_start_hook<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Option<Value>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -87,7 +87,7 @@ pub fn execute_user_prompt_submit_hook<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Option<Value>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -118,15 +118,11 @@ where
         // mailboxes only on it.
         PromptMentionOutcome::Sent { remote } => {
             if !remote.is_empty() {
-                let _ = runtime.herdr.execute(&[
-                    "notification",
-                    "show",
+                let _ = runtime.host.notify(
                     "Namedrop",
-                    "--body",
                     &format!("Sent to {}", remote.join(", ")),
-                    "--position",
-                    "bottom-right",
-                ]);
+                    false,
+                );
             }
             Some(json!({
                 "decision": "block",
@@ -171,7 +167,7 @@ where
 /// it the exact known-safe literal the wrappers match is emitted unchanged.
 fn failed_handoff<E, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -185,7 +181,7 @@ where
 /// with the roster marker every generated wrapper forwards.
 fn under_roster<E, C, I>(guidance: &str, runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -286,7 +282,7 @@ fn delivery_hook_output<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Value
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -331,7 +327,7 @@ fn outstanding_envelope<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Option<Value>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -363,7 +359,7 @@ fn route_leading_mentions<E, C, I>(
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Option<PromptMentionOutcome>
 where
-    E: HerdrCommandExecutor,
+    E: Host,
     C: Clock,
     I: IdGenerator,
 {

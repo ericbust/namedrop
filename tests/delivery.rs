@@ -356,7 +356,7 @@ fn assert_expired_unsent_cancellation(fail_before_expiry: bool) {
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &clock,
         ids: &ids,
     };
@@ -559,7 +559,7 @@ fn human_mention_round_trip(hold_report: bool) {
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &clock,
         ids: &ids,
     };
@@ -1176,7 +1176,7 @@ fn status_events_preserve_busy_fifo_then_hold_a_submitted_attempt_on_session_cha
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &clock,
         ids: &ids,
     };
@@ -1508,7 +1508,9 @@ impl ObservedAttemptFixture {
         }
     }
 
-    fn runtime(&self) -> LifecycleRuntime<'_, DynamicHerdr, TestClock, SequenceIds> {
+    fn runtime(
+        &self,
+    ) -> LifecycleRuntime<'_, namedrop::TuiHost<&'_ DynamicHerdr>, TestClock, SequenceIds> {
         LifecycleRuntime {
             state_directory: self.directory.path(),
             home_directory: Some(self.directory.home()),
@@ -1517,7 +1519,7 @@ impl ObservedAttemptFixture {
             workspace_id: None,
             current_pane_id: Some("pane-recipient"),
             session_socket_id: "socket-a",
-            herdr: &self.herdr,
+            host: Box::leak(Box::new(namedrop::TuiHost::new(&self.herdr))),
             clock: &self.clock,
             ids: &self.ids,
         }
@@ -1670,7 +1672,7 @@ fn unsettled_agent_responses_remain_recoverable_in_the_inbox() {
         workspace_id: None,
         current_pane_id: Some("pane-recipient"),
         session_socket_id: "socket-a",
-        herdr: &herdr,
+        host: &namedrop::TuiHost::new(&herdr),
         clock: &clock,
         ids: &ids,
     };

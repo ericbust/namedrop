@@ -302,7 +302,7 @@ fn runtime<'a>(
     herdr: &'a FakeHerdr,
     ids: &'a SequenceIds,
     pane_id: &'a str,
-) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds> {
+) -> LifecycleRuntime<'a, namedrop::TuiHost<&'a FakeHerdr>, FixedClock, SequenceIds> {
     LifecycleRuntime {
         state_directory: &directory.state,
         home_directory: Some(&directory.home),
@@ -311,13 +311,16 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        herdr,
+        host: Box::leak(Box::new(namedrop::TuiHost::new(herdr))),
         clock: &FixedClock,
         ids,
     }
 }
 
-fn register(address_id: &str, runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>) {
+fn register(
+    address_id: &str,
+    runtime: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
+) {
     let challenge = issue_registration_challenge(
         &PaneAddressId::new(address_id),
         AgentRuntime::Codex,
@@ -1846,8 +1849,8 @@ fn path_review_input(request_id: &str, path: &str) -> serde_json::Value {
 }
 
 fn returned_path_review(
-    source: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
-    reviewer: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    source: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
+    reviewer: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
     herdr: &FakeHerdr,
     path: &str,
 ) -> serde_json::Value {
@@ -1862,8 +1865,8 @@ fn returned_path_review(
 }
 
 fn returned_review(
-    source: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
-    reviewer: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    source: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
+    reviewer: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
     herdr: &FakeHerdr,
     input: serde_json::Value,
 ) -> serde_json::Value {

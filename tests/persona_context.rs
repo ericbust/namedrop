@@ -225,7 +225,7 @@ fn runtime<'a>(
     herdr: &'a FakeHerdr,
     ids: &'a SequenceIds,
     pane_id: &'a str,
-) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds> {
+) -> LifecycleRuntime<'a, namedrop::TuiHost<&'a FakeHerdr>, FixedClock, SequenceIds> {
     LifecycleRuntime {
         state_directory: &directory.state,
         home_directory: Some(&directory.home),
@@ -234,7 +234,7 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        herdr,
+        host: Box::leak(Box::new(namedrop::TuiHost::new(herdr))),
         clock: &FixedClock,
         ids,
     }
@@ -243,7 +243,7 @@ fn runtime<'a>(
 fn register(
     address_id: &str,
     host: AgentRuntime,
-    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
 ) {
     let challenge =
         issue_registration_challenge(&PaneAddressId::new(address_id), host, runtime).unwrap();
@@ -258,7 +258,7 @@ fn register(
 
 fn hook(
     prompt: &str,
-    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
 ) -> Option<Value> {
     execute_user_prompt_submit_hook(
         &json!({"hook_event_name":"UserPromptSubmit","prompt":prompt}).to_string(),
@@ -267,7 +267,7 @@ fn hook(
 }
 
 fn session_start(
-    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
 ) -> Option<Value> {
     execute_session_start_hook(
         &json!({"hook_event_name":"SessionStart","source":"startup"}).to_string(),

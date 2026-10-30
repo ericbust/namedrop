@@ -279,7 +279,7 @@ fn runtime<'a>(
     herdr: &'a FakeHerdr,
     ids: &'a SequenceIds,
     pane_id: &'a str,
-) -> LifecycleRuntime<'a, FakeHerdr, FixedClock, SequenceIds> {
+) -> LifecycleRuntime<'a, namedrop::TuiHost<&'a FakeHerdr>, FixedClock, SequenceIds> {
     LifecycleRuntime {
         state_directory: &directory.state,
         home_directory: Some(&directory.home),
@@ -288,13 +288,16 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        herdr,
+        host: Box::leak(Box::new(namedrop::TuiHost::new(herdr))),
         clock: &FixedClock,
         ids,
     }
 }
 
-fn register(address_id: &str, runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>) {
+fn register(
+    address_id: &str,
+    runtime: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
+) {
     let challenge = issue_registration_challenge(
         &PaneAddressId::new(address_id),
         AgentRuntime::Codex,
@@ -315,7 +318,7 @@ fn register(address_id: &str, runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClo
 }
 
 fn create_referenced_thread(
-    runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    runtime: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
 ) -> serde_json::Value {
     execute_message_operation(
         "send",
@@ -3051,7 +3054,7 @@ fn canonical(path: &std::path::Path) -> String {
 }
 
 fn read_evidence(
-    reader: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>,
+    reader: &LifecycleRuntime<'_, namedrop::TuiHost<&'_ FakeHerdr>, FixedClock, SequenceIds>,
     grant_id: &str,
     selection: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -3289,34 +3292,39 @@ fn an_invalid_or_unattached_checkout_selector_writes_nothing() {
     ];
     let mut snapshot = valid_snapshot();
     snapshot["evidence"] = serde_json::json!([{"kind": "diff", "locator": "src/notes.txt"}]);
-    let attempt =
-        |path: &str, runtime: &LifecycleRuntime<'_, FakeHerdr, FixedClock, SequenceIds>| {
-            let published = execute_context_operation(
-                "snapshot.publish",
-                serde_json::json!({
-                    "thread_id": sent["thread_id"],
-                    "grantee_address_ids": ["address-reviewer"],
-                    "capture_git_state": true,
-                    "checkout": {"path": path},
-                    "snapshot": snapshot
-                }),
-                runtime,
-            )
-            .unwrap_err();
-            let sent = execute_message_operation(
-                "send",
-                serde_json::json!({
-                    "request_id": format!("invalid-{path}"),
-                    "source": "@reviewer Review this.",
-                    "author_kind": "agent_session",
-                    "context": {"checkout": {"path": path}, "snapshot": snapshot}
-                }),
-                runtime,
-            )
-            .unwrap_err();
-            assert_eq!(published, sent);
-            published
-        };
+    let attempt = |path: &str,
+                   runtime: &LifecycleRuntime<
+        '_,
+        namedrop::TuiHost<&'_ FakeHerdr>,
+        FixedClock,
+        SequenceIds,
+    >| {
+        let published = execute_context_operation(
+            "snapshot.publish",
+            serde_json::json!({
+                "thread_id": sent["thread_id"],
+                "grantee_address_ids": ["address-reviewer"],
+                "capture_git_state": true,
+                "checkout": {"path": path},
+                "snapshot": snapshot
+            }),
+            runtime,
+        )
+        .unwrap_err();
+        let sent = execute_message_operation(
+            "send",
+            serde_json::json!({
+                "request_id": format!("invalid-{path}"),
+                "source": "@reviewer Review this.",
+                "author_kind": "agent_session",
+                "context": {"checkout": {"path": path}, "snapshot": snapshot}
+            }),
+            runtime,
+        )
+        .unwrap_err();
+        assert_eq!(published, sent);
+        published
+    };
     for (path, refusal) in cases {
         let refused = attempt(&path, &source);
         assert!(refused.contains(refusal), "{path}: {refused}");
