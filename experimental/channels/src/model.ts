@@ -248,11 +248,16 @@ export type Participant =
   | { kind: "envoy"; id: AddressId; home: Home | null }
   | { kind: "unknown"; id: AddressId };
 export type ReplyTo = { names: readonly string[]; mentions: string };
-// What a composer needs before Enter sends. A channel post always sends. A
-// thread reply goes to `to`, the thread's agents as display names; with none,
-// the text must start with the members it is for.
+// What a composer needs before Enter sends. A channel post always sends; its
+// `label` is the channel's addressable label, under which a leading name
+// resolves here. A thread reply goes to `to`, the thread's agents as display
+// names; with none, the text must start with the members it is for.
 export type SendRule =
-  | { kind: "channel"; agents: ReadonlyMap<AddressId, Member> }
+  | {
+      kind: "channel";
+      agents: ReadonlyMap<AddressId, Member>;
+      label: string | null;
+    }
   | { kind: "thread"; to: readonly string[] };
 export type WireEvent =
   | { type: "space"; channel: ChannelSnapshot }

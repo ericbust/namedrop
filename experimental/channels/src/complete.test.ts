@@ -465,7 +465,7 @@ test("complete: the hint finds mentions the way the server does, in code spans, 
   ];
   for (const [text, expected] of leading)
     assert.deepEqual(leadingMentions(text), expected, JSON.stringify(text));
-  const channel = { kind: "channel", agents: members } as const;
+  const channel = { kind: "channel", agents: members, label: "alpha" } as const;
   assert.equal(
     composerHint(channel, "ask `@codex` about it"),
     "Enter posts to the channel · Mention @name to bring someone in",
@@ -481,7 +481,11 @@ test("complete: the hint finds mentions the way the server does, in code spans, 
 });
 
 test("complete: a channel post sends as typed, a thread reply needs agents or its own mentions", () => {
-  const channel = { kind: "channel", agents: alpha.members } as const;
+  const channel = {
+    kind: "channel",
+    agents: alpha.members,
+    label: "alpha",
+  } as const;
   assert.equal(postSource("  hello room ", channel), "hello room");
   assert.equal(postSource("can @codex look?", channel), "can @codex look?");
   assert.equal(postSource("@codex hi", channel), "@codex hi");
@@ -514,7 +518,11 @@ test("complete: a channel post sends as typed, a thread reply needs agents or it
 });
 
 test("complete: the hint says where Enter sends the text", () => {
-  const channel = { kind: "channel", agents: alpha.members } as const;
+  const channel = {
+    kind: "channel",
+    agents: alpha.members,
+    label: "alpha",
+  } as const;
   const hint = (text: string) => composerHint(channel, text);
   const room = "Enter posts to the channel · Mention @name to bring someone in";
   assert.equal(hint(""), room);
@@ -545,7 +553,11 @@ test("complete: the hint says where Enter sends the text", () => {
 });
 
 test("complete: the hint names leading text the server refuses, reading leading names the way the server does", () => {
-  const channel = { kind: "channel", agents: alpha.members } as const;
+  const channel = {
+    kind: "channel",
+    agents: alpha.members,
+    label: "alpha",
+  } as const;
   const hint = (text: string) => composerHint(channel, text);
   const room = "Enter posts to the channel · Mention @name to bring someone in";
   const cases: [string, string][] = [
@@ -606,7 +618,7 @@ test("complete: a leading name whose pane is closed says so, before its capitals
     ]),
   );
   const hint = (text: string) =>
-    composerHint({ kind: "channel", agents: closed }, text);
+    composerHint({ kind: "channel", agents: closed, label: "alpha" }, text);
   const room = "Enter posts to the channel · Mention @name to bring someone in";
   const cases: [string, string][] = [
     ["@codex hi", "@codex's pane is closed"],
@@ -622,8 +634,8 @@ test("complete: a leading name whose pane is closed says so, before its capitals
     ["@claude hi", "Enter sends only to @claude"],
     ["@codex; hi", "Put a space after @codex"],
     ["@codex_x hi", "@codex_x isn't in this channel"],
-    ["#alpha @codex hi", "Enter sends only to @codex"],
-    ["#alpha @Codex hi", "Names are lowercase: @codex"],
+    ["#beta @codex hi", "Enter sends only to @codex"],
+    ["#beta @Codex hi", "Names are lowercase: @codex"],
     ["can @codex look?", room],
   ];
   for (const [text, expected] of cases)
@@ -634,7 +646,10 @@ test("complete: a leading name whose pane is closed says so, before its capitals
     id: "id-@codex-2" as AddressId,
   });
   assert.equal(
-    composerHint({ kind: "channel", agents: renamed }, "@codex hi"),
+    composerHint(
+      { kind: "channel", agents: renamed, label: "alpha" },
+      "@codex hi",
+    ),
     "Enter sends only to @codex",
     "a new pane took the name, so the name reaches it",
   );
@@ -648,6 +663,15 @@ const roomHint =
   "Enter posts to the channel · Mention @name to bring someone in";
 const checksHint = (names: string) =>
   `Enter posts to the channel · Namedrop checks if it's for ${names}`;
+const closedAlpha = new Map(
+  [...alpha.members].map(([id, member]) => [
+    id,
+    member.alias === "@codex"
+      ? { ...member, activity: "retired" as const }
+      : member,
+  ]),
+);
+
 test("H1: the hint judges the text Enter sends, so a U+FEFF that trim drops can't flip it, and U+0085 reads as the server's whitespace", () => {
   const channel = {
     kind: "channel",
@@ -707,8 +731,71 @@ test("H2: a lone @ reads Type a name after @ and Enter keeps it in the box, sinc
   assert.equal(composerHint(channel, "@-x"), "@-x isn't in this channel");
 });
 
+test("H3: #all with workspace labels before a valid mention reads that #all already means every workspace, and Enter still sends it", () => {
+  const all = "#all already means every workspace · Drop the other labels";
+  for (const agents of [alpha.members, closedAlpha]) {
+    const channel = { kind: "channel", agents, label: "alpha" } as const;
+    const cases: [string, string][] = [
+      ["#all #alpha @codex hi", all],
+      ["#alpha #all @codex hi", all],
+      ["#ALL #beta: @codex hi", all],
+      ["#all, #alpha, @codex hi", all],
+      ["#all #beta @claude @codex hi", all],
+      // The server names #all before it asks for a message.
+      ["#all #alpha @codex", all],
+      // The server refuses a capital before it reads the labels.
+      ["#all #alpha @Codex hi", "Names are lowercase: @codex"],
+      ["#all #alpha @claude @Claude hi", "Names are lowercase: @claude"],
+      // No other label, or no valid mention after them: no refusal.
+      ["#all #ALL @claude hi", "Enter sends only to @claude"],
+      ["#all.x #alpha @claude hi", "Enter sends only to @claude"],
+      ["#all #alpha hi", roomHint],
+      ["#all #alpha @@codex hi", roomHint],
+    ];
+    for (const [text, expected] of cases)
+      assert.equal(composerHint(channel, text), expected, JSON.stringify(text));
+    for (const text of ["#all #alpha @codex hi", "#alpha #all @codex hi"])
+      assert.equal(postSource(text, channel), text, "Enter still sends it");
+  }
+});
+
+test("H4: when every leading label names this channel, a closed name reads as closed, since the server resolves the name here", () => {
+  const closed = "@codex's pane is closed";
+  const rule = (label: string | null) =>
+    ({ kind: "channel", agents: closedAlpha, label }) as const;
+  const cases: [string | null, string, string][] = [
+    ["alpha", "#alpha @codex hi", closed],
+    ["alpha", "#Alpha @codex hi", closed],
+    ["alpha", "#alpha #ALPHA, @codex hi", closed],
+    ["alpha", "#alpha: @Codex hi", closed],
+    ["alpha", "#alpha @claude @codex hi", closed],
+    ["alpha", "#alpha @claude hi", "Enter sends only to @claude"],
+    // Any other label, or #all, names another workspace or every one.
+    ["alpha", "#beta @codex hi", "Enter sends only to @codex"],
+    ["alpha", "#alpha #beta @codex hi", "Enter sends only to @codex"],
+    ["alpha", "#all @codex hi", "Enter sends only to @codex"],
+    ["alpha-project", "#alpha @codex hi", "Enter sends only to @codex"],
+    [null, "#alpha @codex hi", "Enter sends only to @codex"],
+  ];
+  for (const [label, text, expected] of cases)
+    assert.equal(
+      composerHint(rule(label), text),
+      expected,
+      `${label} ${JSON.stringify(text)}`,
+    );
+  assert.equal(
+    postSource("#alpha @codex hi", rule("alpha")),
+    "#alpha @codex hi",
+    "Enter still sends it for the server to refuse",
+  );
+});
+
 test("complete: a name right after a #label word names someone in that workspace, so it is no channel mention, as the server's workspace_label_before reads it", () => {
-  const channel = { kind: "channel", agents: alpha.members } as const;
+  const channel = {
+    kind: "channel",
+    agents: alpha.members,
+    label: "alpha",
+  } as const;
   const hint = (text: string) => composerHint(channel, text);
   const named = (text: string) =>
     mentionedAgents(text, alpha.members).map((member) => member.alias);

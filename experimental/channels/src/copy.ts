@@ -427,6 +427,7 @@ export const composerCopy = {
   notMember: (name: string) => `${name} isn't in this channel`,
   spaceAfter: (alias: string) => `Put a space after ${alias}`,
   nameAfter: "Type a name after @",
+  allWithLabels: "#all already means every workspace · Drop the other labels",
   sending: "Sending…",
   send: "Send",
   everyWorkspace: "every workspace",

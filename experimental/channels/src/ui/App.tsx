@@ -559,9 +559,10 @@ export function App() {
     measure("namedrop:activity-derive", start);
     return activitySeen.current;
   }, [state.channels]);
+  const label = channel?.addressableLabel ?? null;
   const channelRule = useMemo<SendRule>(
-    () => ({ kind: "channel", agents: members }),
-    [members],
+    () => ({ kind: "channel", agents: members, label }),
+    [members, label],
   );
   const directory = useMemo<Directory>(
     () => ({ members, homes }),

@@ -9047,6 +9047,57 @@ test("UI-R4 H2: a lone @ reads Type a name after @, Enter keeps it with no reque
   assert.equal(ui.posts.attempts.length, 0, "no request was made");
 });
 
+test("UI-R4 H3: #all with another label before a name says #all already means every workspace, and Enter still sends it for the server to refuse", async (t) => {
+  const refusal =
+    "#all already addresses every workspace, so it cannot be combined with workspace labels";
+  const { ui } = await chatRoom(t, [], {
+    onPost: () => ({ status: 400, error: refusal }),
+  });
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  await box.fill("#all #alpha @codex hi");
+  assert.equal(
+    await status.textContent(),
+    "#all already means every workspace · Drop the other labels",
+  );
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(
+    JSON.parse(ui.posts.attempts[0].raw).source,
+    "#all #alpha @codex hi",
+  );
+  await status.getByText(refusal).waitFor();
+  assert.equal(
+    await box.inputValue(),
+    "#all #alpha @codex hi",
+    "the text stays",
+  );
+});
+
+test("UI-R4 H4: this channel's own #label before a closed name reads that the pane is closed, and any other label or #all skips the check", async (t) => {
+  const value = team(1, "alpha");
+  value.frame.participants[0].activity = "retired";
+  value.frame.participants[0].recently_closed = true;
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const hints = [
+    ["#alpha @codex hi", "@codex's pane is closed"],
+    ["#Alpha: @Codex hi", "@codex's pane is closed"],
+    ["#beta @codex hi", "Enter sends only to @codex"],
+    ["#all @codex hi", "Enter sends only to @codex"],
+  ];
+  const read = [];
+  for (const [text] of hints) {
+    await box.fill(text);
+    read.push([text, await status.textContent()]);
+  }
+  assert.deepEqual(read, hints);
+});
+
 test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {
   const at = Date.now() - 600_000;
   const { ui } = await chatRoom(t, [
