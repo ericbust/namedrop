@@ -584,7 +584,10 @@ fn manually_delivered_router_followup_under_a_mention_root_keeps_agent_thread_mo
 fn bare_member_with_leading_punctuation_routes_without_a_model() {
     let f = fixture();
     let server = Server::start(&f, "not json", false);
-    for (index, source) in ["planner, inspect", "planner: inspect"].iter().enumerate() {
+    for (index, source) in ["planner inspect", "planner, inspect", "planner: inspect"]
+        .iter()
+        .enumerate()
+    {
         let (status, receipt) = post(&server, &format!("bare-member-{index}"), source, None);
         assert_eq!(status, 200, "{source}: {receipt}");
         assert_eq!(
@@ -593,24 +596,32 @@ fn bare_member_with_leading_punctuation_routes_without_a_model() {
             "{source}: {receipt}"
         );
         assert!(receipt.get("channel").is_none());
-        let body: String = f
+        let stored: (String, String) = f
             .db()
             .query_row(
-                "SELECT body FROM collaboration_messages WHERE message_id=?1",
+                "SELECT authored_source, body FROM collaboration_messages WHERE message_id=?1",
                 [receipt["message_id"].as_str().unwrap()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(body, "inspect");
+        assert_eq!(stored, (source.to_string(), "inspect".to_string()));
     }
     assert!(calls(&f).is_empty());
 }
 
 #[test]
 fn bound_channel_report_from_the_delivered_template_does_not_bounce() {
-    for report_body in [
-        r"\@lead says 6 times 7 is 42.",
-        r"\\@lead says 6 times 7 is 42.",
+    for (answer_body, report_body) in [
+        ("6 times 7 is 42.", r"\@lead says 6 times 7 is 42."),
+        ("@planner 6 times 7 is 42.", r"\@lead says 6 times 7 is 42."),
+        (
+            "@planner, 6 times 7 is 42.",
+            r"\@lead says 6 times 7 is 42.",
+        ),
+        (
+            "@planner: 6 times 7 is 42.",
+            r"\\@lead says 6 times 7 is 42.",
+        ),
     ] {
         let f = fixture();
         let root = plain_root(&f, "bound-template-root", "Please collaborate here.");
@@ -638,7 +649,7 @@ fn bound_channel_report_from_the_delivered_template_does_not_bounce() {
                 .into();
             namedrop::execute_message_operation("reply", input, &f.runtime("w1", pane)).unwrap()
         };
-        let answer = reply_from_template("pane-1-lead", "6 times 7 is 42.");
+        let answer = reply_from_template("pane-1-lead", answer_body);
         assert_eq!(recipient_aliases(&question), ["operator", "lead"]);
         assert_eq!(recipient_aliases(&answer), ["operator", "planner"]);
         let report = reply_from_template("pane-1-planner", report_body);
@@ -646,4 +657,30 @@ fn bound_channel_report_from_the_delivered_template_does_not_bounce() {
         assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 3);
         assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 1);
     }
+}
+
+#[test]
+fn bare_nonmembers_and_malformed_member_names_remain_channel_text() {
+    let f = fixture();
+    f.add_terminal("w1", "shell", "pane-shell");
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in [
+        "ghost, inspect",
+        "Planner, inspect",
+        "planner,, inspect",
+        "planner:: inspect",
+        "planner; inspect",
+        "shell, echo hi",
+        "operator, hello",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(&server, &format!("bare-literal-{index}"), source, None);
+        assert_eq!(status, 200, "{source}: {receipt}");
+        assert_eq!(recipient_aliases(&receipt), Vec::<String>::new());
+        assert_eq!(receipt["channel"]["state"], "unrouted");
+    }
+    assert!(calls(&f).is_empty());
+    assert!(f.herdr.runs("pane-shell").is_empty());
 }
