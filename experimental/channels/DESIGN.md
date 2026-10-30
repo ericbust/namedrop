@@ -1041,10 +1041,15 @@ Motion shows state and nothing else.
 | Channel with no messages      | Title "No messages yet". Body "Post here to talk with the agents in this workspace. Mention @name to bring one in."                |
 | Loading older messages        | A 12px muted "Loading earlier messages…" line at the top of the timeline.                                                          |
 | History error                 | "Couldn't load earlier messages." and a **Try again** button, in the same line.                                                    |
+| Conversation error            | "Couldn't load this conversation." and a **Try again** button, in the thread pane.                                                 |
 | Missing range                 | A hairline divider with "Some messages are missing here" and a **Load them** button.                                               |
 | Reconnecting                  | A 36px bar at the top of the main column in `--warning-bg` and `--warning-text`: "Reconnecting… Showing updates up to 10:42 PM."   |
 | Server-shortened text         | A 12px muted line "Shortened by Namedrop."                                                                                         |
 | All activity, nothing active  | The pulse icon, title "Every agent is idle", body "Agents show up here while they work, wait on each other, or need you."          |
+
+The conversation error line is 12px muted with `role="alert"`, like the history
+error. Its tooltip is the status, such as "HTTP 503", or "Couldn't reach
+Namedrop." when the server never answered. The pane header keeps "in #alpha".
 
 ## Accessibility
 

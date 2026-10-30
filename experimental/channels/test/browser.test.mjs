@@ -5710,6 +5710,64 @@ test("CL-A: explicit attention names its responsible member and focuses fetched 
   );
 });
 
+test("DESIGN-R2 A7: a conversation that fails to load says so in the history-error line, keeps its channel, and Try again loads it", async (t) => {
+  const { value, context } = actionableAttention();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const line = pane.getByRole("alert");
+  const look = () =>
+    line.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const probe = document.body.appendChild(document.createElement("p"));
+      probe.style.color = "var(--text-muted)";
+      const muted = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        text: element.textContent,
+        title: element.title,
+        size: style.fontSize,
+        muted: style.color === muted,
+        where: element.closest("aside").querySelector(".thread-where")
+          ?.textContent,
+      };
+    });
+  await ui.page.route("**/context", (route) =>
+    route.fulfill({ status: 503, body: "" }),
+  );
+  await ui.page.getByRole("button", { name: /^Show message/ }).click();
+  await line.waitFor();
+  assert.deepEqual(await look(), {
+    text: "Couldn't load this conversation. Try again",
+    title: "HTTP 503",
+    size: "12px",
+    muted: true,
+    where: "in #alpha",
+  });
+  await ui.page.unroute("**/context");
+  await ui.page.route("**/context", (route) =>
+    route.abort("connectionrefused"),
+  );
+  await line.getByRole("button", { name: "Try again", exact: true }).click();
+  await ui.page.waitForFunction(
+    () =>
+      document.querySelector('.thread [role="alert"]')?.title ===
+      "Couldn't reach Namedrop.",
+  );
+  await ui.page.unroute("**/context");
+  await line.getByRole("button", { name: "Try again", exact: true }).click();
+  await pane.locator('[data-message-id="attention-target"]').waitFor();
+  assert.equal(await pane.getByRole("alert").count(), 0);
+});
+
 test("CL-A: Respond posts the exact attention target despite newer context and SSE replies", async (t) => {
   const { value, context } = actionableAttention();
   const ui = await open(

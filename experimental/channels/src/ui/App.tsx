@@ -16,7 +16,7 @@ import {
   prepareChannelMessage,
 } from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
-import { composerPlaceholder } from "../copy.ts";
+import { channelMention, composerPlaceholder } from "../copy.ts";
 import { createDeliveries, deliveryOf } from "../delivery.ts";
 import type {
   ComposerId,
@@ -132,6 +132,9 @@ export function App() {
         signal: controller.signal,
       },
     )
+      .catch(() => {
+        throw new Error("Couldn't reach Namedrop.");
+      })
       .then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const context = parseMessageContext(
@@ -966,6 +969,9 @@ export function App() {
             <aside className="slot thread" aria-label="Thread" id={paneId}>
               <header className="thread-head">
                 <h2 className="thread-title">Thread</h2>
+                <span className="thread-where">
+                  in {channelMention(channel)}
+                </span>
                 <button
                   type="button"
                   className="icon-button"
@@ -975,22 +981,28 @@ export function App() {
                   <Icon name="x" />
                 </button>
               </header>
-              <div className="thread-body" role="status">
-                {focused.kind === "loading" ? (
-                  "Loading conversation…"
-                ) : (
-                  <>
-                    Could not load conversation. {focused.reason}{" "}
+              {focused.kind === "loading" ? (
+                <div className="thread-body" role="status">
+                  Loading conversation…
+                </div>
+              ) : (
+                <div className="thread-body">
+                  <p
+                    className="thread-error"
+                    role="alert"
+                    title={focused.reason}
+                  >
+                    Couldn't load this conversation.{" "}
                     <button
                       type="button"
                       className="text-button"
                       onClick={() => focusEvidence({ type: "retry" })}
                     >
-                      Retry
+                      Try again
                     </button>
-                  </>
-                )}
-              </div>
+                  </p>
+                </div>
+              )}
             </aside>
           )}
           {peeking && who && (
