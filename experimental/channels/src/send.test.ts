@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import type { SpaceKey } from "./model.ts";
 import { createPoster, type Post } from "./send.ts";
@@ -302,6 +304,44 @@ test("deliver: a 200 whose body never finishes or breaks still reads as sent, wi
       { "@codex": { kind: "done" } },
     );
     assert.ok(Date.now() - started < 2_000);
+  }
+});
+
+test("deliver: a 200 whose body stalls is aborted when the body wait ends, so the server sees its socket close", async () => {
+  const wait = 100;
+  const margin = 1_000;
+  let closed: number | null = null;
+  const server = createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.url === "/api/session") return res.end('{"csrf_token":"t"}');
+    req.socket.once("close", () => {
+      closed = Date.now();
+    });
+    res.write('{"delivered":');
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const fetcher: typeof fetch = (input, init) =>
+    fetch(`http://127.0.0.1:${port}${String(input)}`, init);
+  try {
+    const started = Date.now();
+    assert.deepEqual(
+      Object.fromEntries(
+        await createPoster(fetcher, wait).deliver(key, "p1", ["@codex"]),
+      ),
+      { "@codex": { kind: "done" } },
+      "the press still reads as sent",
+    );
+    while (closed === null && Date.now() - started < wait + margin)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    const seen: number | null = closed;
+    assert.ok(
+      seen !== null && seen - started <= wait + margin,
+      `the server saw the socket close within ${wait + margin} ms`,
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

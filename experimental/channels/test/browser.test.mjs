@@ -225,6 +225,15 @@ function postRoute(onPost) {
         res.writeHead(200, { "Content-Type": "application/json" });
         return res.end(outcome.raw);
       }
+      if (outcome.stall) {
+        request.status = 200;
+        request.closed = false;
+        req.socket.once("close", () => {
+          request.closed = true;
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.write('{"delivered":');
+      }
       const { status = 200, ...answer } = outcome;
       if (status === 200) return reply(200, { delivered: asked.to, ...answer });
       if (answer.error !== undefined)
@@ -6940,6 +6949,23 @@ test("DESIGN-R2 B6: a 200 whose delivered list is missing or malformed reads Cou
   assert.deepEqual(
     ui.posts.deliveries.map(({ body, status }) => [body, status]),
     Array.from({ length: 5 }, () => ['{"to":["codex"]}', 200]),
+  );
+});
+
+test("DESIGN-R2 B5: a 200 whose body stalls reads Sent to @codex once the 5 s body wait ends, and the page closes that connection", async (t) => {
+  const { ui } = await chatRoom(t, [unsent()], {
+    onDeliver: () => ({ stall: true }),
+  });
+  await ui.page.clock.install();
+  const { route } = routeOf(ui, "p1");
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await until(() => ui.posts.deliveries[0]?.status === 200, "the 200 headers");
+  await readsAs(route, "Sending to @codex…");
+  await ui.page.clock.runFor(5_000);
+  await readsAs(route, "Sent to @codex");
+  await until(
+    () => ui.posts.deliveries[0].closed,
+    "the server to see the connection close",
   );
 });
 

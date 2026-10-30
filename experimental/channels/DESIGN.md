@@ -725,7 +725,8 @@ uses the "Send to" form. Each offer is a text button in 12px 600
     Try again is safe.
   - A 2xx answer whose body is empty, is not JSON, or stalls for 5 seconds or
     breaks reads as sent. The status is the server's answer, and the line
-    updates when the frame shows the agent reached.
+    updates when the frame shows the agent reached. At 5 seconds the page
+    aborts the request, so a stalled body never holds a connection.
 - Focus moves from the pressed offer to the agent's part and stays there
   through sending, sent and failed, because "Try again" is the same button.
   When the part goes, nothing moves focus.
