@@ -43,7 +43,9 @@ export type Completion = {
 };
 
 const ALL = "#all";
-const WHITESPACE = /\s/;
+// Rust's char::is_whitespace, which the server's mention grammar uses; JS \s differs at U+0085 and U+FEFF.
+const WHITESPACE =
+  /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
 
 function disabledReason(
   reason: ChannelSnapshot["notAddressableReason"],

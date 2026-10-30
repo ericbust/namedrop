@@ -438,6 +438,9 @@ test("complete: the hint finds mentions the way the server does, in code spans, 
     ["@codex. hi", []],
     ["`@codex` hi", []],
     ["\t#alpha\n@codex\u00a0@claude hi", ["@codex", "@claude"]],
+    ["@codex\u0085hi", ["@codex"]],
+    ["@codex\ufeffhi", []],
+    ["@codex\u3000hi", ["@codex"]],
   ];
   for (const [text, expected] of leading)
     assert.deepEqual(leadingMentions(text), expected, JSON.stringify(text));
