@@ -941,12 +941,19 @@ Enter sends:
     channel post apply. Its @codex follows the `#label` word, so the post
     mentions no one: "Enter posts to the channel · Mention @name to bring
     someone in".
+  - With no `#label` before it, a name whose lowercase form belongs to a
+    member of this channel whose pane is closed (the chip's "Pane closed"):
+    "@codex's pane is closed", for "@codex hi" and "@Codex hi" alike. The
+    server refuses both, so this comes before the capitals rule: lowercasing
+    the name would only lead to a second refusal. A name a current member has
+    taken since is not closed. With a `#label` first, the name belongs to that
+    workspace, so the rules below apply.
   - A name with capitals: "Names are lowercase: @codex", the name with its
     ASCII letters lowercased. The server refuses the capital before it looks
-    the name up, so this is the reason for a current member, a closed one, a
-    mention group the page can't see, and an unknown name alike: "@Backend hi"
-    reads "Names are lowercase: @backend" and "@Nobody hi there" reads "Names
-    are lowercase: @nobody".
+    the name up, so this is the reason for a current member, a mention group
+    the page can't see, and an unknown name alike: "@Backend hi" reads "Names
+    are lowercase: @backend" and "@Nobody hi there" reads "Names are
+    lowercase: @nobody".
   - A lowercase name the page doesn't know keeps "Enter sends only to
     @name". It may be a group, which the page can't see, so the server
     decides.

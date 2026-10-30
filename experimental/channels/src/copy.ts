@@ -409,6 +409,7 @@ export const composerCopy = {
   sendsOnlyTo: (names: readonly string[]) =>
     `Enter sends only to ${shortList(names)}`,
   lowercase: (alias: string) => `Names are lowercase: ${alias}`,
+  paneClosed: (alias: string) => `${alias}'s pane is closed`,
   notMember: (name: string) => `${name} isn't in this channel`,
   spaceAfter: (alias: string) => `Put a space after ${alias}`,
   sending: "Sending…",

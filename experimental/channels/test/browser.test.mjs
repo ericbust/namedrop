@@ -6806,7 +6806,7 @@ test("R3 U3: when the responsible agent is gone, the first press of Message @cod
   await ui.page.keyboard.type("@Codex hi");
   await readsAs(
     ui.page.locator("main .composer-status"),
-    "Names are lowercase: @codex",
+    "@codex's pane is closed",
   );
 });
 
@@ -8849,6 +8849,48 @@ test("R3 U1: a leading name may end in one comma or colon, so the hint says Ente
     JSON.parse(ui.posts.attempts[0].raw).source,
     "@claude, @codex, compare notes",
   );
+});
+
+test("R3 fix1 F3: a leading name whose pane is closed says so as you type, in any case, and Enter still sends it for the server to refuse", async (t) => {
+  const value = team(1, "alpha");
+  value.frame.participants[0].activity = "retired";
+  value.frame.participants[0].recently_closed = true;
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onPost: ({ source }) => ({
+      status: 400,
+      error: `unknown Mention: ${source.split(" ")[0]}`,
+    }),
+  });
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const hints = [];
+  for (const text of ["@codex hi", "@Codex hi", "@claude, @codex: hi"]) {
+    await box.fill(text);
+    hints.push(await status.textContent());
+  }
+  await box.fill("@claude hi");
+  hints.push(await status.textContent());
+  assert.deepEqual(hints, [
+    "@codex's pane is closed",
+    "@codex's pane is closed",
+    "@codex's pane is closed",
+    "Enter sends only to @claude",
+  ]);
+  assert.equal(
+    await ui.page
+      .getByRole("list", { name: "Members" })
+      .getByText("Pane closed")
+      .count(),
+    1,
+    "the chip names the same state",
+  );
+  await box.fill("@codex hi");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  await status.getByText("unknown Mention: @codex").waitFor();
+  assert.equal(await box.inputValue(), "@codex hi", "the text stays");
 });
 
 test("R3 fix1 F1: a name right after a #label word is that workspace's, so the hint promises no check for it, and a #label with a mark or #all keeps the check", async (t) => {

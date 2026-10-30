@@ -329,34 +329,53 @@ export function leadingMentions(text: string): readonly string[] {
 function asciiLower(text: string): string {
   return text.replace(/[A-Z]+/g, (upper) => upper.toLowerCase());
 }
+// The names whose panes are closed, unless a current member took the name.
+function closedNames(members: ReadonlyMap<AddressId, Member>): Set<string> {
+  const closed = new Set<string>();
+  const current = new Set<string>();
+  for (const member of members.values())
+    (member.activity === "retired" ? closed : current).add(member.alias);
+  for (const alias of current) closed.delete(alias);
+  return closed;
+}
 // The hint for leading text the server refuses, read in its order: after any
 // `#label` words, the first `@` word must be a whole name, and no leading name
 // may have capitals. The server refuses a capital before it looks the name up,
 // so that is the reason whether or not the page knows the name. A lowercase
 // name the page doesn't know may be a group, which the frame doesn't carry, so
-// the server decides that one.
-function refusedLeading(text: string): string | null {
+// the server decides that one. Without a `#label`, a name whose pane is closed
+// comes before any capital: lowercasing it would only meet a second refusal.
+function refusedLeading(
+  text: string,
+  members: ReadonlyMap<AddressId, Member>,
+): string | null {
   let at = afterLabels(text);
+  const labelled = at > spaceAfter(text, 0);
   let word = wordAt(text, at);
   const isName = (token: string) =>
     token.startsWith("@") && ALIAS.test(asciiLower(recipient(token).slice(1)));
   if (word.length > 1 && word.startsWith("@") && !isName(word)) {
     // Text that starts with a #label is never a leading mention to the server,
     // so it posts to the channel as it is.
-    if (at > spaceAfter(text, 0)) return null;
+    if (labelled) return null;
     const name = PUNCTUATED.exec(word)?.[1];
     return name !== undefined && ALIAS.test(asciiLower(name))
       ? composerCopy.spaceAfter(`@${asciiLower(name)}`)
       : composerCopy.notMember(word);
   }
+  const names: string[] = [];
   while (isName(word)) {
-    const name = recipient(word);
-    if (name !== asciiLower(name))
-      return composerCopy.lowercase(asciiLower(name));
+    names.push(recipient(word));
     at = spaceAfter(text, at + word.length);
     word = wordAt(text, at);
   }
-  return null;
+  const closed = labelled ? new Set<string>() : closedNames(members);
+  const closedName = names.map(asciiLower).find((name) => closed.has(name));
+  if (closedName !== undefined) return composerCopy.paneClosed(closedName);
+  const capital = names.find((name) => name !== asciiLower(name));
+  return capital === undefined
+    ? null
+    : composerCopy.lowercase(asciiLower(capital));
 }
 
 // The agents a channel post mentions, in the order the text first names them.
@@ -386,7 +405,7 @@ export function postSource(text: string, rule: SendRule): string | null {
 // Where Enter sends the text, in the words of the hint under the box.
 export function composerHint(rule: SendRule, text: string): string {
   if (rule.kind === "thread") return composerCopy.hint;
-  const refused = refusedLeading(text);
+  const refused = refusedLeading(text, rule.agents);
   if (refused !== null) return refused;
   const leading = leadingMentions(text);
   if (leading.length > 0) return composerCopy.sendsOnlyTo(leading);
