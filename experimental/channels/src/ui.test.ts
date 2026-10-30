@@ -633,18 +633,21 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
     ),
     item("integration_registration", { kind: "local" }, { conversation: null }),
   ];
-  const { channel } = space(value);
-  const markup = renderToStaticMarkup(
-    createElement(
-      PeekContext,
-      { value: { scope: channel.key, open() {} } },
-      createElement(NeedsYou, { channel, onFocus() {}, onControl }),
-    ),
-  );
-  const items = [
-    ...markup.matchAll(/<li class="attention-item">(.*?)<\/li>/gs),
-  ].map(([, inner]) => inner ?? "");
-  assert.equal(items.length, 3, markup);
+  const render = () => {
+    const { channel } = space(value);
+    const markup = renderToStaticMarkup(
+      createElement(
+        PeekContext,
+        { value: { scope: channel.key, open() {} } },
+        createElement(NeedsYou, { channel, onFocus() {}, onControl }),
+      ),
+    );
+    return [...markup.matchAll(/<li class="attention-item">(.*?)<\/li>/gs)].map(
+      ([, inner]) => inner ?? "",
+    );
+  };
+  const items = render();
+  assert.equal(items.length, 3);
   const rows = items.map((inner) => [
     ...inner.matchAll(/<div class="attention-actions">(.*?)<\/div>/gs),
   ]);
@@ -660,7 +663,7 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
     inner.match(/<p class="attention-hint"( title="[^"]*")?>(.*?)<\/p>/s);
   assert.deepEqual(hint(items[0] ?? "")?.slice(1), [
     ' title="w1:worker"',
-    "Answer it in @worker&#x27;s pane in Herdr.",
+    "Approve or decline it in @worker&#x27;s pane in Herdr.",
   ]);
   assert.deepEqual(hint(items[1] ?? "")?.slice(1), [
     undefined,
@@ -669,6 +672,24 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
   assert.deepEqual(hint(items[2] ?? "")?.slice(1), [
     undefined,
     "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.",
+  ]);
+  value.frame.attention = [
+    item(
+      "automatic_reply_limit",
+      { kind: "pane", address_id: worker.address_id },
+      { thread_id: "t", actions: ["continue", "stop"] },
+    ),
+    item("pane_binding", { kind: "pane", address_id: worker.address_id }),
+  ];
+  const [limit, binding] = render();
+  assert.deepEqual(
+    hint(limit ?? "")?.slice(1),
+    [undefined, "The agents paused after 10 replies in a row."],
+    "beside Continue and Stop the paused hint stands, with no pane tooltip",
+  );
+  assert.deepEqual(hint(binding ?? "")?.slice(1), [
+    ' title="w1:worker"',
+    "Answer it in @worker&#x27;s pane in Herdr.",
   ]);
 });
 

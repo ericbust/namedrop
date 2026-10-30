@@ -6101,7 +6101,7 @@ test("DESIGN-R2 A1-A3: each Needs-you card has one action row, 12px apart, that 
   const hint = cards.nth(2).locator(".attention-hint");
   assert.deepEqual(
     [await hint.textContent(), await hint.getAttribute("title")],
-    ["Answer it in @codex's pane in Herdr.", "w1:codex"],
+    ["Approve or decline it in @codex's pane in Herdr.", "w1:codex"],
   );
   assert.equal(
     await cards.locator(".attention-actions", { hasText: "in Herdr" }).count(),

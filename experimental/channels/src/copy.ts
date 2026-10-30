@@ -111,6 +111,7 @@ export function receiptCopy(
 export type AttentionCopy = {
   title: string;
   hint: string;
+  hintTitle: string | null;
   details: string | null;
 };
 const SHORT_SUMMARY = 90;
@@ -184,16 +185,29 @@ const localHint =
   "Open this workspace in Herdr and choose Namedrop Doctor to review this item.";
 const localSetupHint =
   "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.";
-function responseHint(item: Attention, responderAlias: string | null) {
-  const who = responderAlias ?? item.subjectAlias;
+const pausedHint = "The agents paused after 10 replies in a row.";
+function responseHint(
+  item: Attention,
+  responder: Member | null,
+): Pick<AttentionCopy, "hint" | "hintTitle"> | null {
   if (item.response?.kind === "local")
-    return item.source === "integration_registration"
-      ? localSetupHint
-      : localHint;
-  return who !== null &&
-    (item.response?.kind === "pane" || item.source === "agent_status")
-    ? answerInPane(who)
-    : null;
+    return {
+      hint:
+        item.source === "integration_registration" ? localSetupHint : localHint,
+      hintTitle: null,
+    };
+  if (item.source === "automatic_reply_limit" && threadControls(item) !== null)
+    return { hint: pausedHint, hintTitle: null };
+  const who = responder?.alias ?? item.subjectAlias;
+  const pane = item.response?.kind === "pane";
+  if (who === null || !(pane || item.source === "agent_status")) return null;
+  return {
+    hint:
+      item.source === "context_grant"
+        ? `Approve or decline it in ${who}'s pane in Herdr.`
+        : answerInPane(who),
+    hintTitle: pane ? paneLabelText(responder) : null,
+  };
 }
 export const threadControlCopy = {
   continue: {
@@ -218,34 +232,37 @@ export const threadControlCopy = {
   { label: string; pending: string; title: string; failed: string }
 > &
   Record<string, unknown>;
-const pausedHint = "The agents paused after 10 replies in a row.";
 // What an item is about, in the Needs-you table's words, for a row that already names the agent.
 export function attentionKind(item: Attention): string {
   return attentionTable[item.source].title;
 }
 export function attentionCopy(
   item: Attention,
-  responderAlias: string | null = null,
+  responder: Member | null = null,
 ): AttentionCopy {
   const { text, truncated } = item.summary;
-  const row =
-    item.source === "automatic_reply_limit" && threadControls(item) !== null
-      ? { ...attentionTable[item.source], hint: pausedHint }
-      : attentionTable[item.source];
-  const hint = responseHint(item, responderAlias);
+  const row = attentionTable[item.source];
+  const response = responseHint(item, responder);
+  const hintTitle = response?.hintTitle ?? null;
   if (
     item.source === "agent_status" &&
     !truncated &&
     text.trim() &&
     text.length <= SHORT_SUMMARY
   )
-    return { title: text, hint: hint ?? row.hint, details: null };
+    return {
+      title: text,
+      hint: response?.hint ?? row.hint,
+      hintTitle,
+      details: null,
+    };
   const details = `${text}${truncated ? "…" : ""}`;
   return item.subjectAlias === null
-    ? { title: row.title, hint: hint ?? row.hint, details }
+    ? { title: row.title, hint: response?.hint ?? row.hint, hintTitle, details }
     : {
         title: row.named(item.subjectAlias),
-        hint: hint ?? row.namedHint ?? row.hint,
+        hint: response?.hint ?? row.namedHint ?? row.hint,
+        hintTitle,
         details,
       };
 }

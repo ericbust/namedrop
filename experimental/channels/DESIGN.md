@@ -445,13 +445,23 @@ offer, and its button names the action and the person:
 | `pane`     | "See @worker's screen" | Opens the peek drawer for that agent.                                |
 | `local`    | none                   | Its setup step becomes the hint.                                     |
 
-A `pane` response is answered in Herdr, so its hint reads "Answer it in
-@worker's pane in Herdr." with the pane label, such as `w1:worker`, as the
-hint's tooltip. An `agent_status` item whose agent is known uses the same hint.
-A `local` response's hint reads "Open this workspace in Herdr and choose
-Namedrop setup from the command palette to repair the integration." for
+A `pane` response is answered in Herdr, so its hint names the agent's pane,
+with the pane label, such as `w1:worker`, as the hint's tooltip. A `local`
+response's hint reads "Open this workspace in Herdr and choose Namedrop setup
+from the command palette to repair the integration." for
 `integration_registration`, and "Open this workspace in Herdr and choose
 Namedrop Doctor to review this item." otherwise.
+
+**Which hint wins.** The first row that fits the item gives its hint:
+
+| Item                                                  | Hint                                                | Tooltip        |
+| ----------------------------------------------------- | --------------------------------------------------- | -------------- |
+| A `local` response                                    | Its setup step, as above                            | none           |
+| `automatic_reply_limit` with Continue or Stop on page | "The agents paused after 10 replies in a row."      | none           |
+| `context_grant` with a `pane` response                | "Approve or decline it in @worker's pane in Herdr." | the pane label |
+| Any other source with a `pane` response               | "Answer it in @worker's pane in Herdr."             | the pane label |
+| `agent_status` whose agent is known                   | "Answer it in @claude's pane in Herdr."             | none           |
+| Anything else, or no agent known                      | The first table's hint, or the named hint above     | none           |
 
 **Reply limit.** A reply-limit item that names its thread (`thread_id`) and
 lists the actions the browser may take (`actions`) can be continued or stopped

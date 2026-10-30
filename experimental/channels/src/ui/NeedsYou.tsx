@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { responderOf } from "../attention.ts";
-import { attentionCopy, paneLabelText, relativeAge } from "../copy.ts";
+import { attentionCopy, relativeAge } from "../copy.ts";
 import type { Attention, ChannelSnapshot, SpaceKey } from "../model.ts";
 import {
   AttentionActions,
@@ -57,8 +57,7 @@ function Item({
 }) {
   const [open, setOpen] = useState(false);
   const responder = responderOf(item, channel.members);
-  const copy = attentionCopy(item, responder?.alias ?? null);
-  const pane = item.response?.kind === "pane" ? paneLabelText(responder) : null;
+  const copy = attentionCopy(item, responder);
   const opened = new Date(item.openedAt);
   return (
     <li className="attention-item">
@@ -70,7 +69,7 @@ function Item({
       >
         {relativeAge(item.openedAt, now)}
       </time>
-      <p className="attention-hint" title={pane ?? undefined}>
+      <p className="attention-hint" title={copy.hintTitle ?? undefined}>
         {copy.hint}
       </p>
       <AttentionActions
