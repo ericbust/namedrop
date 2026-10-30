@@ -81,7 +81,24 @@ pub(crate) fn install_shell_command(
         )
     };
     let script = format!(
-        "{OWNER}if [ \"${{NAMEDROP_HOST-}}\" = hc ] || {{ [ -z \"${{HERDR_SOCKET_PATH-}}${{HERDR_PANE_ID-}}\" ] && [ -n \"${{HC_TERMINAL_ID-}}\" ]; }}; then\n  exec {executable} --host hc \"$@\"\nfi\n# TUI command\n{tui}"
+        r#"{OWNER}namedrop_explicit_host=
+namedrop_previous_arg=
+for namedrop_arg do
+  if [ "$namedrop_previous_arg" = --host ]; then
+    namedrop_explicit_host=$namedrop_arg
+    break
+  fi
+  case "$namedrop_arg" in
+    --host=*) namedrop_explicit_host=${{namedrop_arg#--host=}}; break ;;
+  esac
+  namedrop_previous_arg=$namedrop_arg
+done
+if [ "$namedrop_explicit_host" = hc ] || {{ [ -z "$namedrop_explicit_host" ] && {{ [ "${{NAMEDROP_HOST-}}" = hc ] || {{ [ -z "${{HERDR_SOCKET_PATH-}}${{HERDR_PANE_ID-}}" ] && [ -n "${{HC_TERMINAL_ID-}}" ]; }}; }}; }}; then
+  if [ -z "$namedrop_explicit_host" ]; then set -- --host hc "$@"; fi
+  exec {executable} "$@"
+fi
+# TUI command
+{tui}"#
     );
     replace_if_changed(&launcher, &script, Some(0o755))?;
     for (path, text, mode) in &updates {
@@ -178,6 +195,34 @@ mod tests {
         assert_eq!(
             String::from_utf8(hc_output.stdout).unwrap(),
             "hc\n--host\nhc\ndoctor\n"
+        );
+        for flags in [vec!["--host", "hc"], vec!["--host=hc"]] {
+            let output = Command::new(&launcher)
+                .args(&flags)
+                .arg("doctor")
+                .env("HERDR_SOCKET_PATH", "tui")
+                .env_remove("NAMEDROP_HOST")
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("hc\n{}\ndoctor\n", flags.join("\n"))
+            );
+        }
+        let output = Command::new(&launcher)
+            .args(["--host", "tui", "doctor"])
+            .env("HC_TERMINAL_ID", "t1")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("NAMEDROP_HOST")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!(
+                "tui\n--plugin-state\n{}\n--host\ntui\ndoctor\n",
+                state.display()
+            )
         );
         fs::remove_dir_all(root).unwrap();
     }

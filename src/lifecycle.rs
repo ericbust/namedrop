@@ -250,6 +250,24 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    let _label_lock = if runtime.is_hc() {
+        Some(crate::host::hc::label_lock(runtime.state_directory)?)
+    } else {
+        None
+    };
+    execute_lifecycle_operation_locked(operation, input, runtime)
+}
+
+pub(crate) fn execute_lifecycle_operation_locked<H, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+) -> Result<Value, String>
+where
+    H: Host + Copy,
+    C: Clock,
+    I: IdGenerator,
+{
     let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let (actor_kind, actor_id) = if operation.starts_with("event.") || operation == "reconcile" {
@@ -687,6 +705,12 @@ where
             )?;
             onboard_settled_integrations(runtime, &discovered)?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
+            if runtime.is_hc()
+                && let (Some(pane), Some(alias)) =
+                    (record["pane_id"].as_str(), record["alias"].as_str())
+            {
+                publish_pane_address_metadata(runtime, pane, alias, PaneLabel::Ready)?;
+            }
             Ok(record)
         }
         "address.unbind" => {
@@ -718,6 +742,12 @@ where
                 },
             )?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
+            if runtime.is_hc()
+                && let (Some(pane), Some(alias)) =
+                    (record["pane_id"].as_str(), record["alias"].as_str())
+            {
+                publish_pane_address_metadata(runtime, pane, alias, PaneLabel::Ready)?;
+            }
             Ok(record)
         }
         "address.persona" => {
@@ -754,11 +784,6 @@ where
                         .and_then(|address| address.pane_id))
                 })
                 .map_err(|error| error.to_string())?;
-            store
-                .transaction(|transaction| {
-                    transaction.release_alias(&namespace, &alias, &attribution)
-                })
-                .map_err(|error| error.to_string())?;
             let pane = pane.or_else(|| {
                 discovered
                     .panes
@@ -766,7 +791,12 @@ where
                     .find(|pane| pane.pane_label.as_deref() == Some(&format!("@{alias}")))
                     .map(|pane| pane.pane_id.clone())
             });
-            clear_hc_name(runtime, pane.as_deref())?;
+            store
+                .transaction(|transaction| {
+                    transaction.release_alias(&namespace, &alias, &attribution)?;
+                    clear_hc_name(runtime, pane.as_deref()).map_err(StoreError::invalid_input)
+                })
+                .map_err(|error| error.to_string())?;
             Ok(json!({"alias": alias, "released": true}))
         }
         "address.remove" => {
@@ -784,11 +814,13 @@ where
                 .map_err(|error| error.to_string())?;
             let released_aliases = store
                 .transaction(|transaction| {
-                    transaction.remove_pane_address(&namespace, &address_id, &attribution)
+                    let aliases =
+                        transaction.remove_pane_address(&namespace, &address_id, &attribution)?;
+                    clear_hc_name(runtime, pane.as_deref()).map_err(StoreError::invalid_input)?;
+                    Ok(aliases)
                 })
                 .map_err(|error| error.to_string())?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
-            clear_hc_name(runtime, pane.as_deref())?;
             Ok(json!({
                 "address_id": address_id,
                 "released_aliases": released_aliases,

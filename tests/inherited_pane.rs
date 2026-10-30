@@ -664,7 +664,7 @@ else: raise AssertionError(args)
         serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
     assert!(before["labels"]["namedrop.session"].is_null());
     let namespace = namedrop::StateNamespace::for_space("hc:hook-test", "fixture-space");
-    namedrop::StateStore::open(&f.0.join("state"))
+    namedrop::StateStore::open(f.0.join("state"))
         .unwrap()
         .transaction(|transaction| {
             transaction.activate_worktree(

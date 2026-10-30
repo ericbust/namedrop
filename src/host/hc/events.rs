@@ -86,7 +86,7 @@ impl Subscriber {
                 if matches!(event.kind, Kind::Lost | Kind::Restarted) {
                     runtime
                         .host
-                        .set_labels(&pane, &[("namedrop.session", "")])?;
+                        .invalidate_session(runtime.state_directory, &pane)?;
                 }
                 let terminal = runtime.host.terminal(&pane, None).ok();
                 let space = terminal
@@ -209,6 +209,7 @@ impl Subscriber {
         pane: &str,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
+        let _lock = label_lock(runtime.state_directory)?;
         // Read the current label, since a queued event can precede a release.
         let terminal = runtime.host.terminal(pane, None)?;
         let requested = terminal
@@ -238,7 +239,17 @@ impl Subscriber {
             current_pane_id: Some(pane),
             ..*runtime
         };
-        if let Err(error) = self.operation("name", json!({"alias":requested}), &scoped) {
+        let result = crate::lifecycle::execute_lifecycle_operation_locked(
+            "name",
+            json!({"alias":requested}),
+            &scoped,
+        );
+        if let Ok(value) = &result
+            && let Some(drain) = value.get("drain")
+        {
+            self.remember_drain(drain, runtime.clock.now_unix_ms());
+        }
+        if let Err(error) = result {
             runtime
                 .host
                 .set_labels(pane, &[("namedrop.name", stored.as_deref().unwrap_or(""))])?;

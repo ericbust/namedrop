@@ -514,7 +514,14 @@ fn open_dashboard(root: &Path, workspace: &str) -> serde_json::Value {
     let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
         .args(["--json", "--plugin-state"])
         .arg(root.join("state"))
-        .args(["--herdr-socket", SOCKET, "--herdr-workspace", workspace])
+        .args([
+            "--host",
+            "tui",
+            "--herdr-socket",
+            SOCKET,
+            "--herdr-workspace",
+            workspace,
+        ])
         .args(["dashboard", "--no-open"])
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_WORKSPACE_ID")

@@ -9,6 +9,7 @@ struct Fixture {
     terminals: RefCell<Vec<Value>>,
     calls: RefCell<Vec<Vec<String>>>,
     send_error: Option<String>,
+    fail_clear: std::cell::Cell<bool>,
 }
 impl Default for Fixture {
     fn default() -> Self {
@@ -18,6 +19,7 @@ impl Default for Fixture {
             ]),
             calls: RefCell::new(Vec::new()),
             send_error: None,
+            fail_clear: std::cell::Cell::new(false),
         }
     }
 }
@@ -47,6 +49,9 @@ impl HerdrCommandExecutor for Fixture {
             }
             ["--version"] => "herdr-core 0.1.14\n".to_owned(),
             ["label", id, labels @ ..] => {
+                if self.fail_clear.get() && labels.contains(&"namedrop.name=") {
+                    return Err("label clear failed".into());
+                }
                 let mut terminals = self.terminals.borrow_mut();
                 let terminal = terminals
                     .iter_mut()
@@ -377,6 +382,33 @@ fn release_and_removal_clear_name_mirrors_after_store_mutation() {
             })
             .unwrap();
         if remove {
+            fixture.fail_clear.set(true);
+            assert!(
+                namedrop::execute_lifecycle_operation(
+                    "address.remove",
+                    json!({"address_id":address_id}),
+                    &runtime
+                )
+                .is_err()
+            );
+            let still_named = namedrop::StateStore::open(&state)
+                .unwrap()
+                .transaction(|transaction| {
+                    transaction.list_pane_addresses(&namedrop::StateNamespace::for_space(
+                        "hc:fixture",
+                        "fixture-space",
+                    ))
+                })
+                .unwrap();
+            assert_eq!(
+                still_named[0].alias, "alice",
+                "failed label clear must roll back removal"
+            );
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+                "alice"
+            );
+            fixture.fail_clear.set(false);
             namedrop::execute_lifecycle_operation(
                 "address.remove",
                 json!({"address_id":address_id}),
@@ -490,6 +522,22 @@ fn events_reconcile_names_preserve_lost_aliases_and_clear_sessions() {
         );
         assert_eq!(names()[0].alias, "bob");
     }
+    runtime
+        .host
+        .publish_session(&state, "t1", "fresh-session")
+        .unwrap();
+    for kind in ["lost", "restarted"] {
+        subscriber.handle_line(&event(kind), &runtime).unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "fresh-session"
+        );
+        assert_eq!(names()[0].alias, "bob");
+    }
+    fixture.terminals.borrow_mut()[0]["labels"]
+        .as_object_mut()
+        .unwrap()
+        .remove("namedrop.session");
     for kind in [
         "created",
         "status",
@@ -652,5 +700,206 @@ fn doctor_reports_only_observed_unreported_codex_and_uses_hc_repairs() {
             );
         }
     }
+    std::fs::remove_dir_all(state).unwrap();
+}
+
+struct ConcurrentFixture {
+    record: std::sync::Mutex<Value>,
+    get_count: std::sync::atomic::AtomicUsize,
+    pause_get: std::sync::atomic::AtomicUsize,
+    gate: std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+}
+impl ConcurrentFixture {
+    fn new() -> Self {
+        let mut record: Value =
+            serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
+        record["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove("namedrop.session");
+        Self {
+            record: std::sync::Mutex::new(record),
+            get_count: std::sync::atomic::AtomicUsize::new(0),
+            pause_get: std::sync::atomic::AtomicUsize::new(usize::MAX),
+            gate: std::sync::Mutex::new(None),
+        }
+    }
+    fn pause_on_get(
+        &self,
+        count: usize,
+    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        *self.gate.lock().unwrap() = Some((entered_tx, resume_rx));
+        self.get_count.store(0, std::sync::atomic::Ordering::SeqCst);
+        self.pause_get
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+        (entered_rx, resume_tx)
+    }
+}
+impl HerdrCommandExecutor for ConcurrentFixture {
+    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        let stdout = match args {
+            ["ls", "--json"] => json!({"terminals":[*self.record.lock().unwrap()]}).to_string(),
+            ["get", _, "--json"] => {
+                let snapshot = self.record.lock().unwrap().to_string();
+                if self
+                    .get_count
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1
+                    == self.pause_get.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    let (entered, resume) = self.gate.lock().unwrap().take().unwrap();
+                    entered.send(()).unwrap();
+                    resume
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .unwrap();
+                }
+                snapshot
+            }
+            ["label", _, labels @ ..] => {
+                let mut record = self.record.lock().unwrap();
+                for label in labels.iter().filter(|label| **label != "--json") {
+                    let (key, value) = label.split_once('=').unwrap();
+                    if value.is_empty() {
+                        record["labels"].as_object_mut().unwrap().remove(key);
+                    } else {
+                        record["labels"][key] = json!(value);
+                    }
+                }
+                record.to_string()
+            }
+            args => panic!("unexpected hc call {args:?}"),
+        };
+        Ok(HerdrCommandOutput { stdout })
+    }
+}
+
+#[test]
+fn delayed_invalidations_and_interleaved_publication_preserve_the_new_session() {
+    let fixture = ConcurrentFixture::new();
+    let state =
+        std::env::temp_dir().join(format!("namedrop-hc-session-race-{}", std::process::id()));
+    let host = HcHost::new(&fixture);
+    fixture.record.lock().unwrap()["pid"] = json!(100);
+    host.publish_session(&state, "t1", "old").unwrap();
+    fixture.record.lock().unwrap()["pid"] = json!(200);
+    host.publish_session(&state, "t1", "new").unwrap();
+    host.invalidate_session(&state, "t1").unwrap();
+    assert_eq!(
+        fixture.record.lock().unwrap()["labels"]["namedrop.session"],
+        "new",
+        "a delayed event must retain a session published for the current PID"
+    );
+
+    fixture.record.lock().unwrap()["pid"] = Value::Null;
+    let (entered, resume) = fixture.pause_on_get(1);
+    std::thread::scope(|scope| {
+        let invalidation = scope.spawn(|| host.invalidate_session(&state, "t1"));
+        entered
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        fixture.record.lock().unwrap()["pid"] = json!(300);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let state = &state;
+        let publication = scope.spawn(move || {
+            let result = host.publish_session(state, "t1", "newest");
+            done_tx.send(()).unwrap();
+            result
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(75))
+                .is_err(),
+            "publication must serialize with the whole invalidation decision"
+        );
+        resume.send(()).unwrap();
+        invalidation.join().unwrap().unwrap();
+        publication.join().unwrap().unwrap();
+    });
+    assert_eq!(
+        fixture.record.lock().unwrap()["labels"]["namedrop.session"],
+        "newest"
+    );
+    assert_eq!(
+        fixture.record.lock().unwrap()["labels"]["namedrop.session.pid"],
+        "300"
+    );
+    std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn removal_serializes_with_a_name_request_already_being_read() {
+    let fixture = ConcurrentFixture::new();
+    let state = std::env::temp_dir().join(format!("namedrop-hc-name-race-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&state);
+    let home = state.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let clock = namedrop::SystemClock;
+    let ids = namedrop::ProcessIds::default();
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&home),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    namedrop::execute_lifecycle_operation(
+        "name",
+        json!({"alias":"alice","pane_type":"terminal"}),
+        &runtime,
+    )
+    .unwrap();
+    let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+    let address = namedrop::StateStore::open(&state)
+        .unwrap()
+        .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+        .unwrap()
+        .remove(0);
+    let (entered, resume) = fixture.pause_on_get(2);
+    std::thread::scope(|scope| {
+        let event = scope.spawn(|| {
+            namedrop::host::hc::events::Subscriber::default().handle_line(
+                r#"{"method":"event","params":{"type":"labels","terminal":"t1","data":{}}}"#,
+                &runtime,
+            )
+        });
+        entered
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let runtime = &runtime;
+        let removal = scope.spawn(move || {
+            let result = namedrop::execute_lifecycle_operation(
+                "address.remove",
+                json!({"address_id":address.id}),
+                runtime,
+            );
+            done_tx.send(()).unwrap();
+            result
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(75))
+                .is_err(),
+            "removal must wait for naming's read and decision"
+        );
+        resume.send(()).unwrap();
+        event.join().unwrap().unwrap();
+        removal.join().unwrap().unwrap();
+    });
+    assert!(
+        namedrop::StateStore::open(&state)
+            .unwrap()
+            .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+            .unwrap()
+            .is_empty()
+    );
+    assert!(fixture.record.lock().unwrap()["labels"]["namedrop.name"].is_null());
     std::fs::remove_dir_all(state).unwrap();
 }

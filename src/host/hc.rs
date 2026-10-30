@@ -219,6 +219,25 @@ impl Terminal {
     }
 }
 
+pub(crate) fn label_lock(state: &Path) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(state)
+        .map_err(|error| error.to_string())?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(state.join("hc-labels.lock"))
+        .map_err(|error| error.to_string())?;
+    file.lock().map_err(|error| error.to_string())?;
+    Ok(file)
+}
+
 impl<E: HerdrCommandExecutor> HcHost<E> {
     pub fn new(transport: E) -> Self {
         Self { transport }
@@ -289,6 +308,43 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
             .execute(&args)
             .map_err(host_error)
             .map(|_| ())
+    }
+
+    pub fn publish_session(
+        &self,
+        state: &Path,
+        pane: &str,
+        session: &str,
+    ) -> Result<(), HostError> {
+        let _lock = label_lock(state)?;
+        let terminal = self.terminal(pane, None)?;
+        let pid = terminal
+            .pid
+            .filter(|pid| *pid > 0)
+            .ok_or("hc terminal has no live program to own a session".to_owned())?;
+        self.set_labels(
+            pane,
+            &[
+                ("namedrop.session", session),
+                ("namedrop.session.pid", &pid.to_string()),
+            ],
+        )
+    }
+
+    pub fn invalidate_session(&self, state: &Path, pane: &str) -> Result<(), HostError> {
+        let _lock = label_lock(state)?;
+        let terminal = self.terminal(pane, None)?;
+        let current_pid = terminal.pid.map(|pid| pid.to_string());
+        if current_pid
+            .as_ref()
+            .is_some_and(|pid| terminal.labels.get("namedrop.session.pid") == Some(pid))
+        {
+            return Ok(());
+        }
+        self.set_labels(
+            pane,
+            &[("namedrop.session", ""), ("namedrop.session.pid", "")],
+        )
     }
 
     pub fn version(&self) -> Result<String, HostError> {

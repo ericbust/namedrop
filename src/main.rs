@@ -808,7 +808,7 @@ fn run_context_hook(
                             .filter(|session| !session.is_empty())
                         && let Some(pane) = runtime.current_pane_id
                     {
-                        host.set_labels(pane, &[("namedrop.session", session)])?;
+                        host.publish_session(runtime.state_directory, pane, session)?;
                         namedrop::host::hc::events::start(
                             &host,
                             &namedrop::runtime_executable()?,
@@ -1129,10 +1129,11 @@ fn run_agent_status_worker(options: &RuntimeOptions) -> ExitCode {
                     wait_for_marker_or_deadline(&directory, due);
                     continue;
                 }
-                deadline_ms =
-                    with_runtime_options(options, |runtime| namedrop::drain_mailboxes(runtime))
-                        .ok()
-                        .and_then(|report| report.next_grace_due_ms());
+                deadline_ms = with_runtime_options(options, |runtime| {
+                    namedrop::drain_mailboxes(runtime).map(|report| report.next_grace_due_ms())
+                })
+                .ok()
+                .flatten();
                 continue;
             }
             let _ = lock.unlock();

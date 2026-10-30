@@ -273,7 +273,9 @@ where
                 .find(|address| !address.retired && address.id == binding.address_id)
             {
                 let label = PaneLabel::for_pane(pane, served.as_ref());
-                if label.replaces(&address.alias, pane.idle_state_label.as_deref()) {
+                if !runtime.is_hc()
+                    && label.replaces(&address.alias, pane.idle_state_label.as_deref())
+                {
                     crate::lifecycle::publish_pane_address_metadata(
                         runtime,
                         &binding.pane_id,

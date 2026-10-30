@@ -61,11 +61,11 @@ pub fn execute_terminal<H: Host, C: Clock, I: IdGenerator>(
     if pane.agent.is_some() || pane.agent_session_id.is_some() {
         return Err("terminal pane now contains an agent; command was not executed".to_owned());
     }
-    if !runtime.host.process_info(&pane.pane_id).is_some_and(|p| {
-        p.foreground_processes
-            .iter()
-            .any(|p| p.pid == std::process::id())
-    }) {
+    if !runner_in_foreground(
+        &runtime.host,
+        &pane.pane_id,
+        std::time::Duration::from_secs(2),
+    ) {
         return Err(
             "terminal runner must be running in the target pane's foreground process group"
                 .to_owned(),
@@ -154,6 +154,23 @@ fn copy_output(mut reader: impl Read, mut writer: impl Write) -> Result<String, 
         text.push_str("\n[output truncated at 32 KiB; full output was streamed to the terminal]");
     }
     Ok(text)
+}
+
+fn runner_in_foreground(host: &impl Host, pane: &str, budget: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if host.process_info(pane).is_some_and(|info| {
+            info.foreground_processes
+                .iter()
+                .any(|process| process.pid == std::process::id())
+        }) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 pub(crate) fn shell_is_available(herdr: &impl Host, pane_id: &str) -> bool {
@@ -358,4 +375,46 @@ pub fn default_pane_type<H: Host, C, I>(
         return Ok(Some(kind));
     }
     detect_pane_type(runtime)
+}
+
+#[cfg(test)]
+mod foreground_transition_tests {
+    use super::*;
+    use std::{cell::Cell, time::Duration};
+
+    struct DelayedSample(Cell<usize>);
+    impl crate::HerdrCommandExecutor for DelayedSample {
+        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
+            assert_eq!(args, ["pane", "process-info", "--pane", "pane"]);
+            let sample = self.0.get();
+            self.0.set(sample + 1);
+            let pid = if sample == 0 { 1 } else { std::process::id() };
+            Ok(crate::HerdrCommandOutput {
+                stdout: serde_json::json!({"result":{"process_info":{
+                    "shell_pid":1,
+                    "foreground_process_group_id":2,
+                    "foreground_processes":[{"pid":pid}]
+                }}})
+                .to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn runner_waits_for_positive_foreground_membership_evidence() {
+        let samples = DelayedSample(Cell::new(0));
+        assert!(runner_in_foreground(
+            &crate::TuiHost::new(&samples),
+            "pane",
+            Duration::from_millis(300)
+        ));
+        assert_eq!(samples.0.get(), 2);
+        samples.0.set(0);
+        assert!(!runner_in_foreground(
+            &crate::TuiHost::new(&samples),
+            "pane",
+            Duration::ZERO
+        ));
+        assert_eq!(samples.0.get(), 1);
+    }
 }
