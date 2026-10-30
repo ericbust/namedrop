@@ -9051,3 +9051,212 @@ test("CH-2: an agent conversation shows every message flat, with header recipien
     .getByRole("combobox", { name: "Reply to @claude, @codex" })
     .waitFor();
 });
+
+function layoutChannel() {
+  const value = team(1, "alpha");
+  const at = Date.now() - 60 * 60_000;
+  value.frame.health = { level: "needs_you", items: 1 };
+  value.frame.attention = [
+    {
+      source_kind: "agent_status",
+      summary: {
+        text: "@codex is waiting on an approval or question about the release.",
+        truncated: false,
+      },
+      opened_at_ms: at,
+    },
+  ];
+  value.frame.messages = [
+    message("p1", "@codex please check the build cache", {
+      at_ms: at,
+      legs: [{ to: "codex", stage: { stage: "delivered" } }],
+    }),
+    message("r1", "the cache is fine", {
+      thread_id: "p1",
+      in_reply_to: "p1",
+      kind: "reply",
+      author: "codex",
+      at_ms: at + 60_000,
+    }),
+    ...Array.from({ length: 24 }, (_, n) =>
+      message(
+        `m${n}`,
+        `Status line ${n}: the build finished and the cache is warm. Next step is the release notes for section ${n}.`,
+        { author: n % 2 ? "claude" : "human", at_ms: at + (n + 2) * 60_000 },
+      ),
+    ),
+  ];
+  return value;
+}
+const layoutSizes = [
+  [390, 844],
+  [390, 460],
+  [640, 800],
+  [640, 460],
+  [768, 1024],
+  [1024, 768],
+  [1440, 900],
+];
+// Every region a reader needs, as the reader sees it. A region is rendered unless
+// it sits in a display: none or visibility: hidden ancestor, and shown when it
+// is rendered with some area.
+function layoutFacts(page) {
+  return page.evaluate(() => {
+    const regions = {
+      header: "main .channel-header",
+      members: "main .members",
+      banner: "main .attention",
+      timeline: "main .timeline",
+      jump: "main .jump-latest",
+      composer: "main .composer",
+      slotHeader: ".slot .thread-head, .slot .peek-head",
+      threadBody: ".slot .thread-body",
+      threadComposer: ".slot .composer",
+    };
+    const facts = {};
+    for (const [name, selector] of Object.entries(regions)) {
+      const element = document.querySelector(selector);
+      if (element === null) continue;
+      const { left, top, right, bottom, width, height } =
+        element.getBoundingClientRect();
+      const rendered = element.checkVisibility({ visibilityProperty: true });
+      const shown = rendered && width > 0 && height > 0;
+      facts[name] = { rendered, shown, left, top, right, bottom, height };
+    }
+    const main = document.querySelector("main").getBoundingClientRect();
+    const slot = document.querySelector(".slot")?.getBoundingClientRect();
+    return {
+      facts,
+      viewport: [innerWidth, innerHeight],
+      scroll: [
+        document.documentElement.scrollWidth,
+        document.documentElement.scrollHeight,
+      ],
+      columnLeft: Math.min(main.left, slot?.left ?? main.left),
+      mainShown: document
+        .querySelector("main")
+        .checkVisibility({ visibilityProperty: true }),
+      dots: [...document.querySelectorAll(".connection-dot")].map((dot) =>
+        dot.checkVisibility({ visibilityProperty: true }),
+      ),
+    };
+  });
+}
+function layoutProblems(shown, at, expect) {
+  const { facts } = shown;
+  const [width, height] = shown.viewport;
+  const problems = [];
+  const round = (n) => Math.round(n * 10) / 10;
+  if (shown.scroll[0] > width || shown.scroll[1] > height)
+    problems.push(`${at}: the page overflows to ${shown.scroll.join("x")}`);
+  if (shown.dots.length !== 1 || !shown.dots[0])
+    problems.push(`${at}: connection dots shown ${JSON.stringify(shown.dots)}`);
+  for (const name of expect)
+    if (!facts[name]?.shown) problems.push(`${at}: ${name} is not shown`);
+  const visible = Object.entries(facts).filter(([, fact]) => fact.shown);
+  for (const [i, [a, ra]] of visible.entries())
+    for (const [b, rb] of visible.slice(i + 1)) {
+      if ([a, b].includes("jump") && [a, b].includes("timeline")) continue;
+      const x = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left);
+      const y = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
+      if (x > 0.5 && y > 0.5)
+        problems.push(`${at}: ${a} and ${b} overlap by ${round(y)} px`);
+    }
+  for (const name of ["timeline", "threadBody"])
+    if (
+      facts[name] !== undefined &&
+      (facts[name].rendered || expect.has(name)) &&
+      facts[name].height < 96
+    )
+      problems.push(`${at}: ${name} is ${round(facts[name].height)} px tall`);
+  if (facts.banner?.shown) {
+    const next = ["timeline", "composer"].find((name) => facts[name]?.shown);
+    const gap = facts[next].top - facts.banner.bottom;
+    if (gap < 11.5)
+      problems.push(`${at}: ${round(gap)} px between the banner and ${next}`);
+  }
+  for (const name of ["composer", "threadComposer"])
+    if (
+      facts[name]?.shown &&
+      (facts[name].top < -0.5 || facts[name].bottom > height + 0.5)
+    )
+      problems.push(`${at}: ${name} leaves the window`);
+  if (width <= 600 && Math.abs(shown.columnLeft) >= 0.5)
+    problems.push(`${at}: the main column starts at x=${shown.columnLeft}`);
+  return problems;
+}
+
+test("UI-R4 L4: at every size, with a banner, a thread open or the drawer open, no region overlaps another, the page never overflows, and the timeline and thread keep their room", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const channelsButton = ui.page.getByRole("button", { name: /^Channels/ });
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const scrollUp = () =>
+    ui.page
+      .locator("main .timeline")
+      .evaluate((element) => element.scrollTo({ top: 0 }));
+  const problems = [];
+  for (const [width, height] of layoutSizes) {
+    await ui.page.setViewportSize({ width, height });
+    const at = `${width}x${height}`;
+    await scrollUp();
+    await ui.page
+      .getByRole("button", { name: "Jump to latest messages" })
+      .waitFor({ timeout: 1000 })
+      .catch(() => {});
+    problems.push(
+      ...layoutProblems(
+        await layoutFacts(ui.page),
+        `${at} reading back`,
+        new Set([
+          "header",
+          "members",
+          "banner",
+          "timeline",
+          "jump",
+          "composer",
+        ]),
+      ),
+    );
+    const toggles = await channelsButton.count();
+    if (toggles !== (width <= 600 ? 1 : 0))
+      problems.push(`${at}: ${toggles} Channels buttons`);
+
+    await timeline.getByRole("button", { name: /^1 reply from/ }).click();
+    await threadPane(ui).waitFor();
+    await scrollUp();
+    const threaded = await layoutFacts(ui.page);
+    problems.push(
+      ...layoutProblems(
+        threaded,
+        `${at} with a thread open`,
+        new Set(["slotHeader", "threadBody", "threadComposer"]),
+      ),
+    );
+    const alone = width <= 600 || (width <= 860 && height < 900);
+    if (threaded.mainShown === alone)
+      problems.push(
+        `${at}: the thread should ${alone ? "take the channel's place" : "share the window"}`,
+      );
+    await threadPane(ui).getByRole("button", { name: "Close thread" }).click();
+    await threadPane(ui).waitFor({ state: "detached" });
+
+    if (width <= 600 && toggles === 1) {
+      await channelsButton.click();
+      await ui.page.getByRole("dialog", { name: "Channels" }).waitFor();
+      problems.push(
+        ...layoutProblems(
+          await layoutFacts(ui.page),
+          `${at} with the drawer open`,
+          new Set(),
+        ),
+      );
+      await ui.page.keyboard.press("Escape");
+      await ui.page
+        .getByRole("dialog", { name: "Channels" })
+        .waitFor({ state: "hidden" });
+    }
+  }
+  assert.deepEqual(problems, []);
+});
