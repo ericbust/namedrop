@@ -6802,6 +6802,12 @@ test("R3 U3: when the responsible agent is gone, the first press of Message @cod
     0,
   );
   assert.equal(ui.posts.attempts.length, 0);
+  await draft.press("Control+a");
+  await ui.page.keyboard.type("@Codex hi");
+  await readsAs(
+    ui.page.locator("main .composer-status"),
+    "Names are lowercase: @codex",
+  );
 });
 
 test("DESIGN-R2 D2: the kept-draft notice lasts until the box changes, then the hint names a capitalized leading name again", async (t) => {

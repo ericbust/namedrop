@@ -113,7 +113,8 @@ export function evidenceReduce(
       return state.kind === "ready" &&
         state.request.key === event.key &&
         state.request.response?.kind === "message" &&
-        state.request.response.preparation === "preserved"
+        (state.request.response.preparation === "preserved" ||
+          state.request.response.preparation === "unavailable")
         ? {
             ...state,
             request: {

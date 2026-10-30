@@ -322,6 +322,9 @@ function refusedLeading(text: string): string | null {
   const isName = (token: string) =>
     token.startsWith("@") && ALIAS.test(asciiLower(recipient(token).slice(1)));
   if (word.length > 1 && word.startsWith("@") && !isName(word)) {
+    // Text that starts with a #label is never a leading mention to the server,
+    // so it posts to the channel as it is.
+    if (at > spaceAfter(text, 0)) return null;
     const name = PUNCTUATED.exec(word)?.[1];
     return name !== undefined && ALIAS.test(asciiLower(name))
       ? composerCopy.spaceAfter(`@${asciiLower(name)}`)

@@ -446,7 +446,7 @@ test("an edit of the channel box ends a preserved preparation, so the kept-draft
       type: "draft-edited",
       key: channel.key,
     });
-    if (preparation !== "preserved") {
+    if (preparation !== "preserved" && preparation !== "unavailable") {
       assert.equal(edited, state, preparation);
       continue;
     }

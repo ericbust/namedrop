@@ -603,7 +603,9 @@ main column, under the timeline, and at the bottom of the thread pane.
   first press says so in the same row, whether or not the box holds a draft,
   and the box keeps its text: "The responsible agent is no longer available.
   Use its pane in Herdr to respond." Availability is checked before the draft,
-  so the operator never clears a draft only to learn the agent is gone.
+  so the operator never clears a draft only to learn the agent is gone. That
+  line also gives way at the next edit, so the hint and the guard explain the
+  text that follows.
 - The Jump to latest pill floats 16px above the composer, not above the
   timeline's bottom edge.
 
@@ -928,6 +930,9 @@ Enter sends:
     "@codex,, hi". The server reads whole words.
   - Any other first `@` word that is no name at all: "@codex_x isn't in this
     channel", as typed.
+  - After a `#label` run, neither of the two rules above applies: the server
+    posts "#alpha @codex; hi" to the channel as it is, so the hints for a
+    channel post apply.
   - A name with capitals: "Names are lowercase: @codex", the name with its
     ASCII letters lowercased. The server refuses the capital before it looks
     the name up, so this is the reason for a current member, a closed one, a

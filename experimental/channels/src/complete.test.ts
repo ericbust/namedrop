@@ -578,7 +578,15 @@ test("complete: the hint names leading text the server refuses, reading leading 
     ["@codex,, hi", "Put a space after @codex"],
     ["@codex:: hi", "Put a space after @codex"],
     ["@codex,: hi", "Put a space after @codex"],
-    ["#alpha @codex; hi", "Put a space after @codex"],
+    [
+      "#alpha @codex; hi",
+      "Enter posts to the channel · Namedrop checks if it's for @codex",
+    ],
+    [
+      "#alpha @codex,, hi",
+      "Enter posts to the channel · Namedrop checks if it's for @codex",
+    ],
+    ["#alpha @codex_x hi", room],
     ["@codex_x hi", "@codex_x isn't in this channel"],
     ["@ hi", room],
     ["#alpha @Codex hi", "Names are lowercase: @codex"],
