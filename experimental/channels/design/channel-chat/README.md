@@ -89,3 +89,52 @@ Follow-ups from the live run:
    short topic, such as "build question". This belongs to CH-1's router prompt
    round: ask for two to four words that name the topic, without the agent or
    "Post asks". The page shows the reason as the server sends it.
+
+## Final integration with the cleanup round
+
+`final/` holds the smoke run after merging exp/channel-core 4b12a26, which adds
+the router fixes and the cleanup round (#70 to #76). The testbed was made by
+`testbed test --link . --keep`, which passed all 10 of its checks at 34b5fce,
+with real Claude Code 2.1.310 and Codex 0.164.0. `final/live-log.json` holds
+every post's receipt.
+
+| Scenario                     | What happened                                                                                                                                                                      | Shot                         |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| Plain post, no mention       | No route line, and neither agent answered in 20 s.                                                                                                                                 | `final-1-plain.png`          |
+| Post that mentions @claude   | Routed by claude-haiku-4-5 with the topic "repository description". The line read "@claude · repository description · Queued", and @claude answered in the room.                   | `final-2-*`, `final-3-*`     |
+| Post that mentions @codex    | Topic "definition request". @codex answered in the room.                                                                                                                           | `final-4-codex-answered`     |
+| Thread reply with no mention | The label read "To @claude". The text was sent as typed with `in_reply_to`, and @claude answered.                                                                                  | `final-5-thread-answered`    |
+| Needs-you item               | "@claude didn't answer a request" opened after an interrupted turn. Show message opened the thread on the tinted request. Respond prefilled "@claude ", and @claude answered "ok". | `final-6-*` to `final-9-*`   |
+| Recently closed member       | Closing @codex's pane turned its chip into "@codex Retired". Its peek read "Pane closed", and its earlier post kept "@codex · definition request · 1 reply".                       | `final-11-*` to `final-13-*` |
+
+`final-14-{1440,390}-{light,dark}.png` show the finished channel. The page did
+not scroll at either size.
+
+The driver's wait for @claude's "ok" timed out because it looked only in the
+main timeline, where a request-thread reply shows as a preview card. The reply
+itself arrived within seconds; `live-log.json` records the step as the driver
+saw it and the facts from the receipts and screenshots.
+
+Verdict: **PASS with follow-ups**. Channel chat and the cleanup features work
+together. Router topics now read as short anonymous labels, which closes
+follow-up 5. When the model names no topic, the server sends "General topic";
+the page reads that as no reason and shows the names alone.
+
+Two fixes landed from an independent review of the merge:
+
+- Send anyway inside a Needs-you conversation fills that pane's reply box. It
+  used to close the pane when the thread was outside the loaded timeline.
+- Respond's composer label names every agent that a plain reply reaches. The
+  prefill still targets the responsible agent.
+
+Follow-ups for the design polish PR, after DESIGN-R2:
+
+6. **Reply preview at phone width**: below 600 px, the preview's time wraps
+   under "2 replies" and the two overlap (`final-14-390-dark.png`).
+7. **Receipt on an unanswered request**: the request reads "Done" while the
+   Needs-you item says it was not answered. It should say the agent ended
+   without replying.
+8. **Item after a Respond answer**: the item stays open after the operator
+   responds and the agent answers, because the interrupted request still has
+   no disposition. Resolving it on that answer is a server change, for the
+   cleanup owner.
