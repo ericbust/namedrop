@@ -5984,6 +5984,103 @@ test("CH-2: routing reads Checking who this is for, then a live routed frame fil
   );
 });
 
+// Holds the same row and route line across a frame, so a test can tell an
+// update in place from a remount.
+async function sameNodes(ui, id) {
+  const row = await ui.page.$(`main [data-message-id="${id}"]`);
+  const route = await ui.page.$(`main [data-message-id="${id}"] .route`);
+  return () =>
+    ui.page.evaluate(
+      ([row, route, id]) => {
+        const now = document.querySelector(`main [data-message-id="${id}"]`);
+        return [
+          now === row,
+          now?.querySelector(".route") === route,
+          now?.classList.contains("arrive"),
+          now?.getAnimations({ subtree: true }).length,
+        ];
+      },
+      [row, route, id],
+    );
+}
+
+test("CH-fix-2 item 2: a post reads Sending… until the server answers, then Checking who this is for… until a frame routes it in place", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const { ui, value } = await chatRoom(t, [], {
+    onPost: async () => {
+      await gate;
+      return { status: 200 };
+    },
+  });
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  await box.fill("can @claude check why the mac build fails on main?");
+  await box.press("Enter");
+  const pending = ui.page.locator("main article.pending");
+  await pending.waitFor();
+  assert.equal(await pending.locator(".receipt").textContent(), "Sending…");
+  release();
+  await pending.locator(".receipt").getByText("Sent").waitFor();
+  const { request_id } = JSON.parse(ui.posts.attempts[0].raw);
+  const committed = (channel, legs) => ({
+    ...ui.posts.postedRow(request_id, Date.now() - 60_000),
+    kind: "mention",
+    legs,
+    channel: { mentioned: ["claude"], ...channel },
+  });
+  value.frame.messages = [committed({ state: "routing" }, [])];
+  ui.connections[0].send("space", value);
+  await pending.waitFor({ state: "detached" });
+  const { route, parts, icon } = routeOf(ui, "posted-1");
+  await route.waitFor();
+  assert.deepEqual(await parts(), ["Checking who this is for…"]);
+  assert.deepEqual(await icon(), [iconShape.clock]);
+  assert.equal(await route.getByRole("button").count(), 0, "no offers yet");
+  const same = await sameNodes(ui, "posted-1");
+  value.frame.messages = [
+    committed(routed(), [{ to: "claude", stage: { stage: "delivered" } }]),
+  ];
+  ui.connections[0].send("space", value);
+  await route.getByText("build question", { exact: true }).waitFor();
+  assert.deepEqual(await parts(), ["@claude", "build question", "Delivered"]);
+  assert.deepEqual(await icon(), [iconShape.arrow]);
+  assert.deepEqual(
+    await same(),
+    [true, true, false, 0],
+    "the same row and line update with no arrival",
+  );
+});
+
+for (const [state, text, expected] of [
+  [
+    "unrouted",
+    "nice catch by @codex on the cache",
+    ["Mentioned @codex, not sent", "Send anyway"],
+  ],
+  [
+    "router_failed",
+    "can @codex look at the flaky test?",
+    ["Couldn't check who this is for", "Send to @codex"],
+  ],
+])
+  test(`CH-fix-2 item 2: a routing post that turns ${state} offers to send only once it leaves routing`, async (t) => {
+    const { ui, value } = await chatRoom(t, [
+      channelPost("p1", text, { state: "routing" }),
+    ]);
+    const { route, parts } = routeOf(ui, "p1");
+    await route.waitFor();
+    assert.deepEqual(await parts(), ["Checking who this is for…"]);
+    assert.equal(await route.getByRole("button").count(), 0, "no offers yet");
+    const same = await sameNodes(ui, "p1");
+    value.frame.messages = [channelPost("p1", text, { state })];
+    ui.connections[0].send("space", value);
+    await route.getByRole("button", { name: "Send this to @codex" }).waitFor();
+    assert.deepEqual(await parts(), expected);
+    assert.deepEqual(await same(), [true, true, false, 0]);
+  });
+
 test("CH-2: a routed post offers Send anyway for the mentioned agent it did not reach", async (t) => {
   const { ui } = await chatRoom(t, [
     channelPost(
@@ -6357,7 +6454,7 @@ test("CH-fix-2 item 1: Send anyway keeps a draft that has text and says so until
   assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@codex hi");
 });
 
-test("CH-2: the channel composer says where Enter sends, posts plain text, and a post that mentions agents waits on Checking who this is for", async (t) => {
+test("CH-2: the channel composer says where Enter sends and posts plain text", async (t) => {
   let release;
   const gate = new Promise((resolve) => {
     release = resolve;
@@ -6400,10 +6497,7 @@ test("CH-2: the channel composer says where Enter sends, posts plain text, and a
   await box.press("Enter");
   const pending = ui.page.locator("main article.pending");
   await pending.waitFor();
-  assert.equal(
-    await pending.locator(".receipt").textContent(),
-    "Checking who this is for…",
-  );
+  assert.equal(await pending.locator(".receipt").textContent(), "Sending…");
   assert.deepEqual(
     await pending
       .locator(".receipt svg path")

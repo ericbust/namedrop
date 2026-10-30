@@ -4,7 +4,6 @@ import type {
   AddressId,
   ChannelSnapshot,
   Member,
-  Outgoing,
   SendRule,
   SpaceKey,
 } from "./model.ts";
@@ -296,18 +295,4 @@ export function composerHint(rule: SendRule, text: string): string {
   return mentioned.length > 0
     ? composerCopy.checks(mentioned.map((member) => member.alias))
     : composerCopy.toRoom;
-}
-
-export type PendingStage = "sending" | "checking" | "sent";
-// A channel post that mentions agents waits on the router before the server answers.
-export function pendingStage(
-  entry: Pick<Outgoing, "composer" | "source" | "phase">,
-  members: ReadonlyMap<AddressId, Member>,
-): PendingStage {
-  if (entry.phase.kind === "sent") return "sent";
-  return entry.composer.thread === null &&
-    leadingMentions(entry.source).length === 0 &&
-    mentionedAgents(entry.source, members).length > 0
-    ? "checking"
-    : "sending";
 }

@@ -1,5 +1,5 @@
 import type { ActivityGroupKind } from "./activity.ts";
-import type { DisabledReason, PendingStage } from "./complete.ts";
+import type { DisabledReason } from "./complete.ts";
 import type {
   Activity,
   Attention,
@@ -7,6 +7,7 @@ import type {
   DeliveryStage,
   Health,
   MemberKind,
+  OutgoingPhase,
   Participant,
   ScreenFailure,
   SendFailure,
@@ -238,9 +239,8 @@ export function dayBounds(ms: number): { start: number; end: number } {
 
 export const pendingCopy = {
   sending: { label: "Sending…", icon: "clock" },
-  checking: { label: "Checking who this is for…", icon: "clock" },
   sent: { label: "Sent", icon: "check" },
-} satisfies Record<PendingStage, { label: string; icon: IconName }>;
+} satisfies Record<OutgoingPhase["kind"], { label: string; icon: IconName }>;
 
 const couldNotSend = "Namedrop couldn't send this. Try again.";
 const sessionExpired = () =>

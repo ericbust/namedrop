@@ -216,11 +216,7 @@ export function ThreadPane({
           />
         ))}
         {pending.map((entry) => (
-          <PendingMessage
-            key={entry.requestId}
-            entry={entry}
-            members={channel.members}
-          />
+          <PendingMessage key={entry.requestId} entry={entry} />
         ))}
       </div>
       {replyIntent !== null && draftPreserved && (

@@ -1,5 +1,4 @@
 import { Fragment, memo, type ReactNode, useState } from "react";
-import { pendingStage } from "../complete.ts";
 import {
   overflowCopy,
   type ParticipantCopy,
@@ -14,7 +13,6 @@ import {
 import type {
   AddressId,
   Directory,
-  Member,
   Message as MessageRow,
   Outgoing,
   TerminalResult,
@@ -829,15 +827,13 @@ export const Message = memo(
 
 export function PendingMessage({
   entry,
-  members,
   grouped = false,
 }: {
   entry: Outgoing;
-  members: ReadonlyMap<AddressId, Member>;
   grouped?: boolean;
 }) {
   const time = clock(entry.at);
-  const stage = pendingStage(entry, members);
+  const stage = entry.phase.kind;
   const copy = pendingCopy[stage];
   return (
     <article

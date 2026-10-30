@@ -337,7 +337,6 @@ export function Timeline({
           <PendingMessage
             key={entry.requestId}
             entry={entry}
-            members={channel.members}
             grouped={grouped}
           />
         );

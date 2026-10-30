@@ -10,7 +10,6 @@ import {
   composerHint,
   leadingMentions,
   mentionedAgents,
-  pendingStage,
   postSource,
 } from "./complete.ts";
 import type { ChannelSnapshot, SpaceKey } from "./model.ts";
@@ -458,28 +457,6 @@ test("complete: the hint says where Enter sends the text", () => {
       composerHint({ kind: "thread", to }, "@codex hi"),
       "Enter to send · Shift+Enter for a new line",
     );
-});
-
-test("complete: a pending channel post that mentions agents reads as checking until the server answers", () => {
-  const entry = (
-    source: string,
-    thread: string | null = null,
-    sent = false,
-  ) => ({
-    composer: { key: alphaKey, thread },
-    source,
-    phase: sent
-      ? ({ kind: "sent", messageId: "m1" } as const)
-      : ({ kind: "sending" } as const),
-  });
-  const stage = (...args: Parameters<typeof entry>) =>
-    pendingStage(entry(...args), alpha.members);
-  assert.equal(stage("can @codex look?"), "checking");
-  assert.equal(stage("can @codex look?", null, true), "sent");
-  assert.equal(stage("hello room"), "sending");
-  assert.equal(stage("@codex look"), "sending", "a request skips the router");
-  assert.equal(stage("ask @shell"), "sending", "a terminal is never routed");
-  assert.equal(stage("can @codex look?", "t1"), "sending", "a thread reply");
 });
 
 test("complete: disabled copy follows the server reason despite sanitized or identical names", () => {

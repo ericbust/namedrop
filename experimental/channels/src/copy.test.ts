@@ -372,7 +372,6 @@ test("a queued leg in a paused channel reads Held while paused, other stages kee
   assert.equal(receiptCopy({ stage: "delivered" }, true).label, "Delivered");
   assert.deepEqual(pendingCopy, {
     sending: { label: "Sending…", icon: "clock" },
-    checking: { label: "Checking who this is for…", icon: "clock" },
     sent: { label: "Sent", icon: "check" },
   });
 });
