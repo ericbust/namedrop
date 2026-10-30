@@ -505,14 +505,44 @@ test("complete: the hint says where Enter sends the text", () => {
     "Enter sends only to @codex, @shell",
   );
   assert.equal(
-    hint("@codex @shell @lead @claude hi"),
-    "Enter sends only to @codex, @shell +2",
+    hint("@codex @shell @claude hi"),
+    "Enter sends only to @codex, @shell +1",
   );
   for (const to of [[], ["@codex"]])
     assert.equal(
       composerHint({ kind: "thread", to }, "@codex hi"),
       "Enter to send · Shift+Enter for a new line",
     );
+});
+
+test("complete: the hint names a leading name the server refuses, reading leading names the way the server does", () => {
+  const channel = { kind: "channel", agents: alpha.members } as const;
+  const hint = (text: string) => composerHint(channel, text);
+  const room = "Enter posts to the channel · Mention @name to bring someone in";
+  const cases: [string, string][] = [
+    ["@Codex quick check", "Names are lowercase: @codex"],
+    ["@Nobody hi there", "@Nobody isn't in this channel"],
+    ["@nobody hi there", "@nobody isn't in this channel"],
+    ["@CODEX hi", "Names are lowercase: @codex"],
+    ["  @Codex hi", "Names are lowercase: @codex"],
+    ["@Shell ls", "Names are lowercase: @shell"],
+    ["@Codex", "Names are lowercase: @codex"],
+    ["@codex @Claude hi", "Names are lowercase: @claude"],
+    ["@nobody @Codex hi", "Names are lowercase: @codex"],
+    ["@codex @nobody hi", "@nobody isn't in this channel"],
+    ["@codex @shell @lead @claude hi", "@lead isn't in this channel"],
+    ["@ghost come back", "@ghost isn't in this channel"],
+    ["#alpha @Codex hi", "Names are lowercase: @codex"],
+    ["#beta @Coder hi", "Names are lowercase: @coder"],
+    ["#beta @coder hi", "Enter sends only to @coder"],
+    ["@codex @Claude_x hi", "Enter sends only to @codex"],
+    ["hi @Codex", room],
+    ["can @nobody look?", room],
+  ];
+  for (const [text, expected] of cases)
+    assert.equal(hint(text), expected, JSON.stringify(text));
+  for (const text of ["@Codex quick check", "@nobody hi there"])
+    assert.equal(postSource(text, channel), text, "Enter still sends it");
 });
 
 test("complete: disabled copy follows the server reason despite sanitized or identical names", () => {

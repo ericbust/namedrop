@@ -344,6 +344,8 @@ export const composerCopy = {
     `Enter posts to the channel · Namedrop checks if it's for ${shortList(names)}`,
   sendsOnlyTo: (names: readonly string[]) =>
     `Enter sends only to ${shortList(names)}`,
+  lowercase: (alias: string) => `Names are lowercase: ${alias}`,
+  notMember: (name: string) => `${name} isn't in this channel`,
   sending: "Sending…",
   send: "Send",
   everyWorkspace: "every workspace",

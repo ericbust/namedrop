@@ -7267,6 +7267,40 @@ test("CH-2: the channel composer says where Enter sends and posts plain text", a
   assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "hello room");
 });
 
+test("DESIGN-R2 B1: the channel hint names a capitalized or unknown leading name as you type, and Enter still sends it for the server to refuse", async (t) => {
+  const { ui } = await chatRoom(t, [], {
+    onPost: ({ source }) => ({
+      status: 400,
+      error: `unknown Mention: ${source.split(" ")[0]}`,
+    }),
+  });
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const hints = [];
+  for (const part of ["@Codex", " quick check"]) {
+    await box.pressSequentially(part);
+    hints.push(await status.textContent());
+  }
+  await box.fill("");
+  for (const part of ["@Nobody", " hi there"]) {
+    await box.pressSequentially(part);
+    hints.push(await status.textContent());
+  }
+  assert.deepEqual(hints, [
+    "Names are lowercase: @codex",
+    "Names are lowercase: @codex",
+    "@Nobody isn't in this channel",
+    "@Nobody isn't in this channel",
+  ]);
+  assert.equal(ui.posts.attempts.length, 0, "nothing is sent before Enter");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@Nobody hi there");
+  await status.getByText("unknown Mention: @Nobody").waitFor();
+  assert.equal(await box.inputValue(), "@Nobody hi there", "the text stays");
+});
+
 test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {
   const at = Date.now() - 600_000;
   const { ui } = await chatRoom(t, [

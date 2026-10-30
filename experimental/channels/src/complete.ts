@@ -296,6 +296,46 @@ function serverMentions(text: string): Mentions {
 export function leadingMentions(text: string): readonly string[] {
   return serverMentions(text).leading;
 }
+// The server lowercases ASCII only, so a name with any other letter stays invalid.
+function asciiLower(text: string): string {
+  return text.replace(/[A-Z]+/g, (upper) => upper.toLowerCase());
+}
+// The hint for a leading name the server refuses, checked in its order: after
+// any `#label` words, each `@name` that is an alias once lowercased, first for
+// capitals, then for a name that is not a current member. Names after a label
+// belong to that channel, so only their case is checked.
+function refusedLeading(
+  text: string,
+  members: ReadonlyMap<AddressId, Member>,
+): string | null {
+  let at = spaceAfter(text, 0);
+  const start = at;
+  while (LABEL.test(wordAt(text, at)))
+    at = spaceAfter(text, at + wordAt(text, at).length);
+  const labeled = at > start;
+  const names: string[] = [];
+  let word = wordAt(text, at);
+  while (word.startsWith("@") && ALIAS.test(asciiLower(word.slice(1)))) {
+    names.push(word);
+    at = spaceAfter(text, at + word.length);
+    word = wordAt(text, at);
+  }
+  const current = new Set<string>();
+  for (const member of members.values())
+    if (member.kind.type !== "human" && member.activity !== "retired")
+      current.add(member.alias);
+  const capitalized = names.find((name) => name !== asciiLower(name));
+  if (capitalized !== undefined) {
+    const alias = asciiLower(capitalized);
+    return labeled || current.has(alias)
+      ? composerCopy.lowercase(alias)
+      : composerCopy.notMember(capitalized);
+  }
+  const unknown = labeled
+    ? undefined
+    : names.find((name) => !current.has(name));
+  return unknown === undefined ? null : composerCopy.notMember(unknown);
+}
 
 // The agents a channel post mentions, in the order the text first names them.
 export function mentionedAgents(
@@ -324,6 +364,8 @@ export function postSource(text: string, rule: SendRule): string | null {
 // Where Enter sends the text, in the words of the hint under the box.
 export function composerHint(rule: SendRule, text: string): string {
   if (rule.kind === "thread") return composerCopy.hint;
+  const refused = refusedLeading(text, rule.agents);
+  if (refused !== null) return refused;
   const leading = leadingMentions(text);
   if (leading.length > 0) return composerCopy.sendsOnlyTo(leading);
   const mentioned = mentionedAgents(text, rule.agents);
