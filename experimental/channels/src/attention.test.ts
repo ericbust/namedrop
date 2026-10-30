@@ -13,7 +13,7 @@ import {
   replyPrefill,
 } from "./attention.ts";
 import { timeOfDay } from "./copy.ts";
-import type { Attention, MessageContext } from "./model.ts";
+import type { Attention, Directory, MessageContext } from "./model.ts";
 import { parseEvent, parseMessageContext } from "./wire.ts";
 
 const raw = JSON.parse(
@@ -336,6 +336,33 @@ test("tracked response prepares plain words on the first line, the caret at its 
       caret: about.length,
     },
   );
+});
+test("a response whose agent is gone reads unavailable on the first press, whatever the box holds, and prepares no text", () => {
+  const intent: MessageIntent = {
+    kind: "message",
+    addressId: member.id,
+    reference: { kind: "coordination", id: "coordination-1" },
+    preparation: "requested",
+  };
+  const directories: Record<string, Directory> = {
+    closed: {
+      members: new Map([[member.id, { ...member, activity: "retired" }]]),
+      homes: new Map(),
+    },
+    removed: { members: new Map(), homes: new Map() },
+  };
+  for (const [gone, directory] of Object.entries(directories))
+    for (const [draft, pending] of [
+      ["My authored draft", false],
+      ["My authored draft", true],
+      ["", true],
+      ["", false],
+    ] as const)
+      assert.deepEqual(
+        prepareChannelMessage(intent, directory, draft, pending, context),
+        { kind: "unavailable" },
+        JSON.stringify({ gone, draft, pending }),
+      );
 });
 test("channel preparation retries after preserved drafts without losing the tracked evidence boundary", () => {
   const response = {

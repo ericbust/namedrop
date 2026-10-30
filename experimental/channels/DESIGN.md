@@ -592,8 +592,10 @@ main column, under the timeline, and at the bottom of the thread pane.
   recipient guard and the hint return, so "@Codex hi" typed after it reads
   "Names are lowercase: @codex". The message that button prepared is not
   another draft, so pressing it again never warns. When the agent is gone, the
-  same row reads "The responsible agent is no longer available. Use its pane
-  in Herdr to respond."
+  first press says so in the same row, whether or not the box holds a draft,
+  and the box keeps its text: "The responsible agent is no longer available.
+  Use its pane in Herdr to respond." Availability is checked before the draft,
+  so the operator never clears a draft only to learn the agent is gone.
 - The Jump to latest pill floats 16px above the composer, not above the
   timeline's bottom edge.
 

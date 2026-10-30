@@ -272,8 +272,7 @@ export function prepareChannelMessage(
   | { kind: "prepared"; text: string; caret: number }
   | { kind: "preserved" | "unavailable" } {
   const to = attentionReplyTo(intent, directory);
-  if (to === null)
-    return { kind: draft.length > 0 || pending ? "preserved" : "unavailable" };
+  if (to === null) return { kind: "unavailable" };
   const first = `${to.mentions} About ${anchorWords(intent.reference, context)}: `;
   const text = `${first}\nRef: ${intent.reference.id}`;
   return pending || (draft.length > 0 && draft !== text)

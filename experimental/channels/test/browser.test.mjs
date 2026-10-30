@@ -6703,6 +6703,37 @@ test("DESIGN-R2 A5: a kept channel draft is named in the composer's status row, 
   assert.equal(await notice.count(), 0);
 });
 
+test("R3 U3: when the responsible agent is gone, the first press of Message @codex says so and leaves the draft alone", async (t) => {
+  const { value, context } = actionableAttention("message");
+  value.frame.participants[0].activity = "retired";
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  await until(() => ui.contextRequests.length === 1, "the conversation");
+  await readsAs(
+    ui.page.locator("main .composer-status"),
+    "The responsible agent is no longer available. Use its pane in Herdr to respond.",
+  );
+  assert.equal(await draft.inputValue(), "my own words");
+  assert.equal(
+    await ui.page
+      .getByText("Your draft is still here.", { exact: false })
+      .count(),
+    0,
+  );
+  assert.equal(ui.posts.attempts.length, 0);
+});
+
 test("DESIGN-R2 D2: the kept-draft notice lasts until the box changes, then the hint names a capitalized leading name again", async (t) => {
   const { value, context } = actionableAttention("message");
   const ui = await open(
