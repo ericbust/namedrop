@@ -16,6 +16,7 @@ function useMedia(query: string): boolean {
       return () => list.removeEventListener("change", change);
     },
     () => matchMedia(query).matches,
+    () => false,
   );
 }
 // style.css turns the sidebar into a drawer at this width. The page needs it
