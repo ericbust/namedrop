@@ -90,6 +90,9 @@ function clock(at: number) {
     full: date.toLocaleString(),
   };
 }
+// The server reads "\@name" as a reference that wakes no one, so the reader sees just the name.
+const ESCAPED_MENTION = /\\(?=@[a-z0-9])/g;
+const prose = (text: string) => text.replace(ESCAPED_MENTION, "");
 function linkedText(text: string, limit: number): ReactNode {
   const parts: ReactNode[] = [];
   let start = 0;
@@ -97,7 +100,7 @@ function linkedText(text: string, limit: number): ReactNode {
     const at = match.index;
     if (at >= limit) break;
     const href = match[0].replace(/[.,;!?)]+$/, "");
-    parts.push(text.slice(start, Math.min(at, limit)));
+    parts.push(prose(text.slice(start, Math.min(at, limit))));
     parts.push(
       <a key={at} href={href} target="_blank" rel="noreferrer">
         {href.slice(0, limit - at)}
@@ -105,7 +108,7 @@ function linkedText(text: string, limit: number): ReactNode {
     );
     start = at + href.length;
   }
-  if (start < limit) parts.push(text.slice(start, limit));
+  if (start < limit) parts.push(prose(text.slice(start, limit)));
   return parts;
 }
 function formattedText(text: string, limit: number): ReactNode {
@@ -306,7 +309,7 @@ function Reference({
   let content: ReactNode = referenceCopy.earlier;
   if (reference.kind === "message") {
     const author = who(directory, reference.parent.author);
-    const [line = ""] = reference.parent.body.text.split("\n", 1);
+    const [line = ""] = prose(reference.parent.body.text).split("\n", 1);
     label = referenceCopy.label(author.name, line);
     content = (
       <>
@@ -602,7 +605,7 @@ function ReplyPreview({
     const result = type === "terminal" ? terminalResult(reply.body) : null;
     const text = result
       ? (result.stdout || result.stderr).split("\n", 2).join("\n")
-      : reply.body.text;
+      : prose(reply.body.text);
     label = `${replies}${count === 1 ? "" : ", latest"} from ${name}${time ? ` at ${time.label}` : ""}. Open thread`;
     content = (
       <>

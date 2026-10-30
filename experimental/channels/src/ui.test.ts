@@ -361,6 +361,30 @@ test("an old retired member leaves the strip but remains the author of its histo
   assert.ok(history.includes("@closed"), history);
 });
 
+test("an escaped mention reads as the plain name in prose, and stays literal in code", async () => {
+  const { Message } = await load<typeof import("./ui/Message.tsx")>(
+    "/src/ui/Message.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  const text = "\\@codex says 6 times 7 is 42.\n```\nwrite \\@codex here\n```";
+  fixture.frame.messages = [
+    { ...fixture.frame.messages[0], body: { text, truncated: false } },
+  ];
+  const { channel } = space(fixture);
+  const message = [...channel.messages.values()][0];
+  assert.ok(message);
+  const markup = renderToStaticMarkup(
+    createElement(Message, {
+      message,
+      directory: { members: channel.members, homes: new Map() },
+      recipients: [],
+      exit: undefined,
+    }),
+  );
+  assert.ok(markup.includes(">@codex says 6 times 7 is 42."), markup);
+  assert.ok(markup.includes("write \\@codex here"), markup);
+});
+
 test("a terminal run for the request decides Exit over the code in the result body", async () => {
   const { Message } = await load<typeof import("./ui/Message.tsx")>(
     "/src/ui/Message.tsx",

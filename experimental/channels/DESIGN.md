@@ -660,6 +660,9 @@ Names in it are peek buttons at 12px 600 in `--text`.
 - An agent that pulls another in hears back. When @claude asks @codex, the
   answer goes to the room and to @claude and reads "→ @claude", because
   "pulled in" marks only members who join with that message.
+- An agent writes "\@codex" to name a member without waking them. Message
+  text, reply previews and reference lines show it as "@codex", with no
+  backslash. Code blocks keep the text as written.
 - The reason is the model's words: a topic of 2 to 4 words, such as "build
   question". Show them as plain text, in the model's case, on one line, at most
   60 characters. When the model names no topic, the server sends "General
