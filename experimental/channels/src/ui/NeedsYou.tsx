@@ -1,11 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { attentionCopy, relativeAge } from "../copy.ts";
-import type {
-  Attention,
-  ChannelSnapshot,
-  Message,
-  SpaceKey,
-} from "../model.ts";
+import type { Attention, ChannelSnapshot, SpaceKey } from "../model.ts";
+import { AttentionActions, type FocusAttention } from "./AttentionActions.tsx";
 import { Icon } from "./Icons.tsx";
 
 const SHOWN = 3;
@@ -44,11 +40,13 @@ function useAnnouncement(key: SpaceKey, items: readonly Attention[]): string {
 function Item({
   item,
   now,
-  onShow,
+  channel,
+  onFocus,
 }: {
   item: Attention;
   now: number;
-  onShow: ((button: HTMLButtonElement) => void) | null;
+  channel: ChannelSnapshot;
+  onFocus: FocusAttention;
 }) {
   const [open, setOpen] = useState(false);
   const copy = attentionCopy(item);
@@ -64,32 +62,17 @@ function Item({
         {relativeAge(item.openedAt, now)}
       </time>
       <p className="attention-hint">{copy.hint}</p>
-      {(onShow !== null || copy.details !== null) && (
+      <AttentionActions item={item} channel={channel} onFocus={onFocus} />
+      {copy.details !== null && (
         <div className="attention-actions">
-          {onShow !== null && (
-            <button
-              type="button"
-              className="text-button"
-              aria-label={
-                item.subjectAlias === null
-                  ? undefined
-                  : `Show message from ${item.subjectAlias}`
-              }
-              onClick={(event) => onShow(event.currentTarget)}
-            >
-              Show message
-            </button>
-          )}
-          {copy.details !== null && (
-            <button
-              type="button"
-              className="text-button"
-              aria-expanded={open}
-              onClick={() => setOpen(!open)}
-            >
-              {open ? "Hide details" : "Details"}
-            </button>
-          )}
+          <button
+            type="button"
+            className="text-button"
+            aria-expanded={open}
+            onClick={() => setOpen(!open)}
+          >
+            {open ? "Hide details" : "Details"}
+          </button>
         </div>
       )}
       {copy.details !== null && open && (
@@ -100,12 +83,10 @@ function Item({
 }
 export function NeedsYou({
   channel,
-  inTimeline,
-  onShow,
+  onFocus,
 }: {
   channel: ChannelSnapshot;
-  inTimeline: ReadonlyMap<string, Message>;
-  onShow: (message: Message, button: HTMLButtonElement) => void;
+  onFocus: FocusAttention;
 }) {
   const items = channel.health.level === "needs_you" ? channel.attention : none;
   const now = useNow(items.length > 0);
@@ -119,24 +100,15 @@ export function NeedsYou({
       {items.length > 0 && (
         <section className="attention" aria-label="Attention needed">
           <ul>
-            {(all ? items : items.slice(0, SHOWN)).map((item) => {
-              const message =
-                item.messageId === null
-                  ? undefined
-                  : inTimeline.get(item.messageId);
-              return (
-                <Item
-                  key={item.rowKey}
-                  item={item}
-                  now={now}
-                  onShow={
-                    message === undefined
-                      ? null
-                      : (button) => onShow(message, button)
-                  }
-                />
-              );
-            })}
+            {(all ? items : items.slice(0, SHOWN)).map((item) => (
+              <Item
+                key={item.rowKey}
+                item={item}
+                now={now}
+                channel={channel}
+                onFocus={onFocus}
+              />
+            ))}
           </ul>
           {!all && items.length > SHOWN && (
             <div className="attention-more">

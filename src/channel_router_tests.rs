@@ -27,11 +27,13 @@ pub(super) fn rows() -> DashboardRows {
         persona: Some("Build and review".to_owned()),
         pane_type,
         retired,
+        closed_at_ms: None,
         bound: true,
         occupied: true,
         agent_status: None,
         blocked_since_ms: None,
         blocked_message_id: None,
+        blocked_conversation: None,
     })
     .collect();
     let registrations = [
@@ -257,11 +259,13 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
             persona: Some("😀".repeat(1_000)),
             pane_type: PaneType::Agent,
             retired: false,
+            closed_at_ms: None,
             bound: true,
             occupied: true,
             agent_status: Some("\n\tworking".repeat(100)),
             blocked_since_ms: None,
             blocked_message_id: None,
+            blocked_conversation: None,
         });
         rows.registrations.push(RegistrationRow {
             address_id: alias,

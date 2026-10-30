@@ -190,7 +190,7 @@ test("failure table: with no earlier text the notice fills the body, with Try ag
     });
   }
 });
-test("failure table: over earlier text the notice becomes the bar, and the text keeps its old stamp", () => {
+test("failure table: only transient failures keep earlier text and its old stamp under a notice bar", () => {
   for (const [failure, title, body, retry] of table) {
     const read = peekReduce(peekReduce(shownAt("kept"), { type: "again" }), {
       type: "settled",
@@ -198,12 +198,22 @@ test("failure table: over earlier text the notice becomes the bar, and the text 
       result: failed(failure),
       at: later,
     });
-    assert.deepEqual(peekView(read, who), {
-      stamp: `Read at ${clock(early)}`,
-      refreshing: false,
-      bar: { title, body, retry },
-      body: { kind: "text", earlierOmitted: false, text: "kept" },
-    });
+    assert.deepEqual(
+      peekView(read, who),
+      failure === "busy" || failure === "unreachable"
+        ? {
+            stamp: `Read at ${clock(early)}`,
+            refreshing: false,
+            bar: { title, body, retry },
+            body: { kind: "text", earlierOmitted: false, text: "kept" },
+          }
+        : {
+            stamp: null,
+            refreshing: false,
+            bar: null,
+            body: { kind: "failure", notice: { title, body, retry } },
+          },
+    );
     const retried = peekReduce(read, { type: "again" });
     assert.equal(
       retried.phase,
@@ -213,3 +223,85 @@ test("failure table: over earlier text the notice becomes the bar, and the text 
     assert.equal(peekView(retried, who).bar, null);
   }
 });
+
+test("a retained snapshot seeds a fresh read with its original timestamp", () => {
+  const snapshot = {
+    screen: { earlierOmitted: true, text: "retained tail" },
+    at: early,
+  };
+  const read = firstRead(snapshot);
+  assert.deepEqual(read, {
+    phase: "reading",
+    request: 1,
+    wait: "brief",
+    shown: snapshot,
+  });
+  assert.deepEqual(peekView(read, who), {
+    stamp: `Read at ${clock(early)}`,
+    refreshing: true,
+    bar: null,
+    body: { kind: "text", earlierOmitted: true, text: "retained tail" },
+  });
+  const settled = peekReduce(read, {
+    type: "settled",
+    request: 1,
+    result: text("fresh"),
+    at: later,
+  });
+  assert.equal(peekView(settled, who).stamp, `Read at ${clock(later)}`);
+  assert.deepEqual(settled.shown, {
+    screen: { earlierOmitted: false, text: "fresh" },
+    at: later,
+  });
+});
+
+test("a retained empty snapshot stays empty during a fresh read and failures keep it", () => {
+  const snapshot = { screen: { earlierOmitted: false, text: "" }, at: early };
+  const read = firstRead(snapshot);
+  assert.deepEqual(peekView(read, who).body, { kind: "empty" });
+  const failure = peekReduce(read, {
+    type: "settled",
+    request: 1,
+    result: failed("busy"),
+    at: later,
+  });
+  assert.equal(failure.shown, snapshot);
+  assert.equal(peekView(failure, who).stamp, `Read at ${clock(early)}`);
+  assert.deepEqual(peekView(failure, who).body, { kind: "empty" });
+});
+
+for (const failure of ["closed", "missing", "session"] as const) {
+  test(`target or session failure ${failure} replaces earlier text and its timestamp`, () => {
+    const snapshot = {
+      screen: { earlierOmitted: false, text: "old screen" },
+      at: early,
+    };
+    for (const reading of [
+      firstRead(snapshot),
+      peekReduce(shownAt("old screen"), { type: "again" }),
+    ]) {
+      const read = peekReduce(reading, {
+        type: "settled",
+        request: reading.request,
+        result: failed(failure),
+        at: later,
+      });
+      const view = peekView(read, who);
+      assert.equal(
+        view.body.kind,
+        "failure",
+        "invalid screen must be replaced by its failure",
+      );
+      assert.equal(
+        view.stamp,
+        null,
+        "invalid screen must not retain its read time",
+      );
+      assert.equal(
+        view.bar,
+        null,
+        "invalid screen must not stay behind a failure bar",
+      );
+    }
+  });
+}

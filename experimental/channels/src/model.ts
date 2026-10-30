@@ -22,11 +22,28 @@ export type Member = {
   alias: string;
   kind: MemberKind;
   activity: Activity;
+  recentlyClosed: boolean;
   role: SafeText | null;
   paneLabel: SafeText | null;
 };
+export type Conversation = { threadId: string; messageId: string };
+export type AttentionResponse =
+  | ({ kind: "reply"; addressId: AddressId } & Conversation)
+  | { kind: "message"; addressId: AddressId }
+  | { kind: "pane"; addressId: AddressId }
+  | { kind: "local" };
+export type MessageContext = {
+  threadId: string;
+  messageCount: number;
+  earlierOmitted: boolean;
+  messages: readonly Message[];
+};
 export type Attention = {
   rowKey: string;
+  sourceId?: string | null;
+  coordinationId?: string | null;
+  conversation?: Conversation | null;
+  response?: AttentionResponse | null;
   source:
     | "delivery_attempt"
     | "automatic_reply_limit"
@@ -38,6 +55,7 @@ export type Attention = {
     | "agent_status"
     | "unknown";
   summary: SafeText;
+  subjectSummary: SafeText | null;
   openedAt: number;
   subjectAlias: string | null;
   messageId: string | null;
@@ -123,11 +141,21 @@ export type MemberWork = Readonly<{
   mailbox: readonly MailItem[];
   waitingOn: readonly Mention[];
 }>;
+export type NotAddressableReason =
+  | "missing_label"
+  | "empty_label"
+  | "reserved_all"
+  | "shared_label"
+  | "id_collision"
+  | "not_activated"
+  | "not_active"
+  | "unavailable";
 export type ChannelSnapshot = {
   key: SpaceKey;
   workspaceId: string;
   displayName: string;
   addressableLabel: string | null;
+  notAddressableReason: NotAddressableReason | null;
   state: SpaceState;
   health: Health;
   members: ReadonlyMap<AddressId, Member>;

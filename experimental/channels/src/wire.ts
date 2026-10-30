@@ -2,7 +2,9 @@ import type {
   Activity,
   AddressId,
   Attention,
+  AttentionResponse,
   ChannelSnapshot,
+  Conversation,
   DeliveryStage,
   Health,
   MailItem,
@@ -12,7 +14,9 @@ import type {
   MemberWork,
   Mention,
   Message,
+  MessageContext,
   MessageKind,
+  NotAddressableReason,
   Route,
   SafeText,
   Screen,
@@ -56,6 +60,23 @@ function optionalAlias(value: unknown): string | null {
 }
 function nullableText(value: unknown): string | null {
   return value === null ? null : text(value);
+}
+function notAddressableReason(value: unknown): NotAddressableReason | null {
+  switch (value) {
+    case null:
+      return null;
+    case "missing_label":
+    case "empty_label":
+    case "reserved_all":
+    case "shared_label":
+    case "id_collision":
+    case "not_activated":
+    case "not_active":
+    case "unavailable":
+      return value;
+    default:
+      return "unavailable";
+  }
 }
 function integer(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0)
@@ -127,6 +148,50 @@ function memberKind(value: unknown): MemberKind {
       return { type: "unknown" };
   }
 }
+function conversation(value: unknown): Conversation | null {
+  if (value === undefined || value === null) return null;
+  const item = record(value);
+  return {
+    threadId: identity(item.thread_id),
+    messageId: identity(item.message_id),
+  };
+}
+function attentionResponse(
+  value: unknown,
+  anchor: Conversation | null,
+): AttentionResponse | null {
+  if (value === undefined || value === null) return null;
+  const item = record(value);
+  switch (item.kind) {
+    case "reply": {
+      const target = {
+        threadId: identity(item.thread_id),
+        messageId: identity(item.message_id),
+      };
+      if (
+        anchor === null ||
+        anchor.threadId !== target.threadId ||
+        anchor.messageId !== target.messageId
+      )
+        throw new Error("Reply does not match attention conversation");
+      return {
+        kind: "reply",
+        ...target,
+        addressId: addressId(item.address_id),
+      };
+    }
+    case "message":
+      if (anchor === null)
+        throw new Error("Message response needs attention evidence");
+      return { kind: "message", addressId: addressId(item.address_id) };
+    case "pane":
+      return { kind: "pane", addressId: addressId(item.address_id) };
+    case "local":
+      return { kind: "local" };
+    default:
+      return null;
+  }
+}
 function attention(
   value: unknown,
   occurrences: Map<string, number>,
@@ -158,10 +223,18 @@ function attention(
   ]);
   const occurrence = occurrences.get(fingerprint) ?? 0;
   occurrences.set(fingerprint, occurrence + 1);
+  const anchor = conversation(item.conversation);
   return {
-    rowKey: JSON.stringify([fingerprint, occurrence]),
+    rowKey:
+      optionalIdentity(item.attention_id) ??
+      JSON.stringify([fingerprint, occurrence]),
+    sourceId: optionalIdentity(item.source_id),
+    coordinationId: optionalIdentity(item.coordination_id),
+    conversation: anchor,
+    response: attentionResponse(item.response, anchor),
     source,
     summary,
+    subjectSummary: optionalSafeText(item.subject_summary ?? null),
     openedAt,
     subjectAlias: optionalAlias(item.subject_alias),
     messageId: optionalIdentity(item.message_id),
@@ -434,6 +507,32 @@ export function screenFailure(status: number): ScreenFailure {
       return "unreachable";
   }
 }
+export function parseMessageContext(
+  raw: unknown,
+  target: Conversation,
+): MessageContext {
+  const item = record(raw);
+  const threadId = identity(item.thread_id);
+  const rows = [...messages(item.messages).values()].sort(
+    (a, b) => a.at - b.at || a.id.localeCompare(b.id),
+  );
+  const messageCount = integer(item.message_count);
+  if (
+    threadId !== target.threadId ||
+    rows.some((row) => row.threadId !== threadId) ||
+    !rows.some((row) => row.id === target.messageId) ||
+    rows.length > 102 ||
+    messageCount < rows.length ||
+    typeof item.earlier_omitted !== "boolean"
+  )
+    throw new Error("Invalid conversation context");
+  return {
+    threadId,
+    messageCount,
+    earlierOmitted: item.earlier_omitted,
+    messages: rows,
+  };
+}
 export function parseHistory(raw: unknown): readonly ChannelMessage[] {
   return [...messages(raw).values()].reverse();
 }
@@ -455,6 +554,7 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
       alias: text(item.alias),
       kind: memberKind(item.kind),
       activity: activity(item.activity),
+      recentlyClosed: item.recently_closed === true,
       role: optionalSafeText(item.role),
       paneLabel: optionalSafeText(item.pane_label),
     });
@@ -476,6 +576,7 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
     workspaceId: identity(space.workspace_id),
     displayName: identity(space.display_name),
     addressableLabel: nullableText(space.addressable_label),
+    notAddressableReason: notAddressableReason(space.not_addressable_reason),
     state: spaceState(space.state),
     health: health(frame.health),
     members,

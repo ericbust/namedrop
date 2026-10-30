@@ -1,3 +1,5 @@
+#[path = "support/channel_merge.rs"]
+mod channel_merge;
 #[path = "support/channel_router_attempts.rs"]
 mod channel_router_attempts;
 #[path = "support/channel_chat.rs"]

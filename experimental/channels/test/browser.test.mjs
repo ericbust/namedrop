@@ -3,7 +3,9 @@ import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname } from "node:path";
 import { after, before, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
+import { build } from "vite";
 
 const key = (n) => n.toString(16).padStart(20, "0");
 const fixture = JSON.parse(
@@ -38,6 +40,7 @@ function frame(n, name, level = "calm") {
     workspace_id: `w${n}`,
     display_name: name,
     addressable_label: name,
+    not_addressable_reason: null,
   };
   value.frame.health = level === "needs_you" ? { level, items: 1 } : { level };
   return value;
@@ -219,12 +222,15 @@ async function open(
     path = "/",
     onPost = () => ({ status: 200 }),
     onScreen = () => ({ body: "" }),
+    onContext = null,
+    observeLanding = false,
   } = {},
 ) {
   const clients = new Set();
   const connections = [];
   const errors = [];
   const historyRequests = [];
+  const contextRequests = [];
   const posts = postRoute(onPost);
   const screens = screenRoute(onScreen);
   const server = createServer(async (req, res) => {
@@ -264,6 +270,14 @@ async function open(
       }
       return;
     }
+    if (/^\/w\/[^/]+\/messages\/[^/]+\/context$/.test(url.pathname)) {
+      contextRequests.push(url);
+      if (onContext === null) return res.writeHead(404).end();
+      const context = await onContext(url);
+      return context === null
+        ? res.writeHead(404).end()
+        : sendJson(res, 200, context);
+    }
     const screen = /^\/w\/([^/]+)\/participants\/([^/]+)\/screen$/.exec(
       url.pathname,
     );
@@ -291,13 +305,31 @@ async function open(
   const page = await browser.newPage();
   page.setDefaultTimeout(5000);
   page.on("pageerror", (error) => errors.push(error.message));
-  await page.addInitScript(() => {
+  await page.addInitScript((observeLanding) => {
     window.cspErrors = [];
     window.initialHistoryLength = history.length;
     document.addEventListener("securitypolicyviolation", (event) =>
       window.cspErrors.push(event.violatedDirective),
     );
-  });
+    if (observeLanding) {
+      window.landingHeadings = [];
+      window.operatorInputs = [];
+      for (const name of ["pointerdown", "keydown", "wheel", "touchstart"])
+        addEventListener(name, () => window.operatorInputs.push(name), true);
+      new MutationObserver(() => {
+        const heading = document.querySelector("main h1:not(.sr-only)");
+        if (
+          heading?.getClientRects().length &&
+          heading.textContent !== window.landingHeadings.at(-1)
+        )
+          window.landingHeadings.push(heading.textContent);
+      }).observe(document, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+      });
+    }
+  }, observeLanding);
   t.after(async () => {
     try {
       assert.deepEqual(errors, []);
@@ -323,6 +355,7 @@ async function open(
     connections,
     live,
     historyRequests,
+    contextRequests,
     posts,
     screens,
   };
@@ -1832,6 +1865,114 @@ function selected(ui, n) {
     key(n),
   );
 }
+test("landing without input: ready opens the channel that needs you first", async (t) => {
+  const needsYou = attentionFrame("agent_status");
+  needsYou.key = key(3);
+  needsYou.frame.space = frame(3, "gamma").frame.space;
+  needsYou.frame.messages = [message("gamma-request", "Please check gamma")];
+  const alpha = frame(1, "alpha");
+  alpha.frame.messages = [
+    message("alpha-recent", "Recent calm message", { at_ms: 500 }),
+  ];
+  const ui = await open(
+    t,
+    (client) => replay(client, [alpha, needsYou]),
+    undefined,
+    { observeLanding: true },
+  );
+  await ui.live();
+  assert.equal(
+    await ui.page.getByRole("heading", { level: 1 }).textContent(),
+    "gamma",
+  );
+  assert.equal(await ui.row(3).getAttribute("aria-current"), "page");
+  assert.equal(await ui.row(1).getAttribute("aria-current"), null);
+  const shortcut = ui.page.getByRole("navigation", {
+    name: "Needs you",
+    exact: true,
+  });
+  assert.equal(await shortcut.getByRole("button").count(), 1);
+  assert.equal(await shortcut.getByRole("button").isVisible(), true);
+  assert.match(
+    await shortcut.textContent(),
+    /gamma.*Waiting on approval or a question/,
+  );
+  const banner = ui.page.getByRole("region", { name: "Attention needed" });
+  assert.equal(await banner.isVisible(), true);
+  await banner
+    .getByText("Waiting on approval or a question", { exact: true })
+    .waitFor();
+  await ui.page.getByText("Please check gamma", { exact: true }).waitFor();
+  assert.deepEqual(await ui.page.evaluate(() => window.landingHeadings), [
+    "gamma",
+  ]);
+  assert.deepEqual(await ui.page.evaluate(() => window.operatorInputs), []);
+  assert.equal(await ui.page.evaluate(() => location.pathname), "/");
+  assert.equal(ui.posts.attempts.length, 0);
+});
+
+test("landing without input: late ready keeps alpha visible while Needs you lists late gamma", async (t) => {
+  const alpha = frame(1, "alpha");
+  alpha.frame.messages = [message("alpha-message", "Alpha is calm")];
+  const ui = await open(t, (client) => client.send("space", alpha), undefined, {
+    observeLanding: true,
+  });
+  await ui.live();
+  await ui.page.getByRole("heading", { name: "alpha", exact: true }).waitFor();
+  await ui.page.waitForTimeout(400);
+  assert.deepEqual(await ui.page.evaluate(() => window.landingHeadings), [
+    "alpha",
+  ]);
+  assert.equal(
+    await ui.page
+      .getByRole("navigation", { name: "Needs you", exact: true })
+      .count(),
+    0,
+  );
+  const needsYou = attentionFrame("agent_status");
+  needsYou.key = key(3);
+  needsYou.frame.space = frame(3, "gamma").frame.space;
+  needsYou.frame.messages = [message("gamma-request", "Please check gamma")];
+  ui.connections[0].send("space", needsYou);
+  ui.connections[0].send("ready", { keys: [key(1), key(3)] });
+  const shortcut = ui.page.getByRole("navigation", {
+    name: "Needs you",
+    exact: true,
+  });
+  await shortcut.getByRole("button").waitFor();
+  await nextFrames(ui.page);
+  assert.equal(await shortcut.getByRole("button").count(), 1);
+  assert.match(
+    await shortcut.textContent(),
+    /gamma.*Waiting on approval or a question/,
+  );
+  assert.equal(
+    await ui.page.getByRole("heading", { level: 1 }).textContent(),
+    "alpha",
+  );
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+  assert.equal(await ui.row(3).getAttribute("aria-current"), null);
+  assert.equal(
+    await ui.page.getByRole("region", { name: "Attention needed" }).count(),
+    0,
+  );
+  assert.equal(
+    await ui.page.getByText("Alpha is calm", { exact: true }).isVisible(),
+    true,
+  );
+  assert.equal(
+    await ui.page.getByText("Please check gamma", { exact: true }).count(),
+    0,
+  );
+  assert.deepEqual(await ui.page.evaluate(() => window.landingHeadings), [
+    "alpha",
+  ]);
+  assert.deepEqual(await ui.page.evaluate(() => window.operatorInputs), []);
+  assert.equal(await ui.page.evaluate(() => location.pathname), "/");
+  assert.equal(ui.posts.attempts.length, 0);
+  assert.equal(ui.connections.length, 1);
+});
+
 test("landing: late frames select the URL's channel when it arrives, and an automatic choice never rewrites the URL", async (t) => {
   const requested = await open(t, () => {}, undefined, {
     path: `/w/${key(2)}`,
@@ -3249,6 +3390,7 @@ test("UI-3: a thread reply to an agent in another workspace names it through its
   const now = Date.now();
   const testbed = team(1, "testbed");
   testbed.frame.space.addressable_label = null;
+  testbed.frame.space.not_addressable_reason = "unavailable";
   testbed.frame.messages = [
     message("ask", "#alpha @lead please reply", {
       thread_id: "t1",
@@ -3617,6 +3759,7 @@ test("UI-3: channels that share a label are listed disabled with a tooltip and c
   const twin = (n) => {
     const value = frame(n, "twin");
     value.frame.space.addressable_label = null;
+    value.frame.space.not_addressable_reason = "shared_label";
     return value;
   };
   const ui = await open(t, (client) =>
@@ -3654,6 +3797,7 @@ test("UI-3: channels that share a label carry the sidebar's workspace suffix in 
   const twin = (n) => {
     const value = frame(n, "twin");
     value.frame.space.addressable_label = null;
+    value.frame.space.not_addressable_reason = "shared_label";
     return value;
   };
   const ui = await open(t, (client) =>
@@ -4032,26 +4176,28 @@ test("UI-3 fix: the thread box says Write a reply while the To label names the r
 });
 
 test("UI-3 fix: a disabled channel's tooltip names a reason only when the page can be sure of it", async (t) => {
-  const disabled = (n, name) => {
+  const disabled = (n, name, reason = "unavailable", state = "active") => {
     const value = frame(n, name);
     value.frame.space.addressable_label = null;
+    value.frame.space.not_addressable_reason = reason;
+    value.frame.space.state = state;
     return value;
   };
   const ui = await open(t, (client) =>
     replay(client, [
       team(1, "alpha"),
-      disabled(2, "w2"),
-      disabled(3, "日本語"),
-      disabled(4, "All"),
+      disabled(2, "w2", "missing_label"),
+      disabled(3, "日本語", "empty_label"),
+      disabled(4, "All", "reserved_all"),
       disabled(5, "Twin"),
       disabled(6, "twin"),
-      disabled(7, "Dormant"),
+      disabled(7, "Dormant", "not_activated", "not_activated"),
       frame(8, "foobar"),
-      disabled(9, "same"),
-      disabled(10, "same"),
+      disabled(9, "same", "shared_label"),
+      disabled(10, "same", "shared_label"),
       disabled(11, "foobar"),
       disabled(12, "w13"),
-      disabled(13, "w13"),
+      disabled(13, "w13", "missing_label"),
     ]),
   );
   await ui.live();
@@ -4373,6 +4519,10 @@ test("UI-4: Enter on a member chip opens the drawer with focus on the screen, an
     await drawer(ui).locator(".peek-where").textContent(),
     /^in #alpha · Read at \d/,
   );
+  await ui.page.waitForFunction(
+    () =>
+      performance.getEntriesByName("namedrop:click-to-peek-text").length > 0,
+  );
   await ui.page.keyboard.press("Escape");
   await drawer(ui).waitFor({ state: "detached" });
   assert.equal(
@@ -4495,7 +4645,44 @@ test("UI-4: a slow first read shows nothing for 400 ms, then names the screen, t
   assert.equal(await note.count(), 0);
 });
 
-test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and failures over text become a bar", async (t) => {
+test("a recent retired member opens Pane closed, then leaves the strip after grace while its history author stays", async (t) => {
+  const value = team(1, "alpha");
+  const member = value.frame.participants.find(
+    ({ address_id }) => address_id === "codex",
+  );
+  assert.ok(member);
+  member.activity = "retired";
+  member.recently_closed = true;
+  value.frame.messages = [
+    message("old-author", "Saved before closing", { author: "codex" }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onScreen: () => ({
+      status: 410,
+      body: "This participant's pane is no longer available.\n",
+    }),
+  });
+  await ui.live();
+  const chip = ui.page.locator('.members li[data-address-id="codex"]');
+  await chip.getByText("Retired", { exact: true }).waitFor();
+  await chip.getByRole("button").click();
+  await drawer(ui).getByText("Pane closed", { exact: true }).waitFor();
+  assert.deepEqual(
+    ui.screens.requests.map(({ address }) => address),
+    ["codex"],
+  );
+  const expired = structuredClone(value);
+  expired.frame.participants.find(
+    ({ address_id }) => address_id === "codex",
+  ).recently_closed = false;
+  ui.connections[0].send("space", expired);
+  await chip.waitFor({ state: "detached" });
+  const history = ui.page.locator('[data-message-id="old-author"]');
+  await history.getByText("@codex", { exact: true }).waitFor();
+  await history.getByText("Saved before closing", { exact: true }).waitFor();
+});
+
+test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and session failure replaces text", async (t) => {
   const answers = [
     { status: 410, body: "This participant's pane is no longer available.\n" },
     { status: 503, body: "Screen is temporarily unavailable.\n" },
@@ -4537,8 +4724,10 @@ test("UI-4: a closed pane reads Pane closed, a busy Herdr offers Try again, and 
     /Read at \d/,
   );
   await bar.getByRole("button", { name: "Try again", exact: true }).click();
-  await bar.getByText("Session ended", { exact: true }).waitFor();
-  assert.equal(await bar.getByRole("button").count(), 0);
+  await failure.getByText("Session ended", { exact: true }).waitFor();
+  assert.equal(await failure.getByRole("button").count(), 0);
+  assert.equal(await screenText(ui).textContent(), "");
+  assert.equal(await bar.count(), 0);
   assert.equal(ui.screens.requests.length, 5);
 });
 
@@ -4675,4 +4864,720 @@ test("UI-4: the drawer is 480 wide at 1440 and 400 at 1024, opening a row select
     true,
   );
   assert.equal(await row.getAttribute("aria-expanded"), "false");
+});
+
+test("CL-K: reopening shows the last screen and original stamp before a fresh full response", async (t) => {
+  let release = () => {};
+  let reads = 0;
+  const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
+    onScreen: async () => {
+      const read = ++reads;
+      if (read === 2) await new Promise((resolve) => (release = resolve));
+      return { body: `full screen ${read}` };
+    },
+  });
+  t.after(() => release());
+  await ui.live();
+  await ui.page.clock.install({ time: new Date("2026-10-29T12:00:00Z") });
+  const chip = ui.page
+    .locator(".members")
+    .getByRole("button", { name: /@codex/ });
+  await chip.click();
+  await screenText(ui).getByText("full screen 1").waitFor();
+  const stamp = await drawer(ui).locator(".peek-where").textContent();
+  await ui.page.keyboard.press("Escape");
+  await drawer(ui).waitFor({ state: "detached" });
+  await ui.page.clock.setFixedTime(new Date("2026-10-29T12:02:00Z"));
+  await chip.click();
+  await until(
+    () => ui.screens.requests.length === 2,
+    "the fresh reopen request",
+  );
+  assert.equal(
+    await screenText(ui).textContent(),
+    "full screen 1",
+    "reopen retains successful text while the full read is pending",
+  );
+  assert.equal(
+    await drawer(ui).locator(".peek-where").textContent(),
+    stamp,
+    "reopen keeps the original read time",
+  );
+  assert.equal(
+    await drawer(ui)
+      .getByRole("button", { name: "Refresh" })
+      .getAttribute("aria-disabled"),
+    "true",
+  );
+  release();
+  await screenText(ui).getByText("full screen 2").waitFor();
+  assert.notEqual(await drawer(ui).locator(".peek-where").textContent(), stamp);
+  assert.deepEqual(
+    ui.screens.requests.map(({ key: channel, address }) => [channel, address]),
+    [
+      [key(1), "codex"],
+      [key(1), "codex"],
+    ],
+  );
+});
+
+let peekHarnessBuild;
+async function openPeekHarness(t) {
+  peekHarnessBuild ??= build({
+    root: fileURLToPath(new URL("..", import.meta.url)),
+    configFile: false,
+    logLevel: "silent",
+    build: { write: false, rollupOptions: { input: "virtual:peek-harness" } },
+    plugins: [
+      {
+        name: "peek-harness",
+        resolveId(id) {
+          if (id === "virtual:peek-harness") return "\0peek-harness";
+        },
+        load(id) {
+          if (id !== "\0peek-harness") return;
+          return `
+          import { createElement } from "react";
+          import { createRoot } from "react-dom/client";
+          import { PeekDrawer } from "./src/ui/PeekDrawer.tsx";
+          const root = createRoot(document.getElementById("root"));
+          const requests = [];
+          const readers = Array.from({length: 2}, () => (target, signal) =>
+            new Promise(resolve => requests.push({ target, signal, resolve })));
+          const close = () => root.render(null);
+          window.peekHarness = {
+            requests,
+            close,
+            open(member = "codex", channel = "alpha", reader = 0) {
+              root.render(createElement(PeekDrawer, {
+                target: { channel, member, alias: "@" + member, kind: "agent" },
+                who: { alias: "@" + member, kind: "agent", activity: "working", channel: {label: "#" + channel, suffix: null} },
+                reader: readers[reader], startedAt: performance.now(), paneId: "peek", onClose: close,
+              }));
+            },
+            settle(index, text, failure = null) {
+              requests[index].resolve(failure === null
+                ? {kind: "text", screen: {text, earlierOmitted: false}}
+                : {kind: "failed", failure});
+            },
+          };
+        `;
+        },
+      },
+    ],
+  });
+  const bundle = await peekHarnessBuild;
+  const source = bundle.output.find((entry) => entry.type === "chunk").code;
+  const server = createServer((req, res) => {
+    res.writeHead(200, {
+      "Content-Type": req.url === "/peek.js" ? "text/javascript" : "text/html",
+    });
+    res.end(
+      req.url === "/peek.js"
+        ? source
+        : '<div id="root"></div><script type="module" src="/peek.js"></script>',
+    );
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const page = await browser.newPage();
+  page.setDefaultTimeout(5000);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  t.after(async () => {
+    await page.close();
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    assert.deepEqual(errors, []);
+  });
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
+  await page.waitForFunction(() => window.peekHarness !== undefined);
+  let reads = 0;
+  return {
+    page,
+    async show(member = "codex", channel = "alpha", reader = 0) {
+      await page.evaluate(
+        ([member, channel, reader]) =>
+          window.peekHarness.open(member, channel, reader),
+        [member, channel, reader],
+      );
+      await page.waitForFunction(
+        (count) => window.peekHarness.requests.length === count,
+        ++reads,
+      );
+    },
+    async close() {
+      await page.evaluate(() => window.peekHarness.close());
+      await page.locator("aside.peek").waitFor({ state: "detached" });
+    },
+    async settle(text, failure = null, index = reads - 1) {
+      await page.evaluate(
+        ([index, text, failure]) =>
+          window.peekHarness.settle(index, text, failure),
+        [index, text, failure],
+      );
+      if (failure === null) {
+        await page.waitForFunction(
+          () =>
+            document
+              .querySelector(".peek-refresh")
+              ?.getAttribute("aria-disabled") === null,
+        );
+      } else {
+        await page.locator('[role="status"]').waitFor();
+      }
+    },
+    text: () =>
+      page
+        .getByRole("region", { name: "Screen text", exact: true })
+        .textContent(),
+  };
+}
+
+test("CL-K: targets, channels and readers isolate retained text, including reader replacement while mounted", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show();
+  await ui.settle("alpha codex");
+  await ui.show("lead");
+  assert.equal(await ui.text(), "");
+  await ui.settle("alpha lead");
+  await ui.show("codex", "beta");
+  assert.equal(await ui.text(), "");
+  await ui.settle("beta codex");
+  await ui.show();
+  assert.equal(await ui.text(), "alpha codex");
+  await ui.settle("alpha codex fresh");
+  await ui.show("codex", "alpha", 1);
+  assert.equal(
+    await ui.text(),
+    "",
+    "replacing the reader resets mounted state",
+  );
+  await ui.settle("second reader");
+  await ui.show();
+  assert.equal(await ui.text(), "alpha codex fresh");
+  await ui.show("codex", "beta");
+  assert.equal(await ui.text(), "beta codex");
+  await ui.settle("", "session");
+  await ui.show("codex", "alpha", 1);
+  assert.equal(
+    await ui.text(),
+    "second reader",
+    "session failure clears only its reader scope",
+  );
+});
+
+test("CL-K: a late aborted completion cannot replace mounted text or retained snapshots", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show();
+  await ui.settle("accepted");
+  await ui.close();
+  await ui.show();
+  await ui.close();
+  await ui.show("lead");
+  await ui.settle("lead accepted");
+  assert.equal(
+    await ui.page.evaluate(() => window.peekHarness.requests[1].signal.aborted),
+    true,
+  );
+  await ui.page.evaluate(() => window.peekHarness.settle(1, "late aborted"));
+  assert.equal(await ui.text(), "lead accepted");
+  await ui.show();
+  assert.equal(
+    await ui.text(),
+    "accepted",
+    "the aborted completion never enters retention",
+  );
+  await ui.close();
+  await ui.page.evaluate(() => window.peekHarness.settle(3, "", "session"));
+  await ui.show("lead");
+  assert.equal(
+    await ui.text(),
+    "lead accepted",
+    "an aborted session failure cannot clear retention",
+  );
+});
+
+test("CL-K: successful empty reads replace prior retained text", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show();
+  await ui.settle("prior");
+  await ui.close();
+  await ui.show();
+  await ui.settle("");
+  await ui.page.getByText("The screen is empty.", { exact: true }).waitFor();
+  await ui.close();
+  await ui.show();
+  assert.equal(await ui.text(), "");
+  await ui.page.getByText("The screen is empty.", { exact: true }).waitFor();
+});
+
+test("CL-K: transient failures preserve retention, target failures remove one screen, and session failure clears the reader", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show("lead");
+  await ui.settle("lead retained");
+  for (const failure of [
+    "busy",
+    "unreachable",
+    "missing",
+    "closed",
+    "session",
+  ]) {
+    await ui.show();
+    await ui.settle("codex retained");
+    await ui.close();
+    await ui.show();
+    await ui.settle("", failure);
+    assert.equal(
+      await ui.text(),
+      failure === "busy" || failure === "unreachable" ? "codex retained" : "",
+      "only transient failures keep mounted text",
+    );
+    await ui.close();
+    await ui.show();
+    assert.equal(
+      await ui.text(),
+      failure === "busy" || failure === "unreachable" ? "codex retained" : "",
+    );
+    await ui.show("lead");
+    assert.equal(await ui.text(), failure === "session" ? "" : "lead retained");
+    await ui.close();
+  }
+});
+
+test("CL-K: retention holds at most eight screens and reads do not renew insertion order", async (t) => {
+  const ui = await openPeekHarness(t);
+  for (let n = 0; n < 8; n++) {
+    await ui.show(`member${n}`);
+    await ui.settle(`screen ${n}`);
+  }
+  await ui.show("member0");
+  assert.equal(await ui.text(), "screen 0");
+  await ui.show("member8");
+  await ui.settle("screen 8");
+  await ui.show("member0");
+  assert.equal(
+    await ui.text(),
+    "",
+    "a cache read does not prevent oldest-entry eviction",
+  );
+  await ui.show("member1");
+  assert.equal(await ui.text(), "screen 1");
+  await ui.settle("member1 updated");
+  await ui.show("member9");
+  await ui.settle("screen 9");
+  await ui.show("member2");
+  assert.equal(await ui.text(), "");
+  await ui.show("member1");
+  assert.equal(
+    await ui.text(),
+    "member1 updated",
+    "successful writes renew insertion order",
+  );
+});
+
+test("CL-K: character bounds evict old text and oversized success invalidates a prior snapshot", async (t) => {
+  const ui = await openPeekHarness(t);
+  await ui.show("oldest");
+  await ui.settle("old");
+  await ui.show("largest");
+  await ui.settle("x".repeat(512 * 1024));
+  await ui.show("oldest");
+  assert.equal(
+    await ui.text(),
+    "",
+    "total retained characters stay within 512 Ki",
+  );
+  await ui.show("largest");
+  assert.equal(
+    (await ui.text()).length,
+    512 * 1024,
+    "the exact character limit is retained",
+  );
+  await ui.settle("y".repeat(512 * 1024 + 1));
+  assert.equal(
+    (await ui.text()).length,
+    512 * 1024 + 1,
+    "oversized success still renders",
+  );
+  await ui.close();
+  await ui.show("largest");
+  assert.equal(
+    await ui.text(),
+    "",
+    "oversized success removes its previous snapshot",
+  );
+});
+
+for (const status of [404, 410, 401, 403]) {
+  test(`CL-K: HTTP ${status} invalidates retained text at the parsed failure boundary`, async (t) => {
+    let release = () => {};
+    const gate = new Promise((resolve) => (release = resolve));
+    const answers = {
+      codex: [{ body: "codex retained" }, { status }, null],
+      lead: [{ body: "lead retained" }, null],
+    };
+    const ui = await open(
+      t,
+      (client) => replay(client, busyTeam()),
+      undefined,
+      {
+        onScreen: async ({ address }) => {
+          const answer = answers[address].shift();
+          if (answer !== null) return answer;
+          await gate;
+          return { body: "fresh" };
+        },
+      },
+    );
+    t.after(() => release());
+    await ui.live();
+    const members = ui.page.locator(".members");
+    const codex = members.getByRole("button", { name: /@codex/ });
+    const lead = members.getByRole("button", { name: /@lead/ });
+    await codex.click();
+    await screenText(ui).getByText("codex retained").waitFor();
+    await lead.click();
+    await screenText(ui).getByText("lead retained").waitFor();
+    await codex.click();
+    await drawer(ui).locator(".peek-failure").waitFor();
+    assert.equal(await screenText(ui).textContent(), "");
+    await ui.page.keyboard.press("Escape");
+    await drawer(ui).waitFor({ state: "detached" });
+    await codex.click();
+    await until(
+      () => ui.screens.requests.length === 4,
+      "the uncached target read",
+    );
+    assert.equal(await screenText(ui).textContent(), "");
+    await lead.click();
+    await until(
+      () => ui.screens.requests.length === 5,
+      "the other target read",
+    );
+    assert.equal(
+      await screenText(ui).textContent(),
+      status === 401 || status === 403 ? "" : "lead retained",
+    );
+  });
+}
+
+for (const status of [404, 410, 401, 403]) {
+  test(`CL-K fix 1: HTTP ${status} replaces retained text and its old stamp after reopen`, async (t) => {
+    let release = () => {};
+    let reads = 0;
+    const gate = new Promise((resolve) => (release = resolve));
+    const ui = await open(
+      t,
+      (client) => replay(client, busyTeam()),
+      undefined,
+      {
+        onScreen: async () => {
+          if (++reads === 1) return { body: "old screen before pane closes" };
+          await gate;
+          return { status };
+        },
+      },
+    );
+    t.after(() => release());
+    await ui.live();
+    const chip = ui.page
+      .locator(".members")
+      .getByRole("button", { name: /@codex/ });
+    await chip.click();
+    await screenText(ui).getByText("old screen before pane closes").waitFor();
+    await ui.page.keyboard.press("Escape");
+    await drawer(ui).waitFor({ state: "detached" });
+    await chip.click();
+    await until(
+      () => ui.screens.requests.length === 2,
+      "the reopen screen request",
+    );
+    assert.equal(
+      await screenText(ui).textContent(),
+      "old screen before pane closes",
+    );
+    release();
+    await ui.page.waitForFunction(
+      () =>
+        document
+          .querySelector(".peek-refresh")
+          ?.getAttribute("aria-disabled") === null,
+    );
+    assert.equal(
+      await screenText(ui).textContent(),
+      "",
+      "failed target or session must remove retained screen text",
+    );
+    assert.equal(await drawer(ui).locator(".peek-bar").count(), 0);
+    assert.equal(await drawer(ui).locator(".peek-failure").count(), 1);
+    assert.doesNotMatch(
+      await drawer(ui).locator(".peek-where").textContent(),
+      /Read at/,
+    );
+    assert.equal(ui.screens.requests.length, 2);
+  });
+}
+
+function actionableAttention(kind = "reply") {
+  const value = frame(1, "alpha", "needs_you");
+  value.frame.participants = people();
+  const root = message("attention-root", "Original request", {
+    at_ms: 1,
+    legs: [{ to: "codex", stage: { stage: "delivered" } }],
+  });
+  const target = message(
+    "attention-target",
+    "The decision needing a response",
+    {
+      thread_id: root.message_id,
+      in_reply_to: root.message_id,
+      at_ms: 2,
+      author: "codex",
+      kind: "reply",
+    },
+  );
+  const newer = message("attention-newer", "A newer reply in the same thread", {
+    thread_id: root.message_id,
+    in_reply_to: target.message_id,
+    at_ms: 3,
+    author: "codex",
+    kind: "reply",
+  });
+  value.frame.messages = [root, target, newer];
+  const conversation = {
+    thread_id: root.message_id,
+    message_id: target.message_id,
+  };
+  value.frame.attention = [
+    {
+      source_kind: kind === "reply" ? "delivery_attempt" : "coordination",
+      summary: { text: "A response is needed.", truncated: false },
+      opened_at_ms: 4,
+      subject_alias: null,
+      message_id: target.message_id,
+      conversation,
+      coordination_id: kind === "message" ? "decision-1" : null,
+      response:
+        kind === "reply"
+          ? { kind, ...conversation, address_id: "codex" }
+          : { kind, address_id: "codex" },
+    },
+  ];
+  return {
+    value,
+    context: {
+      thread_id: root.message_id,
+      message_count: 3,
+      earlier_omitted: false,
+      messages: [root, target, newer],
+    },
+  };
+}
+
+test("CL-A: legacy loaded navigation never requests context and restores focus", async (t) => {
+  const ui = await open(t, (client) => replay(client, [locatedChannel()]));
+  await ui.live();
+  const show = ui.page.getByRole("button", {
+    name: "Show message from @codex",
+    exact: true,
+  });
+  await show.click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await pane.locator('[data-message-id="m20"]').waitFor();
+  assert.deepEqual(ui.contextRequests, []);
+  assert.equal(
+    await pane
+      .getByRole("button", { name: "Close thread" })
+      .evaluate((button) => button === document.activeElement),
+    true,
+  );
+  await ui.page.keyboard.press("Escape");
+  await pane.waitFor({ state: "detached" });
+  assert.equal(
+    await show.evaluate((button) => button === document.activeElement),
+    true,
+  );
+});
+
+test("CL-A: explicit attention names its responsible member and focuses fetched evidence", async (t) => {
+  const { value, context } = actionableAttention();
+  value.frame.participants[0].alias = "@current-owner";
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  assert.equal(
+    await ui.page
+      .getByRole("button", { name: "Respond to @current-owner", exact: true })
+      .count(),
+    1,
+  );
+  await ui.page
+    .getByRole("button", {
+      name: "Show message from @current-owner",
+      exact: true,
+    })
+    .click();
+  const target = ui.page
+    .getByRole("complementary", { name: "Thread", exact: true })
+    .locator('[data-message-id="attention-target"]');
+  await target.waitFor();
+  assert.equal(
+    await target.evaluate((row) => row === document.activeElement),
+    true,
+  );
+  assert.equal(
+    ui.contextRequests.length,
+    1,
+    "explicit metadata fetches even when target is loaded",
+  );
+  assert.equal(
+    ui.contextRequests[0].pathname,
+    `/w/${key(1)}/messages/attention-target/context`,
+  );
+});
+
+test("CL-A: Respond posts the exact attention target despite newer context and SSE replies", async (t) => {
+  const { value, context } = actionableAttention();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await pane.locator('[data-message-id="attention-newer"]').waitFor();
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  await reply.fill("@codex Keep the selected decision");
+  const next = structuredClone(value);
+  next.frame.messages.push(
+    message("attention-live", "An even newer live reply", {
+      thread_id: "attention-root",
+      in_reply_to: "attention-newer",
+      at_ms: Date.now(),
+      author: "codex",
+      kind: "reply",
+    }),
+  );
+  ui.connections[0].send("space", next);
+  await pane.locator('[data-message-id="attention-live"]').waitFor();
+  await reply.press("Enter");
+  await until(
+    () => ui.posts.attempts.some((attempt) => attempt.body !== null),
+    "the attention reply POST",
+  );
+  assert.equal(ui.posts.attempts[0].body.in_reply_to, "attention-target");
+  assert.equal(
+    ui.posts.attempts[0].body.source,
+    "@codex Keep the selected decision",
+  );
+});
+
+test("CL-A: preparing an already prepared coordination response keeps the draft without a warning", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await ui.page.waitForFunction(() =>
+    document
+      .querySelector("main .composer textarea")
+      ?.value.includes("Regarding coordination decision-1:"),
+  );
+  const prepared = await draft.inputValue();
+  assert.equal(prepared, "@codex Regarding coordination decision-1: ");
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await pane
+    .getByRole("button", { name: "Prepare response", exact: true })
+    .click();
+  assert.equal(await draft.inputValue(), prepared);
+  assert.equal(
+    await ui.page
+      .getByText("Your channel draft or pending send was kept.", {
+        exact: false,
+      })
+      .count(),
+    0,
+  );
+  assert.equal(ui.posts.attempts.length, 0);
+  await draft.fill("");
+  await pane
+    .getByRole("button", { name: "Prepare response", exact: true })
+    .click();
+  await ui.page.waitForFunction(() =>
+    document
+      .querySelector("main .composer textarea")
+      ?.value.includes("Regarding coordination decision-1:"),
+  );
+  assert.equal(await draft.inputValue(), prepared);
+  assert.equal(
+    await ui.page
+      .getByText("Your channel draft or pending send was kept.", {
+        exact: false,
+      })
+      .count(),
+    0,
+  );
+});
+
+test("CH-2: the page fills the window and never scrolls, with a long channel and a thread open", async (t) => {
+  const codex = fixture.frame.participants[0].address_id;
+  const busy = frame(1, "alpha");
+  busy.frame.messages = Array.from({ length: 80 }, (_, index) =>
+    message(
+      `long-${index}`,
+      `@codex message ${index} with enough words to wrap`,
+      {
+        at_ms: 1_000 + index * 60_000,
+        legs: [{ to: codex, stage: { stage: "delivered" } }],
+      },
+    ),
+  ).reverse();
+  const ui = await open(t, (client) => replay(client, [busy]));
+  await ui.page.locator('[data-message-id="long-79"]').waitFor();
+  const page = () =>
+    ui.page.evaluate(() => {
+      window.scrollTo(0, 100_000);
+      return {
+        overflow:
+          document.documentElement.scrollHeight -
+          document.documentElement.clientHeight,
+        scrolled: window.scrollY,
+      };
+    });
+  for (const [width, height] of [
+    [1440, 900],
+    [1024, 700],
+    [640, 800],
+    [1152, 720],
+  ]) {
+    await ui.page.setViewportSize({ width, height });
+    assert.deepEqual(
+      await page(),
+      { overflow: 0, scrolled: 0 },
+      `${width}x${height}`,
+    );
+  }
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  await ui.page.locator('[data-message-id="long-79"]').hover();
+  assert.deepEqual(await page(), { overflow: 0, scrolled: 0 });
 });
