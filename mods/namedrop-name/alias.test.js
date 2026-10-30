@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeAlias, aliasTaken } from "./alias.js";
+import { normalizeAlias, aliasTaken, formatHcError } from "./alias.js";
 
 const invalidCharacters = "aliases can contain only ASCII letters, digits, spaces, hyphens, or underscores";
 const invalidAlias = "alias must be lowercase ASCII kebab-case with no leading or trailing hyphen";
@@ -11,6 +11,10 @@ test("normalizes Code Reviewer to code-reviewer", () => {
 
 test("accepts one leading at sign on a kebab-case alias", () => {
   assert.deepEqual(normalizeAlias("@code-reviewer"), { alias: "code-reviewer" });
+});
+
+test("accepts one leading at sign before normalizing Code Reviewer", () => {
+  assert.deepEqual(normalizeAlias("@Code Reviewer"), { alias: "code-reviewer" });
 });
 
 test("trims before accepting one leading at sign and normalizing", () => {
@@ -101,3 +105,36 @@ for (const space of ["s1", undefined]) {
 test("a remote unlabelled terminal cannot reserve a local alias", () => {
   assert.equal(aliasTaken([terminal("t1", "coder"), terminal("west/t2", "reviewer")], "reviewer", "t1"), false);
 });
+
+test("formats the captured piped hc JSON error and its hint", () => {
+  const stderr = '{"error":{"hint":"check the core log in the state directory","kind":"unavailable","message":"cannot start core: Read-only file system (os error 30)"}}\n';
+  assert.equal(formatHcError(stderr), "cannot start core: Read-only file system (os error 30) check the core log in the state directory");
+});
+
+test("formats a JSON error with an empty hint", () => {
+  assert.equal(formatHcError('{"error":{"kind":"not_found","message":"No terminal found.","hint":""}}'), "No terminal found.");
+});
+
+test("formats a JSON error without a hint field", () => {
+  assert.equal(formatHcError('{"error":{"kind":"not_found","message":"No terminal found."}}'), "No terminal found.");
+});
+
+test("keeps the nonempty hint text unchanged", () => {
+  assert.equal(formatHcError('{"error":{"message":"No terminal found.","hint":" Check its address. "}}'), "No terminal found.  Check its address. ");
+});
+
+test("falls back to trimmed plain stderr", () => {
+  assert.equal(formatHcError(" \nerror: terminal finished\n "), "error: terminal finished");
+});
+
+for (const stderr of ["", " \n\t"]) {
+  test(`empty stderr ${JSON.stringify(stderr)} preserves the caller's exit-code fallback`, () => {
+    assert.equal(formatHcError(stderr), "");
+  });
+}
+
+for (const stderr of ["{broken", "null", "[]", '"failure"', '{"error":null}', '{"error":[]}', '{"error":{"message":7}}', '{"error":{"message":"Failed","hint":[]}}']) {
+  test(`unrecognized stderr shape ${stderr} falls back to raw text`, () => {
+    assert.equal(formatHcError(" \n" + stderr + "\n "), stderr);
+  });
+}

@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Button } from "gpui-base";
 import { focused, terminals, hc, props, closeOverlay, theme } from "herdr";
-import { normalizeAlias, aliasTaken } from "./alias.js";
+import { normalizeAlias, aliasTaken, formatHcError } from "./alias.js";
 
 export default class NameTerminal extends View {
   init() {
@@ -43,7 +43,7 @@ export default class NameTerminal extends View {
       try {
         const saved = await hc(["label", this.address, "namedrop.name=" + result.alias]);
         if (saved.code !== 0) {
-          this.state = { kind: "editing", error: saved.stderr || `Naming failed with exit code ${saved.code}.` };
+          this.state = { kind: "editing", error: formatHcError(saved.stderr) || `Naming failed with exit code ${saved.code}.` };
         } else {
           this.state = { kind: "closed" };
           this.dismiss();
