@@ -25,6 +25,8 @@ const INSTRUCTIONS: &str = concat!(
     "Do not answer or rewrite the post. Use reason as one topic noun phrase, ",
     "such as 'build question' or 'review request'. Use exactly 2 words by default, ",
     "or 3 or 4 only when needed for clarity. Never name an agent, alias or router host in reason. ",
+    "For multi-step requests or requests to several members, use one broad umbrella topic, ",
+    "such as 'code verification', rather than listing individual tasks. ",
     "Keep reason within 60 characters and reply under 200 tokens. ",
     "Return only {\"to\":[alias],\"reason\":\"short topic\"}. ",
     "Do not include Markdown, code fences, explanations or any other text."
