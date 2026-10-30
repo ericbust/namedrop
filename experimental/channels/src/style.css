@@ -762,6 +762,10 @@ button.member:not(.more):hover {
   column-gap: var(--space-4);
   margin-top: 2px;
 }
+.attention-confirm {
+  font-size: var(--text-sm);
+  color: var(--text);
+}
 .attention-failure {
   grid-column: 2;
   margin-top: 2px;

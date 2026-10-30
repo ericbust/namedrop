@@ -122,7 +122,9 @@ export function AttentionActions({
         {controls !== null &&
           (confirming ? (
             <>
-              <span>{threadControlCopy.confirm}</span>
+              <span className="attention-confirm">
+                {threadControlCopy.confirm}
+              </span>
               <button
                 ref={confirmButton}
                 type="button"
