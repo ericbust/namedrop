@@ -1997,7 +1997,7 @@ code.inline {
 }
 /* A narrow window tall enough for both stacks the thread or peek under the
    channel, each in half the height. */
-@media (max-width: 860px) and (min-height: 900px) and (not (max-width: 600px)) {
+@media (max-width: 860px) and (min-height: 900px) and (width > 600px) {
   .app-shell.has-slot {
     grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr);
   }
@@ -2012,7 +2012,7 @@ code.inline {
 /* Any other narrow window has no room for two: the thread or peek takes the
    channel's place. The channel stays mounted under it, so its draft, scroll
    and deliveries survive. */
-@media (max-width: 860px) and (not (min-height: 900px)), (max-width: 600px) {
+@media (max-width: 860px) and (height < 900px), (max-width: 600px) {
   .app-shell.has-slot > .main,
   .app-shell.has-slot > .slot {
     grid-row: 2;
