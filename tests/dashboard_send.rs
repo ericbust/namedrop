@@ -856,6 +856,79 @@ fn conflicting_operator_pane_receives_ordinary_alias_send_without_silent_settlem
     );
 }
 
+#[test]
+fn synchronous_terminal_completion_keeps_the_queued_successor_retryable() {
+    use namedrop::{HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime};
+    use std::sync::atomic::Ordering;
+
+    struct CompletingTerminal<'a>(&'a Fixture);
+    impl HerdrCommandExecutor for CompletingTerminal<'_> {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            let output = self.0.herdr.execute(args)?;
+            if let ["pane", "run", pane, _] = args {
+                assert_eq!(self.0.run_terminal("w1", pane)?, 0);
+            }
+            Ok(output)
+        }
+    }
+
+    let f = Fixture::new();
+    f.add_terminal("w1", "shell", "pane-shell");
+    f.herdr.shells_busy.store(true, Ordering::Relaxed);
+    for request in ["first", "second"] {
+        send_operator_message(request, "@shell true", None, &f.runtime("w1", "unused")).unwrap();
+    }
+    f.herdr.shells_busy.store(false, Ordering::Relaxed);
+    let executor = CompletingTerminal(&f);
+    let runtime = LifecycleRuntime {
+        state_directory: &f.state,
+        home_directory: None,
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: &f.root,
+        workspace_id: Some("w1"),
+        current_pane_id: None,
+        session_socket_id: "socket-a",
+        herdr: &executor,
+        clock: &f.clock,
+        ids: &f.ids,
+    };
+    let report = namedrop::drain_mailboxes(&runtime).unwrap();
+    assert_eq!(f.texts("SELECT state FROM mailbox_deliveries WHERE address_id='address-w1-shell' ORDER BY rowid"), ["settled", "queued"]);
+    assert!(report.terminal_running.is_empty());
+    assert_eq!(
+        report.terminal_waiting,
+        [PaneAddressId::new("address-w1-shell")]
+    );
+    assert!(report.awaits_retry());
+    namedrop::drain_mailboxes(&runtime).unwrap();
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 2);
+    assert_eq!(
+        f.count("SELECT COUNT(*) FROM terminal_executions WHERE completed_at_ms IS NOT NULL"),
+        2
+    );
+    assert_eq!(f.herdr.runs.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn terminal_retry_excludes_stale_and_disabled_heads() {
+    use std::sync::atomic::Ordering;
+    for blocked in ["stale", "disabled", "paused"] {
+        let f = Fixture::new();
+        f.add_terminal("w1", "shell", "pane-shell");
+        f.herdr.shells_busy.store(true, Ordering::Relaxed);
+        send_operator_message("queued", "@shell true", None, &f.runtime("w1", "unused")).unwrap();
+        match blocked {
+            "stale" => f.herdr.terminals.lock().unwrap().clear(),
+            "disabled" => f.sql("UPDATE pane_addresses SET collaboration_disabled=1 WHERE address_id='address-w1-shell'"),
+            "paused" => f.sql("UPDATE worktrees SET paused=1 WHERE worktree_id='w1'"),
+            _ => unreachable!(),
+        }
+        let report = namedrop::drain_mailboxes(&f.runtime("w1", "unused")).unwrap();
+        assert!(!report.awaits_terminal(), "{blocked}: {report:?}");
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 0);
+    }
+}
+
 mod http {
     use super::*;
     use namedrop::HerdrCommandExecutor;
@@ -877,6 +950,7 @@ mod http {
         port: u16,
         cookie: String,
         csrf: String,
+        root: std::path::PathBuf,
     }
 
     struct Response {
@@ -999,9 +1073,23 @@ mod http {
             fs::write(
                 &shim,
                 r#"#!/usr/bin/python3
-import json, os, sys
+import json, os, subprocess, sys, time
 args = sys.argv[1:]
 root = os.path.dirname(__file__)
+with open(os.path.join(root, 'http-herdr-parents'), 'a') as parents:
+    parents.write(str(os.getppid()) + '\n')
+def wait_for_gate(name):
+    gate = os.path.join(root, name + '-gate')
+    if os.path.exists(gate):
+        open(os.path.join(root, name + '-started'), 'w').close()
+        deadline = time.monotonic() + 15
+        while os.path.exists(gate):
+            if time.monotonic() >= deadline:
+                sys.stderr.write('HTTP test gate timed out: ' + name)
+                sys.exit(1)
+            time.sleep(0.01)
+if args == ['workspace', 'list']:
+    wait_for_gate('http-discovery')
 with open(os.path.join(root, 'http-herdr-responses.json')) as source:
     responses = json.load(source)
 key = ' '.join(args)
@@ -1010,7 +1098,31 @@ if key in responses:
 elif args[:2] == ['worktree', 'list']:
     sys.stderr.write('{"error":{"code":"not_git_worktree"}}')
     sys.exit(1)
+elif args[:2] == ['pane', 'process-info']:
+    pane = args[3]
+    busy = os.path.exists(os.path.join(root, pane + '-busy'))
+    blocked = os.path.exists(os.path.join(root, pane + '-gate'))
+    with open(os.path.join(root, 'http-process-info.jsonl'), 'a') as log:
+        log.write(json.dumps({'pane': pane, 'blocked': blocked, 'at': time.monotonic(), 'parent': os.getppid()}) + '\n')
+    print(json.dumps({'result': {'process_info': {
+        'shell_pid': 42, 'foreground_process_group_id': 43 if busy or blocked else 42,
+        'foreground_processes': [{'pid': os.getppid()}]}}}))
+elif args[:2] == ['pane', 'run']:
+    pane = args[2]
+    busy = os.path.join(root, pane + '-busy')
+    open(busy, 'w').close()
+    with open(os.path.join(root, 'http-terminal-runs.jsonl'), 'a') as log:
+        log.write(json.dumps({'pane': pane, 'command': args[3]}) + '\n')
+    subprocess.Popen([sys.executable, __file__, 'finish-terminal', pane, args[3]],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    print('{}')
+elif args[0] == 'finish-terminal':
+    subprocess.run(args[2], shell=True, check=False)
+    os.unlink(os.path.join(root, args[1] + '-busy'))
 elif args[:2] in [['agent', 'prompt'], ['pane', 'report-metadata'], ['notification', 'show']]:
+    if args[:2] == ['agent', 'prompt']:
+        wait_for_gate('http-prompt')
     with open(os.path.join(root, 'http-herdr-invocations.jsonl'), 'a') as log:
         log.write(json.dumps({'args': args, 'socket': os.environ.get('HERDR_SOCKET_PATH')}) + '\n')
     print('{}')
@@ -1060,6 +1172,7 @@ else:
                 port,
                 cookie: format!("namedrop_dashboard_{port}={session}"),
                 csrf: String::new(),
+                root: f.root.clone(),
             };
             let response = server.request("GET", "/api/session", &[("Cookie", &server.cookie)], "");
             assert_eq!(response.status, 200, "{}", response.body);
@@ -1135,6 +1248,22 @@ else:
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+            let parents =
+                fs::read_to_string(self.root.join("http-herdr-parents")).unwrap_or_default();
+            for pid in parents.lines().filter_map(|line| line.parse::<i32>().ok()) {
+                let command = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+                let environment = fs::read(format!("/proc/{pid}/environ")).unwrap_or_default();
+                let state = format!("HERDR_PLUGIN_STATE_DIR={}/state", self.root.display());
+                if String::from_utf8_lossy(&command).contains(self.root.to_str().unwrap())
+                    || environment
+                        .split(|byte| *byte == 0)
+                        .any(|entry| entry == state.as_bytes())
+                {
+                    unsafe {
+                        libc::kill(pid, libc::SIGKILL);
+                    }
+                }
+            }
         }
     }
 
@@ -1480,6 +1609,387 @@ else:
         assert_eq!(f.message_rows(), (0, 0));
     }
 
+    struct Gate(std::path::PathBuf);
+
+    impl Gate {
+        fn new(f: &Fixture, name: &str) -> Self {
+            let path = f.root.join(format!("{name}-gate"));
+            fs::write(&path, b"").unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+
+    fn wait_until(description: &str, ready: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn prompts(f: &Fixture) -> Vec<Value> {
+        fs::read_to_string(f.root.join("http-herdr-invocations.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|call| call["args"][0] == "agent")
+            .collect()
+    }
+
+    fn wait_for_submitted(f: &Fixture, count: i64) {
+        wait_until("recorded prompt submission", || {
+            prompts(f).len() == count as usize
+                && f.count("SELECT COUNT(*) FROM delivery_attempt_state WHERE state IN ('submitted','acknowledged')") == count
+        });
+    }
+
+    fn delivery_ids(receipt: &Value) -> Vec<&Value> {
+        receipt["deliveries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|delivery| &delivery["delivery_id"])
+            .collect()
+    }
+
+    fn terminal_posts_finish(commands: &[&str], workspace: &str) {
+        let f = Fixture::new();
+        f.add_terminal(workspace, "shell", "pane-shell");
+        f.sql("UPDATE pane_addresses SET remote_commands_terminal_id='t-pane-shell' WHERE pane_type='terminal'");
+        let gate = Gate::new(&f, "pane-shell");
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let path = format!("/w/{}/messages", key.as_str());
+        let output = f.root.join("executed");
+        for (i, command) in commands.iter().enumerate() {
+            let routing = if workspace == "w1" { "" } else { "#ws2 " };
+            let source = format!(
+                "{routing}@shell {command}; echo {i} >> '{}'",
+                output.display()
+            );
+            let body = json!({"request_id":format!("terminal-{i}"), "source":source}).to_string();
+            let response = server.post(&path, &body, &[]);
+            assert_eq!(response.status, 200, "{}", response.body);
+        }
+        wait_until("every POST drain observes the blocked shell", || {
+            fs::read_to_string(f.root.join("http-process-info.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+                >= commands.len()
+        });
+        assert_eq!(f.count("SELECT COUNT(*) FROM terminal_executions"), 0);
+        drop(gate);
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let expected = commands.len() as i64;
+        while f.count("SELECT COUNT(*) FROM mailbox_deliveries WHERE address_id LIKE 'address-%-shell' AND state='settled'") != expected {
+            assert!(Instant::now() < deadline, "terminal commands stranded: {:?}",
+                f.texts("SELECT state FROM mailbox_deliveries WHERE address_id LIKE 'address-%-shell' ORDER BY rowid"));
+            thread::sleep(Duration::from_millis(20));
+        }
+        let executions = fs::read_to_string(output).unwrap();
+        assert_eq!(
+            executions.lines().collect::<Vec<_>>(),
+            (0..commands.len())
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            f.count(
+                "SELECT COUNT(*) FROM delivery_attempts WHERE address_id LIKE 'address-%-shell'"
+            ),
+            expected
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM terminal_executions WHERE completed_at_ms IS NOT NULL"),
+            expected
+        );
+        assert_eq!(
+            fs::read_to_string(f.root.join("http-terminal-runs.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            commands.len()
+        );
+    }
+
+    #[test]
+    fn terminal_fast_pair_settles_without_an_unrelated_drain() {
+        terminal_posts_finish(&["true", "true"], "w1");
+    }
+
+    #[test]
+    fn terminal_long_then_short_settles_without_an_unrelated_drain() {
+        terminal_posts_finish(&["sleep 1", "true"], "w1");
+    }
+
+    #[test]
+    fn terminal_burst_settles_once_per_request_in_bounded_time() {
+        terminal_posts_finish(&["true"; 8], "w1");
+    }
+
+    #[test]
+    fn terminal_forwarded_only_queue_starts_a_watcher() {
+        terminal_posts_finish(&["true", "true"], "w2");
+    }
+
+    #[test]
+    fn terminal_forwarded_queue_progresses_while_the_source_shell_stays_busy() {
+        let f = Fixture::new();
+        f.add_terminal("w1", "local", "pane-local");
+        f.add_terminal("w2", "remote", "pane-remote");
+        f.sql("UPDATE pane_addresses SET remote_commands_terminal_id='t-pane-remote' WHERE address_id='address-w2-remote'");
+        let local = Gate::new(&f, "pane-local");
+        let remote = Gate::new(&f, "pane-remote");
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let path = format!("/w/{}/messages", key.as_str());
+        for (i, source) in ["@local true", "#ws2 @remote true"].iter().enumerate() {
+            let response = server.post(
+                &path,
+                &json!({"request_id":format!("fair-{i}"), "source":source}).to_string(),
+                &[],
+            );
+            assert_eq!(response.status, 200, "{}", response.body);
+        }
+        wait_until("forwarded drain observes the blocked remote shell", || {
+            fs::read_to_string(f.root.join("http-process-info.jsonl"))
+                .unwrap_or_default()
+                .contains("pane-remote")
+        });
+        drop(remote);
+        wait_until("forwarded terminal while source stays busy", || {
+            f.count("SELECT COUNT(*) FROM terminal_executions WHERE worktree_id='w2' AND completed_at_ms IS NOT NULL") == 1
+        });
+        assert!(local.0.exists());
+        assert_eq!(
+            f.texts("SELECT state FROM mailbox_deliveries WHERE address_id='address-w1-local'"),
+            ["queued"]
+        );
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM delivery_attempts WHERE worktree_id='w2'"),
+            1
+        );
+    }
+
+    #[test]
+    fn terminal_wake_hook_starts_forwarded_workers_before_waiting_for_the_source() {
+        use std::sync::atomic::Ordering;
+
+        struct Hook(Child);
+        impl Drop for Hook {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        let f = Fixture::new();
+        f.clock.0.store(
+            namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
+            Ordering::Relaxed,
+        );
+        f.add_terminal("w1", "local", "pane-local");
+        f.add_terminal("w2", "remote", "pane-remote");
+        f.sql("UPDATE pane_addresses SET remote_commands_terminal_id='t-pane-remote' WHERE address_id='address-w2-remote'");
+        f.herdr.shells_busy.store(true, Ordering::Relaxed);
+        for (i, source) in ["@local true", "#ws2 @remote true"].iter().enumerate() {
+            send_operator_message(
+                &format!("hook-{i}"),
+                source,
+                None,
+                &f.runtime("w1", "unused"),
+            )
+            .unwrap();
+        }
+        let local = Gate::new(&f, "pane-local");
+        let _server = Server::start(&f, None);
+        let _hook = Hook(
+            Command::new(env!("CARGO_BIN_EXE_namedrop"))
+                .args(["hook", "mailbox-wake", "--state-directory"])
+                .arg(&f.state)
+                .env("HERDR_BIN_PATH", f.root.join("http-herdr"))
+                .env("HERDR_SOCKET_PATH", "socket-a")
+                .env("HERDR_WORKSPACE_ID", "w1")
+                .env_remove("HERDR_PANE_ID")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        wait_until("forwarded worker behind busy source", || {
+            f.count("SELECT COUNT(*) FROM terminal_executions WHERE worktree_id='w2' AND completed_at_ms IS NOT NULL") == 1
+        });
+        assert!(local.0.exists());
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM terminal_executions WHERE worktree_id='w1'"),
+            0
+        );
+    }
+
+    fn post_returns_before_prompt(source: &str, workspace: &str, pane: &str) {
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let gate = Gate::new(&f, "http-prompt");
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let path = format!("/w/{}/messages", key.as_str());
+        let body = json!({"request_id":"http-gated", "source":source}).to_string();
+        let expected_rows = if workspace == "w1" { 1 } else { 2 };
+        let receipt = thread::scope(|scope| {
+            let (send, receive) = std::sync::mpsc::channel();
+            let (server, path, body) = (&server, &path, &body);
+            scope.spawn(move || send.send(server.post(path, body, &[])).unwrap());
+            wait_until("blocked Herdr prompt", || {
+                f.root.join("http-prompt-started").exists()
+            });
+            let response = receive.recv_timeout(Duration::from_secs(1));
+            if response.is_err() {
+                drop(gate);
+                let _ = receive.recv_timeout(Duration::from_secs(5));
+                panic!("POST did not reach EOF while the Herdr prompt gate stayed shut");
+            }
+            let response = response.unwrap();
+            assert_eq!(response.status, 200, "{}", response.body);
+            let receipt: Value = serde_json::from_str(&response.body).unwrap();
+            assert!(receipt.get("drain").is_none());
+            assert!(receipt.get("drains").is_none());
+            let message_id = receipt["message_id"].as_str().unwrap();
+            let stored: String = f.db().query_row(
+                "SELECT m.message_id FROM collaboration_messages m JOIN idempotency_records i
+                 ON i.session_socket_id=m.session_socket_id AND i.worktree_id=m.worktree_id
+                 AND i.message_id=m.message_id WHERE i.request_id='http-gated' AND i.worktree_id='w1'",
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(stored, message_id);
+            assert_eq!(
+                f.count("SELECT COUNT(*) FROM mailbox_deliveries"),
+                expected_rows
+            );
+            assert!(prompts(&f).is_empty());
+            let replay = server.post(path, body, &[]);
+            assert_eq!(replay.status, 200, "{}", replay.body);
+            let replay: Value = serde_json::from_str(&replay.body).unwrap();
+            assert_eq!(replay["message_id"], receipt["message_id"]);
+            assert_eq!(replay["thread_id"], receipt["thread_id"]);
+            assert_eq!(delivery_ids(&replay), delivery_ids(&receipt));
+            assert_eq!(replay["forwarded"], receipt["forwarded"]);
+            assert_eq!(replay["idempotent_replay"], true);
+            assert!(f.root.join("http-prompt-gate").exists());
+            assert!(prompts(&f).is_empty());
+            drop(gate);
+            receipt
+        });
+        wait_for_submitted(&f, 1);
+        let prompts = prompts(&f);
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0]["args"][2], pane);
+        assert_eq!(prompts[0]["socket"], "socket-a");
+        let envelope: Value =
+            serde_json::from_str(prompts[0]["args"][3].as_str().unwrap()).unwrap();
+        assert_eq!(
+            &envelope["control"]["message_id"],
+            if workspace == "w1" {
+                &receipt["message_id"]
+            } else {
+                &receipt["forwarded"][0]["message_id"]
+            }
+        );
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 1);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM mailbox_deliveries"),
+            expected_rows
+        );
+        let stored_workspace: String = f
+            .db()
+            .query_row(
+                "SELECT worktree_id FROM mailbox_deliveries WHERE state IN ('submitted','acknowledged')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_workspace, workspace);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM collaboration_messages"),
+            expected_rows
+        );
+    }
+
+    #[test]
+    fn post_reaches_eof_before_local_prompt_returns() {
+        post_returns_before_prompt("@planner inspect", "w1", "pane-1-planner");
+    }
+
+    #[test]
+    fn post_reaches_eof_before_forwarded_prompt_returns() {
+        post_returns_before_prompt("#ws2 @tester inspect", "w2", "pane-2-tester");
+    }
+
+    #[test]
+    fn disconnected_post_still_drains_home_and_forwarded_workspaces() {
+        use std::os::fd::AsRawFd;
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let gate = Gate::new(&f, "http-discovery");
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let body =
+            json!({"request_id":"http-reset", "source":"#ws1 #ws2 @planner @tester inspect"})
+                .to_string();
+        let request = format!(
+            "POST /w/{}/messages HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nX-Namedrop-Csrf: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            key.as_str(),
+            server.port,
+            server.cookie,
+            server.csrf,
+            body.len(),
+        );
+        let mut stream = TcpStream::connect(("127.0.0.1", server.port)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        wait_until("Herdr discovery before commit", || {
+            f.root.join("http-discovery-started").exists()
+        });
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        assert_eq!(
+            unsafe {
+                libc::setsockopt(
+                    stream.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    (&linger as *const libc::linger).cast(),
+                    std::mem::size_of_val(&linger) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        drop(stream);
+        drop(gate);
+        wait_for_submitted(&f, 2);
+        let calls = prompts(&f);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["args"][2], "pane-1-planner");
+        assert_eq!(calls[1]["args"][2], "pane-2-tester");
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 2);
+        assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 2);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM idempotency_records WHERE request_id='http-reset'"),
+            1
+        );
+    }
+
     #[test]
     fn concurrent_identical_posts_append_and_deliver_once() {
         let f = Fixture::new();
@@ -1504,7 +2014,7 @@ else:
         });
         assert_eq!(receipts[0]["message_id"], receipts[1]["message_id"]);
         assert_eq!(receipts[0]["thread_id"], receipts[1]["thread_id"]);
-        assert_eq!(receipts[0]["deliveries"], receipts[1]["deliveries"]);
+        assert_eq!(delivery_ids(&receipts[0]), delivery_ids(&receipts[1]));
         assert_eq!(
             receipts
                 .iter()
@@ -1514,6 +2024,7 @@ else:
         );
         assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 1);
         assert_eq!(f.count("SELECT COUNT(*) FROM mailbox_deliveries"), 1);
+        wait_for_submitted(&f, 1);
         assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 1);
         let invocations = fs::read_to_string(f.root.join("http-herdr-invocations.jsonl")).unwrap();
         let prompts: Vec<Value> = invocations
@@ -1565,6 +2076,7 @@ else:
             [first["message_id"].as_str().unwrap()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
         ).unwrap();
         assert_eq!(stored, ("w1".to_owned(), "human".to_owned(), None));
+        wait_for_submitted(&f, 1);
         let invocations = fs::read_to_string(f.root.join("http-herdr-invocations.jsonl")).unwrap();
         let prompts: Vec<Value> = invocations
             .lines()

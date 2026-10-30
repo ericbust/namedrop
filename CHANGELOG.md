@@ -6,6 +6,9 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Fixed
 
+- Queued terminal commands continue after early dashboard responses, including back-to-back posts and bursts, without an unrelated drain. Forwarded mailbox workers start before the source worker is awaited.
+- Dashboard schema checks retry only SQLite Busy or Locked errors for a bounded five-second budget and log contention. Other read failures retain the exit or handoff behavior.
+- Operator dashboard posts return after the message and request ID commit, before agent delivery finishes. Delivery continues in the source and forwarded workspaces even if the client disconnects.
 - Dashboard delivery and unanswered-request warnings follow the recipient's current alias after a rename. Attention links load in one query instead of preparing a query for each warning.
 - Reopening Peek in the channels app shows the last successful screen and its original read time while a fresh full read runs. Retained screens stay in memory for the current app instance. Missing, closed, and session-ended failures replace earlier screen text with their notice.
 

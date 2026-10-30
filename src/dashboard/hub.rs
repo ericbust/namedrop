@@ -22,6 +22,7 @@ const TICK: Duration = Duration::from_millis(250);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(1);
 const UNAVAILABLE_LIMIT: u8 = 3;
 const RECOVERY_BACKOFF: Duration = Duration::from_secs(2);
+const SCHEMA_BUSY_LIMIT: Duration = Duration::from_secs(5);
 
 pub(crate) enum HubCommand {
     Subscribe {
@@ -346,6 +347,7 @@ struct Hub<'a> {
     metadata_dirty: bool,
     idle_since: Option<Instant>,
     unsupported_schema: bool,
+    schema_busy_since: Option<Instant>,
     last_error: Option<String>,
 }
 
@@ -374,6 +376,7 @@ pub(crate) fn run(
         metadata_dirty: false,
         idle_since: Some(Instant::now()),
         unsupported_schema: false,
+        schema_busy_since: None,
         last_error: None,
     };
     let verdict = loop {
@@ -471,27 +474,55 @@ impl Hub<'_> {
     }
 
     fn verdict(&mut self) -> Option<Verdict> {
+        self.verdict_at(Instant::now())
+    }
+
+    fn verdict_at(&mut self, now: Instant) -> Option<Verdict> {
         if self.unsupported_schema {
             return Some(Verdict::Exit(
                 "this release does not support the state schema",
             ));
         }
         let runtime = self.files.state().join("runtime");
-        let wants_handoff =
-            if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
-                Some("an update is migrating state")
-            } else if runtime.join("namedrop").exists()
-                && fs::canonicalize(runtime.join("current/namedrop")).ok()
-                    != std::env::current_exe().and_then(fs::canonicalize).ok()
-            {
-                Some("a newer release is current")
-            } else if self.store.as_ref().is_some_and(|store| {
-                store.schema_version().ok() != Some(crate::store::SCHEMA_VERSION)
-            }) {
-                Some("the state schema changed")
-            } else {
-                None
-            };
+        let wants_handoff = if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
+            Some("an update is migrating state")
+        } else if runtime.join("namedrop").exists()
+            && fs::canonicalize(runtime.join("current/namedrop")).ok()
+                != std::env::current_exe().and_then(fs::canonicalize).ok()
+        {
+            Some("a newer release is current")
+        } else if self
+            .store
+            .as_ref()
+            .is_some_and(|store| match store.schema_version() {
+                Ok(version) => {
+                    self.schema_busy_since = None;
+                    version != crate::store::SCHEMA_VERSION
+                }
+                Err(error) if error.kind() == StoreErrorKind::Busy => {
+                    let since = self.schema_busy_since.get_or_insert_with(|| {
+                        eprintln!(
+                            "dashboard: state schema read is busy; retrying for up to {} seconds",
+                            SCHEMA_BUSY_LIMIT.as_secs()
+                        );
+                        now
+                    });
+                    let expired = now.duration_since(*since) >= SCHEMA_BUSY_LIMIT;
+                    if expired {
+                        eprintln!(
+                            "dashboard: state schema read is still busy after {} seconds: {error}",
+                            SCHEMA_BUSY_LIMIT.as_secs()
+                        );
+                    }
+                    expired
+                }
+                Err(_) => true,
+            })
+        {
+            Some("the state schema changed")
+        } else {
+            None
+        };
         if let Some(reason) = wants_handoff {
             return Some(if self.subscribers.is_empty() {
                 Verdict::Exit(reason)
@@ -508,7 +539,7 @@ impl Hub<'_> {
         }
         if self
             .idle_since
-            .is_some_and(|since| since.elapsed() >= self.idle)
+            .is_some_and(|since| now.duration_since(since) >= self.idle)
         {
             return Some(Verdict::Idle);
         }
@@ -1076,6 +1107,7 @@ mod tests {
             metadata_dirty: false,
             idle_since: None,
             unsupported_schema: false,
+            schema_busy_since: None,
             last_error: None,
         }
     }
@@ -1097,6 +1129,277 @@ mod tests {
             })),
             thread: None,
         });
+    }
+
+    fn schema_test_files(name: &str) -> ServerFiles {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-hub-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        StateStore::open(&state).unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let claim = files.claim().unwrap().unwrap();
+        files
+            .publish(
+                &claim,
+                &super::super::server_files::ServerInfo {
+                    pid: std::process::id(),
+                    port: 0,
+                    instance: "test".to_owned(),
+                    started_at_ms: now_ms(),
+                    ui: Default::default(),
+                },
+            )
+            .unwrap();
+        files
+    }
+
+    fn schema_test_hub(files: &ServerFiles) -> Hub<'_> {
+        let mut hub = test_hub(files);
+        assert!(hub.open_store());
+        hub.store
+            .as_ref()
+            .unwrap()
+            .set_busy_timeout(Duration::ZERO)
+            .unwrap();
+        hub
+    }
+
+    fn add_schema_subscriber(hub: &mut Hub<'_>) {
+        hub.subscribers.insert(
+            1,
+            Subscriber {
+                state: ConnectionState::PendingAll,
+                frames: sync_channel(1).0,
+                notify: std::sync::mpsc::channel().0,
+            },
+        );
+    }
+
+    #[test]
+    fn a_busy_schema_read_expires_after_five_continuous_seconds() {
+        let files = schema_test_files("schema-expiry");
+        let mut hub = schema_test_hub(&files);
+        let writer = rusqlite::Connection::open(files.state().join("namedrop.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let now = Instant::now();
+        assert!(hub.verdict_at(now).is_none());
+        assert!(hub.verdict_at(now + Duration::from_millis(4999)).is_none());
+        let verdict = hub.verdict_at(now + Duration::from_secs(5));
+        assert!(
+            matches!(verdict, Some(Verdict::Exit("the state schema changed"))),
+            "expected schema-changed exit, got {:?}",
+            verdict.map(|verdict| verdict.reason())
+        );
+        add_schema_subscriber(&mut hub);
+        assert!(matches!(
+            hub.verdict_at(now + Duration::from_secs(6)),
+            Some(Verdict::Handoff("the state schema changed"))
+        ));
+        writer.execute_batch("ROLLBACK").unwrap();
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn a_successful_schema_read_resets_the_busy_budget() {
+        let files = schema_test_files("schema-reset");
+        let mut hub = schema_test_hub(&files);
+        let writer = rusqlite::Connection::open(files.state().join("namedrop.sqlite3")).unwrap();
+        let now = Instant::now();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        assert!(hub.verdict_at(now + Duration::from_secs(4)).is_none());
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(hub.verdict_at(now + Duration::from_secs(4)).is_none());
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(hub.verdict_at(now + Duration::from_secs(6)).is_none());
+        assert!(hub.verdict_at(now + Duration::from_millis(10999)).is_none());
+        let verdict = hub.verdict_at(now + Duration::from_secs(11));
+        assert!(
+            matches!(verdict, Some(Verdict::Exit("the state schema changed"))),
+            "expected schema-changed exit, got {:?}",
+            verdict.map(|verdict| verdict.reason())
+        );
+        writer.execute_batch("ROLLBACK").unwrap();
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn a_non_busy_schema_read_error_exits_or_hands_off_immediately() {
+        let files = schema_test_files("schema-read-error");
+        let mut hub = schema_test_hub(&files);
+        let writer = rusqlite::Connection::open(files.state().join("namedrop.sqlite3")).unwrap();
+        let now = Instant::now();
+        for after_busy in [false, true] {
+            hub.subscribers.clear();
+            writer
+                .pragma_update(None, "user_version", crate::store::SCHEMA_VERSION)
+                .unwrap();
+            assert!(hub.verdict_at(now).is_none());
+            if after_busy {
+                writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+                assert!(hub.verdict_at(now).is_none());
+                writer.execute_batch("ROLLBACK").unwrap();
+            }
+            writer.pragma_update(None, "user_version", -1).unwrap();
+            assert_eq!(
+                hub.store
+                    .as_ref()
+                    .unwrap()
+                    .schema_version()
+                    .unwrap_err()
+                    .kind(),
+                StoreErrorKind::Storage
+            );
+            let verdict = hub.verdict_at(now + Duration::from_millis(1));
+            assert!(
+                matches!(verdict, Some(Verdict::Exit("the state schema changed"))),
+                "expected schema-changed exit, got {:?}",
+                verdict.map(|verdict| verdict.reason())
+            );
+            add_schema_subscriber(&mut hub);
+            assert!(matches!(
+                hub.verdict_at(now + Duration::from_millis(1)),
+                Some(Verdict::Handoff("the state schema changed"))
+            ));
+        }
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn a_busy_schema_read_preserves_other_exit_and_handoff_checks() {
+        let files = schema_test_files("schema-precedence");
+        let mut hub = schema_test_hub(&files);
+        let writer = rusqlite::Connection::open(files.state().join("namedrop.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let now = Instant::now();
+        assert!(hub.verdict_at(now).is_none());
+        hub.idle_since = Some(now - hub.idle);
+        assert!(matches!(hub.verdict_at(now), Some(Verdict::Idle)));
+        fs::remove_file(files.state().join("dashboard/server.json")).unwrap();
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Exit("server.json was replaced"))
+        ));
+        let runtime = files.state().join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::write(runtime.join("namedrop"), "new release").unwrap();
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Exit("a newer release is current"))
+        ));
+        fs::write(runtime.join("migration.json"), "{}").unwrap();
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Exit("an update is migrating state"))
+        ));
+        add_schema_subscriber(&mut hub);
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Handoff("an update is migrating state"))
+        ));
+        hub.unsupported_schema = true;
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Exit(
+                "this release does not support the state schema"
+            ))
+        ));
+        writer.execute_batch("ROLLBACK").unwrap();
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn sqlite_busy_and_locked_are_retryable_schema_read_errors() {
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+            let error = crate::StoreError::from(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert_eq!(error.kind(), StoreErrorKind::Busy);
+        }
+    }
+
+    #[test]
+    fn a_busy_schema_read_keeps_the_hub_running() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-hub-schema-busy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        StateStore::open(&state).unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let claim = files.claim().unwrap().unwrap();
+        files
+            .publish(
+                &claim,
+                &super::super::server_files::ServerInfo {
+                    pid: std::process::id(),
+                    port: 0,
+                    instance: "test".to_owned(),
+                    started_at_ms: now_ms(),
+                    ui: Default::default(),
+                },
+            )
+            .unwrap();
+        let mut hub = test_hub(&files);
+        assert!(hub.open_store());
+        hub.store
+            .as_ref()
+            .unwrap()
+            .set_busy_timeout(Duration::ZERO)
+            .unwrap();
+        let writer = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert_eq!(
+            hub.store
+                .as_ref()
+                .unwrap()
+                .schema_version()
+                .unwrap_err()
+                .kind(),
+            StoreErrorKind::Busy
+        );
+        assert_eq!(hub.verdict().map(|verdict| verdict.reason()), None);
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            hub.store.as_ref().unwrap().schema_version().unwrap(),
+            crate::store::SCHEMA_VERSION
+        );
+        assert_eq!(hub.verdict().map(|verdict| verdict.reason()), None);
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn a_changed_schema_exits_or_hands_off_to_connected_tabs() {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-hub-schema-changed-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state);
+        StateStore::open(&state).unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = test_hub(&files);
+        assert!(hub.open_store());
+        let writer = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+        writer
+            .pragma_update(None, "user_version", crate::store::SCHEMA_VERSION + 1)
+            .unwrap();
+        assert!(matches!(
+            hub.verdict(),
+            Some(Verdict::Exit("the state schema changed"))
+        ));
+        hub.subscribers.insert(
+            1,
+            Subscriber {
+                state: ConnectionState::PendingAll,
+                frames: sync_channel(1).0,
+                notify: std::sync::mpsc::channel().0,
+            },
+        );
+        assert!(matches!(
+            hub.verdict(),
+            Some(Verdict::Handoff("the state schema changed"))
+        ));
+        let _ = fs::remove_dir_all(&state);
     }
 
     #[test]
