@@ -544,7 +544,10 @@ test("complete: the hint names leading text the server refuses, reading leading 
   const room = "Enter posts to the channel · Mention @name to bring someone in";
   const cases: [string, string][] = [
     ["@Codex quick check", "Names are lowercase: @codex"],
-    ["@Nobody hi there", "@Nobody isn't in this channel"],
+    ["@Codex hi", "Names are lowercase: @codex"],
+    ["@Nobody hi there", "Names are lowercase: @nobody"],
+    ["@Backend hi", "Names are lowercase: @backend"],
+    ["@Ghost come back", "Names are lowercase: @ghost"],
     ["@nobody hi there", "Enter sends only to @nobody"],
     ["@CODEX hi", "Names are lowercase: @codex"],
     ["  @Codex hi", "Names are lowercase: @codex"],
@@ -583,6 +586,19 @@ test("complete: the hint names leading text the server refuses, reading leading 
     assert.equal(hint(text), expected, JSON.stringify(text));
   for (const text of ["@Codex quick check", "@codex; hi", "@nobody hi there"])
     assert.equal(postSource(text, channel), text, "Enter still sends it");
+  const closed = new Map(
+    [...alpha.members].map(([id, member]) => [
+      id,
+      member.alias === "@codex"
+        ? { ...member, activity: "retired" as const }
+        : member,
+    ]),
+  );
+  assert.equal(
+    composerHint({ kind: "channel", agents: closed }, "@Codex hi"),
+    "Names are lowercase: @codex",
+    "a closed member is refused for its capital too",
+  );
 });
 
 test("complete: disabled copy follows the server reason despite sanitized or identical names", () => {

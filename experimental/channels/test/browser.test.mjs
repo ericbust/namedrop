@@ -8624,7 +8624,7 @@ test("CH-2: the channel composer says where Enter sends and posts plain text", a
   assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "hello room");
 });
 
-test("DESIGN-R2 B1: the channel hint names a capitalized or unknown leading name as you type, and Enter still sends it for the server to refuse", async (t) => {
+test("DESIGN-R2 B1, R3 U2: the channel hint names a capitalized leading name as lowercase as you type, known or not, and Enter still sends it for the server to refuse", async (t) => {
   const { ui } = await chatRoom(t, [], {
     onPost: ({ source }) => ({
       status: 400,
@@ -8647,8 +8647,8 @@ test("DESIGN-R2 B1: the channel hint names a capitalized or unknown leading name
   assert.deepEqual(hints, [
     "Names are lowercase: @codex",
     "Names are lowercase: @codex",
-    "@Nobody isn't in this channel",
-    "@Nobody isn't in this channel",
+    "Names are lowercase: @nobody",
+    "Names are lowercase: @nobody",
   ]);
   assert.equal(ui.posts.attempts.length, 0, "nothing is sent before Enter");
   await box.press("Enter");

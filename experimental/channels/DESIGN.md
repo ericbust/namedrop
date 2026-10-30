@@ -914,10 +914,12 @@ Enter sends:
     "@codex,, hi". The server reads whole words.
   - Any other first `@` word that is no name at all: "@codex_x isn't in this
     channel", as typed.
-  - A name with capitals: "Names are lowercase: @codex", with the member's
-    alias, when its lowercase form is a current member or a `#label` names
-    another channel. Otherwise "@Nobody isn't in this channel", as typed.
-    Retired members are not current.
+  - A name with capitals: "Names are lowercase: @codex", the name with its
+    ASCII letters lowercased. The server refuses the capital before it looks
+    the name up, so this is the reason for a current member, a closed one, a
+    mention group the page can't see, and an unknown name alike: "@Backend hi"
+    reads "Names are lowercase: @backend" and "@Nobody hi there" reads "Names
+    are lowercase: @nobody".
   - A lowercase name the page doesn't know keeps "Enter sends only to
     @name". It may be a group, which the page can't see, so the server
     decides.

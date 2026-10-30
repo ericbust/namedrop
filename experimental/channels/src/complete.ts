@@ -312,43 +312,29 @@ function asciiLower(text: string): string {
 }
 // The hint for leading text the server refuses, read in its order: after any
 // `#label` words, the first `@` word must be a whole name, and no leading name
-// may have capitals. A lowercase name the page doesn't know may be a group,
-// which the frame doesn't carry, so the server decides that one.
-function refusedLeading(
-  text: string,
-  members: ReadonlyMap<AddressId, Member>,
-): string | null {
+// may have capitals. The server refuses a capital before it looks the name up,
+// so that is the reason whether or not the page knows the name. A lowercase
+// name the page doesn't know may be a group, which the frame doesn't carry, so
+// the server decides that one.
+function refusedLeading(text: string): string | null {
   let at = afterLabels(text);
-  const labeled = at > spaceAfter(text, 0);
-  const first = wordAt(text, at);
-  if (first.length > 1 && first.startsWith("@")) {
-    if (!ALIAS.test(asciiLower(recipient(first).slice(1)))) {
-      const name = PUNCTUATED.exec(first)?.[1];
-      return name !== undefined && ALIAS.test(asciiLower(name))
-        ? composerCopy.spaceAfter(`@${asciiLower(name)}`)
-        : composerCopy.notMember(first);
-    }
+  let word = wordAt(text, at);
+  const isName = (token: string) =>
+    token.startsWith("@") && ALIAS.test(asciiLower(recipient(token).slice(1)));
+  if (word.length > 1 && word.startsWith("@") && !isName(word)) {
+    const name = PUNCTUATED.exec(word)?.[1];
+    return name !== undefined && ALIAS.test(asciiLower(name))
+      ? composerCopy.spaceAfter(`@${asciiLower(name)}`)
+      : composerCopy.notMember(word);
   }
-  const names: string[] = [];
-  let word = first;
-  while (
-    word.startsWith("@") &&
-    ALIAS.test(asciiLower(recipient(word).slice(1)))
-  ) {
-    names.push(recipient(word));
+  while (isName(word)) {
+    const name = recipient(word);
+    if (name !== asciiLower(name))
+      return composerCopy.lowercase(asciiLower(name));
     at = spaceAfter(text, at + word.length);
     word = wordAt(text, at);
   }
-  const capitalized = names.find((name) => name !== asciiLower(name));
-  if (capitalized === undefined) return null;
-  const alias = asciiLower(capitalized);
-  const current = new Set<string>();
-  for (const member of members.values())
-    if (member.kind.type !== "human" && member.activity !== "retired")
-      current.add(member.alias);
-  return labeled || current.has(alias)
-    ? composerCopy.lowercase(alias)
-    : composerCopy.notMember(capitalized);
+  return null;
 }
 
 // The agents a channel post mentions, in the order the text first names them.
@@ -378,7 +364,7 @@ export function postSource(text: string, rule: SendRule): string | null {
 // Where Enter sends the text, in the words of the hint under the box.
 export function composerHint(rule: SendRule, text: string): string {
   if (rule.kind === "thread") return composerCopy.hint;
-  const refused = refusedLeading(text, rule.agents);
+  const refused = refusedLeading(text);
   if (refused !== null) return refused;
   const leading = leadingMentions(text);
   if (leading.length > 0) return composerCopy.sendsOnlyTo(leading);
