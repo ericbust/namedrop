@@ -1725,19 +1725,34 @@ else:
         );
     }
 
-    #[test]
-    fn contended_pane_lock_retries_without_an_unrelated_event() {
+    fn cli(f: &Fixture, args: &[&str], input: Value) -> Value {
+        let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            .args(["--herdr-pane", "pane-1-lead"])
+            .args(args)
+            .arg("--input-json")
+            .arg(input.to_string())
+            .current_dir(f.root.join("repo"))
+            .env("HERDR_PLUGIN_STATE_DIR", &f.state)
+            .env("HERDR_SOCKET_PATH", "socket-a")
+            .env("HERDR_WORKSPACE_ID", "w1")
+            .env("HERDR_PANE_ID", "pane-1-lead")
+            .env("HERDR_BIN_PATH", f.root.join("http-herdr"))
+            .env("HOME", f.root.join("home"))
+            .env("CODEX_HOME", f.root.join("home/.codex"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["data"].clone()
+    }
+
+    fn hold_pane_lock(f: &Fixture, pane: &str) -> fs::File {
         use sha2::{Digest, Sha256};
         use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
-
-        let f = Fixture::new();
-        f.register_all();
-        let server = Server::start(&f, None);
         let directory = f.state.join("pane-effects");
         fs::create_dir_all(&directory).unwrap();
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         let key = namedrop::lower_hex(&Sha256::digest(
-            serde_json::to_vec(&("socket-a", "pane-1-planner")).unwrap(),
+            serde_json::to_vec(&("socket-a", pane)).unwrap(),
         ));
         let lock = fs::OpenOptions::new()
             .create(true)
@@ -1751,6 +1766,103 @@ else:
             unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
             0
         );
+        lock
+    }
+
+    #[test]
+    fn cli_forwarded_send_retries_a_contended_recipient_without_another_event() {
+        let f = Fixture::new();
+        f.register_all();
+        let _server = Server::start(&f, None);
+        let lock = hold_pane_lock(&f, "pane-2-tester");
+        let started = Instant::now();
+        let receipt = cli(
+            &f,
+            &["send"],
+            json!({
+                "request_id":"forwarded-lock", "source":"#ws2 @tester inspect",
+                "author_kind":"agent_session"
+            }),
+        );
+        assert!(started.elapsed() >= Duration::from_secs(2), "{receipt}");
+        assert_eq!(
+            f.texts("SELECT state FROM mailbox_deliveries WHERE worktree_id='w2'"),
+            ["queued"]
+        );
+        assert!(prompts(&f).is_empty());
+        drop(lock);
+        wait_for_submitted(&f, 1);
+        let envelope: Value =
+            serde_json::from_str(prompts(&f)[0]["args"][3].as_str().unwrap()).unwrap();
+        namedrop::execute_integration_operation(
+            "complete",
+            json!({"attempt_id":envelope["control"]["attempt_id"]}),
+            &f.runtime("w2", "pane-2-tester"),
+        )
+        .unwrap();
+        assert_eq!(
+            f.texts("SELECT state FROM mailbox_deliveries WHERE worktree_id='w2'"),
+            ["settled"]
+        );
+        assert_eq!(prompts(&f).len(), 1);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM delivery_attempts WHERE worktree_id='w2'"),
+            1
+        );
+    }
+
+    #[test]
+    fn cli_handoff_resolve_retries_a_contended_report_without_another_event() {
+        let f = Fixture::new();
+        f.register_all();
+        let _server = Server::start(&f, None);
+        let coordination = cli(
+            &f,
+            &["handoff", "begin"],
+            json!({
+                "request_id":"begin-lock", "deliverable":"Inspect the result"
+            }),
+        )["coordination_id"]
+            .clone();
+        let lock = hold_pane_lock(&f, "pane-1-lead");
+        let started = Instant::now();
+        let receipt = cli(
+            &f,
+            &["handoff", "resolve"],
+            json!({
+                "request_id":"resolve-lock", "coordination_id":coordination,
+                "outcome":"blocked", "report":"Inspection needs input", "reason":"Missing input"
+            }),
+        );
+        assert!(started.elapsed() >= Duration::from_secs(2), "{receipt}");
+        assert_eq!(f.texts("SELECT state FROM mailbox_deliveries"), ["queued"]);
+        assert!(prompts(&f).is_empty());
+        drop(lock);
+        wait_for_submitted(&f, 1);
+        let envelope: Value =
+            serde_json::from_str(prompts(&f)[0]["args"][3].as_str().unwrap()).unwrap();
+        namedrop::execute_integration_operation(
+            "complete",
+            json!({"attempt_id":envelope["control"]["attempt_id"]}),
+            &f.runtime("w1", "pane-1-lead"),
+        )
+        .unwrap();
+        assert_eq!(
+            f.texts("SELECT state FROM mailbox_deliveries WHERE worktree_id='w1'"),
+            ["settled"]
+        );
+        assert_eq!(prompts(&f).len(), 1);
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 1);
+    }
+
+    #[test]
+    fn contended_pane_lock_retries_without_an_unrelated_event() {
+        use sha2::{Digest, Sha256};
+
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let lock = hold_pane_lock(&f, "pane-1-planner");
         let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
         let started = Instant::now();
         let response = server.post(
@@ -1759,12 +1871,24 @@ else:
             &[],
         );
         assert_eq!(response.status, 200, "{}", response.body);
-        wait_until("contended drain finishes publishing metadata", || {
+        let completed_drains = || {
             fs::read_to_string(f.root.join("http-herdr-invocations.jsonl"))
                 .unwrap_or_default()
                 .lines()
                 .map(|line| serde_json::from_str::<Value>(line).unwrap())
-                .any(|call| call["args"][0] == "pane" && call["args"][1] == "report-metadata")
+                .filter(|call| {
+                    call["args"][0] == "pane"
+                        && call["args"][1] == "report-metadata"
+                        && call["args"][2] == "pane-1-planner"
+                        && call["args"][4] == "namedrop"
+                })
+                .count()
+        };
+        wait_until("initial contended drain finishes", || {
+            completed_drains() >= 1
+        });
+        wait_until("worker retry times out while the pane stays locked", || {
+            completed_drains() >= 2
         });
         assert!(started.elapsed() >= Duration::from_secs(2));
         assert_eq!(f.texts("SELECT state FROM mailbox_deliveries"), ["queued"]);
@@ -1896,7 +2020,10 @@ else:
         assert!(
             rows.attention.iter().any(|row| {
                 let summary = row.item.summary.to_lowercase();
-                summary.contains("pane")
+                summary.contains("@planner")
+                    && !summary.contains("address-w1-planner")
+                    && !summary.contains("gate")
+                    && summary.contains("send the message again")
                     && (summary.contains("unsafe") || summary.contains("permission"))
             }),
             "permanent pane lock failure needs an actionable durable diagnostic"

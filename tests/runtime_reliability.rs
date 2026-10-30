@@ -1165,3 +1165,83 @@ fn status_worker_serves_a_marker_written_during_a_grace_wait_without_delay() {
     worker.finish();
     assert_eq!(fixture.attempt_state(&attempt), DeliveryState::Settled);
 }
+
+fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fixture.connect_recipient();
+    fixture.queue_message();
+    let script = fs::read_to_string(fixture.root.join("herdr")).unwrap();
+    fixture.set_herdr(&format!(
+        r#"if [ "$1 $2" = 'agent prompt' ]; then
+             printf 'x' >> "$NAMEDROP_TEST_FIXTURE/prompts"
+             if [ ! -f "$NAMEDROP_TEST_FIXTURE/rejected-once" ]; then
+             touch "$NAMEDROP_TEST_FIXTURE/rejected-once"
+             printf '%s\n' '{{"error":{{"code":"{code}"}}}}' >&2
+             exit 1
+             fi
+             printf 'x' >> "$NAMEDROP_TEST_FIXTURE/accepted-prompts"
+             fi
+             {script}"#
+    ));
+    let rejected = fixture.reconcile_drain();
+    assert_eq!(
+        rejected["requeued"].as_array().map(Vec::len),
+        Some(1),
+        "{code}: {rejected}"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fixture.prompt_counts().1 == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "{code} stranded without another event: {:?}",
+            fixture.prompt_counts()
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fixture.prompt_counts(), (2, 1), "{code}");
+    let inbox = fixture.inbox();
+    assert_eq!(inbox.len(), 1, "{code}");
+    assert_eq!(inbox[0]["untrusted_body"], "review", "{code}");
+    let completed = fixture
+        .command()
+        .args(["complete", "--input-json"])
+        .arg(serde_json::json!({"attempt_id":inbox[0]["control"]["attempt_id"]}).to_string())
+        .output()
+        .unwrap();
+    assert!(completed.status.success(), "{code}: {completed:?}");
+    use sha2::{Digest, Sha256};
+    let scope = namedrop::lower_hex(&Sha256::digest("test-socket\0workspace-1"));
+    let directory = fixture
+        .state()
+        .join("agent-status-reconciliation")
+        .join(scope);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while fs::read_dir(&directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry.file_name().to_string_lossy().starts_with("pending-"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "{code}: settled worker still has pending work"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fixture.prompt_counts(), (2, 1), "{code}");
+}
+
+#[test]
+fn server_busy_retries_without_another_event() {
+    temporary_prompt_rejection_retries_without_another_event("server_busy");
+}
+
+#[test]
+fn conflict_retries_without_another_event() {
+    temporary_prompt_rejection_retries_without_another_event("conflict");
+}
+
+#[test]
+fn agent_not_ready_retries_without_another_event() {
+    temporary_prompt_rejection_retries_without_another_event("agent_not_ready");
+}

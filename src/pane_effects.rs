@@ -9,7 +9,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, Read, Write},
     os::{
-        fd::{AsRawFd, FromRawFd},
+        fd::{AsRawFd, FromRawFd, RawFd},
         unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     },
     path::Path,
@@ -162,20 +162,7 @@ impl PaneEffects {
             .collect::<String>();
         let lock_name = CString::new(format!("{key}.lock")).map_err(io::Error::from)?;
         let lock = open_at(&directory, &lock_name, libc::O_RDWR | libc::O_CREAT)?;
-        let deadline = Instant::now() + timeout;
-        loop {
-            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                break;
-            }
-            let error = io::Error::last_os_error();
-            if ![Some(libc::EWOULDBLOCK), Some(libc::EAGAIN)].contains(&error.raw_os_error()) {
-                return Err(AcquireError::Fault(error));
-            }
-            if Instant::now() >= deadline {
-                return Err(AcquireError::Contended);
-            }
-            thread::sleep(Duration::from_millis(5));
-        }
+        acquire_flock(lock.as_raw_fd(), timeout)?;
         Ok(Self {
             _lock: lock,
             directory,
@@ -353,6 +340,24 @@ pub(crate) fn interrupt_if_current(
     report
 }
 
+fn acquire_flock(fd: RawFd, timeout: Duration) -> Result<(), AcquireError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        let error = io::Error::last_os_error();
+        if ![Some(libc::EWOULDBLOCK), Some(libc::EAGAIN)].contains(&error.raw_os_error()) {
+            return Err(AcquireError::Fault(error));
+        }
+        if Instant::now() >= deadline {
+            return Err(AcquireError::Contended);
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,6 +368,15 @@ mod tests {
         process::{Child, Command, Stdio},
         sync::Mutex,
     };
+
+    #[test]
+    fn unexpected_flock_errno_is_a_fault_even_at_the_deadline() {
+        let error = acquire_flock(-1, Duration::ZERO).unwrap_err();
+        assert!(
+            matches!(error, AcquireError::Fault(ref error) if error.raw_os_error() == Some(libc::EBADF)),
+            "{error:?}"
+        );
+    }
 
     struct State(std::path::PathBuf);
     impl State {
