@@ -389,7 +389,9 @@ age at the right, such as "4 min". Under the hint, the item's actions sit on one
 wrapping row of 13px text buttons, 12px apart, such as "Show message · Reply to
 @quiet · Details". **Details** is always on that row; it reveals the server's
 full summary in 13px muted text. On a narrow window the row wraps between
-buttons, never inside a label. Show three items, then a "Show N more" button.
+buttons, never inside a label, and a button never shrinks below its label. Only
+a label wider than the whole column ends in an ellipsis, with the full label as
+its tooltip. Show three items, then a "Show N more" button.
 The banner takes at most 40 percent of the main column's height and scrolls
 inside (see App shell for the stacked layout).
 Announce new items through a polite live region.

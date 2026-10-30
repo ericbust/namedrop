@@ -767,6 +767,7 @@ button.member:not(.more):hover {
   display: none;
 }
 .attention-actions .text-button {
+  flex: none;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -6116,6 +6116,103 @@ test("DESIGN-R2 A1-A3: each Needs-you card has one action row, 12px apart, that 
     .waitFor();
 });
 
+test("DESIGN-R2 D3: a narrow action row wraps between whole labels, and only a label wider than the whole column ends in an ellipsis, with the label as its title", async (t) => {
+  const { value, context } = actionableAttention();
+  const [reply] = value.frame.attention;
+  const [worker] = value.frame.participants;
+  worker.alias = "@integration-reviewer-worker";
+  value.frame.participants.push({
+    ...worker,
+    address_id: "reviewer",
+    alias: "@reviewer",
+  });
+  value.frame.attention.push(
+    {
+      ...reply,
+      source_kind: "context_grant",
+      opened_at_ms: 5,
+      response: { kind: "pane", address_id: "codex" },
+    },
+    {
+      ...reply,
+      opened_at_ms: 6,
+      response: { ...reply.response, address_id: "reviewer" },
+    },
+  );
+  value.frame.health = { level: "needs_you", items: 3 };
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const cards = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  await cards.nth(2).waitFor();
+  const read = () =>
+    cards.evaluateAll((items) =>
+      items.map((item) => {
+        const row = item.querySelector(".attention-actions");
+        const buttons = [...row.querySelectorAll("button")];
+        return {
+          lines: new Set(buttons.map((button) => button.offsetTop)).size,
+          buttons: buttons.map((button) => ({
+            label: button.textContent,
+            cut: button.scrollWidth > button.clientWidth,
+            alone: button.scrollWidth > row.clientWidth,
+            title: button.getAttribute("title"),
+          })),
+        };
+      }),
+    );
+  const long = "Reply to @integration-reviewer-worker";
+  const screen = "See @integration-reviewer-worker's screen";
+  const whole = (label) => ({ label, cut: false, alone: false, title: null });
+  const labels = [
+    ["Show message", long, "Details"],
+    ["Show message", screen, "Details"],
+    ["Show message", "Reply to @reviewer", "Details"],
+  ];
+  const wide = labels.map((row) => ({ lines: 1, buttons: row.map(whole) }));
+  for (const [width, height] of [
+    [1440, 900],
+    [1024, 700],
+  ]) {
+    await ui.page.setViewportSize({ width, height });
+    assert.deepEqual(
+      await settled(read, wide),
+      wide,
+      `${width}px keeps one row of whole labels`,
+    );
+  }
+  await ui.page.setViewportSize({ width: 390, height: 844 });
+  const buttons = async () => (await read()).map((row) => row.buttons);
+  const cut = labels.map((row) =>
+    row.map((label) =>
+      label.includes("@integration-reviewer-worker")
+        ? { label, cut: true, alone: true, title: label }
+        : whole(label),
+    ),
+  );
+  assert.deepEqual(
+    await settled(buttons, cut),
+    cut,
+    "only a label wider than the whole column is cut, and its title holds it",
+  );
+  assert.ok(
+    (await read()).every((row) => row.lines > 1),
+    "each narrow row wraps between its buttons",
+  );
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  assert.deepEqual(
+    await settled(read, wide),
+    wide,
+    "the title goes once the label fits again",
+  );
+});
+
 test("CL-A: Respond posts the exact attention target despite newer context and SSE replies", async (t) => {
   const { value, context } = actionableAttention();
   const ui = await open(

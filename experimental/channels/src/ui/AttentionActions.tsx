@@ -1,6 +1,7 @@
 import {
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -41,6 +42,35 @@ export type ControlThread = (
   signal: AbortSignal,
 ) => Promise<ControlResult>;
 const idle: ThreadControl = { kind: "idle" };
+// A label wider than the whole row ends in an ellipsis, so its tooltip carries it whole.
+function useWholeLabels(row: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const element = row.current;
+    if (element === null) return;
+    const label = () => {
+      for (const button of element.querySelectorAll("button")) {
+        const ours = button.hasAttribute("data-cut");
+        if (button.hasAttribute("title") && !ours) continue;
+        const cut = button.scrollWidth > button.clientWidth;
+        button.toggleAttribute("data-cut", cut);
+        if (cut) button.title = button.textContent ?? "";
+        else if (ours) button.removeAttribute("title");
+      }
+    };
+    const resized = new ResizeObserver(label);
+    const changed = new MutationObserver(label);
+    resized.observe(element);
+    changed.observe(element, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+    return () => {
+      resized.disconnect();
+      changed.disconnect();
+    };
+  }, [row]);
+}
 export function AttentionActions({
   item,
   channel,
@@ -81,6 +111,8 @@ export function AttentionActions({
   const shown = useRef(control.kind);
   const press = useRef<AbortController | null>(null);
   useEffect(() => () => press.current?.abort(), []);
+  const row = useRef<HTMLDivElement>(null);
+  useWholeLabels(row);
   useLayoutEffect(() => {
     const before = shown.current;
     shown.current = control.kind;
@@ -119,7 +151,7 @@ export function AttentionActions({
     (control.kind === "pending" && control.action === "stop");
   return (
     <>
-      <div className="attention-actions">
+      <div className="attention-actions" ref={row}>
         {navigation !== null && (
           <button
             type="button"
