@@ -204,11 +204,7 @@ export type SendAttempt = {
 export type SendFailure = { status: number; message: string };
 // A refused draft keeps its attempt until a success, so the same post reuses
 // its id. The failure shows only until the next edit, and never without an attempt.
-export type Draft = ComposerId & {
-  text: string;
-  inReplyTo: string | null;
-  fillRefused: boolean;
-} & (
+export type Draft = ComposerId & { text: string } & (
     | { attempt: null; failure: null }
     | { attempt: SendAttempt; failure: SendFailure | null }
   );
@@ -272,7 +268,6 @@ export type Event =
   | { type: "disconnected" }
   | { type: "visibility"; visible: boolean }
   | { type: "edit"; composer: ComposerId; text: string }
-  | { type: "fill"; composer: ComposerId; text: string; inReplyTo: string }
   | { type: "send"; outgoing: Omit<Outgoing, "phase"> }
   | { type: "sent"; requestId: string; messageId: string }
   | { type: "send-failed"; requestId: string; status: number; message: string };

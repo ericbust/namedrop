@@ -85,9 +85,6 @@ const noRows: readonly TimelineRow[] = [];
 const noPending: readonly Outgoing[] = [];
 const noMembers: Directory["members"] = new Map();
 const POSTED_LIMIT = 200;
-type PaneFocus =
-  | { kind: "pane" }
-  | { kind: "composer"; note: string; selectFrom: number };
 const MAIN_SCROLLER = "main .timeline, main .activity-list";
 function go(route: Route) {
   if (!sameRoute(routeOf(location), route))
@@ -621,17 +618,13 @@ export function App() {
     button: HTMLButtonElement;
     threadId: string;
   } | null>(null);
-  const focusIntent = useRef<PaneFocus | null>(null);
+  const focusPane = useRef(false);
   const [, requestFocus] = useReducer((count: number) => count + 1, 0);
   const openThread = useCallback(
-    (
-      threadId: string,
-      button: HTMLButtonElement,
-      focus: PaneFocus = { kind: "pane" },
-    ) => {
+    (threadId: string, button: HTMLButtonElement) => {
       focusEvidence({ type: "close" });
       returnFocus.current = { button, threadId };
-      focusIntent.current = focus;
+      focusPane.current = true;
       requestFocus();
       dispatch({ type: "thread", threadId });
     },
@@ -681,7 +674,7 @@ export function App() {
         openThread(target.threadId, button);
       } else {
         returnFocus.current = { button, threadId: target.threadId };
-        focusIntent.current = null;
+        focusPane.current = false;
         dispatch({ type: "thread", threadId: target.threadId });
         focusEvidence({
           type: "open",
@@ -715,7 +708,7 @@ export function App() {
     (target: PeekTarget, element: HTMLElement, startedAt: number) => {
       focusEvidence({ type: "close" });
       opening.current = { element, key: peekKey(target), startedAt };
-      focusIntent.current = { kind: "pane" };
+      focusPane.current = true;
       requestFocus();
       dispatch({ type: "peek", target });
     },
@@ -743,26 +736,16 @@ export function App() {
   const view = viewOf(state.selection);
   const shownView = useRef(view);
   useLayoutEffect(() => {
-    const intent = focusIntent.current;
-    if (pane !== null && intent !== null) {
-      const opened = document.getElementById(paneId);
-      const box = opened?.querySelector("textarea");
-      if (pane === "thread" && intent.kind === "composer" && box) {
-        const end = box.value.length;
-        box.setSelectionRange(
-          box.value === intent.note ? intent.selectFrom : end,
-          end,
-        );
-        box.focus();
-      } else
-        opened
-          ?.querySelector<HTMLElement>(
-            pane === "thread"
-              ? 'button[aria-label="Close thread"]'
-              : ".peek-text",
-          )
-          ?.focus();
-      focusIntent.current = null;
+    if (pane !== null && focusPane.current) {
+      document
+        .getElementById(paneId)
+        ?.querySelector<HTMLElement>(
+          pane === "thread"
+            ? 'button[aria-label="Close thread"]'
+            : ".peek-text",
+        )
+        ?.focus();
+      focusPane.current = false;
     }
     const unmounted =
       (pane === null && paneWasOpen.current) ||

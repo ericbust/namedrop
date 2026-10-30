@@ -783,9 +783,7 @@ function step(state: State, event: Event): State {
       if (
         known === undefined
           ? event.text === ""
-          : known.text === event.text &&
-            known.failure === null &&
-            !known.fillRefused
+          : known.text === event.text && known.failure === null
       )
         return state;
       const drafts = new Map(state.drafts);
@@ -795,40 +793,10 @@ function step(state: State, event: Event): State {
         drafts.set(at, {
           ...event.composer,
           text: event.text,
-          inReplyTo: event.text === "" ? null : (known?.inReplyTo ?? null),
-          fillRefused: false,
           attempt,
           failure: null,
         });
       return { ...state, drafts };
-    }
-    case "fill": {
-      const at = draftKey(event.composer);
-      const known = state.drafts.get(at);
-      if (known !== undefined && known.text !== "") {
-        const same =
-          known.text === event.text && known.inReplyTo === event.inReplyTo;
-        return same || known.fillRefused
-          ? state
-          : {
-              ...state,
-              drafts: new Map(state.drafts).set(at, {
-                ...known,
-                fillRefused: true,
-              }),
-            };
-      }
-      return {
-        ...state,
-        drafts: new Map(state.drafts).set(at, {
-          ...event.composer,
-          text: event.text,
-          inReplyTo: event.inReplyTo,
-          fillRefused: false,
-          attempt: known?.attempt ?? null,
-          failure: null,
-        }),
-      };
     }
     case "send": {
       const { outgoing } = event;
@@ -871,12 +839,9 @@ function step(state: State, event: Event): State {
       outbox.delete(event.requestId);
       const at = draftKey(known.composer);
       const drafts = new Map(state.drafts);
-      const draft = state.drafts.get(at);
       drafts.set(at, {
         ...known.composer,
-        text: draft?.text ?? known.source,
-        inReplyTo: draft?.inReplyTo ?? null,
-        fillRefused: false,
+        text: state.drafts.get(at)?.text ?? known.source,
         attempt: {
           requestId: event.requestId,
           source: known.source,

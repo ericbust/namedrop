@@ -313,8 +313,6 @@ export const composerCopy = {
   needsRecipient: "Start with @name to choose who gets this.",
   needsMessage: (names: readonly string[]) =>
     `Add a message after ${shortList(names)}.`,
-  draftKept:
-    "Your draft is still here. Send or clear it, then press Send anyway again.",
   postNotSent: "A post wasn't sent",
   replyNotSent: "Reply not sent · Open thread",
 };
@@ -378,7 +376,6 @@ export const routeCopy = {
     string
   >,
   sendThis: (alias: string) => `Send this to ${alias}`,
-  sendAnywayNote: "Please read my post.",
   delivery: {
     label: {
       sending: "Sending…",

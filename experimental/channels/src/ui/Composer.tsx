@@ -371,10 +371,6 @@ export function Composer({
               ? composerCopy.needsMessage(leading)
               : composerCopy.needsRecipient}
           </p>
-        ) : draft?.fillRefused ? (
-          <p className="composer-guard" role="status">
-            {composerCopy.draftKept}
-          </p>
         ) : focused ? (
           <p>{composerHint(rule, text)}</p>
         ) : null}
