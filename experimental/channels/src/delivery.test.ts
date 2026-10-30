@@ -22,6 +22,7 @@ const sending: Delivery = { kind: "sending" };
 const sent: Delivery = { kind: "sent" };
 const refused: Delivery = {
   kind: "failed",
+  cause: "refused",
   status: 400,
   message: "@codex is not an agent here.",
 };
@@ -35,6 +36,7 @@ test("delivery: a press sends once, the answer says sent or failed, and Try agai
   assert.deepEqual(
     delivery(sending, {
       kind: "failed",
+      cause: "refused",
       status: 400,
       message: "@codex is not an agent here.",
     }),
@@ -43,7 +45,12 @@ test("delivery: a press sends once, the answer says sent or failed, and Try agai
   for (const state of [idle, sent, refused]) {
     assert.equal(delivery(state, { kind: "done" }), state);
     assert.equal(
-      delivery(state, { kind: "failed", status: 0, message: "" }),
+      delivery(state, {
+        kind: "failed",
+        cause: "refused",
+        status: 0,
+        message: "",
+      }),
       state,
     );
   }
@@ -98,6 +105,7 @@ test("deliveries: a press sends once, each offer keeps its own state, and Try ag
   assert.equal(requests.length, 2, "Sent never sends again");
   await answer(claude, {
     kind: "failed",
+    cause: "refused",
     status: 400,
     message: "@codex is not an agent here.",
   });
@@ -111,7 +119,7 @@ test("deliveries: an answer moves each agent it names that was sending, and no o
   const { store, requests, answer, of } = server();
   store.deliver(codex);
   await answer(codex, { kind: "done" }, [
-    ["@claude", { kind: "failed", status: 200, message: "" }],
+    ["@claude", { kind: "failed", cause: "left-out" }],
   ]);
   assert.deepEqual(
     [of(codex), of(claude)],
@@ -120,26 +128,28 @@ test("deliveries: an answer moves each agent it names that was sending, and no o
   );
   store.deliver(claude);
   store.deliver(codex);
-  await answer(claude, { kind: "failed", status: 200, message: "" }, [
-    ["@codex", { kind: "failed", status: 200, message: "" }],
+  await answer(claude, { kind: "failed", cause: "left-out" }, [
+    ["@codex", { kind: "failed", cause: "left-out" }],
   ]);
   assert.deepEqual(
     [of(codex), of(claude)],
-    [sent, { kind: "failed", status: 200, message: "" }],
+    [sent, { kind: "failed", cause: "left-out" }],
     "Sent stays sent",
   );
   assert.deepEqual(requests, [codex, claude]);
 });
 
-test("deliveries: a 200 leaves the pressed agent Sent only when it lists the agent, and otherwise failed", async () => {
-  const notSent: Delivery = { kind: "failed", status: 200, message: "" };
+test("deliveries: a 200 leaves the pressed agent Sent only when it lists the agent, failed when it leaves the agent out or lists no one readable, and Sent when the body is not JSON", async () => {
+  const leftOut: Delivery = { kind: "failed", cause: "left-out" };
+  const unconfirmed: Delivery = { kind: "failed", cause: "unconfirmed" };
   const cases: [string, Delivery][] = [
     ['{"channel":{},"delivered":["codex"]}', sent],
-    ['{"channel":{},"delivered":["claude"]}', notSent],
-    ['{"delivered":[]}', notSent],
-    ['{"channel":{}}', sent],
-    ['{"delivered":"codex"}', sent],
+    ['{"channel":{},"delivered":["claude"]}', leftOut],
+    ['{"delivered":[]}', leftOut],
+    ['{"channel":{}}', unconfirmed],
+    ['{"delivered":"codex"}', unconfirmed],
     ["Sent.", sent],
+    ["", sent],
   ];
   for (const [body, expected] of cases) {
     const store = createDeliveries(async ({ alias }) =>

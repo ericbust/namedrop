@@ -638,36 +638,36 @@ export function parseReceipt(raw: unknown): string {
 export function parseSessionToken(raw: unknown): string {
   return identity(record(raw).csrf_token);
 }
-function aliasSet(value: unknown): ReadonlySet<Alias> | null {
-  if (!Array.isArray(value)) return null;
-  const aliases = new Set<Alias>();
-  for (const item of value) {
-    const alias = optionalAlias(item);
-    if (alias === null) return null;
-    aliases.add(alias);
-  }
-  return aliases;
+function deliveredList(answer: unknown): ReadonlySet<Alias> | null {
+  const value =
+    typeof answer === "object" && answer !== null && !Array.isArray(answer)
+      ? (answer as Record<string, unknown>).delivered
+      : undefined;
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+    return null;
+  return new Set(value.flatMap((item) => optionalAlias(item) ?? []));
 }
-function fields(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
-}
+// The 2xx status is the server's answer, so a body cut short or not JSON at all
+// reads as sent. A JSON body confirms only the agents its `delivered` names.
 export function parseDelivered(
   body: string,
   to: readonly Alias[],
 ): ReadonlyMap<Alias, DeliverResult> {
-  let answer: Record<string, unknown> = {};
+  let answer: unknown;
   try {
-    answer = fields(JSON.parse(body) as unknown);
-  } catch {}
-  const delivered = aliasSet(answer.delivered);
+    answer = JSON.parse(body) as unknown;
+  } catch {
+    return new Map(to.map((alias) => [alias, { kind: "done" }]));
+  }
+  const delivered = deliveredList(answer);
   return new Map(
     to.map((alias): [Alias, DeliverResult] => [
       alias,
-      delivered === null || delivered.has(alias)
-        ? { kind: "done" }
-        : { kind: "failed", status: 200, message: "" },
+      delivered === null
+        ? { kind: "failed", cause: "unconfirmed" }
+        : delivered.has(alias)
+          ? { kind: "done" }
+          : { kind: "failed", cause: "left-out" },
     ]),
   );
 }

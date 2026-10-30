@@ -217,10 +217,16 @@ function postRoute(onPost) {
       };
       if (!authorized(req)) return reply(401, { error: "No session." });
       if (request.csrf !== session.csrf) return reply(403, {});
-      const outcome = await onDeliver(JSON.parse(request.body), request);
+      const asked = JSON.parse(request.body);
+      const outcome = await onDeliver(asked, request);
       if (outcome.drop) return req.socket.destroy();
-      const { status = 200, channel = {}, ...answer } = outcome;
-      if (status === 200) return reply(200, { channel, ...answer });
+      if (outcome.raw !== undefined) {
+        request.status = 200;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(outcome.raw);
+      }
+      const { status = 200, ...answer } = outcome;
+      if (status === 200) return reply(200, { delivered: asked.to, ...answer });
       if (answer.error !== undefined)
         return reply(status, { error: answer.error });
       request.status = status;
@@ -6899,29 +6905,42 @@ test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @cod
   );
 });
 
-test("CH-fix-4: a 200 that did not deliver and gives no reason says the name may belong to a different agent now, and a 200 with no delivered field reads Sent to @codex", async (t) => {
-  const outcomes = [{ delivered: ["claude"] }, {}];
+test("DESIGN-R2 B6: a 200 whose delivered list is missing or malformed reads Couldn't send to @codex · Try again, Namedrop didn't confirm it sent this., and an empty 200 body reads Sent to @codex", async (t) => {
+  const malformed = [undefined, null, "codex", ["codex", 7]];
+  const outcomes = [
+    ...malformed.map((delivered) => ({ delivered })),
+    { raw: "" },
+  ];
   const { ui } = await chatRoom(t, [unsent()], {
     onDeliver: () => outcomes.shift(),
   });
   const { route } = routeOf(ui, "p1");
   await route.getByRole("button", { name: "Send this to @codex" }).click();
-  await readsAs(route, "Couldn't send to @codex · Try again");
-  const button = await pressedOffer(route, "p1", "@codex");
-  assert.equal(
-    (await offerState(button)).title,
-    "Namedrop didn't send it. The name may belong to a different agent now.",
-  );
-  await button.click();
-  assert.deepEqual(await offerReads(button, "Sent to @codex"), {
-    text: "Sent to @codex",
-    disabled: "true",
-    title: null,
-    focused: true,
-    connected: true,
-  });
+  for (const [index, delivered] of malformed.entries()) {
+    await until(
+      () => ui.posts.deliveries[index]?.status === 200,
+      `answer ${index + 1}`,
+    );
+    await readsAs(route, "Couldn't send to @codex · Try again");
+    const button = await pressedOffer(route, "p1", "@codex");
+    assert.deepEqual(
+      await offerState(button),
+      {
+        text: "Try again",
+        disabled: null,
+        title: "Namedrop didn't confirm it sent this.",
+        focused: true,
+        connected: true,
+      },
+      JSON.stringify(delivered),
+    );
+    await button.click();
+  }
   await readsAs(route, "Sent to @codex");
-  assert.equal(ui.posts.deliveries.length, 2);
+  assert.deepEqual(
+    ui.posts.deliveries.map(({ body, status }) => [body, status]),
+    Array.from({ length: 5 }, () => ['{"to":["codex"]}', 200]),
+  );
 });
 
 test("CH-fix-3 item 1: Send to after router_failed moves each pressed agent to its own part after the ones still not sent", async (t) => {

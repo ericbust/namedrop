@@ -202,9 +202,15 @@ export type SendAttempt = {
   inReplyTo: string | null;
 };
 export type SendFailure = { status: number; message: string };
+// Why a deliver press did not reach one agent: the server refused the request
+// (status 0 when it never reached the server), or its 2xx answer left the
+// agent out of `delivered`, or had no `delivered` list it could read.
+export type DeliverFailure =
+  | ({ cause: "refused" } & SendFailure)
+  | { cause: "left-out" | "unconfirmed" };
 export type DeliverResult =
   | { kind: "done" }
-  | ({ kind: "failed" } & SendFailure);
+  | ({ kind: "failed" } & DeliverFailure);
 // A refused draft keeps its attempt until a success, so the same post reuses
 // its id. The failure shows only until the next edit, and never without an attempt.
 export type Draft = ComposerId & { text: string } & (

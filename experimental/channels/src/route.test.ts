@@ -149,6 +149,7 @@ const sending: Delivery = { kind: "sending" };
 const sent: Delivery = { kind: "sent" };
 const refused: Delivery = {
   kind: "failed",
+  cause: "refused",
   status: 400,
   message: "@claude is not an agent in this workspace.",
 };

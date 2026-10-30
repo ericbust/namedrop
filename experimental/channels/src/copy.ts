@@ -386,12 +386,22 @@ export const routeCopy = {
       (alias: string) => string
     >,
     failed: (alias: string) => `Couldn't send to ${alias}`,
-    why: ({ status, message }: SendFailure) => {
-      if (status === 0) return "Couldn't reach Namedrop.";
-      if (message !== "") return message;
-      return status === 200
-        ? "Namedrop didn't send it. The name may belong to a different agent now."
-        : `HTTP ${status}`;
+    why: (failure: Extract<Delivery, { kind: "failed" }>) => {
+      switch (failure.cause) {
+        case "refused":
+          if (failure.status === 0) return "Couldn't reach Namedrop.";
+          return failure.message === ""
+            ? `HTTP ${failure.status}`
+            : failure.message;
+        case "left-out":
+          return "Namedrop didn't send it. The name may belong to a different agent now.";
+        case "unconfirmed":
+          return "Namedrop didn't confirm it sent this.";
+        default: {
+          const exhaustive: never = failure;
+          return exhaustive;
+        }
+      }
     },
   },
   tip: {

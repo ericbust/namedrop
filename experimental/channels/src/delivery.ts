@@ -1,8 +1,8 @@
 import type {
   Alias,
   ChannelSnapshot,
+  DeliverFailure,
   DeliverResult,
-  SendFailure,
   SpaceKey,
 } from "./model.ts";
 
@@ -10,7 +10,7 @@ export type Delivery =
   | { kind: "idle" }
   | { kind: "sending" }
   | { kind: "sent" }
-  | ({ kind: "failed" } & SendFailure);
+  | ({ kind: "failed" } & DeliverFailure);
 export type DeliveryEvent = { kind: "start" } | DeliverResult;
 
 export function delivery(state: Delivery, event: DeliveryEvent): Delivery {
@@ -22,9 +22,7 @@ export function delivery(state: Delivery, event: DeliveryEvent): Delivery {
     case "done":
       return state.kind === "sending" ? { kind: "sent" } : state;
     case "failed":
-      return state.kind === "sending"
-        ? { kind: "failed", status: event.status, message: event.message }
-        : state;
+      return state.kind === "sending" ? event : state;
     default: {
       const exhaustive: never = event;
       return exhaustive;

@@ -362,41 +362,56 @@ test("history pages carry the channel state and woke", () => {
   assert.deepEqual(page?.woke, ["@codex"]);
 });
 
-test("deliver answer: an alias the 200 lists was delivered, and any other named alias was not", () => {
+test("deliver answer: an alias the 200 lists was delivered, and any other named alias was left out", () => {
   const read = (body: unknown, to: readonly Alias[] = ["@codex"]) =>
     Object.fromEntries(parseDelivered(JSON.stringify(body), to));
   const done = { kind: "done" };
-  const notSent = { kind: "failed", status: 200, message: "" };
+  const leftOut = { kind: "failed", cause: "left-out" };
   assert.deepEqual(read({ channel: {}, delivered: ["codex"] }), {
     "@codex": done,
   });
   assert.deepEqual(
     read({ channel: {}, delivered: ["codex"] }, ["@codex", "@claude"]),
-    { "@codex": done, "@claude": notSent },
+    { "@codex": done, "@claude": leftOut },
   );
-  assert.deepEqual(read({ delivered: [] }), { "@codex": notSent });
+  assert.deepEqual(read({ delivered: [] }), { "@codex": leftOut });
   assert.deepEqual(
     read({ delivered: ["lead"] }, ["@codex", "@claude", "@lead"]),
-    { "@codex": notSent, "@claude": notSent, "@lead": done },
+    { "@codex": leftOut, "@claude": leftOut, "@lead": done },
+  );
+  assert.deepEqual(
+    read({ delivered: ["@codex", "claude", ""] }, [
+      "@codex",
+      "@claude",
+      "@lead",
+    ]),
+    { "@codex": done, "@claude": done, "@lead": leftOut },
+    "a list of strings is read, and a string that names no one names no one",
   );
 });
-test("deliver answer: a 200 with no delivered field, or one the page cannot read, delivered every named alias", () => {
+test("deliver answer: a 200 JSON body without a valid delivered list of strings confirms nothing, so every named alias failed", () => {
   const to: readonly Alias[] = ["@codex", "@claude"];
-  const all = { "@codex": { kind: "done" }, "@claude": { kind: "done" } };
+  const unconfirmed = { kind: "failed", cause: "unconfirmed" };
+  const none = { "@codex": unconfirmed, "@claude": unconfirmed };
   const read = (body: string) => Object.fromEntries(parseDelivered(body, to));
   for (const body of [
     '{"channel":{"state":"unrouted","to":["codex"]}}',
     "{}",
-    "",
-    "Sent.",
-    "[]",
-    "null",
-    '"codex"',
     '{"delivered":"codex"}',
     '{"delivered":null}',
     '{"delivered":{"codex":true}}',
     '{"delivered":["codex",7]}',
-    '{"delivered":["claude",""]}',
+    '{"delivered":["codex",null]}',
+    "[]",
+    "null",
+    '"codex"',
   ])
+    assert.deepEqual(read(body), none, body);
+});
+test("deliver answer: an empty body or one that is not JSON reads as sent, because the 2xx status is the answer", () => {
+  const to: readonly Alias[] = ["@codex", "@claude"];
+  const all = { "@codex": { kind: "done" }, "@claude": { kind: "done" } };
+  const read = (body: string) => Object.fromEntries(parseDelivered(body, to));
+  for (const body of ["", "Sent.", '{"delivered":["codex"'])
     assert.deepEqual(read(body), all, body);
 });

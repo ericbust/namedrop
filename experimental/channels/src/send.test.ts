@@ -219,7 +219,10 @@ test("deliver: posts the bare aliases for a stored post with the session token, 
   const server = fakeServer(({ url, init }) => {
     if (url === "/api/session") return json(200, { csrf_token: `t${++token}` });
     return new Headers(init?.headers).get("X-Namedrop-Csrf") === "t2"
-      ? json(200, { channel: { state: "unrouted", to: ["codex"] } })
+      ? json(200, {
+          channel: { state: "unrouted", to: ["codex"] },
+          delivered: JSON.parse(String(init?.body)).to,
+        })
       : new Response("Forbidden.\n", { status: 403 });
   });
   const poster = createPoster(server.fetcher);
@@ -271,7 +274,7 @@ test("deliver: a 200 that lists only some aliases sends the rest back as failed"
     ),
     {
       "@codex": { kind: "done" },
-      "@claude": { kind: "failed", status: 200, message: "" },
+      "@claude": { kind: "failed", cause: "left-out" },
     },
   );
 });
@@ -302,25 +305,25 @@ test("deliver: a 200 whose body never finishes or breaks still reads as sent, wi
   }
 });
 
-test("deliver: a refusal carries the server's message and a network failure reads status 0", async () => {
+test("deliver: a refusal carries the server's message, a network failure reads status 0, and a 200 that lists no one readable confirms nothing", async () => {
+  const refused = (status: number, message: string) => ({
+    kind: "failed",
+    cause: "refused",
+    status,
+    message,
+  });
   const cases: [Response | Error, unknown][] = [
     [
       json(400, { error: "@shell is not an agent in this workspace." }),
-      {
-        kind: "failed",
-        status: 400,
-        message: "@shell is not an agent in this workspace.",
-      },
+      refused(400, "@shell is not an agent in this workspace."),
     ],
+    [new Response("Not found.\n", { status: 404 }), refused(404, "Not found.")],
+    [new Response("", { status: 500 }), refused(500, "")],
+    [new Error("offline"), refused(0, "")],
     [
-      new Response("Not found.\n", { status: 404 }),
-      { kind: "failed", status: 404, message: "Not found." },
+      json(200, { channel: { state: "unrouted", to: ["codex"] } }),
+      { kind: "failed", cause: "unconfirmed" },
     ],
-    [
-      new Response("", { status: 500 }),
-      { kind: "failed", status: 500, message: "" },
-    ],
-    [new Error("offline"), { kind: "failed", status: 0, message: "" }],
   ];
   for (const [outcome, expected] of cases) {
     const server = fakeServer(({ url }) => {

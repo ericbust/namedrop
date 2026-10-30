@@ -1,5 +1,6 @@
 import type {
   Alias,
+  DeliverFailure,
   DeliverResult,
   SendFailure,
   SpaceKey,
@@ -131,7 +132,7 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
       messageId: string,
       to: readonly Alias[],
     ): Promise<ReadonlyMap<Alias, DeliverResult>> {
-      const each = (failure: SendFailure) =>
+      const each = (failure: DeliverFailure) =>
         new Map(
           to.map((alias): [Alias, DeliverResult] => [
             alias,
@@ -146,9 +147,13 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
         const body = await bodyWithin(response, bodyWait);
         return response.ok
           ? parseDelivered(body, to)
-          : each({ status: response.status, message: parseRefusal(body) });
+          : each({
+              cause: "refused",
+              status: response.status,
+              message: parseRefusal(body),
+            });
       } catch {
-        return each({ status: 0, message: "" });
+        return each({ cause: "refused", status: 0, message: "" });
       }
     },
   };

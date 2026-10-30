@@ -719,9 +719,13 @@ uses the "Send to" form. Each offer is a text button in 12px 600
     as when the name now belongs to a different agent, the part shows the same
     failure with the tooltip "Namedrop didn't send it. The name may belong to a
     different agent now."
-  - A 2xx answer whose body stalls for 5 seconds or breaks reads as sent. The
-    status is the server's answer, and the line updates when the frame shows
-    the agent reached.
+  - A 2xx answer whose JSON body has no `delivered` list of strings confirms
+    nothing, so it shows the same failure for every pressed agent with the
+    tooltip "Namedrop didn't confirm it sent this." Deliver is idempotent, so
+    Try again is safe.
+  - A 2xx answer whose body is empty, is not JSON, or stalls for 5 seconds or
+    breaks reads as sent. The status is the server's answer, and the line
+    updates when the frame shows the agent reached.
 - Focus moves from the pressed offer to the agent's part and stays there
   through sending, sent and failed, because "Try again" is the same button.
   When the part goes, nothing moves focus.
