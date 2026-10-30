@@ -47,7 +47,6 @@ pub(crate) struct ChannelClaim {
     pub token: u64,
     pub candidates: Vec<RoutingAddressSnapshot>,
     pub participants: Vec<RoutingAddressSnapshot>,
-    pub rows: dashboard::DashboardRows,
     pub host: Option<AgentRuntime>,
 }
 
@@ -56,6 +55,31 @@ fn attribution(now: u64) -> MutationAttribution {
         actor_kind: ActorKind::Human,
         actor_id: ACTOR.to_owned(),
         occurred_at_ms: now,
+    }
+}
+
+impl StateStore {
+    pub(crate) fn channel_context(
+        &mut self,
+        claim: &ChannelClaim,
+    ) -> Result<Option<dashboard::DashboardRows>, StoreError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let tx = StateTransaction { transaction };
+        let current = tx.channel_fact(&claim.namespace, &claim.draft.message_id)?
+            == Some((claim.token, "dispatching".to_owned()));
+        let rows = if current
+            && !tx
+                .thread_control_state(&claim.namespace, &claim.draft.thread_id)?
+                .stopped
+        {
+            Some(tx.dashboard_rows(&claim.namespace)?)
+        } else {
+            None
+        };
+        tx.transaction.commit()?;
+        Ok(rows)
     }
 }
 
@@ -279,13 +303,8 @@ impl StateTransaction<'_> {
 
     fn pending_channel(
         &self,
-        include_dispatching: bool,
+        kind: &str,
     ) -> Result<Option<(StateNamespace, MessageId)>, StoreError> {
-        let pending = if include_dispatching {
-            "('queued','dispatching')"
-        } else {
-            "('queued')"
-        };
         Ok(self
             .transaction
             .query_row(
@@ -296,10 +315,10 @@ impl StateTransaction<'_> {
                         PARTITION BY session_socket_id, worktree_id, entity_id
                         ORDER BY worktree_order DESC) rank
                 FROM transition_facts WHERE {FACTS}
-             ) WHERE rank = 1 AND transition_kind IN {pending}
+             ) WHERE rank = 1 AND transition_kind = ?1
              ORDER BY worktree_order, session_socket_id, worktree_id LIMIT 1"
                 ),
-                [],
+                [kind],
                 |row| {
                     Ok((
                         StateNamespace::for_space(
@@ -313,12 +332,13 @@ impl StateTransaction<'_> {
             .optional()?)
     }
 
+    #[cfg(test)]
     pub(crate) fn has_pending_channel(&self) -> Result<bool, StoreError> {
-        Ok(self.pending_channel(false)?.is_some())
+        Ok(self.pending_channel("queued")?.is_some())
     }
 
     pub(crate) fn claim_channel(&mut self, now: u64) -> Result<Option<ChannelClaim>, StoreError> {
-        while let Some((ns, message)) = self.pending_channel(false)? {
+        while let Some((ns, message)) = self.pending_channel("queued")? {
             self.append_transition(
                 &ns,
                 TransitionEntityKind::CollaborationMessage,
@@ -390,7 +410,6 @@ impl StateTransaction<'_> {
             .ok_or_else(|| StoreError::invalid_input("missing channel claim"))?
             .0;
         Ok(ChannelClaim {
-            rows: self.dashboard_rows(&ns)?,
             host: self.preferred_router_host()?,
             namespace: ns,
             draft,
@@ -496,19 +515,7 @@ impl StateTransaction<'_> {
         now: u64,
     ) -> Result<Vec<StateNamespace>, StoreError> {
         let mut namespaces = Vec::new();
-        while let Some((ns, message)) = self.pending_channel(true)? {
-            if self
-                .channel_fact(&ns, &message)?
-                .is_some_and(|(_, kind)| kind == "queued")
-            {
-                self.append_transition(
-                    &ns,
-                    TransitionEntityKind::CollaborationMessage,
-                    message.as_str(),
-                    TransitionKind::Dispatching,
-                    &attribution(now),
-                )?;
-            }
+        while let Some((ns, message)) = self.pending_channel("dispatching")? {
             let claim = self.channel_claim(ns, message)?;
             self.finish_channel(&claim, &[], true, now)?;
             if !namespaces.contains(&claim.namespace) {
@@ -522,6 +529,190 @@ impl StateTransaction<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn queued_fixture(count: usize) -> (PathBuf, StateStore, StateNamespace) {
+        let root = std::env::temp_dir().join(format!(
+            "channel-context-{}",
+            crate::IdGenerator::next_id(&crate::ProcessIds::default(), "test")
+        ));
+        let mut store = StateStore::open(&root).unwrap();
+        let ns = StateNamespace::for_space("synthetic", "w1");
+        let actor = MutationAttribution::new(ActorKind::Human, "test", 1);
+        store
+            .transaction(|tx| {
+                tx.activate_worktree(&ns, &actor)?;
+                tx.ensure_operator_author(&ns, &actor)?;
+                let thread = ThreadId::new("thread");
+                tx.create_thread(&ns, &thread, "test", &actor)?;
+                for index in 0..count {
+                    tx.append_pending_channel(
+                        &ns,
+                        &MessageDraft {
+                            thread_id: thread.clone(),
+                            message_id: MessageId::new(format!("message-{index}")),
+                            in_reply_to: None,
+                            author_address_id: PaneAddressId::new("operator:local"),
+                            author_kind: ActorKind::Human,
+                            author_alias_snapshot: "operator".to_owned(),
+                            author_agent_session_snapshot: None,
+                            request_id: format!("request-{index}"),
+                            authored_source: "Hello @planner".to_owned(),
+                            body: "Hello @planner".to_owned(),
+                            grammar_version: "channel/v1".to_owned(),
+                            recipients: Vec::new(),
+                            context_references: Vec::new(),
+                        },
+                        &actor,
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        (root, store, ns)
+    }
+
+    #[test]
+    fn context_rechecks_stop_and_obsolete_claims() {
+        for stop in [false, true] {
+            let (root, mut store, ns) = queued_fixture(1);
+            let claim = store
+                .transaction(|tx| tx.claim_channel(2))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                store
+                    .channel_context(&claim)
+                    .unwrap()
+                    .unwrap()
+                    .messages
+                    .len(),
+                1
+            );
+            store
+                .transaction(|tx| {
+                    if stop {
+                        tx.stop_thread(&ns, &claim.draft.thread_id, &attribution(3))?;
+                    } else {
+                        tx.fail_abandoned_channels(3)?;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            assert!(store.channel_context(&claim).unwrap().is_none());
+            let settled = store
+                .transaction(|tx| tx.finish_channel(&claim, &[], true, 4))
+                .unwrap();
+            assert_eq!(settled, stop);
+            assert_eq!(
+                store
+                    .transaction(|tx| tx.channel_routing_state(&ns, &claim.draft.message_id))
+                    .unwrap(),
+                Some(ChannelRoutingState::RouterFailed)
+            );
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn context_projection_releases_writer_ownership_after_claim_commit() {
+        use std::{
+            ffi::{CStr, c_char, c_int, c_void},
+            sync::mpsc,
+            thread,
+        };
+        struct Gate {
+            entered: mpsc::Sender<()>,
+            resume: mpsc::Receiver<()>,
+            paused: bool,
+        }
+        unsafe extern "C" fn pause_projection(
+            pointer: *mut c_void,
+            action: c_int,
+            table: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+            _: *const c_char,
+        ) -> c_int {
+            let gate = unsafe { &mut *pointer.cast::<Gate>() };
+            if !gate.paused
+                && action == rusqlite::ffi::SQLITE_READ
+                && !table.is_null()
+                && unsafe { CStr::from_ptr(table) }.to_bytes() == b"pane_addresses"
+            {
+                gate.paused = true;
+                if gate.entered.send(()).is_err()
+                    || gate.resume.recv_timeout(Duration::from_secs(3)).is_err()
+                {
+                    return rusqlite::ffi::SQLITE_DENY;
+                }
+            }
+            rusqlite::ffi::SQLITE_OK
+        }
+        for wal in [false, true] {
+            let (root, mut store, _) = queued_fixture(151);
+            if wal {
+                store
+                    .connection
+                    .execute_batch("PRAGMA journal_mode=WAL")
+                    .unwrap();
+            }
+            let claim = store
+                .transaction(|tx| tx.claim_channel(2))
+                .unwrap()
+                .unwrap();
+            let mut writer = StateStore::open(&root).unwrap();
+            writer.connection.busy_timeout(Duration::ZERO).unwrap();
+            let (entered, paused) = mpsc::channel();
+            let (resume, resumed) = mpsc::channel();
+            let reader = thread::spawn(move || {
+                let mut gate = Gate {
+                    entered,
+                    resume: resumed,
+                    paused: false,
+                };
+                unsafe {
+                    rusqlite::ffi::sqlite3_set_authorizer(
+                        store.connection.handle(),
+                        Some(pause_projection),
+                        (&mut gate as *mut Gate).cast(),
+                    );
+                }
+                let rows = store.channel_context(&claim);
+                unsafe {
+                    rusqlite::ffi::sqlite3_set_authorizer(
+                        store.connection.handle(),
+                        None,
+                        std::ptr::null_mut(),
+                    );
+                }
+                assert_eq!(rows.unwrap().unwrap().messages.len(), 150);
+                store
+            });
+            paused.recv_timeout(Duration::from_secs(3)).unwrap();
+            let outcome = match writer
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+            {
+                Ok(transaction) => {
+                    if wal {
+                        let write = transaction
+                            .execute("UPDATE worktrees SET created_at_ms=created_at_ms+1", [])
+                            .map(|_| ());
+                        write.and_then(|()| transaction.commit())
+                    } else {
+                        transaction.rollback()
+                    }
+                }
+                Err(error) => Err(error),
+            };
+            resume.send(()).unwrap();
+            let store = reader.join().unwrap();
+            outcome.expect("context projection must allow a writer reservation, and WAL must also allow its commit");
+            drop((store, writer));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
 
     #[test]
     fn pending_commit_is_atomic_and_claim_fences_late_completions() {

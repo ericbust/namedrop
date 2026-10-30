@@ -7,14 +7,48 @@ use std::{
     },
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
 };
 
+#[derive(Clone, Default)]
+pub(super) struct ChannelWake(Arc<WakeState>);
+
+#[derive(Default)]
+struct WakeState {
+    generation: Mutex<u64>,
+    ready: Condvar,
+}
+
+impl ChannelWake {
+    pub(super) fn notify(&self) {
+        let mut generation = self.0.generation.lock().unwrap_or_else(|e| e.into_inner());
+        *generation = generation.wrapping_add(1);
+        drop(generation);
+        self.0.ready.notify_all();
+    }
+
+    fn generation(&self) -> u64 {
+        *self.0.generation.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn wait(&self, observed: u64, cancel: &AtomicBool, timeout: Duration) {
+        let generation = self.0.generation.lock().unwrap_or_else(|e| e.into_inner());
+        drop(
+            self.0
+                .ready
+                .wait_timeout_while(generation, timeout, |generation| {
+                    *generation == observed && !cancel.load(Ordering::Acquire)
+                }),
+        );
+    }
+}
+
 pub(super) struct ChannelService {
+    wake: ChannelWake,
     cancel: Arc<AtomicBool>,
     workers: Vec<JoinHandle<()>>,
     state: PathBuf,
@@ -53,6 +87,7 @@ impl ChannelService {
         let cancel = Arc::new(AtomicBool::new(false));
         let mut service = Self {
             cancel,
+            wake: ChannelWake::default(),
             workers: Vec::new(),
             state: state.to_owned(),
             ownership: Some(ownership),
@@ -60,18 +95,24 @@ impl ChannelService {
         for index in 0..4 {
             let state = state.to_owned();
             let cancel = service.cancel.clone();
+            let wake = service.wake.clone();
             service.workers.push(
                 thread::Builder::new()
                     .name(format!("channel-router-{index}"))
-                    .spawn(move || worker(&state, &cancel))
+                    .spawn(move || worker(&state, &cancel, &wake, Duration::from_secs(5)))
                     .map_err(|e| e.to_string())?,
             );
         }
         Ok(service)
     }
 
+    pub(super) fn wake(&self) -> ChannelWake {
+        self.wake.clone()
+    }
+
     pub fn shutdown(&mut self) -> Result<(), String> {
         self.cancel.store(true, Ordering::Release);
+        self.wake.notify();
         let mut panicked = false;
         for worker in self.workers.drain(..) {
             panicked |= worker.join().is_err();
@@ -98,10 +139,7 @@ impl Drop for ChannelService {
 }
 
 fn recover(state: &Path) -> Result<(), String> {
-    if StateStore::open_read_only(state)
-        .map_err(|e| e.to_string())?
-        .is_none()
-    {
+    if !state.join("namedrop.sqlite3").is_file() {
         return Ok(());
     }
     let namespaces = StateStore::open(state)
@@ -115,42 +153,60 @@ fn recover(state: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn worker(state: &Path, cancel: &AtomicBool) {
+fn worker(state: &Path, cancel: &AtomicBool, wake: &ChannelWake, fallback: Duration) {
+    let mut store = None;
     while !cancel.load(Ordering::Acquire) {
-        let claim = StateStore::open_read_only(state).and_then(|store| {
-            let Some(mut store) = store else {
-                return Ok(None);
-            };
-            let pending = store.transaction(|tx| tx.has_pending_channel())?;
-            drop(store);
-            if !pending {
-                return Ok(None);
+        let generation = wake.generation();
+        let claim = (|| {
+            if store.is_none() {
+                if !state.join("namedrop.sqlite3").is_file() {
+                    return Ok(None);
+                }
+                store = Some(StateStore::open(state)?);
             }
-            StateStore::open(state).and_then(|mut store| {
-                store.transaction(|tx| tx.claim_channel(crate::SystemClock.now_unix_ms()))
-            })
-        });
+            store
+                .as_mut()
+                .unwrap()
+                .transaction(|tx| tx.claim_channel(crate::SystemClock.now_unix_ms()))
+        })();
         let claim = match claim {
             Ok(Some(claim)) => claim,
             Ok(None) => {
-                thread::sleep(Duration::from_millis(25));
+                wake.wait(generation, cancel, fallback);
                 continue;
             }
             Err(error) => {
                 eprintln!("dashboard: channel claim: {error}");
-                thread::sleep(Duration::from_millis(100));
+                wake.wait(generation, cancel, fallback);
                 continue;
             }
         };
-        let run = crate::agent_status_model::channel_router::route_with_cancel(
-            crate::agent_status_model::channel_router::RouterRequest {
-                host: claim.host,
-                rows: &claim.rows,
-                source: &claim.draft.authored_source,
-                candidates: &claim.candidates,
-            },
-            cancel,
-        );
+        let store = store.as_mut().unwrap();
+        let rows = match store.channel_context(&claim) {
+            Ok(rows) => rows,
+            Err(error) => {
+                eprintln!("dashboard: channel context: {error}");
+                None
+            }
+        };
+        let run = if let Some(rows) = rows.filter(|_| !cancel.load(Ordering::Acquire)) {
+            crate::agent_status_model::channel_router::route_with_cancel(
+                crate::agent_status_model::channel_router::RouterRequest {
+                    host: claim.host,
+                    rows: &rows,
+                    source: &claim.draft.authored_source,
+                    candidates: &claim.candidates,
+                },
+                cancel,
+            )
+        } else {
+            crate::agent_status_model::channel_router::RouteRun {
+                decision: crate::agent_status_model::channel_router::RoutingDecision::Failed {
+                    router: "context".to_owned(),
+                },
+                attempt: None,
+            }
+        };
         if let Some(attempt) = run.attempt {
             super::snapshot::channel_routing::record_attempt(
                 state,
@@ -190,15 +246,13 @@ fn worker(state: &Path, cancel: &AtomicBool) {
         }
         // A failed commit retries the same decision; it never reruns the model.
         loop {
-            let completed = StateStore::open(state).and_then(|mut store| {
-                store.transaction(|tx| {
-                    tx.finish_channel(
-                        &claim,
-                        &selected,
-                        failed || cancel.load(Ordering::Acquire),
-                        crate::SystemClock.now_unix_ms(),
-                    )
-                })
+            let completed = store.transaction(|tx| {
+                tx.finish_channel(
+                    &claim,
+                    &selected,
+                    failed || cancel.load(Ordering::Acquire),
+                    crate::SystemClock.now_unix_ms(),
+                )
             });
             match completed {
                 Ok(true) => {
@@ -245,6 +299,105 @@ pub(super) fn drain(state: &Path, namespace: &StateNamespace) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_between_probe_and_wait_is_not_lost() {
+        let wake = ChannelWake::default();
+        let observed = wake.generation();
+        wake.notify();
+        let start = std::time::Instant::now();
+        wake.wait(observed, &AtomicBool::new(false), Duration::from_secs(2));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn one_notification_wakes_every_waiter() {
+        let wake = ChannelWake::default();
+        let ready = Arc::new(std::sync::Barrier::new(5));
+        let (sent, received) = std::sync::mpsc::channel();
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let wake = wake.clone();
+                let ready = ready.clone();
+                let sent = sent.clone();
+                thread::spawn(move || {
+                    let generation = wake.generation();
+                    ready.wait();
+                    wake.wait(generation, &AtomicBool::new(false), Duration::from_secs(2));
+                    sent.send(()).unwrap();
+                })
+            })
+            .collect();
+        ready.wait();
+        thread::sleep(Duration::from_millis(100));
+        wake.notify();
+        for _ in 0..4 {
+            received.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        for worker in workers {
+            worker.join().unwrap();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn idle_workers_keep_connections_across_probes_and_cancel_promptly() {
+        let root = std::env::temp_dir().join(format!(
+            "channel-idle-{}",
+            crate::IdGenerator::next_id(&crate::ProcessIds::default(), "test")
+        ));
+        std::fs::create_dir_all(root.join("dashboard")).unwrap();
+        drop(StateStore::open(&root).unwrap());
+        let mut service = ChannelService::start(&root).unwrap();
+        let count = || {
+            std::fs::read_dir("/proc/self/fd")
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|fd| {
+                    std::fs::read_link(fd.path())
+                        .is_ok_and(|path| path == root.join("namedrop.sqlite3"))
+                })
+                .count()
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while count() != 4 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "four idle workers must retain their database connections"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        use std::{ffi::CString, io::Read, os::fd::FromRawFd};
+        let watcher = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(watcher >= 0);
+        let mut watcher = unsafe { File::from_raw_fd(watcher) };
+        let database =
+            CString::new(root.join("namedrop.sqlite3").as_os_str().as_encoded_bytes()).unwrap();
+        assert!(
+            unsafe {
+                libc::inotify_add_watch(watcher.as_raw_fd(), database.as_ptr(), libc::IN_OPEN)
+            } >= 0
+        );
+        for _ in 0..3 {
+            service.wake.notify();
+            thread::sleep(Duration::from_millis(30));
+            assert_eq!(count(), 4);
+            let mut events = [0; 4096];
+            assert_eq!(
+                watcher.read(&mut events).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "idle probes must reuse their open connections"
+            );
+        }
+        let start = std::time::Instant::now();
+        service.shutdown().unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "shutdown must wake the five-second idle wait"
+        );
+        assert_eq!(count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn unused_service_does_not_initialize_database() {

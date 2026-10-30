@@ -27,6 +27,78 @@ fn stop_routing_thread(server: &Server, receipt: &Value) {
 }
 
 #[test]
+fn settlement_failure_retries_original_decision_without_another_model_call() {
+    let f = fixture();
+    let server = Server::start(&f, "delayed", false);
+    let (status, initial) =
+        support::raw_post(&server, "settlement-retry", "Could @planner inspect?", None);
+    assert_eq!(status, 200, "{initial}");
+    until(|| calls(&f).len() == 1);
+    f.db().execute_batch("CREATE TRIGGER reject_router_settlement BEFORE INSERT ON transition_facts WHEN NEW.actor_id='channel-router/v1' AND NEW.transition_kind='settled' BEGIN SELECT RAISE(ABORT,'synthetic settlement failure'); END;").unwrap();
+    fs::write(f.root.join("router-release"), "").unwrap();
+    until(|| attempt_records(&f).len() == 1);
+    thread::sleep(Duration::from_millis(250));
+    assert_eq!(calls(&f).len(), 1);
+    assert_eq!(f.count("SELECT COUNT(*) FROM transition_facts WHERE actor_id='channel-router/v1' AND transition_kind='settled'"), 0);
+    f.db()
+        .execute_batch("DROP TRIGGER reject_router_settlement")
+        .unwrap();
+    let (status, receipt) = post(&server, "settlement-retry", "Could @planner inspect?", None);
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["message_id"], initial["message_id"]);
+    assert_eq!(receipt["channel"]["state"], "routed");
+    assert_eq!(calls(&f).len(), 1);
+}
+
+#[test]
+fn context_projection_error_settles_original_post_without_calling_model() {
+    let f = fixture();
+    let server = Server::start(&f, r#"{"to":["planner"],"reason":"review request"}"#, false);
+    thread::sleep(Duration::from_millis(150));
+    f.db()
+        .execute_batch("ALTER TABLE attention_items RENAME TO hidden_attention_items")
+        .unwrap();
+    let (status, receipt) = post(&server, "context-error", "Could @planner inspect?", None);
+    assert_eq!(status, 200, "{receipt}");
+    assert_eq!(receipt["channel"]["state"], "router_failed");
+    assert_eq!(receipt["recipients"], json!([]));
+    assert_eq!(calls(&f).len(), 0);
+    f.db()
+        .execute_batch("ALTER TABLE hidden_attention_items RENAME TO attention_items")
+        .unwrap();
+    let (status, replay) = post(&server, "context-error", "Could @planner inspect?", None);
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(replay["message_id"], receipt["message_id"]);
+    assert_eq!(replay["channel"]["state"], "router_failed");
+    assert_eq!(calls(&f).len(), 0);
+}
+
+#[test]
+fn committing_post_wakes_all_parked_router_workers_before_fallback() {
+    let f = fixture();
+    let server = Server::start(&f, "delayed", false);
+    thread::sleep(Duration::from_millis(150));
+    let deadline = Instant::now() + Duration::from_secs(2);
+    for index in 0..4 {
+        let (status, receipt) = support::raw_post(
+            &server,
+            &format!("wake-{index}"),
+            "Could @planner inspect?",
+            None,
+        );
+        assert_eq!(status, 200, "{receipt}");
+    }
+    while calls(&f).len() < 4 {
+        assert!(
+            Instant::now() < deadline,
+            "committed posts must wake all four workers before the five-second fallback"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    fs::write(f.root.join("router-release"), "").unwrap();
+}
+
+#[test]
 fn stop_during_routing_prevents_selected_and_baseline_deliveries_and_releases_mailbox() {
     for with_baseline in [false, true] {
         let f = fixture();
@@ -288,9 +360,17 @@ fn restart_fails_only_dispatching_and_routes_queued_without_mutating_fingerprint
     let server = Server::start(&f, r#"{"to":["planner"],"reason":"review request"}"#, false);
     until(|| calls(&f).len() == 6);
     for index in 0..6 {
-        let (status, receipt) = post(&server, &format!("recover-{index}"), "Could @planner inspect?", None);
+        let (status, receipt) = post(
+            &server,
+            &format!("recover-{index}"),
+            "Could @planner inspect?",
+            None,
+        );
         assert_eq!(status, 200, "{receipt}");
-        assert_eq!(receipt["channel"]["state"], if index < 4 { "router_failed" } else { "routed" });
+        assert_eq!(
+            receipt["channel"]["state"],
+            if index < 4 { "router_failed" } else { "routed" }
+        );
         assert_eq!(receipt["idempotent_replay"], true);
     }
     let page = history(&server);

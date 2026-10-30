@@ -49,6 +49,7 @@ pub(crate) struct Front {
     pub assets: Assets,
     pub restarting: Arc<AtomicBool>,
     pub mutations: Arc<Mutex<()>>,
+    pub channel_wake: super::channel_service::ChannelWake,
 }
 
 impl Front {
@@ -1294,6 +1295,7 @@ fn send_operator_post(
     let target = post.in_reply_to.map(crate::MessageId::new);
     writer.set_write_timeout(Some(Duration::from_secs(1)))?;
     let observe_commit = |receipt: &serde_json::Value| {
+        front.channel_wake.notify();
         let mut receipt = receipt.clone();
         snapshot::channel_routing::finish_post(front.files.state(), &namespace, &mut receipt);
         let response = respond(

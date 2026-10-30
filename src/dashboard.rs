@@ -265,6 +265,7 @@ fn run_server(
         assets,
         restarting: restarting.clone(),
         mutations: mutations.clone(),
+        channel_wake: channel_service.wake(),
     });
     let stop = Arc::new(AtomicBool::new(false));
     let accept_stop = stop.clone();
