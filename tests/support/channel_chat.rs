@@ -530,6 +530,82 @@ pub(super) fn context(server: &Server, message: &str) -> Value {
 }
 
 #[test]
+fn startup_waits_for_predecessor_claim_release_before_launching_a_successor() {
+    struct ClaimHolder {
+        child: Child,
+        release: std::path::PathBuf,
+    }
+    impl Drop for ClaimHolder {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.release, "");
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    let f = fixture();
+    fs::create_dir_all(f.state.join("dashboard")).unwrap();
+    let entered = f.root.join("claim-entered");
+    let release = f.root.join("claim-release");
+    let mut holder = ClaimHolder {
+        child: Command::new("/usr/bin/python3")
+            .args([
+                "-c",
+                "import fcntl, os, sys, time\nwith open(sys.argv[1], 'a') as claim:\n fcntl.flock(claim, fcntl.LOCK_EX)\n open(sys.argv[2], 'w').close()\n while not os.path.exists(sys.argv[3]): time.sleep(0.01)",
+            ])
+            .arg(f.state.join("dashboard/server.lock"))
+            .arg(&entered)
+            .arg(&release)
+            .spawn()
+            .unwrap(),
+        release,
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entered.exists() {
+        assert!(holder.child.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline, "claim holder did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let fixture = &f;
+        scope.spawn(move || {
+            let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Server::start(fixture, "{}", false)
+            }))
+            .map_err(|error| {
+                error
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_else(|| "startup panicked".to_owned())
+            });
+            sender.send(started).unwrap();
+        });
+        let before_release = receiver.recv_timeout(Duration::from_millis(200));
+        fs::write(&holder.release, "").unwrap();
+        assert!(holder.child.wait().unwrap().success());
+        match before_release {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(Err(error)) => {
+                panic!("startup returned before predecessor released its claim: {error}")
+            }
+            Ok(Ok(_)) => panic!("successor started while predecessor still held its claim"),
+            Err(error) => panic!("startup worker failed: {error}"),
+        }
+        let server = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("startup completes after predecessor releases its claim")
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            server
+                .request("GET", "/api/session", &[("Cookie", &server.cookie)], "")
+                .status,
+            200
+        );
+    });
+}
+
+#[test]
 fn startup_diagnostics_report_early_exit_and_stderr_without_waiting_for_timeout() {
     let f = Fixture::new();
     let stderr = f.root.join("early-exit.stderr");
