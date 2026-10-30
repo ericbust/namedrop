@@ -1,5 +1,4 @@
-// Server nudges name tracked work by id (src/store/coordination.rs). The page
-// shows plain words and keeps the original text for the tooltip.
+// Matches the wording of the server's coordination nudge in src/store/coordination.rs.
 const ID = String.raw`(?<![\w-])(?:coordination|assignment|message|thread|delivery-attempt|delivery|attempt|request)-\d+-\d+-\d+(?![\w-])`;
 const COORDINATION = new RegExp(
   String.raw`\bCoordination[ \t]+(?=coordination-)${ID}`,

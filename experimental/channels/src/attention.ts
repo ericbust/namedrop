@@ -258,17 +258,11 @@ export function prepareChannelMessage(
   | { kind: "prepared"; text: string; caret: number }
   | { kind: "preserved" | "unavailable" } {
   const to = attentionReplyTo(intent, directory);
-  const first =
-    to === null
-      ? null
-      : `${to.mentions} About ${anchorWords(intent.reference, context)}: `;
-  const text = first === null ? null : `${first}\nRef: ${intent.reference.id}`;
-  if (pending || (draft.length > 0 && draft !== text))
-    return { kind: "preserved" };
-  if (first === null || text === null) return { kind: "unavailable" };
-  return {
-    kind: "prepared",
-    text,
-    caret: first.length,
-  };
+  if (to === null)
+    return { kind: draft.length > 0 || pending ? "preserved" : "unavailable" };
+  const first = `${to.mentions} About ${anchorWords(intent.reference, context)}: `;
+  const text = `${first}\nRef: ${intent.reference.id}`;
+  return pending || (draft.length > 0 && draft !== text)
+    ? { kind: "preserved" }
+    : { kind: "prepared", text, caret: first.length };
 }

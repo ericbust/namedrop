@@ -9,6 +9,7 @@ import type {
   ChannelSnapshot,
   DeliveryStage,
   Health,
+  Member,
   MemberKind,
   OutgoingPhase,
   Participant,
@@ -172,6 +173,12 @@ export function answerInPane(name: string | null): string {
   return name === null
     ? attentionTable.agent_status.hint
     : `Answer it in ${name}'s pane in Herdr.`;
+}
+export function paneLabelText(
+  member: Member | null | undefined,
+): string | null {
+  const label = member?.paneLabel;
+  return label ? `${label.text}${label.truncated ? "…" : ""}` : null;
 }
 const localHint =
   "Open this workspace in Herdr and choose Namedrop Doctor to review this item.";

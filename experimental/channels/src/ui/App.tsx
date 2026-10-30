@@ -16,7 +16,12 @@ import {
   prepareChannelMessage,
 } from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
-import { channelMention, composerPlaceholder, responseCopy } from "../copy.ts";
+import {
+  channelMention,
+  composerPlaceholder,
+  paneLabelText,
+  responseCopy,
+} from "../copy.ts";
 import { createDeliveries, deliveryOf } from "../delivery.ts";
 import type {
   ComposerId,
@@ -771,9 +776,8 @@ export function App() {
       ? ""
       : (state.drafts.get(draftKey(composerId))?.text ?? "");
   const messaged =
-    channelResponse === null
-      ? null
-      : (members.get(channelResponse.addressId)?.alias ?? "the agent");
+    (channelResponse && members.get(channelResponse.addressId)?.alias) ??
+    "the agent";
   let threadResponse: ThreadResponse | null = null;
   if (focused?.kind === "ready") {
     const response = focused.request.response;
@@ -784,7 +788,7 @@ export function App() {
       case "message":
         threadResponse = {
           kind: "message",
-          name: messaged ?? "the agent",
+          name: messaged,
           ready: response.preparation === "prepared" && channelDraft !== "",
           prepare: prepareResponse,
         };
@@ -794,9 +798,7 @@ export function App() {
         threadResponse = {
           kind: "pane",
           name: member?.alias ?? null,
-          pane: member?.paneLabel
-            ? `${member.paneLabel.text}${member.paneLabel.truncated ? "…" : ""}`
-            : null,
+          pane: paneLabelText(member),
         };
         break;
       }
@@ -887,7 +889,7 @@ export function App() {
                       channelResponse?.preparation === "preserved" ? (
                         <p className="composer-guard" role="status">
                           Your draft is still here. Send or clear it, then press{" "}
-                          {responseCopy.message(messaged ?? "the agent")} again.
+                          {responseCopy.message(messaged)} again.
                         </p>
                       ) : channelResponse?.preparation === "unavailable" ? (
                         <p className="composer-guard" role="status">
