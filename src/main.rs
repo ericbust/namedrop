@@ -1115,6 +1115,27 @@ fn wait_for_marker_or_deadline(directory: &Path, due_ms: u64) {
     }
 }
 
+#[cfg(test)]
+mod worker_shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn a_removed_queue_stops_a_grace_deadline_wait() {
+        let directory =
+            env::temp_dir().join(format!("namedrop-removed-queue-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        fs::remove_dir(&directory).unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            wait_for_marker_or_deadline(&directory, u64::MAX);
+            done.send(()).unwrap();
+        });
+        finished
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a removed queue must stop the worker before its grace deadline");
+    }
+}
+
 fn wait_for_reconciliation_retry(failures: &mut usize) {
     let delays = [100, 250, 500, 1_000, 5_000];
     let delay = delays[(*failures).min(delays.len() - 1)];
