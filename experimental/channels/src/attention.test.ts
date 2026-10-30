@@ -7,6 +7,7 @@ import {
   evidenceReduce,
   evidenceThread,
   type FocusedEvidence,
+  type MessageIntent,
   messageIntent,
   prepareChannelMessage,
   replyPrefill,
@@ -390,6 +391,54 @@ test("channel preparation retries after preserved drafts without losing the trac
     }),
     sent,
   );
+});
+
+test("an edit of the channel box ends a preserved preparation, so the kept-draft notice gives way, and leaves every other state alone", () => {
+  for (const preparation of [
+    "idle",
+    "requested",
+    "prepared",
+    "preserved",
+    "unavailable",
+  ] as const) {
+    const response: MessageIntent = {
+      kind: "message",
+      addressId: member.id,
+      reference: { kind: "coordination", id: "coordination-1" },
+      preparation,
+    };
+    const state = evidenceReduce(
+      evidenceReduce(
+        { kind: "closed", version: 0 },
+        { type: "open", request: { ...request, response } },
+      ),
+      { type: "loaded", version: 1, context },
+    );
+    assert.ok(state.kind === "ready");
+    const edited = evidenceReduce(state, {
+      type: "draft-edited",
+      key: channel.key,
+    });
+    if (preparation !== "preserved") {
+      assert.equal(edited, state, preparation);
+      continue;
+    }
+    assert.deepEqual(edited, {
+      ...state,
+      request: {
+        ...state.request,
+        response: { ...response, preparation: "idle" },
+      },
+    });
+    assert.equal(
+      evidenceReduce(state, {
+        type: "draft-edited",
+        key: "b".repeat(20) as typeof channel.key,
+      }),
+      state,
+      "another channel's box",
+    );
+  }
 });
 
 test("channel preparation is idempotent while requested or already prepared", () => {

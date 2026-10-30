@@ -3,6 +3,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -109,6 +110,7 @@ export function ThreadPane({
       ((drafts.get(draftKey(composer))?.text.length ?? 0) > 0 ||
         pending.length > 0),
   );
+  const [keptNotice, endKeptNotice] = useReducer(() => false, draftPreserved);
   const activeReply = draftPreserved ? null : replyIntent;
   const to = useMemo(
     () =>
@@ -283,15 +285,19 @@ export function ThreadPane({
             label={replyLabel(rule.to)}
             rule={rule}
             notice={
-              replyIntent !== null && draftPreserved ? (
+              replyIntent !== null && keptNotice ? (
                 <p role="status">
                   Your existing draft was kept. Send or clear it before
                   preparing this reply.
                 </p>
               ) : null
             }
-            onEdit={(text) => onEdit(composer, text)}
-            onSend={(source, startedAt) =>
+            onEdit={(text) => {
+              endKeptNotice();
+              onEdit(composer, text);
+            }}
+            onSend={(source, startedAt) => {
+              endKeptNotice();
               onSend(
                 {
                   composer,
@@ -299,8 +305,8 @@ export function ThreadPane({
                   inReplyTo: activeReply?.messageId ?? latest.id,
                 },
                 startedAt,
-              )
-            }
+              );
+            }}
           />
         )}
     </aside>

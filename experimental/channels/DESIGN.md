@@ -527,7 +527,8 @@ bottom. Only one place offers an action at a time.
 
 When a reply's thread already holds a draft, the composer stays and its status
 row reads, 12px muted: "Your existing draft was kept. Send or clear it before
-preparing this reply."
+preparing this reply." The line stays until the box changes or its text is
+sent; then the box's hint returns.
 
 ### History window
 
@@ -584,9 +585,12 @@ main column, under the timeline, and at the bottom of the thread pane.
   reads, in 12px `--text` like the recipient guard: "Your draft is still here.
   Send or clear it, then press Message @claude again.", with the pressed
   button's own label. There is no link in it; the card's button is the retry.
-  The message that button prepared is not another draft, so pressing it again
-  never warns. When the agent is gone, the same row reads "The responsible
-  agent is no longer available. Use its pane in Herdr to respond."
+  The notice stays until the next edit of the box, a send, or a clear; then the
+  recipient guard and the hint return, so "@Codex hi" typed after it reads
+  "Names are lowercase: @codex". The message that button prepared is not
+  another draft, so pressing it again never warns. When the agent is gone, the
+  same row reads "The responsible agent is no longer available. Use its pane
+  in Herdr to respond."
 - The Jump to latest pill floats 16px above the composer, not above the
   timeline's bottom edge.
 

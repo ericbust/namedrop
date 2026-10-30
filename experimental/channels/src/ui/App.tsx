@@ -903,7 +903,13 @@ export function App() {
                         </p>
                       ) : null
                     }
-                    onEdit={(text) => edit(composerId, text)}
+                    onEdit={(text) => {
+                      edit(composerId, text);
+                      focusEvidence({
+                        type: "draft-edited",
+                        key: composerId.key,
+                      });
+                    }}
                     onSend={(source, startedAt) => {
                       if (channel.viewMode === "browsing")
                         dispatch({ type: "latest", key: channel.key });

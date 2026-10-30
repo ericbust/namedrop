@@ -55,6 +55,7 @@ export type EvidenceEvent =
       result: "prepared" | "preserved" | "unavailable";
     }
   | { type: "close" }
+  | { type: "draft-edited"; key: SpaceKey }
   | { type: "sent"; key: SpaceKey; messageId: string | null }
   | { type: "loaded"; version: number; context: MessageContext }
   | { type: "failed"; version: number; reason: string };
@@ -105,6 +106,19 @@ export function evidenceReduce(
                 ...state.request.response,
                 preparation: event.result,
               },
+            },
+          }
+        : state;
+    case "draft-edited":
+      return state.kind === "ready" &&
+        state.request.key === event.key &&
+        state.request.response?.kind === "message" &&
+        state.request.response.preparation === "preserved"
+        ? {
+            ...state,
+            request: {
+              ...state.request,
+              response: { ...state.request.response, preparation: "idle" },
             },
           }
         : state;

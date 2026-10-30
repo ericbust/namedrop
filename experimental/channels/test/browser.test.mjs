@@ -6703,6 +6703,76 @@ test("DESIGN-R2 A5: a kept channel draft is named in the composer's status row, 
   assert.equal(await notice.count(), 0);
 });
 
+test("DESIGN-R2 D2: the kept-draft notice lasts until the box changes, then the hint names a capitalized leading name again", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  const status = ui.page.locator("main .composer-status");
+  await readsAs(
+    status,
+    "Your draft is still here. Send or clear it, then press Message @codex again.",
+  );
+  await draft.focus();
+  await readsAs(
+    status,
+    "Your draft is still here. Send or clear it, then press Message @codex again.",
+  );
+  await draft.press("Control+a");
+  await ui.page.keyboard.type("@Codex hi");
+  await readsAs(status, "Names are lowercase: @codex");
+  await draft.fill("hello room");
+  await readsAs(
+    status,
+    "Enter posts to the channel · Mention @name to bring someone in",
+  );
+  assert.equal(await draft.inputValue(), "hello room");
+  assert.equal(ui.posts.attempts.length, 0);
+});
+
+test("DESIGN-R2 D2: a thread's kept-draft line lasts until that box changes, then its hint returns", async (t) => {
+  const { value, context } = actionableAttention();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card.getByRole("button", { name: /^Show message/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox");
+  await reply.fill("my thread words");
+  await card
+    .getByRole("button", { name: "Reply to @codex", exact: true })
+    .click();
+  const status = pane.locator(".composer-status");
+  const kept =
+    "Your existing draft was kept. Send or clear it before preparing this reply.";
+  await readsAs(status, kept);
+  assert.equal(await reply.inputValue(), "my thread words");
+  await reply.focus();
+  await readsAs(status, kept);
+  await reply.press("End");
+  await ui.page.keyboard.type(" too");
+  await readsAs(status, "Enter to send · Shift+Enter for a new line");
+  assert.equal(await reply.inputValue(), "my thread words too");
+});
+
 test("DESIGN-R2 A6: a tracked conversation says where to answer on one 12px muted line in the composer's place", async (t) => {
   const { value, context } = actionableAttention("message");
   const ui = await open(
