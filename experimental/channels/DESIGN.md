@@ -719,6 +719,9 @@ uses the "Send to" form. Each offer is a text button in 12px 600
     the name now belongs to a different agent, the part shows the same failure
     with the server's reason as its tooltip, or "Namedrop didn't send it. The
     name may belong to a different agent now." when the server gives none.
+  - A 2xx answer whose body stalls for 5 seconds or breaks reads as sent. The
+    status is the server's answer, and the line updates when the frame shows
+    the agent reached.
 - Focus moves from the pressed offer to the agent's part and stays there
   through sending, sent and failed, because "Try again" is the same button.
   When the part goes, nothing moves focus.

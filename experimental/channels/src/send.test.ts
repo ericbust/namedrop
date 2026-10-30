@@ -278,6 +278,32 @@ test("deliver: a 200 that lists only some aliases sends the rest back as failed 
   );
 });
 
+test("deliver: a 200 whose body never finishes or breaks still reads as sent, within the body wait", async () => {
+  const bodies = [
+    new ReadableStream({ start() {} }),
+    new ReadableStream({
+      start(controller) {
+        controller.error(new Error("cut"));
+      },
+    }),
+  ];
+  for (const body of bodies) {
+    const server = fakeServer(({ url }) =>
+      url === "/api/session"
+        ? json(200, { csrf_token: "t" })
+        : new Response(body, { status: 200 }),
+    );
+    const started = Date.now();
+    assert.deepEqual(
+      Object.fromEntries(
+        await createPoster(server.fetcher, 50).deliver(key, "p1", ["@codex"]),
+      ),
+      { "@codex": { kind: "done" } },
+    );
+    assert.ok(Date.now() - started < 2_000);
+  }
+});
+
 test("deliver: a refusal carries the server's message and a network failure reads status 0", async () => {
   const cases: [Response | Error, unknown][] = [
     [

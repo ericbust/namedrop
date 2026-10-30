@@ -25,7 +25,21 @@ export type ControlResult =
   | { kind: "done" }
   | { kind: "failed"; status: number };
 
-export function createPoster(fetcher: typeof fetch = fetch) {
+// A 2xx status is the server's answer; a body that stalls or breaks after it must not hold the press.
+function bodyWithin(response: Response, ms: number): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<string>((resolve) => {
+    timer = setTimeout(() => {
+      void response.body?.cancel().catch(() => {});
+      resolve("");
+    }, ms);
+  });
+  return Promise.race([response.text().catch(() => ""), late]).finally(() =>
+    clearTimeout(timer),
+  );
+}
+
+export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
   let session: Promise<string | null> | null = null;
   const token = () => {
     session ??= fetcher("/api/session", { credentials: "same-origin" })
@@ -129,7 +143,7 @@ export function createPoster(fetcher: typeof fetch = fetch) {
           `/w/${key}/messages/${encodeURIComponent(messageId)}/deliver`,
           { to: to.map((alias) => alias.slice(1)) },
         );
-        const body = await response.text();
+        const body = await bodyWithin(response, bodyWait);
         return response.ok
           ? parseDelivered(body, to)
           : each({ status: response.status, message: parseRefusal(body) });
