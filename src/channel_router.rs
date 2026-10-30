@@ -3,10 +3,12 @@ use super::{
     capture_worker, env, extract_response, json, sanitize_text, truncate_chars, worker_usage,
 };
 use crate::{AgentRuntime, RoutingAddressSnapshot, store::dashboard::DashboardRows};
-use std::collections::HashSet;
+use std::{collections::HashSet, ops::Range};
 
 const DEADLINE: Duration = Duration::from_secs(17);
 const MAX_POST_CHARS: usize = 4_000;
+const POST_CONTEXT_CHARS: usize = 320;
+const MIN_POST_CONTEXT_CHARS: usize = 32;
 const MAX_ROSTER: usize = 32;
 const MAX_INPUT_BYTES: usize = 12 * 1024;
 const INSTRUCTIONS: &str = concat!(
@@ -44,6 +46,12 @@ pub(crate) enum RoutingDecision {
     Failed {
         router: String,
     },
+}
+
+#[derive(Debug)]
+enum InputError {
+    Unavailable,
+    TooLarge,
 }
 
 struct RouterInput {
@@ -113,6 +121,10 @@ pub(crate) struct RouteRun {
 }
 
 pub(crate) fn route(request: RouterRequest<'_>) -> RouteRun {
+    route_with_cancel(request, &AtomicBool::new(false))
+}
+
+pub(crate) fn route_with_cancel(request: RouterRequest<'_>, cancelled: &AtomicBool) -> RouteRun {
     if request.candidates.is_empty()
         || env::var("NAMEDROP_CHANNEL_ROUTER").is_ok_and(|value| value == "off")
     {
@@ -121,17 +133,39 @@ pub(crate) fn route(request: RouterRequest<'_>) -> RouteRun {
             attempt: None,
         };
     }
-    let Some(input) = build_input(request) else {
-        return RouteRun {
-            decision: RoutingDecision::Unrouted,
-            attempt: None,
-        };
+    let host = request.host;
+    let input = match build_input(request) {
+        Ok(input) => input,
+        Err(error) => {
+            return RouteRun {
+                decision: match error {
+                    InputError::Unavailable => RoutingDecision::Unrouted,
+                    InputError::TooLarge => RoutingDecision::Failed {
+                        router: match host {
+                            Some(AgentRuntime::Codex) => format!("codex-{CODEX_MODEL}"),
+                            _ => CLAUDE_MODEL.to_owned(),
+                        },
+                    },
+                },
+                attempt: None,
+            };
+        }
     };
     let structured = input.host == "codex";
-    run_input(input, DEADLINE, structured)
+    run_input_cancellable(input, DEADLINE, structured, cancelled)
 }
 
+#[cfg(test)]
 fn run_input(input: RouterInput, deadline: Duration, structured: bool) -> RouteRun {
+    run_input_cancellable(input, deadline, structured, &AtomicBool::new(false))
+}
+
+fn run_input_cancellable(
+    input: RouterInput,
+    deadline: Duration,
+    structured: bool,
+    cancelled: &AtomicBool,
+) -> RouteRun {
     let router = if input.host == "codex" {
         format!("codex-{CODEX_MODEL}")
     } else {
@@ -151,7 +185,7 @@ fn run_input(input: RouterInput, deadline: Duration, structured: bool) -> RouteR
             schema: input.schema,
         },
         &input.payload,
-        &AtomicBool::new(false),
+        cancelled,
         Some(started + deadline),
         structured,
     );
@@ -272,7 +306,7 @@ fn bounded_text(text: &str, limit: usize) -> String {
     sanitize_text(&truncate_chars(text, limit))
 }
 
-fn build_input(request: RouterRequest<'_>) -> Option<RouterInput> {
+fn build_input(request: RouterRequest<'_>) -> Result<RouterInput, InputError> {
     let RouterRequest {
         host,
         rows,
@@ -280,15 +314,18 @@ fn build_input(request: RouterRequest<'_>) -> Option<RouterInput> {
         candidates,
     } = request;
     if candidates.is_empty() {
-        return None;
+        return Err(InputError::Unavailable);
     }
-    let host = match host? {
+    let host = match host.ok_or(InputError::Unavailable)? {
         AgentRuntime::ClaudeCode => "claude",
         AgentRuntime::Codex => "codex",
     };
+    if candidates.len() > MAX_ROSTER {
+        return Err(InputError::TooLarge);
+    }
     let mut aliases = Vec::new();
     let mut roster = Vec::new();
-    for member in candidates.iter().take(MAX_ROSTER) {
+    for member in candidates {
         let address = rows
             .addresses
             .iter()
@@ -312,32 +349,97 @@ fn build_input(request: RouterRequest<'_>) -> Option<RouterInput> {
             ), 32),
         }));
     }
+    let spans: Vec<_> = crate::message::context_mention_spans(source)
+        .into_iter()
+        .filter(|(mention, _)| mention.workspace.is_none() && aliases.contains(&mention.alias))
+        .map(|(_, span)| span)
+        .collect();
+    let mut context_chars = POST_CONTEXT_CHARS;
     let mut payload = json!({
-        "post": truncate_chars(source, MAX_POST_CHARS),
+        "post": post_excerpt(source, &spans, context_chars),
         "roster": roster,
         "recap": recap(rows),
     });
-    let mut schema = schema(&aliases);
-    let mut rendered = payload.to_string();
-    while rendered.len() + schema.len() + INSTRUCTIONS.len() > MAX_INPUT_BYTES {
-        let post = payload["post"].as_str().unwrap_or_default();
-        if aliases.len() <= 1 && !post.is_empty() {
-            payload["post"] = json!(truncate_chars(post, post.chars().count() / 2));
-        } else {
-            payload["roster"]
-                .as_array_mut()
-                .expect("router roster")
-                .pop();
-            aliases.pop();
-            schema = self::schema(&aliases);
+    let schema = schema(&aliases);
+    loop {
+        let rendered = payload.to_string();
+        if rendered.len() + schema.len() + INSTRUCTIONS.len() <= MAX_INPUT_BYTES {
+            return Ok(RouterInput {
+                host,
+                aliases,
+                payload: rendered,
+                schema,
+            });
         }
-        rendered = payload.to_string();
+        if payload["recap"]
+            .as_array()
+            .is_some_and(|recap| !recap.is_empty())
+        {
+            payload["recap"]
+                .as_array_mut()
+                .expect("router recap")
+                .remove(0);
+        } else if context_chars > MIN_POST_CONTEXT_CHARS {
+            context_chars = (context_chars / 2).max(MIN_POST_CONTEXT_CHARS);
+            payload["post"] = json!(post_excerpt(source, &spans, context_chars));
+        } else {
+            return Err(InputError::TooLarge);
+        }
     }
-    Some(RouterInput {
-        host,
-        aliases,
-        payload: rendered,
-        schema,
+}
+
+fn post_excerpt(source: &str, spans: &[Range<usize>], context_chars: usize) -> String {
+    if spans.is_empty() {
+        return truncate_chars(source, MAX_POST_CHARS * context_chars / POST_CONTEXT_CHARS);
+    }
+    let mut windows: Vec<Range<usize>> = Vec::new();
+    for span in spans {
+        let start = source[..span.start]
+            .char_indices()
+            .rev()
+            .take(context_chars)
+            .last()
+            .map_or(0, |(offset, _)| offset);
+        let end = source[span.end..]
+            .char_indices()
+            .nth(context_chars)
+            .map_or(source.len(), |(offset, _)| span.end + offset);
+        let start = sentence_boundaries(&source[start..span.start])
+            .next_back()
+            .map_or(start, |offset| start + offset);
+        let end = sentence_boundaries(&source[span.end..end])
+            .next()
+            .map_or(end, |offset| span.end + offset);
+        if let Some(previous) = windows.last_mut()
+            && start <= previous.end
+        {
+            previous.end = previous.end.max(end);
+        } else {
+            windows.push(start..end);
+        }
+    }
+    let mut post = String::new();
+    let mut previous_end = 0;
+    for window in windows {
+        if window.start > previous_end {
+            post.push_str("\n[…]\n");
+        }
+        post.push_str(&source[window.clone()]);
+        previous_end = window.end;
+    }
+    if previous_end < source.len() {
+        post.push_str("\n[…]\n");
+    }
+    post
+}
+
+fn sentence_boundaries(text: &str) -> impl DoubleEndedIterator<Item = usize> + '_ {
+    text.char_indices().filter_map(|(offset, character)| {
+        let end = offset + character.len_utf8();
+        (character == '\n'
+            || (matches!(character, '.' | '!' | '?')
+                && text[end..].chars().next().is_none_or(char::is_whitespace)))
+        .then_some(end)
     })
 }
 
@@ -389,7 +491,7 @@ fn normalize_topic(reason: &str) -> String {
     let topic = truncate_chars(&topic, 60);
     let topic = topic.trim();
     match topic_words(topic).count() {
-        0 => "General topic".to_owned(),
+        0 => String::new(),
         1 => format!("{} topic", truncate_chars(topic, 54)),
         _ => topic.to_owned(),
     }

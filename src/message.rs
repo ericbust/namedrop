@@ -2066,6 +2066,13 @@ fn mention_token_end(text: &str, at: usize) -> usize {
 /// looked up: a token that is not alias-shaped is not Mention-shaped, so it stays literal prose
 /// instead of rejecting the send, and no valid alias prefix is taken out of it.
 pub(crate) fn context_mentions(body: &str) -> Vec<BodyMention> {
+    context_mention_spans(body)
+        .into_iter()
+        .map(|(mention, _)| mention)
+        .collect()
+}
+
+pub(crate) fn context_mention_spans(body: &str) -> Vec<(BodyMention, std::ops::Range<usize>)> {
     let mut mentions = Vec::new();
     let mut qualified_run: Option<(usize, WorkspaceLabel)> = None;
     for anchor in mention_anchors(body) {
@@ -2081,10 +2088,13 @@ pub(crate) fn context_mentions(body: &str) -> Vec<BodyMention> {
         }
         let token = &body[anchor + 1..end];
         if validate_alias(token).is_ok() {
-            mentions.push(BodyMention {
-                alias: token.to_owned(),
-                workspace,
-            });
+            mentions.push((
+                BodyMention {
+                    alias: token.to_owned(),
+                    workspace,
+                },
+                anchor..end,
+            ));
         }
     }
     mentions
