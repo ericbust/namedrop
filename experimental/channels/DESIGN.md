@@ -634,19 +634,23 @@ because the message went to the room. The line is a wrapping row of parts
 divided by "·", like the receipt line, and it starts with a 12px drawn icon.
 Names in it are peek buttons at 12px 600 in `--text`.
 
-| Message and state                              | Route line                                                            | Icon                   |
-| ---------------------------------------------- | --------------------------------------------------------------------- | ---------------------- |
-| Post that mentions no agent                    | No line                                                               | none                   |
-| Post, `routing`                                | "Checking who this is for…"                                           | clock                  |
-| Post, `routed`                                 | "@claude · build question", where the words are the reason            | arrow                  |
-| Post, `routed` with no topic                   | "@claude"                                                             | arrow                  |
-| Post, `routed`, and a mentioned agent not sent | "@claude · build question · Mentioned @codex, not sent · Send anyway" | arrow                  |
-| Post, `unrouted`, mentioning agents            | "Mentioned @codex, not sent · Send anyway"                            | inbox                  |
-| Post, `router_failed`                          | "Couldn't check who this is for · Send to @codex"                     | alert, `--failed-text` |
-| Reply or follow-up that woke a new member      | "@codex · pulled in"                                                  | arrow                  |
-| Answer to the agent that asked                 | "@claude"                                                             | arrow                  |
-| Follow-up sent to members                      | "@codex"                                                              | arrow                  |
-| Reply to the operator only                     | No line                                                               | none                   |
+| Message and state                              | Route line                                                              | Icon                   |
+| ---------------------------------------------- | ----------------------------------------------------------------------- | ---------------------- |
+| Post that mentions no agent                    | No line                                                                 | none                   |
+| Post, `routing`                                | "Checking who this is for…"                                             | clock                  |
+| Post, `routed`                                 | "@claude · build question", where the words are the reason              | arrow                  |
+| Post, `routed` with no topic                   | "@claude"                                                               | arrow                  |
+| Post, `routed`, and a mentioned agent not sent | "@claude · build question · Mentioned @codex, not sent · Send anyway"   | arrow                  |
+| Post, `unrouted`, mentioning agents            | "Mentioned @codex, not sent · Send anyway"                              | inbox                  |
+| Post, `router_failed`                          | "Couldn't check who this is for · Send to @codex"                       | alert, `--failed-text` |
+| Post, Send anyway pressed, server not answered | "Sending to @codex…"                                                    | the post's icon        |
+| Post, delivery taken by the server             | "Sent to @codex", until a frame shows the post reached @codex           | the post's icon        |
+| Post, delivery refused or not reached          | "Couldn't send to @codex · Try again"                                   | the post's icon        |
+| Post, `router_failed`, one of two pressed      | "Couldn't check who this is for · Send to @claude · Sending to @codex…" | alert, `--failed-text` |
+| Reply or follow-up that woke a new member      | "@codex · pulled in"                                                    | arrow                  |
+| Answer to the agent that asked                 | "@claude"                                                               | arrow                  |
+| Follow-up sent to members                      | "@codex"                                                                | arrow                  |
+| Reply to the operator only                     | No line                                                                 | none                   |
 - The names are the message's recipients: its legs, without the operator, all
   of them, with no "+N". "pulled in" shows when the message woke a member who
   joins the conversation with it: one that had not written in the thread or
@@ -681,33 +685,40 @@ Names in it are peek buttons at 12px 600 in `--text`.
   "Namedrop couldn't reach its router. The post is saved, and no one got it."
 
 **Send anyway.** A post offers to send itself to each agent it mentions that
-did not get it. Once a later message in the thread reaches that agent, or the
-agent writes in it, the offer goes, so the line never invites a second send. One such agent reads "Mentioned @codex, not sent · Send
-anyway". Several read "Mentioned 2 agents, not sent · Send to @codex, @lead", so
-each name shows once, as its button. `router_failed` always uses the "Send to"
-form. Each offer is a
-text button in 12px 600 `--accent-text` with the accessible name "Send this to
-@codex".
+did not get it and that the operator has not pressed yet. Once a later message
+in the thread reaches that agent, or the agent writes in it, the offer goes, so
+the line never invites a second send. One such agent reads "Mentioned @codex,
+not sent · Send anyway". Several read "Mentioned 2 agents, not sent · Send to
+@codex, @lead", so each name shows once, as its button. `router_failed` always
+uses the "Send to" form. Each offer is a text button in 12px 600
+`--accent-text` with the accessible name "Send this to @codex".
 
 - One click delivers the post itself to that agent, as the operator's request,
   the same way the router would have sent it
-  (`POST /w/<key>/messages/<id>/deliver`). Nothing opens, nothing is typed in a
-  composer, and focus stays on the button. The room never shows a copy: the
-  agent gets the stored post, not the page's display copy, which the server
-  cuts and redacts.
-- The button reads "Sending…", then "Sent", in `--text-muted` and inert, until
-  a frame shows the post reached the agent. The line then names the agent with
-  its receipt, and the offer goes. In the "Send to" form the name stays before
-  the label, as in "Send to @codex Sent, @lead".
-- A failure reads "Couldn't send to @codex." in `--failed-text`, then a "Try
-  again" text button. Its tooltip is the server's message, "HTTP 500" when the
-  server gives none, or "Couldn't reach Namedrop." when the request never
-  reached it.
-- The offer sits in a polite status region, so a screen reader hears
-  "Sending…", "Sent", or the failure.
-- Each agent after "Send to" keeps its own state. The timeline, the thread
-  pane, and a Needs-you conversation show one state for the same post and
-  agent.
+  (`POST /w/<key>/messages/<id>/deliver`). Nothing opens and nothing is typed
+  in a composer. The room never shows a copy: the agent gets the stored post,
+  not the page's display copy, which the server cuts and redacts.
+- The agent leaves the "not sent" part the moment its delivery starts. The
+  count and the form follow the agents still left, so "Mentioned 2 agents, not
+  sent · Send to @codex, @lead" becomes "Mentioned @lead, not sent · Send
+  anyway · Sending to @codex…". When no agent is left, that part and its offer
+  go.
+- Each pressed agent then has its own part, after the offer and in the order
+  the post names the agents. The part is a text button in the same style:
+  - "Sending to @codex…", then "Sent to @codex", in `--text-muted` and inert,
+    until a frame shows the post reached the agent. The line then names the
+    agent with its receipt, and the part goes.
+  - A failure reads "Couldn't send to @codex" in `--failed-text`, then a "Try
+    again" button. Its tooltip is the server's message, "HTTP 500" when the
+    server gives none, or "Couldn't reach Namedrop." when the request never
+    reached it.
+- Focus moves from the pressed offer to the agent's part and stays there
+  through sending, sent and failed, because "Try again" is the same button.
+  When the part goes, nothing moves focus.
+- Each part sits in a polite status region, so a screen reader hears "Sent to
+  @codex" or the failure.
+- The timeline, the thread pane, and a Needs-you conversation show one state
+  for the same post and agent.
 
 **Replies in the timeline.**
 
