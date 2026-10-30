@@ -38,6 +38,7 @@ export type MessageContext = {
   earlierOmitted: boolean;
   messages: readonly Message[];
 };
+export type ThreadAction = "continue" | "stop";
 export type Attention = {
   rowKey: string;
   sourceId?: string | null;
@@ -59,6 +60,8 @@ export type Attention = {
   openedAt: number;
   subjectAlias: string | null;
   messageId: string | null;
+  threadId: string | null;
+  actions: readonly ThreadAction[];
 };
 export type TerminalRun = {
   terminal: AddressId;
@@ -93,6 +96,19 @@ export type DeliveryStage =
   | { stage: "working"; ackedAt: number }
   | { stage: "replied"; replyId: string }
   | { stage: "completed"; kind: string };
+// A member alias as `Member.alias` holds it: one "@", then the name.
+export type Alias = `@${string}`;
+// Where a channel post stands with the router. A message carries one exactly
+// when its wire row has a `channel` object, so a state a newer server invents
+// still marks the post as channel chat. Who got it comes from the legs; the
+// agents the post names come from the server, which read them when it stored it.
+export type Routing = { mentioned: readonly Alias[] } & (
+  | { state: "routing" }
+  | { state: "routed"; reason: string | null; router: string | null }
+  | { state: "unrouted" }
+  | { state: "router_failed" }
+  | { state: "unknown" }
+);
 export type Message = {
   id: string;
   threadId: string;
@@ -102,6 +118,8 @@ export type Message = {
   kind: MessageKind;
   body: SafeText;
   legs: readonly { to: AddressId; stage: DeliveryStage }[];
+  routing: Routing | null;
+  woke: readonly Alias[];
 };
 export type ThreadChip = { id: string; title: SafeText; messageCount: number };
 export type HistoryRequest = {
@@ -184,6 +202,9 @@ export type SendAttempt = {
   inReplyTo: string | null;
 };
 export type SendFailure = { status: number; message: string };
+export type DeliverResult =
+  | { kind: "done" }
+  | ({ kind: "failed" } & SendFailure);
 // A refused draft keeps its attempt until a success, so the same post reuses
 // its id. The failure shows only until the next edit, and never without an attempt.
 export type Draft = ComposerId & { text: string } & (
@@ -214,6 +235,12 @@ export type Participant =
   | { kind: "envoy"; id: AddressId; home: Home | null }
   | { kind: "unknown"; id: AddressId };
 export type ReplyTo = { names: readonly string[]; mentions: string };
+// What a composer needs before Enter sends. A channel post always sends. A
+// thread reply goes to `to`, the thread's agents as display names; with none,
+// the text must start with the members it is for.
+export type SendRule =
+  | { kind: "channel"; agents: ReadonlyMap<AddressId, Member> }
+  | { kind: "thread"; to: readonly string[] };
 export type WireEvent =
   | { type: "space"; channel: ChannelSnapshot }
   | { type: "gone"; key: SpaceKey }

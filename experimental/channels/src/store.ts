@@ -1,4 +1,10 @@
-import { channelMention, channelToken, dayBounds, dayLabel } from "./copy.ts";
+import {
+  channelMention,
+  channelToken,
+  dayBounds,
+  dayLabel,
+  participantCopy,
+} from "./copy.ts";
 import type {
   Activity,
   AddressId,
@@ -11,13 +17,14 @@ import type {
   HistoryRequest,
   Home,
   Landing,
+  Member,
   Message,
   Outgoing,
   Participant,
   PeekableKind,
   PeekTarget,
-  ReplyTo,
   Route,
+  Routing,
   Selection,
   Slot,
   SpaceKey,
@@ -90,6 +97,12 @@ const SNAPSHOT_CAP = 150;
 function sameValue(a: unknown, b: unknown): boolean {
   return a === b || JSON.stringify(a) === JSON.stringify(b);
 }
+function sameRouting(a: Routing | null, b: Routing | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (!sameList(a.mentioned, b.mentioned)) return false;
+  if (a.state !== "routed" || b.state !== "routed") return a.state === b.state;
+  return a.reason === b.reason && a.router === b.router;
+}
 function sameMessage(a: Message, b: Message): boolean {
   return (
     a === b ||
@@ -109,7 +122,9 @@ function sameMessage(a: Message, b: Message): boolean {
           leg.to === other.to &&
           sameValue(leg.stage, other.stage)
         );
-      }))
+      }) &&
+      sameRouting(a.routing, b.routing) &&
+      sameList(a.woke, b.woke))
   );
 }
 function reuseMap<K, V>(
@@ -911,18 +926,79 @@ export function connectionStatus(
   return state.sync.kind;
 }
 
+// The latest time each author wrote anything in a thread.
+export type Wrote = ReadonlyMap<AddressId | "human", number>;
+// When each member first wrote or was sent a message in a thread: the time it
+// joined the conversation.
+export type Joined = ReadonlyMap<AddressId, number>;
+// A thread that reads as a conversation, every message its own row. Its first
+// loaded parent decides: a channel post makes a channel room, a first message
+// an agent wrote makes an agents room, and anything else is a request thread.
+export type Room =
+  | { kind: "channel"; post: Message; wrote: Wrote; joined: Joined }
+  | { kind: "agents"; root: Message; wrote: Wrote };
 export type ThreadGroup = {
   id: string;
   parents: readonly Message[];
   replies: readonly Message[];
   knownCount: number;
+  room: Room | null;
 };
+function agentAuthor(
+  author: Message["author"],
+  members: ReadonlyMap<AddressId, Member>,
+): boolean {
+  if (author === "human") return false;
+  const type = members.get(author)?.kind.type;
+  return type !== "terminal" && type !== "human";
+}
+function wroteIn(group: Pick<ThreadGroup, "parents" | "replies">): Wrote {
+  const wrote = new Map<AddressId | "human", number>();
+  for (const messages of [group.parents, group.replies])
+    for (const { author, at } of messages)
+      wrote.set(author, Math.max(at, wrote.get(author) ?? at));
+  return wrote;
+}
+function joinedIn(group: Pick<ThreadGroup, "parents" | "replies">): Joined {
+  const joined = new Map<AddressId, number>();
+  const join = (id: AddressId, at: number) =>
+    joined.set(id, Math.min(at, joined.get(id) ?? at));
+  for (const messages of [group.parents, group.replies])
+    for (const { author, at, legs } of messages) {
+      if (author !== "human") join(author, at);
+      for (const { to } of legs) join(to, at);
+    }
+  return joined;
+}
+export function roomOf(
+  group: Pick<ThreadGroup, "parents" | "replies">,
+  members: ReadonlyMap<AddressId, Member>,
+): Room | null {
+  const [first] = group.parents;
+  if (first === undefined) return null;
+  if (first.routing !== null)
+    return {
+      kind: "channel",
+      post: first,
+      wrote: wroteIn(group),
+      joined: joinedIn(group),
+    };
+  return agentAuthor(first.author, members)
+    ? { kind: "agents", root: first, wrote: wroteIn(group) }
+    : null;
+}
 export function threadGroups(
-  channel: Pick<Channel, "messages" | "runs" | "threads">,
+  channel: Pick<Channel, "messages" | "runs" | "threads" | "members">,
 ): ReadonlyMap<string, ThreadGroup> {
   const groups = new Map<
     string,
-    { id: string; parents: Message[]; replies: Message[]; knownCount: number }
+    {
+      id: string;
+      parents: Message[];
+      replies: Message[];
+      knownCount: number;
+      room: Room | null;
+    }
   >();
   for (const id of channel.runs.flat()) {
     const row = channel.messages.get(id);
@@ -934,14 +1010,22 @@ export function threadGroups(
         parents: [],
         replies: [],
         knownCount: channel.threads.get(row.threadId)?.messageCount ?? 0,
+        room: null,
       };
       groups.set(row.threadId, group);
     }
     if (row.inReplyTo !== null || row.kind === "reply") group.replies.push(row);
     else group.parents.push(row);
   }
+  for (const group of groups.values())
+    group.room = roomOf(group, channel.members);
   return groups;
 }
+// The line above a conversation reply whose row above is not the message it answers.
+export type ReplyReference =
+  | { kind: "message"; parent: Message }
+  | { kind: "earlier" };
+const earlier: ReplyReference = { kind: "earlier" };
 export type MessageRow = {
   kind: "message" | "orphan";
   message: Message;
@@ -951,6 +1035,7 @@ export type MessageRow = {
   recipients: readonly AddressId[];
   latestReply: Message | null;
   replyCount: number;
+  reference: ReplyReference | null;
 };
 export type TimelineRow =
   | MessageRow
@@ -977,7 +1062,7 @@ function isSystem(message: Message): boolean {
   return message.kind === "nudge" || message.kind === "hook";
 }
 export function timelineView(
-  channel: Pick<Channel, "messages" | "runs" | "threads">,
+  channel: Pick<Channel, "messages" | "runs" | "threads" | "members">,
   groups: ReadonlyMap<string, ThreadGroup> = threadGroups(channel),
   now = Date.now(),
 ): readonly TimelineRow[] {
@@ -985,6 +1070,8 @@ export function timelineView(
   let dayStart = Number.POSITIVE_INFINITY;
   let dayEnd = Number.NEGATIVE_INFINITY;
   let previous: Message | null = null;
+  // A channel-chat header names no one, so a row grouped under it compares with nobody.
+  let previousNamed = noRecipients;
   for (const [index, run] of channel.runs.entries()) {
     const before = run[0];
     if (index > 0 && before !== undefined) {
@@ -996,42 +1083,59 @@ export function timelineView(
       if (!message) continue;
       const thread = groups.get(message.threadId);
       if (!thread) continue;
+      const { room } = thread;
       const reply = message.inReplyTo !== null || message.kind === "reply";
-      if (reply && thread.parents.length > 0) continue;
+      if (reply && room === null && thread.parents.length > 0) continue;
       if (message.at < dayStart || message.at >= dayEnd) {
         ({ start: dayStart, end: dayEnd } = dayBounds(message.at));
         rows.push({ kind: "day", label: dayLabel(dayStart, now), before: id });
         previous = null;
       }
       const to = recipients(message);
+      let reference: ReplyReference | null = null;
+      if (
+        room !== null &&
+        message.inReplyTo !== null &&
+        previous?.id !== message.inReplyTo
+      ) {
+        const parent = channel.messages.get(message.inReplyTo);
+        reference =
+          parent === undefined ? earlier : { kind: "message", parent };
+      }
       const grouped =
-        !reply &&
+        (!reply || room !== null) &&
+        reference === null &&
         previous !== null &&
         previous.author === message.author &&
         message.at - previous.at >= 0 &&
         message.at - previous.at <= GROUP_WINDOW &&
         !isSystem(message) &&
         !isSystem(previous);
+      const channelChat = room?.kind === "channel";
       rows.push({
-        kind: reply ? "orphan" : "message",
+        kind: reply && room === null ? "orphan" : "message",
         message,
         thread,
         grouped,
-        showRecipients:
-          !grouped ||
-          ((to.length > 0 || message.kind === "handoff") &&
-            (previous?.kind !== message.kind ||
-              !sameList(recipients(previous), to))),
+        showRecipients: channelChat
+          ? !grouped
+          : !grouped ||
+            ((to.length > 0 || message.kind === "handoff") &&
+              (previous?.kind !== message.kind ||
+                !sameList(previousNamed, to))),
         recipients: to,
-        latestReply: reply ? null : (thread.replies.at(-1) ?? null),
+        latestReply:
+          reply || room !== null ? null : (thread.replies.at(-1) ?? null),
         replyCount: reply
           ? 0
           : Math.max(
               thread.replies.length,
               thread.knownCount - Math.max(1, thread.parents.length),
             ),
+        reference,
       });
-      previous = reply ? null : message;
+      previous = reply && room === null ? null : message;
+      previousNamed = channelChat ? noRecipients : to;
     }
   }
   return rows;
@@ -1103,38 +1207,27 @@ export function participant(
     ? { kind: "member", member: agent, home }
     : { kind: "envoy", id, home: home ?? null };
 }
-// The server looks every `@alias` up in every workspace a post names, so a reply
-// names one workspace, or it would reach same-named agents outside the thread.
-export function replyRecipients(
+// Who a thread reply goes to when its text names no one: every agent who wrote
+// in the thread or was sent a message in it, as the server reads the thread.
+export function threadAgents(
   thread: ThreadGroup,
   directory: Directory,
-): ReplyTo | null {
-  const agents = (ids: readonly (AddressId | "human")[]) =>
-    ids.flatMap((id) => {
+): readonly string[] {
+  const names = new Map<AddressId | "human", string>();
+  for (const message of [...thread.parents, ...thread.replies])
+    for (const id of [message.author, ...recipients(message)]) {
+      if (names.has(id)) continue;
       const who = participant(directory, id);
-      return who.kind === "member" ? [who] : [];
-    });
-  const wrote = agents(
-    [...thread.parents, ...thread.replies].map((message) => message.author),
-  );
-  const pool =
-    wrote.length > 0 ? wrote : agents(thread.parents.flatMap(recipients));
-  const anchor = wrote.length > 0 ? wrote.at(-1) : pool[0];
-  if (anchor === undefined) return null;
-  const { home } = anchor;
-  const aliases = [
-    ...new Set(
-      pool.flatMap((who) => (who.home === home ? [who.member.alias] : [])),
-    ),
-  ];
-  if (home === null) return { names: aliases, mentions: aliases.join(" ") };
-  const { token } = home;
-  return token === null
-    ? null
-    : {
-        names: aliases.map((alias) => `${alias} · ${token}`),
-        mentions: `${token} ${aliases.join(" ")}`,
-      };
+      const agent =
+        who.kind === "envoy" ||
+        (who.kind === "member" &&
+          who.member.kind.type !== "terminal" &&
+          who.member.activity !== "retired");
+      if (!agent) continue;
+      const { name, suffix } = participantCopy(who);
+      names.set(id, suffix === null ? name : `${name} · ${suffix}`);
+    }
+  return [...names.values()];
 }
 
 export type PeekWho = Readonly<{

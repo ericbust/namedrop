@@ -1,12 +1,23 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { composerCopy } from "../copy.ts";
+import {
+  Fragment,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { composerCopy, emptyChannelCopy } from "../copy.ts";
+import { idle } from "../delivery.ts";
 import type { Channel, Directory, Outgoing, SpaceKey } from "../model.ts";
+import { answered, chatOf } from "../route.ts";
 import {
   exitFor,
   GROUP_WINDOW,
   type RunIndex,
   type TimelineRow,
 } from "../store.ts";
+import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
 
@@ -78,6 +89,7 @@ export function Timeline({
 }) {
   const scroller = useRef<HTMLElement>(null);
   const anchors = useRef(new Map<SpaceKey, Anchor>());
+  const deliveries = useContext(DeliveryContext);
   const [far, setFar] = useState(false);
   const shown = useRef<{ key: SpaceKey; at: number } | null>(null);
   if (shown.current?.key !== channel.key)
@@ -140,6 +152,23 @@ export function Timeline({
       (port.top + element.clientTop + element.clientHeight / 2);
     anchors.current.set(channel.key, capture(element));
   }, [located, channel.key]);
+  const chats = useMemo(
+    () =>
+      rows.map((row) =>
+        row.kind === "day" || row.kind === "gap"
+          ? null
+          : chatOf({
+              message: row.message,
+              thread: row.thread,
+              reference: row.reference,
+              directory,
+              replies: row.replyCount,
+              delivery: (alias) =>
+                deliveries?.of(row.message.id, alias) ?? idle,
+            }),
+      ),
+    [rows, directory, deliveries],
+  );
   const history = channel.history;
   const gap = channel.runs.length > 1;
   const browsing = channel.viewMode === "browsing";
@@ -212,14 +241,11 @@ export function Timeline({
       {channel.messages.size === 0 && (
         <div className="empty">
           <Icon name="inbox" />
-          <h2>No messages yet</h2>
-          <p>
-            When agents in this workspace mention each other, the conversation
-            shows up here.
-          </p>
+          <h2>{emptyChannelCopy.title}</h2>
+          <p>{emptyChannelCopy.body}</p>
         </div>
       )}
-      {rows.map((row) => {
+      {rows.map((row, index) => {
         switch (row.kind) {
           case "day":
             return (
@@ -244,12 +270,14 @@ export function Timeline({
           default: {
             const { message, thread, latestReply, replyCount, recipients } =
               row;
-            const answered =
-              latestReply !== null &&
-              recipients.length > 0 &&
-              recipients.every((id) =>
-                thread.replies.some((reply) => reply.author === id),
-              );
+            const replied =
+              thread.room === null
+                ? latestReply !== null &&
+                  recipients.length > 0 &&
+                  recipients.every((id) =>
+                    thread.replies.some((reply) => reply.author === id),
+                  )
+                : answered(thread.room, recipients, message.at, directory);
             return (
               <Fragment key={message.id}>
                 {row.kind === "orphan" && (
@@ -271,11 +299,12 @@ export function Timeline({
                   recipients={recipients}
                   grouped={row.grouped}
                   showRecipients={row.showRecipients}
-                  receipts={!answered}
+                  receipts={!replied}
                   exit={exitFor(runs, message)}
                   latestReply={latestReply}
                   replyCount={replyCount}
                   replyExit={exitFor(runs, latestReply)}
+                  chat={chats[index]}
                   onThread={onThread}
                   paneId={paneId}
                   threadExpanded={expandedThread === thread.id}

@@ -7,6 +7,8 @@ import { createServer, type ViteDevServer } from "vite";
 import { exitFor, initialState, reduce, runsByMessage } from "./store.ts";
 import { parseEvent } from "./wire.ts";
 
+const onControl = async () => ({ kind: "done" }) as const;
+
 let vite: ViteDevServer;
 before(async () => {
   vite = await createServer({
@@ -175,6 +177,7 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
       createElement(NeedsYou, {
         channel: event.channel,
         onFocus() {},
+        onControl,
       }),
     );
     const needsYou = level === "needs_you";
@@ -358,6 +361,30 @@ test("an old retired member leaves the strip but remains the author of its histo
   assert.ok(history.includes("@closed"), history);
 });
 
+test("an escaped mention reads as the plain name in prose, and stays literal in code", async () => {
+  const { Message } = await load<typeof import("./ui/Message.tsx")>(
+    "/src/ui/Message.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  const text = "\\@codex says 6 times 7 is 42.\n```\nwrite \\@codex here\n```";
+  fixture.frame.messages = [
+    { ...fixture.frame.messages[0], body: { text, truncated: false } },
+  ];
+  const { channel } = space(fixture);
+  const message = [...channel.messages.values()][0];
+  assert.ok(message);
+  const markup = renderToStaticMarkup(
+    createElement(Message, {
+      message,
+      directory: { members: channel.members, homes: new Map() },
+      recipients: [],
+      exit: undefined,
+    }),
+  );
+  assert.ok(markup.includes(">@codex says 6 times 7 is 42."), markup);
+  assert.ok(markup.includes("write \\@codex here"), markup);
+});
+
 test("a terminal run for the request decides Exit over the code in the result body", async () => {
   const { Message } = await load<typeof import("./ui/Message.tsx")>(
     "/src/ui/Message.tsx",
@@ -475,7 +502,12 @@ test("attention actions show historical evidence and safe responses for every so
       createElement(
         PeekContext,
         { value: { scope: channel.key, open() {} } },
-        createElement(AttentionActions, { item, channel, onFocus() {} }),
+        createElement(AttentionActions, {
+          item,
+          channel,
+          onFocus() {},
+          onControl,
+        }),
       ),
     );
     assert.ok(markup.includes("Show message"), source);
@@ -496,7 +528,7 @@ test("attention actions show historical evidence and safe responses for every so
   const item = channel.attention[0];
   assert.ok(item);
   const local = renderToStaticMarkup(
-    createElement(AttentionActions, { item, channel, onFocus() {} }),
+    createElement(AttentionActions, { item, channel, onFocus() {}, onControl }),
   );
   assert.ok(local.includes("Namedrop setup from the command palette"), local);
   assert.equal(local.includes("Show message"), false);
@@ -506,6 +538,7 @@ test("attention actions show historical evidence and safe responses for every so
       item: { ...item, source: "coordination" },
       channel,
       onFocus() {},
+      onControl,
     }),
   );
   assert.ok(missing.includes("Namedrop Doctor"), missing);
@@ -542,6 +575,7 @@ test("Activity reuses the attention evidence and response controls", async () =>
       channels: state.channels,
       open: null,
       onFocus() {},
+      onControl,
       onJump() {},
     }),
   );
@@ -572,10 +606,13 @@ test("focused tracked evidence exposes the channel response path without a rejec
           kind: "mention",
           body: { text: "Request", truncated: false },
           legs: [],
+          routing: null,
+          woke: [],
         },
       ],
       replies: [],
       knownCount: 1,
+      room: null,
     },
     runs: new Map(),
     directory,

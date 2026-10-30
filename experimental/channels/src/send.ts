@@ -1,5 +1,16 @@
-import type { SendFailure, SpaceKey } from "./model.ts";
-import { parseReceipt, parseRefusal, parseSessionToken } from "./wire.ts";
+import type {
+  Alias,
+  DeliverResult,
+  SendFailure,
+  SpaceKey,
+  ThreadAction,
+} from "./model.ts";
+import {
+  parseDelivered,
+  parseReceipt,
+  parseRefusal,
+  parseSessionToken,
+} from "./wire.ts";
 
 export type Post = {
   requestId: string;
@@ -10,8 +21,25 @@ export type Post = {
 export type PostResult =
   | { kind: "sent"; messageId: string }
   | ({ kind: "failed" } & SendFailure);
+export type ControlResult =
+  | { kind: "done" }
+  | { kind: "failed"; status: number };
 
-export function createPoster(fetcher: typeof fetch = fetch) {
+// A 2xx status is the server's answer; a body that stalls or breaks after it must not hold the press.
+function bodyWithin(response: Response, ms: number): Promise<string> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<string>((resolve) => {
+    timer = setTimeout(() => {
+      void response.body?.cancel().catch(() => {});
+      resolve("");
+    }, ms);
+  });
+  return Promise.race([response.text().catch(() => ""), late]).finally(() =>
+    clearTimeout(timer),
+  );
+}
+
+export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
   let session: Promise<string | null> | null = null;
   const token = () => {
     session ??= fetcher("/api/session", { credentials: "same-origin" })
@@ -21,21 +49,34 @@ export function createPoster(fetcher: typeof fetch = fetch) {
       .catch(() => null);
     return session;
   };
-  async function attempt(post: Post, csrf: string | null): Promise<Response> {
+  function attempt(
+    path: string,
+    body: object,
+    csrf: string | null,
+    signal: AbortSignal | null,
+  ): Promise<Response> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
     };
     if (csrf !== null) headers["X-Namedrop-Csrf"] = csrf;
-    return fetcher(`/w/${post.key}/messages`, {
+    return fetcher(path, {
       method: "POST",
       credentials: "same-origin",
       headers,
-      body: JSON.stringify({
-        request_id: post.requestId,
-        source: post.source,
-        ...(post.inReplyTo === null ? {} : { in_reply_to: post.inReplyTo }),
-      }),
+      body: JSON.stringify(body),
+      signal,
     });
+  }
+  async function postWithTokenRetry(
+    path: string,
+    body: object,
+    signal: AbortSignal | null = null,
+  ): Promise<Response> {
+    const used = token();
+    const response = await attempt(path, body, await used, signal);
+    if (response.status !== 403) return response;
+    if (session === used) session = null;
+    return attempt(path, body, await token(), signal);
   }
   return {
     prepare(): void {
@@ -43,12 +84,11 @@ export function createPoster(fetcher: typeof fetch = fetch) {
     },
     async post(post: Post): Promise<PostResult> {
       try {
-        const used = token();
-        let response = await attempt(post, await used);
-        if (response.status === 403) {
-          if (session === used) session = null;
-          response = await attempt(post, await token());
-        }
+        const response = await postWithTokenRetry(`/w/${post.key}/messages`, {
+          request_id: post.requestId,
+          source: post.source,
+          ...(post.inReplyTo === null ? {} : { in_reply_to: post.inReplyTo }),
+        });
         if (!response.ok)
           return {
             kind: "failed",
@@ -65,6 +105,50 @@ export function createPoster(fetcher: typeof fetch = fetch) {
         }
       } catch {
         return { kind: "failed", status: 0, message: "" };
+      }
+    },
+    async control(
+      key: SpaceKey,
+      threadId: string,
+      action: ThreadAction,
+      signal: AbortSignal,
+    ): Promise<ControlResult> {
+      try {
+        const response = await postWithTokenRetry(
+          `/w/${key}/threads/${encodeURIComponent(threadId)}/${action}`,
+          {},
+          signal,
+        );
+        return response.ok
+          ? { kind: "done" }
+          : { kind: "failed", status: response.status };
+      } catch {
+        return { kind: "failed", status: 0 };
+      }
+    },
+    async deliver(
+      key: SpaceKey,
+      messageId: string,
+      to: readonly Alias[],
+    ): Promise<ReadonlyMap<Alias, DeliverResult>> {
+      const each = (failure: SendFailure) =>
+        new Map(
+          to.map((alias): [Alias, DeliverResult] => [
+            alias,
+            { kind: "failed", ...failure },
+          ]),
+        );
+      try {
+        const response = await postWithTokenRetry(
+          `/w/${key}/messages/${encodeURIComponent(messageId)}/deliver`,
+          { to: to.map((alias) => alias.slice(1)) },
+        );
+        const body = await bodyWithin(response, bodyWait);
+        return response.ok
+          ? parseDelivered(body, to)
+          : each({ status: response.status, message: parseRefusal(body) });
+      } catch {
+        return each({ status: 0, message: "" });
       }
     },
   };

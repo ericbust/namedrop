@@ -1,15 +1,17 @@
 import type {
+  AddressId,
   Attention,
   AttentionResponse,
   ChannelSnapshot,
   Conversation,
   Directory,
+  Member,
   Message,
   MessageContext,
   ReplyTo,
   SpaceKey,
 } from "./model.ts";
-import { participant, type ThreadGroup } from "./store.ts";
+import { participant, roomOf, type ThreadGroup } from "./store.ts";
 
 export type ReplyIntent = Extract<AttentionResponse, { kind: "reply" }>;
 export type MessageIntent = Extract<AttentionResponse, { kind: "message" }> & {
@@ -149,6 +151,7 @@ export function attentionConversation(
 export function evidenceThread(
   context: MessageContext,
   live: ReadonlyMap<string, Message>,
+  members: ReadonlyMap<AddressId, Member>,
 ): ThreadGroup {
   const rows = new Map(context.messages.map((row) => [row.id, row]));
   for (const row of live.values())
@@ -156,15 +159,19 @@ export function evidenceThread(
   const messages = [...rows.values()].sort(
     (a, b) => a.at - b.at || a.id.localeCompare(b.id),
   );
-  return {
-    id: context.threadId,
+  const group = {
     parents: messages.filter(
       (row) => row.inReplyTo === null && row.kind !== "reply",
     ),
     replies: messages.filter(
       (row) => row.inReplyTo !== null || row.kind === "reply",
     ),
+  };
+  return {
+    id: context.threadId,
+    ...group,
     knownCount: Math.max(context.messageCount, messages.length),
+    room: roomOf(group, members),
   };
 }
 export function attentionReplyTo(

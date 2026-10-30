@@ -149,8 +149,14 @@ test("historical reply target survives live frame eviction and newer replies", (
     kind: "reply",
     body: { text: "Later", truncated: false },
     legs: [],
+    routing: null,
+    woke: [],
   } as const;
-  const merged = evidenceThread(loaded.context, new Map([[newer.id, newer]]));
+  const merged = evidenceThread(
+    loaded.context,
+    new Map([[newer.id, newer]]),
+    channel.members,
+  );
   assert.deepEqual(
     merged.replies.map((row) => row.id),
     [target.messageId, "newer"],
@@ -163,7 +169,7 @@ test("historical reply target survives live frame eviction and newer replies", (
   );
   assert.equal(loaded.request.response?.addressId, member.id);
   assert.equal(
-    evidenceThread(loaded.context, new Map()).replies[0]?.id,
+    evidenceThread(loaded.context, new Map(), channel.members).replies[0]?.id,
     target.messageId,
   );
   const sent = evidenceReduce(loaded, {
@@ -209,6 +215,8 @@ test("legacy attention links only to an available loaded message and does not in
     summary: { text: "Old", truncated: false },
     subjectSummary: null,
     openedAt: 1,
+    threadId: null,
+    actions: [],
   };
   assert.equal(attentionConversation(attention, channel), null);
   assert.deepEqual(
@@ -231,6 +239,8 @@ test("tracked response prepares visible channel text with the owner and exact it
     openedAt: 1,
     subjectAlias: null,
     messageId: null,
+    threadId: null,
+    actions: [],
   };
   const intent = messageIntent(item, target, true);
   assert.ok(intent);

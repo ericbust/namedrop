@@ -1,5 +1,12 @@
+import { composerCopy } from "./copy.ts";
 import { foldLabel } from "./label.ts";
-import type { ChannelSnapshot, Member, ReplyTo, SpaceKey } from "./model.ts";
+import type {
+  AddressId,
+  ChannelSnapshot,
+  Member,
+  SendRule,
+  SpaceKey,
+} from "./model.ts";
 import { channelSuffix } from "./store.ts";
 
 export type DisabledReason =
@@ -36,7 +43,9 @@ export type Completion = {
 };
 
 const ALL = "#all";
-const WHITESPACE = /\s/;
+// Rust's char::is_whitespace, which the server's mention grammar uses; JS \s differs at U+0085 and U+FEFF.
+const WHITESPACE =
+  /[\t\n\v\f\r \u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/;
 
 function disabledReason(
   reason: ChannelSnapshot["notAddressableReason"],
@@ -229,16 +238,96 @@ export function accept(
   };
 }
 
-// The server's send grammar: any `#label` tokens, then at least one valid `@alias`.
-const LEADING_MENTION = /^\s*(?:#[\w.-]+\s+)*@[a-z0-9]+(?:-[a-z0-9]+)*(?:\s|$)/;
-
-export function leadingMention(text: string): boolean {
-  return LEADING_MENTION.test(text);
+const ALIAS = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const LABEL = /^#[A-Za-z0-9._-]+$/;
+const TOKEN_CHAR = /[A-Za-z0-9_-]/;
+const EMBEDDED_AFTER = /[A-Za-z0-9_\\]/;
+type Mentions = {
+  leading: readonly string[];
+  rest: string;
+  anywhere: readonly string[];
+};
+function wordAt(text: string, at: number): string {
+  let end = at;
+  while (end < text.length && !WHITESPACE.test(text.charAt(end))) end++;
+  return text.slice(at, end);
+}
+function spaceAfter(text: string, at: number): number {
+  while (at < text.length && WHITESPACE.test(text.charAt(at))) at++;
+  return at;
+}
+function serverMentions(text: string): Mentions {
+  let at = spaceAfter(text, 0);
+  while (LABEL.test(wordAt(text, at)))
+    at = spaceAfter(text, at + wordAt(text, at).length);
+  const leading = new Set<string>();
+  let word = wordAt(text, at);
+  while (word.startsWith("@") && ALIAS.test(word.slice(1))) {
+    leading.add(word);
+    at = spaceAfter(text, at + word.length);
+    word = wordAt(text, at);
+  }
+  const anywhere = new Set<string>();
+  let cursor = 0;
+  while (cursor < text.length) {
+    const char = text.charAt(cursor);
+    if (char === "`") {
+      const open = cursor;
+      while (text.charAt(cursor) === "`") cursor++;
+      const close = text.indexOf(text.slice(open, cursor), cursor);
+      cursor = close < 0 ? text.length : close + cursor - open;
+    } else if (
+      char === "@" &&
+      !(cursor > 0 && EMBEDDED_AFTER.test(text.charAt(cursor - 1)))
+    ) {
+      let end = cursor + 1;
+      while (end < text.length && TOKEN_CHAR.test(text.charAt(end))) end++;
+      const alias = text.slice(cursor + 1, end);
+      if (ALIAS.test(alias)) anywhere.add(`@${alias}`);
+      cursor = end;
+    } else cursor++;
+  }
+  return {
+    leading: [...leading],
+    rest: leading.size === 0 ? text : text.slice(at),
+    anywhere: [...anywhere],
+  };
+}
+export function leadingMentions(text: string): readonly string[] {
+  return serverMentions(text).leading;
 }
 
-export function postSource(text: string, to: ReplyTo | null): string | null {
+// The agents a channel post mentions, in the order the text first names them.
+export function mentionedAgents(
+  text: string,
+  members: ReadonlyMap<AddressId, Member>,
+): readonly Member[] {
+  const agents = new Map<string, Member>();
+  for (const member of members.values())
+    if (member.kind.type === "agent" && member.activity !== "retired")
+      agents.set(member.alias, member);
+  return serverMentions(text).anywhere.flatMap(
+    (alias) => agents.get(alias) ?? [],
+  );
+}
+
+// The text Enter sends, or null when it must stay in the box.
+export function postSource(text: string, rule: SendRule): string | null {
   const body = text.trim();
-  if (body === "") return null;
-  if (leadingMention(body)) return body;
-  return to === null ? null : `${to.mentions} ${body}`;
+  const { leading, rest } = serverMentions(body);
+  if (leading.length > 0) return rest.trim() === "" ? null : body;
+  return body === "" || (rule.kind === "thread" && rule.to.length === 0)
+    ? null
+    : body;
+}
+
+// Where Enter sends the text, in the words of the hint under the box.
+export function composerHint(rule: SendRule, text: string): string {
+  if (rule.kind === "thread") return composerCopy.hint;
+  const leading = leadingMentions(text);
+  if (leading.length > 0) return composerCopy.sendsOnlyTo(leading);
+  const mentioned = mentionedAgents(text, rule.agents);
+  return mentioned.length > 0
+    ? composerCopy.checks(mentioned.map((member) => member.alias))
+    : composerCopy.toRoom;
 }

@@ -15,11 +15,15 @@ import {
   presenceWord,
   receiptCopy,
   recipientsLabel,
+  referenceCopy,
   relativeAge,
+  repliesCopy,
   replyLabel,
   replyPlaceholder,
+  routeCopy,
   runtimeName,
   sendErrorCopy,
+  threadControlCopy,
 } from "./copy.ts";
 import type { Attention, DeliveryStage, Member } from "./model.ts";
 import { parseEvent } from "./wire.ts";
@@ -104,11 +108,58 @@ function attention(
     openedAt: 0,
     subjectAlias: null,
     messageId: null,
+    threadId: null,
+    actions: [],
     ...extra,
   };
 }
 const ND_DELIVERY =
   "ND-DELIVERY-003: The agent received this message and ended its turn without a reply or a no-reply. Its exact session can still answer it from delivery.inbox.";
+
+test("a reply-limit item the browser can continue or stop says why the agents paused, and names each control in plain words", () => {
+  const limit = (extra: Partial<Attention>) =>
+    attentionCopy(attention("automatic_reply_limit", "Paused", extra));
+  const paused = "The agents paused after 10 replies in a row.";
+  assert.equal(
+    limit({ threadId: "t1", actions: ["continue", "stop"] }).hint,
+    paused,
+  );
+  assert.equal(limit({ threadId: "t1", actions: ["stop"] }).hint, paused);
+  assert.deepEqual(
+    limit({ threadId: "t1", actions: ["continue"], subjectAlias: "@codex" }),
+    {
+      title: "@codex hit the reply limit",
+      hint: paused,
+      details: "Paused",
+    },
+  );
+  for (const extra of [{}, { threadId: "t1" }, { actions: ["continue"] }])
+    assert.equal(
+      limit(extra as Partial<Attention>).hint,
+      "Continue or stop this thread from its pane.",
+      JSON.stringify(extra),
+    );
+  const { status, ...words } = threadControlCopy;
+  assert.equal(status(404), "HTTP 404");
+  assert.deepEqual(words, {
+    continue: {
+      label: "Allow 10 more replies",
+      pending: "Allowing…",
+      title: "Lets the agents send 10 more replies in this thread.",
+      failed: "Couldn't allow more replies. Try again.",
+    },
+    stop: {
+      label: "Stop thread",
+      pending: "Stopping…",
+      title: "Ends agent replies in this thread. You can't undo this.",
+      failed: "Couldn't stop the thread. Try again.",
+    },
+    confirm: "Stop this thread for good?",
+    confirmStop: "Stop",
+    cancel: "Cancel",
+    gone: "This thread is no longer in this workspace.",
+  });
+});
 
 test("Needs-you copy gives every source a title and a hint and keeps the server text in details", () => {
   const table: [Attention["source"], string, string][] = [
@@ -389,14 +440,35 @@ test("composer words name the channel, the thread's recipients and the reason a 
   assert.equal(replyPlaceholder(["@lead · #alpha"]), "Write a reply");
   assert.equal(replyLabel(["@codex"]), "Reply to @codex");
   assert.equal(replyLabel(["@lead · #alpha"]), "Reply to @lead · #alpha");
-  const noOne =
-    "No one in this thread can be mentioned. Start with @name to choose someone.";
+  const noOne = "Start with @name to choose who gets this.";
   assert.equal(replyPlaceholder([]), noOne);
   assert.equal(replyLabel([]), noOne);
   assert.equal(recipientsLabel(["@codex", "@shell"]), "To @codex, @shell");
+  assert.equal(composerCopy.needsRecipient, noOne);
+  assert.equal(composerCopy.hint, "Enter to send · Shift+Enter for a new line");
   assert.equal(
-    composerCopy.needsRecipient,
-    "Start with @name to choose who gets this.",
+    composerCopy.toRoom,
+    "Enter posts to the channel · Mention @name to bring someone in",
+  );
+  assert.equal(
+    composerCopy.checks(["@codex"]),
+    "Enter posts to the channel · Namedrop checks if it's for @codex",
+  );
+  assert.equal(
+    composerCopy.checks(["@codex", "@claude", "@lead"]),
+    "Enter posts to the channel · Namedrop checks if it's for @codex, @claude +1",
+  );
+  assert.equal(
+    composerCopy.sendsOnlyTo(["@codex"]),
+    "Enter sends only to @codex",
+  );
+  assert.equal(
+    composerCopy.sendsOnlyTo(["@codex", "@shell"]),
+    "Enter sends only to @codex, @shell",
+  );
+  assert.equal(
+    composerCopy.sendsOnlyTo(["@codex", "@shell", "@a", "@b"]),
+    "Enter sends only to @codex, @shell +2",
   );
   assert.deepEqual(disabledChannelCopy, {
     "unusable-label":
@@ -489,4 +561,45 @@ test("participant names: remote agents carry their home, envoys and unknown ids 
     title: "envoy:w2:pane-7",
     avatar: "unresolved",
   });
+});
+
+test("channel chat words: the route line, its offers and tooltips, reply counts and the reference line", () => {
+  assert.deepEqual(routeCopy.state, {
+    checking: "Checking who this is for…",
+    failed: "Couldn't check who this is for",
+  });
+  assert.equal(routeCopy.pulledIn, "pulled in");
+  assert.equal(routeCopy.mentioned(["@codex"]), "Mentioned @codex, not sent");
+  assert.equal(
+    routeCopy.mentioned(["@codex", "@claude"]),
+    "Mentioned 2 agents, not sent",
+  );
+  assert.deepEqual(routeCopy.send, { anyway: "Send anyway", to: "Send to" });
+  assert.equal(routeCopy.sendThis("@codex"), "Send this to @codex");
+  assert.equal(routeCopy.tip.router("claude-haiku"), "Picked by claude-haiku");
+  assert.equal(
+    routeCopy.tip.unreachable,
+    "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+  );
+  assert.equal(repliesCopy(1), "1 reply");
+  assert.equal(repliesCopy(3), "3 replies");
+  assert.equal(routeCopy.openReplies(3), "3 replies. Open thread");
+  assert.equal(
+    referenceCopy.label("@claude", "The arm64 link step fails."),
+    "Reply to @claude: The arm64 link step fails. Open thread",
+  );
+  assert.equal(
+    referenceCopy.label("@claude", `${"a".repeat(78)} ${"b".repeat(9)}`),
+    `Reply to @claude: ${"a".repeat(78)}… Open thread`,
+    "a long first line is clipped in the accessible name",
+  );
+  assert.equal(
+    referenceCopy.label("You", "can you look"),
+    "Reply to You: can you look. Open thread",
+  );
+  assert.equal(referenceCopy.earlier, "Reply to an earlier message");
+  assert.equal(
+    referenceCopy.earlierLabel,
+    "Reply to an earlier message. Open thread",
+  );
 });

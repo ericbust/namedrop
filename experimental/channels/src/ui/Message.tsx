@@ -1,14 +1,26 @@
-import { Fragment, memo, type ReactNode, useState } from "react";
+import {
+  Fragment,
+  memo,
+  type ReactNode,
+  useContext,
+  useRef,
+  useState,
+} from "react";
+import { flushSync } from "react-dom";
 import {
   overflowCopy,
   type ParticipantCopy,
   participantCopy,
   pendingCopy,
   receiptCopy,
+  referenceCopy,
+  repliesCopy,
+  routeCopy,
   SHOWN_RECIPIENTS,
 } from "../copy.ts";
 import type {
   AddressId,
+  Alias,
   Directory,
   Message as MessageRow,
   Outgoing,
@@ -16,9 +28,17 @@ import type {
   TerminalRun,
 } from "../model.ts";
 import { peekTargetOf } from "../peek.ts";
-import { participant } from "../store.ts";
+import {
+  type Chat,
+  chatPeople,
+  type RouteLine,
+  type RoutePart,
+  sameChat,
+} from "../route.ts";
+import { participant, type ReplyReference } from "../store.ts";
 import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
+import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { PeekControl, usePeek } from "./PeekContext.tsx";
 
@@ -70,6 +90,9 @@ function clock(at: number) {
     full: date.toLocaleString(),
   };
 }
+// The server reads "\@name" as a reference that wakes no one, so the reader sees just the name.
+const ESCAPED_MENTION = /\\(?=@[a-z0-9])/g;
+const prose = (text: string) => text.replace(ESCAPED_MENTION, "");
 function linkedText(text: string, limit: number): ReactNode {
   const parts: ReactNode[] = [];
   let start = 0;
@@ -77,7 +100,7 @@ function linkedText(text: string, limit: number): ReactNode {
     const at = match.index;
     if (at >= limit) break;
     const href = match[0].replace(/[.,;!?)]+$/, "");
-    parts.push(text.slice(start, Math.min(at, limit)));
+    parts.push(prose(text.slice(start, Math.min(at, limit))));
     parts.push(
       <a key={at} href={href} target="_blank" rel="noreferrer">
         {href.slice(0, limit - at)}
@@ -85,7 +108,7 @@ function linkedText(text: string, limit: number): ReactNode {
     );
     start = at + href.length;
   }
-  if (start < limit) parts.push(text.slice(start, limit));
+  if (start < limit) parts.push(prose(text.slice(start, limit)));
   return parts;
 }
 function formattedText(text: string, limit: number): ReactNode {
@@ -270,6 +293,236 @@ function variantFor(
     : "text";
 }
 
+type ThreadOpener = (threadId: string, button: HTMLButtonElement) => void;
+function Reference({
+  reference,
+  message,
+  directory,
+  onThread,
+}: {
+  reference: ReplyReference;
+  message: MessageRow;
+  directory: Directory;
+  onThread: ThreadOpener;
+}) {
+  let label = referenceCopy.earlierLabel;
+  let content: ReactNode = referenceCopy.earlier;
+  if (reference.kind === "message") {
+    const author = who(directory, reference.parent.author);
+    const [line = ""] = prose(reference.parent.body.text).split("\n", 1);
+    label = referenceCopy.label(author.name, line);
+    content = (
+      <>
+        <span className="reply-ref-author">
+          <Name person={author} />:
+        </span>
+        <span className="reply-ref-text">{line}</span>
+      </>
+    );
+  }
+  return (
+    <button
+      type="button"
+      className="reply-ref"
+      data-thread-id={message.threadId}
+      aria-label={label}
+      onClick={(event) => onThread(message.threadId, event.currentTarget)}
+    >
+      <Icon name="reply" className="icon-12" />
+      {content}
+    </button>
+  );
+}
+function partKey(part: RoutePart): string {
+  switch (part.kind) {
+    case "receipt":
+      return `receipt:${part.id}`;
+    case "delivery":
+      return `delivery:${part.alias}`;
+    default:
+      return part.kind;
+  }
+}
+function Route({
+  line,
+  message,
+  directory,
+  paused,
+  onThread,
+  paneId,
+  expanded,
+}: {
+  line: RouteLine;
+  message: MessageRow;
+  directory: Directory;
+  paused: boolean;
+  onThread: ThreadOpener | undefined;
+  paneId: string | undefined;
+  expanded: boolean;
+}) {
+  const deliveries = useContext(DeliveryContext);
+  const element = useRef<HTMLDivElement>(null);
+  const offerId = (alias: Alias) => `${message.id} ${alias}`;
+  const offer = (alias: Alias, text: string) =>
+    deliveries === null ? (
+      text
+    ) : (
+      <button
+        type="button"
+        className="route-link"
+        aria-label={routeCopy.sendThis(alias)}
+        onClick={() => {
+          flushSync(() => deliveries.deliver(message, alias));
+          for (const button of element.current?.querySelectorAll<HTMLElement>(
+            "[data-offer]",
+          ) ?? [])
+            if (button.dataset.offer === offerId(alias)) button.focus();
+        }}
+      >
+        {text}
+      </button>
+    );
+  function part(part: RoutePart): ReactNode {
+    switch (part.kind) {
+      case "state":
+        return <li className="route-state">{routeCopy.state[part.state]}</li>;
+      case "names":
+        return (
+          <li className="route-names">
+            {part.ids.map((id, index) => (
+              <Fragment key={id}>
+                {index > 0 && ", "}
+                <PeekName directory={directory} id={id} />
+              </Fragment>
+            ))}
+          </li>
+        );
+      case "reason":
+        return <li>{part.text}</li>;
+      case "pulled-in":
+        return <li>{routeCopy.pulledIn}</li>;
+      case "receipt": {
+        const copy = receiptCopy(part.stage, paused);
+        return (
+          <li
+            data-stage={part.stage.stage}
+            data-tone={copy.tone}
+            title={copy.title}
+          >
+            {part.named && (
+              <span className="receipt-to">
+                <Name person={who(directory, part.id)} />
+              </span>
+            )}
+            <Icon name={copy.icon} className="icon-12" />
+            {copy.label}
+          </li>
+        );
+      }
+      case "mentioned":
+        return <li>{routeCopy.mentioned(part.aliases)}</li>;
+      case "send":
+        return (
+          <li>
+            {part.form === "anyway"
+              ? part.aliases.map((alias) => (
+                  <Fragment key={alias}>
+                    {offer(alias, routeCopy.send.anyway)}
+                  </Fragment>
+                ))
+              : [
+                  `${routeCopy.send.to} `,
+                  ...part.aliases.map((alias, index) => (
+                    <Fragment key={alias}>
+                      {index > 0 && ", "}
+                      {offer(alias, alias)}
+                    </Fragment>
+                  )),
+                ]}
+          </li>
+        );
+      case "delivery": {
+        const { alias, state } = part;
+        return (
+          <li>
+            <span role="status">
+              {state.kind === "failed" && (
+                <span className="route-failed">
+                  {routeCopy.delivery.failed(alias)}
+                </span>
+              )}
+              <button
+                type="button"
+                className="route-link"
+                data-offer={offerId(alias)}
+                aria-disabled={state.kind !== "failed" || undefined}
+                title={
+                  state.kind === "failed"
+                    ? routeCopy.delivery.why(state)
+                    : undefined
+                }
+                onClick={() => deliveries?.deliver(message, alias)}
+              >
+                {routeCopy.delivery.label[state.kind](alias)}
+              </button>
+            </span>
+          </li>
+        );
+      }
+      case "replies":
+        return (
+          <li>
+            {onThread === undefined ? (
+              repliesCopy(part.count)
+            ) : (
+              <button
+                type="button"
+                className="route-link"
+                data-thread-id={message.threadId}
+                aria-controls={paneId}
+                aria-expanded={expanded}
+                aria-label={routeCopy.openReplies(part.count)}
+                onClick={(event) =>
+                  onThread(message.threadId, event.currentTarget)
+                }
+              >
+                {repliesCopy(part.count)}
+              </button>
+            )}
+          </li>
+        );
+      default: {
+        const exhaustive: never = part;
+        return exhaustive;
+      }
+    }
+  }
+  const { tip } = line;
+  return (
+    <div
+      ref={element}
+      className="route"
+      data-tone={line.tone}
+      title={
+        tip === null
+          ? undefined
+          : tip.kind === "router"
+            ? routeCopy.tip.router(tip.name)
+            : routeCopy.tip.unreachable
+      }
+    >
+      {line.icon !== null && (
+        <Icon name={line.icon} className="icon-12 route-icon" />
+      )}
+      <ul className="route-parts" aria-label={routeCopy.label}>
+        {line.parts.map((item) => (
+          <Fragment key={partKey(item)}>{part(item)}</Fragment>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 type MessageProps = {
   message: MessageRow;
   directory: Directory;
@@ -282,7 +535,8 @@ type MessageProps = {
   latestReply?: MessageRow | null;
   replyCount?: number;
   replyExit?: TerminalRun | undefined;
-  onThread?: (threadId: string, button: HTMLButtonElement) => void;
+  chat?: Chat | null;
+  onThread?: ThreadOpener;
   paneId?: string;
   threadExpanded?: boolean;
   arrive?: boolean;
@@ -336,7 +590,7 @@ function ReplyPreview({
   reply: MessageRow | null;
   count: number;
   exit: TerminalRun | undefined;
-  onThread: NonNullable<MessageProps["onThread"]>;
+  onThread: ThreadOpener;
   paneId: string | undefined;
   expanded: boolean;
 }) {
@@ -351,7 +605,7 @@ function ReplyPreview({
     const result = type === "terminal" ? terminalResult(reply.body) : null;
     const text = result
       ? (result.stdout || result.stderr).split("\n", 2).join("\n")
-      : reply.body.text;
+      : prose(reply.body.text);
     label = `${replies}${count === 1 ? "" : ", latest"} from ${name}${time ? ` at ${time.label}` : ""}. Open thread`;
     content = (
       <>
@@ -421,6 +675,7 @@ export const Message = memo(
     latestReply = null,
     replyCount = 0,
     replyExit,
+    chat = null,
     onThread,
     paneId,
     threadExpanded = false,
@@ -442,12 +697,22 @@ export const Message = memo(
     const variant = variantFor(message, directory, recipients);
     const named = recipients.map((id) => who(directory, id));
     const result = variant === "output" ? terminalResult(message.body) : null;
+    // A channel-chat message went to the room, so its route line says who got it.
+    const channelChat = chat?.kind === "channel";
     return (
       <article
         className={`msg ${grouped ? "grouped" : "group-start"}${arrive ? " arrive" : ""}${located ? " located" : ""}`}
         data-message-id={message.id}
         data-kind={message.kind}
       >
+        {chat?.reference && onThread && (
+          <Reference
+            reference={chat.reference}
+            message={message}
+            directory={directory}
+            onThread={onThread}
+          />
+        )}
         {grouped ? (
           <time className="msg-gutter" dateTime={time?.iso} title={time?.full}>
             {time?.short}
@@ -464,7 +729,7 @@ export const Message = memo(
                 </span>
               )}
               {!grouped && <Exit run={exit} result={result} />}
-              {recipients.length > 0 && (
+              {!channelChat && recipients.length > 0 && (
                 <span
                   className="to"
                   title={
@@ -525,10 +790,38 @@ export const Message = memo(
               variant={variant}
             />
           )}
-          {receipts && message.legs.length > 0 && (
-            <Receipts message={message} directory={directory} paused={paused} />
+          {channelChat
+            ? chat.route && (
+                <Route
+                  line={chat.route}
+                  message={message}
+                  directory={directory}
+                  paused={paused}
+                  onThread={onThread}
+                  paneId={paneId}
+                  expanded={threadExpanded}
+                />
+              )
+            : receipts &&
+              message.legs.length > 0 && (
+                <Receipts
+                  message={message}
+                  directory={directory}
+                  paused={paused}
+                />
+              )}
+          {chat?.kind === "agents" && chat.route && (
+            <Route
+              line={chat.route}
+              message={message}
+              directory={directory}
+              paused={paused}
+              onThread={onThread}
+              paneId={paneId}
+              expanded={threadExpanded}
+            />
           )}
-          {onThread && replyCount > 0 && (
+          {chat == null && onThread && replyCount > 0 && (
             <ReplyPreview
               message={message}
               directory={directory}
@@ -554,6 +847,7 @@ export const Message = memo(
     before.latestReply === after.latestReply &&
     before.replyCount === after.replyCount &&
     before.replyExit === after.replyExit &&
+    sameChat(before.chat ?? null, after.chat ?? null) &&
     before.onThread === after.onThread &&
     before.paneId === after.paneId &&
     before.threadExpanded === after.threadExpanded &&
@@ -570,7 +864,10 @@ export const Message = memo(
             before.directory,
             after.directory,
             before.latestReply.author,
-          )))),
+          )) &&
+        chatPeople(before.chat ?? null).every((id) =>
+          samePerson(before.directory, after.directory, id),
+        ))),
 );
 
 export function PendingMessage({
@@ -581,7 +878,8 @@ export function PendingMessage({
   grouped?: boolean;
 }) {
   const time = clock(entry.at);
-  const copy = pendingCopy[entry.phase.kind === "sent" ? "sent" : "sending"];
+  const stage = entry.phase.kind;
+  const copy = pendingCopy[stage];
   return (
     <article
       className={`msg pending ${grouped ? "grouped" : "group-start"}`}
@@ -607,7 +905,7 @@ export function PendingMessage({
         )}
         <Body text={entry.source} truncated={false} variant="text" />
         <ul className="receipt" aria-label="Delivery">
-          <li data-stage={entry.phase.kind}>
+          <li data-stage={stage}>
             <Icon name={copy.icon} className="icon-12" />
             {copy.label}
           </li>

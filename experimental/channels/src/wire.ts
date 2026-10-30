@@ -1,10 +1,12 @@
 import type {
   Activity,
   AddressId,
+  Alias,
   Attention,
   AttentionResponse,
   ChannelSnapshot,
   Conversation,
+  DeliverResult,
   DeliveryStage,
   Health,
   MailItem,
@@ -18,6 +20,7 @@ import type {
   MessageKind,
   NotAddressableReason,
   Route,
+  Routing,
   SafeText,
   Screen,
   ScreenFailure,
@@ -25,6 +28,7 @@ import type {
   SpaceState,
   TerminalResult,
   TerminalRun,
+  ThreadAction,
   ThreadChip,
   WireEvent,
 } from "./model.ts";
@@ -54,7 +58,7 @@ function addressId(value: unknown): AddressId {
 function optionalIdentity(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
 }
-function optionalAlias(value: unknown): string | null {
+function optionalAlias(value: unknown): Alias | null {
   const bare = typeof value === "string" ? value.replace(/^@+/, "") : "";
   return bare.trim() ? `@${bare}` : null;
 }
@@ -238,7 +242,17 @@ function attention(
     openedAt,
     subjectAlias: optionalAlias(item.subject_alias),
     messageId: optionalIdentity(item.message_id),
+    threadId: optionalIdentity(item.thread_id),
+    actions: threadActions(item.actions),
   };
+}
+const noActions: readonly ThreadAction[] = [];
+function threadActions(value: unknown): readonly ThreadAction[] {
+  if (!Array.isArray(value)) return noActions;
+  const found = new Set<ThreadAction>();
+  for (const action of value)
+    if (action === "continue" || action === "stop") found.add(action);
+  return found.size === 0 ? noActions : [...found];
 }
 function terminalRuns(value: unknown): TerminalRun[] {
   if (!Array.isArray(value)) return [];
@@ -362,42 +376,58 @@ function deliveryStage(value: unknown): DeliveryStage {
       return { stage: "unknown" };
   }
 }
-export type ChannelRouting = {
-  state: "routing" | "routed" | "unrouted" | "router_failed";
-  to: readonly string[];
-  mentioned?: readonly string[];
-  reason?: string;
-  router?: string;
-};
-
-export type ChannelMessage = Message & {
-  channel?: ChannelRouting;
-  woke?: readonly string[];
-};
-
-function channelRouting(value: unknown): ChannelRouting {
-  const item = record(value);
-  const state = text(item.state);
-  switch (state) {
+const REASON_LIMIT = 60;
+// The router model's words, made safe to show on one line.
+// The router's topic when the model named none. It says nothing, so it reads as no reason.
+const NO_TOPIC = "General topic";
+function reasonText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const line = value.replace(/\s+/g, " ").trim();
+  if (line === "" || line === NO_TOPIC) return null;
+  const points = Array.from(line);
+  return points.length <= REASON_LIMIT
+    ? line
+    : `${points
+        .slice(0, REASON_LIMIT - 1)
+        .join("")
+        .trimEnd()}…`;
+}
+function routing(value: unknown): Routing | null {
+  if (value === undefined || value === null) return null;
+  const item =
+    typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const mentioned = aliases(item.mentioned);
+  switch (item.state) {
     case "routing":
-    case "routed":
     case "unrouted":
     case "router_failed":
+      return { state: item.state, mentioned };
+    case "routed":
       return {
-        state,
-        to: array(item.to).map(identity),
-        ...(item.mentioned === undefined
-          ? {}
-          : { mentioned: array(item.mentioned).map(identity) }),
-        ...(item.reason === undefined ? {} : { reason: text(item.reason) }),
-        ...(item.router === undefined ? {} : { router: identity(item.router) }),
+        state: item.state,
+        mentioned,
+        reason: reasonText(item.reason),
+        router: optionalIdentity(item.router),
       };
     default:
-      throw new Error("Invalid channel routing state");
+      return { state: "unknown", mentioned };
   }
 }
-
-function message(value: unknown): ChannelMessage {
+const noAliases: readonly Alias[] = [];
+// A list of aliases, bare or with "@", as `Member.alias` holds them. Anything
+// else in the list is dropped, so a malformed entry never drops the frame.
+function aliases(value: unknown): readonly Alias[] {
+  if (!Array.isArray(value)) return noAliases;
+  const found = new Set<Alias>();
+  for (const raw of value) {
+    const alias = optionalAlias(raw);
+    if (alias !== null) found.add(alias);
+  }
+  return found.size === 0 ? noAliases : [...found];
+}
+function message(value: unknown): Message {
   const item = record(value);
   return {
     id: identity(item.message_id),
@@ -407,20 +437,16 @@ function message(value: unknown): ChannelMessage {
     author: item.author === "human" ? "human" : addressId(item.author),
     kind: messageKind(item.kind),
     body: safeText(item.body),
-    ...(item.channel === undefined
-      ? {}
-      : { channel: channelRouting(item.channel) }),
-    ...(item.woke === undefined
-      ? {}
-      : { woke: array(item.woke).map(identity) }),
     legs: array(item.legs).map((raw) => {
       const leg = record(raw);
       return { to: addressId(leg.to), stage: deliveryStage(leg.stage) };
     }),
+    routing: routing(item.channel),
+    woke: aliases(item.woke),
   };
 }
-function messages(value: unknown): Map<string, ChannelMessage> {
-  const rows = new Map<string, ChannelMessage>();
+function messages(value: unknown): Map<string, Message> {
+  const rows = new Map<string, Message>();
   for (const raw of array(value)) {
     const row = message(raw);
     if (rows.has(row.id)) throw new Error("Duplicate message");
@@ -533,7 +559,7 @@ export function parseMessageContext(
     messages: rows,
   };
 }
-export function parseHistory(raw: unknown): readonly ChannelMessage[] {
+export function parseHistory(raw: unknown): readonly Message[] {
   return [...messages(raw).values()].reverse();
 }
 function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
@@ -611,6 +637,52 @@ export function parseReceipt(raw: unknown): string {
 }
 export function parseSessionToken(raw: unknown): string {
   return identity(record(raw).csrf_token);
+}
+function aliasSet(value: unknown): ReadonlySet<Alias> | null {
+  if (!Array.isArray(value)) return null;
+  const aliases = new Set<Alias>();
+  for (const item of value) {
+    const alias = optionalAlias(item);
+    if (alias === null) return null;
+    aliases.add(alias);
+  }
+  return aliases;
+}
+function fields(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+function reason(value: unknown): string | null {
+  return optionalIdentity(value)?.trim() ?? null;
+}
+export function parseDelivered(
+  body: string,
+  to: readonly Alias[],
+): ReadonlyMap<Alias, DeliverResult> {
+  let answer: Record<string, unknown> = {};
+  try {
+    answer = fields(JSON.parse(body) as unknown);
+  } catch {}
+  const delivered = aliasSet(answer.delivered);
+  const reasons = new Map<Alias, string>();
+  for (const item of Array.isArray(answer.not_delivered)
+    ? answer.not_delivered
+    : []) {
+    const entry = fields(item);
+    const alias = optionalAlias(entry.alias);
+    const why = reason(entry.reason);
+    if (alias !== null && why !== null) reasons.set(alias, why);
+  }
+  const error = reason(answer.error) ?? "";
+  return new Map(
+    to.map((alias): [Alias, DeliverResult] => [
+      alias,
+      delivered === null || delivered.has(alias)
+        ? { kind: "done" }
+        : { kind: "failed", status: 200, message: reasons.get(alias) ?? error },
+    ]),
+  );
 }
 export function parseRefusal(body: string): string {
   try {

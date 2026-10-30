@@ -7,7 +7,9 @@ import {
   type CompletionContext,
   channelOptions,
   complete,
-  leadingMention,
+  composerHint,
+  leadingMentions,
+  mentionedAgents,
   postSource,
 } from "./complete.ts";
 import type { ChannelSnapshot, SpaceKey } from "./model.ts";
@@ -353,36 +355,164 @@ test("complete: channel options that share a name carry the sidebar's workspace 
 });
 
 test("complete: a post names its recipients only the way the server's grammar reads them", () => {
-  const cases: [string, boolean][] = [
-    ["@codex hi", true],
-    ["  #beta @codex hi", true],
-    ["#all @codex hi", true],
-    ["#alpha #beta @lead @reviewer hi", true],
-    ["@codex\nhi", true],
-    ["@codex", true],
-    ["hello", false],
-    ["hi @codex", false],
-    ["@ alone", false],
-    ["#alpha hi", false],
-    ["#alpha", false],
-    ["#42 fix the build", false],
-    ["@Codex hi", false],
-    ["@codex, hi", false],
-    ["@-codex hi", false],
-    ["@co--dex hi", false],
-    ["#alpha hi @codex", false],
+  const cases: [string, string[]][] = [
+    ["@codex hi", ["@codex"]],
+    ["  #beta @codex hi", ["@codex"]],
+    ["#all @codex hi", ["@codex"]],
+    ["#alpha #beta @lead @reviewer hi", ["@lead", "@reviewer"]],
+    [
+      "@codex  @shell\n@claude-2 run it @lead",
+      ["@codex", "@shell", "@claude-2"],
+    ],
+    ["@codex @Shell hi", ["@codex"]],
+    ["@codex\nhi", ["@codex"]],
+    ["@codex", ["@codex"]],
+    ["hello", []],
+    ["hi @codex", []],
+    ["@ alone", []],
+    ["#alpha hi", []],
+    ["#alpha", []],
+    ["#42 fix the build", []],
+    ["@Codex hi", []],
+    ["@codex, hi", []],
+    ["@-codex hi", []],
+    ["@co--dex hi", []],
+    ["#alpha hi @codex", []],
   ];
   for (const [text, named] of cases)
-    assert.equal(leadingMention(text), named, JSON.stringify(text));
+    assert.deepEqual(leadingMentions(text), named, JSON.stringify(text));
 });
 
-test("complete: a post sends its own recipients, else the thread's, else nothing", () => {
-  const to = { names: ["@lead · #alpha"], mentions: "#alpha @lead" };
-  assert.equal(postSource("  @codex hi ", to), "@codex hi");
-  assert.equal(postSource("thanks", to), "#alpha @lead thanks");
-  assert.equal(postSource("#alpha hi", to), "#alpha @lead #alpha hi");
-  assert.equal(postSource("hello", null), null);
-  assert.equal(postSource("   ", to), null);
+test("complete: a channel post mentions the agents it names anywhere, once each, in the order it names them", () => {
+  const { members } = alpha;
+  const named = (text: string) =>
+    mentionedAgents(text, members).map((member) => member.alias);
+  assert.deepEqual(named("can @claude ask @codex, then @claude again?"), [
+    "@claude",
+    "@codex",
+  ]);
+  assert.deepEqual(named("@codex: look"), ["@codex"]);
+  assert.deepEqual(named("(@codex) and @claude."), ["@codex", "@claude"]);
+  assert.deepEqual(named("mail me at ops@codex or x_@codex or 1@codex"), []);
+  assert.deepEqual(named("escaped \\@codex stays text"), []);
+  assert.deepEqual(named("@codex-2 and @codex- and @codexx"), []);
+  assert.deepEqual(named("@Codex and @CODEX"), []);
+  assert.deepEqual(named("@shell ls"), [], "a terminal never counts");
+  assert.deepEqual(named("@ghost come back"), [], "a retired agent");
+  assert.deepEqual(named("@you and @unknown"), [], "not agents");
+  assert.deepEqual(named("é@codex and ü @codex"), ["@codex"]);
+});
+
+test("complete: the hint finds mentions the way the server does, in code spans, after other characters, and in whole tokens", () => {
+  const { members } = alpha;
+  const named = (text: string) =>
+    mentionedAgents(text, members).map((member) => member.alias);
+  const cases: [string, string[]][] = [
+    ["can @claude ask @codex, then @claude again?", ["@claude", "@codex"]],
+    ["`@codex` stays code", []],
+    ["``say `@codex` here`` and @claude", ["@claude"]],
+    ["`` a ` @codex `` then @claude", ["@claude"]],
+    ["```@codex``` @claude", ["@claude"]],
+    ["unclosed `code @codex and @claude", []],
+    ["unclosed ``code` @codex", []],
+    ["x@codex 1@codex _@codex \\@codex X@claude", []],
+    ["é@claude", ["@claude"]],
+    ["日本@codex", ["@codex"]],
+    ["-@codex (@claude)", ["@codex", "@claude"]],
+    ["@@codex", ["@codex"]],
+    ["@codex@claude", ["@codex"]],
+    ["@codex_x and @codex-x and @co--dex and @codex-", []],
+    ["@Codex and @CODEX", []],
+    ["@codex. @claude,", ["@codex", "@claude"]],
+    ["@codex: look", ["@codex"]],
+    ["mail me at ops@codex", []],
+    ["@shell ls and @ghost and @you", []],
+  ];
+  for (const [text, expected] of cases)
+    assert.deepEqual(named(text), expected, JSON.stringify(text));
+  const leading: [string, string[]][] = [
+    ["@codex @codex hi", ["@codex"]],
+    ["#ALL @codex hi", ["@codex"]],
+    ["#al!pha @codex hi", []],
+    ["@codex_x hi", []],
+    ["@codex. hi", []],
+    ["`@codex` hi", []],
+    ["\t#alpha\n@codex\u00a0@claude hi", ["@codex", "@claude"]],
+    ["@codex\u0085hi", ["@codex"]],
+    ["@codex\ufeffhi", []],
+    ["@codex\u3000hi", ["@codex"]],
+  ];
+  for (const [text, expected] of leading)
+    assert.deepEqual(leadingMentions(text), expected, JSON.stringify(text));
+  const channel = { kind: "channel", agents: members } as const;
+  assert.equal(
+    composerHint(channel, "ask `@codex` about it"),
+    "Enter posts to the channel · Mention @name to bring someone in",
+  );
+  assert.equal(
+    composerHint(channel, "é@claude look"),
+    "Enter posts to the channel · Namedrop checks if it's for @claude",
+  );
+  assert.equal(
+    composerHint(channel, "@codex @codex hi"),
+    "Enter sends only to @codex",
+  );
+});
+
+test("complete: a channel post sends as typed, a thread reply needs agents or its own mentions", () => {
+  const channel = { kind: "channel", agents: alpha.members } as const;
+  assert.equal(postSource("  hello room ", channel), "hello room");
+  assert.equal(postSource("can @codex look?", channel), "can @codex look?");
+  assert.equal(postSource("@codex hi", channel), "@codex hi");
+  assert.equal(postSource("  \n ", channel), null);
+  const agents = { kind: "thread", to: ["@lead · #alpha"] } as const;
+  assert.equal(postSource(" thanks ", agents), "thanks", "never prefixed");
+  assert.equal(postSource("#alpha hi", agents), "#alpha hi");
+  assert.equal(postSource("@codex hi", agents), "@codex hi");
+  const nobody = { kind: "thread", to: [] } as const;
+  assert.equal(postSource("ls -la", nobody), null);
+  assert.equal(postSource("hi @shell", nobody), null);
+  assert.equal(postSource("@shell ls -la", nobody), "@shell ls -la");
+  assert.equal(postSource("#alpha @shell ls", nobody), "#alpha @shell ls");
+  assert.equal(postSource("   ", agents), null);
+  for (const rule of [channel, agents, nobody])
+    for (const text of ["@codex", " @codex  ", "#alpha @codex @shell\n"])
+      assert.equal(
+        postSource(text, rule),
+        null,
+        `${JSON.stringify(text)} names someone but has no message`,
+      );
+});
+
+test("complete: the hint says where Enter sends the text", () => {
+  const channel = { kind: "channel", agents: alpha.members } as const;
+  const hint = (text: string) => composerHint(channel, text);
+  const room = "Enter posts to the channel · Mention @name to bring someone in";
+  assert.equal(hint(""), room);
+  assert.equal(hint("heads up, keys rotate at 3pm"), room);
+  assert.equal(hint("ask @shell and @ghost"), room, "no agent mentioned");
+  assert.equal(
+    hint("can @codex look?"),
+    "Enter posts to the channel · Namedrop checks if it's for @codex",
+  );
+  assert.equal(
+    hint("@ @claude, @codex and @claude"),
+    "Enter posts to the channel · Namedrop checks if it's for @claude, @codex",
+  );
+  assert.equal(hint("@codex hi"), "Enter sends only to @codex");
+  assert.equal(
+    hint("#alpha @codex @shell hi"),
+    "Enter sends only to @codex, @shell",
+  );
+  assert.equal(
+    hint("@codex @shell @lead @claude hi"),
+    "Enter sends only to @codex, @shell +2",
+  );
+  for (const to of [[], ["@codex"]])
+    assert.equal(
+      composerHint({ kind: "thread", to }, "@codex hi"),
+      "Enter to send · Shift+Enter for a new line",
+    );
 });
 
 test("complete: disabled copy follows the server reason despite sanitized or identical names", () => {

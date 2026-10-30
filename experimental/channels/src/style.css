@@ -686,9 +686,16 @@ button.member:not(.more):hover {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
-.text-button:disabled {
+.text-button:disabled,
+.text-button[aria-disabled="true"] {
   color: var(--text-muted);
   text-decoration: none;
+}
+.text-button.confirm-stop {
+  color: var(--failed-text);
+}
+.text-button.confirm-stop[aria-disabled="true"] {
+  color: var(--text-muted);
 }
 .attention {
   margin: var(--space-3) var(--space-6) 0;
@@ -754,6 +761,16 @@ button.member:not(.more):hover {
   flex-wrap: wrap;
   column-gap: var(--space-4);
   margin-top: 2px;
+}
+.attention-confirm {
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+.attention-failure {
+  grid-column: 2;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--failed-text);
 }
 .attention-more {
   padding: 6px 14px 6px 40px;
@@ -998,16 +1015,20 @@ button.member:not(.more):hover {
   align-items: center;
   gap: var(--space-1);
 }
-.receipt [data-tone="working"] {
+.receipt [data-tone="working"],
+.route-parts [data-tone="working"] {
   --receipt-icon: var(--working);
 }
-.receipt .icon {
+.receipt .icon,
+.route-parts .icon {
   color: var(--receipt-icon, currentColor);
 }
-.receipt [data-tone="held"] {
+.receipt [data-tone="held"],
+.route-parts [data-tone="held"] {
   color: var(--held-text);
 }
-.receipt [data-tone="failed"] {
+.receipt [data-tone="failed"],
+.route-parts [data-tone="failed"] {
   color: var(--failed-text);
 }
 .receipt li + li::before {
@@ -1016,6 +1037,111 @@ button.member:not(.more):hover {
 }
 .receipt-to {
   margin-right: 2px;
+}
+.route {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin-top: 3px;
+  font-size: var(--text-xs);
+  line-height: 16px;
+  color: var(--text-muted);
+}
+.route-icon {
+  flex: none;
+  margin-top: 2px;
+}
+.route[data-tone="failed"] .route-icon,
+.route[data-tone="failed"] .route-state {
+  color: var(--failed-text);
+}
+.route-parts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px var(--space-2);
+  min-width: 0;
+}
+.route-names {
+  font-weight: 600;
+  color: var(--text);
+}
+.route-link {
+  position: relative;
+  padding-block: var(--space-2);
+  margin-block: calc(-1 * var(--space-2));
+  font-weight: 600;
+  color: var(--accent-text);
+}
+.route-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.route-link[aria-disabled="true"] {
+  color: var(--text-muted);
+  text-decoration: none;
+  cursor: default;
+}
+.route-failed {
+  color: var(--failed-text);
+}
+.route-failed::after {
+  content: "·" / "";
+  margin-inline: var(--space-2);
+  font-weight: 400;
+  color: var(--text-muted);
+}
+/* The padding gives a 32px hit target. The ring hugs the 12px text instead, so
+   it never covers the line above. */
+.route-link:focus-visible {
+  outline: none;
+}
+.route-link:focus-visible::after {
+  content: "";
+  position: absolute;
+  inset: var(--space-2) 0;
+  border-radius: var(--radius-sm);
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  pointer-events: none;
+}
+.route-parts [data-stage] {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+.route-parts li + li::before {
+  content: "·" / "";
+  margin-right: var(--space-2);
+  font-weight: 400;
+  color: var(--text-muted);
+}
+.reply-ref {
+  grid-column: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: var(--measure);
+  padding-block: var(--space-2);
+  margin-block: calc(-1 * var(--space-2)) -6px;
+  font-size: var(--text-xs);
+  line-height: 16px;
+  color: var(--text-muted);
+  text-align: left;
+}
+.reply-ref:hover {
+  color: var(--text);
+}
+.reply-ref-author {
+  flex: none;
+  font-weight: 600;
+}
+.reply-ref-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .report {
   max-width: var(--measure);

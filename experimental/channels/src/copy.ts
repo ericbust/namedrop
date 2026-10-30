@@ -1,5 +1,7 @@
 import type { ActivityGroupKind } from "./activity.ts";
 import type { DisabledReason } from "./complete.ts";
+import { threadControls } from "./control.ts";
+import type { Delivery } from "./delivery.ts";
 import type {
   Activity,
   Attention,
@@ -11,8 +13,10 @@ import type {
   Participant,
   ScreenFailure,
   SendFailure,
+  ThreadAction,
 } from "./model.ts";
 import type { PeekNotice } from "./peek.ts";
+import type { RouteState, RouteTip, SendForm } from "./route.ts";
 import type { PeekWho } from "./store.ts";
 
 export type IconName =
@@ -118,9 +122,36 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
   },
   unknown: { ...needsYou, hint: "Open Details for the full message." },
 };
+export const threadControlCopy = {
+  continue: {
+    label: "Allow 10 more replies",
+    pending: "Allowing…",
+    title: "Lets the agents send 10 more replies in this thread.",
+    failed: "Couldn't allow more replies. Try again.",
+  },
+  stop: {
+    label: "Stop thread",
+    pending: "Stopping…",
+    title: "Ends agent replies in this thread. You can't undo this.",
+    failed: "Couldn't stop the thread. Try again.",
+  },
+  confirm: "Stop this thread for good?",
+  confirmStop: "Stop",
+  cancel: "Cancel",
+  gone: "This thread is no longer in this workspace.",
+  status: (code: number) => `HTTP ${code}`,
+} satisfies Record<
+  ThreadAction,
+  { label: string; pending: string; title: string; failed: string }
+> &
+  Record<string, unknown>;
+const pausedHint = "The agents paused after 10 replies in a row.";
 export function attentionCopy(item: Attention): AttentionCopy {
   const { text, truncated } = item.summary;
-  const row = attentionTable[item.source];
+  const row =
+    item.source === "automatic_reply_limit" && threadControls(item) !== null
+      ? { ...attentionTable[item.source], hint: pausedHint }
+      : attentionTable[item.source];
   if (
     item.source === "agent_status" &&
     !truncated &&
@@ -262,12 +293,26 @@ export function sendErrorCopy({ status, message }: SendFailure): string {
   return (sendErrors.get(status) ?? (() => couldNotSend))(message);
 }
 
+// At most two names, then "+N".
+function shortList(names: readonly string[]): string {
+  const shown = names.slice(0, SHOWN_RECIPIENTS).join(", ");
+  return names.length > SHOWN_RECIPIENTS
+    ? `${shown} ${overflowCopy(names.length - SHOWN_RECIPIENTS)}`
+    : shown;
+}
 export const composerCopy = {
   hint: "Enter to send · Shift+Enter for a new line",
+  toRoom: "Enter posts to the channel · Mention @name to bring someone in",
+  checks: (names: readonly string[]) =>
+    `Enter posts to the channel · Namedrop checks if it's for ${shortList(names)}`,
+  sendsOnlyTo: (names: readonly string[]) =>
+    `Enter sends only to ${shortList(names)}`,
   sending: "Sending…",
   send: "Send",
   everyWorkspace: "every workspace",
   needsRecipient: "Start with @name to choose who gets this.",
+  needsMessage: (names: readonly string[]) =>
+    `Add a message after ${shortList(names)}.`,
   postNotSent: "A post wasn't sent",
   replyNotSent: "Reply not sent · Open thread",
 };
@@ -288,15 +333,15 @@ export function composerPlaceholder(
 ): string {
   return `Message ${channelMention(channel)}`;
 }
-const noOneToReplyTo =
-  "No one in this thread can be mentioned. Start with @name to choose someone.";
 // The "To" label above the box already names the recipients.
 export function replyPlaceholder(recipients: readonly string[]): string {
-  return recipients.length === 0 ? noOneToReplyTo : "Write a reply";
+  return recipients.length === 0
+    ? composerCopy.needsRecipient
+    : "Write a reply";
 }
 export function replyLabel(recipients: readonly string[]): string {
   return recipients.length === 0
-    ? noOneToReplyTo
+    ? composerCopy.needsRecipient
     : `Reply to ${recipients.join(", ")}`;
 }
 export function recipientsLabel(recipients: readonly string[]): string {
@@ -311,6 +356,73 @@ export const disabledChannelCopy = {
   unknown:
     "Namedrop can't mention this workspace by its label. Check that the label is unique and isn't “all”, and that Namedrop is active there.",
 } satisfies Record<DisabledReason, string>;
+
+export function repliesCopy(count: number): string {
+  return `${count} ${count === 1 ? "reply" : "replies"}`;
+}
+export const routeCopy = {
+  label: "Who got this",
+  state: {
+    checking: "Checking who this is for…",
+    failed: "Couldn't check who this is for",
+  } satisfies Record<RouteState, string>,
+  pulledIn: "pulled in",
+  mentioned: (aliases: readonly string[]) =>
+    aliases.length === 1
+      ? `Mentioned ${aliases[0]}, not sent`
+      : `Mentioned ${aliases.length} agents, not sent`,
+  send: { anyway: "Send anyway", to: "Send to" } satisfies Record<
+    SendForm,
+    string
+  >,
+  sendThis: (alias: string) => `Send this to ${alias}`,
+  delivery: {
+    label: {
+      sending: (alias: string) => `Sending to ${alias}…`,
+      sent: (alias: string) => `Sent to ${alias}`,
+      failed: () => "Try again",
+    } satisfies Record<
+      Exclude<Delivery["kind"], "idle">,
+      (alias: string) => string
+    >,
+    failed: (alias: string) => `Couldn't send to ${alias}`,
+    why: ({ status, message }: SendFailure) => {
+      if (status === 0) return "Couldn't reach Namedrop.";
+      if (message !== "") return message;
+      return status === 200
+        ? "Namedrop didn't send it. The name may belong to a different agent now."
+        : `HTTP ${status}`;
+    },
+  },
+  tip: {
+    router: (name: string) => `Picked by ${name}`,
+    unreachable:
+      "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+  } satisfies Record<RouteTip["kind"], unknown>,
+  openReplies: (count: number) => `${repliesCopy(count)}. Open thread`,
+};
+const REFERENCE_LIMIT = 80;
+export const referenceCopy = {
+  earlier: "Reply to an earlier message",
+  label: (author: string, line: string) => {
+    const points = Array.from(line);
+    const clipped =
+      points.length > REFERENCE_LIMIT
+        ? `${points
+            .slice(0, REFERENCE_LIMIT - 1)
+            .join("")
+            .trimEnd()}…`
+        : line;
+    const stop = /[.!?…]$/.test(clipped) ? "" : ".";
+    return `Reply to ${author}: ${clipped}${stop} Open thread`;
+  },
+  earlierLabel: "Reply to an earlier message. Open thread",
+};
+
+export const emptyChannelCopy = {
+  title: "No messages yet",
+  body: "Post here to talk with the agents in this workspace. Mention @name to bring one in.",
+};
 
 export const SHOWN_RECIPIENTS = 2;
 export function overflowCopy(hidden: number): string {

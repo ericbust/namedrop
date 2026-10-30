@@ -14,8 +14,9 @@ import {
   type Candidate,
   type CompletionContext,
   complete,
+  composerHint,
   insertion,
-  leadingMention,
+  leadingMentions,
   postSource,
 } from "../complete.ts";
 import {
@@ -30,7 +31,7 @@ import type {
   Draft,
   DraftKey,
   Outgoing,
-  ReplyTo,
+  SendRule,
 } from "../model.ts";
 import { draftKey, inFlight } from "../store.ts";
 import { Avatar } from "./Avatar.tsx";
@@ -131,7 +132,7 @@ export function Composer({
   outbox,
   placeholder,
   label,
-  to,
+  rule,
   onEdit,
   onSend,
 }: {
@@ -141,7 +142,7 @@ export function Composer({
   outbox: ReadonlyMap<string, Outgoing>;
   placeholder: string;
   label: string;
-  to: ReplyTo | null;
+  rule: SendRule;
   onEdit: (text: string) => void;
   onSend: (source: string, startedAt: number) => void;
 }) {
@@ -162,8 +163,8 @@ export function Composer({
   const text = draft?.text ?? "";
   const failure = draft?.failure ?? null;
   const sending = inFlight(outbox, composer);
-  const named = leadingMention(text);
-  const source = postSource(text, to);
+  const leading = leadingMentions(text);
+  const source = postSource(text, rule);
 
   const completion = useMemo(
     () => (sending ? null : complete(text, caret, context)),
@@ -317,9 +318,11 @@ export function Composer({
             ))}
           </div>
         )}
-        {to && !named && (
-          <span className="composer-to">{recipientsLabel(to.names)}</span>
-        )}
+        {rule.kind === "thread" &&
+          rule.to.length > 0 &&
+          leading.length === 0 && (
+            <span className="composer-to">{recipientsLabel(rule.to)}</span>
+          )}
         <textarea
           ref={box}
           rows={1}
@@ -337,7 +340,10 @@ export function Composer({
           onChange={onChange}
           onKeyDown={onKeyDown}
           onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
-          onFocus={() => setFocused(true)}
+          onFocus={(event) => {
+            setFocused(true);
+            setCaret(event.currentTarget.selectionStart);
+          }}
           onBlur={() => setFocused(false)}
         />
         <button
@@ -360,9 +366,13 @@ export function Composer({
         ) : sending ? (
           <p>{composerCopy.sending}</p>
         ) : guarded && source === null && text.trim() !== "" ? (
-          <p className="composer-guard">{composerCopy.needsRecipient}</p>
+          <p className="composer-guard">
+            {leading.length > 0
+              ? composerCopy.needsMessage(leading)
+              : composerCopy.needsRecipient}
+          </p>
         ) : focused ? (
-          <p>{composerCopy.hint}</p>
+          <p>{composerHint(rule, text)}</p>
         ) : null}
       </div>
     </div>

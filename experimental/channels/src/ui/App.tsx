@@ -7,6 +7,7 @@ import {
   useReducer,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import { type ActivityList, activityOf } from "../activity.ts";
 import {
@@ -16,6 +17,7 @@ import {
 } from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
 import { composerPlaceholder } from "../copy.ts";
+import { createDeliveries, deliveryOf } from "../delivery.ts";
 import type {
   ComposerId,
   Directory,
@@ -24,6 +26,7 @@ import type {
   Outgoing,
   PeekTarget,
   Route,
+  SendRule,
   SpaceKey,
   State,
 } from "../model.ts";
@@ -59,6 +62,7 @@ import { ActivityView } from "./ActivityView.tsx";
 import type { FocusAttention } from "./AttentionActions.tsx";
 import { ChannelHeader } from "./ChannelHeader.tsx";
 import { Composer } from "./Composer.tsx";
+import { type DeliveryAccess, DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { MemberStrip } from "./MemberStrip.tsx";
 import { measure } from "./measure.ts";
@@ -485,13 +489,15 @@ export function App() {
   const messages = channel?.messages;
   const windows = channel?.runs;
   const threads = channel?.threads;
+  const members = channel?.members ?? noMembers;
   const { groups, rows } = useMemo(() => {
     if (!messages || !windows || !threads)
       return { groups: noGroups, rows: noRows };
-    const groups = threadGroups({ messages, runs: windows, threads });
-    const rows = timelineView({ messages, runs: windows, threads }, groups);
+    const window = { messages, runs: windows, threads, members };
+    const groups = threadGroups(window);
+    const rows = timelineView(window, groups);
     return { groups, rows };
-  }, [messages, windows, threads]);
+  }, [messages, windows, threads, members]);
   const homesSeen = useRef<ReadonlyMap<string, Home> | undefined>(undefined);
   const homes = useMemo(() => {
     homesSeen.current = homesOf(state.channels.values(), homesSeen.current);
@@ -504,7 +510,10 @@ export function App() {
     measure("namedrop:activity-derive", start);
     return activitySeen.current;
   }, [state.channels]);
-  const members = channel?.members ?? noMembers;
+  const channelRule = useMemo<SendRule>(
+    () => ({ kind: "channel", agents: members }),
+    [members],
+  );
   const directory = useMemo<Directory>(
     () => ({ members, homes }),
     [members, homes],
@@ -553,7 +562,7 @@ export function App() {
   const thread = useMemo(
     () =>
       focused?.kind === "ready" && channel !== undefined
-        ? evidenceThread(focused.context, channel.messages)
+        ? evidenceThread(focused.context, channel.messages, channel.members)
         : state.slot.kind === "thread"
           ? groups.get(state.slot.id)
           : undefined,
@@ -602,17 +611,42 @@ export function App() {
     button: HTMLButtonElement;
     threadId: string;
   } | null>(null);
-  const focusIntent = useRef(false);
+  const focusPane = useRef(false);
   const [, requestFocus] = useReducer((count: number) => count + 1, 0);
   const openThread = useCallback(
     (threadId: string, button: HTMLButtonElement) => {
       focusEvidence({ type: "close" });
       returnFocus.current = { button, threadId };
-      focusIntent.current = true;
+      focusPane.current = true;
       requestFocus();
       dispatch({ type: "thread", threadId });
     },
     [],
+  );
+  const [deliveries] = useState(() =>
+    createDeliveries(({ key, messageId, alias }) =>
+      poster.deliver(key, messageId, [alias]),
+    ),
+  );
+  const shownDeliveries = useSyncExternalStore(
+    deliveries.subscribe,
+    deliveries.snapshot,
+  );
+  useEffect(
+    () => deliveries.settle(state.channels),
+    [deliveries, state.channels],
+  );
+  const deliveryAccess = useMemo<DeliveryAccess | null>(
+    () =>
+      current === undefined
+        ? null
+        : {
+            of: (messageId, alias) =>
+              deliveryOf(shownDeliveries, { key: current, messageId, alias }),
+            deliver: (post, alias) =>
+              deliveries.deliver({ key: current, messageId: post.id, alias }),
+          },
+    [current, shownDeliveries, deliveries],
   );
   const [located, locate] = useState<Located | null>(null);
   useEffect(() => {
@@ -629,7 +663,7 @@ export function App() {
         openThread(target.threadId, button);
       } else {
         returnFocus.current = { button, threadId: target.threadId };
-        focusIntent.current = false;
+        focusPane.current = false;
         dispatch({ type: "thread", threadId: target.threadId });
         focusEvidence({
           type: "open",
@@ -663,7 +697,7 @@ export function App() {
     (target: PeekTarget, element: HTMLElement, startedAt: number) => {
       focusEvidence({ type: "close" });
       opening.current = { element, key: peekKey(target), startedAt };
-      focusIntent.current = true;
+      focusPane.current = true;
       requestFocus();
       dispatch({ type: "peek", target });
     },
@@ -691,7 +725,7 @@ export function App() {
   const view = viewOf(state.selection);
   const shownView = useRef(view);
   useLayoutEffect(() => {
-    if (pane !== null && focusIntent.current) {
+    if (pane !== null && focusPane.current) {
       document
         .getElementById(paneId)
         ?.querySelector<HTMLElement>(
@@ -700,7 +734,7 @@ export function App() {
             : ".peek-text",
         )
         ?.focus();
-      focusIntent.current = false;
+      focusPane.current = false;
     }
     const unmounted =
       (pane === null && paneWasOpen.current) ||
@@ -747,207 +781,218 @@ export function App() {
   const updatedAt = lastUpdate.current;
   return (
     <PeekContext value={peekAccess}>
-      <div
-        className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}`}
-      >
-        <a className="skip-link" href="#main-content">
-          Skip to messages
-        </a>
-        <Sidebar
-          state={state}
-          busy={activity.count}
-          onSelect={select}
-          onActivity={showActivity}
-        />
-        <main className="main" id="main-content" tabIndex={-1} ref={main}>
-          {connection === "reconnecting" && (
-            <div className="reconnect" role="status">
-              <Icon name="refresh" />
-              Reconnecting…
-              {updatedAt !== null &&
-                ` Showing updates up to ${new Date(updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`}
-            </div>
-          )}
-          {state.selection.kind === "activity" && state.channels.size > 0 ? (
-            <ActivityView
-              list={activity}
-              homes={homes}
-              open={peeking === null ? null : peekKey(peeking)}
-              onJump={jump}
-              channels={state.channels}
-              onFocus={showAttention}
-            />
-          ) : channel ? (
-            <>
-              <ChannelHeader
-                channel={channel}
-                suffix={channelSuffix(channel, state.channels.values())}
+      <DeliveryContext value={deliveryAccess}>
+        <div
+          className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}`}
+        >
+          <a className="skip-link" href="#main-content">
+            Skip to messages
+          </a>
+          <Sidebar
+            state={state}
+            busy={activity.count}
+            onSelect={select}
+            onActivity={showActivity}
+          />
+          <main className="main" id="main-content" tabIndex={-1} ref={main}>
+            {connection === "reconnecting" && (
+              <div className="reconnect" role="status">
+                <Icon name="refresh" />
+                Reconnecting…
+                {updatedAt !== null &&
+                  ` Showing updates up to ${new Date(updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`}
+              </div>
+            )}
+            {state.selection.kind === "activity" && state.channels.size > 0 ? (
+              <ActivityView
+                list={activity}
+                homes={homes}
+                open={peeking === null ? null : peekKey(peeking)}
+                onJump={jump}
+                channels={state.channels}
+                onFocus={showAttention}
+                onControl={poster.control}
               />
-              <MemberStrip key={channel.key} members={channel.members} />
-              <NeedsYou channel={channel} onFocus={showAttention} />
-              <Timeline
+            ) : channel ? (
+              <>
+                <ChannelHeader
+                  channel={channel}
+                  suffix={channelSuffix(channel, state.channels.values())}
+                />
+                <MemberStrip key={channel.key} members={channel.members} />
+                <NeedsYou
+                  channel={channel}
+                  onFocus={showAttention}
+                  onControl={poster.control}
+                />
+                <Timeline
+                  channel={channel}
+                  rows={rows}
+                  runs={runs}
+                  directory={directory}
+                  pending={pending}
+                  posted={posted.current}
+                  located={located}
+                  unsentReplies={unsentReplies}
+                  expandedThread={thread ? thread.id : null}
+                  onThread={openThread}
+                  paneId={paneId}
+                  onOlder={(key) => dispatch({ type: "older", key })}
+                  onLatest={(key) => dispatch({ type: "latest", key })}
+                  onFollow={(key, atBottom) =>
+                    dispatch({ type: "follow", key, atBottom })
+                  }
+                />
+                {channelResponse?.preparation === "preserved" && (
+                  <p className="earlier-thread" role="status">
+                    Your channel draft or pending send was kept. Send or clear
+                    it, then retry.{" "}
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={prepareResponse}
+                    >
+                      Prepare response
+                    </button>
+                  </p>
+                )}
+                {channelResponse?.preparation === "unavailable" && (
+                  <p className="earlier-thread" role="status">
+                    The responsible agent is no longer available. Use its pane
+                    in Herdr to respond.
+                  </p>
+                )}
+                {completion && composerId && (
+                  <Composer
+                    key={`composer:${channel.key}`}
+                    context={completion}
+                    composer={composerId}
+                    drafts={state.drafts}
+                    outbox={state.outbox}
+                    placeholder={composerPlaceholder(channel)}
+                    label={composerPlaceholder(channel)}
+                    rule={channelRule}
+                    onEdit={(text) => edit(composerId, text)}
+                    onSend={(source, startedAt) => {
+                      if (channel.viewMode === "browsing")
+                        dispatch({ type: "latest", key: channel.key });
+                      send(
+                        { composer: composerId, source, inReplyTo: null },
+                        startedAt,
+                      );
+                    }}
+                  />
+                )}
+              </>
+            ) : state.channels.size > 0 ? (
+              <div className="empty">
+                <h1>Choose a channel</h1>
+                <p>Select a channel to read its messages and live status.</p>
+              </div>
+            ) : connection === "live" ? (
+              <div className="empty">
+                <Icon name="inbox" />
+                <h1>No workspaces yet</h1>
+                <p>
+                  Open a workspace in Herdr and name an agent with{" "}
+                  <code className="inline">namedrop name</code>. It shows up
+                  here as a channel.
+                </p>
+              </div>
+            ) : (
+              <>
+                <h1 className="sr-only">
+                  {connection === "reconnecting"
+                    ? "Waiting to reconnect"
+                    : "Connecting to Namedrop"}
+                </h1>
+                <div className="skeleton" aria-hidden="true">
+                  <div className="skeleton-message">
+                    <span />
+                  </div>
+                  <div className="skeleton-message">
+                    <span />
+                  </div>
+                  <div className="skeleton-message">
+                    <span />
+                  </div>
+                </div>
+              </>
+            )}
+          </main>
+          {channel &&
+            thread &&
+            (focused === null || focused.kind === "ready") && (
+              <ThreadPane
+                key={
+                  focused === null
+                    ? thread.id
+                    : `${thread.id}:${focused.version}`
+                }
                 channel={channel}
-                rows={rows}
+                thread={thread}
                 runs={runs}
                 directory={directory}
-                pending={pending}
+                completion={completion}
+                drafts={state.drafts}
+                outbox={state.outbox}
                 posted={posted.current}
-                located={located}
-                unsentReplies={unsentReplies}
-                expandedThread={thread ? thread.id : null}
-                onThread={openThread}
+                onEdit={edit}
+                onSend={send}
+                onClose={closeThread}
                 paneId={paneId}
-                onOlder={(key) => dispatch({ type: "older", key })}
-                onLatest={(key) => dispatch({ type: "latest", key })}
-                onFollow={(key, atBottom) =>
-                  dispatch({ type: "follow", key, atBottom })
+                response={threadResponse}
+                target={
+                  focused?.kind === "ready" ? focused.request.target : null
+                }
+                earlierOmitted={
+                  focused?.kind === "ready" && focused.context.earlierOmitted
                 }
               />
-              {channelResponse?.preparation === "preserved" && (
-                <p className="earlier-thread" role="status">
-                  Your channel draft or pending send was kept. Send or clear it,
-                  then retry.{" "}
-                  <button
-                    type="button"
-                    className="text-button"
-                    onClick={prepareResponse}
-                  >
-                    Prepare response
-                  </button>
-                </p>
-              )}
-              {channelResponse?.preparation === "unavailable" && (
-                <p className="earlier-thread" role="status">
-                  The responsible agent is no longer available. Use its pane in
-                  Herdr to respond.
-                </p>
-              )}
-              {completion && composerId && (
-                <Composer
-                  key={`composer:${channel.key}`}
-                  context={completion}
-                  composer={composerId}
-                  drafts={state.drafts}
-                  outbox={state.outbox}
-                  placeholder={composerPlaceholder(channel)}
-                  label={composerPlaceholder(channel)}
-                  to={null}
-                  onEdit={(text) => edit(composerId, text)}
-                  onSend={(source, startedAt) => {
-                    if (channel.viewMode === "browsing")
-                      dispatch({ type: "latest", key: channel.key });
-                    send(
-                      { composer: composerId, source, inReplyTo: null },
-                      startedAt,
-                    );
-                  }}
-                />
-              )}
-            </>
-          ) : state.channels.size > 0 ? (
-            <div className="empty">
-              <h1>Choose a channel</h1>
-              <p>Select a channel to read its messages and live status.</p>
-            </div>
-          ) : connection === "live" ? (
-            <div className="empty">
-              <Icon name="inbox" />
-              <h1>No workspaces yet</h1>
-              <p>
-                Open a workspace in Herdr and name an agent with{" "}
-                <code className="inline">namedrop name</code>. It shows up here
-                as a channel.
-              </p>
-            </div>
-          ) : (
-            <>
-              <h1 className="sr-only">
-                {connection === "reconnecting"
-                  ? "Waiting to reconnect"
-                  : "Connecting to Namedrop"}
-              </h1>
-              <div className="skeleton" aria-hidden="true">
-                <div className="skeleton-message">
-                  <span />
-                </div>
-                <div className="skeleton-message">
-                  <span />
-                </div>
-                <div className="skeleton-message">
-                  <span />
-                </div>
+            )}
+          {channel && focused && focused.kind !== "ready" && (
+            <aside className="slot thread" aria-label="Thread" id={paneId}>
+              <header className="thread-head">
+                <h2 className="thread-title">Thread</h2>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={closeThread}
+                  aria-label="Close thread"
+                >
+                  <Icon name="x" />
+                </button>
+              </header>
+              <div className="thread-body" role="status">
+                {focused.kind === "loading" ? (
+                  "Loading conversation…"
+                ) : (
+                  <>
+                    Could not load conversation. {focused.reason}{" "}
+                    <button
+                      type="button"
+                      className="text-button"
+                      onClick={() => focusEvidence({ type: "retry" })}
+                    >
+                      Retry
+                    </button>
+                  </>
+                )}
               </div>
-            </>
+            </aside>
           )}
-        </main>
-        {channel &&
-          thread &&
-          (focused === null || focused.kind === "ready") && (
-            <ThreadPane
-              key={
-                focused === null ? thread.id : `${thread.id}:${focused.version}`
-              }
-              channel={channel}
-              thread={thread}
-              runs={runs}
-              directory={directory}
-              completion={completion}
-              drafts={state.drafts}
-              outbox={state.outbox}
-              posted={posted.current}
-              onEdit={edit}
-              onSend={send}
-              onClose={closeThread}
+          {peeking && who && (
+            <PeekDrawer
+              target={peeking}
+              who={who}
+              reader={reader}
+              startedAt={opening.current?.startedAt ?? 0}
               paneId={paneId}
-              response={threadResponse}
-              target={focused?.kind === "ready" ? focused.request.target : null}
-              earlierOmitted={
-                focused?.kind === "ready" && focused.context.earlierOmitted
-              }
+              onClose={closePeek}
             />
           )}
-        {channel && focused && focused.kind !== "ready" && (
-          <aside className="slot thread" aria-label="Thread" id={paneId}>
-            <header className="thread-head">
-              <h2 className="thread-title">Thread</h2>
-              <button
-                type="button"
-                className="icon-button"
-                onClick={closeThread}
-                aria-label="Close thread"
-              >
-                <Icon name="x" />
-              </button>
-            </header>
-            <div className="thread-body" role="status">
-              {focused.kind === "loading" ? (
-                "Loading conversation…"
-              ) : (
-                <>
-                  Could not load conversation. {focused.reason}{" "}
-                  <button
-                    type="button"
-                    className="text-button"
-                    onClick={() => focusEvidence({ type: "retry" })}
-                  >
-                    Retry
-                  </button>
-                </>
-              )}
-            </div>
-          </aside>
-        )}
-        {peeking && who && (
-          <PeekDrawer
-            target={peeking}
-            who={who}
-            reader={reader}
-            startedAt={opening.current?.startedAt ?? 0}
-            paneId={paneId}
-            onClose={closePeek}
-          />
-        )}
-      </div>
+        </div>
+      </DeliveryContext>
     </PeekContext>
   );
 }

@@ -1,11 +1,12 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useContext, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   attentionReplyTo,
   type ReplyIntent,
   replyPrefill,
 } from "../attention.ts";
 import type { CompletionContext } from "../complete.ts";
-import { replyLabel, replyPlaceholder } from "../copy.ts";
+import { repliesCopy, replyLabel, replyPlaceholder } from "../copy.ts";
+import { idle } from "../delivery.ts";
 import type {
   Channel,
   ComposerId,
@@ -13,17 +14,20 @@ import type {
   Draft,
   DraftKey,
   Outgoing,
+  SendRule,
 } from "../model.ts";
+import { chatOf } from "../route.ts";
 import {
   draftKey,
   exitFor,
   type RunIndex,
   recipients,
-  replyRecipients,
   sameComposer,
   type ThreadGroup,
+  threadAgents,
 } from "../store.ts";
 import { Composer } from "./Composer.tsx";
+import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
 import { useEscape } from "./useEscape.ts";
@@ -72,6 +76,7 @@ export function ThreadPane({
   const replyIntent = response?.kind === "reply" ? response.intent : null;
   const pane = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
+  const deliveries = useContext(DeliveryContext);
   const [openedAt] = useState(() => Date.now());
   const latest = thread.replies.at(-1) ?? thread.parents.at(-1);
   const composer = useMemo<ComposerId>(
@@ -94,10 +99,12 @@ export function ThreadPane({
   const activeReply = draftPreserved ? null : replyIntent;
   const to = useMemo(
     () =>
-      activeReply === null
-        ? replyRecipients(thread, directory)
-        : attentionReplyTo(activeReply, directory),
-    [thread, directory, activeReply],
+      activeReply === null ? null : attentionReplyTo(activeReply, directory),
+    [directory, activeReply],
+  );
+  const rule = useMemo<Extract<SendRule, { kind: "thread" }>>(
+    () => ({ kind: "thread", to: threadAgents(thread, directory) }),
+    [thread, directory],
   );
   const prefilled = useRef<ReplyIntent | null>(null);
   useLayoutEffect(() => {
@@ -175,12 +182,18 @@ export function ThreadPane({
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}
             exit={exitFor(runs, message)}
+            chat={chatOf({
+              message,
+              thread,
+              reference: null,
+              directory,
+              replies: 0,
+              delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
+            })}
           />
         ))}
         <p className="divider">
-          {count === 0 && !unloaded
-            ? "No replies yet"
-            : `${count} ${count === 1 ? "reply" : "replies"}`}
+          {count === 0 && !unloaded ? "No replies yet" : repliesCopy(count)}
           {unloaded ? " · earlier replies not loaded" : ""}
         </p>
         {thread.replies.map((message) => (
@@ -192,6 +205,14 @@ export function ThreadPane({
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}
             exit={exitFor(runs, message)}
+            chat={chatOf({
+              message,
+              thread,
+              reference: null,
+              directory,
+              replies: 0,
+              delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
+            })}
             arrive={message.at > openedAt && !posted.has(message.id)}
           />
         ))}
@@ -237,9 +258,9 @@ export function ThreadPane({
             composer={composer}
             drafts={drafts}
             outbox={outbox}
-            placeholder={replyPlaceholder(to?.names ?? [])}
-            label={replyLabel(to?.names ?? [])}
-            to={to}
+            placeholder={replyPlaceholder(rule.to)}
+            label={replyLabel(rule.to)}
+            rule={rule}
             onEdit={(text) => onEdit(composer, text)}
             onSend={(source, startedAt) =>
               onSend(

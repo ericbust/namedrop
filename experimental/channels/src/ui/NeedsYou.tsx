@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { attentionCopy, relativeAge } from "../copy.ts";
 import type { Attention, ChannelSnapshot, SpaceKey } from "../model.ts";
-import { AttentionActions, type FocusAttention } from "./AttentionActions.tsx";
+import {
+  AttentionActions,
+  type ControlThread,
+  type FocusAttention,
+} from "./AttentionActions.tsx";
 import { Icon } from "./Icons.tsx";
 
 const SHOWN = 3;
@@ -42,11 +46,13 @@ function Item({
   now,
   channel,
   onFocus,
+  onControl,
 }: {
   item: Attention;
   now: number;
   channel: ChannelSnapshot;
   onFocus: FocusAttention;
+  onControl: ControlThread;
 }) {
   const [open, setOpen] = useState(false);
   const copy = attentionCopy(item);
@@ -62,7 +68,12 @@ function Item({
         {relativeAge(item.openedAt, now)}
       </time>
       <p className="attention-hint">{copy.hint}</p>
-      <AttentionActions item={item} channel={channel} onFocus={onFocus} />
+      <AttentionActions
+        item={item}
+        channel={channel}
+        onFocus={onFocus}
+        onControl={onControl}
+      />
       {copy.details !== null && (
         <div className="attention-actions">
           <button
@@ -84,9 +95,11 @@ function Item({
 export function NeedsYou({
   channel,
   onFocus,
+  onControl,
 }: {
   channel: ChannelSnapshot;
   onFocus: FocusAttention;
+  onControl: ControlThread;
 }) {
   const items = channel.health.level === "needs_you" ? channel.attention : none;
   const now = useNow(items.length > 0);
@@ -107,6 +120,7 @@ export function NeedsYou({
                 now={now}
                 channel={channel}
                 onFocus={onFocus}
+                onControl={onControl}
               />
             ))}
           </ul>
