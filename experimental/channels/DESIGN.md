@@ -312,6 +312,11 @@ click.
   replies, latest from @codex at 11:03 PM. Open thread". A terminal reply's
   preview shows its Exit chip and the first two lines of stdout. On hover it
   gets `--bg-hover` and a `--line-strong` border.
+- **Narrow previews**: the reply count never shrinks and nothing covers it.
+  The author, time and reply text take the width left beside it, the author
+  and text ending in an ellipsis. When less than 120px is left for them, as in
+  a 390px window, the box shows the count alone and hugs it, the look of a
+  request whose latest reply is not loaded.
 - **Hover**: the row background becomes `--bg-hover` at 50 percent.
 - **Arrival**: a message that arrives live fades in and rises 4px over
   `--duration` with `--ease-out`. History pages and channel switches do not

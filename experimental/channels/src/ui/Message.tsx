@@ -642,18 +642,20 @@ function ReplyPreview({
     );
   }
   return (
-    <button
-      type="button"
-      className={`reply-preview${reply === null ? " count-only" : ""}`}
-      data-thread-id={message.threadId}
-      aria-controls={paneId}
-      aria-expanded={expanded}
-      aria-label={label}
-      onClick={(event) => onThread(message.threadId, event.currentTarget)}
-    >
-      {content}
-      <span className="rp-count">{replies}</span>
-    </button>
+    <div className="rp-room">
+      <button
+        type="button"
+        className={`reply-preview${reply === null ? " count-only" : ""}`}
+        data-thread-id={message.threadId}
+        aria-controls={paneId}
+        aria-expanded={expanded}
+        aria-label={label}
+        onClick={(event) => onThread(message.threadId, event.currentTarget)}
+      >
+        {content}
+        <span className="rp-count">{replies}</span>
+      </button>
+    </div>
   );
 }
 function samePerson(

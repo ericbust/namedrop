@@ -2491,6 +2491,57 @@ test("thread pane: a non-terminal reply that mimics a terminal result renders as
   );
 });
 
+test("DESIGN-R2 B2: the reply count is never covered: the preview text takes the room beside it, and with under 120 px left the row shows the count only", async (t) => {
+  const { value } = conversation();
+  const latest = value.frame.messages.find((row) => row.message_id === "r2");
+  latest.body.text =
+    "Fixed: the CI cache was stale. I cleared it and the build passes now on every runner.";
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const preview = ui.page.locator('[data-message-id="ask"] .reply-preview');
+  const facts = async () => {
+    await preview.scrollIntoViewIfNeeded();
+    return preview.evaluate((button) => {
+      const count = button.querySelector(".rp-count");
+      const c = count.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        c.left + c.width / 2,
+        c.top + c.height / 2,
+      );
+      const text = [...button.querySelectorAll(".rp-main, .rp-main *")]
+        .map((element) => element.getBoundingClientRect())
+        .filter((r) => r.width > 0 && r.height > 0);
+      const main = button.querySelector(".rp-main")?.getBoundingClientRect();
+      return {
+        text: text.length > 0 ? Math.round(main.width) >= 120 : "count only",
+        covered: text.some(
+          (r) =>
+            r.left < c.right &&
+            r.right > c.left &&
+            r.top < c.bottom &&
+            r.bottom > c.top,
+        ),
+        countShown: count.contains(hit) && count.textContent === "2 replies",
+        countFits: count.scrollWidth <= count.clientWidth,
+      };
+    });
+  };
+  for (const [width, height, text] of [
+    [390, 844, "count only"],
+    [599, 844, true],
+    [640, 800, true],
+    [1440, 900, true],
+  ])
+    assert.deepEqual(
+      await (async () => {
+        await ui.page.setViewportSize({ width, height });
+        return facts();
+      })(),
+      { text, covered: false, countShown: true, countFits: true },
+      `${width}x${height}`,
+    );
+});
+
 test("design-b fix: terminal results show stdout, stderr and the exit code instead of the preamble", async (t) => {
   const at = Date.now() - 10 * 60_000;
   const value = frame(1, "alpha");

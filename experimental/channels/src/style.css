@@ -1213,6 +1213,9 @@ button.member:not(.more):hover {
   font-size: var(--text-xs);
 }
 
+.rp-room {
+  container-type: inline-size;
+}
 .reply-preview {
   display: grid;
   grid-template-columns: var(--avatar-sm) minmax(0, 1fr) auto;
@@ -1240,19 +1243,40 @@ button.member:not(.more):hover {
   grid-template-columns: minmax(0, 1fr) auto;
   width: auto;
 }
+/* Under 120px of text beside the count, the row shows the count only. The
+   box's 22px of border and padding, the 20px avatar, two 10px gaps and a 49px
+   "2 replies" leave 120px at 231px. */
+@container (width < 231px) {
+  .reply-preview {
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: auto;
+  }
+  .reply-preview > :not(.rp-count) {
+    display: none;
+  }
+}
 .rp-main {
   display: flex;
   flex-direction: column;
   gap: 1px;
   min-width: 0;
+  overflow: hidden;
 }
 .rp-head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   line-height: 18px;
+  white-space: nowrap;
+}
+.rp-head > * {
+  flex: none;
 }
 .rp-author {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: var(--text-sm);
   font-weight: 600;
 }
