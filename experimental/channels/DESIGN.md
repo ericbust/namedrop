@@ -600,7 +600,7 @@ Names in it are peek buttons at 12px 600 in `--text`.
 | Post that mentions no agent                    | No line                                                               | none                   |
 | Post, `routing`                                | "Checking who this is for…"                                           | clock                  |
 | Post, `routed`                                 | "@claude · build question", where the words are the reason            | arrow                  |
-| Post, `routed` with an empty reason            | "@claude"                                                             | arrow                  |
+| Post, `routed` with no topic                   | "@claude"                                                             | arrow                  |
 | Post, `routed`, and a mentioned agent not sent | "@claude · build question · Mentioned @codex, not sent · Send anyway" | arrow                  |
 | Post, `unrouted`, mentioning agents            | "Mentioned @codex, not sent · Send anyway"                            | inbox                  |
 | Post, `router_failed`                          | "Couldn't check who this is for · Send to @codex"                     | alert, `--failed-text` |
@@ -611,9 +611,12 @@ Names in it are peek buttons at 12px 600 in `--text`.
   of them, with no "+N". "pulled in" shows when the message's `woke` list is
   not empty. An `unrouted` post that still has recipients reads like a routed
   one with no reason. The line's accessible name is "Who got this".
-- The reason is the model's words. Show them as plain text, on one line, at
-  most 60 characters. The line's tooltip reads "Picked by claude-haiku", with
-  the server's router name, when the server sends one.
+- The reason is the model's words: a topic of 2 to 4 words, such as "build
+  question". Show them as plain text, in the model's case, on one line, at most
+  60 characters. When the model names no topic, the server sends "General
+  topic". It says nothing, so the line shows the names alone, as for an empty
+  reason. The line's tooltip reads "Picked by claude-haiku-4-5", with the
+  server's router name, when the server sends one.
 - Legs to the operator never show, in the route line or anywhere else in channel
   chat. The operator wrote the post and reads every reply in the room.
 - The server routes a post before it answers the send, so frames do not carry

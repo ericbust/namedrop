@@ -290,7 +290,7 @@ test("channel: an unknown, missing or malformed state stays a channel post, and 
   );
   assert.deepEqual([...rows.keys()], ["odd", "next"]);
 });
-test("channel: the reason is one line of at most 60 characters, and a blank reason or router reads as none", () => {
+test("channel: the reason is one line of at most 60 characters, and a blank reason, the no-topic filler or a blank router reads as none", () => {
   const routed = (reason: unknown, router: unknown = "claude-haiku") =>
     routingOf({ state: "routed", reason, router });
   assert.deepEqual(routed("  build\n\tquestion  "), {
@@ -315,6 +315,18 @@ test("channel: the reason is one line of at most 60 characters, and a blank reas
     mentioned: [],
     reason: null,
     router: null,
+  });
+  assert.deepEqual(routed("General topic"), {
+    state: "routed",
+    mentioned: [],
+    reason: null,
+    router: "claude-haiku",
+  });
+  assert.deepEqual(routed("General topic question"), {
+    state: "routed",
+    mentioned: [],
+    reason: "General topic question",
+    router: "claude-haiku",
   });
   assert.deepEqual(routed(42, { name: "x" }), {
     state: "routed",

@@ -366,10 +366,12 @@ function deliveryStage(value: unknown): DeliveryStage {
 }
 const REASON_LIMIT = 60;
 // The router model's words, made safe to show on one line.
+// The router's topic when the model named none. It says nothing, so it reads as no reason.
+const NO_TOPIC = "General topic";
 function reasonText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const line = value.replace(/\s+/g, " ").trim();
-  if (line === "") return null;
+  if (line === "" || line === NO_TOPIC) return null;
   const points = Array.from(line);
   return points.length <= REASON_LIMIT
     ? line
