@@ -262,6 +262,76 @@ fn pulled_in_agent_answers_the_asker_without_repeating_its_name() {
 }
 
 #[test]
+fn bound_answer_transport_recipient_does_not_turn_a_closing_report_into_an_ask() {
+    let f = fixture();
+    let root = plain_root(&f, "bound-root", "Please collaborate here.");
+    let question = agent_reply(
+        &f,
+        "bound-question",
+        &root,
+        "pane-1-planner",
+        "@operator Asking @lead what 6 times 7 is.",
+    )
+    .unwrap();
+    let answer = agent_reply(
+        &f,
+        "bound-answer",
+        &question,
+        "pane-1-lead",
+        "@operator @planner 6 times 7 is 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&answer), vec!["operator", "planner"]);
+    let envelope = f.herdr.last_envelope("pane-1-planner");
+    assert_eq!(envelope["untrusted_body"], "6 times 7 is 42.");
+    let report = agent_reply(
+        &f,
+        "bound-report",
+        &answer,
+        "pane-1-planner",
+        r"@operator \@lead says 6 times 7 is 42.",
+    )
+    .unwrap();
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 3);
+    assert_eq!(recipient_aliases(&report), vec!["operator"]);
+    assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 1);
+}
+
+#[test]
+fn bound_answer_still_accepts_an_explicit_followup_question() {
+    let f = fixture();
+    let root = plain_root(&f, "bound-followup-root", "Please collaborate here.");
+    let question = agent_reply(
+        &f,
+        "bound-followup-question",
+        &root,
+        "pane-1-planner",
+        "@operator Asking @lead what 6 times 7 is.",
+    )
+    .unwrap();
+    let answer = agent_reply(
+        &f,
+        "bound-followup-answer",
+        &question,
+        "pane-1-lead",
+        "@operator @planner 6 times 7 is 42.",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&answer), vec!["operator", "planner"]);
+    let followup = agent_reply(
+        &f,
+        "bound-followup-new-question",
+        &answer,
+        "pane-1-planner",
+        "@operator Can @lead explain the calculation?",
+    )
+    .unwrap();
+    assert_eq!(recipient_aliases(&followup), vec!["operator", "lead"]);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 4);
+    assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 2);
+}
+
+#[test]
 fn leading_at_sign_followed_by_whitespace_is_plain_channel_text() {
     let f = fixture();
     let server = Server::start(&f, "not json", true);
