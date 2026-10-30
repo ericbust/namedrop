@@ -1,0 +1,9 @@
+{
+  "place": "none",
+  "overlay": {
+    "kind": "window",
+    "key": "namedrop-roster",
+    "keep": true,
+    "width": 300
+  }
+}
