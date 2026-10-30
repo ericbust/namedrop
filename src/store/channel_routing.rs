@@ -29,8 +29,13 @@ pub(crate) struct ChannelProjection {
     mentioned: Vec<String>,
 }
 
+pub(crate) struct DeliveredChannel {
+    pub channel: ChannelProjection,
+    pub delivered: Vec<String>,
+}
+
 pub(crate) enum ChannelDelivery {
-    Delivered(ChannelProjection),
+    Delivered(DeliveredChannel),
     Refused(ChannelDeliveryRefusal),
 }
 
@@ -152,10 +157,11 @@ impl StateTransaction<'_> {
             "recipient_order",
             false,
         )?;
+        let delivered = selected.iter().map(|member| member.alias.clone()).collect();
         selected.retain(|member| {
             !existing
                 .iter()
-                .any(|old| old.alias == member.alias || old.address_id == member.address_id)
+                .any(|old| old.address_id == member.address_id)
         });
         if !selected.is_empty() {
             if self.thread_control_state(ns, &thread)?.stopped {
@@ -184,11 +190,12 @@ impl StateTransaction<'_> {
                 )?;
             }
         }
-        Ok(Delivered(
-            self.channel_projection(ns, message)?.ok_or_else(|| {
+        Ok(Delivered(DeliveredChannel {
+            channel: self.channel_projection(ns, message)?.ok_or_else(|| {
                 StoreError::invalid_input("eligible channel post has no projection")
             })?,
-        ))
+            delivered,
+        }))
     }
 
     pub(crate) fn append_pending_channel(

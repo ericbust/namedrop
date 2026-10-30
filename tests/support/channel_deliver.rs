@@ -250,20 +250,47 @@ fn delivery_validates_the_entire_current_roster_before_any_write() {
 }
 
 #[test]
-fn delivery_uses_both_stored_alias_and_address_for_idempotency() {
+fn delivery_reports_current_aliases_and_deduplicates_only_addresses() {
     let f = fixture();
     let server = Server::start(&f, "not json", true);
     let (_, root) = post(&server, "identity-root", "Room statement.", None);
-    assert_eq!(deliver(&server, &root, &["planner"]).0, 200);
+    let (_, first) = deliver(&server, &root, &["planner"]);
+    assert_eq!(first["delivered"], json!(["planner"]));
     f.rename("w1", "planner", "renamed");
-    assert_eq!(deliver(&server, &root, &["renamed"]).0, 200);
+    let (_, renamed) = deliver(&server, &root, &["renamed", "renamed"]);
+    assert_eq!(renamed["delivered"], json!(["renamed"]));
+    assert_eq!(renamed["channel"]["to"], json!(["planner"]));
     f.release("w1", "planner");
     f.rename("w1", "lead", "planner");
-    assert_eq!(deliver(&server, &root, &["planner"]).0, 200);
-    assert_eq!(f.count("SELECT count(*) FROM mailbox_deliveries"), 1);
+    let (_, reused) = deliver(&server, &root, &["planner"]);
+    assert_eq!(reused["delivered"], json!(["planner"]));
+    wait_for(
+        &f,
+        "SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.address_id='address-w1-lead'",
+        1,
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let invoked =
+            fs::read_to_string(f.root.join("http-herdr-invocations.jsonl")).unwrap_or_default();
+        if invoked.lines().filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|call| call["args"][1] == "prompt" && call["args"][2] == "pane-1-lead"
+                && serde_json::from_str::<Value>(call["args"][3].as_str().unwrap()).unwrap()["control"]["message_id"] == root["message_id"]) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "reused alias did not receive the original envelope: {invoked}"
+        );
+        thread::yield_now();
+    }
+    assert_eq!(f.count("SELECT count(*) FROM mailbox_deliveries"), 2);
     assert_eq!(
         recipient_rows(&f, &root),
-        [(1, "address-w1-planner".into(), "planner".into())]
+        [
+            (1, "address-w1-planner".into(), "planner".into()),
+            (2, "address-w1-lead".into(), "planner".into()),
+        ]
     );
 }
 
@@ -275,8 +302,12 @@ fn concurrent_delivery_requests_add_each_member_once() {
     thread::scope(|scope| {
         let first = scope.spawn(|| deliver(&server, &root, &["planner", "lead"]));
         let second = scope.spawn(|| deliver(&server, &root, &["lead", "planner"]));
-        assert_eq!(first.join().unwrap().0, 200);
-        assert_eq!(second.join().unwrap().0, 200);
+        let (status, receipt) = first.join().unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(receipt["delivered"], json!(["planner", "lead"]));
+        let (status, receipt) = second.join().unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(receipt["delivered"], json!(["lead", "planner"]));
     });
     assert_eq!(recipient_rows(&f, &root).len(), 2);
     assert_eq!(f.count("SELECT count(*) FROM mailbox_deliveries"), 2);
