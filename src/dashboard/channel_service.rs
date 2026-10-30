@@ -428,6 +428,28 @@ mod tests {
 
     #[test]
     fn recovery_error_still_releases_manager_ownership() {
+        // Open the manager descriptor after exec so parallel tests cannot
+        // retain a forked copy while this fixture checks immediate release.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "dashboard::channel_service::tests::recovery_error_ownership_fixture",
+                "--ignored",
+                "--nocapture",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for manager ownership assertions"]
+    fn recovery_error_ownership_fixture() {
         let root = std::env::temp_dir().join(format!(
             "channel-manager-{}-{}",
             std::process::id(),
@@ -436,6 +458,26 @@ mod tests {
         std::fs::create_dir_all(root.join("dashboard")).unwrap();
         drop(StateStore::open(&root).unwrap());
         let mut service = ChannelService::start(&root).unwrap();
+        let claim_from_process = |held: bool| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "dashboard::channel_service::tests::manager_ownership_claim_fixture",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("NAMEDROP_TEST_MANAGER_STATE", &root)
+                .env("NAMEDROP_TEST_MANAGER_HELD", held.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        claim_from_process(true);
         let database = root.join("namedrop.sqlite3");
         std::fs::rename(&database, root.join("saved.sqlite3")).unwrap();
         std::fs::write(&database, b"invalid database").unwrap();
@@ -446,12 +488,35 @@ mod tests {
             .write(true)
             .open(root.join("dashboard/channel-manager.lock"))
             .unwrap();
-        assert_eq!(
-            unsafe { libc::flock(claim.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
+        let result = unsafe { libc::flock(claim.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        let error = std::io::Error::last_os_error();
+        assert_eq!(result, 0, "{error}");
         drop(claim);
+        claim_from_process(false);
         drop(service);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for an independent manager ownership claim"]
+    fn manager_ownership_claim_fixture() {
+        let root = std::env::var_os("NAMEDROP_TEST_MANAGER_STATE").unwrap();
+        let held: bool = std::env::var("NAMEDROP_TEST_MANAGER_HELD")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let claim = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(Path::new(&root).join("dashboard/channel-manager.lock"))
+            .unwrap();
+        let result = unsafe { libc::flock(claim.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        let error = std::io::Error::last_os_error();
+        if held {
+            assert_eq!(result, -1);
+            assert_eq!(error.raw_os_error(), Some(libc::EWOULDBLOCK));
+        } else {
+            assert_eq!(result, 0, "{error}");
+        }
     }
 }
