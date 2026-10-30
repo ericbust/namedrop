@@ -740,6 +740,7 @@ test("fix2 item 2: frames do not postpone the per-open timeout", async (t) => {
 
 test("fix2 item 2: error and new open invalidate the previous generation timeout", async (t) => {
   const ui = await open(t, (client) => client.send("space", frame(1, "alpha")));
+  await until(() => ui.connections.length > 0, "the first stream");
   await new Promise((resolve) => setTimeout(resolve, 200));
   ui.connections[0].destroy();
   await ui.page.getByRole("status").waitFor();
