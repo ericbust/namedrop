@@ -258,7 +258,7 @@ fn failed_and_empty_followups_preserve_baseline_deliveries_and_all_projections_w
 }
 
 #[test]
-fn restart_fails_both_queued_and_dispatching_posts_without_mutating_fingerprints() {
+fn restart_fails_only_dispatching_and_routes_queued_without_mutating_fingerprints() {
     let f = fixture();
     let server = Server::start(&f, "delayed", false);
     for index in 0..6 {
@@ -285,16 +285,17 @@ fn restart_fails_both_queued_and_dispatching_posts_without_mutating_fingerprints
         .collect::<Result<_, _>>()
         .unwrap();
     drop(server);
-    let server = Server::start(&f, "not json", false);
+    let server = Server::start(&f, r#"{"to":["planner"],"reason":"review request"}"#, false);
+    until(|| calls(&f).len() == 6);
+    for index in 0..6 {
+        let (status, receipt) = post(&server, &format!("recover-{index}"), "Could @planner inspect?", None);
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(receipt["channel"]["state"], if index < 4 { "router_failed" } else { "routed" });
+        assert_eq!(receipt["idempotent_replay"], true);
+    }
     let page = history(&server);
     assert_eq!(page.as_array().unwrap().len(), 6);
-    assert!(
-        page.as_array()
-            .unwrap()
-            .iter()
-            .all(|m| m["channel"]["state"] == "router_failed")
-    );
-    assert_eq!(calls(&f).len(), 4);
+    assert_eq!(calls(&f).len(), 6);
     let after: Vec<(String, String)> = f
         .db()
         .prepare(
@@ -306,7 +307,7 @@ fn restart_fails_both_queued_and_dispatching_posts_without_mutating_fingerprints
         .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(before, after);
-    assert_eq!(f.count("SELECT COUNT(*) FROM message_recipients"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM message_recipients"), 2);
 }
 
 #[cfg(target_os = "linux")]
