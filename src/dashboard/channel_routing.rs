@@ -242,18 +242,16 @@ pub(crate) fn finish_post(state: &Path, namespace: &StateNamespace, receipt: &mu
     let Some(message_id) = receipt["message_id"].as_str() else {
         return;
     };
-    let marked = crate::StateStore::open_read_only(state)
-        .ok()
-        .flatten()
-        .and_then(|mut store| {
-            store
-                .transaction(|tx| {
-                    tx.channel_routing_state(namespace, &crate::MessageId::new(message_id))
-                })
-                .ok()
-                .flatten()
-        })
-        .is_some();
+    let marked = match crate::StateStore::open_read_only(state) {
+        Ok(Some(mut store)) => store
+            .transaction(|tx| {
+                tx.channel_routing_state(namespace, &crate::MessageId::new(message_id))
+            })
+            .map(|state| state.is_some())
+            .unwrap_or(true),
+        Ok(None) => false,
+        Err(_) => true,
+    };
     if let Some(internal) = internal {
         let note = Note {
             space: SpaceKey::of(namespace).as_str().to_owned(),
@@ -339,6 +337,29 @@ mod tests {
             usage_complete: false,
             provider_usd: None,
         }
+    }
+
+    #[test]
+    fn unreadable_routing_facts_do_not_let_optional_notes_replace_receipt_state() {
+        let state = directory();
+        let namespace = StateNamespace::for_space("synthetic", "w1");
+        append(
+            &state,
+            Note {
+                space: SpaceKey::of(&namespace).as_str().to_owned(),
+                message_id: "post-1".to_owned(),
+                reason: None,
+                router: None,
+                router_failed: true,
+            },
+        )
+        .unwrap();
+        fs::write(state.join("namedrop.sqlite3"), "invalid database").unwrap();
+        let mut receipt =
+            serde_json::json!({"message_id":"post-1","channel":{"state":"unrouted","to":[]}});
+        finish_post(&state, &namespace, &mut receipt);
+        assert_eq!(receipt["channel"]["state"], "unrouted");
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
