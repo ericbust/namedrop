@@ -129,6 +129,14 @@ sidebar list, the Needs-you details, the timeline, the thread, the activity list
 and the screen text. Each of them is the containing block of what it scrolls, so
 hidden text inside it never stretches the page.
 
+Below 860px of window width, an open thread pane or peek drawer stacks under
+the main column, and each gets half the window's height. Nothing in the main
+column paints outside it. The Needs-you banner takes at most 40 percent of the
+main column. When the column is short, the timeline shrinks first, down to
+nothing, and then the banner, which scrolls inside itself. The composer always
+stays whole. Side by side, from 860px up, the banner's cap is 40 percent of the
+window's height.
+
 ### Landing and navigation
 
 - Open the channel the URL names. With no channel in the URL, or one that has
@@ -382,7 +390,8 @@ wrapping row of 13px text buttons, 12px apart, such as "Show message · Reply to
 @quiet · Details". **Details** is always on that row; it reveals the server's
 full summary in 13px muted text. On a narrow window the row wraps between
 buttons, never inside a label. Show three items, then a "Show N more" button.
-The banner takes at most 40 percent of the window height and scrolls inside.
+The banner takes at most 40 percent of the main column's height and scrolls
+inside (see App shell for the stacked layout).
 Announce new items through a polite live region.
 
 | `source`                                | Title                                                                                                | Hint                                                |

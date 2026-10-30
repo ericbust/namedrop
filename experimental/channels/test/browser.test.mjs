@@ -3260,6 +3260,153 @@ test("design-b: the layout gives the timeline the room, wraps members in two lin
   );
 });
 
+test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column keeps the Needs-you banner and the composer inside its half", async (t) => {
+  const value = team(1, "alpha");
+  const at = Date.now() - 60 * 60_000;
+  value.frame.health = { level: "needs_you", items: 8 };
+  value.frame.attention = Array.from({ length: 8 }, (_, n) => ({
+    source_kind: "agent_status",
+    summary: {
+      text: `@codex is waiting on an approval or question ${n + 1}.`,
+      truncated: false,
+    },
+    opened_at_ms: at,
+  }));
+  value.frame.messages = [
+    message("p1", "@codex please check the build cache", {
+      at_ms: at,
+      legs: [{ to: "codex", stage: { stage: "delivered" } }],
+    }),
+    message("r1", "the cache is fine", {
+      thread_id: "p1",
+      in_reply_to: "p1",
+      kind: "reply",
+      author: "codex",
+      at_ms: at + 60_000,
+    }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.page.setViewportSize({ width: 1024, height: 700 });
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Show 5 more", exact: true })
+    .click();
+  const layout = () =>
+    ui.page.evaluate(() => {
+      const main = document.querySelector("main");
+      const pane = document.querySelector(".app-shell > .slot");
+      const box = (element) => element.getBoundingClientRect();
+      // What an element paints: its box cut by every scroller it sits in.
+      const painted = (element) => {
+        let { left, top, right, bottom } = box(element);
+        for (let clip = element.parentElement; clip !== main; ) {
+          const style = getComputedStyle(clip);
+          if (style.overflowX !== "visible" || style.overflowY !== "visible") {
+            const edge = box(clip);
+            left = Math.max(left, edge.left);
+            top = Math.max(top, edge.top);
+            right = Math.min(right, edge.right);
+            bottom = Math.min(bottom, edge.bottom);
+          }
+          clip = clip.parentElement;
+        }
+        return { left, top, right, bottom };
+      };
+      const area = box(pane);
+      const overlaps = (r) =>
+        Math.min(r.right, area.right) - Math.max(r.left, area.left) > 0.5 &&
+        Math.min(r.bottom, area.bottom) - Math.max(r.top, area.top) > 0.5;
+      const describe = (element) =>
+        `${element.tagName.toLowerCase()}.${[...element.classList].join(".")}`;
+      const hits = new Set();
+      for (let x = area.left + 2; x < area.right; x += 12)
+        for (let y = area.top + 2; y < area.bottom; y += 12) {
+          const hit = document.elementFromPoint(x, y);
+          if (hit !== null && !pane.contains(hit)) hits.add(describe(hit));
+        }
+      const edges = (element) => {
+        const { top, bottom, height } = box(element);
+        return { top, bottom, height };
+      };
+      const of = (selector) => edges(main.querySelector(selector));
+      const banner = main.querySelector(".attention");
+      return {
+        main: edges(main),
+        banner: edges(banner),
+        bannerScrolls: banner.scrollHeight > banner.clientHeight,
+        timeline: of(".timeline"),
+        composer: of(".composer"),
+        intruders: [...main.querySelectorAll("*")]
+          .filter((element) => overlaps(painted(element)))
+          .map(describe),
+        hits: [...hits],
+      };
+    });
+  const squeezed = [];
+  const stacked = async (state) => {
+    for (const [width, height] of [
+      [390, 844],
+      [640, 600],
+    ]) {
+      await ui.page.setViewportSize({ width, height });
+      const at = `${state} at ${width}x${height}`;
+      const shown = await layout();
+      assert.deepEqual(
+        { intruders: shown.intruders, hits: shown.hits },
+        { intruders: [], hits: [] },
+        `nothing in the main column paints over the pane with ${at}`,
+      );
+      assert.ok(
+        shown.composer.top >= shown.main.top &&
+          shown.composer.bottom <= shown.main.bottom + 0.5,
+        `the composer is whole and inside the column with ${at}: ${JSON.stringify(shown)}`,
+      );
+      assert.ok(
+        shown.banner.bottom <= shown.composer.top + 0.5,
+        `the banner ends above the composer with ${at}: ${JSON.stringify(shown)}`,
+      );
+      const cap = shown.main.height * 0.4;
+      assert.ok(
+        shown.banner.height <= cap + 0.5,
+        `the banner is capped at 40% of the column with ${at}: ${JSON.stringify(shown)}`,
+      );
+      assert.ok(shown.bannerScrolls, `the banner scrolls inside with ${at}`);
+      if (shown.banner.height < cap - 0.5) {
+        squeezed.push(at);
+        assert.equal(
+          shown.timeline.height,
+          0,
+          `the timeline gives up all its room before the banner with ${at}: ${JSON.stringify(shown)}`,
+        );
+      }
+    }
+    await ui.page.setViewportSize({ width: 1024, height: 700 });
+    const wide = await layout();
+    assert.ok(
+      Math.abs(wide.banner.height - 0.4 * 700) < 1,
+      `side by side, the banner keeps 40% of the window with ${state}: ${wide.banner.height}`,
+    );
+  };
+  await ui.page.getByRole("button", { name: /^1 reply from/ }).click();
+  await threadPane(ui).waitFor();
+  await stacked("a thread open");
+  await ui.page.keyboard.press("Escape");
+  await threadPane(ui).waitFor({ state: "detached" });
+  await ui.page
+    .locator(".members")
+    .getByRole("button", { name: /@codex/ })
+    .click();
+  await drawer(ui).waitFor();
+  await stacked("the peek drawer open");
+  assert.deepEqual(
+    squeezed.filter((at) => at.endsWith("640x600")),
+    ["a thread open at 640x600", "the peek drawer open at 640x600"],
+    "the 300px column squeezes the banner",
+  );
+});
+
 function team(n, name) {
   const value = frame(n, name);
   value.frame.participants = [

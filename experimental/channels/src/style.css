@@ -792,9 +792,20 @@ button.member:not(.more):hover {
   min-height: 0;
   overflow-y: auto;
   overflow-anchor: none;
-  padding: var(--space-2) var(--space-6) var(--pad-bottom);
+  padding: 0 var(--space-6);
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px);
   mask-image: linear-gradient(to bottom, transparent, #000 12px);
+}
+/* The space above and below the messages is content, not padding, so a
+   squeezed timeline can shrink to nothing. */
+.timeline::before,
+.timeline::after {
+  content: "";
+  display: block;
+  height: var(--space-2);
+}
+.timeline::after {
+  height: var(--pad-bottom);
 }
 .timeline:focus-visible {
   outline-offset: -2px;
@@ -857,7 +868,7 @@ button.member:not(.more):hover {
 }
 .jump-dock {
   position: sticky;
-  bottom: 0;
+  bottom: var(--pad-bottom);
   height: 0;
   display: flex;
   justify-content: center;
@@ -876,7 +887,7 @@ button.member:not(.more):hover {
   font-size: var(--text-sm);
   font-weight: 500;
   box-shadow: var(--shadow-pop);
-  /* The dock sticks above the bottom padding; drop the pill to 16px from the edge. */
+  /* The dock sticks above the bottom space; drop the pill to 16px from the edge. */
   translate: 0 calc(var(--pad-bottom) - 16px);
 }
 .jump-latest:hover {
@@ -1969,6 +1980,12 @@ code.inline {
   }
   .attention {
     margin-inline: var(--space-4);
+  }
+  /* Stacked, the main column is half the window. Once the timeline is gone,
+     the banner shrinks so the composer stays whole. */
+  .app-shell.has-slot .attention {
+    flex-shrink: 1;
+    max-height: 40%;
   }
 }
 @media (max-width: 600px) {
