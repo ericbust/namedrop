@@ -392,9 +392,19 @@ export function mentionedAgents(
   );
 }
 
+// The text Enter sends. The hint judges this same string.
+export function sentText(text: string): string {
+  return text.trim();
+}
+// The server reads text that is only `@` as a leading mention with no name.
+function loneAt(sent: string): boolean {
+  return sent.slice(spaceAfter(sent, 0)) === "@";
+}
+
 // The text Enter sends, or null when it must stay in the box.
 export function postSource(text: string, rule: SendRule): string | null {
-  const body = text.trim();
+  const body = sentText(text);
+  if (loneAt(body)) return null;
   const { leading, rest } = serverMentions(body);
   if (leading.length > 0) return rest.trim() === "" ? null : body;
   return body === "" || (rule.kind === "thread" && rule.to.length === 0)
@@ -402,14 +412,26 @@ export function postSource(text: string, rule: SendRule): string | null {
     : body;
 }
 
+// Why Enter kept the text in the box, for the line under it.
+export function keptHint(text: string): string {
+  const body = sentText(text);
+  if (loneAt(body)) return composerCopy.nameAfter;
+  const leading = leadingMentions(body);
+  return leading.length > 0
+    ? composerCopy.needsMessage(leading)
+    : composerCopy.needsRecipient;
+}
+
 // Where Enter sends the text, in the words of the hint under the box.
 export function composerHint(rule: SendRule, text: string): string {
+  const body = sentText(text);
+  if (loneAt(body)) return composerCopy.nameAfter;
   if (rule.kind === "thread") return composerCopy.hint;
-  const refused = refusedLeading(text, rule.agents);
+  const refused = refusedLeading(body, rule.agents);
   if (refused !== null) return refused;
-  const leading = leadingMentions(text);
+  const leading = leadingMentions(body);
   if (leading.length > 0) return composerCopy.sendsOnlyTo(leading);
-  const mentioned = mentionedAgents(text, rule.agents);
+  const mentioned = mentionedAgents(body, rule.agents);
   return mentioned.length > 0
     ? composerCopy.checks(mentioned.map((member) => member.alias))
     : composerCopy.toRoom;

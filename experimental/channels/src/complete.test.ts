@@ -644,6 +644,69 @@ test("complete: a leading name whose pane is closed says so, before its capitals
   );
 });
 
+const roomHint =
+  "Enter posts to the channel · Mention @name to bring someone in";
+const checksHint = (names: string) =>
+  `Enter posts to the channel · Namedrop checks if it's for ${names}`;
+test("H1: the hint judges the text Enter sends, so a U+FEFF that trim drops can't flip it, and U+0085 reads as the server's whitespace", () => {
+  const channel = {
+    kind: "channel",
+    agents: alpha.members,
+    label: "alpha",
+  } as const;
+  // [typed, what Enter sends, the hint]. The server's reading of each sent
+  // text comes from parse_mentions and is_plain_channel_post.
+  const cases: [string, string, string][] = [
+    // JS trim drops a leading U+FEFF, so the server reads a leading mention.
+    ["﻿@codex hi", "@codex hi", "Enter sends only to @codex"],
+    ["﻿@Codex hi", "@Codex hi", "Names are lowercase: @codex"],
+    ["﻿\u0085@codex hi", "\u0085@codex hi", "Enter sends only to @codex"],
+    // A trailing U+FEFF is dropped too, and never changed who gets it.
+    ["@codex hi﻿", "@codex hi", "Enter sends only to @codex"],
+    ["﻿can @codex look?", "can @codex look?", checksHint("@codex")],
+    // JS trim keeps U+0085; Rust's trim_start and the grammar skip it.
+    ["\u0085@codex hi", "\u0085@codex hi", "Enter sends only to @codex"],
+    ["@codex hi\u0085", "@codex hi\u0085", "Enter sends only to @codex"],
+    // U+0085 stops JS trim before the U+FEFF, which the server keeps as a
+    // character, so the text is a plain post that mentions @codex.
+    ["\u0085﻿@codex hi", "\u0085﻿@codex hi", checksHint("@codex")],
+  ];
+  for (const [text, sent, hint] of cases) {
+    assert.equal(postSource(text, channel), sent, JSON.stringify(text));
+    assert.equal(composerHint(channel, text), hint, JSON.stringify(text));
+  }
+});
+
+test("H2: a lone @ reads Type a name after @ and Enter keeps it in the box, since parse_mentions refuses it", () => {
+  const channel = {
+    kind: "channel",
+    agents: alpha.members,
+    label: "alpha",
+  } as const;
+  const rules = [
+    channel,
+    { kind: "thread", to: ["@codex"] },
+    { kind: "thread", to: [] },
+  ] as const;
+  // Each sends "@" or "\u0085@", which the server reads as a leading mention with no name.
+  for (const rule of rules)
+    for (const text of ["@", " @ ", "\n@\n", "﻿@", "@﻿", "\u0085@"]) {
+      const at = `${rule.kind} ${JSON.stringify(text)}`;
+      assert.equal(composerHint(rule, text), "Type a name after @", at);
+      assert.equal(postSource(text, rule), null, at);
+    }
+  // Whitespace after the @, or a #label before it, makes a plain post.
+  for (const text of ["#alpha @", "@ hi", "@\u0085"]) {
+    assert.equal(composerHint(channel, text), roomHint, JSON.stringify(text));
+    assert.equal(postSource(text, channel), text, JSON.stringify(text));
+  }
+  assert.equal(
+    composerHint(channel, "@@codex"),
+    "@@codex isn't in this channel",
+  );
+  assert.equal(composerHint(channel, "@-x"), "@-x isn't in this channel");
+});
+
 test("complete: a name right after a #label word names someone in that workspace, so it is no channel mention, as the server's workspace_label_before reads it", () => {
   const channel = { kind: "channel", agents: alpha.members } as const;
   const hint = (text: string) => composerHint(channel, text);

@@ -426,6 +426,7 @@ export const composerCopy = {
   paneClosed: (alias: string) => `${alias}'s pane is closed`,
   notMember: (name: string) => `${name} isn't in this channel`,
   spaceAfter: (alias: string) => `Put a space after ${alias}`,
+  nameAfter: "Type a name after @",
   sending: "Sending…",
   send: "Send",
   everyWorkspace: "every workspace",

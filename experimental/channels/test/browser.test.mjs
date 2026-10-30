@@ -9004,6 +9004,49 @@ test("R3 fix1 F1: a name right after a #label word is that workspace's, so the h
   );
 });
 
+test("UI-R4 H1: a pasted U+FEFF before a leading name reads as Enter sends it, only to that name, and Enter sends the trimmed text", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  await box.fill("﻿@codex hi");
+  assert.equal(await status.textContent(), "Enter sends only to @codex");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@codex hi");
+});
+
+test("UI-R4 H2: a lone @ reads Type a name after @, Enter keeps it with no request, and with the list open Enter still picks a name", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  const list = ui.page.getByRole("listbox", { name: "Members" });
+  await box.click();
+  await box.pressSequentially("@");
+  await list.waitFor();
+  assert.equal(await status.textContent(), "Type a name after @");
+  await box.press("Enter");
+  assert.equal(await box.inputValue(), "@claude ", "Enter picked a name");
+  await box.fill("@");
+  await list.waitFor();
+  await box.press("Escape");
+  assert.equal(await list.count(), 0);
+  assert.equal(await status.textContent(), "Type a name after @");
+  assert.equal(
+    await ui.page.getByRole("button", { name: "Send" }).isDisabled(),
+    true,
+  );
+  await box.press("Enter");
+  await readsAs(status, "Type a name after @");
+  assert.equal(await box.inputValue(), "@", "the @ stays in the box");
+  await box.fill("@ hi");
+  assert.equal(
+    await status.textContent(),
+    "Enter posts to the channel · Mention @name to bring someone in",
+  );
+  assert.equal(ui.posts.attempts.length, 0, "no request was made");
+});
+
 test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {
   const at = Date.now() - 600_000;
   const { ui } = await chatRoom(t, [
