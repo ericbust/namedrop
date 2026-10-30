@@ -1367,17 +1367,15 @@ pub(super) fn wake_mailboxes_after_send(
 ) -> Result<(), String> {
     use std::os::unix::process::CommandExt;
 
-    let needs_watcher = |value: &serde_json::Value| {
-        serde_json::from_value::<crate::DrainReport>(value.clone())
-            .is_ok_and(|report| report.needs_mailbox_worker())
-    };
+    let pending = crate::drain_reports(receipt)
+        .filter(|(_, report)| report.needs_mailbox_worker())
+        .map(|(workspace, _)| workspace)
+        .collect::<Vec<_>>();
     let mut spaces = Vec::new();
-    if needs_watcher(&receipt["drain"]) {
+    if pending.contains(&None) {
         spaces.push(namespace.space_id.clone());
     }
-    if let Some(drains) = receipt["drains"].as_object()
-        && drains.values().any(needs_watcher)
-    {
+    if pending.iter().any(Option::is_some) {
         let message = crate::MessageId::new(
             receipt["message_id"]
                 .as_str()
@@ -1388,10 +1386,9 @@ pub(super) fn wake_mailboxes_after_send(
             .transaction(|tx| tx.forwarded_copies(namespace, &message))
             .map_err(|error| error.to_string())?;
         spaces.extend(copies.into_iter().filter_map(|copy| {
-            drains
-                .get(copy.workspace.as_str())
-                .filter(|report| needs_watcher(report))
-                .map(|_| copy.space)
+            pending
+                .contains(&Some(copy.workspace.as_str()))
+                .then_some(copy.space)
         }));
     }
     for space in spaces {

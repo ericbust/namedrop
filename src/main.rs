@@ -370,14 +370,7 @@ fn drain_report(result: &serde_json::Value) -> Result<namedrop::DrainReport, Str
 }
 
 fn needs_mailbox_watcher(result: &serde_json::Value) -> bool {
-    let needs_worker =
-        |value| drain_report(value).is_ok_and(|report| report.needs_mailbox_worker());
-    needs_worker(result)
-        || result.get("delivery").is_some_and(needs_worker)
-        || result
-            .get("drains")
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(|drains| drains.values().any(needs_worker))
+    namedrop::drain_reports(result).any(|(_, report)| report.needs_mailbox_worker())
 }
 
 #[cfg(test)]

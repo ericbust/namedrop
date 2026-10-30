@@ -83,6 +83,30 @@ impl DrainReport {
     }
 }
 
+/// Read drain reports from a bare report or an operation receipt. A report with
+/// no workspace key belongs to the current space; forwarded reports retain the
+/// workspace key used to find their saved copy.
+pub fn drain_reports(result: &Value) -> impl Iterator<Item = (Option<&str>, DrainReport)> {
+    std::iter::once((None, result))
+        .chain(result.get("delivery").map(|value| (None, value)))
+        .chain(
+            result
+                .get("drains")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|drains| {
+                    drains
+                        .iter()
+                        .map(|(workspace, value)| (Some(workspace.as_str()), value))
+                }),
+        )
+        .filter_map(|(workspace, value)| {
+            serde_json::from_value(value.get("drain").unwrap_or(value).clone())
+                .ok()
+                .map(|report| (workspace, report))
+        })
+}
+
 /// The spaces one mailbox wake should drain: this one first, then every other
 /// space of the Herdr session holding a queued forwarded copy, and every space
 /// whose open coordination has an assignee here, so a worker going idle
@@ -482,7 +506,7 @@ where
             Ok(effects) => effects,
             Err(error) => {
                 let summary = format!(
-                    "Could not send to @{}. {error}. Check the state directory permissions and available file descriptors, then send the message again.",
+                    "Could not send to @{}. {error}. Check the state directory permissions and available file descriptors, then review the conversation before retrying delivery.",
                     second.alias,
                 );
                 let failed = store

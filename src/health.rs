@@ -809,10 +809,10 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
         AttentionSourceKind::ContextGrant => issue(
             "ND-CONTEXT-001",
             HealthSeverity::Notice,
-            "Shared context is waiting for a decision.",
-            "Namedrop will not reveal or reuse it without a valid grant.",
+            "Shared context failed.",
+            "Ask the sender to fix the problem and share the context again.",
             HealthRepairKind::HumanDecision,
-            "Review the context request?",
+            "Ask the sender to fix the problem and share the context again?",
         ),
         AttentionSourceKind::Coordination => issue(
             "ND-COORDINATION-001",

@@ -70,7 +70,7 @@ impl std::fmt::Display for AcquireError {
                 "pane effects: {}",
                 io::Error::from_raw_os_error(libc::EWOULDBLOCK)
             ),
-            Self::Fault(error) => write!(f, "pane effects: {error}"),
+            Self::Fault(error) => error.fmt(f),
         }
     }
 }

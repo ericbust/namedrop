@@ -3484,12 +3484,12 @@ impl StateTransaction<'_> {
         Ok(DeliveryState::Cancelled)
     }
 
-    pub(crate) fn reply_limit_blocked_mailbox_addresses(
+    pub(crate) fn reply_limit_blocked_mailbox_threads(
         &self,
         namespace: &StateNamespace,
-    ) -> Result<Vec<PaneAddressId>, StoreError> {
+    ) -> Result<Vec<(PaneAddressId, ThreadId)>, StoreError> {
         let mut statement = self.transaction.prepare(
-            "SELECT d.address_id
+            "SELECT d.address_id, m.thread_id
              FROM mailbox_deliveries d
              JOIN collaboration_messages m USING (session_socket_id, worktree_id, message_id)
              JOIN thread_controls c USING (session_socket_id, worktree_id, thread_id)
@@ -3507,7 +3507,10 @@ impl StateTransaction<'_> {
         )?;
         statement
             .query_map(namespace_params(namespace), |row| {
-                row.get::<_, String>(0).map(PaneAddressId::new)
+                Ok((
+                    PaneAddressId::new(row.get::<_, String>(0)?),
+                    ThreadId::new(row.get::<_, String>(1)?),
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StoreError::from)
