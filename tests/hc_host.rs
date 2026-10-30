@@ -1107,3 +1107,207 @@ fn removing_or_releasing_a_gone_terminal_succeeds_but_other_clear_errors_roll_ba
         }
     }
 }
+
+#[test]
+fn routine_events_preserve_another_dispatchers_live_lease() {
+    for event in ["created", "restarted", "snapshot", "missed"] {
+        check_dispatch_lease(event, false);
+    }
+}
+
+#[test]
+fn subscriber_holds_abandoned_dispatch_lease_at_deadline() {
+    check_dispatch_lease("snapshot", true);
+}
+
+#[test]
+fn explicit_reconcile_holds_live_dispatch_lease() {
+    check_dispatch_lease("reconcile", false);
+}
+
+fn check_dispatch_lease(event: &str, expires: bool) {
+    use namedrop::{
+        ActorKind, AgentSessionId, Clock, DeliveryAttemptId, DeliveryId, DeliveryState, LeaseDraft,
+        MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution, StateStore, ThreadId,
+    };
+    let fixture = Fixture::default();
+    {
+        let mut terminals = fixture.terminals.borrow_mut();
+        terminals[0]["foreground"]["argv"] = json!(["claude"]);
+        terminals[0]["status"] = json!({"state":"done", "app":"claude-code"});
+        let mut other = terminals[0].clone();
+        other["address"] = json!("t2");
+        other["labels"] = json!({"herdr.space":"fixture-space"});
+        terminals.push(other);
+    }
+    let state = std::env::temp_dir().join(format!(
+        "namedrop-hc-live-lease-{}-{event}-{expires}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&state);
+    struct TestClock(std::cell::Cell<u64>);
+    impl Clock for TestClock {
+        fn now_unix_ms(&self) -> u64 {
+            self.0.get()
+        }
+    }
+    let clock = TestClock(std::cell::Cell::new(1_000));
+    let ids = namedrop::ProcessIds::default();
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&state),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    namedrop::execute_lifecycle_operation("name", json!({"alias":"alice"}), &runtime).unwrap();
+    let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+    let mut store = StateStore::open(&state).unwrap();
+    let now = clock.now_unix_ms();
+    let attribution = MutationAttribution::new(ActorKind::Plugin, "test-dispatcher", now);
+    let attempt_id = DeliveryAttemptId::new("active-dispatch");
+    store
+        .transaction(|tx| {
+            let binding = tx
+                .active_pane_bindings(&namespace)?
+                .into_iter()
+                .find(|binding| binding.pane_id == "t1")
+                .unwrap();
+            let session = AgentSessionId::new("fixture-session");
+            let thread = ThreadId::new("test-thread");
+            tx.create_thread(&namespace, &thread, "test", &attribution)?;
+            tx.append_message(
+                &namespace,
+                &MessageDraft {
+                    thread_id: thread,
+                    message_id: MessageId::new("test-message"),
+                    in_reply_to: None,
+                    author_address_id: binding.address_id.clone(),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: "alice".into(),
+                    author_agent_session_snapshot: None,
+                    request_id: "test-request".into(),
+                    authored_source: "@alice test".into(),
+                    body: "test".into(),
+                    grammar_version: "mention/v1".into(),
+                    recipients: vec![MessageRecipientDraft {
+                        address_id: binding.address_id.clone(),
+                        alias_snapshot: "alice".into(),
+                        agent_session_snapshot: Some(session.clone()),
+                        delivery_id: DeliveryId::new("test-delivery"),
+                    }],
+                    context_references: Vec::new(),
+                },
+                &attribution,
+            )?;
+            assert!(
+                tx.lease_mailbox_head(
+                    &namespace,
+                    &binding.address_id,
+                    &LeaseDraft {
+                        attempt_id: attempt_id.clone(),
+                        binding_id: binding.id.clone(),
+                        agent_session_id: session,
+                        retry_of_attempt_id: None,
+                        owner: "other-process".into(),
+                        acquired_at_ms: now,
+                        expires_at_ms: now + 30_000,
+                    },
+                    &attribution
+                )?
+                .is_some()
+            );
+            Ok(())
+        })
+        .unwrap();
+    if event == "reconcile" {
+        namedrop::execute_lifecycle_operation("reconcile", json!({}), &runtime).unwrap();
+        assert_eq!(
+            store
+                .transaction(|tx| tx.delivery_attempt_state(&namespace, &attempt_id))
+                .unwrap(),
+            DeliveryState::Held
+        );
+        std::fs::remove_dir_all(state).unwrap();
+        return;
+    }
+    let line = match event {
+        "snapshot" => json!({"terminals": *fixture.terminals.borrow()}),
+        "missed" => json!({"method":"missed", "params":{"seq":99}}),
+        _ => json!({"method":"event", "params":{"type":event, "terminal":"t2"}}),
+    }
+    .to_string();
+    let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+    subscriber.handle_line(&line, &runtime).unwrap();
+    assert_eq!(
+        store
+            .transaction(|tx| tx.delivery_attempt_state(&namespace, &attempt_id))
+            .unwrap(),
+        DeliveryState::Dispatching,
+        "{event}"
+    );
+    clock.0.set(now + 29_999);
+    subscriber.tick(&runtime).unwrap();
+    assert_eq!(
+        store
+            .transaction(|tx| tx.delivery_attempt_state(&namespace, &attempt_id))
+            .unwrap(),
+        DeliveryState::Dispatching,
+        "before lease expiry"
+    );
+    if expires {
+        clock.0.set(now + 30_000);
+        subscriber.tick(&runtime).unwrap();
+        assert_eq!(
+            store
+                .transaction(|tx| tx.delivery_attempt_state(&namespace, &attempt_id))
+                .unwrap(),
+            DeliveryState::Held,
+            "at lease expiry"
+        );
+        assert!(
+            !fixture
+                .take_calls()
+                .iter()
+                .any(|args| args.first().is_some_and(|arg| arg == "send"))
+        );
+        std::fs::remove_dir_all(state).unwrap();
+        return;
+    }
+    let attribution =
+        MutationAttribution::new(ActorKind::Plugin, "test-dispatcher", clock.now_unix_ms());
+    store
+        .transaction(|tx| {
+            assert_eq!(
+                tx.delivery_attempt_state(&namespace, &attempt_id)?,
+                DeliveryState::Dispatching,
+                "{event}"
+            );
+            tx.transition_delivery_attempt(
+                &namespace,
+                &attempt_id,
+                DeliveryState::Submitted,
+                &attribution,
+            )?;
+            tx.acknowledge_delivery_attempt(
+                &namespace,
+                &attempt_id,
+                "test-receipt",
+                &AgentSessionId::new("fixture-session"),
+                &attribution,
+            )
+        })
+        .unwrap();
+    assert_eq!(
+        store
+            .transaction(|tx| tx.delivery_attempt_state(&namespace, &attempt_id))
+            .unwrap(),
+        DeliveryState::Acknowledged
+    );
+    std::fs::remove_dir_all(state).unwrap();
+}
