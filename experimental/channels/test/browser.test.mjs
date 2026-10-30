@@ -185,7 +185,11 @@ function postRoute(onPost) {
         type: req.headers["content-type"] ?? null,
         body: await readBody(req),
         status: 0,
+        closedUnanswered: false,
       };
+      res.on("close", () => {
+        request.closedUnanswered = !res.writableFinished;
+      });
       controls.push(request);
       const reply = (status, value) => {
         request.status = status;
@@ -5705,6 +5709,49 @@ test("CH-fix-2 item 3: Allow 10 more replies posts continue with the CSRF header
   ui.connections[0].send("space", value);
   await limit.item.waitFor({ state: "detached" });
 });
+
+for (const action of ["continue", "stop"])
+  test(`CH-fix-3 item 2: a ${action} request still open when its item leaves is aborted, and the page posts afterwards`, async (t) => {
+    const value = replyLimit();
+    const ui = await open(t, (client) => replay(client, [value]), undefined, {
+      onControl: () => new Promise(() => {}),
+    });
+    await ui.live();
+    const failed = [];
+    ui.page.on("requestfailed", (request) =>
+      failed.push([
+        new URL(request.url()).pathname,
+        request.failure()?.errorText,
+      ]),
+    );
+    const limit = limitItem(ui);
+    if (action === "continue") await limit.allow.click();
+    else {
+      await limit.stop.click();
+      await limit.confirm.click();
+    }
+    await until(() => ui.posts.controls.length === 1, `the ${action} POST`);
+    value.frame.attention = [];
+    value.frame.health = { level: "calm" };
+    ui.connections[0].send("space", value);
+    await limit.item.waitFor({ state: "detached" });
+    await until(() => failed.length > 0, "the page to abort the request");
+    assert.deepEqual(failed, [
+      [`/w/${key(1)}/threads/t1/${action}`, "net::ERR_ABORTED"],
+    ]);
+    await until(
+      () => ui.posts.controls[0].closedUnanswered,
+      "the server to see the connection close",
+    );
+    const box = ui.page.locator("main textarea");
+    await box.fill("still here");
+    await box.press("Enter");
+    await until(
+      () => ui.posts.attempts[0]?.status === 200,
+      "a message POST after the abort",
+    );
+    assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "still here");
+  });
 
 test("CH-fix-2 item 3: Stop thread asks once inline, Cancel and Escape take it back, and only the confirm posts stop", async (t) => {
   const ui = await open(t, (client) => replay(client, [replyLimit()]));

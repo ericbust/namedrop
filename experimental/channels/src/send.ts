@@ -31,6 +31,7 @@ export function createPoster(fetcher: typeof fetch = fetch) {
     path: string,
     body: object,
     csrf: string | null,
+    signal: AbortSignal | null,
   ): Promise<Response> {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -41,17 +42,19 @@ export function createPoster(fetcher: typeof fetch = fetch) {
       credentials: "same-origin",
       headers,
       body: JSON.stringify(body),
+      signal,
     });
   }
   async function postWithTokenRetry(
     path: string,
     body: object,
+    signal: AbortSignal | null = null,
   ): Promise<Response> {
     const used = token();
-    const response = await attempt(path, body, await used);
+    const response = await attempt(path, body, await used, signal);
     if (response.status !== 403) return response;
     if (session === used) session = null;
-    return attempt(path, body, await token());
+    return attempt(path, body, await token(), signal);
   }
   return {
     prepare(): void {
@@ -86,11 +89,13 @@ export function createPoster(fetcher: typeof fetch = fetch) {
       key: SpaceKey,
       threadId: string,
       action: ThreadAction,
+      signal: AbortSignal,
     ): Promise<ControlResult> {
       try {
         const response = await postWithTokenRetry(
           `/w/${key}/threads/${encodeURIComponent(threadId)}/${action}`,
           {},
+          signal,
         );
         return response.ok
           ? { kind: "done" }

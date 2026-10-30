@@ -1,4 +1,10 @@
-import { type KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   type AttentionNavigation,
   attentionConversation,
@@ -30,6 +36,7 @@ export type ControlThread = (
   key: SpaceKey,
   threadId: string,
   action: ThreadAction,
+  signal: AbortSignal,
 ) => Promise<ControlResult>;
 const idle: ThreadControl = { kind: "idle" };
 export function AttentionActions({
@@ -70,6 +77,10 @@ export function AttentionActions({
   const stopButton = useRef<HTMLButtonElement>(null);
   const confirmButton = useRef<HTMLButtonElement>(null);
   const shown = useRef(control.kind);
+  // A press the frame answers by dropping the item never hears back, so its
+  // request ends when the item leaves instead of holding a connection.
+  const press = useRef<AbortController | null>(null);
+  useEffect(() => () => press.current?.abort(), []);
   useLayoutEffect(() => {
     const before = shown.current;
     shown.current = control.kind;
@@ -86,9 +97,12 @@ export function AttentionActions({
     if (next === control) return;
     setControl(next);
     if (next.kind !== "pending" || controls === null) return;
-    void onControl(channel.key, controls.threadId, next.action).then(
+    press.current?.abort();
+    press.current = new AbortController();
+    const { signal } = press.current;
+    void onControl(channel.key, controls.threadId, next.action, signal).then(
       (result) => {
-        if (result.kind === "failed")
+        if (result.kind === "failed" && !signal.aborted)
           setControl((now) =>
             threadControl(now, { type: "failed", status: result.status }),
           );

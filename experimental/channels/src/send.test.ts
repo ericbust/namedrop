@@ -25,6 +25,7 @@ const post: Post = {
   source: "@codex hi",
   inReplyTo: null,
 };
+const press = new AbortController().signal;
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), {
     status,
@@ -148,10 +149,12 @@ test("control: posts a thread action with the session token and an empty body, s
       : json(200, {});
   });
   const poster = createPoster(server.fetcher);
-  assert.deepEqual(await poster.control(key, "thread 1/a", "continue"), {
+  assert.deepEqual(await poster.control(key, "thread 1/a", "continue", press), {
     kind: "done",
   });
-  assert.deepEqual(await poster.control(key, "t2", "stop"), { kind: "done" });
+  assert.deepEqual(await poster.control(key, "t2", "stop", press), {
+    kind: "done",
+  });
   assert.deepEqual(await poster.post(post), { kind: "sent", messageId: "m1" });
   assert.deepEqual(
     posts(server.seen).map(({ url, csrf, type, body }) => [
@@ -205,7 +208,7 @@ test("control: a refusal or a network failure carries its status", async () => {
       return outcome;
     });
     assert.deepEqual(
-      await createPoster(server.fetcher).control(key, "t1", "stop"),
+      await createPoster(server.fetcher).control(key, "t1", "stop", press),
       expected,
     );
   }
@@ -279,4 +282,19 @@ test("deliver: a refusal carries the server's message and a network failure read
       expected,
     );
   }
+});
+
+test("control: the thread action's request carries the caller's abort signal", async () => {
+  const server = fakeServer(({ url }) =>
+    url === "/api/session" ? json(200, { csrf_token: "t" }) : json(200, {}),
+  );
+  const press = new AbortController();
+  await createPoster(server.fetcher).control(key, "t1", "stop", press.signal);
+  assert.deepEqual(
+    server.seen.map(({ url, init }) => [url, init?.signal === press.signal]),
+    [
+      ["/api/session", false],
+      [`/w/${key}/threads/t1/stop`, true],
+    ],
+  );
 });
