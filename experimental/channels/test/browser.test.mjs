@@ -9884,6 +9884,18 @@ test("UI-R4 L2: a drawer open when the window grows past 600 px closes, and stay
   await toggle.click();
   await dialog.waitFor();
 });
+test("UI-R4 L2: after the drawer was open, growing past 600 px and shrinking back leaves focus on the Channels button, not on the page", async (t) => {
+  const { page, toggle, dialog, focused } = await phoneDrawer(t);
+  await toggle.click();
+  await dialog.waitFor();
+  await resize(page, 700, 844);
+  assert.equal(await focused(), "alpha", "focus stays on the row at 700 px");
+  await resize(page, 390, 844);
+  assert.ok(
+    await toggle.evaluate((element) => element === document.activeElement),
+    `focus is on ${await page.evaluate(() => document.activeElement?.tagName)}`,
+  );
+});
 test("UI-R4 L2: typing in the composer leaves the page's media queries subscribed once", async (t) => {
   const ui = await open(t, (client) => replay(client, [layoutChannel()]));
   await ui.live();
