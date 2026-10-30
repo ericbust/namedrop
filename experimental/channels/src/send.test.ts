@@ -223,12 +223,14 @@ test("deliver: posts the bare aliases for a stored post with the session token, 
       : new Response("Forbidden.\n", { status: 403 });
   });
   const poster = createPoster(server.fetcher);
-  assert.deepEqual(await poster.deliver(key, "post 1/a", ["@codex"]), {
-    kind: "done",
-  });
-  assert.deepEqual(await poster.deliver(key, "p2", ["@codex", "@claude"]), {
-    kind: "done",
-  });
+  assert.deepEqual(
+    Object.fromEntries(await poster.deliver(key, "post 1/a", ["@codex"])),
+    { "@codex": { kind: "done" } },
+  );
+  assert.deepEqual(
+    Object.fromEntries(await poster.deliver(key, "p2", ["@codex", "@claude"])),
+    { "@codex": { kind: "done" }, "@claude": { kind: "done" } },
+  );
   assert.deepEqual(posts(server.seen), [
     {
       url: `/w/${key}/messages/post%201%2Fa/deliver`,
@@ -249,6 +251,31 @@ test("deliver: posts the bare aliases for a stored post with the session token, 
       body: { to: ["codex", "claude"] },
     },
   ]);
+});
+
+test("deliver: a 200 that lists only some aliases sends the rest back as failed with the server's reason", async () => {
+  const reason = "@claude belongs to a different agent now.";
+  const server = fakeServer(({ url }) =>
+    url === "/api/session"
+      ? json(200, { csrf_token: "t" })
+      : json(200, {
+          channel: { state: "unrouted", to: ["codex"] },
+          delivered: ["codex"],
+          not_delivered: [{ alias: "claude", reason }],
+        }),
+  );
+  assert.deepEqual(
+    Object.fromEntries(
+      await createPoster(server.fetcher).deliver(key, "p1", [
+        "@codex",
+        "@claude",
+      ]),
+    ),
+    {
+      "@codex": { kind: "done" },
+      "@claude": { kind: "failed", status: 200, message: reason },
+    },
+  );
 });
 
 test("deliver: a refusal carries the server's message and a network failure reads status 0", async () => {
@@ -278,8 +305,13 @@ test("deliver: a refusal carries the server's message and a network failure read
       return outcome;
     });
     assert.deepEqual(
-      await createPoster(server.fetcher).deliver(key, "p1", ["@codex"]),
-      expected,
+      Object.fromEntries(
+        await createPoster(server.fetcher).deliver(key, "p1", [
+          "@codex",
+          "@claude",
+        ]),
+      ),
+      { "@codex": expected, "@claude": expected },
     );
   }
 });

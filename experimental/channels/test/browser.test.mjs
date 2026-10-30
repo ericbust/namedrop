@@ -219,9 +219,10 @@ function postRoute(onPost) {
       if (request.csrf !== session.csrf) return reply(403, {});
       const outcome = await onDeliver(JSON.parse(request.body), request);
       if (outcome.drop) return req.socket.destroy();
-      const { status = 200, error, channel = {} } = outcome;
-      if (status === 200) return reply(200, { channel });
-      if (error !== undefined) return reply(status, { error });
+      const { status = 200, channel = {}, ...answer } = outcome;
+      if (status === 200) return reply(200, { channel, ...answer });
+      if (answer.error !== undefined)
+        return reply(status, { error: answer.error });
       request.status = status;
       res.writeHead(status).end();
     },
@@ -6862,6 +6863,72 @@ test("CH-fix-3 item 1: Try again's title says Couldn't reach Namedrop. when the 
     await shownText(route.getByRole("status")),
     "Couldn't send to @codex · Try again",
   );
+});
+
+test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @codex · Try again with the server's reason as its title, and Try again sends it", async (t) => {
+  const reason = "@codex belongs to a different agent now.";
+  const outcomes = [
+    {
+      delivered: [],
+      not_delivered: [{ alias: "codex", reason }],
+      error: "Namedrop skipped 1 agent.",
+    },
+    { delivered: ["codex"] },
+  ];
+  const { ui } = await chatRoom(t, [unsent()], {
+    onDeliver: () => outcomes.shift(),
+  });
+  const { route } = routeOf(ui, "p1");
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await readsAs(route, "Couldn't send to @codex · Try again");
+  await focusOn(ui.page, "p1 @codex", "Try again");
+  const button = await pressedOffer(route, "p1", "@codex");
+  assert.deepEqual(await offerState(button), {
+    text: "Try again",
+    disabled: null,
+    title: reason,
+    focused: true,
+    connected: true,
+  });
+  assert.equal(
+    await shownText(route.getByRole("status")),
+    "Couldn't send to @codex · Try again",
+  );
+  await button.click();
+  assert.equal((await offerReads(button, "Sent to @codex")).focused, true);
+  await readsAs(route, "Sent to @codex");
+  assert.deepEqual(
+    ui.posts.deliveries.map(({ path, body, status }) => [path, body, status]),
+    [
+      [deliverPath("p1"), '{"to":["codex"]}', 200],
+      [deliverPath("p1"), '{"to":["codex"]}', 200],
+    ],
+  );
+});
+
+test("CH-fix-4: a 200 that did not deliver and gives no reason says the name may belong to a different agent now, and a 200 with no delivered field reads Sent to @codex", async (t) => {
+  const outcomes = [{ delivered: ["claude"] }, {}];
+  const { ui } = await chatRoom(t, [unsent()], {
+    onDeliver: () => outcomes.shift(),
+  });
+  const { route } = routeOf(ui, "p1");
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await readsAs(route, "Couldn't send to @codex · Try again");
+  const button = await pressedOffer(route, "p1", "@codex");
+  assert.equal(
+    (await offerState(button)).title,
+    "Namedrop didn't send it. The name may belong to a different agent now.",
+  );
+  await button.click();
+  assert.deepEqual(await offerReads(button, "Sent to @codex"), {
+    text: "Sent to @codex",
+    disabled: "true",
+    title: null,
+    focused: true,
+    connected: true,
+  });
+  await readsAs(route, "Sent to @codex");
+  assert.equal(ui.posts.deliveries.length, 2);
 });
 
 test("CH-fix-3 item 1: Send to after router_failed moves each pressed agent to its own part after the ones still not sent", async (t) => {

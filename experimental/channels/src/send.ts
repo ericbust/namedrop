@@ -1,5 +1,16 @@
-import type { Alias, SendFailure, SpaceKey, ThreadAction } from "./model.ts";
-import { parseReceipt, parseRefusal, parseSessionToken } from "./wire.ts";
+import type {
+  Alias,
+  DeliverResult,
+  SendFailure,
+  SpaceKey,
+  ThreadAction,
+} from "./model.ts";
+import {
+  parseDelivered,
+  parseReceipt,
+  parseRefusal,
+  parseSessionToken,
+} from "./wire.ts";
 
 export type Post = {
   requestId: string;
@@ -13,9 +24,6 @@ export type PostResult =
 export type ControlResult =
   | { kind: "done" }
   | { kind: "failed"; status: number };
-export type DeliverResult =
-  | { kind: "done" }
-  | ({ kind: "failed" } & SendFailure);
 
 export function createPoster(fetcher: typeof fetch = fetch) {
   let session: Promise<string | null> | null = null;
@@ -108,21 +116,25 @@ export function createPoster(fetcher: typeof fetch = fetch) {
       key: SpaceKey,
       messageId: string,
       to: readonly Alias[],
-    ): Promise<DeliverResult> {
+    ): Promise<ReadonlyMap<Alias, DeliverResult>> {
+      const each = (failure: SendFailure) =>
+        new Map(
+          to.map((alias): [Alias, DeliverResult] => [
+            alias,
+            { kind: "failed", ...failure },
+          ]),
+        );
       try {
         const response = await postWithTokenRetry(
           `/w/${key}/messages/${encodeURIComponent(messageId)}/deliver`,
           { to: to.map((alias) => alias.slice(1)) },
         );
+        const body = await response.text();
         return response.ok
-          ? { kind: "done" }
-          : {
-              kind: "failed",
-              status: response.status,
-              message: parseRefusal(await response.text()),
-            };
+          ? parseDelivered(body, to)
+          : each({ status: response.status, message: parseRefusal(body) });
       } catch {
-        return { kind: "failed", status: 0, message: "" };
+        return each({ status: 0, message: "" });
       }
     },
   };

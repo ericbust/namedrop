@@ -386,12 +386,13 @@ export const routeCopy = {
       (alias: string) => string
     >,
     failed: (alias: string) => `Couldn't send to ${alias}`,
-    why: ({ status, message }: SendFailure) =>
-      status === 0
-        ? "Couldn't reach Namedrop."
-        : message === ""
-          ? `HTTP ${status}`
-          : message,
+    why: ({ status, message }: SendFailure) => {
+      if (status === 0) return "Couldn't reach Namedrop.";
+      if (message !== "") return message;
+      return status === 200
+        ? "Namedrop didn't send it. The name may belong to a different agent now."
+        : `HTTP ${status}`;
+    },
   },
   tip: {
     router: (name: string) => `Picked by ${name}`,

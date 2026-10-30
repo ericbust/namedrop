@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Message } from "./model.ts";
+import type { Alias, Message } from "./model.ts";
 import {
+  parseDelivered,
   parseEvent,
   parseHistory,
   routeOf,
@@ -359,4 +360,97 @@ test("history pages carry the channel state and woke", () => {
     router: "codex-luna",
   });
   assert.deepEqual(page?.woke, ["@codex"]);
+});
+
+test("deliver answer: an alias the 200 lists was delivered, and any other named alias was not, with its own reason, then the answer's error", () => {
+  const read = (body: unknown, to: readonly Alias[] = ["@codex"]) =>
+    Object.fromEntries(parseDelivered(JSON.stringify(body), to));
+  const done = { kind: "done" };
+  const notSent = (message: string) => ({
+    kind: "failed",
+    status: 200,
+    message,
+  });
+  const reason = "@codex belongs to a different agent now.";
+  assert.deepEqual(read({ channel: {}, delivered: ["codex"] }), {
+    "@codex": done,
+  });
+  assert.deepEqual(
+    read({ channel: {}, delivered: ["codex"] }, ["@codex", "@claude"]),
+    { "@codex": done, "@claude": notSent("") },
+  );
+  assert.deepEqual(read({ delivered: [] }), { "@codex": notSent("") });
+  assert.deepEqual(
+    read({
+      delivered: [],
+      not_delivered: [{ alias: "codex", reason: `  ${reason} ` }],
+      error: "Namedrop skipped 1 agent.",
+    }),
+    { "@codex": notSent(reason) },
+  );
+  assert.deepEqual(
+    read({ delivered: [], error: " Namedrop skipped 1 agent. " }),
+    { "@codex": notSent("Namedrop skipped 1 agent.") },
+  );
+  assert.deepEqual(
+    read(
+      {
+        delivered: ["lead"],
+        not_delivered: [{ alias: "claude", reason: "@claude is retired." }],
+        error: "Namedrop skipped 2 agents.",
+      },
+      ["@codex", "@claude", "@lead"],
+    ),
+    {
+      "@codex": notSent("Namedrop skipped 2 agents."),
+      "@claude": notSent("@claude is retired."),
+      "@lead": done,
+    },
+  );
+});
+test("deliver answer: a 200 with no delivered field, or one the page cannot read, delivered every named alias", () => {
+  const to: readonly Alias[] = ["@codex", "@claude"];
+  const all = { "@codex": { kind: "done" }, "@claude": { kind: "done" } };
+  const read = (body: string) => Object.fromEntries(parseDelivered(body, to));
+  for (const body of [
+    '{"channel":{"state":"unrouted","to":["codex"]}}',
+    '{"error":"Namedrop skipped 1 agent.","not_delivered":[{"alias":"codex","reason":"x"}]}',
+    "{}",
+    "",
+    "Sent.",
+    "[]",
+    "null",
+    '"codex"',
+    '{"delivered":"codex"}',
+    '{"delivered":null}',
+    '{"delivered":{"codex":true}}',
+    '{"delivered":["codex",7]}',
+    '{"delivered":["claude",""]}',
+  ])
+    assert.deepEqual(read(body), all, body);
+});
+test("deliver answer: a malformed reason or error reads as no reason", () => {
+  const read = (extra: object) =>
+    Object.fromEntries(
+      parseDelivered(JSON.stringify({ delivered: [], ...extra }), ["@codex"]),
+    );
+  const noReason = { "@codex": { kind: "failed", status: 200, message: "" } };
+  for (const extra of [
+    { not_delivered: "codex" },
+    { not_delivered: { alias: "codex", reason: "x" } },
+    {
+      not_delivered: [
+        "codex",
+        null,
+        { alias: 7, reason: "x" },
+        { alias: "codex" },
+        { alias: "codex", reason: 5 },
+        { alias: "codex", reason: "   " },
+      ],
+    },
+    { error: { message: "x" } },
+    { error: 404 },
+    { error: "  " },
+  ])
+    assert.deepEqual(read(extra), noReason, JSON.stringify(extra));
 });

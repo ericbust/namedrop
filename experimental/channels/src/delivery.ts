@@ -1,5 +1,10 @@
-import type { Alias, ChannelSnapshot, SendFailure, SpaceKey } from "./model.ts";
-import type { DeliverResult } from "./send.ts";
+import type {
+  Alias,
+  ChannelSnapshot,
+  DeliverResult,
+  SendFailure,
+  SpaceKey,
+} from "./model.ts";
 
 export type Delivery =
   | { kind: "idle" }
@@ -38,7 +43,7 @@ export function deliveryOf(deliveries: Deliveries, offer: Offer): Delivery {
 }
 
 export function createDeliveries(
-  send: (offer: Offer) => Promise<DeliverResult>,
+  send: (offer: Offer) => Promise<ReadonlyMap<Alias, DeliverResult>>,
 ) {
   let deliveries: Deliveries = new Map();
   const listeners = new Set<() => void>();
@@ -55,16 +60,23 @@ export function createDeliveries(
     },
     snapshot: (): Deliveries => deliveries,
     deliver(offer: Offer): void {
-      const step = (event: DeliveryEvent): boolean => {
-        const before = deliveryOf(deliveries, offer);
+      const step = (alias: Alias, event: DeliveryEvent): boolean => {
+        const target = { ...offer, alias };
+        const before = deliveryOf(deliveries, target);
         const after = delivery(before, event);
         if (after === before) return false;
         commit(
-          new Map(deliveries).set(offerId(offer), { offer, state: after }),
+          new Map(deliveries).set(offerId(target), {
+            offer: target,
+            state: after,
+          }),
         );
         return true;
       };
-      if (step({ kind: "start" })) void send(offer).then(step);
+      if (step(offer.alias, { kind: "start" }))
+        void send(offer).then((results) => {
+          for (const [alias, result] of results) step(alias, result);
+        });
     },
     settle(
       channels: ReadonlyMap<

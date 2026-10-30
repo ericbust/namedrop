@@ -6,6 +6,7 @@ import type {
   AttentionResponse,
   ChannelSnapshot,
   Conversation,
+  DeliverResult,
   DeliveryStage,
   Health,
   MailItem,
@@ -636,6 +637,52 @@ export function parseReceipt(raw: unknown): string {
 }
 export function parseSessionToken(raw: unknown): string {
   return identity(record(raw).csrf_token);
+}
+function aliasSet(value: unknown): ReadonlySet<Alias> | null {
+  if (!Array.isArray(value)) return null;
+  const aliases = new Set<Alias>();
+  for (const item of value) {
+    const alias = optionalAlias(item);
+    if (alias === null) return null;
+    aliases.add(alias);
+  }
+  return aliases;
+}
+function fields(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+function reason(value: unknown): string | null {
+  return optionalIdentity(value)?.trim() ?? null;
+}
+export function parseDelivered(
+  body: string,
+  to: readonly Alias[],
+): ReadonlyMap<Alias, DeliverResult> {
+  let answer: Record<string, unknown> = {};
+  try {
+    answer = fields(JSON.parse(body) as unknown);
+  } catch {}
+  const delivered = aliasSet(answer.delivered);
+  const reasons = new Map<Alias, string>();
+  for (const item of Array.isArray(answer.not_delivered)
+    ? answer.not_delivered
+    : []) {
+    const entry = fields(item);
+    const alias = optionalAlias(entry.alias);
+    const why = reason(entry.reason);
+    if (alias !== null && why !== null) reasons.set(alias, why);
+  }
+  const error = reason(answer.error) ?? "";
+  return new Map(
+    to.map((alias): [Alias, DeliverResult] => [
+      alias,
+      delivered === null || delivered.has(alias)
+        ? { kind: "done" }
+        : { kind: "failed", status: 200, message: reasons.get(alias) ?? error },
+    ]),
+  );
 }
 export function parseRefusal(body: string): string {
   try {

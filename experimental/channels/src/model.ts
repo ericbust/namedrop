@@ -202,6 +202,9 @@ export type SendAttempt = {
   inReplyTo: string | null;
 };
 export type SendFailure = { status: number; message: string };
+export type DeliverResult =
+  | { kind: "done" }
+  | ({ kind: "failed" } & SendFailure);
 // A refused draft keeps its attempt until a success, so the same post reuses
 // its id. The failure shows only until the next edit, and never without an attempt.
 export type Draft = ComposerId & { text: string } & (

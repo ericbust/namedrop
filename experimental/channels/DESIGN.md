@@ -715,6 +715,10 @@ uses the "Send to" form. Each offer is a text button in 12px 600
     again" button. Its tooltip is the server's message, "HTTP 500" when the
     server gives none, or "Couldn't reach Namedrop." when the request never
     reached it.
+  - When the server answers but did not send the post to that agent, as when
+    the name now belongs to a different agent, the part shows the same failure
+    with the server's reason as its tooltip, or "Namedrop didn't send it. The
+    name may belong to a different agent now." when the server gives none.
 - Focus moves from the pressed offer to the agent's part and stays there
   through sending, sent and failed, because "Try again" is the same button.
   When the part goes, nothing moves focus.
