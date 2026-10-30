@@ -136,3 +136,77 @@ test("post: refusals carry the server's message and failures carry their status"
     assert.deepEqual(await createPoster(server.fetcher).post(post), expected);
   }
 });
+
+test("control: posts a thread action with the session token and an empty body, sharing the token and the 403 retry with messages", async () => {
+  let token = 0;
+  const server = fakeServer(({ url, init }) => {
+    if (url === "/api/session") return json(200, { csrf_token: `t${++token}` });
+    if (new Headers(init?.headers).get("X-Namedrop-Csrf") !== "t2")
+      return new Response("Forbidden.\n", { status: 403 });
+    return url.endsWith("/messages")
+      ? json(200, { message_id: "m1" })
+      : json(200, {});
+  });
+  const poster = createPoster(server.fetcher);
+  assert.deepEqual(await poster.control(key, "thread 1/a", "continue"), {
+    kind: "done",
+  });
+  assert.deepEqual(await poster.control(key, "t2", "stop"), { kind: "done" });
+  assert.deepEqual(await poster.post(post), { kind: "sent", messageId: "m1" });
+  assert.deepEqual(
+    posts(server.seen).map(({ url, csrf, type, body }) => [
+      url,
+      csrf,
+      type,
+      body,
+    ]),
+    [
+      [
+        `/w/${key}/threads/thread%201%2Fa/continue`,
+        "t1",
+        "application/json",
+        {},
+      ],
+      [
+        `/w/${key}/threads/thread%201%2Fa/continue`,
+        "t2",
+        "application/json",
+        {},
+      ],
+      [`/w/${key}/threads/t2/stop`, "t2", "application/json", {}],
+      [
+        `/w/${key}/messages`,
+        "t2",
+        "application/json",
+        { request_id: "r1", source: "@codex hi" },
+      ],
+    ],
+  );
+  assert.equal(
+    server.seen.filter(({ url }) => url === "/api/session").length,
+    2,
+    "one token, refreshed once",
+  );
+});
+
+test("control: a refusal or a network failure carries its status", async () => {
+  const cases: [Response | Error, unknown][] = [
+    [
+      new Response("Not found.\n", { status: 404 }),
+      { kind: "failed", status: 404 },
+    ],
+    [json(500, { error: "Broken." }), { kind: "failed", status: 500 }],
+    [new Error("offline"), { kind: "failed", status: 0 }],
+  ];
+  for (const [outcome, expected] of cases) {
+    const server = fakeServer(({ url }) => {
+      if (url === "/api/session") return json(200, { csrf_token: "t" });
+      if (outcome instanceof Error) throw outcome;
+      return outcome;
+    });
+    assert.deepEqual(
+      await createPoster(server.fetcher).control(key, "t1", "stop"),
+      expected,
+    );
+  }
+});

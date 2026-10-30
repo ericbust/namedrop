@@ -1,5 +1,6 @@
 import type { ActivityGroupKind } from "./activity.ts";
 import type { DisabledReason } from "./complete.ts";
+import { threadControls } from "./control.ts";
 import type {
   Activity,
   Attention,
@@ -11,6 +12,7 @@ import type {
   Participant,
   ScreenFailure,
   SendFailure,
+  ThreadAction,
 } from "./model.ts";
 import type { PeekNotice } from "./peek.ts";
 import type { RouteState, RouteTip, SendForm } from "./route.ts";
@@ -119,9 +121,37 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
   },
   unknown: { ...needsYou, hint: "Open Details for the full message." },
 };
+export const threadControlCopy = {
+  continue: {
+    label: "Allow 10 more replies",
+    pending: "Allowing…",
+    title: "Lets the agents send 10 more replies in this thread.",
+    failed: "Couldn't allow more replies. Try again.",
+  },
+  stop: {
+    label: "Stop thread",
+    pending: "Stopping…",
+    title: "Ends agent replies in this thread. You can't undo this.",
+    failed: "Couldn't stop the thread. Try again.",
+  },
+  confirm: "Stop this thread for good?",
+  confirmStop: "Stop",
+  cancel: "Cancel",
+  gone: "This thread is no longer in this workspace.",
+  status: (code: number) => `HTTP ${code}`,
+} satisfies Record<
+  ThreadAction,
+  { label: string; pending: string; title: string; failed: string }
+> &
+  Record<string, unknown>;
+// A reply-limit item the browser can continue or stop says why it paused.
+const pausedHint = "The agents paused after 10 replies in a row.";
 export function attentionCopy(item: Attention): AttentionCopy {
   const { text, truncated } = item.summary;
-  const row = attentionTable[item.source];
+  const row =
+    item.source === "automatic_reply_limit" && threadControls(item) !== null
+      ? { ...attentionTable[item.source], hint: pausedHint }
+      : attentionTable[item.source];
   if (
     item.source === "agent_status" &&
     !truncated &&

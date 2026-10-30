@@ -80,6 +80,7 @@ const pairs = [
   ["attention-text", "attention-bg", 4.5],
   ["text", "attention-bg", 4.5],
   ["text-muted", "attention-bg", 4.5],
+  ["failed-text", "attention-bg", 4.5],
   ["text-muted", "warning-bg", 4.5],
   ["held-text", "bg", 4.5],
   ["failed-text", "bg", 4.5],

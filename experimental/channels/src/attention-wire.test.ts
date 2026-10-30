@@ -133,3 +133,38 @@ test("message response validates its stable owner and requires scoped evidence",
   value.frame.attention[0].conversation = null;
   assert.equal(parseEvent("space", JSON.stringify(value)), null);
 });
+
+test("attention wire reads the thread a reply-limit item names and the actions it allows, and a malformed list never drops the item", () => {
+  const parse = (extra: Record<string, unknown>) => {
+    const value = structuredClone(fixture);
+    value.frame.attention = [
+      {
+        source_kind: "automatic_reply_limit",
+        summary: { text: "Paused", truncated: false },
+        opened_at_ms: 10,
+        ...extra,
+      },
+    ];
+    const event = parseEvent("space", JSON.stringify(value));
+    assert.ok(event?.type === "space");
+    const [item] = event.channel.attention;
+    assert.ok(item !== undefined, JSON.stringify(extra));
+    return [item.threadId, item.actions];
+  };
+  assert.deepEqual(parse({ thread_id: "t1", actions: ["continue", "stop"] }), [
+    "t1",
+    ["continue", "stop"],
+  ]);
+  assert.deepEqual(
+    parse({
+      thread_id: "t1",
+      actions: ["stop", "rewind", 7, "stop", null, "continue"],
+    }),
+    ["t1", ["stop", "continue"]],
+    "unknown words and repeats drop",
+  );
+  assert.deepEqual(parse({}), [null, []]);
+  assert.deepEqual(parse({ thread_id: null, actions: null }), [null, []]);
+  assert.deepEqual(parse({ thread_id: 42, actions: "continue" }), [null, []]);
+  assert.deepEqual(parse({ thread_id: "  ", actions: {} }), [null, []]);
+});

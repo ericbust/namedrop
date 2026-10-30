@@ -38,6 +38,7 @@ export type MessageContext = {
   earlierOmitted: boolean;
   messages: readonly Message[];
 };
+export type ThreadAction = "continue" | "stop";
 export type Attention = {
   rowKey: string;
   sourceId?: string | null;
@@ -59,6 +60,8 @@ export type Attention = {
   openedAt: number;
   subjectAlias: string | null;
   messageId: string | null;
+  threadId: string | null;
+  actions: readonly ThreadAction[];
 };
 export type TerminalRun = {
   terminal: AddressId;

@@ -215,6 +215,8 @@ test("legacy attention links only to an available loaded message and does not in
     summary: { text: "Old", truncated: false },
     subjectSummary: null,
     openedAt: 1,
+    threadId: null,
+    actions: [],
   };
   assert.equal(attentionConversation(attention, channel), null);
   assert.deepEqual(
@@ -237,6 +239,8 @@ test("tracked response prepares visible channel text with the owner and exact it
     openedAt: 1,
     subjectAlias: null,
     messageId: null,
+    threadId: null,
+    actions: [],
   };
   const intent = messageIntent(item, target, true);
   assert.ok(intent);

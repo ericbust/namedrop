@@ -27,6 +27,7 @@ import type {
   SpaceState,
   TerminalResult,
   TerminalRun,
+  ThreadAction,
   ThreadChip,
   WireEvent,
 } from "./model.ts";
@@ -240,7 +241,17 @@ function attention(
     openedAt,
     subjectAlias: optionalAlias(item.subject_alias),
     messageId: optionalIdentity(item.message_id),
+    threadId: optionalIdentity(item.thread_id),
+    actions: threadActions(item.actions),
   };
+}
+const noActions: readonly ThreadAction[] = [];
+function threadActions(value: unknown): readonly ThreadAction[] {
+  if (!Array.isArray(value)) return noActions;
+  const found = new Set<ThreadAction>();
+  for (const action of value)
+    if (action === "continue" || action === "stop") found.add(action);
+  return found.size === 0 ? noActions : [...found];
 }
 function terminalRuns(value: unknown): TerminalRun[] {
   if (!Array.isArray(value)) return [];

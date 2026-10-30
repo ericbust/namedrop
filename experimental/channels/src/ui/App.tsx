@@ -830,6 +830,7 @@ export function App() {
               onJump={jump}
               channels={state.channels}
               onFocus={showAttention}
+              onControl={poster.control}
             />
           ) : channel ? (
             <>
@@ -838,7 +839,11 @@ export function App() {
                 suffix={channelSuffix(channel, state.channels.values())}
               />
               <MemberStrip key={channel.key} members={channel.members} />
-              <NeedsYou channel={channel} onFocus={showAttention} />
+              <NeedsYou
+                channel={channel}
+                onFocus={showAttention}
+                onControl={poster.control}
+              />
               <Timeline
                 channel={channel}
                 rows={rows}

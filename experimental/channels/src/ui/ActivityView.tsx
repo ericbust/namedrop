@@ -8,7 +8,11 @@ import {
 import { activityCopy, presenceWord } from "../copy.ts";
 import type { Channel, Home, SpaceKey } from "../model.ts";
 import type { PeekKey } from "../peek.ts";
-import { AttentionActions, type FocusAttention } from "./AttentionActions.tsx";
+import {
+  AttentionActions,
+  type ControlThread,
+  type FocusAttention,
+} from "./AttentionActions.tsx";
 import { Avatar } from "./Avatar.tsx";
 import { Icon } from "./Icons.tsx";
 import { PeekControl } from "./PeekContext.tsx";
@@ -20,6 +24,7 @@ const Row = memo(function Row({
   onJump,
   channels,
   onFocus,
+  onControl,
 }: {
   row: ActivityRow;
   homes: ReadonlyMap<string, Home>;
@@ -27,6 +32,7 @@ const Row = memo(function Row({
   onJump: (key: SpaceKey) => void;
   channels: ReadonlyMap<SpaceKey, Channel>;
   onFocus: FocusAttention;
+  onControl: ControlThread;
 }) {
   const { member, line, channel } = row;
   const text = lineText(line, homes);
@@ -83,6 +89,7 @@ const Row = memo(function Row({
           item={line.attention}
           channel={source}
           onFocus={onFocus}
+          onControl={onControl}
         />
       )}
     </li>
@@ -96,6 +103,7 @@ export function ActivityView({
   onJump,
   channels,
   onFocus,
+  onControl,
 }: {
   list: ActivityList;
   homes: ReadonlyMap<string, Home>;
@@ -103,6 +111,7 @@ export function ActivityView({
   onJump: (key: SpaceKey) => void;
   channels: ReadonlyMap<SpaceKey, Channel>;
   onFocus: FocusAttention;
+  onControl: ControlThread;
 }) {
   const summary = activitySummary(list);
   return (
@@ -141,6 +150,7 @@ export function ActivityView({
                     onJump={onJump}
                     channels={channels}
                     onFocus={onFocus}
+                    onControl={onControl}
                   />
                 ))}
               </ul>

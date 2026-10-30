@@ -686,9 +686,16 @@ button.member:not(.more):hover {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
-.text-button:disabled {
+.text-button:disabled,
+.text-button[aria-disabled="true"] {
   color: var(--text-muted);
   text-decoration: none;
+}
+.text-button.confirm-stop {
+  color: var(--failed-text);
+}
+.text-button.confirm-stop[aria-disabled="true"] {
+  color: var(--text-muted);
 }
 .attention {
   margin: var(--space-3) var(--space-6) 0;
@@ -754,6 +761,12 @@ button.member:not(.more):hover {
   flex-wrap: wrap;
   column-gap: var(--space-4);
   margin-top: 2px;
+}
+.attention-failure {
+  grid-column: 2;
+  margin-top: 2px;
+  font-size: var(--text-xs);
+  color: var(--failed-text);
 }
 .attention-more {
   padding: 6px 14px 6px 40px;

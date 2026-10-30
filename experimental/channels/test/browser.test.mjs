@@ -6,6 +6,7 @@ import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 import { build } from "vite";
+import { threadControlCopy } from "../src/copy.ts";
 
 const key = (n) => n.toString(16).padStart(20, "0");
 const fixture = JSON.parse(
@@ -88,6 +89,7 @@ function sendJson(res, status, value) {
 function postRoute(onPost) {
   const session = { secret: "session-1", csrf: "csrf-1", tokenReads: 0 };
   const attempts = [];
+  const controls = [];
   const receipts = new Map();
   const authorized = (req) =>
     (req.headers.cookie ?? "")
@@ -96,6 +98,7 @@ function postRoute(onPost) {
   return {
     session,
     attempts,
+    controls,
     receipts,
     cookie: `${COOKIE}=${session.secret}; Path=/; HttpOnly; SameSite=Strict`,
     rotate() {
@@ -172,6 +175,26 @@ function postRoute(onPost) {
       receipts.set(post.request_id, { post, receipt });
       reply(200, receipt);
     },
+    // Mirrors POST /w/<key>/threads/<thread_id>/(continue|stop): the message POST's cookie and CSRF rules.
+    async control(req, res, onControl, path) {
+      const request = {
+        method: req.method,
+        path,
+        csrf: req.headers["x-namedrop-csrf"] ?? null,
+        type: req.headers["content-type"] ?? null,
+        body: await readBody(req),
+        status: 0,
+      };
+      controls.push(request);
+      const reply = (status, value) => {
+        request.status = status;
+        sendJson(res, status, value);
+      };
+      if (!authorized(req)) return reply(401, { error: "No session." });
+      if (request.csrf !== session.csrf) return reply(403, {});
+      const { status = 200 } = await onControl(request);
+      reply(status, status === 200 ? {} : { error: "Refused." });
+    },
     postedRow(requestId, at = Date.now()) {
       const { post, receipt } = receipts.get(requestId);
       return message(receipt.message_id, post.source, {
@@ -223,6 +246,7 @@ async function open(
     onPost = () => ({ status: 200 }),
     onScreen = () => ({ body: "" }),
     onContext = null,
+    onControl = () => ({ status: 200 }),
     observeLanding = false,
   } = {},
 ) {
@@ -259,6 +283,8 @@ async function open(
     const postKey = /^\/w\/([^/]+)\/messages$/.exec(url.pathname)?.[1];
     if (req.method === "POST" && postKey !== undefined)
       return posts.post(req, res, postKey);
+    if (/^\/w\/[^/]+\/threads\/[^/]+\/(continue|stop)$/.test(url.pathname))
+      return posts.control(req, res, onControl, url.pathname);
     if (/^\/w\/[^/]+\/messages$/.test(url.pathname)) {
       historyRequests.push(url);
       try {
@@ -5528,6 +5554,239 @@ test("CL-A: Respond posts the exact attention target despite newer context and S
   assert.equal(
     ui.posts.attempts[0].body.source,
     "@codex Keep the selected decision",
+  );
+});
+
+function replyLimit({ thread_id = "t1", actions = ["continue", "stop"] } = {}) {
+  const value = team(1, "alpha");
+  value.frame.health = { level: "needs_you", items: 1 };
+  value.frame.participants[0].activity = "blocked";
+  const ask = message("ask", "@codex keep going with @claude", {
+    at_ms: 1,
+    legs: [{ to: "codex", stage: { stage: "delivered" } }],
+  });
+  value.frame.messages = [ask];
+  value.frame.attention = [
+    {
+      attention_id: "limit-1",
+      source_kind: "automatic_reply_limit",
+      summary: { text: "Paused after 10 agent replies.", truncated: false },
+      opened_at_ms: Date.now() - 60_000,
+      subject_alias: "codex",
+      message_id: "ask",
+      ...(thread_id === null ? {} : { thread_id }),
+      ...(actions === null ? {} : { actions }),
+    },
+  ];
+  return value;
+}
+const { continue: allowCopy, stop: stopCopy } = threadControlCopy;
+function limitItem(ui) {
+  const item = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  return {
+    item,
+    allow: item.getByRole("button", { name: allowCopy.label }),
+    stop: item.getByRole("button", { name: stopCopy.label, exact: true }),
+    confirm: item.getByRole("button", {
+      name: threadControlCopy.confirmStop,
+      exact: true,
+    }),
+    cancel: item.getByRole("button", { name: threadControlCopy.cancel }),
+    alert: item.getByRole("alert"),
+    labels: () =>
+      item
+        .locator(".attention-actions")
+        .first()
+        .evaluate((row) =>
+          [...row.children].map((child) => child.textContent.trim()),
+        ),
+  };
+}
+const focusedText = (ui) =>
+  ui.page.evaluate(() => document.activeElement?.textContent ?? null);
+
+test("CH-fix-2 item 3: Allow 10 more replies posts continue with the CSRF header, waits on the frame, and the item goes", async (t) => {
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const value = replyLimit();
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onControl: async () => {
+      await gate;
+      return { status: 200 };
+    },
+  });
+  await ui.live();
+  const limit = limitItem(ui);
+  await limit.allow.waitFor();
+  assert.equal(
+    await limit.item.locator(".attention-hint").textContent(),
+    "The agents paused after 10 replies in a row.",
+  );
+  assert.deepEqual(await limit.labels(), [
+    "Show message",
+    allowCopy.label,
+    stopCopy.label,
+  ]);
+  assert.equal(await limit.allow.getAttribute("title"), allowCopy.title);
+  assert.equal(await limit.stop.getAttribute("title"), stopCopy.title);
+  assert.equal(
+    await limit.allow.evaluate((button) => getComputedStyle(button).fontSize),
+    "13px",
+  );
+  await limit.allow.click();
+  await until(() => ui.posts.controls.length === 1, "the continue POST");
+  assert.deepEqual(
+    (({ method, path, csrf, type, body }) => ({
+      method,
+      path,
+      csrf,
+      type,
+      body,
+    }))(ui.posts.controls[0]),
+    {
+      method: "POST",
+      path: `/w/${key(1)}/threads/t1/continue`,
+      csrf: "csrf-1",
+      type: "application/json",
+      body: "{}",
+    },
+  );
+  const pressed = limit.item.getByRole("button", { name: allowCopy.pending });
+  await pressed.waitFor();
+  for (const button of await limit.item.getByRole("button").all())
+    if ((await button.textContent()) !== "Details")
+      assert.equal(await button.isDisabled(), true, await button.textContent());
+  release();
+  await until(() => ui.posts.controls[0].status === 200, "the answer");
+  assert.equal(
+    await pressed.isDisabled(),
+    true,
+    "still pending until the frame drops the item",
+  );
+  assert.equal(ui.posts.controls.length, 1);
+  value.frame.attention = [];
+  value.frame.health = { level: "calm" };
+  ui.connections[0].send("space", value);
+  await limit.item.waitFor({ state: "detached" });
+});
+
+test("CH-fix-2 item 3: Stop thread asks once inline, Cancel and Escape take it back, and only the confirm posts stop", async (t) => {
+  const ui = await open(t, (client) => replay(client, [replyLimit()]));
+  await ui.live();
+  const limit = limitItem(ui);
+  await limit.stop.click();
+  await limit.confirm.waitFor();
+  assert.deepEqual(await limit.labels(), [
+    "Show message",
+    threadControlCopy.confirm,
+    threadControlCopy.confirmStop,
+    threadControlCopy.cancel,
+  ]);
+  assert.equal(await focusedText(ui), threadControlCopy.confirmStop);
+  assert.equal(
+    await limit.confirm.evaluate((button) => getComputedStyle(button).color),
+    await tokenColor(ui.page, "--failed-text"),
+  );
+  assert.equal(ui.posts.controls.length, 0, "the first click sends nothing");
+  await limit.cancel.click();
+  await limit.allow.waitFor();
+  assert.equal(await focusedText(ui), stopCopy.label);
+  await ui.page.keyboard.press("Enter");
+  await limit.confirm.waitFor();
+  await ui.page.keyboard.press("Escape");
+  await limit.allow.waitFor();
+  assert.equal(await focusedText(ui), stopCopy.label, "Escape returns too");
+  assert.equal(ui.posts.controls.length, 0);
+  await limit.stop.click();
+  await limit.confirm.click();
+  await until(() => ui.posts.controls.length === 1, "the stop POST");
+  assert.equal(ui.posts.controls[0].path, `/w/${key(1)}/threads/t1/stop`);
+  assert.equal(ui.posts.controls[0].csrf, "csrf-1");
+  await limit.item.getByRole("button", { name: stopCopy.pending }).waitFor();
+});
+
+test("CH-fix-2 item 3: a failed press says so under the row and the buttons come back, and a 404 says the thread is gone", async (t) => {
+  const outcomes = [500, 200];
+  const ui = await open(
+    t,
+    (client) => replay(client, [replyLimit()]),
+    undefined,
+    {
+      onControl: () => ({ status: outcomes.shift() }),
+    },
+  );
+  await ui.live();
+  const limit = limitItem(ui);
+  await limit.allow.click();
+  await limit.alert.waitFor();
+  assert.equal(await limit.alert.textContent(), allowCopy.failed);
+  assert.equal(await limit.alert.getAttribute("title"), "HTTP 500");
+  assert.equal(
+    await limit.alert.evaluate((line) => getComputedStyle(line).fontSize),
+    "12px",
+  );
+  assert.equal(await limit.allow.isDisabled(), false, "the buttons are back");
+  await limit.allow.click();
+  await limit.item.getByRole("button", { name: allowCopy.pending }).waitFor();
+  assert.equal(await limit.alert.count(), 0, "a new press clears the line");
+  assert.equal(ui.posts.controls.length, 2);
+  const ui2 = await open(
+    t,
+    (client) => replay(client, [replyLimit()]),
+    undefined,
+    {
+      onControl: () => ({ status: 404 }),
+    },
+  );
+  await ui2.live();
+  const gone = limitItem(ui2);
+  await gone.stop.click();
+  await gone.confirm.click();
+  await gone.alert.waitFor();
+  assert.equal(await gone.alert.textContent(), threadControlCopy.gone);
+  assert.equal(await gone.alert.getAttribute("title"), "HTTP 404");
+  assert.equal(await focusedText(ui2), stopCopy.label);
+});
+
+test("CH-fix-2 item 3: an item with no thread or no actions keeps the pane hint, and All activity rows show the same controls", async (t) => {
+  for (const extra of [
+    { thread_id: null },
+    { actions: null },
+    { actions: [] },
+  ]) {
+    const ui = await open(t, (client) => replay(client, [replyLimit(extra)]));
+    await ui.live();
+    const limit = limitItem(ui);
+    await limit.item.waitFor();
+    assert.equal(
+      await limit.item.locator(".attention-hint").textContent(),
+      "Continue or stop this thread from its pane.",
+      JSON.stringify(extra),
+    );
+    assert.equal(await limit.allow.count(), 0);
+    assert.equal(await limit.stop.count(), 0);
+  }
+  const ui = await open(
+    t,
+    (client) => replay(client, [replyLimit({ actions: ["stop"] })]),
+    undefined,
+    {
+      path: "/?view=activity",
+    },
+  );
+  await ui.live();
+  const row = ui.page.locator(".activity-item", { hasText: "@codex" });
+  await row
+    .getByRole("button", { name: stopCopy.label, exact: true })
+    .waitFor();
+  assert.equal(
+    await row.getByRole("button", { name: allowCopy.label }).count(),
+    0,
+    "only the listed action",
   );
 });
 

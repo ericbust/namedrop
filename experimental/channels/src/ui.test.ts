@@ -7,6 +7,8 @@ import { createServer, type ViteDevServer } from "vite";
 import { exitFor, initialState, reduce, runsByMessage } from "./store.ts";
 import { parseEvent } from "./wire.ts";
 
+const onControl = async () => ({ kind: "done" }) as const;
+
 let vite: ViteDevServer;
 before(async () => {
   vite = await createServer({
@@ -175,6 +177,7 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
       createElement(NeedsYou, {
         channel: event.channel,
         onFocus() {},
+        onControl,
       }),
     );
     const needsYou = level === "needs_you";
@@ -475,7 +478,12 @@ test("attention actions show historical evidence and safe responses for every so
       createElement(
         PeekContext,
         { value: { scope: channel.key, open() {} } },
-        createElement(AttentionActions, { item, channel, onFocus() {} }),
+        createElement(AttentionActions, {
+          item,
+          channel,
+          onFocus() {},
+          onControl,
+        }),
       ),
     );
     assert.ok(markup.includes("Show message"), source);
@@ -496,7 +504,7 @@ test("attention actions show historical evidence and safe responses for every so
   const item = channel.attention[0];
   assert.ok(item);
   const local = renderToStaticMarkup(
-    createElement(AttentionActions, { item, channel, onFocus() {} }),
+    createElement(AttentionActions, { item, channel, onFocus() {}, onControl }),
   );
   assert.ok(local.includes("Namedrop setup from the command palette"), local);
   assert.equal(local.includes("Show message"), false);
@@ -506,6 +514,7 @@ test("attention actions show historical evidence and safe responses for every so
       item: { ...item, source: "coordination" },
       channel,
       onFocus() {},
+      onControl,
     }),
   );
   assert.ok(missing.includes("Namedrop Doctor"), missing);
@@ -542,6 +551,7 @@ test("Activity reuses the attention evidence and response controls", async () =>
       channels: state.channels,
       open: null,
       onFocus() {},
+      onControl,
       onJump() {},
     }),
   );
