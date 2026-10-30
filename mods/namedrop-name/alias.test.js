@@ -9,6 +9,18 @@ test("normalizes Code Reviewer to code-reviewer", () => {
   assert.deepEqual(normalizeAlias("Code Reviewer"), { alias: "code-reviewer" });
 });
 
+test("accepts one leading at sign on a kebab-case alias", () => {
+  assert.deepEqual(normalizeAlias("@code-reviewer"), { alias: "code-reviewer" });
+});
+
+test("trims before accepting one leading at sign and normalizing", () => {
+  assert.deepEqual(normalizeAlias(" \t@Code Reviewer\n"), { alias: "code-reviewer" });
+});
+
+test("rejects a second leading at sign", () => {
+  assert.deepEqual(normalizeAlias("@@x"), { error: invalidCharacters });
+});
+
 test("keeps lowercase kebab-case and digits", () => {
   assert.deepEqual(normalizeAlias("reviewer-42"), { alias: "reviewer-42" });
 });
@@ -27,7 +39,7 @@ for (const input of ["", " ", "---", "___", " \t\n\f\r_- "]) {
   });
 }
 
-for (const input of ["@reviewer", "code.reviewer", "code/reviewer", "reviewer!", "café", "审阅", "agent😀", "a\u00a0b", "a\vb", "a\0b"]) {
+for (const input of ["code@reviewer", "code.reviewer", "code/reviewer", "reviewer!", "café", "审阅", "agent😀", "a\u00a0b", "a\vb", "a\0b"]) {
   test(`rejects unsupported characters in ${JSON.stringify(input)} with the Rust character error`, () => {
     assert.deepEqual(normalizeAlias(input), { error: invalidCharacters });
   });
@@ -71,4 +83,21 @@ test("missing space does not conflict with a labelled space in either direction"
 
 test("another alias in the same space does not conflict", () => {
   assert.equal(aliasTaken([terminal("t1", "coder", "s1"), terminal("t2", "writer", "s1")], "reviewer", "t1"), false);
+});
+
+for (const space of ["s1", undefined]) {
+  test(`machines have independent alias scopes ${space ? "with" : "without"} space labels`, () => {
+    const terminals = [terminal("east/t1", "coder", space), terminal("west/t2", "reviewer", space)];
+    assert.equal(aliasTaken(terminals, "reviewer", "east/t1"), false);
+    assert.equal(aliasTaken(terminals, "coder", "west/t2"), false);
+  });
+
+  test(`a remote alias on the same machine conflicts ${space ? "with" : "without"} space labels`, () => {
+    const terminals = [terminal("east/t1", "coder", space), terminal("east/t2", "reviewer", space)];
+    assert.equal(aliasTaken(terminals, "reviewer", "east/t1"), true);
+  });
+}
+
+test("a remote unlabelled terminal cannot reserve a local alias", () => {
+  assert.equal(aliasTaken([terminal("t1", "coder"), terminal("west/t2", "reviewer")], "reviewer", "t1"), false);
 });
