@@ -9783,6 +9783,35 @@ test("UI-R4 L3: in a window under 560 px tall the member strip folds to one row 
     "+N more still shows every member",
   );
 });
+test("UI-R4 L2: the drawer is a modal dialog named Channels, and the list inside it has a name of its own", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [layoutChannel(), team(2, "beta")]),
+  );
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  const dialog = ui.page.getByRole("dialog", { name: "Channels" });
+  await ui.page.getByRole("button", { name: /^Channels/ }).click();
+  await dialog.waitFor();
+  assert.equal(await dialog.getAttribute("aria-modal"), "true");
+  assert.deepEqual(
+    await dialog
+      .getByRole("navigation")
+      .evaluateAll((navs) => navs.map((nav) => nav.getAttribute("aria-label"))),
+    ["Needs you", "Channel list"],
+    "no landmark in the dialog repeats its name",
+  );
+  await ui.page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  await resize(ui.page, 1024, 768);
+  const sidebar = ui.page.getByRole("navigation", { name: "Channel list" });
+  await sidebar.waitFor();
+  assert.equal(
+    await ui.page.locator('[aria-modal="true"]').count(),
+    0,
+    "the sidebar column is no modal",
+  );
+});
 test("UI-R4 L2: typing in the composer leaves the page's media queries subscribed once", async (t) => {
   const ui = await open(t, (client) => replay(client, [layoutChannel()]));
   await ui.live();
