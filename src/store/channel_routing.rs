@@ -195,17 +195,25 @@ impl StateTransaction<'_> {
     }
 
     pub(crate) fn claim_channel(&mut self, now: u64) -> Result<Option<ChannelClaim>, StoreError> {
-        let Some((ns, message)) = self.pending_channel(false)? else {
-            return Ok(None);
-        };
-        self.append_transition(
-            &ns,
-            TransitionEntityKind::CollaborationMessage,
-            message.as_str(),
-            TransitionKind::Dispatching,
-            &attribution(now),
-        )?;
-        self.channel_claim(ns, message).map(Some)
+        while let Some((ns, message)) = self.pending_channel(false)? {
+            self.append_transition(
+                &ns,
+                TransitionEntityKind::CollaborationMessage,
+                message.as_str(),
+                TransitionKind::Dispatching,
+                &attribution(now),
+            )?;
+            let claim = self.channel_claim(ns, message)?;
+            if self
+                .thread_control_state(&claim.namespace, &claim.draft.thread_id)?
+                .stopped
+            {
+                self.finish_channel(&claim, &[], true, now)?;
+                continue;
+            }
+            return Ok(Some(claim));
+        }
+        Ok(None)
     }
 
     fn channel_claim(
@@ -280,6 +288,19 @@ impl StateTransaction<'_> {
             != Some((claim.token, "dispatching".to_owned()))
         {
             return Ok(false);
+        }
+        if self
+            .thread_control_state(&claim.namespace, &claim.draft.thread_id)?
+            .stopped
+        {
+            self.append_transition(
+                &claim.namespace,
+                TransitionEntityKind::CollaborationMessage,
+                claim.draft.message_id.as_str(),
+                TransitionKind::Failed,
+                &attribution(now),
+            )?;
+            return Ok(true);
         }
         let current = self.channel_members(&claim.namespace)?;
         let valid = |old: &RoutingAddressSnapshot| {
