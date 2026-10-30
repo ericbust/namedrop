@@ -1085,6 +1085,12 @@ button.member:not(.more):hover {
 .route-failed {
   color: var(--failed-text);
 }
+.route-failed::after {
+  content: "·" / "";
+  margin-inline: var(--space-2);
+  font-weight: 400;
+  color: var(--text-muted);
+}
 /* The padding gives a 32px hit target. The ring hugs the 12px text instead, so
    it never covers the line above. */
 .route-link:focus-visible {

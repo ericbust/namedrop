@@ -378,11 +378,14 @@ export const routeCopy = {
   sendThis: (alias: string) => `Send this to ${alias}`,
   delivery: {
     label: {
-      sending: "Sending…",
-      sent: "Sent",
-      failed: "Try again",
-    } satisfies Record<Exclude<Delivery["kind"], "idle">, string>,
-    failed: (alias: string) => `Couldn't send to ${alias}.`,
+      sending: (alias: string) => `Sending to ${alias}…`,
+      sent: (alias: string) => `Sent to ${alias}`,
+      failed: () => "Try again",
+    } satisfies Record<
+      Exclude<Delivery["kind"], "idle">,
+      (alias: string) => string
+    >,
+    failed: (alias: string) => `Couldn't send to ${alias}`,
     why: ({ status, message }: SendFailure) =>
       status === 0
         ? "Couldn't reach Namedrop."

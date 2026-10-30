@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { AddressId, Directory } from "./model.ts";
+import type { Delivery } from "./delivery.ts";
+import type { AddressId, Alias, Directory } from "./model.ts";
 import {
   chatOf,
   chatPeople,
@@ -112,13 +113,19 @@ function room(...rows: Row[]) {
   const directory: Directory = { members: channel.members, homes: new Map() };
   return {
     directory,
-    line(id = "post", replies = 0): RouteLine | null {
+    line(id = "post", replies = 0, pressed: Pressed = {}): RouteLine | null {
       const message = channel.messages.get(id);
       const thread = message && groups.get(message.threadId);
       assert.ok(message && thread?.room?.kind === "channel");
-      return routeLine(message, thread.room, directory, replies);
+      return routeLine(
+        message,
+        thread.room,
+        directory,
+        replies,
+        deliveries(pressed),
+      );
     },
-    chat(id: string, replies = 0) {
+    chat(id: string, replies = 0, pressed: Pressed = {}) {
       const message = channel.messages.get(id);
       const thread = message && groups.get(message.threadId);
       assert.ok(message && thread);
@@ -128,10 +135,23 @@ function room(...rows: Row[]) {
         reference: null,
         directory,
         replies,
+        delivery: deliveries(pressed),
       });
     },
   };
 }
+type Pressed = Partial<Record<Alias, Delivery>>;
+const deliveries =
+  (pressed: Pressed) =>
+  (alias: Alias): Delivery =>
+    pressed[alias] ?? { kind: "idle" };
+const sending: Delivery = { kind: "sending" };
+const sent: Delivery = { kind: "sent" };
+const refused: Delivery = {
+  kind: "failed",
+  status: 400,
+  message: "@claude is not an agent in this workspace.",
+};
 const ids = (...names: string[]) => names as AddressId[];
 const working = { stage: "working", ackedAt: 1 } as const;
 const routed = (
@@ -287,6 +307,103 @@ test("route line: Send anyway stops offering an agent the thread has reached sin
       { kind: "send", aliases: ["@claude"], form: "to" },
     ],
   );
+});
+test("route line: an agent leaves the not-sent group the moment its delivery starts, and its state reads as its own part", () => {
+  const chat = room(
+    post("thanks @codex, can @claude check the mac build?", routed(), [
+      "claude",
+    ]),
+  );
+  const reached = [
+    { kind: "names", ids: ids("claude") },
+    { kind: "reason", text: "build question" },
+    { kind: "receipt", id: "claude", named: false, stage: working },
+  ];
+  for (const state of [sending, sent, refused])
+    assert.deepEqual(
+      chat.line("post", 0, { "@codex": state })?.parts,
+      [...reached, { kind: "delivery", alias: "@codex", state }],
+      state.kind,
+    );
+  assert.deepEqual(
+    room(post("nice catch by @codex", { state: "unrouted", to: [] })).line(
+      "post",
+      0,
+      { "@codex": sending },
+    ),
+    {
+      icon: "inbox",
+      tone: "muted",
+      tip: null,
+      parts: [{ kind: "delivery", alias: "@codex", state: sending }],
+    },
+    "with no idle agent left, the not-sent part and its offer go",
+  );
+  const idle = chat.chat("post");
+  const pressed = chat.chat("post", 0, { "@codex": sending });
+  assert.deepEqual(pressed?.route, chat.line("post", 0, { "@codex": sending }));
+  assert.equal(sameChat(idle, pressed), false, "a press re-renders the row");
+});
+test("route line: the not-sent group counts only idle agents, and each pressed agent follows it in the offers' order", () => {
+  const unrouted = room(
+    post("credit to @claude and @codex", { state: "unrouted" }),
+  );
+  assert.deepEqual(unrouted.line("post", 2, { "@codex": sending })?.parts, [
+    { kind: "mentioned", aliases: ["@claude"] },
+    { kind: "send", aliases: ["@claude"], form: "anyway" },
+    { kind: "delivery", alias: "@codex", state: sending },
+    { kind: "replies", count: 2 },
+  ]);
+  assert.deepEqual(
+    unrouted.line("post", 2, { "@codex": sent, "@claude": refused })?.parts,
+    [
+      { kind: "delivery", alias: "@claude", state: refused },
+      { kind: "delivery", alias: "@codex", state: sent },
+      { kind: "replies", count: 2 },
+    ],
+  );
+  const failed = room(
+    post("can @codex and @claude look?", { state: "router_failed" }),
+  );
+  assert.deepEqual(failed.line("post", 0, { "@codex": sending })?.parts, [
+    { kind: "state", state: "failed" },
+    { kind: "send", aliases: ["@claude"], form: "to" },
+    { kind: "delivery", alias: "@codex", state: sending },
+  ]);
+  assert.deepEqual(
+    failed.line("post", 0, { "@codex": sent, "@claude": refused }),
+    {
+      icon: "alert",
+      tone: "failed",
+      tip: { kind: "unreachable" },
+      parts: [
+        { kind: "state", state: "failed" },
+        { kind: "delivery", alias: "@codex", state: sent },
+        { kind: "delivery", alias: "@claude", state: refused },
+      ],
+    },
+  );
+});
+test("route line: a pressed agent's part goes once the frame shows the post reached it", () => {
+  const chat = room(
+    post("nice catch by @codex", { state: "unrouted", to: ["codex"] }, [
+      "codex",
+    ]),
+  );
+  for (const state of [sending, sent, refused])
+    assert.deepEqual(
+      chat.line("post", 0, { "@codex": state }),
+      {
+        icon: "arrow",
+        tone: "muted",
+        tip: null,
+        parts: [
+          { kind: "names", ids: ids("codex") },
+          { kind: "receipt", id: "codex", named: false, stage: working },
+        ],
+      },
+      state.kind,
+    );
 });
 test("route line: router_failed is in the failed tone, always offers Send to, and explains itself", () => {
   assert.deepEqual(

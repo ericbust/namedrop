@@ -1,4 +1,12 @@
-import { Fragment, memo, type ReactNode, useContext, useState } from "react";
+import {
+  Fragment,
+  memo,
+  type ReactNode,
+  useContext,
+  useRef,
+  useState,
+} from "react";
+import { flushSync } from "react-dom";
 import {
   overflowCopy,
   type ParticipantCopy,
@@ -323,7 +331,14 @@ function Reference({
   );
 }
 function partKey(part: RoutePart): string {
-  return part.kind === "receipt" ? `receipt:${part.id}` : part.kind;
+  switch (part.kind) {
+    case "receipt":
+      return `receipt:${part.id}`;
+    case "delivery":
+      return `delivery:${part.alias}`;
+    default:
+      return part.kind;
+  }
 }
 function Route({
   line,
@@ -343,39 +358,27 @@ function Route({
   expanded: boolean;
 }) {
   const deliveries = useContext(DeliveryContext);
-  const offer = (alias: Alias, text: string, named: boolean) => {
-    if (deliveries === null) return text;
-    const state = deliveries.of(message.id, alias);
-    return (
-      <>
-        {state.kind === "failed" ? (
-          <>
-            <span className="route-failed">
-              {routeCopy.delivery.failed(alias)}
-            </span>{" "}
-          </>
-        ) : named && state.kind !== "idle" ? (
-          `${alias} `
-        ) : null}
-        <button
-          type="button"
-          className="route-link"
-          aria-label={
-            state.kind === "idle" ? routeCopy.sendThis(alias) : undefined
-          }
-          aria-disabled={
-            state.kind === "sending" || state.kind === "sent" || undefined
-          }
-          title={
-            state.kind === "failed" ? routeCopy.delivery.why(state) : undefined
-          }
-          onClick={() => deliveries.deliver(message, alias)}
-        >
-          {state.kind === "idle" ? text : routeCopy.delivery.label[state.kind]}
-        </button>
-      </>
+  const element = useRef<HTMLDivElement>(null);
+  const offerId = (alias: Alias) => `${message.id} ${alias}`;
+  const offer = (alias: Alias, text: string) =>
+    deliveries === null ? (
+      text
+    ) : (
+      <button
+        type="button"
+        className="route-link"
+        aria-label={routeCopy.sendThis(alias)}
+        onClick={() => {
+          flushSync(() => deliveries.deliver(message, alias));
+          for (const button of element.current?.querySelectorAll<HTMLElement>(
+            "[data-offer]",
+          ) ?? [])
+            if (button.dataset.offer === offerId(alias)) button.focus();
+        }}
+      >
+        {text}
+      </button>
     );
-  };
   function part(part: RoutePart): ReactNode {
     switch (part.kind) {
       case "state":
@@ -418,25 +421,51 @@ function Route({
       case "send":
         return (
           <li>
-            <span role="status">
-              {part.form === "anyway"
-                ? part.aliases.map((alias) => (
+            {part.form === "anyway"
+              ? part.aliases.map((alias) => (
+                  <Fragment key={alias}>
+                    {offer(alias, routeCopy.send.anyway)}
+                  </Fragment>
+                ))
+              : [
+                  `${routeCopy.send.to} `,
+                  ...part.aliases.map((alias, index) => (
                     <Fragment key={alias}>
-                      {offer(alias, routeCopy.send.anyway, false)}
+                      {index > 0 && ", "}
+                      {offer(alias, alias)}
                     </Fragment>
-                  ))
-                : [
-                    `${routeCopy.send.to} `,
-                    ...part.aliases.map((alias, index) => (
-                      <Fragment key={alias}>
-                        {index > 0 && ", "}
-                        {offer(alias, alias, true)}
-                      </Fragment>
-                    )),
-                  ]}
+                  )),
+                ]}
+          </li>
+        );
+      case "delivery": {
+        const { alias, state } = part;
+        return (
+          <li>
+            <span role="status">
+              {state.kind === "failed" && (
+                <span className="route-failed">
+                  {routeCopy.delivery.failed(alias)}
+                </span>
+              )}
+              <button
+                type="button"
+                className="route-link"
+                data-offer={offerId(alias)}
+                aria-disabled={state.kind !== "failed" || undefined}
+                title={
+                  state.kind === "failed"
+                    ? routeCopy.delivery.why(state)
+                    : undefined
+                }
+                onClick={() => deliveries?.deliver(message, alias)}
+              >
+                {routeCopy.delivery.label[state.kind](alias)}
+              </button>
             </span>
           </li>
         );
+      }
       case "replies":
         return (
           <li>
@@ -468,6 +497,7 @@ function Route({
   const { tip } = line;
   return (
     <div
+      ref={element}
       className="route"
       data-tone={line.tone}
       title={

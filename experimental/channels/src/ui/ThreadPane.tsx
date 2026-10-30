@@ -1,4 +1,4 @@
-import { useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useContext, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   attentionReplyTo,
   type ReplyIntent,
@@ -6,6 +6,7 @@ import {
 } from "../attention.ts";
 import type { CompletionContext } from "../complete.ts";
 import { repliesCopy, replyLabel, replyPlaceholder } from "../copy.ts";
+import { idle } from "../delivery.ts";
 import type {
   Channel,
   ComposerId,
@@ -26,6 +27,7 @@ import {
   threadAgents,
 } from "../store.ts";
 import { Composer } from "./Composer.tsx";
+import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
 import { useEscape } from "./useEscape.ts";
@@ -74,6 +76,7 @@ export function ThreadPane({
   const replyIntent = response?.kind === "reply" ? response.intent : null;
   const pane = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
+  const deliveries = useContext(DeliveryContext);
   const [openedAt] = useState(() => Date.now());
   const latest = thread.replies.at(-1) ?? thread.parents.at(-1);
   const composer = useMemo<ComposerId>(
@@ -185,6 +188,7 @@ export function ThreadPane({
               reference: null,
               directory,
               replies: 0,
+              delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
             })}
           />
         ))}
@@ -207,6 +211,7 @@ export function ThreadPane({
               reference: null,
               directory,
               replies: 0,
+              delivery: (alias) => deliveries?.of(message.id, alias) ?? idle,
             })}
             arrive={message.at > openedAt && !posted.has(message.id)}
           />

@@ -29,7 +29,7 @@ export function delivery(state: Delivery, event: DeliveryEvent): Delivery {
 
 export type Offer = { key: SpaceKey; messageId: string; alias: Alias };
 export type Deliveries = ReadonlyMap<string, { offer: Offer; state: Delivery }>;
-const idle: Delivery = { kind: "idle" };
+export const idle: Delivery = { kind: "idle" };
 function offerId({ key, messageId, alias }: Offer): string {
   return `${key}\n${messageId}\n${alias}`;
 }

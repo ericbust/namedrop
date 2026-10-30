@@ -1,5 +1,6 @@
 import {
   Fragment,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -7,6 +8,7 @@ import {
   useState,
 } from "react";
 import { composerCopy, emptyChannelCopy } from "../copy.ts";
+import { idle } from "../delivery.ts";
 import type { Channel, Directory, Outgoing, SpaceKey } from "../model.ts";
 import { answered, chatOf } from "../route.ts";
 import {
@@ -15,6 +17,7 @@ import {
   type RunIndex,
   type TimelineRow,
 } from "../store.ts";
+import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { Message, PendingMessage } from "./Message.tsx";
 
@@ -86,6 +89,7 @@ export function Timeline({
 }) {
   const scroller = useRef<HTMLElement>(null);
   const anchors = useRef(new Map<SpaceKey, Anchor>());
+  const deliveries = useContext(DeliveryContext);
   const [far, setFar] = useState(false);
   const shown = useRef<{ key: SpaceKey; at: number } | null>(null);
   if (shown.current?.key !== channel.key)
@@ -159,9 +163,11 @@ export function Timeline({
               reference: row.reference,
               directory,
               replies: row.replyCount,
+              delivery: (alias) =>
+                deliveries?.of(row.message.id, alias) ?? idle,
             }),
       ),
-    [rows, directory],
+    [rows, directory, deliveries],
   );
   const history = channel.history;
   const gap = channel.runs.length > 1;

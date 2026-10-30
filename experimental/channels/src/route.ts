@@ -1,3 +1,4 @@
+import type { Delivery } from "./delivery.ts";
 import type {
   AddressId,
   Alias,
@@ -15,7 +16,6 @@ import {
 } from "./store.ts";
 
 export type RouteState = "checking" | "failed";
-// "anyway" offers the one mentioned agent the post did not reach; "to" lists each.
 export type SendForm = "anyway" | "to";
 export type RoutePart =
   | { kind: "state"; state: RouteState }
@@ -25,6 +25,11 @@ export type RoutePart =
   | { kind: "receipt"; id: AddressId; named: boolean; stage: DeliveryStage }
   | { kind: "mentioned"; aliases: readonly string[] }
   | { kind: "send"; aliases: readonly Alias[]; form: SendForm }
+  | {
+      kind: "delivery";
+      alias: Alias;
+      state: Exclude<Delivery, { kind: "idle" }>;
+    }
   | { kind: "replies"; count: number };
 export type RouteTip =
   | { kind: "router"; name: string }
@@ -99,6 +104,7 @@ export function routeLine(
   room: Extract<Room, { kind: "channel" }>,
   directory: Directory,
   replies: number,
+  delivery: (alias: Alias) => Delivery,
 ): RouteLine | null {
   const reached = recipients(message).filter(
     (id) => participant(directory, id).kind !== "operator",
@@ -118,11 +124,22 @@ export function routeLine(
         }));
   // An agent the thread already reached, by this post or a later message, or
   // who wrote in it, has the conversation, so it is not offered again.
-  const offers = () =>
-    (message.routing?.mentioned ?? []).filter((alias) => {
-      const member = liveAgentNamed(directory, alias);
-      return member !== undefined && !room.joined.has(member.id);
-    });
+  const offers = () => {
+    const left = (message.routing?.mentioned ?? [])
+      .filter((alias) => {
+        const member = liveAgentNamed(directory, alias);
+        return member !== undefined && !room.joined.has(member.id);
+      })
+      .map((alias) => ({ alias, state: delivery(alias) }));
+    return {
+      idle: left.flatMap(({ alias, state }) =>
+        state.kind === "idle" ? [alias] : [],
+      ),
+      pressed: left.flatMap(({ alias, state }): RoutePart[] =>
+        state.kind === "idle" ? [] : [{ kind: "delivery", alias, state }],
+      ),
+    };
+  };
   const pulledIn = reached.some((id) => {
     const who = participant(directory, id);
     return (
@@ -133,18 +150,20 @@ export function routeLine(
   });
   // A post the router answered: who it reached, then the mentions it did not.
   const sent = (reason: string | null, router: string | null) => {
-    const left = offers();
-    const unsent: RoutePart[] =
-      left.length === 0
+    const { idle, pressed } = offers();
+    const unsent: RoutePart[] = [
+      ...(idle.length === 0
         ? []
         : [
-            { kind: "mentioned", aliases: left },
+            { kind: "mentioned", aliases: idle } as const,
             {
               kind: "send",
-              aliases: left,
-              form: left.length === 1 ? "anyway" : "to",
-            },
-          ];
+              aliases: idle,
+              form: idle.length === 1 ? "anyway" : "to",
+            } as const,
+          ]),
+      ...pressed,
+    ];
     if (reached.length === 0)
       return unsent.length === 0
         ? repliesOnly(tail)
@@ -170,16 +189,17 @@ export function routeLine(
     case "unrouted":
       return sent(null, null);
     case "router_failed": {
-      const left = offers();
+      const { idle, pressed } = offers();
       return {
         icon: "alert",
         tone: "failed",
         tip: { kind: "unreachable" },
         parts: [
           { kind: "state", state: "failed" },
-          ...(left.length === 0
+          ...(idle.length === 0
             ? []
-            : [{ kind: "send", aliases: left, form: "to" } as const]),
+            : [{ kind: "send", aliases: idle, form: "to" } as const]),
+          ...pressed,
           ...tail,
         ],
       };
@@ -206,12 +226,14 @@ export function chatOf({
   reference,
   directory,
   replies,
+  delivery,
 }: {
   message: Message;
   thread: ThreadGroup;
   reference: ReplyReference | null;
   directory: Directory;
   replies: number;
+  delivery: (alias: Alias) => Delivery;
 }): Chat | null {
   const { room } = thread;
   if (room === null) return null;
@@ -220,7 +242,7 @@ export function chatOf({
     reference,
     route:
       room.kind === "channel"
-        ? routeLine(message, room, directory, replies)
+        ? routeLine(message, room, directory, replies, delivery)
         : repliesOnly(replies > 0 ? [{ kind: "replies", count: replies }] : []),
   };
 }

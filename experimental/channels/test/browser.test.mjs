@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { extname } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { chromium } from "playwright-core";
 import { build } from "vite";
 import { threadControlCopy } from "../src/copy.ts";
@@ -6683,13 +6684,52 @@ async function offerReads(button, text) {
   );
   return offerState(button);
 }
+const shownText = (locator) =>
+  locator.evaluate((root) => {
+    const divider = (element, which) =>
+      getComputedStyle(element, which).content.startsWith('"·"') ? " · " : "";
+    const read = (node) =>
+      node.nodeType === Node.TEXT_NODE
+        ? node.textContent
+        : node.nodeType === Node.ELEMENT_NODE
+          ? divider(node, "::before") +
+            [...node.childNodes].map(read).join("") +
+            divider(node, "::after")
+          : "";
+    return read(root).replace(/\s+/g, " ").trim();
+  });
+const focusedOffer = (page) =>
+  page.evaluate(() => ({
+    offer: document.activeElement?.getAttribute("data-offer") ?? null,
+    text: document.activeElement?.textContent ?? null,
+  }));
+async function settled(read, expected) {
+  const deadline = Date.now() + 2000;
+  let value = await read();
+  while (!isDeepStrictEqual(value, expected) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    value = await read();
+  }
+  return value;
+}
+async function readsAs(locator, text) {
+  assert.equal(await settled(() => shownText(locator), text), text);
+}
+async function focusOn(page, offer, text) {
+  assert.deepEqual(await settled(() => focusedOffer(page), { offer, text }), {
+    offer,
+    text,
+  });
+}
+const pressedOffer = (scope, id, alias) =>
+  scope.locator(`[data-offer="${id} ${alias}"]`).elementHandle();
 const unsent = () =>
   channelPost("p1", "nice catch by @codex on the cache", {
     state: "unrouted",
     to: [],
   });
 
-test("CH-fix-3 item 1: Send anyway delivers the post itself, reads Sending… then Sent, and the frame's leg replaces the offer", async (t) => {
+test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the not-sent part for its own Sending to @codex… then Sent to @codex with focus on it, and the frame's leg replaces it", async (t) => {
   const answered = held();
   const post = unsent();
   const { ui, value } = await chatRoom(t, [post], {
@@ -6699,9 +6739,12 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, reads Sending… th
     },
   });
   const { route, parts } = routeOf(ui, "p1");
-  const offer = route.getByRole("button", { name: "Send this to @codex" });
-  const button = await offer.elementHandle();
-  await offer.click();
+  await route.waitFor();
+  assert.equal(
+    await shownText(route),
+    "Mentioned @codex, not sent · Send anyway",
+  );
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
   await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
   const [{ method, path, csrf, type, body }] = ui.posts.deliveries;
   assert.deepEqual(
@@ -6714,14 +6757,20 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, reads Sending… th
       body: '{"to":["codex"]}',
     },
   );
-  assert.deepEqual(await offerReads(button, "Sending…"), {
-    text: "Sending…",
+  await readsAs(route, "Sending to @codex…");
+  await focusOn(ui.page, "p1 @codex", "Sending to @codex…");
+  const button = await pressedOffer(route, "p1", "@codex");
+  assert.deepEqual(await offerState(button), {
+    text: "Sending to @codex…",
     disabled: "true",
     title: null,
     focused: true,
     connected: true,
   });
-  assert.equal(await route.getByRole("status").textContent(), "Sending…");
+  assert.equal(
+    await route.getByRole("status").textContent(),
+    "Sending to @codex…",
+  );
   assert.equal(await threadPane(ui).count(), 0, "no thread opens");
   assert.equal(
     await ui.page.locator("main textarea").inputValue(),
@@ -6729,20 +6778,21 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, reads Sending… th
     "nothing is typed in the channel box",
   );
   answered.release();
-  assert.deepEqual(await offerReads(button, "Sent"), {
-    text: "Sent",
+  assert.deepEqual(await offerReads(button, "Sent to @codex"), {
+    text: "Sent to @codex",
     disabled: "true",
     title: null,
     focused: true,
     connected: true,
   });
-  assert.equal(await route.getByRole("status").textContent(), "Sent");
+  await readsAs(route, "Sent to @codex");
+  assert.equal(await route.getByRole("status").textContent(), "Sent to @codex");
   await button.click({ force: true });
   value.frame.messages = [reached(post, "codex")];
   ui.connections[0].send("space", value);
   await eventually(
     async () => !(await button.evaluate((element) => element.isConnected)),
-    "the offer to leave once the post reached @codex",
+    "the part to leave once the post reached @codex",
   );
   assert.deepEqual(await parts(), ["@codex", "Delivered"]);
   assert.equal(
@@ -6754,40 +6804,37 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, reads Sending… th
   assert.equal(ui.posts.attempts.length, 0, "no message is posted");
 });
 
-test("CH-fix-3 item 1: a refused delivery says so in --failed-text, Try again carries the server's message, and Try again delivers", async (t) => {
+test("CH-fix-3 item 1: a refused delivery reads Couldn't send to @codex · Try again with focus on Try again, its title is the server's message, and Try again delivers", async (t) => {
   const refusal = "@codex is not an agent in this workspace.";
   const outcomes = [{ status: 400, error: refusal }, { status: 200 }];
   const { ui } = await chatRoom(t, [unsent()], {
     onDeliver: () => outcomes.shift(),
   });
-  const { route, parts } = routeOf(ui, "p1");
-  const offer = route.getByRole("button", { name: "Send this to @codex" });
-  const button = await offer.elementHandle();
-  await offer.click();
-  assert.deepEqual(await offerReads(button, "Try again"), {
+  const { route } = routeOf(ui, "p1");
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await readsAs(route, "Couldn't send to @codex · Try again");
+  await focusOn(ui.page, "p1 @codex", "Try again");
+  const button = await pressedOffer(route, "p1", "@codex");
+  assert.deepEqual(await offerState(button), {
     text: "Try again",
     disabled: null,
     title: refusal,
     focused: true,
     connected: true,
   });
-  assert.deepEqual(await parts(), [
-    "Mentioned @codex, not sent",
-    "Couldn't send to @codex. Try again",
-  ]);
   assert.equal(
-    await route.getByRole("status").textContent(),
-    "Couldn't send to @codex. Try again",
+    await shownText(route.getByRole("status")),
+    "Couldn't send to @codex · Try again",
   );
   assert.equal(
     await route
-      .getByText("Couldn't send to @codex.", { exact: true })
+      .getByText("Couldn't send to @codex", { exact: true })
       .evaluate((element) => getComputedStyle(element).color),
     await tokenColor(ui.page, "--failed-text"),
   );
   await button.click();
-  assert.equal((await offerReads(button, "Sent")).focused, true);
-  assert.deepEqual(await parts(), ["Mentioned @codex, not sent", "Sent"]);
+  assert.equal((await offerReads(button, "Sent to @codex")).focused, true);
+  await readsAs(route, "Sent to @codex");
   assert.deepEqual(
     ui.posts.deliveries.map(({ path, body, status }) => [path, body, status]),
     [
@@ -6801,13 +6848,10 @@ test("CH-fix-3 item 1: Try again's title says Couldn't reach Namedrop. when the 
   let outcome = { drop: true };
   const { ui } = await chatRoom(t, [unsent()], { onDeliver: () => outcome });
   const { route } = routeOf(ui, "p1");
-  const offer = route.getByRole("button", { name: "Send this to @codex" });
-  const button = await offer.elementHandle();
-  await offer.click();
-  assert.equal(
-    (await offerReads(button, "Try again")).title,
-    "Couldn't reach Namedrop.",
-  );
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await focusOn(ui.page, "p1 @codex", "Try again");
+  const button = await pressedOffer(route, "p1", "@codex");
+  assert.equal((await offerState(button)).title, "Couldn't reach Namedrop.");
   outcome = { status: 500 };
   await button.click();
   await eventually(
@@ -6815,13 +6859,14 @@ test("CH-fix-3 item 1: Try again's title says Couldn't reach Namedrop. when the 
     "the status in the title",
   );
   assert.equal(
-    await route.getByRole("status").textContent(),
-    "Couldn't send to @codex. Try again",
+    await shownText(route.getByRole("status")),
+    "Couldn't send to @codex · Try again",
   );
 });
 
-test("CH-fix-3 item 1: Send to after router_failed keeps a state for each agent", async (t) => {
+test("CH-fix-3 item 1: Send to after router_failed moves each pressed agent to its own part after the ones still not sent", async (t) => {
   const refusal = "@claude is not an agent in this workspace.";
+  const codexAnswer = held();
   const { ui } = await chatRoom(
     t,
     [
@@ -6830,36 +6875,47 @@ test("CH-fix-3 item 1: Send to after router_failed keeps a state for each agent"
       }),
     ],
     {
-      onDeliver: ({ to: [alias] }) =>
-        alias === "codex" ? { status: 200 } : { status: 400, error: refusal },
+      onDeliver: async ({ to: [alias] }) => {
+        if (alias !== "codex") return { status: 400, error: refusal };
+        await codexAnswer.gate;
+        return { status: 200 };
+      },
     },
   );
-  const { route, parts } = routeOf(ui, "p1");
-  const codex = await route
-    .getByRole("button", { name: "Send this to @codex" })
-    .elementHandle();
-  const claude = await route
-    .getByRole("button", { name: "Send this to @claude" })
-    .elementHandle();
-  await codex.click();
-  await offerReads(codex, "Sent");
-  assert.deepEqual(await parts(), [
-    "Couldn't check who this is for",
-    "Send to @codex Sent, @claude",
-  ]);
-  await claude.click();
-  assert.deepEqual(await offerReads(claude, "Try again"), {
+  const { route } = routeOf(ui, "p1");
+  await route.waitFor();
+  assert.equal(
+    await shownText(route),
+    "Couldn't check who this is for · Send to @codex, @claude",
+  );
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await readsAs(
+    route,
+    "Couldn't check who this is for · Send to @claude · Sending to @codex…",
+  );
+  await focusOn(ui.page, "p1 @codex", "Sending to @codex…");
+  const codex = await pressedOffer(route, "p1", "@codex");
+  codexAnswer.release();
+  assert.equal((await offerReads(codex, "Sent to @codex")).focused, true);
+  await readsAs(
+    route,
+    "Couldn't check who this is for · Send to @claude · Sent to @codex",
+  );
+  await route.getByRole("button", { name: "Send this to @claude" }).click();
+  await readsAs(
+    route,
+    "Couldn't check who this is for · Sent to @codex · Couldn't send to @claude · Try again",
+  );
+  await focusOn(ui.page, "p1 @claude", "Try again");
+  const claude = await pressedOffer(route, "p1", "@claude");
+  assert.deepEqual(await offerState(claude), {
     text: "Try again",
     disabled: null,
     title: refusal,
     focused: true,
     connected: true,
   });
-  assert.deepEqual(await parts(), [
-    "Couldn't check who this is for",
-    "Send to @codex Sent, Couldn't send to @claude. Try again",
-  ]);
-  assert.equal((await offerState(codex)).text, "Sent");
+  assert.equal((await offerState(codex)).text, "Sent to @codex");
   assert.deepEqual(
     ui.posts.deliveries.map(({ path, body }) => [path, JSON.parse(body)]),
     [
@@ -6869,7 +6925,7 @@ test("CH-fix-3 item 1: Send to after router_failed keeps a state for each agent"
   );
 });
 
-test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, and the timeline's offer shows the same state", async (t) => {
+test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus moves to the pane's part, and the timeline shows the same state", async (t) => {
   const at = Date.now() - 600_000;
   const post = channelPost(
     "p1",
@@ -6895,25 +6951,17 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, and the
   const pane = threadPane(ui);
   const box = pane.getByRole("combobox");
   await box.waitFor();
-  const offer = pane.getByRole("button", { name: "Send this to @codex" });
-  const button = await offer.elementHandle();
-  await offer.click();
+  await pane.getByRole("button", { name: "Send this to @codex" }).click();
   await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
   assert.equal(ui.posts.deliveries[0].path, deliverPath("p1"));
-  assert.equal((await offerReads(button, "Sending…")).focused, true);
-  const inTimeline = routeOf(ui, "p1");
-  assert.deepEqual(await inTimeline.parts(), [
-    "Mentioned @codex, not sent",
-    "Sending…",
-    "1 reply",
-  ]);
+  const inTimeline = routeOf(ui, "p1").route;
+  await readsAs(inTimeline, "Sending to @codex… · 1 reply");
+  await readsAs(pane.locator(".route"), "Sending to @codex…");
+  const button = await pressedOffer(pane, "p1", "@codex");
+  assert.equal((await offerState(button)).focused, true);
   answered.release();
-  assert.equal((await offerReads(button, "Sent")).focused, true);
-  assert.deepEqual(await inTimeline.parts(), [
-    "Mentioned @codex, not sent",
-    "Sent",
-    "1 reply",
-  ]);
+  assert.equal((await offerReads(button, "Sent to @codex")).focused, true);
+  await readsAs(inTimeline, "Sent to @codex · 1 reply");
   assert.equal(await box.inputValue(), "", "nothing is typed in the reply box");
   assert.equal(ui.posts.attempts.length, 0, "no reply is posted");
 });
@@ -6960,10 +7008,9 @@ test("CH-fix-3 item 1: Send anyway in a Needs-you conversation pane delivers the
   const reply = pane.getByRole("combobox");
   await reply.waitFor();
   const before = await reply.inputValue();
-  const offer = pane.getByRole("button", { name: "Send this to @codex" });
-  const button = await offer.elementHandle();
-  await offer.click();
-  assert.equal((await offerReads(button, "Sent")).focused, true);
+  await pane.getByRole("button", { name: "Send this to @codex" }).click();
+  await readsAs(pane.locator(".route"), "Sent to @codex");
+  await focusOn(ui.page, "far-post @codex", "Sent to @codex");
   assert.deepEqual(
     ui.posts.deliveries.map(({ path, body }) => [path, body]),
     [[deliverPath("far-post"), '{"to":["codex"]}']],
@@ -6980,14 +7027,11 @@ test("CH-fix-3 item 1: a double click on Send anyway sends one delivery", async 
       return { status: 200 };
     },
   });
-  const offer = routeOf(ui, "p1").route.getByRole("button", {
-    name: "Send this to @codex",
-  });
-  const button = await offer.elementHandle();
-  await offer.dblclick();
+  const { route } = routeOf(ui, "p1");
+  await route.getByRole("button", { name: "Send this to @codex" }).dblclick();
   await until(() => ui.posts.deliveries.length > 0, "the deliver POST");
   answered.release();
-  await offerReads(button, "Sent");
+  await readsAs(route, "Sent to @codex");
   assert.equal(ui.posts.deliveries.length, 1);
 });
 
