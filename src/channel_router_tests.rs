@@ -936,3 +936,41 @@ fn fake_cli_routes_with_isolation_receipts_and_deadline() {
     }
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn input_preserves_short_post_cancellations_and_reference_framing() {
+    let rows = rows();
+    for source in [
+        "Please ask @claude for a review. Actually, cancel that request and wake nobody.",
+        "For reference only. This was already completed yesterday:\nPlease ask @claude for a review.",
+    ] {
+        let input = test_input(&rows, source);
+        let payload: Value = serde_json::from_str(&input.payload).unwrap();
+        assert_eq!(payload["post"], source);
+    }
+    let source = format!(
+        "{}\nFor reference only. Already completed yesterday.\nAsk @claude for a review. Actually cancel that request and wake nobody.\n{}",
+        "x".repeat(5000),
+        "y".repeat(5000)
+    );
+    let input = test_input(&rows, &source);
+    let payload: Value = serde_json::from_str(&input.payload).unwrap();
+    let post = payload["post"].as_str().unwrap();
+    assert!(post.contains("Already completed yesterday."), "{post}");
+    assert!(
+        post.contains("cancel that request and wake nobody"),
+        "{post}"
+    );
+}
+
+#[test]
+fn input_keeps_complete_posts_above_old_prefix_limit_when_they_fit() {
+    let rows = rows();
+    let source = format!(
+        "{} Please ask @claude for a review. Actually cancel that request and wake nobody.",
+        "x".repeat(4500)
+    );
+    let input = test_input(&rows, &source);
+    let payload: Value = serde_json::from_str(&input.payload).unwrap();
+    assert_eq!(payload["post"], source);
+}

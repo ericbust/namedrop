@@ -356,7 +356,7 @@ fn build_input(request: RouterRequest<'_>) -> Result<RouterInput, InputError> {
         .collect();
     let mut context_chars = POST_CONTEXT_CHARS;
     let mut payload = json!({
-        "post": post_excerpt(source, &spans, context_chars),
+        "post": source,
         "roster": roster,
         "recap": recap(rows),
     });
@@ -379,9 +379,9 @@ fn build_input(request: RouterRequest<'_>) -> Result<RouterInput, InputError> {
                 .as_array_mut()
                 .expect("router recap")
                 .remove(0);
-        } else if context_chars > MIN_POST_CONTEXT_CHARS {
-            context_chars = (context_chars / 2).max(MIN_POST_CONTEXT_CHARS);
+        } else if context_chars >= MIN_POST_CONTEXT_CHARS {
             payload["post"] = json!(post_excerpt(source, &spans, context_chars));
+            context_chars /= 2;
         } else {
             return Err(InputError::TooLarge);
         }
@@ -404,12 +404,6 @@ fn post_excerpt(source: &str, spans: &[Range<usize>], context_chars: usize) -> S
             .char_indices()
             .nth(context_chars)
             .map_or(source.len(), |(offset, _)| span.end + offset);
-        let start = sentence_boundaries(&source[start..span.start])
-            .next_back()
-            .map_or(start, |offset| start + offset);
-        let end = sentence_boundaries(&source[span.end..end])
-            .next()
-            .map_or(end, |offset| span.end + offset);
         if let Some(previous) = windows.last_mut()
             && start <= previous.end
         {
@@ -431,16 +425,6 @@ fn post_excerpt(source: &str, spans: &[Range<usize>], context_chars: usize) -> S
         post.push_str("\n[…]\n");
     }
     post
-}
-
-fn sentence_boundaries(text: &str) -> impl DoubleEndedIterator<Item = usize> + '_ {
-    text.char_indices().filter_map(|(offset, character)| {
-        let end = offset + character.len_utf8();
-        (character == '\n'
-            || (matches!(character, '.' | '!' | '?')
-                && text[end..].chars().next().is_none_or(char::is_whitespace)))
-        .then_some(end)
-    })
 }
 
 fn recap(rows: &DashboardRows) -> Vec<String> {
