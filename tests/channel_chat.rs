@@ -1,5 +1,7 @@
 #[path = "support/channel_controls.rs"]
 mod channel_controls;
+#[path = "support/channel_deliver.rs"]
+mod channel_deliver;
 #[path = "support/channel_durable.rs"]
 mod channel_durable;
 #[path = "support/channel_fix2.rs"]
