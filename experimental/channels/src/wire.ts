@@ -653,9 +653,6 @@ function fields(value: unknown): Record<string, unknown> {
     ? (value as Record<string, unknown>)
     : {};
 }
-function reason(value: unknown): string | null {
-  return optionalIdentity(value)?.trim() ?? null;
-}
 export function parseDelivered(
   body: string,
   to: readonly Alias[],
@@ -665,22 +662,12 @@ export function parseDelivered(
     answer = fields(JSON.parse(body) as unknown);
   } catch {}
   const delivered = aliasSet(answer.delivered);
-  const reasons = new Map<Alias, string>();
-  for (const item of Array.isArray(answer.not_delivered)
-    ? answer.not_delivered
-    : []) {
-    const entry = fields(item);
-    const alias = optionalAlias(entry.alias);
-    const why = reason(entry.reason);
-    if (alias !== null && why !== null) reasons.set(alias, why);
-  }
-  const error = reason(answer.error) ?? "";
   return new Map(
     to.map((alias): [Alias, DeliverResult] => [
       alias,
       delivered === null || delivered.has(alias)
         ? { kind: "done" }
-        : { kind: "failed", status: 200, message: reasons.get(alias) ?? error },
+        : { kind: "failed", status: 200, message: "" },
     ]),
   );
 }

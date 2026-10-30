@@ -253,15 +253,13 @@ test("deliver: posts the bare aliases for a stored post with the session token, 
   ]);
 });
 
-test("deliver: a 200 that lists only some aliases sends the rest back as failed with the server's reason", async () => {
-  const reason = "@claude belongs to a different agent now.";
+test("deliver: a 200 that lists only some aliases sends the rest back as failed", async () => {
   const server = fakeServer(({ url }) =>
     url === "/api/session"
       ? json(200, { csrf_token: "t" })
       : json(200, {
           channel: { state: "unrouted", to: ["codex"] },
           delivered: ["codex"],
-          not_delivered: [{ alias: "claude", reason }],
         }),
   );
   assert.deepEqual(
@@ -273,7 +271,7 @@ test("deliver: a 200 that lists only some aliases sends the rest back as failed 
     ),
     {
       "@codex": { kind: "done" },
-      "@claude": { kind: "failed", status: 200, message: reason },
+      "@claude": { kind: "failed", status: 200, message: "" },
     },
   );
 });

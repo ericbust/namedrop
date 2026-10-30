@@ -715,10 +715,10 @@ uses the "Send to" form. Each offer is a text button in 12px 600
     again" button. Its tooltip is the server's message, "HTTP 500" when the
     server gives none, or "Couldn't reach Namedrop." when the request never
     reached it.
-  - When the server answers but did not send the post to that agent, as when
-    the name now belongs to a different agent, the part shows the same failure
-    with the server's reason as its tooltip, or "Namedrop didn't send it. The
-    name may belong to a different agent now." when the server gives none.
+  - When the server answers 2xx and its `delivered` list leaves that agent out,
+    as when the name now belongs to a different agent, the part shows the same
+    failure with the tooltip "Namedrop didn't send it. The name may belong to a
+    different agent now."
   - A 2xx answer whose body stalls for 5 seconds or breaks reads as sent. The
     status is the server's answer, and the line updates when the frame shows
     the agent reached.

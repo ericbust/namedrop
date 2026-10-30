@@ -6865,16 +6865,8 @@ test("CH-fix-3 item 1: Try again's title says Couldn't reach Namedrop. when the 
   );
 });
 
-test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @codex · Try again with the server's reason as its title, and Try again sends it", async (t) => {
-  const reason = "@codex belongs to a different agent now.";
-  const outcomes = [
-    {
-      delivered: [],
-      not_delivered: [{ alias: "codex", reason }],
-      error: "Namedrop skipped 1 agent.",
-    },
-    { delivered: ["codex"] },
-  ];
+test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @codex · Try again, says the name may belong to a different agent now, and Try again sends it", async (t) => {
+  const outcomes = [{ delivered: [] }, { delivered: ["codex"] }];
   const { ui } = await chatRoom(t, [unsent()], {
     onDeliver: () => outcomes.shift(),
   });
@@ -6886,7 +6878,8 @@ test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @cod
   assert.deepEqual(await offerState(button), {
     text: "Try again",
     disabled: null,
-    title: reason,
+    title:
+      "Namedrop didn't send it. The name may belong to a different agent now.",
     focused: true,
     connected: true,
   });

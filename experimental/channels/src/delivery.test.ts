@@ -131,29 +131,12 @@ test("deliveries: an answer moves each agent it names that was sending, and no o
   assert.deepEqual(requests, [codex, claude]);
 });
 
-test("deliveries: a 200 leaves the pressed agent Sent only when it lists the agent, and otherwise failed with the server's reason", async () => {
-  const notSent = (message: string): Delivery => ({
-    kind: "failed",
-    status: 200,
-    message,
-  });
-  const reason = "@codex belongs to a different agent now.";
+test("deliveries: a 200 leaves the pressed agent Sent only when it lists the agent, and otherwise failed", async () => {
+  const notSent: Delivery = { kind: "failed", status: 200, message: "" };
   const cases: [string, Delivery][] = [
     ['{"channel":{},"delivered":["codex"]}', sent],
-    ['{"channel":{},"delivered":["claude"]}', notSent("")],
-    ['{"delivered":[]}', notSent("")],
-    [
-      JSON.stringify({
-        delivered: [],
-        not_delivered: [{ alias: "codex", reason }],
-        error: "Namedrop skipped 1 agent.",
-      }),
-      notSent(reason),
-    ],
-    [
-      '{"delivered":[],"error":"Namedrop skipped 1 agent."}',
-      notSent("Namedrop skipped 1 agent."),
-    ],
+    ['{"channel":{},"delivered":["claude"]}', notSent],
+    ['{"delivered":[]}', notSent],
     ['{"channel":{}}', sent],
     ['{"delivered":"codex"}', sent],
     ["Sent.", sent],
