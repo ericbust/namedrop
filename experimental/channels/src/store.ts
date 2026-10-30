@@ -961,11 +961,11 @@ export type Wrote = ReadonlyMap<AddressId | "human", number>;
 // A thread that reads as a conversation, every message its own row. Its first
 // loaded parent decides: a channel post makes a channel room, a first message
 // an agent wrote makes an agents room, and anything else is a request thread.
-// Everyone a channel thread sent a message to, so an agent who already has the
-// conversation is never offered it again.
-export type Heard = ReadonlySet<AddressId>;
+// When each member first wrote or was sent a message in a thread: the time it
+// joined the conversation.
+export type Joined = ReadonlyMap<AddressId, number>;
 export type Room =
-  | { kind: "channel"; post: Message; wrote: Wrote; heard: Heard }
+  | { kind: "channel"; post: Message; wrote: Wrote; joined: Joined }
   | { kind: "agents"; root: Message; wrote: Wrote };
 export type ThreadGroup = {
   id: string;
@@ -989,11 +989,16 @@ function wroteIn(group: Pick<ThreadGroup, "parents" | "replies">): Wrote {
       wrote.set(author, Math.max(at, wrote.get(author) ?? at));
   return wrote;
 }
-function heardIn(group: Pick<ThreadGroup, "parents" | "replies">): Heard {
-  const heard = new Set<AddressId>();
+function joinedIn(group: Pick<ThreadGroup, "parents" | "replies">): Joined {
+  const joined = new Map<AddressId, number>();
+  const join = (id: AddressId, at: number) =>
+    joined.set(id, Math.min(at, joined.get(id) ?? at));
   for (const messages of [group.parents, group.replies])
-    for (const { legs } of messages) for (const { to } of legs) heard.add(to);
-  return heard;
+    for (const { author, at, legs } of messages) {
+      if (author !== "human") join(author, at);
+      for (const { to } of legs) join(to, at);
+    }
+  return joined;
 }
 export function roomOf(
   group: Pick<ThreadGroup, "parents" | "replies">,
@@ -1006,7 +1011,7 @@ export function roomOf(
       kind: "channel",
       post: first,
       wrote: wroteIn(group),
-      heard: heardIn(group),
+      joined: joinedIn(group),
     };
   return agentAuthor(first.author, members)
     ? { kind: "agents", root: first, wrote: wroteIn(group) }

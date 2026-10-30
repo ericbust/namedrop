@@ -6564,6 +6564,76 @@ test("CH-2: replies read as their own rows in time order, with a reference above
   );
 });
 
+for (const woke of [["claude"], []])
+  test(`CH-fix-2 item 5: the pull-in loop reads naturally, and the asker hearing back is never pulled in (woke ${JSON.stringify(woke)})`, async (t) => {
+    const at = Date.now() - 600_000;
+    const { ui } = await chatRoom(t, [
+      channelPost("p", "can @claude find out what 6 times 7 is?", routed(""), {
+        at_ms: at,
+        legs: [{ to: "claude", stage: done("replied") }],
+      }),
+      answer(
+        "ask",
+        "p",
+        "p",
+        "claude",
+        "Asking now: @codex what is 6 times 7?",
+        {
+          at_ms: at + 60_000,
+          legs: [
+            { to: "human", stage: { stage: "delivered" } },
+            { to: "codex", stage: done("replied") },
+          ],
+          woke: ["codex"],
+        },
+      ),
+      channelPost(
+        "room",
+        "heads up: the staging keys rotate at 3pm",
+        {
+          state: "unrouted",
+          to: [],
+        },
+        { at_ms: at + 90_000, thread_id: "room" },
+      ),
+      answer("answer", "ask", "p", "codex", "42", {
+        at_ms: at + 120_000,
+        legs: [
+          { to: "human", stage: { stage: "delivered" } },
+          { to: "claude", stage: done("replied") },
+        ],
+        woke,
+      }),
+      answer("report", "answer", "p", "claude", "It's 42.", {
+        at_ms: at + 180_000,
+        legs: [{ to: "human", stage: { stage: "delivered" } }],
+      }),
+    ]);
+    const timeline = ui.page.getByRole("region", { name: "Message history" });
+    await timeline.locator('[data-message-id="report"]').waitFor();
+    assert.deepEqual(await routeOf(ui, "ask").parts(), ["@codex", "pulled in"]);
+    assert.deepEqual(
+      await routeOf(ui, "answer").parts(),
+      ["@claude"],
+      "the asker hears back as a plain recipient",
+    );
+    await timeline
+      .locator('[data-message-id="answer"]')
+      .getByRole("button", {
+        name: "Reply to @claude: Asking now: @codex what is 6 times 7? Open thread",
+      })
+      .waitFor();
+    assert.equal(
+      await routeOf(ui, "report").route.count(),
+      0,
+      "the report back to the room has no route line",
+    );
+    assert.equal(
+      await timeline.getByText("pulled in", { exact: true }).count(),
+      1,
+    );
+  });
+
 const NOTE = "@codex Please read my post.";
 const threadPane = (ui) =>
   ui.page.getByRole("complementary", { name: "Thread", exact: true });

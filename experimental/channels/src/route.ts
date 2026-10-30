@@ -74,6 +74,18 @@ function repliesOnly(tail: readonly RoutePart[]): RouteLine | null {
   return tail.length === 0 ? null : line(null, tail);
 }
 
+// The current agent with this alias. A retired pane's alias can be reused.
+function agentNamed(directory: Directory, alias: string): Member | undefined {
+  for (const member of directory.members.values())
+    if (
+      member.alias === alias &&
+      member.kind.type === "agent" &&
+      member.activity !== "retired"
+    )
+      return member;
+  return undefined;
+}
+
 const unknown = { state: "unknown" } as const;
 const unknownStage: DeliveryStage = { stage: "unknown" };
 
@@ -103,20 +115,20 @@ export function routeLine(
         }));
   // An agent the thread already reached, by this post or a later message, or
   // who wrote in it, has the conversation, so it is not offered again.
-  const offers = () => {
-    const agents = new Map<string, Member>();
-    for (const member of directory.members.values())
-      if (member.kind.type === "agent" && member.activity !== "retired")
-        agents.set(member.alias, member);
-    return (message.routing?.mentioned ?? []).filter((alias) => {
-      const member = agents.get(alias);
-      return (
-        member !== undefined &&
-        !room.heard.has(member.id) &&
-        !room.wrote.has(member.id)
-      );
+  const offers = () =>
+    (message.routing?.mentioned ?? []).filter((alias) => {
+      const member = agentNamed(directory, alias);
+      return member !== undefined && !room.joined.has(member.id);
     });
-  };
+  // A woken member is pulled in only when this message brings it into the
+  // conversation, so the asker hearing back reads as a plain recipient.
+  const pulledIn = message.woke.some((alias) => {
+    const member = agentNamed(directory, alias);
+    return (
+      member === undefined ||
+      (room.joined.get(member.id) ?? message.at) >= message.at
+    );
+  });
   // A post the router answered: who it reached, then the mentions it did not.
   const sent = (reason: string | null, router: string | null) => {
     const left = offers();
@@ -175,9 +187,7 @@ export function routeLine(
         ? repliesOnly(tail)
         : line("arrow", [
             names,
-            ...(message.woke.length > 0
-              ? [{ kind: "pulled-in" } as const]
-              : []),
+            ...(pulledIn ? [{ kind: "pulled-in" } as const] : []),
             ...receipts(),
             ...tail,
           ]);
