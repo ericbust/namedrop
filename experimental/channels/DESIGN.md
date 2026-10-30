@@ -497,16 +497,24 @@ offer, and its button names the action and the person:
 | `pane`     | "See @worker's screen" | Opens the peek drawer for that agent.                                |
 | `local`    | none                   | Its setup step becomes the hint.                                     |
 
-When the agent a `reply` or `message` is for can't take a message, the first
-press says why in the place the answer would go: the channel composer's status
-row for `message`, and the thread pane's slot for `reply`. Its words match the
-member chip.
+When the agent a `reply` or `message` is for can't take a message, the card
+offers no press that can't work. It shows no **Reply to** or **Message**
+button, and its hint line reads why in place of its usual hint, which would ask
+for an action the operator can no longer take. **Show message** and
+**Details** stay. When the frame shows the agent live again, the button and
+the usual hint come back. Its words match the member chip.
 
-| The agent                                    | The line                                               |
-| -------------------------------------------- | ------------------------------------------------------ |
-| Its pane is closed, the chip's "Pane closed" | "@codex's pane is closed, so it can't take a message." |
-| No longer in the frame, the card names it    | "@codex isn't in this channel anymore."                |
-| No longer in the frame, no name known        | "That agent isn't in this channel anymore."            |
+| The agent                                         | The line                                                                                      |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Its pane is closed, the chip's "Pane closed"      | "@codex's pane is closed, so it can't take a message."                                        |
+| In a workspace with no label Namedrop can mention | "@codex's workspace has no label Namedrop can mention, so it can't take a message from here." |
+| No longer in the frame, the card names it         | "@codex isn't in this channel anymore."                                                       |
+| No longer in the frame, no name known             | "That agent isn't in this channel anymore."                                                   |
+
+An agent whose home workspace has no addressable label is alive, so it never
+reads as gone. If the agent goes after the press, the same line shows where
+the answer would go: the channel composer's status row for `message`, and the
+thread pane's slot for `reply`.
 
 The card's name for an agent that left the frame is the item's subject. A
 `coordination` or `automatic_reply_limit` item has none, so it reads "That
@@ -587,15 +595,17 @@ bottom. Only one place offers an action at a time. While the channel box shows
 its kept-draft notice, which names the card's button as the retry, the line has
 no button. Once the notice goes, the button comes back.
 
-| The item's answer                      | The line                                                                      |
-| -------------------------------------- | ----------------------------------------------------------------------------- |
-| A channel message, ready               | "Answer tracked work in the channel. Your message to @claude is ready there." |
-| A channel message, not prepared        | "Answer tracked work in the channel." then a **Message @claude** text button  |
-| A channel message, draft kept          | "Answer tracked work in the channel." alone                                   |
-| The agent's pane                       | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip   |
-| A reply to an agent whose pane closed  | "@codex's pane is closed, so it can't take a message."                        |
-| A reply to an agent no longer in frame | "@codex isn't in this channel anymore."                                       |
-| The same, with no name known           | "That agent isn't in this channel anymore."                                   |
+| The item's answer                      | The line                                                                                      |
+| -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| A channel message, ready               | "Answer tracked work in the channel. Your message to @claude is ready there."                 |
+| A channel message, not prepared        | "Answer tracked work in the channel." then a **Message @claude** text button                  |
+| A channel message to an absent agent   | The agent's line from the Needs-you banner alone, with no button                              |
+| A channel message, draft kept          | "Answer tracked work in the channel." alone                                                   |
+| The agent's pane                       | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip                   |
+| A reply to an agent whose pane closed  | "@codex's pane is closed, so it can't take a message."                                        |
+| A reply to an agent no longer in frame | "@codex isn't in this channel anymore."                                                       |
+| A reply to an agent it can't mention   | "@codex's workspace has no label Namedrop can mention, so it can't take a message from here." |
+| The same, with no name known           | "That agent isn't in this channel anymore."                                                   |
 
 When a reply's thread already holds a draft, the composer stays and its status
 row reads, 12px muted: "Your existing draft was kept. Send or clear it before
@@ -651,7 +661,8 @@ main column, under the timeline, and at the bottom of the thread pane.
   open, Enter and Tab accept the highlighted suggestion instead.
 - **Hint**: while the box has focus, a 12px muted line under it says where Enter
   sends the text. In the thread pane it reads "Enter to send · Shift+Enter for
-  a new line". The channel composer's hints are in Channel chat below.
+  a new line", except for a lone `@` (see Channel chat). The channel
+  composer's hints are in Channel chat below.
 - **Kept draft**: when a Needs-you **Message @claude** finds the channel box
   already holding other text, the text stays and the status row under the box
   reads, in 12px `--text` like the recipient guard: "Your draft is still here.
@@ -660,11 +671,12 @@ main column, under the timeline, and at the bottom of the thread pane.
   The notice stays until the next edit of the box, a send, or a clear; then the
   recipient guard and the hint return, so "@Codex hi" typed after it reads
   "Names are lowercase: @codex". The message that button prepared is not
-  another draft, so pressing it again never warns. When the agent can't take a
-  message, the first press says why in the same row, whether or not the box
-  holds a draft, and the box keeps its text: "@codex's pane is closed, so it
-  can't take a message." or "@codex isn't in this channel anymore." (see
-  Response under Needs-you banner). Availability is checked before the draft,
+  another draft, so pressing it again never warns. The card offers no press
+  for an agent that can't take a message. When the agent goes between the
+  press and the conversation's arrival, the press says why in the same row,
+  whether or not the box holds a draft, and the box keeps its text:
+  "@codex's pane is closed, so it can't take a message." or "@codex isn't in
+  this channel anymore." (see Response under Needs-you banner). Availability is checked before the draft,
   so the operator never clears a draft only to learn the agent is gone. That
   line also gives way at the next edit, so the hint and the guard explain the
   text that follows.
@@ -970,8 +982,15 @@ uses the "Send to" form. Each offer is a text button in 12px 600
   and no reference lines.
 
 **Channel composer hint.** While the box has focus, the hint line says where
-Enter sends:
+Enter sends. It judges the text Enter sends, which is the box's text trimmed
+the way JavaScript trims it, so a pasted U+FEFF at either end can't change the
+hint, and U+0085 reads as whitespace, as the server reads it.
 
+- Text that is only `@`, in any composer: "Type a name after @". The server
+  reads it as a mention with no name and refuses it, so Enter keeps it in the
+  box with no request, and the line under the box keeps the same words after
+  Enter. While the member list is open, Enter still picks the highlighted
+  name. "#alpha @" and "@ hi" are plain posts.
 - Text that mentions no agent, or no text: "Enter posts to the channel ·
   Mention @name to bring someone in".
 - Text that mentions agents but does not start with them: "Enter posts to the
@@ -1003,19 +1022,27 @@ Enter sends:
     channel post apply. Its @codex follows the `#label` word, so the post
     mentions no one: "Enter posts to the channel · Mention @name to bring
     someone in".
-  - With no `#label` before it, a name whose lowercase form belongs to a
-    member of this channel whose pane is closed (the chip's "Pane closed"):
-    "@codex's pane is closed", for "@codex hi" and "@Codex hi" alike. The
-    server refuses both, so this comes before the capitals rule: lowercasing
-    the name would only lead to a second refusal. A name a current member has
-    taken since is not closed. With a `#label` first, the name belongs to that
-    workspace, so the rules below apply.
+  - With no `#label` before it, or only this channel's own label in any case
+    ("#alpha @codex hi", "#Alpha: @codex hi" in #alpha), a name whose
+    lowercase form belongs to a member of this channel whose pane is closed
+    (the chip's "Pane closed"): "@codex's pane is closed", for "@codex hi" and
+    "@Codex hi" alike. The server resolves such a name here and refuses both,
+    so this comes before the capitals rule: lowercasing the name would only
+    lead to a second refusal. A name a current member has taken since is not
+    closed. With any other label, or `#all`, the name belongs to another
+    workspace or to every one, so the rules below apply.
   - A name with capitals: "Names are lowercase: @codex", the name with its
     ASCII letters lowercased. The server refuses the capital before it looks
     the name up, so this is the reason for a current member, a mention group
     the page can't see, and an unknown name alike: "@Backend hi" reads "Names
     are lowercase: @backend" and "@Nobody hi there" reads "Names are
     lowercase: @nobody".
+  - `#all` in the leading label run with any other workspace label, before a
+    valid name: "#all already means every workspace · Drop the other labels",
+    for "#all #alpha @codex hi" and "#alpha #ALL @codex hi". The server
+    checks capitals first, so "#all #alpha @Codex hi" reads "Names are
+    lowercase: @codex". With no valid name after the labels, as in
+    "#all #alpha hi", the text is a plain post.
   - A lowercase name the page doesn't know keeps "Enter sends only to
     @name". It may be a group, which the page can't see, so the server
     decides.
