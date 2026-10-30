@@ -87,7 +87,7 @@ not airy.
 
 - Sidebar rows are 32px tall. Section gaps are 20px.
 - The channel header is 56px. The member strip under it is 36px per line, at
-  most two lines.
+  most two lines, or one line in a window under 560px tall.
 - A message group has 16px above it. Messages inside a group sit about 6px
   apart, which keeps the hover padding.
 - The timeline scroller fades its top 12px with a `mask-image` gradient, so a
@@ -142,9 +142,10 @@ When the pane takes the channel's place, its header's "in #alpha" is the only
 context, and its close button or Escape is the way back. There is no back
 button. Focus returns where it does in the other layouts: to the thread button,
 or to the chip, name or row that opened the screen. The breakpoints are media
-queries in `style.css`. The one fact JavaScript reads is the 600px phone width,
-in `ui/measure.ts`, because it decides where the connection dot is and whether
-the sidebar is a modal drawer.
+queries in `style.css`. JavaScript reads two facts, in `ui/measure.ts`: the
+600px phone width, because it decides where the connection dot is and whether
+the sidebar is a modal drawer, and the 560px short window, because the member
+strip counts its lines.
 
 In every layout the timeline keeps at least 112px, about three message lines.
 When the main column is short, the Needs-you banner gives way first: it
@@ -272,7 +273,9 @@ unknown, pane closed. The operator chip reads "You", shows no presence, and
 comes last. The chip's
 tooltip names the runtime in words: "Claude Code", "Codex", "OpenCode", "Pi",
 or "Terminal". An unknown runtime id is shown with its first letter capitalized. After two lines, end with a
-"+N more" chip that expands the strip. Remove the "Members" and "Status"
+"+N more" chip that expands the strip. In a window under 560px tall, end it
+after one line, so the timeline keeps the second line's room
+(`useShortWindow` in `ui/measure.ts`). Remove the "Members" and "Status"
 headings. Each member chip is a button that opens the peek drawer for that
 member. The operator chip is not a button.
 
