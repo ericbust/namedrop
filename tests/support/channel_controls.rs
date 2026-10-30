@@ -401,3 +401,101 @@ fn browser_thread_controls_refuse_mutations_during_handoff() {
         drop(packages);
     }
 }
+
+#[test]
+fn controls_answer_before_their_delivery_drain_finishes() {
+    use std::sync::mpsc;
+    struct PromptGate(std::path::PathBuf);
+    impl Drop for PromptGate {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    let mut observed = Vec::new();
+    for action in ["continue", "stop"] {
+        let f = fixture();
+        let parent = held_thread(&f);
+        let server = Server::start(&f, "not json", true);
+        if action == "stop" {
+            let namespace = StateNamespace::for_space("socket-a", "w1");
+            let thread = namedrop::ThreadId::new("unrelated-control-drain");
+            let author = f.text("SELECT author_address_id FROM collaboration_messages WHERE author_kind='human' LIMIT 1").unwrap();
+            StateStore::open(&f.state)
+                .unwrap()
+                .transaction(|tx| {
+                    let at = namedrop::MutationAttribution::new(
+                        namedrop::ActorKind::Human,
+                        "test",
+                        namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
+                    );
+                    tx.create_thread(&namespace, &thread, "Unrelated task", &at)?;
+                    tx.append_message(
+                        &namespace,
+                        &namedrop::MessageDraft {
+                            thread_id: thread.clone(),
+                            message_id: namedrop::MessageId::new("unrelated-control-post"),
+                            in_reply_to: None,
+                            author_address_id: namedrop::PaneAddressId::new(&author),
+                            author_kind: namedrop::ActorKind::Human,
+                            author_alias_snapshot: "operator".into(),
+                            author_agent_session_snapshot: None,
+                            request_id: "after-held".into(),
+                            authored_source: "@planner A different task.".into(),
+                            body: "A different task.".into(),
+                            grammar_version: "mention/v1".into(),
+                            recipients: vec![namedrop::MessageRecipientDraft {
+                                address_id: namedrop::PaneAddressId::new("address-w1-planner"),
+                                alias_snapshot: "planner".into(),
+                                agent_session_snapshot: Some(namedrop::AgentSessionId::new(
+                                    xws::session("pane-1-planner"),
+                                )),
+                                delivery_id: namedrop::DeliveryId::new(
+                                    "unrelated-control-delivery",
+                                ),
+                            }],
+                            context_references: vec![],
+                        },
+                        &at,
+                    )
+                })
+                .unwrap();
+        }
+        let (sender, receiver) = mpsc::channel();
+        let early = thread::scope(|scope| {
+            let gate = PromptGate(f.root.join("prompt-gate"));
+            fs::write(&gate.0, "").unwrap();
+            scope.spawn(|| {
+                sender
+                    .send(server.post(&control_path("w1", &parent, action), "{}", &[]))
+                    .unwrap()
+            });
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !f.root.join("prompt-entered").exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "{action}: drain did not reach prompt gate"
+                );
+                thread::yield_now();
+            }
+            let early = receiver.recv_timeout(Duration::from_secs(2));
+            drop(gate);
+            if early.is_err() {
+                let _ = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+            }
+            early
+        });
+        eprintln!(
+            "{action}: HTTP completed while drain blocked = {}",
+            early.is_ok()
+        );
+        observed.push((action, early));
+    }
+    for (action, early) in observed {
+        let response =
+            early.unwrap_or_else(|error| panic!("{action}: response waited for drain: {error}"));
+        assert_eq!(response.status, 200, "{}", response.body);
+        let receipt: Value = serde_json::from_str(&response.body).unwrap();
+        assert!(receipt.get("drain").is_none(), "{receipt}");
+        assert_eq!(receipt["state"]["stopped"], action == "stop");
+    }
+}
