@@ -126,7 +126,12 @@ fn main() -> ExitCode {
             cli.session_start_hook_state_directory()
                 .map(Path::to_path_buf)
         })
-        .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
+        .or_else(|| match HostKind::from_environment(cli.runtime.host) {
+            Ok(HostKind::Hc) => env::var_os("NAMEDROP_STATE_DIR")
+                .map(PathBuf::from)
+                .or_else(|| hc_state_directory(|key| env::var(key).ok()).ok()),
+            _ => env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from),
+        });
     // A dashboard successor started mid-update waits a bounded time rather
     // than parking forever behind a stuck migration.
     let gate_wait = cli.is_dashboard_server().then_some(Duration::from_secs(60));
@@ -210,13 +215,13 @@ fn main() -> ExitCode {
         });
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
-        return run_mailbox_wake_hook(state_directory);
+        return run_mailbox_wake_hook(state_directory, &cli.runtime);
     }
     if cli.is_agent_status_changed_hook() {
-        return run_agent_status_changed_hook();
+        return run_agent_status_changed_hook(&cli.runtime);
     }
     if cli.is_agent_status_worker_hook() {
-        return run_agent_status_worker();
+        return run_agent_status_worker(&cli.runtime);
     }
     if matches!(cli.operation(), "reconcile" | "event.pane-lifecycle")
         && let Some(state) = selected_state.as_deref()
@@ -448,12 +453,13 @@ fn wake_runtime_mailboxes(runtime: &ProcessRuntime<'_>) -> Result<(), String> {
             &directory,
             &serde_json::json!({"operation":"mailbox-wake"}),
         )?;
-        status_worker_command()?
-            .env("HERDR_PLUGIN_STATE_DIR", runtime.state_directory)
-            .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
-            .env("HERDR_WORKSPACE_ID", space)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        status_worker_command(&worker_options(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            &space,
+        ))?
+        .spawn()
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -627,7 +633,22 @@ fn run_operation(
         OperationKind::Group => execute_group_operation(operation, input, runtime),
         OperationKind::Context => execute_context_operation(operation, input, runtime),
         OperationKind::Control => execute_control_operation(operation, input, runtime),
-        OperationKind::Lifecycle => execute_lifecycle_operation(operation, input, runtime),
+        OperationKind::Lifecycle => {
+            let mut result = execute_lifecycle_operation(operation, input, runtime)?;
+            if matches!(operation, "activate" | "name")
+                && let RuntimeHost::Hc(host) = runtime.host
+            {
+                namedrop::host::hc::events::start(
+                    &host,
+                    &namedrop::runtime_executable()?,
+                    runtime.state_directory,
+                )?;
+                result["mod_install"] = serde_json::json!(
+                    "Install the Namedrop mod in herdr-app, then open it from the app's mod commands."
+                );
+            }
+            Ok(result)
+        }
         OperationKind::Message => execute_message_operation(operation, input, runtime),
         OperationKind::Integration => execute_integration_operation(operation, input, runtime),
     })
@@ -640,7 +661,10 @@ fn with_runtime_at<T>(
 ) -> Result<T, String> {
     with_runtime_options(
         &RuntimeOptions {
-            plugin_state: Some(state_directory.to_path_buf()),
+            plugin_state: options
+                .plugin_state
+                .clone()
+                .or_else(|| Some(state_directory.to_path_buf())),
             ..options.clone()
         },
         action,
@@ -684,7 +708,10 @@ fn with_runtime_options<T>(
                 .herdr_workspace
                 .clone()
                 .or_else(|| env::var("HERDR_WORKSPACE_ID").ok()),
-            HostKind::Hc => options.hc_space.clone(),
+            HostKind::Hc => options
+                .hc_space
+                .clone()
+                .or_else(|| env::var("NAMEDROP_HC_SPACE").ok()),
         },
         pane: match kind {
             HostKind::Tui => options.herdr_pane.clone(),
@@ -740,40 +767,56 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
-        with_runtime_at(state_directory, options, |runtime| {
-            if let RuntimeHost::Hc(host) = runtime.host {
-                let Some(space) = runtime.workspace_id else {
-                    return Ok(None);
-                };
-                let namespace =
-                    namedrop::StateNamespace::for_space(runtime.session_socket_id, space);
-                let active = namedrop::StateStore::open(runtime.state_directory)
-                    .map_err(|error| error.to_string())?
-                    .transaction(|transaction| transaction.worktree_state(&namespace))
-                    .map_err(|error| error.to_string())?
-                    .is_some_and(|state| state.activated && !state.deactivated);
-                if !active {
-                    return Ok(None);
-                }
-                let event: serde_json::Value =
-                    serde_json::from_str(&input).map_err(|error| error.to_string())?;
-                if event["hook_event_name"] == "SessionStart"
-                    && let Some(session) = event["session_id"]
-                        .as_str()
-                        .filter(|session| !session.is_empty())
-                    && let Some(pane) = runtime.current_pane_id
-                {
-                    host.set_labels(pane, &[("namedrop.session", session)])?;
-                }
-            }
-            Ok(execute(&input, runtime))
-        })
-        .ok()
+    let hc = HostKind::from_environment(options.host) == Ok(HostKind::Hc);
+    let mut hc_active = false;
+    let state_directory = options.plugin_state.as_deref().unwrap_or(state_directory);
+    let mut output = (!hc)
+        .then(|| namedrop::execute_codex_app_server_hook(&input))
         .flatten()
-    });
-    if serde_json::from_str::<serde_json::Value>(&input)
-        .is_ok_and(|input| input["hook_event_name"] == "SessionStart")
+        .or_else(|| {
+            with_runtime_at(state_directory, options, |runtime| {
+                if let RuntimeHost::Hc(host) = runtime.host {
+                    let Some(space) = runtime.workspace_id else {
+                        return Ok(None);
+                    };
+                    let namespace =
+                        namedrop::StateNamespace::for_space(runtime.session_socket_id, space);
+                    let active = namedrop::StateStore::open(runtime.state_directory)
+                        .map_err(|error| error.to_string())?
+                        .transaction(|transaction| transaction.worktree_state(&namespace))
+                        .map_err(|error| error.to_string())?
+                        .is_some_and(|state| state.activated && !state.deactivated);
+                    if !active {
+                        return Ok(None);
+                    }
+                    hc_active = true;
+                    if let Some(notice) = namedrop::execute_codex_app_server_hook(&input) {
+                        return Ok(Some(notice));
+                    }
+                    let event: serde_json::Value =
+                        serde_json::from_str(&input).map_err(|error| error.to_string())?;
+                    if event["hook_event_name"] == "SessionStart"
+                        && let Some(session) = event["session_id"]
+                            .as_str()
+                            .filter(|session| !session.is_empty())
+                        && let Some(pane) = runtime.current_pane_id
+                    {
+                        host.set_labels(pane, &[("namedrop.session", session)])?;
+                        namedrop::host::hc::events::start(
+                            &host,
+                            &namedrop::runtime_executable()?,
+                            runtime.state_directory,
+                        )?;
+                    }
+                }
+                Ok(execute(&input, runtime))
+            })
+            .ok()
+            .flatten()
+        });
+    if (!hc || hc_active)
+        && serde_json::from_str::<serde_json::Value>(&input)
+            .is_ok_and(|input| input["hook_event_name"] == "SessionStart")
     {
         output = namedrop::update_check::session_notice(
             &input,
@@ -801,14 +844,41 @@ fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
 /// sent. Its hook shell has exited by the time it runs, so it is nobody's
 /// pane: it reconciles the whole space and takes no identity from the
 /// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
-fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
+fn run_mailbox_wake_hook(state_directory: &Path, options: &RuntimeOptions) -> ExitCode {
+    let state_directory = options.plugin_state.as_deref().unwrap_or(state_directory);
     let wake = || -> Result<(), String> {
-        let transport = ProcessHerdr::default();
-        let host = RuntimeHost::new(HostKind::Tui, &transport);
-        let socket_id = session_socket_id(None, &host);
-        let space_id = match env::var("HERDR_WORKSPACE_ID") {
-            Ok(space_id) => space_id,
-            Err(_) => {
+        let kind = HostKind::from_environment(options.host)?;
+        let transport = ProcessHerdr::for_host(kind).with_socket(options.herdr_socket.clone());
+        let host = RuntimeHost::new(kind, &transport);
+        let socket_id = if kind == HostKind::Hc {
+            host.socket_id().ok_or("hc core identity is missing")?
+        } else {
+            session_socket_id(options.herdr_socket.clone(), &host)
+        };
+        let workspace = match kind {
+            HostKind::Tui => options
+                .herdr_workspace
+                .clone()
+                .or_else(|| env::var("HERDR_WORKSPACE_ID").ok()),
+            HostKind::Hc => options
+                .hc_space
+                .clone()
+                .or_else(|| env::var("NAMEDROP_HC_SPACE").ok())
+                .or_else(|| {
+                    let pane = options
+                        .hc_terminal
+                        .clone()
+                        .or_else(|| env::var("HC_TERMINAL_ID").ok())?;
+                    host.panes(namedrop::PaneScope::All)
+                        .ok()?
+                        .into_iter()
+                        .find(|candidate| candidate.pane_id == pane)
+                        .map(|pane| pane.workspace_id)
+                }),
+        };
+        let space_id = match workspace {
+            Some(space_id) => space_id,
+            None => {
                 let cwd = env::current_dir().map_err(|error| error.to_string())?;
                 host.space(namedrop::SpaceLocator::Checkout(&cwd), None)?
                     .workspace_id
@@ -823,10 +893,7 @@ fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
                     &directory,
                     &serde_json::json!({"operation":"mailbox-wake"}),
                 )?;
-                status_worker_command()?
-                    .env("HERDR_PLUGIN_STATE_DIR", state_directory)
-                    .env("HERDR_SOCKET_PATH", &socket_id)
-                    .env("HERDR_WORKSPACE_ID", &space_id)
+                status_worker_command(&worker_options(state_directory, &socket_id, &space_id))?
                     .status()
                     .map_err(|error| error.to_string())?;
                 Ok(())
@@ -850,7 +917,7 @@ fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
     }
 }
 
-fn run_agent_status_changed_hook() -> ExitCode {
+fn run_agent_status_changed_hook(options: &RuntimeOptions) -> ExitCode {
     let input = match env::var("HERDR_PLUGIN_EVENT_JSON")
         .map_err(|_| "HERDR_PLUGIN_EVENT_JSON is required for an event hook".to_owned())
         .and_then(|event| plugin_event_input("event.agent-status-changed", &event))
@@ -861,7 +928,7 @@ fn run_agent_status_changed_hook() -> ExitCode {
             return ExitCode::from(65);
         }
     };
-    let directory = match agent_status_reconciliation_directory() {
+    let directory = match agent_status_reconciliation_directory(options) {
         Ok(directory) => directory,
         Err(error) => {
             eprintln!("could not queue Namedrop reconciliation: {error}");
@@ -872,7 +939,7 @@ fn run_agent_status_changed_hook() -> ExitCode {
         eprintln!("could not queue Namedrop reconciliation: {error}");
         return ExitCode::from(65);
     }
-    match status_worker_command()
+    match status_worker_command(options)
         .and_then(|mut command| command.spawn().map_err(|error| error.to_string()))
     {
         Ok(_) => ExitCode::SUCCESS,
@@ -883,9 +950,36 @@ fn run_agent_status_changed_hook() -> ExitCode {
     }
 }
 
-fn status_worker_command() -> Result<Command, String> {
+fn worker_options(state: &Path, namespace: &str, space: &str) -> RuntimeOptions {
+    let hc = namespace.starts_with("hc:");
+    RuntimeOptions {
+        plugin_state: Some(state.to_path_buf()),
+        host: Some(if hc { HostKind::Hc } else { HostKind::Tui }),
+        hc_space: hc.then(|| space.to_owned()),
+        herdr_socket: (!hc).then(|| namespace.to_owned()),
+        herdr_workspace: (!hc).then(|| space.to_owned()),
+        ..Default::default()
+    }
+}
+
+fn status_worker_command(options: &RuntimeOptions) -> Result<Command, String> {
     use std::os::unix::process::CommandExt;
     let mut command = Command::new(namedrop::runtime_executable()?);
+    if let Some(state) = &options.plugin_state {
+        command.arg("--plugin-state").arg(state);
+    }
+    if let Some(host) = options.host {
+        command.args(["--host", if host == HostKind::Hc { "hc" } else { "tui" }]);
+    }
+    for (flag, value) in [
+        ("--hc-space", &options.hc_space),
+        ("--herdr-socket", &options.herdr_socket),
+        ("--herdr-workspace", &options.herdr_workspace),
+    ] {
+        if let Some(value) = value {
+            command.args([flag, value]);
+        }
+    }
     command
         .args(["hook", "agent-status-worker"])
         .process_group(0)
@@ -893,6 +987,10 @@ fn status_worker_command() -> Result<Command, String> {
         // started it, so it is nobody's pane; the hook's pane must not become
         // its identity.
         .env_remove("HERDR_PANE_ID")
+        .env_remove("HC_TERMINAL_ID")
+        .env_remove("HC_TERMINAL_SOCKET")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .env("NAMEDROP_HERDR_TIMEOUT_MS", "10000")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -900,14 +998,33 @@ fn status_worker_command() -> Result<Command, String> {
     Ok(command)
 }
 
-fn agent_status_reconciliation_directory() -> Result<PathBuf, String> {
-    let state_directory = env::var_os("HERDR_PLUGIN_STATE_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR is required".to_owned())?;
-    let socket_id =
-        env::var("HERDR_SOCKET_PATH").map_err(|_| "HERDR_SOCKET_PATH is required".to_owned())?;
-    let space_id =
-        env::var("HERDR_WORKSPACE_ID").map_err(|_| "HERDR_WORKSPACE_ID is required".to_owned())?;
+fn agent_status_reconciliation_directory(options: &RuntimeOptions) -> Result<PathBuf, String> {
+    if HostKind::from_environment(options.host)? == HostKind::Hc {
+        return with_runtime_options(options, |runtime| {
+            reconciliation_directory(
+                runtime.state_directory,
+                runtime.session_socket_id,
+                runtime
+                    .workspace_id
+                    .ok_or("--hc-space is required for a status worker")?,
+            )
+        });
+    }
+    let state_directory = options
+        .plugin_state
+        .clone()
+        .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
+        .ok_or("HERDR_PLUGIN_STATE_DIR is required")?;
+    let socket_id = options
+        .herdr_socket
+        .clone()
+        .or_else(|| env::var("HERDR_SOCKET_PATH").ok())
+        .ok_or("HERDR_SOCKET_PATH is required")?;
+    let space_id = options
+        .herdr_workspace
+        .clone()
+        .or_else(|| env::var("HERDR_WORKSPACE_ID").ok())
+        .ok_or("HERDR_WORKSPACE_ID is required")?;
     reconciliation_directory(&state_directory, &socket_id, &space_id)
 }
 
@@ -974,8 +1091,8 @@ fn pending_agent_status_reconciliations(directory: &Path) -> Result<Vec<PathBuf>
     Ok(markers)
 }
 
-fn run_agent_status_worker() -> ExitCode {
-    let directory = match agent_status_reconciliation_directory() {
+fn run_agent_status_worker(options: &RuntimeOptions) -> ExitCode {
+    let directory = match agent_status_reconciliation_directory(options) {
         Ok(directory) => directory,
         Err(_) => return ExitCode::SUCCESS,
     };
@@ -1005,11 +1122,10 @@ fn run_agent_status_worker() -> ExitCode {
                     wait_for_marker_or_deadline(&directory, due);
                     continue;
                 }
-                deadline_ms = with_runtime_options(&RuntimeOptions::default(), |runtime| {
-                    namedrop::drain_mailboxes(runtime)
-                })
-                .ok()
-                .and_then(|report| report.next_grace_due_ms());
+                deadline_ms =
+                    with_runtime_options(options, |runtime| namedrop::drain_mailboxes(runtime))
+                        .ok()
+                        .and_then(|report| report.next_grace_due_ms());
                 continue;
             }
             let _ = lock.unlock();
@@ -1037,17 +1153,13 @@ fn run_agent_status_worker() -> ExitCode {
             continue;
         };
         let result = if input == serde_json::json!({"operation":"mailbox-wake"}) {
-            with_runtime_options(&RuntimeOptions::default(), |runtime| {
+            with_runtime_options(options, |runtime| {
                 namedrop::drain_mailboxes(runtime).and_then(|report| {
                     serde_json::to_value(report).map_err(|error| error.to_string())
                 })
             })
         } else {
-            run_lifecycle(
-                "event.agent-status-changed",
-                input,
-                &RuntimeOptions::default(),
-            )
+            run_lifecycle("event.agent-status-changed", input, options)
         };
         match result {
             Ok(result) => match drain_report(&result) {

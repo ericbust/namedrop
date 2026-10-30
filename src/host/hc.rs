@@ -176,6 +176,22 @@ impl Terminal {
                 _ => Some(name.to_owned()),
             }
         });
+        let shell_runner = !self.reported
+            && self
+                .argv
+                .first()
+                .and_then(|program| Path::new(program).file_name())
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| matches!(name, "sh" | "bash" | "zsh" | "fish" | "dash" | "nu"))
+            && self.foreground.as_ref().is_some_and(|foreground| {
+                foreground
+                    .argv
+                    .first()
+                    .and_then(|program| Path::new(program).file_name())
+                    .is_some_and(|name| name == "namedrop")
+                    && foreground.argv.iter().any(|arg| arg == "terminal-execute")
+            });
+        let agent = if shell_runner { None } else { agent };
         DiscoveredPane {
             pane_id: self.address.clone(),
             terminal_id: self.address.clone(),
@@ -396,10 +412,27 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         let foreground = u32::try_from(terminal.foreground?.pid)
             .ok()
             .filter(|pid| *pid > 0)?;
+        let mut foreground_processes = vec![Process { pid: foreground }];
+        if !pane.contains('/')
+            && let Ok(output) = Command::new("ps").args(["-axo", "pid=,pgid="]).output()
+            && output.status.success()
+        {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let mut fields = line.split_whitespace();
+                if let (Some(pid), Some(group)) = (
+                    fields.next().and_then(|value| value.parse::<u32>().ok()),
+                    fields.next().and_then(|value| value.parse::<u32>().ok()),
+                ) && group == foreground
+                    && pid != foreground
+                {
+                    foreground_processes.push(Process { pid });
+                }
+            }
+        }
         Some(ProcessInfo {
             shell_pid: u64::from(shell_pid),
             foreground_process_group_id: u64::from(foreground),
-            foreground_processes: vec![Process { pid: foreground }],
+            foreground_processes,
         })
     }
 

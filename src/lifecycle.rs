@@ -498,6 +498,7 @@ where
                     .ok_or("no HOME is available for shell command installation")?,
                 Path::new(&crate::collaboration_executable()?),
                 runtime.state_directory,
+                runtime.is_hc(),
             )?;
             store
                 .transaction(|transaction| transaction.activate_worktree(&namespace, &attribution))
@@ -510,8 +511,11 @@ where
                 &attribution,
                 false,
             )?;
-            let shortcuts =
-                crate::shortcuts::activate_shortcuts(runtime.home_directory, &runtime.host);
+            let shortcuts = if runtime.is_hc() {
+                json!({"status":"app_managed", "next_step":"Install the Namedrop mod in herdr-app to enable its commands and shortcuts."})
+            } else {
+                crate::shortcuts::activate_shortcuts(runtime.home_directory, &runtime.host)
+            };
             // After the shortcuts, so the tour's reopen shortcut already works
             // when the popup mentions it. It reports instead of failing.
             let tour = crate::tour::show_for_first_agent(runtime, &discovered, None);

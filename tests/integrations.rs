@@ -1277,7 +1277,7 @@ fn generated_skill_command_forms_are_covered_by_managed_settings() {
     assert!(installed_body.starts_with(&packaged_body.replace(
             "<!-- namedrop-installed-command -->",
             &format!(
-                "Use this exact installed command prefix whenever these instructions name `namedrop`: `{command_prefix}`."
+                "Use the installed `namedrop` shell command for unbound commands; it selects TUI or hc state from the current terminal. The TUI fallback command prefix is `{command_prefix}`. For hc direct calls, use the same executable with `--host hc`, `--hc-terminal`, and `--hc-space`; use the hc state directory. Bound registration and delivery commands always supply their own exact prefix."
             )
         )));
     assert!(!instructions.contains("allowed-tools:"), "{instructions}");
@@ -2835,7 +2835,7 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
     let package = integration_package(runtime);
     let installed_instructions = fs::read_to_string(directory.join("SKILL.md")).unwrap();
     assert!(
-        installed_instructions.contains("Use this exact installed command prefix"),
+        installed_instructions.contains("The TUI fallback command prefix is"),
         "{} instructions omit their generated installed command",
         runtime.as_str()
     );
@@ -4460,4 +4460,56 @@ fn managed_claude_rules_reject_environment_injection() {
             "managed rule permits LD_PRELOAD injection: {rule}"
         );
     }
+}
+
+#[test]
+fn installed_hooks_route_hc_state_dynamically() {
+    let directory = TestDirectory::new();
+    let executable = directory.path().join("hook-result");
+    let log = directory.path().join("hook-argv");
+    fs::write(
+        &executable,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let package = install_integration_package(
+        directory.home(),
+        AgentRuntime::ClaudeCode,
+        &executable,
+        directory.path(),
+    )
+    .unwrap();
+    let wrapper = package.join("scripts/session-start");
+    let run = |state: Option<&str>| {
+        let mut command = Command::new(&wrapper);
+        command
+            .env("HOME", directory.home())
+            .env("XDG_STATE_HOME", directory.path().join("xdg"))
+            .env("HC_SESSION", "second-core")
+            .env("HC_TERMINAL_ID", "t3")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("NAMEDROP_HOST");
+        if let Some(state) = state {
+            command.env("NAMEDROP_STATE_DIR", state);
+        } else {
+            command.env_remove("NAMEDROP_STATE_DIR");
+        }
+        assert!(command.status().unwrap().success());
+        fs::read_to_string(&log).unwrap()
+    };
+    let argv = run(None);
+    assert!(
+        argv.starts_with("--host\nhc\n--hc-terminal\nt3\n--plugin-state\n"),
+        "{argv}"
+    );
+    assert!(
+        argv.contains(&format!(
+            "{}/xdg/namedrop/hc/second-core\n",
+            directory.path().display()
+        )),
+        "{argv}"
+    );
+    assert!(run(Some("/explicit-state")).contains("--plugin-state\n/explicit-state\n"));
 }

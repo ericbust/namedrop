@@ -572,3 +572,148 @@ esac
     fs::write(&record, terminal.to_string()).unwrap();
     assert!(!text(&run(None)).contains("HC_TERMINAL_ID is stale"));
 }
+
+#[test]
+fn hc_hooks_write_sessions_only_in_active_spaces_and_preserve_core_routing() {
+    let f = Fixture::new("hc-hooks");
+    let hc = f.0.join("hc");
+    let record = f.0.join("record.json");
+    let mut terminal: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
+    terminal["pid"] = serde_json::json!(std::process::id());
+    terminal["labels"]
+        .as_object_mut()
+        .unwrap()
+        .remove("namedrop.session");
+    terminal["labels"]
+        .as_object_mut()
+        .unwrap()
+        .remove("namedrop.name");
+    terminal["status"] = serde_json::json!({"state":"idle","app":"claude-code"});
+    terminal["reported"] = serde_json::json!(true);
+    fs::write(&record, terminal.to_string()).unwrap();
+    fs::write(
+        &hc,
+        r#"#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(__file__).parent
+args = sys.argv[1:]
+assert 'HC_TERMINAL_ID' not in os.environ
+assert 'HC_TERMINAL_SOCKET' not in os.environ
+assert os.environ['HC_SESSION'] == 'hook-core'
+assert os.environ['HC_SOCKET'] == 'hook-socket'
+with (root / 'hc-calls').open('a') as out:
+    out.write(json.dumps(args) + '\n')
+record = json.loads((root / 'record.json').read_text())
+if args[0] == 'get': print(json.dumps(record))
+elif args[0] == 'ls': print(json.dumps({'terminals':[record]}))
+elif args[0] == 'server': print(json.dumps({'core':{'id':'hook-test'}}))
+elif args[0] == 'label':
+    for arg in args[2:]:
+        if arg == '--json': continue
+        key, value = arg.split('=', 1)
+        if value: record['labels'][key] = value
+        else: record['labels'].pop(key, None)
+    (root / 'record.json').write_text(json.dumps(record))
+    print(json.dumps(record))
+elif args[0] == 'run':
+    print(json.dumps({'error':{'kind':'name_taken','message':'already running'}}), file=sys.stderr)
+    sys.exit(1)
+elif args[0] == 'send':
+    assert 'HC_TERMINAL_ID' not in os.environ
+    assert 'HC_TERMINAL_SOCKET' not in os.environ
+    assert os.environ['HC_SESSION'] == 'hook-core'
+    assert os.environ['HC_SOCKET'] == 'hook-socket'
+    print(json.dumps({'started':True}))
+else: raise AssertionError(args)
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
+    let command = |args: &[&str]| {
+        let mut command = f.namedrop_command(args);
+        command
+            .env("HC_BIN_PATH", &hc)
+            .env("HC_TERMINAL_ID", "t1")
+            .env("HC_TERMINAL_SOCKET", "inherited-terminal-socket")
+            .env("HC_SESSION", "hook-core")
+            .env("HC_SOCKET", "hook-socket");
+        command
+    };
+    let run_hook = || {
+        codex_app_server::run_with_stdin(
+            &mut command(&[
+                "--host",
+                "hc",
+                "--hc-terminal",
+                "t1",
+                "--hc-space",
+                "fixture-space",
+                "hook",
+                "session-start",
+                "--state-directory",
+                f.0.join("state").to_str().unwrap(),
+            ]),
+            r#"{"hook_event_name":"SessionStart","session_id":"real-hook-session","source":"startup"}"#,
+        )
+    };
+    assert!(run_hook().stdout.is_empty());
+    let before: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    assert!(before["labels"]["namedrop.session"].is_null());
+    let namespace = namedrop::StateNamespace::for_space("hc:hook-test", "fixture-space");
+    namedrop::StateStore::open(&f.0.join("state"))
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.activate_worktree(
+                &namespace,
+                &namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "test", 1),
+            )
+        })
+        .unwrap();
+    let active = run_hook();
+    assert!(active.status.success(), "{}", text(&active));
+    assert!(
+        !active.stdout.is_empty(),
+        "active hook should supply the session policy"
+    );
+    let after: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!(after["labels"]["namedrop.session"], "real-hook-session");
+    run_hook();
+    let calls = fs::read_to_string(f.0.join("hc-calls")).unwrap();
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("[\"label\""))
+            .count(),
+        1,
+        "session writes are idempotent"
+    );
+    assert_eq!(
+        calls
+            .lines()
+            .filter(|line| line.starts_with("[\"run\""))
+            .count(),
+        2
+    );
+    let named = command(&[
+        "--host",
+        "hc",
+        "--hc-terminal",
+        "t1",
+        "--hc-space",
+        "fixture-space",
+        "name",
+        "hook-agent",
+    ])
+    .output()
+    .unwrap();
+    assert!(named.status.success(), "{}", text(&named));
+    let result: serde_json::Value = serde_json::from_slice(&named.stdout).unwrap();
+    assert_eq!(
+        result["data"]["registered"], true,
+        "the ordinary native naming path registers this session"
+    );
+}

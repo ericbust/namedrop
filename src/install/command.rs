@@ -11,6 +11,7 @@ pub(crate) fn install_shell_command(
     home: &Path,
     executable: &Path,
     state: &Path,
+    hc: bool,
 ) -> Result<Value, String> {
     if !home.is_absolute() || !executable.is_absolute() || !state.is_absolute() {
         return Err(
@@ -70,10 +71,17 @@ pub(crate) fn install_shell_command(
         })
         .collect::<Result<Vec<_>, String>>()?;
     fs::create_dir_all(&bin).map_err(|e| conflict(&bin, &e.to_string()))?;
+    let executable = shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?);
+    let tui = if hc {
+        existing.as_ref().map(|(text, _)| text.split_once("# TUI command\n").map_or_else(|| text.strip_prefix(OWNER).unwrap_or(text), |(_, command)| command).to_owned()).unwrap_or_else(|| format!("exec {executable} --host tui --plugin-state \"${{HERDR_PLUGIN_STATE_DIR:-${{XDG_STATE_HOME:-$HOME/.local/state}}/herdr/plugins/namedrop}}\" \"$@\"\n"))
+    } else {
+        format!(
+            "exec {executable} --plugin-state {} \"$@\"\n",
+            shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?)
+        )
+    };
     let script = format!(
-        "{OWNER}exec {} --plugin-state {} \"$@\"\n",
-        shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?),
-        shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?)
+        "{OWNER}if [ \"${{NAMEDROP_HOST-}}\" = hc ] || {{ [ -z \"${{HERDR_SOCKET_PATH-}}${{HERDR_PANE_ID-}}\" ] && [ -n \"${{HC_TERMINAL_ID-}}\" ]; }}; then\n  exec {executable} --host hc \"$@\"\nfi\n# TUI command\n{tui}"
     );
     replace_if_changed(&launcher, &script, Some(0o755))?;
     for (path, text, mode) in &updates {
@@ -123,4 +131,54 @@ fn read_target(home: &Path, target: &Path) -> Result<Option<(String, u32)>, Stri
         }
     }
     Err(conflict(target, "is not a file path"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn hc_activation_preserves_tui_launcher_and_is_idempotent() {
+        let root =
+            std::env::temp_dir().join(format!("namedrop-launcher-hosts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let tui = root.join("tui-binary");
+        let hc = root.join("hc-binary");
+        for (path, tag) in [(&tui, "tui"), (&hc, "hc")] {
+            fs::write(path, format!("#!/bin/sh\nprintf '%s\\n' {tag} \"$@\"\n")).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let state = root.join("old-tui-state");
+        install_shell_command(&root, &tui, &state, false).unwrap();
+        install_shell_command(&root, &hc, &root.join("hc-state"), true).unwrap();
+        let launcher = root.join(".local/bin/namedrop");
+        let first = fs::read(&launcher).unwrap();
+        install_shell_command(&root, &hc, &root.join("other-hc-state"), true).unwrap();
+        assert_eq!(fs::read(&launcher).unwrap(), first);
+        let tui_output = Command::new(&launcher)
+            .arg("doctor")
+            .env("HERDR_SOCKET_PATH", "tui-socket")
+            .env_remove("NAMEDROP_HOST")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(tui_output.stdout).unwrap(),
+            format!("tui\n--plugin-state\n{}\ndoctor\n", state.display())
+        );
+        let hc_output = Command::new(&launcher)
+            .arg("doctor")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PANE_ID")
+            .env("HC_TERMINAL_ID", "t1")
+            .env_remove("NAMEDROP_HOST")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(hc_output.stdout).unwrap(),
+            "hc\n--host\nhc\ndoctor\n"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

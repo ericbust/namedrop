@@ -419,8 +419,8 @@ fn prepare_integration_package(
     let instructions =
         installed_instructions(package.instructions, runtime, executable, state_directory)?;
     let hooks = hooks_manifest(&directory)?;
-    let hook = hook_script(runtime, executable, state_directory)?;
-    let session_start = session_start_script(runtime, executable, state_directory)?;
+    let hook = hook_script(root, runtime, executable, state_directory)?;
+    let session_start = session_start_script(root, runtime, executable, state_directory)?;
     let codex_version = codex_cache_version(&[
         runtime.as_str(),
         &instructions,
@@ -624,11 +624,11 @@ fn installed_instructions(
     let body = body.replace(
         INSTALLED_COMMAND_MARKER,
         &format!(
-            "Use this exact installed command prefix whenever these instructions name `namedrop`: `{command_prefix}`."
+            "Use the installed `namedrop` shell command for unbound commands; it selects TUI or hc state from the current terminal. The TUI fallback command prefix is `{command_prefix}`. For hc direct calls, use the same executable with `--host hc`, `--hc-terminal`, and `--hc-space`; use the hc state directory. Bound registration and delivery commands always supply their own exact prefix."
         ),
     );
     let body = format!(
-        "{body}\n## Invocation\n\nUse the installed executable directly with `--plugin-state <HERDR_PLUGIN_STATE_DIR>` before the bound operation. Append `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` with the exact `control.tool.environment` values. Keep operation tokens and flags as shown; single-quote literal values. For long JSON, write and verify a file in a separate tool call, then use `--input-json-file <absolute-path>` instead of `--input-json`; retain all bound fields. Use no environment prefix, shell substitution, pipes or wrappers. An OS sandbox access error is not an approval decision: request normal host approval for this exact invocation. If approval policy rejects it, report the blocker and keep the reply pending; do not broaden permissions or relay around the denial.\n"
+        "{body}\n## Invocation\n\nUse the installed executable directly with `--plugin-state <HERDR_PLUGIN_STATE_DIR>` before the bound operation. For TUI append `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane`. When `NAMEDROP_HOST=hc`, take state from `NAMEDROP_STATE_DIR` and append `--host hc`, `--hc-terminal` from `HC_TERMINAL_ID`, and `--hc-space` from `NAMEDROP_HC_SPACE`. Use the exact `control.tool.environment` values. Keep operation tokens and flags as shown; single-quote literal values. For long JSON, write and verify a file in a separate tool call, then use `--input-json-file <absolute-path>` instead of `--input-json`; retain all bound fields. Use no environment prefix, shell substitution, pipes or wrappers. An OS sandbox access error is not an approval decision: request normal host approval for this exact invocation. If approval policy rejects it, report the blocker and keep the reply pending; do not broaden permissions or relay around the denial.\n"
     );
     if runtime != AgentRuntime::ClaudeCode {
         return Ok(format!(
@@ -922,7 +922,26 @@ fn marketplace_manifest() -> String {
     )
 }
 
+fn hook_invocation(root: &Path, executable: &str) -> String {
+    let launcher = shell_single_quote(&root.join(".local/bin/namedrop").to_string_lossy());
+    format!(
+        r#"namedrop_invoke() {{
+  if [ "${{NAMEDROP_HOST-}}" = hc ] || {{ [ -z "${{HERDR_SOCKET_PATH-}}${{HERDR_PANE_ID-}}" ] && [ -n "${{HC_TERMINAL_ID-}}" ]; }}; then
+    namedrop_state="${{NAMEDROP_STATE_DIR:-${{XDG_STATE_HOME:-$HOME/.local/state}}/namedrop/hc/${{HC_SESSION:-default}}}}"
+    {executable} --host hc --hc-terminal "${{HC_TERMINAL_ID-}}" --plugin-state "$namedrop_state" "$@"
+  elif [ -x {launcher} ]; then
+    {launcher} "$@"
+  else
+    {executable} "$@"
+  fi
+}}
+"#,
+        executable = shell_single_quote(executable)
+    )
+}
+
 fn hook_script(
+    root: &Path,
     runtime: AgentRuntime,
     executable: &Path,
     state_directory: &Path,
@@ -960,10 +979,9 @@ fn hook_script(
         safe_context.push_str(&forward_marked_context("UserPromptSubmit", marker));
     }
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  {} hook mailbox-wake --state-directory {} </dev/null >/dev/null 2>&1 &\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
-        shell_single_quote(executable),
+        "#!/bin/sh\n{}output=$(namedrop_invoke hook user-prompt-submit --state-directory {} 2>/dev/null) || exit 0\nif [ \"$output\" = '{{\"decision\":\"block\",\"reason\":\"Collaboration message sent.\"}}' ]; then\n  namedrop_invoke hook mailbox-wake --state-directory {} </dev/null >/dev/null 2>&1 &\n  printf '%s' \"$output\"\n  exit 0\nfi\n{}exit 0\n",
+        hook_invocation(root, executable),
         shell_single_quote(state_directory),
-        shell_single_quote(executable),
         shell_single_quote(state_directory),
         safe_context,
     ))
@@ -983,6 +1001,7 @@ fn forward_marked_context(event: &str, marker: &str) -> String {
 /// The session-start wrapper. It forwards only what the plugin produced: the
 /// selection policy, a numeric update notice, and Codex's shared-server advice.
 fn session_start_script(
+    root: &Path,
     runtime: AgentRuntime,
     executable: &Path,
     state_directory: &Path,
@@ -1008,8 +1027,8 @@ fn session_start_script(
     };
     let update_notice = forward_update_notice(runtime);
     Ok(format!(
-        "#!/bin/sh\noutput=$({} hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
-        shell_single_quote(executable),
+        "#!/bin/sh\n{}output=$(namedrop_invoke hook session-start --state-directory {} 2>/dev/null) || exit 0\n{app_server_notice}{}{update_notice}exit 0\n",
+        hook_invocation(root, executable),
         shell_single_quote(state_directory),
         forward_marked_context("SessionStart", crate::persona::POLICY_MARKER),
     ))

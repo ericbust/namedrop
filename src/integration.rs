@@ -224,6 +224,23 @@ pub(crate) fn tool_environment(
     workspace_id: &str,
     pane_id: &str,
 ) -> BTreeMap<String, String> {
+    if session_socket_id.starts_with("hc:") {
+        let mut environment = BTreeMap::from([
+            ("NAMEDROP_HOST".to_owned(), "hc".to_owned()),
+            (
+                "NAMEDROP_STATE_DIR".to_owned(),
+                state_directory.to_string_lossy().into_owned(),
+            ),
+            ("HC_TERMINAL_ID".to_owned(), pane_id.to_owned()),
+            ("NAMEDROP_HC_SPACE".to_owned(), workspace_id.to_owned()),
+        ]);
+        for key in ["HC_SESSION", "HC_SOCKET"] {
+            if let Ok(value) = std::env::var(key) {
+                environment.insert(key.to_owned(), value);
+            }
+        }
+        return environment;
+    }
     BTreeMap::from([
         (
             "HERDR_PLUGIN_STATE_DIR".to_owned(),
@@ -867,14 +884,25 @@ pub(crate) fn registration_command(
         "nonce": nonce,
         "capabilities": complete_capability_profile(),
     });
+    let location = if session_socket_id.starts_with("hc:") {
+        format!(
+            "--host hc --hc-space {} --hc-terminal {}",
+            shell_single_quote(workspace_id),
+            shell_single_quote(pane_id)
+        )
+    } else {
+        format!(
+            "--herdr-socket {} --herdr-workspace {} --herdr-pane {}",
+            shell_single_quote(session_socket_id),
+            shell_single_quote(workspace_id),
+            shell_single_quote(pane_id)
+        )
+    };
     Ok(format!(
-        "{} --plugin-state {} register --herdr-socket {} --herdr-workspace {} --herdr-pane {} --input-json {}",
+        "{} --plugin-state {} register {location} --input-json {}",
         shell_single_quote(&executable.to_string_lossy()),
         shell_single_quote(&state_directory.to_string_lossy()),
-        shell_single_quote(session_socket_id),
-        shell_single_quote(workspace_id),
-        shell_single_quote(pane_id),
-        shell_single_quote(&input.to_string()),
+        shell_single_quote(&input.to_string())
     ))
 }
 
@@ -1366,7 +1394,9 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
         let token = operation.get("token")?.as_str()?;
         let input = operation.get("input")?;
         let mut command = shell_single_quote(executable);
-        if let Some(state_directory) = located("HERDR_PLUGIN_STATE_DIR") {
+        if let Some(state_directory) =
+            located("NAMEDROP_STATE_DIR").or_else(|| located("HERDR_PLUGIN_STATE_DIR"))
+        {
             command.push_str(&format!(
                 " --plugin-state {}",
                 shell_single_quote(state_directory)
@@ -1377,6 +1407,9 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
             command.push_str(&shell_argument(argument.as_str()?));
         }
         for (flag, key) in [
+            ("--host", "NAMEDROP_HOST"),
+            ("--hc-terminal", "HC_TERMINAL_ID"),
+            ("--hc-space", "NAMEDROP_HC_SPACE"),
             ("--herdr-socket", "HERDR_SOCKET_PATH"),
             ("--herdr-workspace", "HERDR_WORKSPACE_ID"),
             ("--herdr-pane", "HERDR_PANE_ID"),

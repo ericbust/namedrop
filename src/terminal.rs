@@ -13,23 +13,36 @@ pub(crate) fn runner_command<H, C, I>(
     attempt: &DeliveryAttemptId,
 ) -> Result<String, String> {
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\"'\"'"));
-    Ok([
+    let mut args = vec![
         crate::collaboration_executable()?,
         "--plugin-state".to_owned(),
         runtime.state_directory.display().to_string(),
-        "--herdr-socket".to_owned(),
-        runtime.session_socket_id.to_owned(),
-        "--herdr-workspace".to_owned(),
-        workspace.to_owned(),
-        "--herdr-pane".to_owned(),
-        pane.to_owned(),
-        "terminal-execute".to_owned(),
-        attempt.as_str().to_owned(),
-    ]
-    .iter()
-    .map(|s| quote(s))
-    .collect::<Vec<_>>()
-    .join(" "))
+    ];
+    if runtime.is_hc() {
+        args.extend([
+            "--host".to_owned(),
+            "hc".to_owned(),
+            "--hc-space".to_owned(),
+            workspace.to_owned(),
+            "--hc-terminal".to_owned(),
+            pane.to_owned(),
+        ]);
+    } else {
+        args.extend([
+            "--herdr-socket".to_owned(),
+            runtime.session_socket_id.to_owned(),
+            "--herdr-workspace".to_owned(),
+            workspace.to_owned(),
+            "--herdr-pane".to_owned(),
+            pane.to_owned(),
+        ]);
+    }
+    args.extend(["terminal-execute".to_owned(), attempt.as_str().to_owned()]);
+    Ok(args
+        .iter()
+        .map(|arg| quote(arg))
+        .collect::<Vec<_>>()
+        .join(" "))
 }
 
 /// Runs inside the target terminal. The atomic claim rejects replay and binds
