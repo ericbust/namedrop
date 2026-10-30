@@ -28,7 +28,6 @@ struct TopicCompliance {
 }
 
 fn topic_words(text: &str) -> Vec<String> {
-    // English-style word boundaries split punctuation, including hyphens.
     text.split(|character: char| !character.is_alphanumeric())
         .filter(|word| !word.is_empty())
         .map(str::to_lowercase)
