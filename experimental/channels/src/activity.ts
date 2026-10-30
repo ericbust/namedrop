@@ -1,5 +1,6 @@
 import {
   activityCopy,
+  attentionKind,
   overflowCopy,
   participantCopy,
   SHOWN_RECIPIENTS,
@@ -237,13 +238,21 @@ function mentionText(mention: Mention, homes: ReadonlyMap<string, Home>) {
 function shortened({ text, truncated }: SafeText): string {
   return truncated ? `${text}…` : text;
 }
+// The server's own text for an attention line that reads in other words, for its tooltip.
+export function lineDetail(line: ActivityLine): string | null {
+  return line.kind === "attention" && line.attention.source !== "agent_status"
+    ? shortened(line.summary)
+    : null;
+}
 export function lineText(
   line: ActivityLine,
   homes: ReadonlyMap<string, Home>,
 ): string {
   switch (line.kind) {
     case "attention":
-      return shortened(line.summary);
+      return line.attention.source === "agent_status"
+        ? shortened(line.summary)
+        : attentionKind(line.attention);
     case "waiting": {
       const names = line.on.map((mention) => mentionText(mention, homes));
       const hidden = names.length - SHOWN_RECIPIENTS;

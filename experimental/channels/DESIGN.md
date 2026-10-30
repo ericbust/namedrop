@@ -973,8 +973,12 @@ The one view that spans every channel. It answers "who is busy, and on what?"
     13px "#alpha" button that opens that channel at its newest message.
   - Line 2, 13px `--text-muted`, one line with an ellipsis and the full text in
     the tooltip. The first case that applies:
-    1. In Needs you, the summary of that channel's newest attention item about
-       this member, in `--attention-text`.
+    1. In Needs you, that channel's newest attention item about this member,
+       in `--attention-text`. An agent's own status keeps its words ("Waiting
+       for permission to run a command"). Every other item reads as the
+       Needs-you table's title without the name, which line 1 already shows:
+       "Coordination needs a decision", "Unanswered request". The server's own
+       text, which can hold ids and error codes, is the tooltip.
     2. A member waiting on others: "Waiting on @codex". Names follow
        [Recipients and envoys](#recipients-and-envoys), with at most two names
        and then "+N".

@@ -4681,6 +4681,32 @@ test("DESIGN-R2 A8: an All activity row with actions keeps its grid, with 12px a
   }
 });
 
+test("DESIGN-R2: an All activity row reads the item in plain words, with the server's text and its ids in the tooltip", async (t) => {
+  const team = busyTeam();
+  const [item] = team[1].frame.attention;
+  const server =
+    "Coordination coordination-1793308769836090626-2129769-1 needs a decision: the report is saved and waits for the lead.";
+  item.source_kind = "coordination";
+  item.summary = { text: server, truncated: false };
+  item.subject_summary = null;
+  const ui = await open(t, (client) => replay(client, team), undefined, {
+    path: "/?view=activity",
+  });
+  await ui.live();
+  const line = ui.page.locator(".activity-item .activity-text").first();
+  await line.waitFor();
+  assert.equal(await line.textContent(), "Coordination needs a decision");
+  assert.equal(await line.getAttribute("title"), server);
+  assert.equal(
+    await ui.page
+      .locator(".activity-list")
+      .getByText(/coordination-\d/)
+      .count(),
+    0,
+    "no raw id is visible in the list",
+  );
+});
+
 test("UI-4: All activity lists blocked, then waiting, then working rows, and its URL survives reload and Back", async (t) => {
   const ui = await open(t, (client) => replay(client, busyTeam()));
   await ui.live();

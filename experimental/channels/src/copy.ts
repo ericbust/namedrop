@@ -219,6 +219,10 @@ export const threadControlCopy = {
 > &
   Record<string, unknown>;
 const pausedHint = "The agents paused after 10 replies in a row.";
+// What an item is about, in the Needs-you table's words, for a row that already names the agent.
+export function attentionKind(item: Attention): string {
+  return attentionTable[item.source].title;
+}
 export function attentionCopy(
   item: Attention,
   responderAlias: string | null = null,
