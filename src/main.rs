@@ -413,23 +413,54 @@ fn wake_runtime_mailboxes(
         Some(id) => id.to_owned(),
         None => namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
     };
-    // A terminal finishing here can queue its result in the author's workspace.
-    for space in namedrop::spaces_to_wake(runtime.state_directory, runtime.session_socket_id, &here)
-    {
-        let directory =
-            reconciliation_directory(runtime.state_directory, runtime.session_socket_id, &space)?;
-        queue_agent_status_reconciliation(
-            &directory,
-            &serde_json::json!({"operation":"mailbox-wake"}),
-        )?;
-        status_worker_command()?
-            .env("HERDR_PLUGIN_STATE_DIR", runtime.state_directory)
-            .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
-            .env("HERDR_WORKSPACE_ID", space)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+    schedule_mailbox_workers(
+        runtime.state_directory,
+        runtime.session_socket_id,
+        &here,
+        false,
+    )
+}
+
+fn schedule_mailbox_workers(
+    state_directory: &Path,
+    socket_id: &str,
+    here: &str,
+    wait_for_workers: bool,
+) -> Result<(), String> {
+    let mut failures = Vec::new();
+    let mut workers = Vec::new();
+    for space in namedrop::spaces_to_wake(state_directory, socket_id, here) {
+        let scheduled = (|| -> Result<(), String> {
+            let directory = reconciliation_directory(state_directory, socket_id, &space)?;
+            queue_agent_status_reconciliation(
+                &directory,
+                &serde_json::json!({"operation":"mailbox-wake"}),
+            )?;
+            let worker = status_worker_command()?
+                .env("HERDR_PLUGIN_STATE_DIR", state_directory)
+                .env("HERDR_SOCKET_PATH", socket_id)
+                .env("HERDR_WORKSPACE_ID", &space)
+                .spawn()
+                .map_err(|error| error.to_string())?;
+            workers.push((space.clone(), worker));
+            Ok(())
+        })();
+        if let Err(error) = scheduled {
+            failures.push(format!("{space}: {error}"));
+        }
     }
-    Ok(())
+    if wait_for_workers {
+        for (space, mut worker) in workers {
+            if let Err(error) = worker.wait() {
+                failures.push(format!("{space}: {error}"));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 fn choose_name_type(cli: &Cli) -> Result<Option<namedrop::PaneType>, String> {
@@ -768,32 +799,7 @@ fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
                 namedrop::discover_worktree(&herdr, &cwd)?.workspace_id
             }
         };
-        let mut failures = Vec::new();
-        for space_id in namedrop::spaces_to_wake(state_directory, &socket_id, &space_id) {
-            // One workspace that cannot be woken must not strand the others.
-            let woken = (|| -> Result<(), String> {
-                let directory = reconciliation_directory(state_directory, &socket_id, &space_id)?;
-                queue_agent_status_reconciliation(
-                    &directory,
-                    &serde_json::json!({"operation":"mailbox-wake"}),
-                )?;
-                status_worker_command()?
-                    .env("HERDR_PLUGIN_STATE_DIR", state_directory)
-                    .env("HERDR_SOCKET_PATH", &socket_id)
-                    .env("HERDR_WORKSPACE_ID", &space_id)
-                    .status()
-                    .map_err(|error| error.to_string())?;
-                Ok(())
-            })();
-            if let Err(error) = woken {
-                failures.push(format!("{space_id}: {error}"));
-            }
-        }
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures.join("; "))
-        }
+        schedule_mailbox_workers(state_directory, &socket_id, &space_id, true)
     };
     match wake() {
         Ok(()) => ExitCode::SUCCESS,
@@ -1005,6 +1011,14 @@ fn run_agent_status_worker() -> ExitCode {
         match result {
             Ok(result) => match drain_report(&result) {
                 Ok(report) if report.awaits_retry() => {
+                    if !report.submitted.is_empty()
+                        || !report.settled.is_empty()
+                        || !report.failed.is_empty()
+                        || !report.held.is_empty()
+                        || !report.expired.is_empty()
+                    {
+                        failures = 0;
+                    }
                     wait_for_reconciliation_retry(&mut failures);
                 }
                 Ok(report) => {

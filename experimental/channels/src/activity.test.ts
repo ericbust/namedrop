@@ -197,6 +197,45 @@ test("activity line 2: attention about the member, then waiting on others, then 
   assert.equal(line(list, "@quiet"), "");
 });
 
+test("member activity uses the subject summary and keeps older and stored text intact", () => {
+  const full = "@claude is waiting on an approval or question.";
+  for (const [extra, expected] of [
+    [
+      {
+        subject_summary: {
+          text: "Waiting on an approval or question.",
+          truncated: false,
+        },
+      },
+      "Waiting on an approval or question.",
+    ],
+    [{ subject_summary: { text: "Waiting", truncated: true } }, "Waiting…"],
+    [{}, full],
+    [{ subject_summary: null }, full],
+    [
+      {
+        source_kind: "coordination",
+        summary: {
+          text: "Keep @claude in this stored message",
+          truncated: false,
+        },
+      },
+      "Keep @claude in this stored message",
+    ],
+  ] satisfies [Record<string, unknown>, string][]) {
+    const list = activityOf(
+      load(
+        space("a", "alpha", [lane("a1", "@claude", "blocked")], {
+          attention: [
+            { ...blocker, summary: { text: full, truncated: false }, ...extra },
+          ],
+        }),
+      ),
+    );
+    assert.equal(line(list, "@claude"), expected);
+  }
+});
+
 test("activity rows: held marks the oldest item when it is held, or queued in a paused channel", () => {
   const held = (state: string, level: string) => {
     const list = activityOf(

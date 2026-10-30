@@ -22,6 +22,7 @@ const TICK: Duration = Duration::from_millis(250);
 const HERDR_TIMEOUT: Duration = Duration::from_secs(1);
 const UNAVAILABLE_LIMIT: u8 = 3;
 const RECOVERY_BACKOFF: Duration = Duration::from_secs(2);
+const SCHEMA_BUSY_LIMIT: Duration = Duration::from_secs(5);
 
 pub(crate) enum HubCommand {
     Subscribe {
@@ -318,6 +319,7 @@ enum ConnectionState {
 }
 
 struct Published {
+    expires_at_ms: Option<i64>,
     hash: [u8; 32],
     frame: Arc<str>,
 }
@@ -347,6 +349,7 @@ struct Hub<'a> {
     metadata_dirty: bool,
     idle_since: Option<Instant>,
     unsupported_schema: bool,
+    schema_busy_since: Option<Instant>,
     last_error: Option<String>,
 }
 
@@ -376,6 +379,7 @@ pub(crate) fn run(
         metadata_dirty: false,
         idle_since: Some(Instant::now()),
         unsupported_schema: false,
+        schema_busy_since: None,
         last_error: None,
     };
     let verdict = loop {
@@ -473,27 +477,55 @@ impl Hub<'_> {
     }
 
     fn verdict(&mut self) -> Option<Verdict> {
+        self.verdict_at(Instant::now())
+    }
+
+    fn verdict_at(&mut self, now: Instant) -> Option<Verdict> {
         if self.unsupported_schema {
             return Some(Verdict::Exit(
                 "this release does not support the state schema",
             ));
         }
         let runtime = self.files.state().join("runtime");
-        let wants_handoff =
-            if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
-                Some("an update is migrating state")
-            } else if runtime.join("namedrop").exists()
-                && fs::canonicalize(runtime.join("current/namedrop")).ok()
-                    != std::env::current_exe().and_then(fs::canonicalize).ok()
-            {
-                Some("a newer release is current")
-            } else if self.store.as_ref().is_some_and(|store| {
-                store.schema_version().ok() != Some(crate::store::SCHEMA_VERSION)
-            }) {
-                Some("the state schema changed")
-            } else {
-                None
-            };
+        let wants_handoff = if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
+            Some("an update is migrating state")
+        } else if runtime.join("namedrop").exists()
+            && fs::canonicalize(runtime.join("current/namedrop")).ok()
+                != std::env::current_exe().and_then(fs::canonicalize).ok()
+        {
+            Some("a newer release is current")
+        } else if self
+            .store
+            .as_ref()
+            .is_some_and(|store| match store.schema_version() {
+                Ok(version) => {
+                    self.schema_busy_since = None;
+                    version != crate::store::SCHEMA_VERSION
+                }
+                Err(error) if error.kind() == StoreErrorKind::Busy => {
+                    let since = self.schema_busy_since.get_or_insert_with(|| {
+                        eprintln!(
+                            "dashboard: state schema read is busy; retrying for up to {} seconds",
+                            SCHEMA_BUSY_LIMIT.as_secs()
+                        );
+                        now
+                    });
+                    let expired = now.duration_since(*since) >= SCHEMA_BUSY_LIMIT;
+                    if expired {
+                        eprintln!(
+                            "dashboard: state schema read is still busy after {} seconds: {error}",
+                            SCHEMA_BUSY_LIMIT.as_secs()
+                        );
+                    }
+                    expired
+                }
+                Err(_) => true,
+            })
+        {
+            Some("the state schema changed")
+        } else {
+            None
+        };
         if let Some(reason) = wants_handoff {
             return Some(if self.subscribers.is_empty() {
                 Verdict::Exit(reason)
@@ -510,7 +542,7 @@ impl Hub<'_> {
         }
         if self
             .idle_since
-            .is_some_and(|since| since.elapsed() >= self.idle)
+            .is_some_and(|since| now.duration_since(since) >= self.idle)
         {
             return Some(Verdict::Idle);
         }
@@ -549,7 +581,12 @@ impl Hub<'_> {
         let metadata_changed = std::mem::take(&mut self.metadata_dirty)
             || notes_revision != self.channel_notes_revision;
         self.channel_notes_revision = notes_revision;
-        if !database_changed && !metadata_changed && incoming.is_none() {
+        let retention_expired = self.published.values().any(|published| {
+            published
+                .expires_at_ms
+                .is_some_and(|expiry| now_ms() >= expiry)
+        });
+        if !database_changed && !metadata_changed && !retention_expired && incoming.is_none() {
             self.complete_replays();
             return true;
         }
@@ -894,6 +931,8 @@ impl Hub<'_> {
             self.open_store();
         }
         let label = self.files.labels().remove(key.as_str());
+        let now = now_ms();
+        let mut expires_at_ms = None;
         let mut snapshot = match self.namespace(key) {
             Some(namespace) => {
                 let rows = match self.store.as_mut()?.dashboard_rows(&namespace) {
@@ -903,7 +942,13 @@ impl Hub<'_> {
                         return None;
                     }
                 };
-                let mut snapshot = snapshot::build(&rows, label.as_deref(), 0);
+                expires_at_ms = rows
+                    .addresses
+                    .iter()
+                    .filter_map(snapshot::closed_member_expires_at)
+                    .filter(|expiry| *expiry > now)
+                    .min();
+                let mut snapshot = snapshot::build(&rows, label.as_deref(), now);
                 snapshot::channel_routing::merge(
                     self.files.state(),
                     &namespace,
@@ -911,7 +956,7 @@ impl Hub<'_> {
                 );
                 snapshot
             }
-            None => DashboardSnapshot::unknown(key.clone(), label.as_deref(), 0),
+            None => DashboardSnapshot::unknown(key.clone(), label.as_deref(), now),
         };
         let live_label = self
             .live_spaces
@@ -921,16 +966,20 @@ impl Hub<'_> {
             snapshot.space.workspace_id = space.namespace.space_id.as_str().to_owned();
         }
         let workspace_id = snapshot.space.workspace_id.clone();
-        snapshot
-            .space
-            .set_live_label(&workspace_id, live_label, self.addressable_label(key));
+        snapshot.space.set_live_label(
+            &workspace_id,
+            live_label,
+            self.addressability(key, snapshot.space.state),
+        );
         // Hash without the timestamp, so an unchanged space sends no frame.
+        snapshot.generated_at_ms = 0;
         let hash: [u8; 32] = Sha256::digest(serde_json::to_vec(&snapshot).ok()?).into();
-        snapshot.generated_at_ms = now_ms();
+        snapshot.generated_at_ms = now;
         let frame: Arc<str> = serde_json::to_string(&snapshot).ok()?.into();
         self.published.insert(
             key.clone(),
             Published {
+                expires_at_ms,
                 hash,
                 frame: frame.clone(),
             },
@@ -938,11 +987,28 @@ impl Hub<'_> {
         Some(frame)
     }
 
-    fn addressable_label(&self, key: &SpaceKey) -> Option<String> {
+    fn addressability(
+        &self,
+        key: &SpaceKey,
+        state: snapshot::SpaceState,
+    ) -> Result<String, snapshot::NotAddressableReason> {
         use crate::spaces::{SpaceDirectory, SpaceEntry, names_in_scope, workspace_token};
-        let target = self.live_spaces.get(key)?;
-        let folded = crate::WorkspaceLabel::from_herdr(target.label.as_deref()?);
-        let label = crate::WorkspaceLabel::from_token(folded.as_str())?;
+        use snapshot::NotAddressableReason as Reason;
+        let target = self.live_spaces.get(key).ok_or(Reason::Unavailable)?;
+        let raw_label = target.label.as_deref().ok_or(Reason::MissingLabel)?;
+        let label = crate::WorkspaceLabel::from_herdr(raw_label);
+        if label.as_str().is_empty() {
+            return Err(Reason::EmptyLabel);
+        }
+        if label.as_str() == "all" {
+            return Err(Reason::ReservedAll);
+        }
+        if !self.spaces.get(key).is_some_and(|space| space.activated) {
+            return Err(match state {
+                snapshot::SpaceState::Deactivated => Reason::NotActive,
+                _ => Reason::NotActivated,
+            });
+        }
         let entries: Vec<_> = self
             .live_spaces
             .values()
@@ -970,17 +1036,34 @@ impl Hub<'_> {
                 .iter()
                 .map(|entry| (&entry.space, entry.label.as_ref())),
         );
+        let collision_reason = if entries.iter().any(|entry| {
+            entry.space != target.namespace.space_id && entry.label.as_ref() == Some(&label)
+        }) {
+            Reason::SharedLabel
+        } else {
+            Reason::IdCollision
+        };
         if token != label {
-            return None;
+            return Err(collision_reason);
         }
         let mut others = entries;
         let index = others
             .iter()
-            .position(|entry| entry.space == target.namespace.space_id)?;
+            .position(|entry| entry.space == target.namespace.space_id)
+            .ok_or(Reason::Unavailable)?;
         let here = others.swap_remove(index);
         let directory = SpaceDirectory::new(here, others);
-        names_in_scope(&crate::SpaceScope::Named(vec![label.clone()]), &directory).ok()?;
-        Some(label.as_str().to_owned())
+        names_in_scope(&crate::SpaceScope::Named(vec![label.clone()]), &directory).map_err(
+            |refusal| match refusal {
+                crate::spaces::RouteRefusal::DuplicateLabel { .. } => collision_reason,
+                crate::spaces::RouteRefusal::NotActivated { .. } => match state {
+                    snapshot::SpaceState::Deactivated => Reason::NotActive,
+                    _ => Reason::NotActivated,
+                },
+                _ => Reason::Unavailable,
+            },
+        )?;
+        Ok(label.as_str().to_owned())
     }
 
     fn namespace(&mut self, key: &SpaceKey) -> Option<StateNamespace> {
@@ -1088,6 +1171,7 @@ mod tests {
             metadata_dirty: false,
             idle_since: None,
             unsupported_schema: false,
+            schema_busy_since: None,
             last_error: None,
         }
     }
@@ -1109,6 +1193,391 @@ mod tests {
             })),
             thread: None,
         });
+    }
+
+    fn schema_test_files(name: &str) -> ServerFiles {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-hub-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        StateStore::open(&state).unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let claim = files.claim().unwrap().unwrap();
+        files
+            .publish(
+                &claim,
+                &super::super::server_files::ServerInfo {
+                    pid: std::process::id(),
+                    port: 0,
+                    instance: "test".to_owned(),
+                    started_at_ms: now_ms(),
+                    ui: Default::default(),
+                },
+            )
+            .unwrap();
+        files
+    }
+
+    fn schema_test_hub(files: &ServerFiles) -> Hub<'_> {
+        let mut hub = test_hub(files);
+        assert!(hub.open_store());
+        hub.store
+            .as_ref()
+            .unwrap()
+            .set_busy_timeout(Duration::ZERO)
+            .unwrap();
+        hub
+    }
+
+    fn add_schema_subscriber(hub: &mut Hub<'_>) {
+        hub.subscribers.insert(
+            1,
+            Subscriber {
+                state: ConnectionState::PendingAll,
+                frames: sync_channel(1).0,
+                notify: std::sync::mpsc::channel().0,
+            },
+        );
+    }
+
+    #[test]
+    fn a_busy_schema_read_expires_after_five_continuous_seconds() {
+        let files = schema_test_files("schema-expiry");
+        let mut hub = schema_test_hub(&files);
+        let writer = rusqlite::Connection::open(files.state().join("namedrop.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let now = Instant::now();
+        assert!(hub.verdict_at(now).is_none());
+        assert!(hub.verdict_at(now + Duration::from_millis(4999)).is_none());
+        let verdict = hub.verdict_at(now + Duration::from_secs(5));
+        assert!(
+            matches!(verdict, Some(Verdict::Exit("the state schema changed"))),
+            "expected schema-changed exit, got {:?}",
+            verdict.map(|verdict| verdict.reason())
+        );
+        add_schema_subscriber(&mut hub);
+        assert!(matches!(
+            hub.verdict_at(now + Duration::from_secs(6)),
+            Some(Verdict::Handoff("the state schema changed"))
+        ));
+        writer.execute_batch("ROLLBACK").unwrap();
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn a_successful_schema_read_resets_the_busy_budget() {
+        let files = schema_test_files("schema-reset");
+        let mut hub = schema_test_hub(&files);
+        let writer = rusqlite::Connection::open(files.state().join("namedrop.sqlite3")).unwrap();
+        let now = Instant::now();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(hub.verdict_at(now).is_none());
+        assert!(hub.verdict_at(now + Duration::from_secs(4)).is_none());
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert!(hub.verdict_at(now + Duration::from_secs(4)).is_none());
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert!(hub.verdict_at(now + Duration::from_secs(6)).is_none());
+        assert!(hub.verdict_at(now + Duration::from_millis(10999)).is_none());
+        let verdict = hub.verdict_at(now + Duration::from_secs(11));
+        assert!(
+            matches!(verdict, Some(Verdict::Exit("the state schema changed"))),
+            "expected schema-changed exit, got {:?}",
+            verdict.map(|verdict| verdict.reason())
+        );
+        writer.execute_batch("ROLLBACK").unwrap();
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn a_non_busy_schema_read_error_exits_or_hands_off_immediately() {
+        let files = schema_test_files("schema-read-error");
+        let mut hub = schema_test_hub(&files);
+        let writer = rusqlite::Connection::open(files.state().join("namedrop.sqlite3")).unwrap();
+        let now = Instant::now();
+        for after_busy in [false, true] {
+            hub.subscribers.clear();
+            writer
+                .pragma_update(None, "user_version", crate::store::SCHEMA_VERSION)
+                .unwrap();
+            assert!(hub.verdict_at(now).is_none());
+            if after_busy {
+                writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+                assert!(hub.verdict_at(now).is_none());
+                writer.execute_batch("ROLLBACK").unwrap();
+            }
+            writer.pragma_update(None, "user_version", -1).unwrap();
+            assert_eq!(
+                hub.store
+                    .as_ref()
+                    .unwrap()
+                    .schema_version()
+                    .unwrap_err()
+                    .kind(),
+                StoreErrorKind::Storage
+            );
+            let verdict = hub.verdict_at(now + Duration::from_millis(1));
+            assert!(
+                matches!(verdict, Some(Verdict::Exit("the state schema changed"))),
+                "expected schema-changed exit, got {:?}",
+                verdict.map(|verdict| verdict.reason())
+            );
+            add_schema_subscriber(&mut hub);
+            assert!(matches!(
+                hub.verdict_at(now + Duration::from_millis(1)),
+                Some(Verdict::Handoff("the state schema changed"))
+            ));
+        }
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn a_busy_schema_read_preserves_other_exit_and_handoff_checks() {
+        let files = schema_test_files("schema-precedence");
+        let mut hub = schema_test_hub(&files);
+        let writer = rusqlite::Connection::open(files.state().join("namedrop.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        let now = Instant::now();
+        assert!(hub.verdict_at(now).is_none());
+        hub.idle_since = Some(now - hub.idle);
+        assert!(matches!(hub.verdict_at(now), Some(Verdict::Idle)));
+        fs::remove_file(files.state().join("dashboard/server.json")).unwrap();
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Exit("server.json was replaced"))
+        ));
+        let runtime = files.state().join("runtime");
+        fs::create_dir_all(&runtime).unwrap();
+        fs::write(runtime.join("namedrop"), "new release").unwrap();
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Exit("a newer release is current"))
+        ));
+        fs::write(runtime.join("migration.json"), "{}").unwrap();
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Exit("an update is migrating state"))
+        ));
+        add_schema_subscriber(&mut hub);
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Handoff("an update is migrating state"))
+        ));
+        hub.unsupported_schema = true;
+        assert!(matches!(
+            hub.verdict_at(now),
+            Some(Verdict::Exit(
+                "this release does not support the state schema"
+            ))
+        ));
+        writer.execute_batch("ROLLBACK").unwrap();
+        let _ = fs::remove_dir_all(files.state());
+    }
+
+    #[test]
+    fn sqlite_busy_and_locked_are_retryable_schema_read_errors() {
+        for code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+            let error = crate::StoreError::from(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ));
+            assert_eq!(error.kind(), StoreErrorKind::Busy);
+        }
+    }
+
+    #[test]
+    fn a_busy_schema_read_keeps_the_hub_running() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-hub-schema-busy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        StateStore::open(&state).unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let claim = files.claim().unwrap().unwrap();
+        files
+            .publish(
+                &claim,
+                &super::super::server_files::ServerInfo {
+                    pid: std::process::id(),
+                    port: 0,
+                    instance: "test".to_owned(),
+                    started_at_ms: now_ms(),
+                    ui: Default::default(),
+                },
+            )
+            .unwrap();
+        let mut hub = test_hub(&files);
+        assert!(hub.open_store());
+        hub.store
+            .as_ref()
+            .unwrap()
+            .set_busy_timeout(Duration::ZERO)
+            .unwrap();
+        let writer = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+        writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        assert_eq!(
+            hub.store
+                .as_ref()
+                .unwrap()
+                .schema_version()
+                .unwrap_err()
+                .kind(),
+            StoreErrorKind::Busy
+        );
+        assert_eq!(hub.verdict().map(|verdict| verdict.reason()), None);
+
+        writer.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(
+            hub.store.as_ref().unwrap().schema_version().unwrap(),
+            crate::store::SCHEMA_VERSION
+        );
+        assert_eq!(hub.verdict().map(|verdict| verdict.reason()), None);
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn a_changed_schema_exits_or_hands_off_to_connected_tabs() {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-hub-schema-changed-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&state);
+        StateStore::open(&state).unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = test_hub(&files);
+        assert!(hub.open_store());
+        let writer = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+        writer
+            .pragma_update(None, "user_version", crate::store::SCHEMA_VERSION + 1)
+            .unwrap();
+        assert!(matches!(
+            hub.verdict(),
+            Some(Verdict::Exit("the state schema changed"))
+        ));
+        hub.subscribers.insert(
+            1,
+            Subscriber {
+                state: ConnectionState::PendingAll,
+                frames: sync_channel(1).0,
+                notify: std::sync::mpsc::channel().0,
+            },
+        );
+        assert!(matches!(
+            hub.verdict(),
+            Some(Verdict::Handoff("the state schema changed"))
+        ));
+        let _ = fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn retained_member_expiry_republishes_without_a_database_change() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-hub-expiry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let namespace = StateNamespace::for_space("socket-a", "w1");
+        let at = MutationAttribution::new(ActorKind::Plugin, "test", 1);
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| tx.activate_worktree(&namespace, &at))
+            .unwrap();
+        add_address(&state, &namespace, "closed");
+        add_address(&state, &namespace, "reader");
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                let thread = crate::ThreadId::new("history-thread");
+                tx.create_thread(&namespace, &thread, "History", &at)?;
+                tx.append_message(
+                    &namespace,
+                    &crate::MessageDraft {
+                        thread_id: thread,
+                        message_id: crate::MessageId::new("history-message"),
+                        in_reply_to: None,
+                        author_address_id: PaneAddressId::new("address-closed"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "closed".to_owned(),
+                        author_agent_session_snapshot: None,
+                        request_id: "history-request".to_owned(),
+                        authored_source: "History".to_owned(),
+                        body: "History".to_owned(),
+                        grammar_version: "note/v1".to_owned(),
+                        recipients: vec![crate::MessageRecipientDraft {
+                            address_id: PaneAddressId::new("address-reader"),
+                            alias_snapshot: "reader".to_owned(),
+                            agent_session_snapshot: None,
+                            delivery_id: crate::DeliveryId::new("history-delivery"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &at,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let closed_at = u64::try_from(now_ms() - 300_000 + 1_500).unwrap();
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                let address = PaneAddressId::new("address-closed");
+                tx.bind_pane(
+                    &namespace,
+                    &crate::PaneBindingId::new("binding-closed"),
+                    &address,
+                    "p1",
+                    &at,
+                )?;
+                tx.retire_pane_address(
+                    &namespace,
+                    &address,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", closed_at),
+                )
+            })
+            .unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = test_hub(&files);
+        let (frames, inbox) = sync_channel(8);
+        hub.handle(HubCommand::Subscribe {
+            id: 1,
+            subscription: Subscription::Space(SpaceKey::of(&namespace)),
+            frames,
+            notify: std::sync::mpsc::channel().0,
+        });
+        let Frame::Snapshot(initial) = inbox.recv().unwrap() else {
+            panic!("snapshot")
+        };
+        let initial: serde_json::Value = serde_json::from_str(&initial).unwrap();
+        assert!(
+            initial["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| member["alias"] == "@closed")
+        );
+        let referenced = |frame: &serde_json::Value| {
+            frame["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|member| member["alias"] == "@closed")
+                .cloned()
+                .expect("history must keep its retired author")
+        };
+        assert_eq!(referenced(&initial)["activity"], "retired");
+        assert_eq!(referenced(&initial)["recently_closed"], true);
+        let version = hub.data_version;
+        freeze_discovery(&mut hub);
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let expired = loop {
+            hub.refresh(None);
+            if let Ok(Frame::Snapshot(frame)) = inbox.try_recv() {
+                break frame;
+            }
+            assert!(Instant::now() < deadline, "expiry did not publish a frame");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(hub.data_version, version);
+        let expired: serde_json::Value = serde_json::from_str(&expired).unwrap();
+        assert_eq!(referenced(&expired)["activity"], "retired");
+        assert_eq!(referenced(&expired)["recently_closed"], false);
+        assert_eq!(expired["messages"][0]["author"], "address-closed");
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]
@@ -1170,7 +1639,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_join_retries_after_a_read_failure_with_an_unchanged_legacy_cache() {
+    fn a_pending_join_retries_after_a_read_failure_and_updates_legacy_addressability() {
         let state = std::env::temp_dir().join(format!("namedrop-hub-join-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
         let namespace = StateNamespace::for_space("socket-a", "w1");
@@ -1240,9 +1709,15 @@ mod tests {
             }
             _ => panic!("the rejoined workspace never arrived after the read recovered"),
         }
+        let Ok(Frame::Snapshot(frame)) = legacy.try_recv() else {
+            panic!("the recovered discovery must update legacy addressability");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["space"]["not_addressable_reason"], "missing_label");
+        hub.refresh(None);
         assert!(
             legacy.try_recv().is_err(),
-            "unchanged legacy content sends no new frame"
+            "unchanged content sends no new frame"
         );
         let _ = fs::remove_dir_all(&state);
     }

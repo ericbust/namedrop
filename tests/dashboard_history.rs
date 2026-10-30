@@ -68,6 +68,9 @@ impl Server {
         (status, serde_json::from_str(body).unwrap_or(Value::Null))
     }
     fn raw(&self, path: &str, cookie: bool) -> String {
+        self.raw_with_headers(path, cookie, "")
+    }
+    fn raw_with_headers(&self, path: &str, cookie: bool, headers: &str) -> String {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
@@ -79,6 +82,7 @@ impl Server {
                 self.port, self.session
             ));
         }
+        request.push_str(headers);
         request.push_str("\r\n");
         stream.write_all(request.as_bytes()).unwrap();
         let mut result = String::new();
@@ -124,7 +128,10 @@ fn at(ms: u64) -> MutationAttribution {
     MutationAttribution::new(ActorKind::Plugin, "history-test", ms)
 }
 fn setup(state: &Path, space: &str) -> StateNamespace {
-    let ns = StateNamespace::for_space(SOCKET, space);
+    setup_on_socket(state, SOCKET, space)
+}
+fn setup_on_socket(state: &Path, socket: &str, space: &str) -> StateNamespace {
+    let ns = StateNamespace::for_space(socket, space);
     StateStore::open(state)
         .unwrap()
         .transaction(|tx| {
@@ -164,6 +171,18 @@ fn append_recipients(
     body: &str,
     alternate: bool,
 ) {
+    append_in_thread(state, ns, start, count, body, alternate, "thread-1");
+}
+#[allow(clippy::too_many_arguments)]
+fn append_in_thread(
+    state: &Path,
+    ns: &StateNamespace,
+    start: usize,
+    count: usize,
+    body: &str,
+    alternate: bool,
+    thread_id: &str,
+) {
     StateStore::open(state)
         .unwrap()
         .transaction(|tx| {
@@ -176,7 +195,7 @@ fn append_recipients(
                 tx.append_message(
                     ns,
                     &MessageDraft {
-                        thread_id: ThreadId::new("thread-1"),
+                        thread_id: ThreadId::new(thread_id),
                         message_id: MessageId::new(format!("message-{index}")),
                         in_reply_to: (index == 119).then(|| MessageId::new("message-118")),
                         author_address_id: PaneAddressId::new("address-a"),
@@ -369,6 +388,12 @@ fn planted_api_key_is_redacted() {
     let text = rows[0]["body"]["text"].as_str().unwrap();
     assert!(text.contains("[REDACTED TOKEN]"), "{text}");
     assert!(!text.contains(&key));
+    let (status, context) = f.server.get(
+        &format!("/w/{}/messages/message-0/context", f.key.as_str()),
+        true,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(context["messages"][0], rows[0]);
 }
 
 #[test]
@@ -568,4 +593,108 @@ fn history_http_benchmark() {
             );
         }
     }
+}
+
+#[test]
+fn targeted_context_keeps_an_evicted_target_root_and_recent_messages() {
+    let dir = TestDirectory::new();
+    let state = dir.path().join("state");
+    let ns = setup(&state, "w1");
+    append(&state, &ns, 0, 240, "Context");
+    let server = Server::start(&state);
+    let key = SpaceKey::of(&ns);
+    let route = format!("/w/{}/messages/message-20/context", key.as_str());
+    assert_eq!(server.get(&route, false).0, 401);
+    assert_eq!(server.get(&format!("{route}?n=bogus"), false).0, 401);
+    for headers in [
+        "Origin: http://foreign.invalid\r\n",
+        "Sec-Fetch-Site: same-site\r\n",
+        "Sec-Fetch-Site: cross-site\r\n",
+    ] {
+        let response = server.raw_with_headers(&route, true, headers);
+        assert!(
+            response.starts_with("HTTP/1.1 403"),
+            "{}",
+            response.lines().next().unwrap()
+        );
+    }
+    let (status, context) = server.get(&route, true);
+    assert_eq!(status, 200);
+    assert_eq!(context["thread_id"], "thread-1");
+    assert_eq!(context["message_count"], 240);
+    assert_eq!(context["earlier_omitted"], true);
+    let messages = context["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 102);
+    assert_eq!(messages[0]["message_id"], "message-0");
+    assert_eq!(messages[1]["message_id"], "message-20");
+    assert_eq!(messages[101]["message_id"], "message-239");
+    assert_eq!(messages[1]["legs"][0]["to"], "address-b");
+    assert_eq!(
+        server
+            .get(
+                &format!("/w/{}/messages/missing/context", key.as_str()),
+                true
+            )
+            .0,
+        404
+    );
+}
+
+#[test]
+fn targeted_context_is_thread_and_namespace_scoped_and_uses_the_safe_projection() {
+    let dir = TestDirectory::new();
+    let state = dir.path().join("state");
+    let first = setup(&state, "w1");
+    let second = setup(&state, "w2");
+    append_recipients(&state, &first, 0, 1, "first namespace", true);
+    append(&state, &second, 0, 2, "second namespace");
+    let third = setup_on_socket(&state, "other-socket", "w1");
+    append(&state, &third, 0, 1, "other socket");
+    StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| tx.create_thread(&first, &ThreadId::new("other-thread"), "Other", &at(1)))
+        .unwrap();
+    append_in_thread(&state, &first, 99, 1, "other thread", false, "other-thread");
+    let server = Server::start(&state);
+    for (ns, body, recipient, thread) in [
+        (&first, "first namespace", "address-a", "thread-1"),
+        (&second, "second namespace", "address-b", "thread-1"),
+        (&third, "other socket", "address-b", "thread-1"),
+    ] {
+        let route = format!(
+            "/w/{}/messages/message-0/context",
+            SpaceKey::of(ns).as_str()
+        );
+        let (status, context) = server.get(&route, true);
+        assert_eq!(status, 200);
+        assert_eq!(context["thread_id"], thread);
+        assert_eq!(context["earlier_omitted"], false);
+        assert_eq!(context["message_count"], if ns == &second { 2 } else { 1 });
+        assert_eq!(context["messages"][0]["body"]["text"], body);
+        assert_eq!(context["messages"][0]["legs"][0]["to"], recipient);
+    }
+    assert_eq!(
+        server
+            .get(
+                &format!(
+                    "/w/{}/messages/%6Dessage-1/context",
+                    SpaceKey::of(&second).as_str()
+                ),
+                true
+            )
+            .0,
+        200
+    );
+    assert_eq!(
+        server
+            .get(
+                &format!(
+                    "/w/{}/messages/%6Dessage-1/context",
+                    SpaceKey::of(&first).as_str()
+                ),
+                true
+            )
+            .0,
+        404
+    );
 }

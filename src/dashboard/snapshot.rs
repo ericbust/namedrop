@@ -158,48 +158,115 @@ fn is_secret_ignorable(character: char) -> bool {
     )
 }
 
-fn secret_shadow(source: &str, canonical: bool) -> Shadow {
-    let mut shadow = Shadow {
-        text: String::with_capacity(source.len()),
-        source: Vec::with_capacity(source.len()),
-    };
-    let mut characters = source.char_indices().peekable();
-    while let Some((start, character)) = characters.next() {
-        if canonical
-            && (is_secret_ignorable(character) || character.is_control() && character != '\n')
-        {
-            let mut end = start + character.len_utf8();
-            let mut escape = character == '\u{1b}';
-            while let Some(&(index, next)) = characters.peek() {
-                if next == '\n' && escape {
-                    escape = false;
-                } else if is_secret_ignorable(next) || next.is_control() && next != '\n' {
-                    escape |= next == '\u{1b}';
-                } else {
-                    break;
-                }
-                end = index + next.len_utf8();
-                characters.next();
-            }
-            if start > 0
-                && is_token_byte(source.as_bytes()[start - 1])
-                && source
-                    .as_bytes()
-                    .get(end)
-                    .is_some_and(|byte| is_token_byte(*byte))
-            {
-                continue;
-            }
-            for (index, retained) in source[start..end].char_indices() {
-                if is_display_character(retained) {
-                    shadow.push(retained, start + index);
-                }
-            }
-        } else if !canonical || is_display_character(character) {
-            shadow.push(character, start);
-        }
+fn secret_shadows(source: &str) -> impl Iterator<Item = Shadow> + '_ {
+    enum View {
+        Original,
+        Joined,
+        Terminal,
     }
-    shadow
+    [View::Original, View::Joined, View::Terminal]
+        .into_iter()
+        .map(move |view| {
+            enum State {
+                Ground,
+                Escape,
+                EscapeIntermediate,
+                Csi,
+                ControlString { osc: bool },
+                StringEscape { osc: bool },
+            }
+            let mut state = State::Ground;
+            let mut pending_escape = false;
+            let mut shadow = Shadow {
+                text: String::with_capacity(source.len()),
+                source: Vec::with_capacity(source.len()),
+            };
+            for (start, character) in source.char_indices() {
+                match view {
+                    View::Original => {
+                        shadow.push(character, start);
+                        continue;
+                    }
+                    View::Joined => {
+                        if is_secret_ignorable(character) {
+                            continue;
+                        }
+                        match character {
+                            '\u{1b}' => pending_escape = true,
+                            '\n' => {
+                                if !pending_escape {
+                                    shadow.push(character, start);
+                                }
+                                pending_escape = false;
+                            }
+                            _ if character.is_control() => {}
+                            _ => {
+                                shadow.push(character, start);
+                                pending_escape = false;
+                            }
+                        }
+                        continue;
+                    }
+                    View::Terminal => {}
+                }
+                if is_secret_ignorable(character) {
+                    continue;
+                }
+                state = match state {
+                    State::Ground => match character {
+                        '\u{1b}' => State::Escape,
+                        '\u{9b}' => State::Csi,
+                        '\u{9d}' => State::ControlString { osc: true },
+                        '\u{90}' | '\u{98}' | '\u{9e}' | '\u{9f}' => {
+                            State::ControlString { osc: false }
+                        }
+                        _ => {
+                            if character == '\n' || !character.is_control() {
+                                shadow.push(character, start);
+                            }
+                            State::Ground
+                        }
+                    },
+                    State::Escape => match character {
+                        '\n' => State::Ground,
+                        '[' => State::Csi,
+                        ']' => State::ControlString { osc: true },
+                        'P' | 'X' | '^' | '_' => State::ControlString { osc: false },
+                        '\u{1b}' => State::Escape,
+                        '\u{21}'..='\u{2f}' => State::EscapeIntermediate,
+                        _ if character.is_control() => State::Escape,
+                        _ => {
+                            shadow.push(character, start);
+                            State::Ground
+                        }
+                    },
+                    State::EscapeIntermediate => match character {
+                        '\u{30}'..='\u{7e}' => State::Ground,
+                        '\u{1b}' => State::Escape,
+                        '\n' => State::Ground,
+                        _ => State::EscapeIntermediate,
+                    },
+                    State::Csi => match character {
+                        '\u{40}'..='\u{7e}' => State::Ground,
+                        '\u{1b}' => State::Escape,
+                        _ => State::Csi,
+                    },
+                    State::ControlString { osc } => match character {
+                        '\u{9c}' => State::Ground,
+                        '\u{7}' if osc => State::Ground,
+                        '\u{1b}' => State::StringEscape { osc },
+                        _ => State::ControlString { osc },
+                    },
+                    State::StringEscape { osc } => match character {
+                        '\\' | '\u{9c}' => State::Ground,
+                        '\u{7}' if osc => State::Ground,
+                        '\u{1b}' => State::StringEscape { osc },
+                        _ => State::ControlString { osc },
+                    },
+                };
+            }
+            shadow
+        })
 }
 
 fn token_masks(shadow: &Shadow, masks: &mut Vec<Mask>) {
@@ -318,8 +385,7 @@ fn apply_masks(source: &str, mut masks: Vec<Mask>) -> String {
 
 fn redact_for_display(source: &str) -> String {
     let mut masks = Vec::new();
-    for canonical in [false, true] {
-        let shadow = secret_shadow(source, canonical);
+    for shadow in secret_shadows(source) {
         token_masks(&shadow, &mut masks);
         policy_masks(&shadow, source.len(), &mut masks);
     }
@@ -356,7 +422,21 @@ pub struct SpaceHeader {
     pub label: Option<SafeText>,
     pub display_name: String,
     pub addressable_label: Option<String>,
+    pub not_addressable_reason: Option<NotAddressableReason>,
     pub state: SpaceState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotAddressableReason {
+    MissingLabel,
+    EmptyLabel,
+    ReservedAll,
+    SharedLabel,
+    IdCollision,
+    NotActivated,
+    NotActive,
+    Unavailable,
 }
 
 impl SpaceHeader {
@@ -364,12 +444,17 @@ impl SpaceHeader {
         &mut self,
         workspace_id: &str,
         label: Option<&str>,
-        addressable_label: Option<String>,
+        addressability: Result<String, NotAddressableReason>,
     ) {
         let label = SafeText::optional(label, SHORT_CHARS).map(|label| label.text);
         self.display_name = label.unwrap_or_else(|| workspace_id.to_owned());
-        self.addressable_label = addressable_label
-            .filter(|token| SafeText::from_untrusted(token, SHORT_CHARS).text == *token);
+        (self.addressable_label, self.not_addressable_reason) = match addressability {
+            Ok(token) if SafeText::from_untrusted(&token, SHORT_CHARS).text == token => {
+                (Some(token), None)
+            }
+            Ok(_) => (None, Some(NotAddressableReason::Unavailable)),
+            Err(reason) => (None, Some(reason)),
+        };
     }
 }
 
@@ -414,6 +499,7 @@ pub struct Participant {
     pub persona: Option<SafeText>,
     pub pane_label: Option<SafeText>,
     pub activity: Activity,
+    pub recently_closed: bool,
     /// Inbound work not yet finished, oldest first.
     pub mailbox: Vec<MailboxItem>,
     /// Aliases whose answer this participant is waiting for.
@@ -607,11 +693,89 @@ pub struct TerminalRun {
 
 #[derive(Debug, Serialize)]
 pub struct AttentionCard {
+    pub attention_id: String,
+    pub source_id: String,
+    pub coordination_id: Option<String>,
+    pub conversation: Option<Conversation>,
+    pub response: AttentionResponse,
     pub source_kind: AttentionSourceKind,
     pub summary: SafeText,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_summary: Option<SafeText>,
     pub opened_at_ms: i64,
     pub subject_alias: Option<String>,
     pub message_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Conversation {
+    pub thread_id: String,
+    pub message_id: String,
+}
+
+impl From<&rows::ConversationRow> for Conversation {
+    fn from(row: &rows::ConversationRow) -> Self {
+        Self {
+            thread_id: row.thread_id.clone(),
+            message_id: row.message_id.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AttentionResponse {
+    Reply {
+        thread_id: String,
+        message_id: String,
+        address_id: String,
+    },
+    Message {
+        address_id: String,
+    },
+    Pane {
+        address_id: String,
+    },
+    Local,
+}
+
+fn attention_response(item: &rows::AttentionRow) -> AttentionResponse {
+    use crate::AttentionSourceKind;
+    let Some(address_id) = &item.response_address_id else {
+        return AttentionResponse::Local;
+    };
+    if item.response_is_terminal {
+        return AttentionResponse::Pane {
+            address_id: address_id.clone(),
+        };
+    }
+    match item.item.source_kind {
+        AttentionSourceKind::DeliveryAttempt
+        | AttentionSourceKind::AgentDisposition
+        | AttentionSourceKind::Coordination
+        | AttentionSourceKind::AutomaticReplyLimit => {
+            if let Some(conversation) = &item.conversation {
+                if item.reply_requires_message
+                    || item.item.source_kind == AttentionSourceKind::Coordination
+                {
+                    return AttentionResponse::Message {
+                        address_id: address_id.clone(),
+                    };
+                }
+                return AttentionResponse::Reply {
+                    thread_id: conversation.thread_id.clone(),
+                    message_id: conversation.message_id.clone(),
+                    address_id: address_id.clone(),
+                };
+            }
+        }
+        AttentionSourceKind::ContextGrant
+        | AttentionSourceKind::PaneBinding
+        | AttentionSourceKind::IntegrationRegistration => {}
+    }
+    AttentionResponse::Pane {
+        address_id: address_id.clone(),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
@@ -653,6 +817,7 @@ impl DashboardSnapshot {
                 label: SafeText::optional(label, SHORT_CHARS),
                 display_name: String::new(),
                 addressable_label: None,
+                not_addressable_reason: Some(NotAddressableReason::Unavailable),
                 state: SpaceState::Unknown,
             },
             health: SpaceHealth::Inactive,
@@ -673,7 +838,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .iter()
         .map(|m| message(m, &rows.legs))
         .collect();
-    let participants = participants(rows, &messages);
+    let participants = participants(rows, &messages, now_ms);
     let in_flight = rows
         .mailbox
         .iter()
@@ -687,8 +852,15 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .attention
         .iter()
         .map(|item| AttentionCard {
+            attention_id: item.item.id.as_str().to_owned(),
+            source_id: item.item.source_id.clone(),
+            coordination_id: (item.item.source_kind == crate::AttentionSourceKind::Coordination)
+                .then(|| item.item.source_id.clone()),
+            conversation: item.conversation.as_ref().map(Conversation::from),
+            response: attention_response(item),
             source_kind: AttentionSourceKind::Stored(item.item.source_kind),
             summary: SafeText::from_untrusted(&item.item.summary, SHORT_CHARS),
+            subject_summary: None,
             opened_at_ms: i64::try_from(item.item.opened_at_ms).unwrap_or(i64::MAX),
             subject_alias: item.subject_alias.clone(),
             message_id: item.message_id.clone(),
@@ -696,11 +868,25 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
         .collect();
     attention.extend(rows.addresses.iter().filter_map(|address| {
         blocked_on_user_at(address).map(|opened_at_ms| AttentionCard {
+            attention_id: format!("agent-status-{}", address.address_id),
+            source_id: address.address_id.clone(),
+            coordination_id: None,
+            conversation: address
+                .blocked_conversation
+                .as_ref()
+                .map(Conversation::from),
+            response: AttentionResponse::Pane {
+                address_id: address.address_id.clone(),
+            },
             source_kind: AttentionSourceKind::AgentStatus,
             summary: SafeText::from_untrusted(
                 &format!("@{} is waiting on an approval or question.", address.alias),
                 SHORT_CHARS,
             ),
+            subject_summary: Some(SafeText::from_untrusted(
+                "Waiting on an approval or question.",
+                SHORT_CHARS,
+            )),
             opened_at_ms,
             subject_alias: Some(address.alias.clone()),
             message_id: address.blocked_message_id.clone(),
@@ -715,6 +901,11 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             label: SafeText::optional(label, SHORT_CHARS),
             display_name: rows.namespace.space_id.as_str().to_owned(),
             addressable_label: None,
+            not_addressable_reason: Some(match state {
+                SpaceState::NotActivated => NotAddressableReason::NotActivated,
+                SpaceState::Deactivated => NotAddressableReason::NotActive,
+                _ => NotAddressableReason::Unavailable,
+            }),
             state,
         },
         health: health(state, attention.len(), in_flight, working),
@@ -829,7 +1020,17 @@ fn threads(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<ThreadChip> {
         .collect()
 }
 
-fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participant> {
+const CLOSED_MEMBER_RETENTION_MS: i64 = 5 * 60 * 1_000;
+
+pub(crate) fn closed_member_expires_at(address: &rows::AddressRow) -> Option<i64> {
+    address
+        .retired
+        .then_some(address.closed_at_ms)
+        .flatten()
+        .map(|closed_at| closed_at.saturating_add(CLOSED_MEMBER_RETENTION_MS))
+}
+
+fn participants(rows: &DashboardRows, messages: &[MessageRow], now_ms: i64) -> Vec<Participant> {
     let alias_of: HashMap<&str, &str> = rows
         .addresses
         .iter()
@@ -874,7 +1075,10 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
         .addresses
         .iter()
         .filter(|a| {
-            a.address_id != HUMAN && (!a.retired || referenced.contains(a.address_id.as_str()))
+            a.address_id != HUMAN
+                && (!a.retired
+                    || referenced.contains(a.address_id.as_str())
+                    || closed_member_expires_at(a).is_some_and(|expiry| now_ms < expiry))
         })
         .collect();
     addresses.sort_by_key(|a| {
@@ -924,6 +1128,7 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
             } else {
                 Activity::Waiting
             },
+            recently_closed: false,
             mailbox: Vec::new(),
             waiting_on,
         });
@@ -965,6 +1170,8 @@ fn participants(rows: &DashboardRows, messages: &[MessageRow]) -> Vec<Participan
                 blocked_assignment,
                 !waiting_on.is_empty(),
             ),
+            recently_closed: closed_member_expires_at(address)
+                .is_some_and(|expiry| now_ms < expiry),
             mailbox: inbound
                 .iter()
                 .take(MAILBOX_LIMIT)
@@ -1028,6 +1235,250 @@ fn activity(
 #[cfg(test)]
 mod redaction_regression_tests {
     use super::SafeText;
+
+    #[test]
+    fn pem_joiners_next_to_header_spaces_are_redacted() {
+        let mut failures = Vec::new();
+        for joiner in ['\u{200d}', '\u{2060}', '\u{200c}', '\u{fe0f}'] {
+            for header in [
+                format!("-----BEGIN{joiner} PRIVATE KEY-----"),
+                format!("-----BEGIN {joiner}RSA PRIVATE KEY-----"),
+                format!("-----BEGIN RSA PRIVATE{joiner} KEY-----"),
+                format!("-----BEGIN RSA PRIVATE {joiner}KEY-----"),
+            ] {
+                let raw = format!(
+                    "👩‍💻 before\n{header}\nprivate-body\n-----END RSA PRIVATE KEY-----\nمی‌خواهم after"
+                );
+                let actual = SafeText::from_untrusted(&raw, 2000).text;
+                if actual != "👩‍💻 before\n[REDACTED PRIVATE KEY]\nمی‌خواهم after" {
+                    failures.push((raw, actual));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "PEM joiner bypasses: {failures:#?}");
+    }
+
+    #[test]
+    fn ansi_inside_tokens_and_pem_headers_is_redacted() {
+        let mut failures = Vec::new();
+        for raw in [
+            "s\u{1b}[31mk-abcdefghijklmnopqrstuvwxyz123456",
+            "ghp_abcdefgh\u{1b}[32mijklmnopqrstuvwxyz123456",
+            "AKIAABCD\u{9b}31mEFGHIJKLMNOP",
+            "-----BEGIN\u{1b}[31m PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----",
+            "-----BEGIN\u{1b} PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----",
+        ] {
+            let expected = if raw.starts_with("-----") {
+                "[REDACTED PRIVATE KEY]"
+            } else if raw.starts_with("AKIA") {
+                "[REDACTED AWS ACCESS KEY]"
+            } else {
+                "[REDACTED TOKEN]"
+            };
+            let actual = SafeText::from_untrusted(raw, 2000).text;
+            if actual != expected {
+                failures.push((raw, actual, expected));
+            }
+        }
+        assert!(failures.is_empty(), "ANSI secret bypasses: {failures:#?}");
+    }
+
+    #[test]
+    fn displayed_terminal_payloads_keep_split_secrets_redacted() {
+        for split in [
+            "\u{200d}",
+            "\t",
+            "\u{1b}\n",
+            "\u{1b}\r\n",
+            "\u{1b}\u{200d}\t\r\n",
+        ] {
+            for (open, close, expected) in [
+                ("\u{1b}]0;", "\u{7}", "👩‍💻 ]0;[REDACTED TOKEN] می‌خواهم"),
+                ("\u{1b}]0;", "\u{1b}\\", "👩‍💻 ]0;[REDACTED TOKEN]\\ می‌خواهم"),
+                ("\u{1b}P", "\u{1b}\\", "👩‍💻 P[REDACTED TOKEN]\\ می‌خواهم"),
+                ("\u{9d}0;", "\u{9c}", "👩‍💻 0;[REDACTED TOKEN] می‌خواهم"),
+                ("\u{90}", "\u{9c}", "👩‍💻 [REDACTED TOKEN] می‌خواهم"),
+                ("\u{1b}]0;", "", "👩‍💻 ]0;[REDACTED TOKEN] می‌خواهم"),
+                ("\u{1b}P", "", "👩‍💻 P[REDACTED TOKEN] می‌خواهم"),
+                ("\u{9d}0;", "", "👩‍💻 0;[REDACTED TOKEN] می‌خواهم"),
+                ("\u{90}", "", "👩‍💻 [REDACTED TOKEN] می‌خواهم"),
+            ] {
+                let raw =
+                    format!("👩‍💻 {open}s{split}k-abcdefghijklmnopqrstuvwxyz123456{close} می‌خواهم");
+                assert_eq!(
+                    SafeText::from_untrusted(&raw, 2000).text,
+                    expected,
+                    "{raw:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn displayed_terminal_payloads_keep_split_policy_secrets_redacted() {
+        for split in ["\u{200d}", "\t", "\u{1b}\n", "\u{1b}\r\n"] {
+            for (open, close, expected) in [
+                (
+                    "\u{1b}]0;",
+                    "\u{7}",
+                    "👩‍💻 ]0;\n[REDACTED PRIVATE KEY]\n می‌خواهم",
+                ),
+                (
+                    "\u{1b}]0;",
+                    "\u{1b}\\",
+                    "👩‍💻 ]0;\n[REDACTED PRIVATE KEY]\n\\ می‌خواهم",
+                ),
+                (
+                    "\u{1b}P",
+                    "\u{1b}\\",
+                    "👩‍💻 P\n[REDACTED PRIVATE KEY]\n\\ می‌خواهم",
+                ),
+                (
+                    "\u{9d}0;",
+                    "\u{9c}",
+                    "👩‍💻 0;\n[REDACTED PRIVATE KEY]\n می‌خواهم",
+                ),
+                ("\u{90}", "\u{9c}", "👩‍💻 \n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+                ("\u{1b}]0;", "", "👩‍💻 ]0;\n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+                ("\u{1b}P", "", "👩‍💻 P\n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+                ("\u{9d}0;", "", "👩‍💻 0;\n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+                ("\u{90}", "", "👩‍💻 \n[REDACTED PRIVATE KEY]\n می‌خواهم"),
+            ] {
+                let raw = format!(
+                    "👩‍💻 {open}\n-----BE{split}GIN PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----\n{close} می‌خواهم"
+                );
+                assert_eq!(
+                    SafeText::from_untrusted(&raw, 2000).text,
+                    expected,
+                    "{raw:?}"
+                );
+            }
+        }
+        for (raw, expected) in [
+            (
+                "👩‍💻 \u{1b}]0;TOK\u{200d}EN=hunter2\n\u{7} می‌خواهم",
+                "👩‍💻 ]0;TOK\u{200d}EN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}]0;TOK\tEN=hunter2\n\u{1b}\\ می‌خواهم",
+                "👩‍💻 ]0;TOK\tEN=[REDACTED ENV VALUE]\n\\ می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}PTOK\u{1b}\nEN=hunter2\n\u{1b}\\ می‌خواهم",
+                "👩‍💻 PTOK\nEN=[REDACTED ENV VALUE]\n\\ می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{90}TOK\u{1b}\r\nEN=hunter2\n\u{9c} می‌خواهم",
+                "👩‍💻 TOK\nEN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}]0;TOK\u{200d}EN=hunter2\n می‌خواهم",
+                "👩‍💻 ]0;TOK\u{200d}EN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}PTOK\tEN=hunter2\n می‌خواهم",
+                "👩‍💻 PTOK\tEN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{9d}0;TOK\u{1b}\nEN=hunter2\n می‌خواهم",
+                "👩‍💻 0;TOK\nEN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{90}TOK\u{1b}\r\nEN=hunter2\n می‌خواهم",
+                "👩‍💻 TOK\nEN=[REDACTED ENV VALUE]\n می‌خواهم",
+            ),
+        ] {
+            assert_eq!(
+                SafeText::from_untrusted(raw, 2000).text,
+                expected,
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn displayed_terminal_payloads_preserve_ordinary_line_breaks() {
+        for (raw, expected) in [
+            (
+                "👩‍💻 \u{1b}]0;s\nk-abcdefghijklmnopqrstuvwxyz123456\u{7} می‌خواهم",
+                "👩‍💻 ]0;s\nk-abcdefghijklmnopqrstuvwxyz123456 می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{1b}Ps\u{1b}\r\n\nk-abcdefghijklmnopqrstuvwxyz123456\u{1b}\\ می‌خواهم",
+                "👩‍💻 Ps\n\nk-abcdefghijklmnopqrstuvwxyz123456\\ می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{90}\u{1b}s\nk-abcdefghijklmnopqrstuvwxyz123456\u{9c} می‌خواهم",
+                "👩‍💻 s\nk-abcdefghijklmnopqrstuvwxyz123456 می‌خواهم",
+            ),
+            (
+                "👩‍💻 \u{9d}0;s\nk-abcdefghijklmnopqrstuvwxyz123456 می‌خواهم",
+                "👩‍💻 0;s\nk-abcdefghijklmnopqrstuvwxyz123456 می‌خواهم",
+            ),
+        ] {
+            assert_eq!(
+                SafeText::from_untrusted(raw, 2000).text,
+                expected,
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_sequence_families_inside_secrets_are_redacted() {
+        for sequence in [
+            "\u{1b}[31m",
+            "\u{9b}31m",
+            "\u{1b}]0;title\u{7}",
+            "\u{1b}]0;title\u{1b}\\",
+            "\u{9d}0;title\u{9c}",
+            "\u{1b}Pprivate\u{1b}\\",
+            "\u{1b}Xprivate\u{1b}\\",
+            "\u{1b}^private\u{1b}\\",
+            "\u{1b}_private\u{1b}\\",
+            "\u{90}private\u{9c}",
+            "\u{98}private\u{9c}",
+            "\u{9e}private\u{9c}",
+            "\u{9f}private\u{9c}",
+            "\u{1b}(B",
+            "\u{1b}",
+            "\u{1b}\n",
+            "\u{1b}\r\n",
+            "\t",
+        ] {
+            for (secret, marker) in [
+                (
+                    format!("s{sequence}k-abcdefghijklmnopqrstuvwxyz123456"),
+                    "[REDACTED TOKEN]",
+                ),
+                (
+                    format!(
+                        "-----BE{sequence}GIN PRIVATE KEY-----\nbody\n-----END PRIVATE KEY-----"
+                    ),
+                    "[REDACTED PRIVATE KEY]",
+                ),
+            ] {
+                let raw = format!("👩‍💻 before\n{secret}\nمی‌خواهم after");
+                assert_eq!(
+                    SafeText::from_untrusted(&raw, 2000).text,
+                    format!("👩‍💻 before\n{marker}\nمی‌خواهم after"),
+                    "{sequence:?} in {secret:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nonsecret_unicode_and_coloured_cli_output_keep_their_display_text() {
+        for text in ["👨‍👩‍👧‍👦 🇺🇸 🏳️‍🌈", "می‌خواهم", "❤️ ✈︎ ✈️"]
+        {
+            assert_eq!(SafeText::from_untrusted(text, 2000).text, text);
+        }
+        assert_eq!(
+            SafeText::from_untrusted("\u{1b}[32mReady\u{1b}[0m\t2 passed", 2000).text,
+            "[32mReady[0m\t2 passed"
+        );
+    }
 
     #[test]
     fn legitimate_unicode_round_trips_through_safe_text_and_persona_display() {

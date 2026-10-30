@@ -146,6 +146,92 @@ fn append(state: &Path, note: Note) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+struct AttemptRecord {
+    call_id: String,
+    request_id: String,
+    space: String,
+    timestamp_ms: u64,
+    #[serde(flatten)]
+    metrics: crate::agent_status_model::channel_router::RouterAttempt,
+}
+
+pub(crate) fn record_attempt(
+    state: &Path,
+    namespace: &StateNamespace,
+    request_id: &str,
+    call_id: &str,
+    metrics: crate::agent_status_model::channel_router::RouterAttempt,
+) {
+    let record = AttemptRecord {
+        call_id: call_id.to_owned(),
+        request_id: request_id.to_owned(),
+        space: SpaceKey::of(namespace).as_str().to_owned(),
+        timestamp_ms: SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX),
+        metrics,
+    };
+    if append_attempt(state, &record).is_err() {
+        eprintln!("dashboard: channel router attempt journal unavailable");
+    }
+}
+
+fn append_attempt(state: &Path, record: &AttemptRecord) -> io::Result<()> {
+    use std::io::{Seek, SeekFrom};
+    let _lock = lock(state, true)?;
+    let mut line = serde_json::to_vec(record)?;
+    line.push(b'\n');
+    if line.len() > MAX_LINE {
+        return Err(io::Error::other("channel router attempt record too long"));
+    }
+    let mut file = open_owned(&state.join("dashboard/channel-router-attempts.jsonl"), true)?;
+    let length = file.metadata()?.len();
+    let mut tail = *b"\n";
+    if length > 0 {
+        file.read_exact_at(&mut tail, length - 1)?;
+    }
+    let needs_newline = tail[0] != b'\n';
+    if length + line.len() as u64 + u64::from(needs_newline) > MAX_BYTES {
+        file.seek(SeekFrom::Start(length.saturating_sub(MAX_BYTES / 2)))?;
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take(MAX_BYTES / 2 + 1)
+            .read_to_end(&mut bytes)?;
+        let mut records: Vec<_> = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| line.len() <= MAX_LINE)
+            .filter_map(|line| serde_json::from_slice::<AttemptRecord>(line).ok())
+            .collect();
+        records.push(record.clone());
+        let start = records.len().saturating_sub(MAX_RECORDS / 2);
+        let mut compact = Vec::new();
+        for record in &records[start..] {
+            let encoded = serde_json::to_vec(record)?;
+            if compact.len() + encoded.len() + 1 > MAX_BYTES as usize {
+                return Err(io::Error::other(
+                    "channel router attempt retention exceeded",
+                ));
+            }
+            compact.extend(encoded);
+            compact.push(b'\n');
+        }
+        file.seek(SeekFrom::Start(0))?;
+        file.set_len(0)?;
+        file.write_all(&compact)?;
+    } else {
+        file.seek(SeekFrom::End(0))?;
+        if needs_newline {
+            file.write_all(b"\n")?;
+        }
+        file.write_all(&line)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn finish_post(state: &Path, namespace: &StateNamespace, receipt: &mut Value) {
     let internal = receipt
         .as_object_mut()
@@ -206,5 +292,105 @@ pub(crate) fn merge(state: &Path, namespace: &StateNamespace, messages: &mut [Me
                 .as_deref()
                 .map(|router| SafeText::from_untrusted(router, 80).text);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_status_model::channel_router::{RouterAttempt, RouterHost, RouterOutcome};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    fn directory() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "namedrop-router-journal-{}-{}",
+            std::process::id(),
+            NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn attempt() -> RouterAttempt {
+        RouterAttempt {
+            host: RouterHost::Claude,
+            model: "claude-haiku-4-5".to_owned(),
+            outcome: RouterOutcome::Timeout,
+            duration_ms: 8_000,
+            num_turns: None,
+            input_tokens: None,
+            output_tokens: None,
+            usage_complete: false,
+            provider_usd: None,
+        }
+    }
+
+    #[test]
+    fn attempt_retention_preserves_latest_records_and_never_changes_message_notes() {
+        let state = directory();
+        let namespace = StateNamespace::for_space("synthetic", "w1");
+        let mut receipt = serde_json::json!({"message_id":"post-1","channel":{"to":[]},"_channel_routing_note":{"reason":"statement","router":"claude-haiku-4-5","router_failed":false}});
+        finish_post(&state, &namespace, &mut receipt);
+        let note = fs::read(path(&state)).unwrap();
+        let note_revision = revision(&state);
+        let journal = state.join("dashboard/channel-router-attempts.jsonl");
+        for index in 0..2_000 {
+            record_attempt(
+                &state,
+                &namespace,
+                "reused-request",
+                &format!("call-{index}"),
+                attempt(),
+            );
+        }
+        assert!(fs::metadata(&journal).unwrap().len() <= MAX_BYTES);
+        assert_eq!(
+            fs::metadata(&journal).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let data = fs::read_to_string(&journal).unwrap();
+        let records: Vec<AttemptRecord> = data
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.last().unwrap().call_id, "call-1999");
+        assert_ne!(records.first().unwrap().call_id, "call-0");
+        assert!(
+            records
+                .iter()
+                .all(|record| record.request_id == "reused-request")
+        );
+        assert_eq!(fs::read(path(&state)).unwrap(), note);
+        assert_eq!(revision(&state), note_revision);
+        let mut replay = serde_json::json!({"message_id":"post-1","channel":{"to":[]}});
+        finish_post(&state, &namespace, &mut replay);
+        assert_eq!(replay["channel"], receipt["channel"]);
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn attempt_journal_refuses_symlinks_and_public_files_without_affecting_notes() {
+        let state = directory();
+        let namespace = StateNamespace::for_space("synthetic", "w1");
+        fs::create_dir_all(state.join("dashboard")).unwrap();
+        let journal = state.join("dashboard/channel-router-attempts.jsonl");
+        let target = state.join("private-target");
+        fs::write(&target, "untouched").unwrap();
+        std::os::unix::fs::symlink(&target, &journal).unwrap();
+        record_attempt(&state, &namespace, "request", "call-1", attempt());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
+        fs::remove_file(&journal).unwrap();
+        fs::write(&journal, "untouched").unwrap();
+        fs::set_permissions(&journal, fs::Permissions::from_mode(0o644)).unwrap();
+        record_attempt(&state, &namespace, "request", "call-2", attempt());
+        assert_eq!(fs::read_to_string(&journal).unwrap(), "untouched");
+        let mut receipt = serde_json::json!({"message_id":"post-1","channel":{"to":[]},"_channel_routing_note":{"reason":"statement","router":"claude-haiku-4-5","router_failed":false}});
+        finish_post(&state, &namespace, &mut receipt);
+        assert_eq!(receipt["channel"]["reason"], "statement");
+        assert!(path(&state).exists());
+        fs::remove_dir_all(state).unwrap();
     }
 }

@@ -15,6 +15,7 @@ use std::{
         unix::fs::MetadataExt,
     },
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -630,6 +631,10 @@ enum Route {
         before: Option<String>,
         limit: i64,
     },
+    MessageContext {
+        key: SpaceKey,
+        message_id: String,
+    },
     AllEvents,
     Spaces,
     Asset(String),
@@ -668,6 +673,19 @@ fn route(
     }
     if let Some(rest) = path.strip_prefix("/w/") {
         let segments: Vec<_> = rest.split('/').collect();
+        if segments.get(1) == Some(&"messages") && segments.len() > 2 {
+            authenticate_session(request, port, session)?;
+            authenticate_provenance(request, host)?;
+            let [key, "messages", message, "context"] = segments.as_slice() else {
+                return Err(Status::NotFound);
+            };
+            let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+            let message_id = decode_asset_path(message).ok_or(Status::NotFound)?;
+            if message_id.is_empty() {
+                return Err(Status::NotFound);
+            }
+            return Ok(Route::MessageContext { key, message_id });
+        }
         if segments.get(1) == Some(&"participants") {
             authenticate_session(request, port, session)?;
             authenticate_provenance(request, host)?;
@@ -730,8 +748,19 @@ fn route(
     if !matches!(page, Some((_, "messages")))
         && let Some(nonce) = request.query("n")
     {
+        let query: Vec<_> = request
+            .query
+            .as_deref()
+            .unwrap_or_default()
+            .split('&')
+            .filter(|pair| !pair.starts_with("n="))
+            .collect();
         return Ok(Route::Redeem {
-            location: path.to_owned(),
+            location: if query.is_empty() {
+                path.to_owned()
+            } else {
+                format!("{path}?{}", query.join("&"))
+            },
             nonce: nonce.to_owned(),
         });
     }
@@ -1006,6 +1035,48 @@ fn serve_connection(
                 Err(status) => respond_status(&mut writer, status),
             }
         }
+        Ok(Route::MessageContext { key, message_id }) => {
+            let result = (|| {
+                let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
+                let store = guard.store(front.files.state())?;
+                let namespace = store
+                    .dashboard_spaces()
+                    .map_err(|_| Status::Unavailable)?
+                    .into_iter()
+                    .find(|space| SpaceKey::of(&space.namespace) == key)
+                    .map(|space| space.namespace)
+                    .ok_or(Status::NotFound)?;
+                store
+                    .dashboard_thread_context(&namespace, &message_id)
+                    .map_err(|_| Status::Unavailable)?
+                    .ok_or(Status::NotFound)
+                    .map(|context| (namespace, context))
+            })();
+            match result {
+                Ok((namespace, context)) => {
+                    let mut messages: Vec<_> = context
+                        .history
+                        .messages
+                        .iter()
+                        .map(|row| snapshot::message(row, &context.history.legs))
+                        .collect();
+                    snapshot::channel_routing::merge(
+                        front.files.state(),
+                        &namespace,
+                        &mut messages,
+                    );
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "thread_id": context.thread_id,
+                        "message_count": context.message_count,
+                        "earlier_omitted": context.earlier_omitted,
+                        "messages": messages,
+                    }))
+                    .map_err(io::Error::other)?;
+                    respond(&mut writer, "200 OK", "application/json", "", &body)
+                }
+                Err(status) => respond_status(&mut writer, status),
+            }
+        }
         Ok(Route::AllEvents) => stream_events(stream, writer, front, next_id, Subscription::All),
     }
 }
@@ -1045,26 +1116,42 @@ fn send_operator_post(
         ids: &ids,
     };
     let target = post.in_reply_to.map(crate::MessageId::new);
+    writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let observe_commit = |receipt: &serde_json::Value| {
+        let mut receipt = receipt.clone();
+        snapshot::channel_routing::finish_post(front.files.state(), &namespace, &mut receipt);
+        respond(
+            writer,
+            "200 OK",
+            "application/json",
+            "",
+            receipt.to_string().as_bytes(),
+        )
+    };
     let sent = if crate::message::is_plain_channel_post(&post.source) {
-        crate::message::send_operator_channel_message(
+        crate::message::send_operator_channel_message_observing_commit(
             &post.request_id,
             &post.source,
             target.as_ref(),
             &runtime,
+            observe_commit,
         )
     } else {
-        crate::send_operator_message(&post.request_id, &post.source, target.as_ref(), &runtime)
+        crate::message::send_operator_message_observing_commit(
+            &post.request_id,
+            &post.source,
+            target.as_ref(),
+            &runtime,
+            observe_commit,
+        )
     };
     match sent {
-        Ok(mut receipt) => {
-            snapshot::channel_routing::finish_post(front.files.state(), &namespace, &mut receipt);
-            respond(
-                writer,
-                "200 OK",
-                "application/json",
-                "",
-                receipt.to_string().as_bytes(),
-            )
+        Ok((receipt, response)) => {
+            if let Err(error) = wake_mailboxes_after_send(front.files.state(), &namespace, &receipt)
+            {
+                eprintln!("Message saved; could not wake delivery: {error}");
+            }
+            response
         }
         Err(error) => respond(
             writer,
@@ -1080,6 +1167,63 @@ fn send_operator_post(
                 .as_bytes(),
         ),
     }
+}
+
+fn wake_mailboxes_after_send(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    receipt: &serde_json::Value,
+) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+
+    let needs_watcher = |value: &serde_json::Value| {
+        serde_json::from_value::<crate::DrainReport>(value.clone())
+            .is_ok_and(|report| report.awaits_terminal() || report.next_grace_due_ms().is_some())
+    };
+    let mut spaces = Vec::new();
+    if needs_watcher(&receipt["drain"]) {
+        spaces.push(namespace.space_id.clone());
+    }
+    if let Some(drains) = receipt["drains"].as_object()
+        && drains.values().any(needs_watcher)
+    {
+        let message = crate::MessageId::new(
+            receipt["message_id"]
+                .as_str()
+                .ok_or("send receipt has no message ID")?,
+        );
+        let mut store = StateStore::open(state).map_err(|error| error.to_string())?;
+        let copies = store
+            .transaction(|tx| tx.forwarded_copies(namespace, &message))
+            .map_err(|error| error.to_string())?;
+        spaces.extend(copies.into_iter().filter_map(|copy| {
+            drains
+                .get(copy.workspace.as_str())
+                .filter(|report| needs_watcher(report))
+                .map(|_| copy.space)
+        }));
+    }
+    for space in spaces {
+        let mut child = Command::new(crate::runtime_executable()?)
+            .args(["hook", "mailbox-wake", "--state-directory"])
+            .arg(state)
+            .env("HERDR_PLUGIN_STATE_DIR", state)
+            .env("HERDR_SOCKET_PATH", &namespace.session_socket_id)
+            .env("HERDR_WORKSPACE_ID", space.as_str())
+            .env_remove("HERDR_PANE_ID")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        thread::spawn(move || {
+            if let Err(error) = child.wait() {
+                eprintln!("could not reap mailbox wake: {error}");
+            }
+        });
+    }
+    Ok(())
 }
 
 fn serve_asset(

@@ -515,7 +515,8 @@ where
     }
     let input = prepare_source_message(input)?;
     let author = pane_author(runtime)?;
-    dispatch_prepared_message(input, author, runtime, &workspaces)
+    dispatch_prepared_message(input, author, runtime, &workspaces, |_| ())
+        .map(|(receipt, ())| receipt)
         .map_err(|error| error.to_string())
 }
 
@@ -525,6 +526,22 @@ pub fn send_operator_message<E, C, I>(
     in_reply_to: Option<&MessageId>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
 ) -> Result<Value, OperatorSendError>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    send_operator_message_observing_commit(request_id, source, in_reply_to, runtime, |_| ())
+        .map(|(receipt, ())| receipt)
+}
+
+pub(crate) fn send_operator_message_observing_commit<E, C, I, R>(
+    request_id: &str,
+    source: &str,
+    in_reply_to: Option<&MessageId>,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    observe_commit: impl FnOnce(&Value) -> R,
+) -> Result<(Value, R), OperatorSendError>
 where
     E: crate::HerdrCommandExecutor,
     C: crate::Clock,
@@ -550,20 +567,27 @@ where
     })
     .map_err(SendError::Input)?;
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
-    dispatch_prepared_message(input, Author::Operator, runtime, &workspaces)
-        .map_err(OperatorSendError::from)
+    dispatch_prepared_message(
+        input,
+        Author::Operator,
+        runtime,
+        &workspaces,
+        observe_commit,
+    )
+    .map_err(OperatorSendError::from)
 }
 
 pub(crate) fn is_plain_channel_post(source: &str) -> bool {
     parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
 }
 
-pub(crate) fn send_operator_channel_message<E, C, I>(
+pub(crate) fn send_operator_channel_message_observing_commit<E, C, I, R>(
     request_id: &str,
     source: &str,
     in_reply_to: Option<&MessageId>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
-) -> Result<Value, OperatorSendError>
+    observe_commit: impl FnOnce(&Value) -> R,
+) -> Result<(Value, R), OperatorSendError>
 where
     E: crate::HerdrCommandExecutor,
     C: crate::Clock,
@@ -598,8 +622,14 @@ where
         preparation: MessagePreparation::OperatorPlain,
     };
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
-    dispatch_prepared_message(input, Author::Operator, runtime, &workspaces)
-        .map_err(OperatorSendError::from)
+    dispatch_prepared_message(
+        input,
+        Author::Operator,
+        runtime,
+        &workspaces,
+        observe_commit,
+    )
+    .map_err(OperatorSendError::from)
 }
 
 fn pane_author<'a, E, C, I>(runtime: &LifecycleRuntime<'a, E, C, I>) -> Result<Author<'a>, String> {
@@ -609,12 +639,13 @@ fn pane_author<'a, E, C, I>(runtime: &LifecycleRuntime<'a, E, C, I>) -> Result<A
         .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())
 }
 
-fn dispatch_prepared_message<E, C, I>(
+fn dispatch_prepared_message<E, C, I, R>(
     input: PreparedMessageOperation,
     author: Author<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
-) -> Result<Value, SendError>
+    observe_commit: impl FnOnce(&Value) -> R,
+) -> Result<(Value, R), SendError>
 where
     E: crate::HerdrCommandExecutor,
     C: crate::Clock,
@@ -622,6 +653,7 @@ where
 {
     let (mut response, forwarded) =
         persist_prepared_message_operation(input, author, runtime, workspaces)?;
+    let observed = observe_commit(&response);
     response["drain"] = crate::drain_receipt(runtime);
     // A copy queued in another workspace drains there now rather than waiting
     // for that workspace's next event.
@@ -641,7 +673,7 @@ where
             .collect::<serde_json::Map<_, _>>()
             .into();
     }
-    Ok(response)
+    Ok((response, observed))
 }
 
 pub(crate) enum PromptMentionOutcome {
@@ -1025,7 +1057,7 @@ where
                 transaction.preferred_router_host()?,
             ))
         })?;
-        let decision = crate::agent_status_model::channel_router::route(
+        let run = crate::agent_status_model::channel_router::route(
             crate::agent_status_model::channel_router::RouterRequest {
                 host,
                 rows: &rows,
@@ -1033,8 +1065,17 @@ where
                 candidates: &candidates,
             },
         );
+        if let Some(attempt) = run.attempt {
+            crate::dashboard::snapshot::channel_routing::record_attempt(
+                runtime.state_directory,
+                &namespace,
+                &request_id,
+                &runtime.ids.next_id("router-call"),
+                attempt,
+            );
+        }
         Some(PlainRouting {
-            decision,
+            decision: run.decision,
             candidates,
             participants: participants
                 .into_iter()

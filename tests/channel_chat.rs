@@ -1,7 +1,12 @@
+#[path = "support/channel_merge.rs"]
+mod channel_merge;
+#[path = "support/channel_router_attempts.rs"]
+mod channel_router_attempts;
 #[path = "support/channel_chat.rs"]
 mod support;
 #[path = "support/xws.rs"]
 mod xws;
+use channel_router_attempts::attempt_records;
 use namedrop::{StateNamespace, StateStore};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
@@ -16,47 +21,6 @@ use support::{
 use xws::Fixture;
 
 #[test]
-fn plain_post_routes_verbatim_and_replay_does_not_call_router_again() {
-    let f = fixture();
-    let server = Server::start(
-        &f,
-        r#"{"structured_output":{"to":["planner","ghost","lead","planner"],"reason":"needs a plan"},"usage":{"input_tokens":123,"output_tokens":12}}"#,
-        false,
-    );
-    let source = "Can @planner and @lead plan this?\nKeep @ghost literal.";
-    let (status, receipt) = post(&server, "plain", source, None);
-    assert_eq!(status, 200, "{receipt}");
-    assert_eq!(receipt["channel"]["state"], "routed");
-    assert_eq!(receipt["channel"]["to"], json!(["planner", "lead"]));
-    assert_eq!(receipt["channel"]["reason"], "needs a plan");
-    assert!(receipt.get("_channel_routing_note").is_none());
-    assert_eq!(receipt["routing_usage"]["input_tokens"], 123);
-    let (status, replay) = post(&server, "plain", source, None);
-    assert_eq!(status, 200, "{replay}");
-    assert_eq!(replay["message_id"], receipt["message_id"]);
-    assert_eq!(replay["channel"], receipt["channel"]);
-    assert_eq!(calls(&f).len(), 1);
-    let stored: (String, String, String) = f.db().query_row("SELECT authored_source,body,grammar_version FROM collaboration_messages WHERE message_id=?1", [receipt["message_id"].as_str().unwrap()], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
-    assert_eq!(stored, (source.into(), source.into(), "channel/v1".into()));
-    let messages = history(&server);
-    assert_eq!(messages[0]["channel"], receipt["channel"]);
-    let version: u32 = f
-        .db()
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 6);
-    let call = &calls(&f)[0];
-    assert!(
-        call["env"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .all(|key| !key.starts_with("HERDR_") && !key.starts_with("NAMEDROP_"))
-    );
-    assert!(call["env"].get("CLAUDE_CODE_SESSION_ID").is_none());
-}
-
-#[test]
 fn zero_pick_and_opt_out_store_without_waking_members() {
     for off in [false, true] {
         let f = fixture();
@@ -67,6 +31,7 @@ fn zero_pick_and_opt_out_store_without_waking_members() {
         assert_eq!(receipt["channel"]["to"], json!([]));
         assert_eq!(receipt["deliveries"], json!([]));
         assert_eq!(calls(&f).len(), usize::from(!off));
+        assert_eq!(attempt_records(&f).len(), usize::from(!off));
         assert_eq!(history(&server)[0]["channel"]["state"], "unrouted");
     }
 }
@@ -115,6 +80,7 @@ fn leading_mentions_stay_explicit_and_plain_followup_reaches_thread_agents() {
     assert_eq!(followup["recipients"][0]["alias"], "planner");
     assert!(followup.get("channel").is_none());
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -637,6 +603,7 @@ fn implicit_followups_reach_all_agent_authors_and_recipients_without_a_model() {
         );
     }
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -748,6 +715,7 @@ fn terminal_only_and_empty_threads_refuse_implicit_followups_without_commands() 
         assert_eq!(before, after);
     }
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -781,6 +749,7 @@ fn implicit_followups_keep_envoy_forwarding_and_exclude_retired_origins() {
     assert_eq!(recipient_aliases(&after_retirement), ["planner"]);
     assert!(after_retirement.get("forwarded").is_none());
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -813,6 +782,7 @@ fn implicit_followup_excludes_terminal_and_retired_local_participants() {
         .unwrap();
     assert_eq!(before, after);
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -866,6 +836,7 @@ fn implicit_followup_does_not_resolve_a_reused_participant_alias() {
         "address-w1-planner"
     );
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -880,6 +851,7 @@ fn no_registered_host_stores_mentions_without_running_a_model() {
     assert_eq!(receipt["channel"]["state"], "unrouted");
     assert_eq!(receipt["channel"]["mentioned"], json!(["planner"]));
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]
@@ -939,6 +911,7 @@ fn remote_terminal_only_threads_refuse_implicit_followups_without_new_commands()
         .unwrap();
     assert_eq!(before, after);
     assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
 }
 
 #[test]

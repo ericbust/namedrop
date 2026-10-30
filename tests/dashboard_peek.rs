@@ -1,7 +1,7 @@
 #[path = "support/xws.rs"]
 mod xws;
 
-use namedrop::{HerdrCommandExecutor, StateNamespace, dashboard::snapshot::SpaceKey};
+use namedrop::{HerdrCommandExecutor, StateNamespace, StateStore, dashboard::snapshot::SpaceKey};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -408,6 +408,74 @@ fn strips_terminal_sequences_and_invisible_characters_before_secret_redaction() 
 }
 
 #[test]
+fn peek_redacts_pem_joiners_next_to_spaces() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let mut failures = Vec::new();
+    for joiner in ['\u{200d}', '\u{2060}', '\u{200c}', '\u{fe0f}'] {
+        for header in [
+            format!("-----BEGIN{joiner} PRIVATE KEY-----"),
+            format!("-----BEGIN {joiner}RSA PRIVATE KEY-----"),
+            format!("-----BEGIN RSA PRIVATE{joiner} KEY-----"),
+            format!("-----BEGIN RSA PRIVATE {joiner}KEY-----"),
+        ] {
+            let raw = format!(
+                "👩‍💻 before\n{header}\nprivate-body\n-----END RSA PRIVATE KEY-----\nمی‌خواهم after"
+            );
+            configure(&f, json!({"stdout": raw}));
+            let response = server.get(&path("socket-a", "w1", "lead"));
+            assert_eq!(response.status, 200);
+            if response.body != "👩‍💻 before\n[REDACTED PRIVATE KEY]\nمی‌خواهم after"
+            {
+                failures.push((raw, response.body));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Peek PEM joiner bypasses: {failures:#?}"
+    );
+}
+
+#[test]
+fn peek_redacts_ansi_inside_tokens_and_pem_headers() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    for (raw, expected) in [
+        (
+            "s\u{1b}[31mk-abcdefghijklmnopqrstuvwxyz123456",
+            "[REDACTED TOKEN]",
+        ),
+        (
+            "ghp_abcdefgh\u{1b}[32mijklmnopqrstuvwxyz123456",
+            "[REDACTED TOKEN]",
+        ),
+        ("AKIAABCD\u{9b}31mEFGHIJKLMNOP", "[REDACTED AWS ACCESS KEY]"),
+        (
+            "-----BEGIN\u{1b}[31m PRIVATE KEY-----\nprivate-body\n-----END PRIVATE KEY-----",
+            "[REDACTED PRIVATE KEY]",
+        ),
+    ] {
+        configure(&f, json!({"stdout": raw}));
+        let response = server.get(&path("socket-a", "w1", "lead"));
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, expected, "{raw:?}");
+    }
+}
+
+#[test]
+fn peek_preserves_nonsecret_unicode_and_coloured_cli_output() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let expected = "👨‍👩‍👧‍👦 🇺🇸 🏳️‍🌈\nمی‌خواهم\n❤️ ✈︎ ✈️\nReady\t2 passed";
+    let raw = "👨‍👩‍👧‍👦 🇺🇸 🏳️‍🌈\nمی‌خواهم\n❤️ ✈︎ ✈️\n\u{1b}[32mReady\u{1b}[0m\t2 passed";
+    configure(&f, json!({"stdout": raw}));
+    let response = server.get(&path("socket-a", "w1", "lead"));
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, expected);
+}
+
+#[test]
 fn screen_preserves_legitimate_unicode_beside_redacted_secrets() {
     let f = Fixture::new();
     let server = Server::start(&f);
@@ -783,4 +851,45 @@ fn sixteen_pending_peeks_include_followers_and_leave_other_routes_available() {
     }
     configure(&f, json!({"stdout": "recovered"}));
     assert_eq!(server.get(&target).body, "recovered");
+}
+
+#[test]
+fn a_recently_retired_member_stays_in_the_roster_and_peek_reports_closed() {
+    let f = Fixture::new();
+    let ns = StateNamespace::for_space("socket-a", "w1");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let mut store = StateStore::open(&f.state).unwrap();
+    store
+        .transaction(|tx| {
+            tx.retire_pane_address(
+                &ns,
+                &namedrop::PaneAddressId::new(xws::address_id("w1", "lead")),
+                &namedrop::MutationAttribution::new(
+                    namedrop::ActorKind::Plugin,
+                    "test",
+                    u64::try_from(now).unwrap(),
+                ),
+            )
+        })
+        .unwrap();
+    let frame = namedrop::dashboard::snapshot::build(
+        &store.dashboard_rows(&ns).unwrap(),
+        None,
+        i64::try_from(now).unwrap(),
+    );
+    let member = frame
+        .participants
+        .iter()
+        .find(|member| member.alias == "@lead")
+        .expect("closed member remains available for Peek");
+    assert_eq!(
+        member.activity,
+        namedrop::dashboard::snapshot::Activity::Retired
+    );
+    let server = Server::start(&f);
+    assert_eq!(server.get(&path("socket-a", "w1", "lead")).status, 410);
+    assert!(invocations(&f).is_empty());
 }

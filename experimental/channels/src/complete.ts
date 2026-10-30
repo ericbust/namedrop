@@ -7,13 +7,9 @@ import type {
   Outgoing,
   SendRule,
   SpaceKey,
-  SpaceState,
 } from "./model.ts";
 import { channelSuffix } from "./store.ts";
 
-// Why the server gave a channel no token, in the order DESIGN.md's table checks.
-// The page sees the cleaned display name, not the raw Herdr label, so it names
-// only reasons that name cannot hide.
 export type DisabledReason =
   | "unusable-label"
   | "no-label"
@@ -48,48 +44,41 @@ export type Completion = {
 };
 
 const ALL = "#all";
-const RESERVED_LABEL = "all";
 const WHITESPACE = /\s/;
 
-type Labelling = Pick<
-  ChannelSnapshot,
-  "displayName" | "addressableLabel" | "workspaceId" | "state"
->;
-function activated(state: SpaceState): boolean {
-  return state === "active" || state === "paused";
-}
-
 function disabledReason(
-  channel: Labelling,
-  channels: readonly Labelling[],
+  reason: ChannelSnapshot["notAddressableReason"],
 ): DisabledReason {
-  const folded = foldLabel(channel.displayName);
-  // Stripped characters fold to separators, so a name that folds to nothing came from a label that does too.
-  if (folded === "") return "unusable-label";
-  // The server shows the workspace id as the name only when Herdr has no label.
-  if (channel.displayName === channel.workspaceId) return "no-label";
-  if (folded === RESERVED_LABEL) return "unknown";
-  // Only labels can collide on the server, and a token proves this name did not.
-  const sameName = channels.filter(
-    (other) =>
-      other.displayName === channel.displayName &&
-      other.displayName !== other.workspaceId,
-  );
-  if (
-    sameName.length > 1 &&
-    sameName.every(
-      (other) => other.addressableLabel === null && activated(other.state),
-    )
-  )
-    return "shared-name";
-  return "unknown";
+  switch (reason) {
+    case "empty_label":
+      return "unusable-label";
+    case "missing_label":
+      return "no-label";
+    case "shared_label":
+      return "shared-name";
+    case null:
+    case "reserved_all":
+    case "id_collision":
+    case "not_activated":
+    case "not_active":
+    case "unavailable":
+      return "unknown";
+    default: {
+      const exhaustive: never = reason;
+      return exhaustive;
+    }
+  }
 }
 
 export function channelOptions(
   channels: Iterable<
     Pick<
       ChannelSnapshot,
-      "key" | "displayName" | "addressableLabel" | "workspaceId" | "state"
+      | "key"
+      | "displayName"
+      | "addressableLabel"
+      | "notAddressableReason"
+      | "workspaceId"
     >
   >,
 ): ChannelOption[] {
@@ -105,7 +94,9 @@ export function channelOptions(
           ? null
           : `#${channel.addressableLabel}`,
       disabledReason:
-        channel.addressableLabel === null ? disabledReason(channel, all) : null,
+        channel.addressableLabel === null
+          ? disabledReason(channel.notAddressableReason)
+          : null,
     };
   });
 }

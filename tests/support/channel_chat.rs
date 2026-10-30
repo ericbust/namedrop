@@ -46,7 +46,7 @@ impl Server {
         fs::write(
             &shim,
             r#"#!/usr/bin/python3
-import json, os, sys
+import json, os, sys, time
 args = sys.argv[1:]
 root = os.path.dirname(__file__)
 with open(os.path.join(root, 'http-herdr-responses.json')) as source:
@@ -60,6 +60,10 @@ elif args[:2] == ['worktree', 'list']:
 elif args[:2] in [['agent', 'prompt'], ['pane', 'report-metadata'], ['notification', 'show']]:
     with open(os.path.join(root, 'http-herdr-invocations.jsonl'), 'a') as log:
         log.write(json.dumps({'args': args, 'socket': os.environ.get('HERDR_SOCKET_PATH')}) + '\n')
+    if args[:2] == ['agent', 'prompt'] and os.path.exists(os.path.join(root, 'prompt-gate')):
+        open(os.path.join(root, 'prompt-entered'), 'w').close()
+        while os.path.exists(os.path.join(root, 'prompt-gate')):
+            time.sleep(0.01)
     print('{}')
 else:
     sys.stderr.write('unexpected Herdr invocation: ' + key)
@@ -167,7 +171,7 @@ else:
     fn raw(&self, request: &str) -> Response {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).unwrap();
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(Duration::from_secs(20)))
             .unwrap();
         stream.write_all(request.as_bytes()).unwrap();
         stream.shutdown(Shutdown::Write).unwrap();
@@ -273,6 +277,24 @@ pub(super) fn history(server: &Server) -> Value {
     serde_json::from_str(&response.body).unwrap()
 }
 
+fn reply_attempt(f: &Fixture, parent: &Value, pane: &str, request: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match f.db().query_row(
+        "SELECT a.attempt_id FROM delivery_attempts a JOIN mailbox_deliveries d USING (session_socket_id,worktree_id,delivery_id,address_id)
+         JOIN delivery_attempt_state s USING (session_socket_id,worktree_id,attempt_id)
+         JOIN pane_bindings b ON b.session_socket_id=a.session_socket_id AND b.worktree_id=a.worktree_id AND b.binding_id=a.binding_id
+         WHERE d.message_id=?1 AND b.pane_id=?2 AND s.state <> 'dispatching' ORDER BY a.rowid DESC LIMIT 1",
+        [parent["message_id"].as_str().unwrap(), pane], |row| row.get::<_, String>(0)) {
+            Ok(attempt) => return attempt,
+            Err(rusqlite::Error::QueryReturnedNoRows) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("missing reply attempt for {request} by {pane}: {parent}; {error}"),
+        }
+    }
+}
+
 pub(super) fn agent_reply(
     f: &Fixture,
     request: &str,
@@ -280,11 +302,7 @@ pub(super) fn agent_reply(
     pane: &str,
     source: &str,
 ) -> Result<Value, String> {
-    let attempt: String = f.db().query_row(
-        "SELECT a.attempt_id FROM delivery_attempts a JOIN mailbox_deliveries d USING (session_socket_id,worktree_id,delivery_id,address_id)
-         JOIN pane_bindings b ON b.session_socket_id=a.session_socket_id AND b.worktree_id=a.worktree_id AND b.binding_id=a.binding_id
-         WHERE d.message_id=?1 AND b.pane_id=?2 ORDER BY a.rowid DESC LIMIT 1",
-        [parent["message_id"].as_str().unwrap(), pane], |row| row.get(0)).unwrap_or_else(|error| panic!("missing reply attempt for {request} by {pane}: {parent}; {error}"));
+    let attempt = reply_attempt(f, parent, pane, request);
     namedrop::execute_message_operation(
         "reply",
         json!({
@@ -304,6 +322,7 @@ pub(super) fn plain_root(f: &Fixture, request: &str, source: &str) -> Value {
         None,
     );
     assert_eq!(status, 200, "{receipt}");
+    reply_attempt(f, &receipt, "pane-1-planner", request);
     receipt
 }
 
@@ -400,4 +419,16 @@ int main(int argc, char **argv) {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+pub(super) fn context(server: &Server, message: &str) -> Value {
+    let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+    let response = server.request(
+        "GET",
+        &format!("/w/{}/messages/{message}/context", key.as_str()),
+        &[("Cookie", &server.cookie)],
+        "",
+    );
+    assert_eq!(response.status, 200, "{}", response.body);
+    serde_json::from_str(&response.body).unwrap()
 }

@@ -971,7 +971,7 @@ function heardIn(group: Pick<ThreadGroup, "parents" | "replies">): Heard {
     for (const { legs } of messages) for (const { to } of legs) heard.add(to);
   return heard;
 }
-function roomOf(
+export function roomOf(
   group: Pick<ThreadGroup, "parents" | "replies">,
   members: ReadonlyMap<AddressId, Member>,
 ): Room | null {
