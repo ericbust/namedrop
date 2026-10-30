@@ -51,6 +51,16 @@ pub(crate) struct Front {
     pub mutations: Arc<Mutex<()>>,
 }
 
+impl Front {
+    fn admit_mutation(&self) -> Result<std::sync::MutexGuard<'_, ()>, Status> {
+        let guard = self.mutations.lock().map_err(|_| Status::Unavailable)?;
+        if self.restarting.load(Ordering::Acquire) {
+            return Err(Status::Unavailable);
+        }
+        Ok(guard)
+    }
+}
+
 pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<AtomicBool>) {
     let next_id = Arc::new(AtomicU64::new(1));
     let open = Arc::new(AtomicUsize::new(0));
@@ -958,28 +968,34 @@ fn serve_connection(
             key,
             thread_id,
             action,
-        }) => match super::thread_controls::apply(front.files.state(), &key, &thread_id, action) {
-            Ok((namespace, receipt)) => {
-                if let Err(error) =
-                    wake_mailboxes_after_send(front.files.state(), &namespace, &receipt)
-                {
-                    eprintln!("Thread control saved; could not wake delivery: {error}");
+        }) => {
+            let _admitted = match front.admit_mutation() {
+                Ok(guard) => guard,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            match super::thread_controls::apply(front.files.state(), &key, &thread_id, action) {
+                Ok((namespace, receipt)) => {
+                    if let Err(error) =
+                        wake_mailboxes_after_send(front.files.state(), &namespace, &receipt)
+                    {
+                        eprintln!("Thread control saved; could not wake delivery: {error}");
+                    }
+                    respond(
+                        &mut writer,
+                        "200 OK",
+                        "application/json",
+                        "",
+                        receipt.to_string().as_bytes(),
+                    )
                 }
-                respond(
-                    &mut writer,
-                    "200 OK",
-                    "application/json",
-                    "",
-                    receipt.to_string().as_bytes(),
-                )
+                Err(super::thread_controls::ControlError::NotFound) => {
+                    respond_status(&mut writer, Status::NotFound)
+                }
+                Err(super::thread_controls::ControlError::Unavailable) => {
+                    respond_status(&mut writer, Status::Unavailable)
+                }
             }
-            Err(super::thread_controls::ControlError::NotFound) => {
-                respond_status(&mut writer, Status::NotFound)
-            }
-            Err(super::thread_controls::ControlError::Unavailable) => {
-                respond_status(&mut writer, Status::Unavailable)
-            }
-        },
+        }
         Ok(Route::Screen { key, address_id }) => {
             let _permit = match screens.try_admit() {
                 Ok(permit) => permit,
@@ -1139,12 +1155,10 @@ fn send_operator_post(
     key: SpaceKey,
     post: OperatorPost,
 ) -> io::Result<()> {
-    let Ok(_admitted) = front.mutations.lock() else {
-        return respond_status(writer, Status::Unavailable);
+    let _admitted = match front.admit_mutation() {
+        Ok(guard) => guard,
+        Err(status) => return respond_status(writer, status),
     };
-    if front.restarting.load(Ordering::Acquire) {
-        return respond_status(writer, Status::Unavailable);
-    }
     let namespace = match StateStore::open_read_only(front.files.state())
         .and_then(|store| store.map(|mut store| store.dashboard_spaces()).transpose())
     {

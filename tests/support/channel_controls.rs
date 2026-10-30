@@ -340,3 +340,64 @@ fn browser_controls_stop_rechecks_the_binding_after_discovery() {
         assert_eq!(receipt["warnings"].as_array().unwrap().len(), 1);
     });
 }
+
+#[test]
+fn browser_thread_controls_refuse_mutations_during_handoff() {
+    use std::{io::Read, os::fd::AsRawFd, sync::mpsc};
+    struct PromptGate(std::path::PathBuf);
+    impl Drop for PromptGate {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    for action in ["stop", "continue"] {
+        let f = fixture();
+        let server = Server::start(&f, "not json", true);
+        let gate = PromptGate(f.root.join("prompt-gate"));
+        fs::write(&gate.0, "").unwrap();
+        let (_, parent) = support::raw_post(&server, "handoff-control", "@planner Inspect.", None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !f.root.join("prompt-entered").exists() {
+            assert!(Instant::now() < deadline, "mutation did not enter drain");
+            thread::yield_now();
+        }
+        fs::create_dir_all(f.state.join("runtime")).unwrap();
+        let packages = fs::File::create(f.state.join("runtime/packages.lock")).unwrap();
+        fs::set_permissions(
+            f.state.join("runtime/packages.lock"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(packages.as_raw_fd(), libc::LOCK_EX) },
+            0
+        );
+        let mut stream = events(&server);
+        let mut buffered = String::new();
+        next_frame(&mut stream, &mut buffered);
+        fs::write(f.state.join("runtime/migration.json"), "{}").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !buffered.contains("event: restarting") {
+            assert!(Instant::now() < deadline, "server did not start handoff");
+            let mut bytes = [0u8; 8192];
+            let count = stream.read(&mut bytes).unwrap();
+            assert!(count > 0);
+            buffered.push_str(&String::from_utf8_lossy(&bytes[..count]));
+        }
+        let (sender, receiver) = mpsc::channel();
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                sender
+                    .send(server.post(&control_path("w1", &parent, action), "{}", &[]))
+                    .unwrap()
+            });
+            let early = receiver.recv_timeout(Duration::from_millis(200));
+            drop(gate);
+            let response =
+                early.unwrap_or_else(|_| receiver.recv_timeout(Duration::from_secs(5)).unwrap());
+            assert_eq!(response.status, 503, "{action}: {}", response.body);
+            assert_eq!(controls(&f, &parent)["stopped"], false);
+        });
+        drop(packages);
+    }
+}
