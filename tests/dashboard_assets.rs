@@ -648,11 +648,10 @@ fn old_embedded_metadata_defaults_to_embedded_and_stale_metadata_does_not_choose
     dashboard.open(None);
     let mut info = dashboard.info();
     info.as_object_mut().unwrap().remove("ui");
-    fs::write(
-        dashboard.state().join("dashboard/server.json"),
-        serde_json::to_vec(&info).unwrap(),
-    )
-    .unwrap();
+    let metadata = dashboard.state().join("dashboard/server.json");
+    let staged_metadata = metadata.with_extension("json.tmp");
+    fs::write(&staged_metadata, serde_json::to_vec(&info).unwrap()).unwrap();
+    fs::rename(staged_metadata, metadata).unwrap();
     assert_eq!(dashboard.open(None)["server"], "running");
     let ui = dashboard.ui("custom");
     assert!(
