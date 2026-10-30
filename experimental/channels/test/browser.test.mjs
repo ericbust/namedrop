@@ -475,7 +475,7 @@ test("fix5: blocked agent_status attention survives replay and future attention 
   await banner
     .getByText("Waiting on approval or a question", { exact: true })
     .waitFor();
-  await banner.getByText("Open its pane in Herdr to answer.").waitFor();
+  await banner.getByText("Answer it in its pane in Herdr.").waitFor();
   assert.equal(
     await ui.page
       .locator('.members .presence[data-activity="blocked"]')
