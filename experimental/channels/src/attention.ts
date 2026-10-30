@@ -1,3 +1,4 @@
+import { timeOfDay } from "./copy.ts";
 import type {
   AddressId,
   Attention,
@@ -219,18 +220,41 @@ export function messageIntent(
       }
     : null;
 }
+function anchorWords(
+  reference: MessageIntent["reference"],
+  context: MessageContext,
+): string {
+  switch (reference.kind) {
+    case "coordination":
+      return "your coordination report";
+    case "message": {
+      const at = context.messages.find((row) => row.id === reference.id)?.at;
+      return at === undefined
+        ? "your message"
+        : `your message at ${timeOfDay(at)}`;
+    }
+    default: {
+      const exhaustive: never = reference.kind;
+      return exhaustive;
+    }
+  }
+}
 export function prepareChannelMessage(
   intent: MessageIntent,
   directory: Directory,
   draft: string,
   pending: boolean,
-): { kind: "prepared"; text: string } | { kind: "preserved" | "unavailable" } {
+  context: MessageContext,
+):
+  | { kind: "prepared"; text: string; caret: number }
+  | { kind: "preserved" | "unavailable" } {
   if (draft.length > 0 || pending) return { kind: "preserved" };
   const to = attentionReplyTo(intent, directory);
-  return to === null
-    ? { kind: "unavailable" }
-    : {
-        kind: "prepared",
-        text: `${to.mentions} Regarding ${intent.reference.kind} ${intent.reference.id}: `,
-      };
+  if (to === null) return { kind: "unavailable" };
+  const first = `${to.mentions} About ${anchorWords(intent.reference, context)}: `;
+  return {
+    kind: "prepared",
+    text: `${first}\nRef: ${intent.reference.id}`,
+    caret: first.length,
+  };
 }

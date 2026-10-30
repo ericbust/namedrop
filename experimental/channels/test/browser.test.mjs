@@ -6027,10 +6027,13 @@ test("CL-A: preparing an already prepared coordination response keeps the draft 
   await ui.page.waitForFunction(() =>
     document
       .querySelector("main .composer textarea")
-      ?.value.includes("Regarding coordination decision-1:"),
+      ?.value.includes("Ref: decision-1"),
   );
   const prepared = await draft.inputValue();
-  assert.equal(prepared, "@codex Regarding coordination decision-1: ");
+  assert.equal(
+    prepared,
+    "@codex About your coordination report: \nRef: decision-1",
+  );
   const pane = ui.page.getByRole("complementary", {
     name: "Thread",
     exact: true,
@@ -6055,7 +6058,7 @@ test("CL-A: preparing an already prepared coordination response keeps the draft 
   await ui.page.waitForFunction(() =>
     document
       .querySelector("main .composer textarea")
-      ?.value.includes("Regarding coordination decision-1:"),
+      ?.value.includes("Ref: decision-1"),
   );
   assert.equal(await draft.inputValue(), prepared);
   assert.equal(
@@ -6065,6 +6068,46 @@ test("CL-A: preparing an already prepared coordination response keeps the draft 
       })
       .count(),
     0,
+  );
+});
+
+test("DESIGN-R2 A4: the prepared message puts the caret after the plain words, so typing lands above the Ref line", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  const first = "@codex About your coordination report: ";
+  await eventually(
+    async () => (await draft.inputValue()) === `${first}\nRef: decision-1`,
+    "the prepared coordination message",
+  );
+  assert.deepEqual(
+    await draft.evaluate((box) => [
+      box.selectionStart,
+      box.selectionEnd,
+      box === document.activeElement,
+    ]),
+    [first.length, first.length, true],
+  );
+  await ui.page.keyboard.type("ship option B");
+  assert.equal(
+    await draft.inputValue(),
+    `${first}ship option B\nRef: decision-1`,
+  );
+  await draft.press("Enter");
+  await until(
+    () => ui.posts.attempts.some((attempt) => attempt.body !== null),
+    "the channel post",
+  );
+  assert.equal(
+    ui.posts.attempts[0].body.source,
+    `${first}ship option B\nRef: decision-1`,
   );
 });
 

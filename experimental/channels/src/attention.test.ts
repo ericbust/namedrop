@@ -11,6 +11,7 @@ import {
   prepareChannelMessage,
   replyPrefill,
 } from "./attention.ts";
+import { timeOfDay } from "./copy.ts";
 import type { Attention, MessageContext } from "./model.ts";
 import { parseEvent, parseMessageContext } from "./wire.ts";
 
@@ -227,7 +228,7 @@ test("legacy attention links only to an available loaded message and does not in
   );
 });
 
-test("tracked response prepares visible channel text with the owner and exact item reference", () => {
+test("tracked response prepares plain words on the first line, the caret at its end, and the exact reference on a last line", () => {
   const item: Attention = {
     rowKey: "decision",
     source: "coordination",
@@ -245,23 +246,36 @@ test("tracked response prepares visible channel text with the owner and exact it
   const intent = messageIntent(item, target, true);
   assert.ok(intent);
   const directory = { members: channel.members, homes: new Map() };
-  assert.deepEqual(prepareChannelMessage(intent, directory, "", false), {
-    kind: "prepared",
-    text: `${member.alias} Regarding coordination coordination-1: `,
-  });
+  const first = `${member.alias} About your coordination report: `;
   assert.deepEqual(
-    prepareChannelMessage(intent, directory, "My authored draft", false),
+    prepareChannelMessage(intent, directory, "", false, context),
+    {
+      kind: "prepared",
+      text: `${first}\nRef: coordination-1`,
+      caret: first.length,
+    },
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      directory,
+      "My authored draft",
+      false,
+      context,
+    ),
     { kind: "preserved" },
   );
-  assert.deepEqual(prepareChannelMessage(intent, directory, "", true), {
-    kind: "preserved",
-  });
+  assert.deepEqual(
+    prepareChannelMessage(intent, directory, "", true, context),
+    { kind: "preserved" },
+  );
   assert.deepEqual(
     prepareChannelMessage(
       intent,
       { ...directory, members: new Map() },
       "",
       false,
+      context,
     ),
     { kind: "unavailable" },
   );
@@ -276,6 +290,7 @@ test("tracked response prepares visible channel text with the owner and exact it
       },
       "",
       false,
+      context,
     ),
     { kind: "unavailable" },
   );
@@ -286,10 +301,15 @@ test("tracked response prepares visible channel text with the owner and exact it
   );
   assert.ok(message);
   assert.equal(message.preparation, "idle");
-  assert.deepEqual(prepareChannelMessage(message, directory, "", false), {
-    kind: "prepared",
-    text: `${member.alias} Regarding message old-message: `,
-  });
+  const about = `${member.alias} About your message at ${timeOfDay(anchor.at_ms)}: `;
+  assert.deepEqual(
+    prepareChannelMessage(message, directory, "", false, context),
+    {
+      kind: "prepared",
+      text: `${about}\nRef: old-message`,
+      caret: about.length,
+    },
+  );
 });
 test("channel preparation retries after preserved drafts without losing the tracked evidence boundary", () => {
   const response = {

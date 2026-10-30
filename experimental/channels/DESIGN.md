@@ -444,6 +444,18 @@ when its action is listed:
 - The same row shows in All activity. An item without a thread or actions
   keeps the hint "Continue or stop this thread from its pane."
 
+**Prepared message.** A channel message prepared for a tracked item never puts
+a raw id where the operator writes. The first line is plain words and the
+caret ends it; the id the agent needs sits on a last line of its own, so typing
+goes above it:
+
+| Anchor       | First line                                 | Last line             |
+| ------------ | ------------------------------------------ | --------------------- |
+| coordination | "@claude About your coordination report: " | "Ref: coordination-…" |
+| message      | "@codex About your message at 5:54 PM: "   | "Ref: message-…"      |
+
+The time uses the page's local time format, as message headers do.
+
 ### Thread pane
 
 400px wide, with a 1px `--line` left border. The header is 52px: "Thread" at 15px

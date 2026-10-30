@@ -572,6 +572,7 @@ export function App() {
     focused?.kind === "ready" && focused.request.response?.kind === "message"
       ? focused.request.response
       : null;
+  const preparedCaret = useRef<{ text: string; at: number } | null>(null);
   useLayoutEffect(() => {
     if (
       focused?.kind !== "ready" ||
@@ -584,6 +585,7 @@ export function App() {
       directory,
       state.drafts.get(draftKey(composerId))?.text ?? "",
       pending.length > 0,
+      focused.context,
     );
     focusEvidence({
       type: "message-prepared",
@@ -591,6 +593,7 @@ export function App() {
       result: result.kind,
     });
     if (result.kind === "prepared") {
+      preparedCaret.current = { text: result.text, at: result.caret };
       edit(composerId, result.text);
       main.current?.querySelector("textarea")?.focus();
     }
@@ -603,6 +606,13 @@ export function App() {
     pending,
     edit,
   ]);
+  useLayoutEffect(() => {
+    const box = main.current?.querySelector("textarea");
+    const want = preparedCaret.current;
+    if (want === null || box?.value !== want.text) return;
+    preparedCaret.current = null;
+    box.setSelectionRange(want.at, want.at);
+  });
   const peeking = state.slot.kind === "peek" ? state.slot.target : null;
   const who = peeking === null ? null : peekWho(state.channels, peeking);
   const pane = thread || focused ? "thread" : who ? "peek" : null;
