@@ -1,4 +1,5 @@
 import type { ActivityGroupKind } from "./activity.ts";
+import type { Absence } from "./attention.ts";
 import type { DisabledReason } from "./complete.ts";
 import { threadControls } from "./control.ts";
 import type { Delivery } from "./delivery.ts";
@@ -170,6 +171,18 @@ export const responseCopy = {
   Exclude<AttentionResponse["kind"], "local">,
   (name: string) => string
 >;
+export function absenceCopy(absence: Absence): string {
+  switch (absence.kind) {
+    case "closed":
+      return `${absence.alias}'s pane is closed, so it can't take a message.`;
+    case "gone":
+      return `${absence.alias ?? "That agent"} isn't in this channel anymore.`;
+    default: {
+      const exhaustive: never = absence;
+      return exhaustive;
+    }
+  }
+}
 export function answerInPane(name: string | null): string {
   return name === null
     ? attentionTable.agent_status.hint

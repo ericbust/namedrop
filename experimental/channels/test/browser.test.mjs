@@ -6792,7 +6792,7 @@ test("R3 U3: when the responsible agent is gone, the first press of Message @cod
   await until(() => ui.contextRequests.length === 1, "the conversation");
   await readsAs(
     ui.page.locator("main .composer-status"),
-    "The responsible agent is no longer available. Use its pane in Herdr to respond.",
+    "@codex's pane is closed, so it can't take a message.",
   );
   assert.equal(await draft.inputValue(), "my own words");
   assert.equal(
@@ -6809,6 +6809,77 @@ test("R3 U3: when the responsible agent is gone, the first press of Message @cod
     "@codex's pane is closed",
   );
 });
+
+for (const [subject, button, line] of [
+  ["codex", "Message @codex", "@codex isn't in this channel anymore."],
+  [null, "Message the agent", "That agent isn't in this channel anymore."],
+])
+  test(`R3 fix1 F4: when the responsible agent has left the frame, ${button} says ${line}`, async (t) => {
+    const { value, context } = actionableAttention("message");
+    value.frame.participants = value.frame.participants.filter(
+      (participant) => participant.address_id !== "codex",
+    );
+    value.frame.attention[0].subject_alias = subject;
+    const ui = await open(
+      t,
+      (client) => replay(client, [value]),
+      () => [],
+      { onContext: () => context },
+    );
+    await ui.live();
+    const draft = ui.page.locator("main .composer").getByRole("combobox");
+    await draft.fill("my own words");
+    await ui.page
+      .getByRole("region", { name: "Attention needed" })
+      .getByRole("button", { name: button, exact: true })
+      .click();
+    await until(() => ui.contextRequests.length === 1, "the conversation");
+    await readsAs(ui.page.locator("main .composer-status"), line);
+    assert.equal(await draft.inputValue(), "my own words");
+    assert.equal(ui.posts.attempts.length, 0);
+  });
+
+for (const [gone, line] of [
+  ["closed", "@codex's pane is closed, so it can't take a message."],
+  ["left", "@codex isn't in this channel anymore."],
+])
+  test(`R3 fix1 F4: in the thread pane, a reply whose agent ${gone === "closed" ? "has a closed pane" : "left the frame"} reads ${line} in the reply box's place`, async (t) => {
+    const { value, context } = actionableAttention("reply");
+    if (gone === "closed") {
+      value.frame.participants[0].activity = "retired";
+      value.frame.participants[0].recently_closed = true;
+    } else
+      value.frame.participants = value.frame.participants.filter(
+        (participant) => participant.address_id !== "codex",
+      );
+    value.frame.attention[0].subject_alias = "codex";
+    const ui = await open(
+      t,
+      (client) => replay(client, [value]),
+      () => [],
+      { onContext: () => context },
+    );
+    await ui.live();
+    await ui.page
+      .getByRole("region", { name: "Attention needed" })
+      .getByRole("button", { name: "Reply to @codex", exact: true })
+      .click();
+    const pane = ui.page.getByRole("complementary", {
+      name: "Thread",
+      exact: true,
+    });
+    await readsAs(pane.locator(".thread-answer"), line);
+    assert.equal(await pane.getByRole("combobox").count(), 0);
+    if (gone === "closed")
+      assert.equal(
+        await ui.page
+          .getByRole("list", { name: "Members" })
+          .getByText("Pane closed")
+          .count(),
+        1,
+        "the chip names the same state",
+      );
+  });
 
 test("DESIGN-R2 D2: the kept-draft notice lasts until the box changes, then the hint names a capitalized leading name again", async (t) => {
   const { value, context } = actionableAttention("message");

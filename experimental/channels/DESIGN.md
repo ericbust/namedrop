@@ -453,6 +453,21 @@ offer, and its button names the action and the person:
 | `pane`     | "See @worker's screen" | Opens the peek drawer for that agent.                                |
 | `local`    | none                   | Its setup step becomes the hint.                                     |
 
+When the agent a `reply` or `message` is for can't take a message, the first
+press says why in the place the answer would go: the channel composer's status
+row for `message`, and the thread pane's slot for `reply`. Its words match the
+member chip.
+
+| The agent                                    | The line                                               |
+| -------------------------------------------- | ------------------------------------------------------ |
+| Its pane is closed, the chip's "Pane closed" | "@codex's pane is closed, so it can't take a message." |
+| No longer in the frame, the card names it    | "@codex isn't in this channel anymore."                |
+| No longer in the frame, no name known        | "That agent isn't in this channel anymore."            |
+
+The card's name for an agent that left the frame is the item's subject. A
+`coordination` or `automatic_reply_limit` item has none, so it reads "That
+agent".
+
 A `pane` response is answered in Herdr, so its hint names the agent's pane,
 with the pane label, such as `w1:worker`, as the hint's tooltip. A failed
 `context_grant` is not fixed in that pane, so it keeps its own hint with no
@@ -528,13 +543,15 @@ bottom. Only one place offers an action at a time. While the channel box shows
 its kept-draft notice, which names the card's button as the retry, the line has
 no button. Once the notice goes, the button comes back.
 
-| The item's answer               | The line                                                                          |
-| ------------------------------- | --------------------------------------------------------------------------------- |
-| A channel message, ready        | "Answer tracked work in the channel. Your message to @claude is ready there."     |
-| A channel message, not prepared | "Answer tracked work in the channel." then a **Message @claude** text button      |
-| A channel message, draft kept   | "Answer tracked work in the channel." alone                                       |
-| The agent's pane                | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip       |
-| A reply to an agent now gone    | "The responsible agent is no longer available. Use its pane in Herdr to respond." |
+| The item's answer                      | The line                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------- |
+| A channel message, ready               | "Answer tracked work in the channel. Your message to @claude is ready there." |
+| A channel message, not prepared        | "Answer tracked work in the channel." then a **Message @claude** text button  |
+| A channel message, draft kept          | "Answer tracked work in the channel." alone                                   |
+| The agent's pane                       | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip   |
+| A reply to an agent whose pane closed  | "@codex's pane is closed, so it can't take a message."                        |
+| A reply to an agent no longer in frame | "@codex isn't in this channel anymore."                                       |
+| The same, with no name known           | "That agent isn't in this channel anymore."                                   |
 
 When a reply's thread already holds a draft, the composer stays and its status
 row reads, 12px muted: "Your existing draft was kept. Send or clear it before
@@ -599,10 +616,11 @@ main column, under the timeline, and at the bottom of the thread pane.
   The notice stays until the next edit of the box, a send, or a clear; then the
   recipient guard and the hint return, so "@Codex hi" typed after it reads
   "Names are lowercase: @codex". The message that button prepared is not
-  another draft, so pressing it again never warns. When the agent is gone, the
-  first press says so in the same row, whether or not the box holds a draft,
-  and the box keeps its text: "The responsible agent is no longer available.
-  Use its pane in Herdr to respond." Availability is checked before the draft,
+  another draft, so pressing it again never warns. When the agent can't take a
+  message, the first press says why in the same row, whether or not the box
+  holds a draft, and the box keeps its text: "@codex's pane is closed, so it
+  can't take a message." or "@codex isn't in this channel anymore." (see
+  Response under Needs-you banner). Availability is checked before the draft,
   so the operator never clears a draft only to learn the agent is gone. That
   line also gives way at the next edit, so the hint and the guard explain the
   text that follows.

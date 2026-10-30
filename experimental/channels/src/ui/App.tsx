@@ -11,12 +11,14 @@ import {
 } from "react";
 import { type ActivityList, activityOf } from "../activity.ts";
 import {
+  absence,
   evidenceReduce,
   evidenceThread,
   prepareChannelMessage,
 } from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
 import {
+  absenceCopy,
   channelMention,
   composerPlaceholder,
   paneLabelText,
@@ -924,8 +926,7 @@ export function App() {
                         </p>
                       ) : channelResponse?.preparation === "unavailable" ? (
                         <p className="composer-guard" role="status">
-                          The responsible agent is no longer available. Use its
-                          pane in Herdr to respond.
+                          {absenceCopy(absence(channelResponse, directory))}
                         </p>
                       ) : null
                     }

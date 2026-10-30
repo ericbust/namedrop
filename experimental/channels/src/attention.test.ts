@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
+  absence,
   attentionConversation,
   attentionReplyTo,
   evidenceReduce,
@@ -28,7 +29,12 @@ const channel = event.channel;
 const member = [...channel.members.values()][0];
 if (member === undefined) throw new Error("Missing member");
 const target = { threadId: "old-thread", messageId: "old-message" };
-const reply = { kind: "reply", ...target, addressId: member.id } as const;
+const reply = {
+  kind: "reply",
+  ...target,
+  addressId: member.id,
+  subject: null,
+} as const;
 const request = { key: channel.key, target, response: reply };
 const root = {
   message_id: "root",
@@ -208,6 +214,46 @@ test("reply intent addresses the responsible member, preserves typed drafts and 
     null,
   );
 });
+test("an unreachable response says why: its pane is closed, or it left the frame, with the card's name when the page has one", () => {
+  const item: Attention = {
+    rowKey: "unanswered",
+    source: "delivery_attempt",
+    response: { kind: "message", addressId: member.id },
+    conversation: target,
+    summary: { text: "Unanswered", truncated: false },
+    subjectSummary: null,
+    openedAt: 1,
+    subjectAlias: member.alias,
+    messageId: null,
+    threadId: null,
+    actions: [],
+  };
+  const intent = messageIntent(item, target, true);
+  assert.ok(intent);
+  assert.equal(intent.subject, member.alias);
+  const closed: Directory = {
+    members: new Map([[member.id, { ...member, activity: "retired" }]]),
+    homes: new Map(),
+  };
+  const removed: Directory = { members: new Map(), homes: new Map() };
+  assert.deepEqual(absence(intent, closed), {
+    kind: "closed",
+    alias: member.alias,
+  });
+  assert.deepEqual(absence({ ...intent, subject: null }, closed), {
+    kind: "closed",
+    alias: member.alias,
+  });
+  assert.deepEqual(absence(intent, removed), {
+    kind: "gone",
+    alias: member.alias,
+  });
+  assert.deepEqual(absence(reply, removed), { kind: "gone", alias: null });
+  assert.equal(
+    messageIntent({ ...item, subjectAlias: null }, target, true)?.subject,
+    null,
+  );
+});
 test("legacy attention links only to an available loaded message and does not invent a response", () => {
   const attention: Attention = {
     rowKey: "legacy",
@@ -341,6 +387,7 @@ test("a response whose agent is gone reads unavailable on the first press, whate
   const intent: MessageIntent = {
     kind: "message",
     addressId: member.id,
+    subject: null,
     reference: { kind: "coordination", id: "coordination-1" },
     preparation: "requested",
   };
@@ -368,6 +415,7 @@ test("channel preparation retries after preserved drafts without losing the trac
   const response = {
     kind: "message",
     addressId: member.id,
+    subject: null,
     reference: { kind: "coordination", id: "coordination-1" },
     preparation: "requested",
   } as const;
@@ -431,6 +479,7 @@ test("an edit of the channel box ends a preserved preparation, so the kept-draft
     const response: MessageIntent = {
       kind: "message",
       addressId: member.id,
+      subject: null,
       reference: { kind: "coordination", id: "coordination-1" },
       preparation,
     };
@@ -473,6 +522,7 @@ test("channel preparation is idempotent while requested or already prepared", ()
     const response = {
       kind: "message",
       addressId: member.id,
+      subject: null,
       reference: { kind: "coordination", id: "coordination-1" },
       preparation,
     } as const;
