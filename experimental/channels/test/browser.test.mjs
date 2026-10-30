@@ -10027,6 +10027,75 @@ test("UI-R4 L2: after the drawer was open, growing past 600 px and shrinking bac
     `focus is on ${await page.evaluate(() => document.activeElement?.tagName)}`,
   );
 });
+// WCAG contrast between pixels of a screenshot, read on a blank page so the
+// app's CSP has no say over the data URL.
+async function pixelContrast(png, pairs) {
+  const reader = await browser.newPage();
+  try {
+    return await reader.evaluate(
+      async ([data, pairs]) => {
+        const image = new Image();
+        image.src = `data:image/png;base64,${data}`;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0);
+        const luminance = ([x, y]) => {
+          const [r, g, b] = context.getImageData(x, y, 1, 1).data;
+          const channel = (v) =>
+            v / 255 <= 0.03928
+              ? v / 255 / 12.92
+              : ((v / 255 + 0.055) / 1.055) ** 2.4;
+          return (
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+          );
+        };
+        return pairs.map(([a, b]) => {
+          const [la, lb] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+          return Math.round(((la + 0.05) / (lb + 0.05)) * 100) / 100;
+        });
+      },
+      [png.toString("base64"), pairs],
+    );
+  } finally {
+    await reader.close();
+  }
+}
+test("UI-R4 L2: in dark mode the drawer's edge stands off the dimmed page by 1.5:1, and light mode keeps its separation", async (t) => {
+  const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  const dialog = ui.page.getByRole("dialog", { name: "Channels" });
+  const found = {};
+  for (const colorScheme of ["dark", "light"]) {
+    await ui.page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+    await ui.page.getByRole("button", { name: /^Channels/ }).click();
+    await dialog.waitFor();
+    const right = await dialog.evaluate(
+      (element) => element.getBoundingClientRect().right,
+    );
+    const y = 600;
+    const png = await ui.page.screenshot({
+      clip: { x: right - 20, y, width: 120, height: 1 },
+    });
+    const [edge, nearPage, surface] = [19, 20, 10].map((x) => [x, 0]);
+    const farPage = [119, 0];
+    const [edgeNear, edgeFar, surfaceFar] = await pixelContrast(png, [
+      [edge, nearPage],
+      [edge, farPage],
+      [surface, farPage],
+    ]);
+    found[colorScheme] = { edge: Math.min(edgeNear, edgeFar), surfaceFar };
+    await ui.page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+  }
+  const at = JSON.stringify(found);
+  t.diagnostic(`contrast ${at}`);
+  assert.ok(found.dark.edge >= 1.5, `the dark edge reads ${at}`);
+  assert.ok(found.light.surfaceFar >= 1.9, `light mode keeps its scrim ${at}`);
+});
 test("UI-R4 L2: typing in the composer leaves the page's media queries subscribed once", async (t) => {
   const ui = await open(t, (client) => replay(client, [layoutChannel()]));
   await ui.live();
