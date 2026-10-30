@@ -217,10 +217,25 @@ function postRoute(onPost) {
       };
       if (!authorized(req)) return reply(401, { error: "No session." });
       if (request.csrf !== session.csrf) return reply(403, {});
-      const outcome = await onDeliver(JSON.parse(request.body), request);
+      const asked = JSON.parse(request.body);
+      const outcome = await onDeliver(asked, request);
       if (outcome.drop) return req.socket.destroy();
-      const { status = 200, channel = {}, ...answer } = outcome;
-      if (status === 200) return reply(200, { channel, ...answer });
+      if (outcome.raw !== undefined) {
+        request.status = 200;
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(outcome.raw);
+      }
+      if (outcome.stall) {
+        request.status = 200;
+        request.closed = false;
+        req.socket.once("close", () => {
+          request.closed = true;
+        });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.write('{"delivered":');
+      }
+      const { status = 200, ...answer } = outcome;
+      if (status === 200) return reply(200, { delivered: asked.to, ...answer });
       if (answer.error !== undefined)
         return reply(status, { error: answer.error });
       request.status = status;
@@ -460,7 +475,7 @@ test("fix5: blocked agent_status attention survives replay and future attention 
   await banner
     .getByText("Waiting on approval or a question", { exact: true })
     .waitFor();
-  await banner.getByText("Open its pane in Herdr to answer.").waitFor();
+  await banner.getByText("Answer it in its pane in Herdr.").waitFor();
   assert.equal(
     await ui.page
       .locator('.members .presence[data-activity="blocked"]')
@@ -1296,7 +1311,7 @@ test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t
     [{ stage: "delivered" }, "Delivered", null],
     [{ stage: "working", acked_at_ms: 100 }, "Working on it", null],
     [{ stage: "replied", reply_id: "reply" }, "Replied", null],
-    [{ stage: "completed", kind: "settled" }, "Done", null],
+    [{ stage: "completed", kind: "settled" }, "Ended without an answer", null],
     [{ stage: "completed", kind: "no_reply" }, "Done, no reply needed", null],
     [{ stage: "completed", kind: "success" }, "Done", "success"],
     [{ stage: "held" }, "Held while paused", null],
@@ -1314,7 +1329,11 @@ test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t
         { to: "human", stage: { stage: "working", acked_at_ms: 100 } },
       ],
     }),
+    message("command", "ls", {
+      legs: [{ to: "shell", stage: { stage: "completed", kind: "settled" } }],
+    }),
   );
+  value.frame.participants = people();
   const ui = await open(t, (client) => replay(client, [value]));
   await ui.live();
   for (const [index, [, label, title]] of stages.entries()) {
@@ -1330,7 +1349,14 @@ test("UI-2 fix1: every delivery stage shows its visible receipt label", async (t
     await ui.page
       .locator('[data-message-id="several"] .receipt li')
       .allTextContents(),
-    ["an unknown agentDone", "YouWorking on it"],
+    ["an unknown agentEnded without an answer", "YouWorking on it"],
+  );
+  assert.equal(
+    await ui.page
+      .locator('[data-message-id="command"] .receipt li')
+      .textContent(),
+    "Done",
+    "a terminal's settled command is done",
   );
   assert.equal(
     await ui.page.getByText(/settled|no_reply|Completed/).count(),
@@ -2465,6 +2491,57 @@ test("thread pane: a non-terminal reply that mimics a terminal result renders as
   );
 });
 
+test("DESIGN-R2 B2: the reply count is never covered: the preview text takes the room beside it, and with under 120 px left the row shows the count only", async (t) => {
+  const { value } = conversation();
+  const latest = value.frame.messages.find((row) => row.message_id === "r2");
+  latest.body.text =
+    "Fixed: the CI cache was stale. I cleared it and the build passes now on every runner.";
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const preview = ui.page.locator('[data-message-id="ask"] .reply-preview');
+  const facts = async () => {
+    await preview.scrollIntoViewIfNeeded();
+    return preview.evaluate((button) => {
+      const count = button.querySelector(".rp-count");
+      const c = count.getBoundingClientRect();
+      const hit = document.elementFromPoint(
+        c.left + c.width / 2,
+        c.top + c.height / 2,
+      );
+      const text = [...button.querySelectorAll(".rp-main, .rp-main *")]
+        .map((element) => element.getBoundingClientRect())
+        .filter((r) => r.width > 0 && r.height > 0);
+      const main = button.querySelector(".rp-main")?.getBoundingClientRect();
+      return {
+        text: text.length > 0 ? Math.round(main.width) >= 120 : "count only",
+        covered: text.some(
+          (r) =>
+            r.left < c.right &&
+            r.right > c.left &&
+            r.top < c.bottom &&
+            r.bottom > c.top,
+        ),
+        countShown: count.contains(hit) && count.textContent === "2 replies",
+        countFits: count.scrollWidth <= count.clientWidth,
+      };
+    });
+  };
+  for (const [width, height, text] of [
+    [390, 844, "count only"],
+    [599, 844, true],
+    [640, 800, true],
+    [1440, 900, true],
+  ])
+    assert.deepEqual(
+      await (async () => {
+        await ui.page.setViewportSize({ width, height });
+        return facts();
+      })(),
+      { text, covered: false, countShown: true, countFits: true },
+      `${width}x${height}`,
+    );
+});
+
 test("design-b fix: terminal results show stdout, stderr and the exit code instead of the preamble", async (t) => {
   const at = Date.now() - 10 * 60_000;
   const value = frame(1, "alpha");
@@ -2834,13 +2911,13 @@ test("design-b: Needs you shows titles, hints and ages three at a time and annou
     0,
   );
   assert.equal(await ui.page.locator(".channel-header .health").count(), 0);
-  const live = ui.page.locator('[aria-live="polite"]');
+  const live = ui.page.locator('main [aria-live="polite"]');
   assert.equal(await live.textContent(), "");
   value.frame.attention.push(card("pane_binding", "Pane moved."));
   ui.connections[0].send("space", value);
   await ui.page.waitForFunction(
     () =>
-      document.querySelector('[aria-live="polite"]')?.textContent ===
+      document.querySelector('main [aria-live="polite"]')?.textContent ===
       "Needs you: An agent's pane changed",
   );
 });
@@ -3018,6 +3095,62 @@ test("Needs you: Show message on a live arrival does not replay its arrival when
   );
 });
 
+test("DESIGN-R2 A9: a conversation pane tints its target like Show message for 1.5 s, then clears it, with or without motion", async (t) => {
+  const { value, context } = actionableAttention();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const show = ui.page.getByRole("button", { name: /^Show message/ });
+  const target = ui.page
+    .getByRole("complementary", { name: "Thread", exact: true })
+    .locator('[data-message-id="attention-target"]');
+  const selected = await ui.page.evaluate(() => {
+    const probe = document.body.appendChild(document.createElement("div"));
+    probe.style.backgroundColor = "var(--bg-selected)";
+    const color = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return color;
+  });
+  const cleared = () =>
+    ui.page.waitForFunction(
+      () =>
+        !document
+          .querySelector('.thread [data-message-id="attention-target"]')
+          .classList.contains("located"),
+    );
+  let pressed = Date.now();
+  await show.click();
+  await target.waitFor();
+  assert.equal((await tint(target)).animation, "located");
+  await cleared();
+  assert.ok(Date.now() - pressed >= 1400, "the tint holds for 1.5 s");
+  assert.deepEqual(await tint(target), {
+    located: false,
+    animation: "none",
+    background: "rgba(0, 0, 0, 0)",
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  pressed = Date.now();
+  await show.click();
+  await ui.page.waitForFunction(() =>
+    document
+      .querySelector('.thread [data-message-id="attention-target"]')
+      ?.classList.contains("located"),
+  );
+  assert.deepEqual(await tint(target), {
+    located: true,
+    animation: "none",
+    background: selected,
+  });
+  await cleared();
+  assert.ok(Date.now() - pressed >= 1400, "reduced motion holds 1.5 s too");
+  assert.equal((await tint(target)).background, "rgba(0, 0, 0, 0)");
+});
+
 test("thread pane: a thread with no replies reads No replies yet, and one with unloaded replies keeps its count", async (t) => {
   const value = locatedChannel();
   value.frame.threads = [
@@ -3124,6 +3257,153 @@ test("design-b: the layout gives the timeline the room, wraps members in two lin
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
     true,
+  );
+});
+
+test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column keeps the Needs-you banner and the composer inside its half", async (t) => {
+  const value = team(1, "alpha");
+  const at = Date.now() - 60 * 60_000;
+  value.frame.health = { level: "needs_you", items: 8 };
+  value.frame.attention = Array.from({ length: 8 }, (_, n) => ({
+    source_kind: "agent_status",
+    summary: {
+      text: `@codex is waiting on an approval or question ${n + 1}.`,
+      truncated: false,
+    },
+    opened_at_ms: at,
+  }));
+  value.frame.messages = [
+    message("p1", "@codex please check the build cache", {
+      at_ms: at,
+      legs: [{ to: "codex", stage: { stage: "delivered" } }],
+    }),
+    message("r1", "the cache is fine", {
+      thread_id: "p1",
+      in_reply_to: "p1",
+      kind: "reply",
+      author: "codex",
+      at_ms: at + 60_000,
+    }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.page.setViewportSize({ width: 1024, height: 700 });
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Show 5 more", exact: true })
+    .click();
+  const layout = () =>
+    ui.page.evaluate(() => {
+      const main = document.querySelector("main");
+      const pane = document.querySelector(".app-shell > .slot");
+      const box = (element) => element.getBoundingClientRect();
+      // What an element paints: its box cut by every scroller it sits in.
+      const painted = (element) => {
+        let { left, top, right, bottom } = box(element);
+        for (let clip = element.parentElement; clip !== main; ) {
+          const style = getComputedStyle(clip);
+          if (style.overflowX !== "visible" || style.overflowY !== "visible") {
+            const edge = box(clip);
+            left = Math.max(left, edge.left);
+            top = Math.max(top, edge.top);
+            right = Math.min(right, edge.right);
+            bottom = Math.min(bottom, edge.bottom);
+          }
+          clip = clip.parentElement;
+        }
+        return { left, top, right, bottom };
+      };
+      const area = box(pane);
+      const overlaps = (r) =>
+        Math.min(r.right, area.right) - Math.max(r.left, area.left) > 0.5 &&
+        Math.min(r.bottom, area.bottom) - Math.max(r.top, area.top) > 0.5;
+      const describe = (element) =>
+        `${element.tagName.toLowerCase()}.${[...element.classList].join(".")}`;
+      const hits = new Set();
+      for (let x = area.left + 2; x < area.right; x += 12)
+        for (let y = area.top + 2; y < area.bottom; y += 12) {
+          const hit = document.elementFromPoint(x, y);
+          if (hit !== null && !pane.contains(hit)) hits.add(describe(hit));
+        }
+      const edges = (element) => {
+        const { top, bottom, height } = box(element);
+        return { top, bottom, height };
+      };
+      const of = (selector) => edges(main.querySelector(selector));
+      const banner = main.querySelector(".attention");
+      return {
+        main: edges(main),
+        banner: edges(banner),
+        bannerScrolls: banner.scrollHeight > banner.clientHeight,
+        timeline: of(".timeline"),
+        composer: of(".composer"),
+        intruders: [...main.querySelectorAll("*")]
+          .filter((element) => overlaps(painted(element)))
+          .map(describe),
+        hits: [...hits],
+      };
+    });
+  const squeezed = [];
+  const stacked = async (state) => {
+    for (const [width, height] of [
+      [390, 844],
+      [640, 600],
+    ]) {
+      await ui.page.setViewportSize({ width, height });
+      const at = `${state} at ${width}x${height}`;
+      const shown = await layout();
+      assert.deepEqual(
+        { intruders: shown.intruders, hits: shown.hits },
+        { intruders: [], hits: [] },
+        `nothing in the main column paints over the pane with ${at}`,
+      );
+      assert.ok(
+        shown.composer.top >= shown.main.top &&
+          shown.composer.bottom <= shown.main.bottom + 0.5,
+        `the composer is whole and inside the column with ${at}: ${JSON.stringify(shown)}`,
+      );
+      assert.ok(
+        shown.banner.bottom <= shown.composer.top + 0.5,
+        `the banner ends above the composer with ${at}: ${JSON.stringify(shown)}`,
+      );
+      const cap = shown.main.height * 0.4;
+      assert.ok(
+        shown.banner.height <= cap + 0.5,
+        `the banner is capped at 40% of the column with ${at}: ${JSON.stringify(shown)}`,
+      );
+      assert.ok(shown.bannerScrolls, `the banner scrolls inside with ${at}`);
+      if (shown.banner.height < cap - 0.5) {
+        squeezed.push(at);
+        assert.equal(
+          shown.timeline.height,
+          0,
+          `the timeline gives up all its room before the banner with ${at}: ${JSON.stringify(shown)}`,
+        );
+      }
+    }
+    await ui.page.setViewportSize({ width: 1024, height: 700 });
+    const wide = await layout();
+    assert.ok(
+      Math.abs(wide.banner.height - 0.4 * 700) < 1,
+      `side by side, the banner keeps 40% of the window with ${state}: ${wide.banner.height}`,
+    );
+  };
+  await ui.page.getByRole("button", { name: /^1 reply from/ }).click();
+  await threadPane(ui).waitFor();
+  await stacked("a thread open");
+  await ui.page.keyboard.press("Escape");
+  await threadPane(ui).waitFor({ state: "detached" });
+  await ui.page
+    .locator(".members")
+    .getByRole("button", { name: /@codex/ })
+    .click();
+  await drawer(ui).waitFor();
+  await stacked("the peek drawer open");
+  assert.deepEqual(
+    squeezed.filter((at) => at.endsWith("640x600")),
+    ["a thread open at 640x600", "the peek drawer open at 640x600"],
+    "the 300px column squeezes the banner",
   );
 });
 
@@ -4477,6 +4757,103 @@ const screenText = (ui) =>
 const focusedIn = (locator) =>
   locator.evaluate((element) => element.contains(document.activeElement));
 
+test("DESIGN-R2 A8: an All activity row with actions keeps its grid, with 12px actions under line 2 at the alias", async (t) => {
+  const team = busyTeam();
+  const [item] = team[1].frame.attention;
+  item.conversation = { thread_id: "t-claude", message_id: "m-claude" };
+  item.response = { kind: "message", address_id: "claude" };
+  const ui = await open(t, (client) => replay(client, team), undefined, {
+    path: "/?view=activity",
+  });
+  await ui.live();
+  const actions = ui.page.locator(".activity-item .attention-actions");
+  await actions.waitFor();
+  const layout = () =>
+    ui.page.evaluate(() => {
+      const box = (element) => element.getBoundingClientRect();
+      const row = (alias) =>
+        [...document.querySelectorAll(".activity-item")].find(
+          (item) =>
+            item.querySelector(".activity-alias").firstChild.textContent ===
+            alias,
+        );
+      const asking = row("@claude");
+      const working = row("@codex");
+      const buttons = [...asking.querySelectorAll(".attention-actions button")];
+      return {
+        avatar:
+          box(asking.querySelector(".avatar")).left ===
+          box(working.querySelector(".avatar")).left,
+        alias:
+          box(asking.querySelector(".activity-alias")).left ===
+          box(working.querySelector(".activity-alias")).left,
+        actions:
+          Math.abs(
+            box(asking.querySelector(".attention-actions")).left -
+              box(asking.querySelector(".activity-alias")).left,
+          ) < 0.5,
+        below:
+          box(asking.querySelector(".attention-actions")).top >=
+          box(asking.querySelector(".activity-line")).bottom,
+        labels: buttons.map((button) => button.textContent),
+        lines: new Set(buttons.map((button) => box(button).top)).size,
+        sizes: [
+          ...new Set(
+            buttons.map((button) => getComputedStyle(button).fontSize),
+          ),
+        ],
+        gap: getComputedStyle(asking.querySelector(".attention-actions"))
+          .columnGap,
+      };
+    });
+  for (const [width, height] of [
+    [1440, 900],
+    [1024, 700],
+  ]) {
+    await ui.page.setViewportSize({ width, height });
+    assert.deepEqual(
+      await layout(),
+      {
+        avatar: true,
+        alias: true,
+        actions: true,
+        below: true,
+        labels: ["Show message", "Message @claude"],
+        lines: 1,
+        sizes: ["12px"],
+        gap: "12px",
+      },
+      `${width}px`,
+    );
+  }
+});
+
+test("DESIGN-R2: an All activity row reads the item in plain words, with the server's text and its ids in the tooltip", async (t) => {
+  const team = busyTeam();
+  const [item] = team[1].frame.attention;
+  const server =
+    "Coordination coordination-1793308769836090626-2129769-1 needs a decision: the report is saved and waits for the lead.";
+  item.source_kind = "coordination";
+  item.summary = { text: server, truncated: false };
+  item.subject_summary = null;
+  const ui = await open(t, (client) => replay(client, team), undefined, {
+    path: "/?view=activity",
+  });
+  await ui.live();
+  const line = ui.page.locator(".activity-item .activity-text").first();
+  await line.waitFor();
+  assert.equal(await line.textContent(), "Coordination needs a decision");
+  assert.equal(await line.getAttribute("title"), server);
+  assert.equal(
+    await ui.page
+      .locator(".activity-list")
+      .getByText(/coordination-\d/)
+      .count(),
+    0,
+    "no raw id is visible in the list",
+  );
+});
+
 test("UI-4: All activity lists blocked, then waiting, then working rows, and its URL survives reload and Back", async (t) => {
   const ui = await open(t, (client) => replay(client, busyTeam()));
   await ui.live();
@@ -4775,9 +5152,32 @@ test("a recent retired member opens Pane closed, then leaves the strip after gra
   });
   await ui.live();
   const chip = ui.page.locator('.members li[data-address-id="codex"]');
-  await chip.getByText("Retired", { exact: true }).waitFor();
+  await chip.getByText("Pane closed", { exact: true }).waitFor();
+  assert.deepEqual(
+    await chip.evaluate((item) => {
+      const color = (name) => getComputedStyle(item.querySelector(name)).color;
+      return {
+        alias: color(".alias"),
+        dot: item.querySelector(".presence") !== null,
+      };
+    }),
+    {
+      alias: await ui.page
+        .locator('.members li[data-address-id="codex"] .status')
+        .evaluate((word) => getComputedStyle(word).color),
+      dot: false,
+    },
+    "a closed pane's alias is as quiet as its word, with no dot",
+  );
   await chip.getByRole("button").click();
-  await drawer(ui).getByText("Pane closed", { exact: true }).waitFor();
+  await drawer(ui)
+    .locator(".peek-failure")
+    .getByText("Pane closed", { exact: true })
+    .waitFor();
+  await drawer(ui)
+    .locator(".peek-presence")
+    .getByText("Pane closed", { exact: true })
+    .waitFor();
   assert.deepEqual(
     ui.screens.requests.map(({ address }) => address),
     ["codex"],
@@ -5525,7 +5925,7 @@ test("CL-A: explicit attention names its responsible member and focuses fetched 
   await ui.live();
   assert.equal(
     await ui.page
-      .getByRole("button", { name: "Respond to @current-owner", exact: true })
+      .getByRole("button", { name: "Reply to @current-owner", exact: true })
       .count(),
     1,
   );
@@ -5554,6 +5954,265 @@ test("CL-A: explicit attention names its responsible member and focuses fetched 
   );
 });
 
+test("DESIGN-R2 A7: a conversation that fails to load says so in the history-error line, keeps its channel, and Try again loads it", async (t) => {
+  const { value, context } = actionableAttention();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const line = pane.getByRole("alert");
+  const look = () =>
+    line.evaluate((element) => {
+      const style = getComputedStyle(element);
+      const probe = document.body.appendChild(document.createElement("p"));
+      probe.style.color = "var(--text-muted)";
+      const muted = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        text: element.textContent,
+        title: element.title,
+        size: style.fontSize,
+        muted: style.color === muted,
+        where: element.closest("aside").querySelector(".thread-where")
+          ?.textContent,
+      };
+    });
+  await ui.page.route("**/context", (route) =>
+    route.fulfill({ status: 503, body: "" }),
+  );
+  await ui.page.getByRole("button", { name: /^Show message/ }).click();
+  await line.waitFor();
+  assert.deepEqual(await look(), {
+    text: "Couldn't load this conversation. Try again",
+    title: "HTTP 503",
+    size: "12px",
+    muted: true,
+    where: "in #alpha",
+  });
+  await ui.page.unroute("**/context");
+  await ui.page.route("**/context", (route) =>
+    route.abort("connectionrefused"),
+  );
+  await line.getByRole("button", { name: "Try again", exact: true }).click();
+  await ui.page.waitForFunction(
+    () =>
+      document.querySelector('.thread [role="alert"]')?.title ===
+      "Couldn't reach Namedrop.",
+  );
+  await ui.page.unroute("**/context");
+  await line.getByRole("button", { name: "Try again", exact: true }).click();
+  await pane.locator('[data-message-id="attention-target"]').waitFor();
+  assert.equal(await pane.getByRole("alert").count(), 0);
+});
+
+test("DESIGN-R2 A1-A3: each Needs-you card has one action row, 12px apart, that names the action and the person", async (t) => {
+  const { value, context } = actionableAttention();
+  const [reply] = value.frame.attention;
+  value.frame.participants[0].pane_label = {
+    text: "w1:codex",
+    truncated: false,
+  };
+  value.frame.attention.push(
+    {
+      ...reply,
+      source_kind: "coordination",
+      opened_at_ms: 5,
+      coordination_id: "decision-1",
+      response: { kind: "message", address_id: "codex" },
+    },
+    {
+      ...reply,
+      source_kind: "context_grant",
+      opened_at_ms: 6,
+      response: { kind: "pane", address_id: "codex" },
+    },
+  );
+  value.frame.health = { level: "needs_you", items: 3 };
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const cards = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  await cards.nth(2).waitFor();
+  const rows = () =>
+    cards.evaluateAll((items) =>
+      items.map((item) => {
+        const rows = item.querySelectorAll(".attention-actions");
+        const buttons = [...rows[0].querySelectorAll("button")];
+        return {
+          rows: rows.length,
+          labels: buttons.map((button) => button.textContent),
+          lines: new Set(buttons.map((button) => button.offsetTop)).size,
+          gap: getComputedStyle(rows[0]).columnGap,
+          sizes: [
+            ...new Set(
+              buttons.map((button) => getComputedStyle(button).fontSize),
+            ),
+          ],
+        };
+      }),
+    );
+  const expected = [
+    ["Show message", "Reply to @codex", "Details"],
+    ["Show message", "Message @codex", "Details"],
+    ["Show message", "See @codex's screen", "Details"],
+  ].map((labels) => ({
+    rows: 1,
+    labels,
+    lines: 1,
+    gap: "12px",
+    sizes: ["13px"],
+  }));
+  for (const [width, height] of [
+    [1440, 900],
+    [1024, 700],
+  ]) {
+    await ui.page.setViewportSize({ width, height });
+    assert.deepEqual(await rows(), expected, `${width}px`);
+  }
+  await ui.page.setViewportSize({ width: 390, height: 844 });
+  assert.deepEqual(
+    await cards.evaluateAll((items) =>
+      items.map(
+        (item) =>
+          new Set(
+            [...item.querySelectorAll(".attention-actions button")].map(
+              (button) => button.offsetHeight,
+            ),
+          ).size,
+      ),
+    ),
+    [1, 1, 1],
+    "a narrow row wraps between labels, never inside one",
+  );
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  const hint = cards.nth(2).locator(".attention-hint");
+  assert.deepEqual(
+    [await hint.textContent(), await hint.getAttribute("title")],
+    ["Approve or decline it in @codex's pane in Herdr.", "w1:codex"],
+  );
+  assert.equal(
+    await cards.locator(".attention-actions", { hasText: "in Herdr" }).count(),
+    0,
+  );
+  await cards
+    .nth(2)
+    .getByRole("button", { name: "See @codex's screen", exact: true })
+    .click();
+  await ui.page
+    .getByRole("complementary", { name: "Screen of @codex", exact: true })
+    .waitFor();
+});
+
+test("DESIGN-R2 D3: a narrow action row wraps between whole labels, and only a label wider than the whole column ends in an ellipsis, with the label as its title", async (t) => {
+  const { value, context } = actionableAttention();
+  const [reply] = value.frame.attention;
+  const [worker] = value.frame.participants;
+  worker.alias = "@integration-reviewer-worker";
+  value.frame.participants.push({
+    ...worker,
+    address_id: "reviewer",
+    alias: "@reviewer",
+  });
+  value.frame.attention.push(
+    {
+      ...reply,
+      source_kind: "context_grant",
+      opened_at_ms: 5,
+      response: { kind: "pane", address_id: "codex" },
+    },
+    {
+      ...reply,
+      opened_at_ms: 6,
+      response: { ...reply.response, address_id: "reviewer" },
+    },
+  );
+  value.frame.health = { level: "needs_you", items: 3 };
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const cards = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .locator(".attention-item");
+  await cards.nth(2).waitFor();
+  const read = () =>
+    cards.evaluateAll((items) =>
+      items.map((item) => {
+        const row = item.querySelector(".attention-actions");
+        const buttons = [...row.querySelectorAll("button")];
+        return {
+          lines: new Set(buttons.map((button) => button.offsetTop)).size,
+          buttons: buttons.map((button) => ({
+            label: button.textContent,
+            cut: button.scrollWidth > button.clientWidth,
+            alone: button.scrollWidth > row.clientWidth,
+            title: button.getAttribute("title"),
+          })),
+        };
+      }),
+    );
+  const long = "Reply to @integration-reviewer-worker";
+  const screen = "See @integration-reviewer-worker's screen";
+  const whole = (label) => ({ label, cut: false, alone: false, title: null });
+  const labels = [
+    ["Show message", long, "Details"],
+    ["Show message", screen, "Details"],
+    ["Show message", "Reply to @reviewer", "Details"],
+  ];
+  const wide = labels.map((row) => ({ lines: 1, buttons: row.map(whole) }));
+  for (const [width, height] of [
+    [1440, 900],
+    [1024, 700],
+  ]) {
+    await ui.page.setViewportSize({ width, height });
+    assert.deepEqual(
+      await settled(read, wide),
+      wide,
+      `${width}px keeps one row of whole labels`,
+    );
+  }
+  await ui.page.setViewportSize({ width: 390, height: 844 });
+  const buttons = async () => (await read()).map((row) => row.buttons);
+  const cut = labels.map((row) =>
+    row.map((label) =>
+      label.includes("@integration-reviewer-worker")
+        ? { label, cut: true, alone: true, title: label }
+        : whole(label),
+    ),
+  );
+  assert.deepEqual(
+    await settled(buttons, cut),
+    cut,
+    "only a label wider than the whole column is cut, and its title holds it",
+  );
+  assert.ok(
+    (await read()).every((row) => row.lines > 1),
+    "each narrow row wraps between its buttons",
+  );
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  assert.deepEqual(
+    await settled(read, wide),
+    wide,
+    "the title goes once the label fits again",
+  );
+});
+
 test("CL-A: Respond posts the exact attention target despite newer context and SSE replies", async (t) => {
   const { value, context } = actionableAttention();
   const ui = await open(
@@ -5563,7 +6222,9 @@ test("CL-A: Respond posts the exact attention target despite newer context and S
     { onContext: () => context },
   );
   await ui.live();
-  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  await ui.page
+    .getByRole("button", { name: "Reply to @codex", exact: true })
+    .click();
   const pane = ui.page.getByRole("complementary", {
     name: "Thread",
     exact: true,
@@ -5668,6 +6329,7 @@ test("CH-fix-2 item 3: Allow 10 more replies posts continue with the CSRF header
     "Show message",
     allowCopy.label,
     stopCopy.label,
+    "Details",
   ]);
   assert.equal(await limit.allow.getAttribute("title"), allowCopy.title);
   assert.equal(await limit.stop.getAttribute("title"), stopCopy.title);
@@ -5766,6 +6428,7 @@ test("CH-fix-2 item 3: Stop thread asks once inline, Cancel and Escape take it b
     threadControlCopy.confirm,
     threadControlCopy.confirmStop,
     threadControlCopy.cancel,
+    "Details",
   ]);
   assert.equal(await focusedText(ui), threadControlCopy.confirmStop);
   assert.equal(
@@ -5891,7 +6554,9 @@ test("CH-2: Respond targets its agent with the prefill, and plain text names eve
     { onContext: () => context },
   );
   await ui.live();
-  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  await ui.page
+    .getByRole("button", { name: "Reply to @codex", exact: true })
+    .click();
   const pane = ui.page.getByRole("complementary", {
     name: "Thread",
     exact: true,
@@ -5922,49 +6587,334 @@ test("CL-A: preparing an already prepared coordination response keeps the draft 
     { onContext: () => context },
   );
   await ui.live();
-  await ui.page.getByRole("button", { name: /^Respond/ }).click();
+  await ui.page
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
   const draft = ui.page.locator("main .composer").getByRole("combobox");
   await ui.page.waitForFunction(() =>
     document
       .querySelector("main .composer textarea")
-      ?.value.includes("Regarding coordination decision-1:"),
+      ?.value.includes("Ref: decision-1"),
   );
   const prepared = await draft.inputValue();
-  assert.equal(prepared, "@codex Regarding coordination decision-1: ");
+  assert.equal(
+    prepared,
+    "@codex About your coordination report: \nRef: decision-1",
+  );
   const pane = ui.page.getByRole("complementary", {
     name: "Thread",
     exact: true,
   });
-  await pane
-    .getByRole("button", { name: "Prepare response", exact: true })
-    .click();
+  const answer = pane.locator(".thread-answer");
+  await answer
+    .getByText("Your message to @codex is ready there.", { exact: false })
+    .waitFor();
+  assert.equal(
+    await answer.getByRole("button").count(),
+    0,
+    "a ready message is never offered again in the pane",
+  );
+  const card = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true });
+  await card.click();
+  await until(() => ui.contextRequests.length === 2, "the second load");
+  await answer
+    .getByText("Your message to @codex is ready there.", { exact: false })
+    .waitFor();
   assert.equal(await draft.inputValue(), prepared);
   assert.equal(
     await ui.page
-      .getByText("Your channel draft or pending send was kept.", {
-        exact: false,
-      })
+      .getByText("Your draft is still here.", { exact: false })
       .count(),
     0,
   );
   assert.equal(ui.posts.attempts.length, 0);
   await draft.fill("");
-  await pane
-    .getByRole("button", { name: "Prepare response", exact: true })
+  await answer
+    .getByRole("button", { name: "Message @codex", exact: true })
     .click();
   await ui.page.waitForFunction(() =>
     document
       .querySelector("main .composer textarea")
-      ?.value.includes("Regarding coordination decision-1:"),
+      ?.value.includes("Ref: decision-1"),
   );
   assert.equal(await draft.inputValue(), prepared);
   assert.equal(
     await ui.page
-      .getByText("Your channel draft or pending send was kept.", {
-        exact: false,
-      })
+      .getByText("Your draft is still here.", { exact: false })
       .count(),
     0,
+  );
+});
+
+test("DESIGN-R2 A5: a kept channel draft is named in the composer's status row, in 12px text, with the card's button as the retry", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  const card = ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true });
+  await card.click();
+  const status = ui.page.locator("main .composer-status");
+  const notice = status.getByRole("status");
+  await notice.waitFor();
+  assert.deepEqual(
+    await notice.evaluate((line) => {
+      const probe = document.body.appendChild(document.createElement("p"));
+      probe.style.color = "var(--text)";
+      const text = getComputedStyle(probe).color;
+      probe.remove();
+      const box = line
+        .closest(".composer")
+        .querySelector(".composer-box")
+        .getBoundingClientRect();
+      return {
+        text: line.textContent,
+        size: getComputedStyle(line).fontSize,
+        color: getComputedStyle(line).color === text,
+        under: line.getBoundingClientRect().top >= box.bottom,
+        buttons: line.querySelectorAll("button").length,
+      };
+    }),
+    {
+      text: "Your draft is still here. Send or clear it, then press Message @codex again.",
+      size: "12px",
+      color: true,
+      under: true,
+      buttons: 0,
+    },
+  );
+  assert.equal(await draft.inputValue(), "my own words");
+  assert.equal(await ui.page.locator("main .earlier-thread").count(), 0);
+  await draft.fill("");
+  await card.click();
+  await eventually(
+    async () => (await draft.inputValue()).includes("Ref: decision-1"),
+    "the prepared message after the draft is cleared",
+  );
+  assert.equal(await notice.count(), 0);
+});
+
+test("DESIGN-R2 D2: the kept-draft notice lasts until the box changes, then the hint names a capitalized leading name again", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  const status = ui.page.locator("main .composer-status");
+  await readsAs(
+    status,
+    "Your draft is still here. Send or clear it, then press Message @codex again.",
+  );
+  await draft.focus();
+  await readsAs(
+    status,
+    "Your draft is still here. Send or clear it, then press Message @codex again.",
+  );
+  await draft.press("Control+a");
+  await ui.page.keyboard.type("@Codex hi");
+  await readsAs(status, "Names are lowercase: @codex");
+  await draft.fill("hello room");
+  await readsAs(
+    status,
+    "Enter posts to the channel · Mention @name to bring someone in",
+  );
+  assert.equal(await draft.inputValue(), "hello room");
+  assert.equal(ui.posts.attempts.length, 0);
+});
+
+test("DESIGN-R2 D2: a thread's kept-draft line lasts until that box changes, then its hint returns", async (t) => {
+  const { value, context } = actionableAttention();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card.getByRole("button", { name: /^Show message/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox");
+  await reply.fill("my thread words");
+  await card
+    .getByRole("button", { name: "Reply to @codex", exact: true })
+    .click();
+  const status = pane.locator(".composer-status");
+  const kept =
+    "Your existing draft was kept. Send or clear it before preparing this reply.";
+  await readsAs(status, kept);
+  assert.equal(await reply.inputValue(), "my thread words");
+  await reply.focus();
+  await readsAs(status, kept);
+  await reply.press("End");
+  await ui.page.keyboard.type(" too");
+  await readsAs(status, "Enter to send · Shift+Enter for a new line");
+  assert.equal(await reply.inputValue(), "my thread words too");
+});
+
+test("DESIGN-R2 A6: a tracked conversation says where to answer on one 12px muted line in the composer's place", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  await ui.page.getByRole("button", { name: /^Show message/ }).click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const answer = pane.locator(".thread-answer");
+  await answer.waitFor();
+  const look = () =>
+    answer.evaluate((line) => {
+      const probe = document.body.appendChild(document.createElement("p"));
+      probe.style.color = "var(--text-muted)";
+      const muted = getComputedStyle(probe).color;
+      probe.remove();
+      const style = getComputedStyle(line);
+      const slot = line.closest("aside").getBoundingClientRect();
+      return {
+        text: line.textContent,
+        size: style.fontSize,
+        muted: style.color === muted,
+        insets: [style.paddingLeft, style.paddingRight, style.paddingBottom],
+        last: line === line.closest("aside").lastElementChild,
+        bottom: Math.round(slot.bottom - line.getBoundingClientRect().bottom),
+        composer: line.closest("aside").querySelector(".composer") !== null,
+      };
+    });
+  const at = {
+    size: "12px",
+    muted: true,
+    insets: ["20px", "20px", "12px"],
+    last: true,
+    bottom: 0,
+    composer: false,
+  };
+  assert.deepEqual(await look(), {
+    ...at,
+    text: "Answer tracked work in the channel. Message @codex",
+  });
+  await answer
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  await answer
+    .getByText("Your message to @codex is ready there.", { exact: false })
+    .waitFor();
+  assert.deepEqual(await look(), {
+    ...at,
+    text: "Answer tracked work in the channel. Your message to @codex is ready there.",
+  });
+});
+
+test("DESIGN-R2 D5: while the kept-draft notice names the card's button as the retry, the thread pane offers no second Message @codex", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  const notice = ui.page
+    .locator("main .composer-status")
+    .getByText("Your draft is still here.", { exact: false });
+  await notice.waitFor();
+  const answer = ui.page
+    .getByRole("complementary", { name: "Thread", exact: true })
+    .locator(".thread-answer");
+  await readsAs(answer, "Answer tracked work in the channel.");
+  const offers = ui.page.getByRole("button", {
+    name: "Message @codex",
+    exact: true,
+  });
+  assert.equal(await answer.getByRole("button").count(), 0);
+  assert.equal(await offers.count(), 1, "only the card's button is offered");
+  await draft.fill("");
+  await notice.waitFor({ state: "detached" });
+  await readsAs(answer, "Answer tracked work in the channel. Message @codex");
+  await answer
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  await readsAs(
+    answer,
+    "Answer tracked work in the channel. Your message to @codex is ready there.",
+  );
+  assert.equal(
+    await draft.inputValue(),
+    "@codex About your coordination report: \nRef: decision-1",
+  );
+});
+
+test("DESIGN-R2 A4: the prepared message puts the caret after the plain words, so typing lands above the Ref line", async (t) => {
+  const { value, context } = actionableAttention("message");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  await ui.page
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  const first = "@codex About your coordination report: ";
+  await eventually(
+    async () => (await draft.inputValue()) === `${first}\nRef: decision-1`,
+    "the prepared coordination message",
+  );
+  assert.deepEqual(
+    await draft.evaluate((box) => [
+      box.selectionStart,
+      box.selectionEnd,
+      box === document.activeElement,
+    ]),
+    [first.length, first.length, true],
+  );
+  await ui.page.keyboard.type("ship option B");
+  assert.equal(
+    await draft.inputValue(),
+    `${first}ship option B\nRef: decision-1`,
+  );
+  await draft.press("Enter");
+  await until(
+    () => ui.posts.attempts.some((attempt) => attempt.body !== null),
+    "the channel post",
+  );
+  assert.equal(
+    ui.posts.attempts[0].body.source,
+    `${first}ship option B\nRef: decision-1`,
   );
 });
 
@@ -6056,27 +7006,52 @@ test("CH-2: the page fills the window in every view and width, and only the pane
   await ui.page.locator('[data-message-id="long-59"]').waitFor();
   const page = () =>
     ui.page.evaluate(() => {
-      window.scrollTo(0, 100_000);
+      window.scrollTo(100_000, 100_000);
+      const root = document.documentElement;
       return {
-        overflow:
-          document.documentElement.scrollHeight -
-          document.documentElement.clientHeight,
-        scrolled: window.scrollY,
+        overflow: [
+          root.scrollWidth - root.clientWidth,
+          root.scrollHeight - root.clientHeight,
+        ],
+        scrolled: [window.scrollX, window.scrollY],
       };
     });
+  const sizes = [
+    ["1440x900", 1440, 900],
+    ["1024x700", 1024, 700],
+    ["640x800", 640, 800],
+    ["390x844", 390, 844],
+    ["1440x900 at 125% zoom", 1152, 720],
+  ];
   const fits = async (view) => {
-    for (const [width, height] of [
-      [1440, 900],
-      [1024, 700],
-      [640, 800],
-      [390, 844],
-      [1152, 720],
-    ]) {
+    for (const [size, width, height] of sizes) {
       await ui.page.setViewportSize({ width, height });
       assert.deepEqual(
         await page(),
-        { overflow: 0, scrolled: 0 },
-        `${view} at ${width}x${height}`,
+        { overflow: [0, 0], scrolled: [0, 0] },
+        `${view} at ${size}`,
+      );
+    }
+    await ui.page.setViewportSize({ width: 1440, height: 900 });
+  };
+  // A mouse wheel over a pane scrolls the pane, at a wide and a phone width.
+  const wheels = async (selector, view) => {
+    for (const [size, width, height] of [sizes[0], sizes[3]]) {
+      await ui.page.setViewportSize({ width, height });
+      const pane = ui.page.locator(selector);
+      const box = await pane.boundingBox();
+      await ui.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      const before = await pane.evaluate((element) => element.scrollTop);
+      await ui.page.mouse.wheel(0, before > 0 ? -400 : 400);
+      await eventually(
+        async () =>
+          (await pane.evaluate((element) => element.scrollTop)) !== before,
+        `${view} to scroll on the wheel at ${size}`,
+      );
+      assert.deepEqual(
+        await ui.page.evaluate(() => [window.scrollX, window.scrollY]),
+        [0, 0],
+        `the wheel over ${view} never scrolls the page at ${size}`,
       );
     }
     await ui.page.setViewportSize({ width: 1440, height: 900 });
@@ -6094,12 +7069,14 @@ test("CH-2: the page fills the window in every view and width, and only the pane
   };
   await fits("the channel");
   await scrolls(".timeline", "the timeline");
+  await wheels(".timeline", "the timeline");
   await ui.page.locator('[data-message-id="long-59"] .reply-preview').click();
   await ui.page
     .getByRole("complementary", { name: "Thread", exact: true })
     .waitFor();
   await fits("an open thread");
   await scrolls(".thread-body", "the thread");
+  await wheels(".thread-body", "the thread");
   await ui.page.keyboard.press("Escape");
   await ui.page
     .locator(".members")
@@ -6421,7 +7398,7 @@ test("CH-2: router_failed reads in --failed-text, explains itself, and offers Se
   assert.deepEqual(await icon(), [iconShape.alert]);
   assert.equal(
     await route.getAttribute("title"),
-    "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+    "Namedrop couldn't reach its router, so it didn't pick who gets this post. The post is saved.",
   );
   const failed = await tokenColor(ui.page, "--failed-text");
   assert.equal(
@@ -6729,6 +7706,22 @@ const unsent = () =>
     state: "unrouted",
     to: [],
   });
+const announcer = '.app-shell > [aria-live="polite"]';
+// Every text the page's delivery announcer shows, in order, from now on.
+const recordAnnouncements = (page) =>
+  page.evaluate((announcer) => {
+    window.announced = [];
+    new MutationObserver(() => {
+      const text = document.querySelector(announcer)?.textContent ?? "";
+      if (text !== "" && text !== window.announced.at(-1))
+        window.announced.push(text);
+    }).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+  }, announcer);
+const announced = (page) => page.evaluate(() => window.announced);
 
 test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the not-sent part for its own Sending to @codex… then Sent to @codex with focus on it, and the frame's leg replaces it", async (t) => {
   const answered = held();
@@ -6736,7 +7729,7 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
   const { ui, value } = await chatRoom(t, [post], {
     onDeliver: async () => {
       await answered.gate;
-      return { status: 200, channel: { ...post.channel, to: ["codex"] } };
+      return { status: 200 };
     },
   });
   const { route, parts } = routeOf(ui, "p1");
@@ -6769,7 +7762,7 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
     connected: true,
   });
   assert.equal(
-    await route.getByRole("status").textContent(),
+    await ui.page.locator(announcer).textContent(),
     "Sending to @codex…",
   );
   assert.equal(await threadPane(ui).count(), 0, "no thread opens");
@@ -6787,7 +7780,10 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
     connected: true,
   });
   await readsAs(route, "Sent to @codex");
-  assert.equal(await route.getByRole("status").textContent(), "Sent to @codex");
+  assert.equal(
+    await ui.page.locator(announcer).textContent(),
+    "Sent to @codex",
+  );
   await button.click({ force: true });
   value.frame.messages = [reached(post, "codex")];
   ui.connections[0].send("space", value);
@@ -6803,6 +7799,412 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
   );
   assert.equal(ui.posts.deliveries.length, 1, "Sent never sends again");
   assert.equal(ui.posts.attempts.length, 0, "no message is posted");
+});
+
+test("DESIGN-R2 B4: the deliver answer's channel object names @codex on the line right after the answer, with no frame", async (t) => {
+  const post = unsent();
+  const { ui } = await chatRoom(t, [post], {
+    onDeliver: () => ({ channel: { ...post.channel, to: ["codex"] } }),
+  });
+  const { route, parts, icon } = routeOf(ui, "p1");
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await readsAs(route, "@codex · Queued · Sent to @codex");
+  assert.deepEqual(await parts(), ["@codex", "Queued", "Sent to @codex"]);
+  assert.deepEqual(await icon(), [iconShape.arrow]);
+  assert.equal(
+    await route.getByRole("button", { name: "Send this to @codex" }).count(),
+    0,
+    "no offer",
+  );
+  assert.equal(ui.posts.deliveries.length, 1);
+  assert.equal(ui.connections.length, 1, "no new frame or connection");
+});
+
+const focusedRow = (page) =>
+  page.evaluate(() => {
+    const active = document.activeElement;
+    return {
+      tag: active.tagName.toLowerCase(),
+      id: active.getAttribute("data-message-id"),
+      tabindex: active.getAttribute("tabindex"),
+      inPane: active.closest(".slot") !== null,
+    };
+  });
+const deliverySurfaces = {
+  "the channel timeline": async (t, answered) => {
+    const post = unsent();
+    const { ui } = await chatRoom(t, [post], {
+      onDeliver: async () => {
+        await answered.gate;
+        return { channel: { ...post.channel, to: ["codex"] } };
+      },
+    });
+    return { ui, scope: ui.page.locator("main"), id: "p1", inPane: false };
+  },
+  "the thread pane": async (t, answered) => {
+    const at = Date.now() - 600_000;
+    const post = channelPost(
+      "p1",
+      "nice catch by @codex on the cache",
+      { state: "unrouted", to: [] },
+      { at_ms: at },
+    );
+    const reply = answer("r1", "p1", "p1", "claude", "agreed, nice one", {
+      at_ms: at + 60_000,
+      legs: [{ to: "human", stage: { stage: "delivered" } }],
+    });
+    const { ui } = await chatRoom(t, [post, reply], {
+      onDeliver: async () => {
+        await answered.gate;
+        return { channel: { ...post.channel, to: ["codex"] } };
+      },
+    });
+    await ui.page
+      .locator("main")
+      .getByRole("button", { name: "1 reply. Open thread" })
+      .click();
+    await threadPane(ui).getByRole("combobox").waitFor();
+    return { ui, scope: threadPane(ui), id: "p1", inPane: true };
+  },
+  "a Needs-you conversation pane": async (t, answered) => {
+    const value = frame(1, "alpha", "needs_you");
+    value.frame.participants = people();
+    const post = channelPost(
+      "far-post",
+      "the deploy notes @codex wrote last week were clear",
+      { state: "unrouted", to: [] },
+    );
+    const conversation = { thread_id: "far-post", message_id: "far-post" };
+    value.frame.attention = [
+      {
+        source_kind: "delivery_attempt",
+        summary: { text: "A response is needed.", truncated: false },
+        opened_at_ms: 4,
+        subject_alias: null,
+        message_id: "far-post",
+        conversation,
+        coordination_id: null,
+        response: { kind: "reply", ...conversation, address_id: "codex" },
+      },
+    ];
+    const ui = await open(
+      t,
+      (client) => replay(client, [value]),
+      () => [],
+      {
+        onContext: () => ({
+          thread_id: "far-post",
+          message_count: 1,
+          earlier_omitted: false,
+          messages: [post],
+        }),
+        onDeliver: async () => {
+          await answered.gate;
+          return { status: 200 };
+        },
+      },
+    );
+    await ui.live();
+    await ui.page
+      .getByRole("button", { name: "Show message from @codex", exact: true })
+      .click();
+    await threadPane(ui).getByRole("combobox").waitFor();
+    // The post is not in the room's frame, so the frame that brings its leg moves the line.
+    const reach = async () => {
+      await readsAs(threadPane(ui).locator(".route"), "Sent to @codex");
+      value.frame.messages = [reached(post, "codex")];
+      ui.connections[0].send("space", value);
+    };
+    return { ui, scope: threadPane(ui), id: "far-post", inPane: true, reach };
+  },
+};
+for (const [surface, setUp] of Object.entries(deliverySurfaces))
+  test(`DESIGN-R2 C2: in ${surface}, a sent delivery is announced once by the page, and when its part leaves, focus moves to the message row`, async (t) => {
+    const answered = held();
+    const { ui, scope, id, inPane, reach } = await setUp(t, answered);
+    await recordAnnouncements(ui.page);
+    const route = scope.locator(`[data-message-id="${id}"] .route`);
+    await route.getByRole("button", { name: "Send this to @codex" }).click();
+    await focusOn(ui.page, `${id} @codex`, "Sending to @codex…");
+    const ownRegions = await route
+      .locator('[role="status"], [aria-live]')
+      .count();
+    answered.release();
+    await reach?.();
+    await eventually(
+      async () => (await route.locator("[data-offer]").count()) === 0,
+      "the part to leave once the post reached @codex",
+    );
+    assert.deepEqual(await focusedRow(ui.page), {
+      tag: "article",
+      id,
+      tabindex: "-1",
+      inPane,
+    });
+    assert.deepEqual(await announced(ui.page), [
+      "Sending to @codex…",
+      "Sent to @codex",
+    ]);
+    assert.equal(ownRegions, 0, "the part held no live region of its own");
+    await ui.page.keyboard.press("Tab");
+    assert.equal(
+      await scope
+        .locator(`article[data-message-id="${id}"]`)
+        .evaluate(
+          (row) =>
+            row.contains(document.activeElement) ||
+            (row.compareDocumentPosition(document.activeElement) &
+              Node.DOCUMENT_POSITION_FOLLOWING) !==
+              0,
+        ),
+      true,
+      "the next Tab continues from the row",
+    );
+  });
+
+const elsewhere = {
+  "the channel box": {
+    move: (ui) => ui.page.locator("main textarea").focus(),
+    focused: () => document.activeElement?.matches("main textarea") === true,
+  },
+  nothing: {
+    move: (ui) => ui.page.evaluate(() => document.activeElement?.blur()),
+    focused: () => document.activeElement === document.body,
+  },
+};
+for (const [where, { move, focused }] of Object.entries(elsewhere))
+  test(`DESIGN-R2 C2: a delivery whose part leaves after focus moved to ${where} keeps focus there, and is still announced`, async (t) => {
+    const answered = held();
+    const post = unsent();
+    const { ui } = await chatRoom(t, [post], {
+      onDeliver: async () => {
+        await answered.gate;
+        return { channel: { ...post.channel, to: ["codex"] } };
+      },
+    });
+    await ui.page.clock.install();
+    await recordAnnouncements(ui.page);
+    const { route } = routeOf(ui, "p1");
+    await route.getByRole("button", { name: "Send this to @codex" }).click();
+    await focusOn(ui.page, "p1 @codex", "Sending to @codex…");
+    await move(ui);
+    answered.release();
+    await readsAs(route, "@codex · Queued · Sent to @codex");
+    await ui.page.clock.runFor(1_500);
+    await readsAs(route, "@codex · Queued");
+    assert.equal(
+      await ui.page.evaluate(focused),
+      true,
+      `focus stays on ${where}`,
+    );
+    assert.deepEqual(await announced(ui.page), [
+      "Sending to @codex…",
+      "Sent to @codex",
+    ]);
+  });
+
+// Every label the post's control for @codex shows, in order, from now on:
+// the offer, then the agent's own part, and "" once neither is on the line.
+const recordLabels = (page, id) =>
+  page.evaluate((id) => {
+    window.labels = [];
+    const record = () => {
+      const route = document.querySelector(
+        `main [data-message-id="${id}"] .route`,
+      );
+      const label =
+        (
+          route?.querySelector(`[data-offer="${id} @codex"]`) ??
+          route?.querySelector('[aria-label="Send this to @codex"]')
+        )?.textContent ?? "";
+      if (label !== window.labels.at(-1)) window.labels.push(label);
+    };
+    record();
+    new MutationObserver(record).observe(document.body, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+  }, id);
+// Every write to the page's delivery announcer, so one said twice shows twice.
+const recordAnnouncer = (page) =>
+  page.evaluate((announcer) => {
+    window.said = [];
+    const region = document.querySelector(announcer);
+    new MutationObserver(() => window.said.push(region.textContent)).observe(
+      region,
+      { subtree: true, childList: true, characterData: true },
+    );
+  }, announcer);
+// A Send anyway press whose answer waits for `answer()`, on a page whose clock
+// stands still, so the test runs the 1.5 s hold itself.
+async function heldPress(t, outcome) {
+  const answered = held();
+  const post = unsent();
+  const { ui, value } = await chatRoom(t, [post], {
+    onDeliver: async () => {
+      await answered.gate;
+      return outcome(post);
+    },
+  });
+  await ui.page.clock.install();
+  await ui.page.clock.pauseAt(Date.now() + 1_000);
+  const { route } = routeOf(ui, "p1");
+  await recordLabels(ui.page, "p1");
+  await recordAnnouncer(ui.page);
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await focusOn(ui.page, "p1 @codex", "Sending to @codex…");
+  const button = await pressedOffer(route, "p1", "@codex");
+  return {
+    ui,
+    route,
+    button,
+    frame: () => {
+      value.frame.messages = [reached(post, "codex")];
+      ui.connections[0].send("space", value);
+    },
+    answer: async () => {
+      const finished = ui.page.waitForEvent("requestfinished", (request) =>
+        request.url().endsWith("/deliver"),
+      );
+      answered.release();
+      await finished;
+    },
+  };
+}
+const sentPart = {
+  text: "Sent to @codex",
+  disabled: "true",
+  title: null,
+  focused: true,
+  connected: true,
+};
+// The same button, still focused, reads Sent to @codex.
+async function readsSent(button) {
+  assert.deepEqual(await settled(() => offerState(button), sentPart), sentPart);
+}
+async function holdsThenLeaves({ ui, button }) {
+  await ui.page.clock.runFor(1_499);
+  assert.deepEqual(await offerState(button), sentPart, "Sent holds 1.5 s");
+  await ui.page.clock.runFor(1);
+  await eventually(
+    async () => !(await button.evaluate((element) => element.isConnected)),
+    "the part to leave once its 1.5 s are over",
+  );
+  assert.deepEqual(await focusedRow(ui.page), {
+    tag: "article",
+    id: "p1",
+    tabindex: "-1",
+    inPane: false,
+  });
+  assert.deepEqual(await ui.page.evaluate(() => window.labels), [
+    "Send anyway",
+    "Sending to @codex…",
+    "Sent to @codex",
+    "",
+  ]);
+  assert.deepEqual(await ui.page.evaluate(() => window.said), [
+    "Sending to @codex…",
+    "Sent to @codex",
+  ]);
+}
+
+test("DESIGN-R2 E2 (a): the frame that adds @codex before the deliver answer confirms the press, Sent to @codex holds 1.5 s beside @codex · Delivered, then focus moves to the row", async (t) => {
+  const press = await heldPress(t, (post) => ({
+    channel: { ...post.channel, to: ["codex"] },
+  }));
+  press.frame();
+  await readsSent(press.button);
+  await readsAs(press.route, "@codex · Delivered · Sent to @codex");
+  await press.answer();
+  assert.deepEqual(await offerState(press.button), sentPart);
+  await holdsThenLeaves(press);
+  await readsAs(press.route, "@codex · Delivered");
+});
+
+test("DESIGN-R2 E2 (b): the deliver answer with the channel object before the frame confirms the press, Sent to @codex holds 1.5 s beside @codex · Queued and then the frame's receipt, then focus moves to the row", async (t) => {
+  const press = await heldPress(t, (post) => ({
+    channel: { ...post.channel, to: ["codex"] },
+  }));
+  await press.answer();
+  await readsSent(press.button);
+  await readsAs(press.route, "@codex · Queued · Sent to @codex");
+  press.frame();
+  await readsAs(press.route, "@codex · Delivered · Sent to @codex");
+  assert.deepEqual(await offerState(press.button), sentPart);
+  await holdsThenLeaves(press);
+  await readsAs(press.route, "@codex · Delivered");
+});
+
+test("DESIGN-R2 E2 (c): the deliver answer with the channel object and no frame confirms the press, Sent to @codex holds 1.5 s beside @codex · Queued, then focus moves to the row", async (t) => {
+  const press = await heldPress(t, (post) => ({
+    channel: { ...post.channel, to: ["codex"] },
+  }));
+  await press.answer();
+  await readsSent(press.button);
+  await readsAs(press.route, "@codex · Queued · Sent to @codex");
+  await holdsThenLeaves(press);
+  await readsAs(press.route, "@codex · Queued");
+  assert.equal(press.ui.connections.length, 1, "no new frame or connection");
+});
+
+test("DESIGN-R2 E2 (d): a deliver answer of 503 after the frame confirmed the press changes nothing: Sent to @codex holds 1.5 s with no failure, then focus moves to the row", async (t) => {
+  const press = await heldPress(t, () => ({ status: 503 }));
+  press.frame();
+  await readsSent(press.button);
+  await press.answer();
+  assert.equal(press.ui.posts.deliveries[0].status, 503);
+  await readsAs(press.route, "@codex · Delivered · Sent to @codex");
+  assert.deepEqual(await offerState(press.button), sentPart);
+  assert.equal(await press.route.locator(".route-failed").count(), 0);
+  await holdsThenLeaves(press);
+  await readsAs(press.route, "@codex · Delivered");
+});
+
+test("DESIGN-R2 D1: a Send to on a router_failed post keeps who it reached, with the receipt, before the offers still left", async (t) => {
+  const failed = { state: "router_failed" };
+  const both = channelPost("p1", "can @codex and @claude look?", failed);
+  const one = channelPost("p2", "can @codex look?", failed);
+  const { ui } = await chatRoom(t, [both, one], {
+    onDeliver: ({ to }, { path }) => ({
+      channel: { ...(path === deliverPath("p1") ? both : one).channel, to },
+    }),
+  });
+  await ui.page.clock.install();
+  const first = routeOf(ui, "p1");
+  await first.route
+    .getByRole("button", { name: "Send this to @codex" })
+    .click();
+  await readsAs(
+    first.route,
+    "Couldn't check who this is for · @codex · Queued · Send to @claude · Sent to @codex",
+  );
+  await ui.page.clock.runFor(1_500);
+  await readsAs(
+    first.route,
+    "Couldn't check who this is for · @codex · Queued · Send to @claude",
+  );
+  assert.deepEqual(await first.icon(), [iconShape.alert]);
+  const second = routeOf(ui, "p2");
+  await second.route
+    .getByRole("button", { name: "Send this to @codex" })
+    .click();
+  await readsAs(
+    second.route,
+    "Couldn't check who this is for · @codex · Queued · Sent to @codex",
+  );
+  await ui.page.clock.runFor(1_500);
+  await readsAs(
+    second.route,
+    "Couldn't check who this is for · @codex · Queued",
+  );
+  assert.deepEqual(await second.parts(), [
+    "Couldn't check who this is for",
+    "@codex",
+    "Queued",
+  ]);
+  assert.equal(ui.posts.deliveries.length, 2);
+  assert.equal(ui.connections.length, 1, "no new frame or connection");
 });
 
 test("CH-fix-3 item 1: a refused delivery reads Couldn't send to @codex · Try again with focus on Try again, its title is the server's message, and Try again delivers", async (t) => {
@@ -6824,8 +8226,8 @@ test("CH-fix-3 item 1: a refused delivery reads Couldn't send to @codex · Try a
     connected: true,
   });
   assert.equal(
-    await shownText(route.getByRole("status")),
-    "Couldn't send to @codex · Try again",
+    await ui.page.locator(announcer).textContent(),
+    "Couldn't send to @codex",
   );
   assert.equal(
     await route
@@ -6860,21 +8262,13 @@ test("CH-fix-3 item 1: Try again's title says Couldn't reach Namedrop. when the 
     "the status in the title",
   );
   assert.equal(
-    await shownText(route.getByRole("status")),
-    "Couldn't send to @codex · Try again",
+    await ui.page.locator(announcer).textContent(),
+    "Couldn't send to @codex",
   );
 });
 
-test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @codex · Try again with the server's reason as its title, and Try again sends it", async (t) => {
-  const reason = "@codex belongs to a different agent now.";
-  const outcomes = [
-    {
-      delivered: [],
-      not_delivered: [{ alias: "codex", reason }],
-      error: "Namedrop skipped 1 agent.",
-    },
-    { delivered: ["codex"] },
-  ];
+test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @codex · Try again, says the name may belong to a different agent now, and Try again sends it", async (t) => {
+  const outcomes = [{ delivered: [] }, { delivered: ["codex"] }];
   const { ui } = await chatRoom(t, [unsent()], {
     onDeliver: () => outcomes.shift(),
   });
@@ -6886,13 +8280,14 @@ test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @cod
   assert.deepEqual(await offerState(button), {
     text: "Try again",
     disabled: null,
-    title: reason,
+    title:
+      "Namedrop didn't send it. The name may belong to a different agent now.",
     focused: true,
     connected: true,
   });
   assert.equal(
-    await shownText(route.getByRole("status")),
-    "Couldn't send to @codex · Try again",
+    await ui.page.locator(announcer).textContent(),
+    "Couldn't send to @codex",
   );
   await button.click();
   assert.equal((await offerReads(button, "Sent to @codex")).focused, true);
@@ -6906,29 +8301,59 @@ test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @cod
   );
 });
 
-test("CH-fix-4: a 200 that did not deliver and gives no reason says the name may belong to a different agent now, and a 200 with no delivered field reads Sent to @codex", async (t) => {
-  const outcomes = [{ delivered: ["claude"] }, {}];
+test("DESIGN-R2 B6: a 200 whose delivered list is missing or malformed reads Couldn't send to @codex · Try again, Namedrop didn't confirm it sent this., and an empty 200 body reads Sent to @codex", async (t) => {
+  const malformed = [undefined, null, "codex", ["codex", 7]];
+  const outcomes = [
+    ...malformed.map((delivered) => ({ delivered })),
+    { raw: "" },
+  ];
   const { ui } = await chatRoom(t, [unsent()], {
     onDeliver: () => outcomes.shift(),
   });
   const { route } = routeOf(ui, "p1");
   await route.getByRole("button", { name: "Send this to @codex" }).click();
-  await readsAs(route, "Couldn't send to @codex · Try again");
-  const button = await pressedOffer(route, "p1", "@codex");
-  assert.equal(
-    (await offerState(button)).title,
-    "Namedrop didn't send it. The name may belong to a different agent now.",
-  );
-  await button.click();
-  assert.deepEqual(await offerReads(button, "Sent to @codex"), {
-    text: "Sent to @codex",
-    disabled: "true",
-    title: null,
-    focused: true,
-    connected: true,
-  });
+  for (const [index, delivered] of malformed.entries()) {
+    await until(
+      () => ui.posts.deliveries[index]?.status === 200,
+      `answer ${index + 1}`,
+    );
+    await readsAs(route, "Couldn't send to @codex · Try again");
+    const button = await pressedOffer(route, "p1", "@codex");
+    assert.deepEqual(
+      await offerState(button),
+      {
+        text: "Try again",
+        disabled: null,
+        title: "Namedrop didn't confirm it sent this.",
+        focused: true,
+        connected: true,
+      },
+      JSON.stringify(delivered),
+    );
+    await button.click();
+  }
   await readsAs(route, "Sent to @codex");
-  assert.equal(ui.posts.deliveries.length, 2);
+  assert.deepEqual(
+    ui.posts.deliveries.map(({ body, status }) => [body, status]),
+    Array.from({ length: 5 }, () => ['{"to":["codex"]}', 200]),
+  );
+});
+
+test("DESIGN-R2 B5: a 200 whose body stalls reads Sent to @codex once the 5 s body wait ends, and the page closes that connection", async (t) => {
+  const { ui } = await chatRoom(t, [unsent()], {
+    onDeliver: () => ({ stall: true }),
+  });
+  await ui.page.clock.install();
+  const { route } = routeOf(ui, "p1");
+  await route.getByRole("button", { name: "Send this to @codex" }).click();
+  await until(() => ui.posts.deliveries[0]?.status === 200, "the 200 headers");
+  await readsAs(route, "Sending to @codex…");
+  await ui.page.clock.runFor(5_000);
+  await readsAs(route, "Sent to @codex");
+  await until(
+    () => ui.posts.deliveries[0].closed,
+    "the server to see the connection close",
+  );
 });
 
 test("CH-fix-3 item 1: Send to after router_failed moves each pressed agent to its own part after the ones still not sent", async (t) => {
@@ -7197,6 +8622,40 @@ test("CH-2: the channel composer says where Enter sends and posts plain text", a
   await box.press("Enter");
   await until(() => ui.posts.attempts.length === 2, "the plain post");
   assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "hello room");
+});
+
+test("DESIGN-R2 B1: the channel hint names a capitalized or unknown leading name as you type, and Enter still sends it for the server to refuse", async (t) => {
+  const { ui } = await chatRoom(t, [], {
+    onPost: ({ source }) => ({
+      status: 400,
+      error: `unknown Mention: ${source.split(" ")[0]}`,
+    }),
+  });
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const hints = [];
+  for (const part of ["@Codex", " quick check"]) {
+    await box.pressSequentially(part);
+    hints.push(await status.textContent());
+  }
+  await box.fill("");
+  for (const part of ["@Nobody", " hi there"]) {
+    await box.pressSequentially(part);
+    hints.push(await status.textContent());
+  }
+  assert.deepEqual(hints, [
+    "Names are lowercase: @codex",
+    "Names are lowercase: @codex",
+    "@Nobody isn't in this channel",
+    "@Nobody isn't in this channel",
+  ]);
+  assert.equal(ui.posts.attempts.length, 0, "nothing is sent before Enter");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@Nobody hi there");
+  await status.getByText("unknown Mention: @Nobody").waitFor();
+  assert.equal(await box.inputValue(), "@Nobody hi there", "the text stays");
 });
 
 test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {

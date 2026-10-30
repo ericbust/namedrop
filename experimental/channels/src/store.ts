@@ -99,7 +99,8 @@ function sameValue(a: unknown, b: unknown): boolean {
 }
 function sameRouting(a: Routing | null, b: Routing | null): boolean {
   if (a === null || b === null) return a === b;
-  if (!sameList(a.mentioned, b.mentioned)) return false;
+  if (!sameList(a.mentioned, b.mentioned) || !sameList(a.to, b.to))
+    return false;
   if (a.state !== "routed" || b.state !== "routed") return a.state === b.state;
   return a.reason === b.reason && a.router === b.router;
 }
@@ -851,11 +852,46 @@ function step(state: State, event: Event): State {
       });
       return { ...state, outbox, drafts };
     }
+    case "delivered":
+      return applyDeliverAnswer(state, event);
     default: {
       const exhaustive: never = event;
       return exhaustive;
     }
   }
+}
+// A deliver answer's channel object names who has the post before a frame
+// does. The frame stays the final word, so the answer applies only when it
+// lists every agent it delivered and the stored post does not yet.
+function applyDeliverAnswer(
+  state: State,
+  { key, messageId, answer }: Extract<Event, { type: "delivered" }>,
+): State {
+  const channel = state.channels.get(key);
+  const stored =
+    channel?.latestMessages.get(messageId) ?? channel?.messages.get(messageId);
+  const routing = answer.channel;
+  if (channel === undefined || stored === undefined || routing === null)
+    return state;
+  const delivered = [...answer.results].flatMap(([alias, result]) =>
+    result.kind === "done" ? [alias] : [],
+  );
+  const listed = stored.routing?.to ?? [];
+  if (
+    !delivered.every((alias) => routing.to.includes(alias)) ||
+    delivered.every((alias) => listed.includes(alias))
+  )
+    return state;
+  const message: Message = { ...stored, routing };
+  const swap = (rows: ReadonlyMap<string, Message>) =>
+    rows.has(messageId) ? new Map(rows).set(messageId, message) : rows;
+  const channels = new Map(state.channels);
+  channels.set(key, {
+    ...channel,
+    messages: swap(channel.messages),
+    latestMessages: swap(channel.latestMessages),
+  });
+  return { ...state, channels };
 }
 function settleOutbox(
   outbox: ReadonlyMap<string, Outgoing>,

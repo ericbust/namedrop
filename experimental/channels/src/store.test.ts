@@ -4,8 +4,11 @@ import { activityOf } from "./activity.ts";
 import type {
   Activity,
   AddressId,
+  Alias,
   ChannelSnapshot,
   ComposerId,
+  DeliverResult,
+  Event,
   State,
 } from "./model.ts";
 import { peekTarget, peekTargetOf } from "./peek.ts";
@@ -3240,6 +3243,7 @@ test("channel chat: a routing change or a new woke list re-renders the row, and 
   assert.deepEqual(after?.routing, {
     state: "routed",
     mentioned: [],
+    to: [],
     reason: "build question",
     router: "haiku",
   });
@@ -3270,6 +3274,64 @@ test("channel chat: a routing change or a new woke list re-renders the row, and 
   const named = activeChannel(apply(routed, value)).messages.get("post");
   assert.notEqual(named, after, "a new mentioned list re-renders");
   assert.deepEqual(named?.routing?.mentioned, ["@codex"]);
+});
+
+test("channel chat: a deliver answer's channel object names the agents it reached before a frame does, and never overrides a post that already lists them", () => {
+  const value = snapshot();
+  const post = (to: string[]) => ({
+    ...message("post"),
+    author: "human",
+    channel: { state: "unrouted", to, mentioned: ["codex"] },
+  });
+  value.frame.messages = [post([])];
+  const stored = apply(initialState(), value);
+  const done: DeliverResult = { kind: "done" };
+  const answer = (
+    result: DeliverResult,
+    to: readonly Alias[] | null,
+    messageId = "post",
+  ): Event => ({
+    type: "delivered",
+    key: activeChannel(stored).key,
+    messageId,
+    answer: {
+      results: new Map([["@codex", result]]),
+      channel:
+        to === null ? null : { state: "unrouted", mentioned: ["@codex"], to },
+    },
+  });
+  const reached = reduce(stored, answer(done, ["@codex"]));
+  const row = activeChannel(reached).messages.get("post");
+  assert.deepEqual(row?.routing?.to, ["@codex"]);
+  assert.equal(
+    activeChannel(reached).latestMessages.get("post"),
+    row,
+    "the latest window shows the same row",
+  );
+  const ignored: [string, Event][] = [
+    ["the answer has no channel object", answer(done, null)],
+    ["the answer's channel does not list @codex", answer(done, [])],
+    [
+      "the answer delivered no one",
+      answer({ kind: "failed", cause: "left-out" }, ["@codex"]),
+    ],
+    ["the post is not loaded", answer(done, ["@codex"], "elsewhere")],
+  ];
+  for (const [why, event] of ignored)
+    assert.equal(reduce(stored, event), stored, why);
+  value.frame.messages = [post(["codex", "claude"])];
+  const framed = apply(stored, value);
+  assert.equal(
+    reduce(framed, answer(done, ["@codex"])),
+    framed,
+    "a frame that already lists @codex may be newer, so the answer is ignored",
+  );
+  value.frame.messages = [post(["claude"])];
+  assert.deepEqual(
+    activeChannel(apply(reached, value)).messages.get("post")?.routing?.to,
+    ["@claude"],
+    "the frame stays the final word",
+  );
 });
 
 function members(): unknown[] {

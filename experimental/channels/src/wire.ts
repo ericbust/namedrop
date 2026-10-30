@@ -6,6 +6,7 @@ import type {
   AttentionResponse,
   ChannelSnapshot,
   Conversation,
+  DeliverAnswer,
   DeliverResult,
   DeliveryStage,
   Health,
@@ -399,20 +400,22 @@ function routing(value: unknown): Routing | null {
       ? (value as Record<string, unknown>)
       : {};
   const mentioned = aliases(item.mentioned);
+  const to = aliases(item.to);
   switch (item.state) {
     case "routing":
     case "unrouted":
     case "router_failed":
-      return { state: item.state, mentioned };
+      return { state: item.state, mentioned, to };
     case "routed":
       return {
         state: item.state,
         mentioned,
+        to,
         reason: reasonText(item.reason),
         router: optionalIdentity(item.router),
       };
     default:
-      return { state: "unknown", mentioned };
+      return { state: "unknown", mentioned, to };
   }
 }
 const noAliases: readonly Alias[] = [];
@@ -638,51 +641,49 @@ export function parseReceipt(raw: unknown): string {
 export function parseSessionToken(raw: unknown): string {
   return identity(record(raw).csrf_token);
 }
-function aliasSet(value: unknown): ReadonlySet<Alias> | null {
-  if (!Array.isArray(value)) return null;
-  const aliases = new Set<Alias>();
-  for (const item of value) {
-    const alias = optionalAlias(item);
-    if (alias === null) return null;
-    aliases.add(alias);
-  }
-  return aliases;
+function field(answer: unknown, name: string): unknown {
+  return typeof answer === "object" && answer !== null && !Array.isArray(answer)
+    ? (answer as Record<string, unknown>)[name]
+    : undefined;
 }
-function fields(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : {};
+function deliveredList(value: unknown): ReadonlySet<Alias> | null {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+    return null;
+  return new Set(value.flatMap((item) => optionalAlias(item) ?? []));
 }
-function reason(value: unknown): string | null {
-  return optionalIdentity(value)?.trim() ?? null;
-}
-export function parseDelivered(
+// The 2xx status is the server's answer, so a body cut short or not JSON at all
+// reads as sent. A JSON body confirms only the agents its `delivered` names.
+export function parseDeliverAnswer(
   body: string,
   to: readonly Alias[],
-): ReadonlyMap<Alias, DeliverResult> {
-  let answer: Record<string, unknown> = {};
+): DeliverAnswer {
+  let answer: unknown;
   try {
-    answer = fields(JSON.parse(body) as unknown);
-  } catch {}
-  const delivered = aliasSet(answer.delivered);
-  const reasons = new Map<Alias, string>();
-  for (const item of Array.isArray(answer.not_delivered)
-    ? answer.not_delivered
-    : []) {
-    const entry = fields(item);
-    const alias = optionalAlias(entry.alias);
-    const why = reason(entry.reason);
-    if (alias !== null && why !== null) reasons.set(alias, why);
+    answer = JSON.parse(body) as unknown;
+  } catch {
+    return {
+      results: new Map(to.map((alias) => [alias, { kind: "done" }])),
+      channel: null,
+    };
   }
-  const error = reason(answer.error) ?? "";
-  return new Map(
-    to.map((alias): [Alias, DeliverResult] => [
-      alias,
-      delivered === null || delivered.has(alias)
-        ? { kind: "done" }
-        : { kind: "failed", status: 200, message: reasons.get(alias) ?? error },
-    ]),
-  );
+  const delivered = deliveredList(field(answer, "delivered"));
+  const channel = field(answer, "channel");
+  return {
+    results: new Map(
+      to.map((alias): [Alias, DeliverResult] => [
+        alias,
+        delivered === null
+          ? { kind: "failed", cause: "unconfirmed" }
+          : delivered.has(alias)
+            ? { kind: "done" }
+            : { kind: "failed", cause: "left-out" },
+      ]),
+    ),
+    channel:
+      typeof channel === "object" && channel !== null && !Array.isArray(channel)
+        ? routing(channel)
+        : null,
+  };
 }
 export function parseRefusal(body: string): string {
   try {

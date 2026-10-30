@@ -1,5 +1,7 @@
 import {
   type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -9,6 +11,7 @@ import {
   type AttentionNavigation,
   attentionConversation,
   messageIntent,
+  responderOf,
 } from "../attention.ts";
 import {
   type ThreadControl,
@@ -16,7 +19,7 @@ import {
   threadControl,
   threadControls,
 } from "../control.ts";
-import { threadControlCopy } from "../copy.ts";
+import { responseCopy, threadControlCopy } from "../copy.ts";
 import type {
   Attention,
   ChannelSnapshot,
@@ -39,24 +42,53 @@ export type ControlThread = (
   signal: AbortSignal,
 ) => Promise<ControlResult>;
 const idle: ThreadControl = { kind: "idle" };
+// A label wider than the whole row ends in an ellipsis, so its tooltip carries it whole.
+function useWholeLabels(row: RefObject<HTMLElement | null>) {
+  useEffect(() => {
+    const element = row.current;
+    if (element === null) return;
+    const label = () => {
+      for (const button of element.querySelectorAll("button")) {
+        const ours = button.hasAttribute("data-cut");
+        if (button.hasAttribute("title") && !ours) continue;
+        const cut = button.scrollWidth > button.clientWidth;
+        button.toggleAttribute("data-cut", cut);
+        if (cut) button.title = button.textContent ?? "";
+        else if (ours) button.removeAttribute("title");
+      }
+    };
+    const resized = new ResizeObserver(label);
+    const changed = new MutationObserver(label);
+    resized.observe(element);
+    changed.observe(element, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+    });
+    return () => {
+      resized.disconnect();
+      changed.disconnect();
+    };
+  }, [row]);
+}
 export function AttentionActions({
   item,
   channel,
   onFocus,
   onControl,
+  children,
 }: {
   item: Attention;
   channel: Pick<ChannelSnapshot, "key" | "members" | "messages">;
   onFocus: FocusAttention;
   onControl: ControlThread;
+  children?: ReactNode;
 }) {
   const target = attentionConversation(item, channel);
   const response = item.response;
-  const member =
-    response && "addressId" in response
-      ? channel.members.get(response.addressId)
-      : undefined;
+  const member = responderOf(item, channel.members);
   const subject = item.subjectAlias ?? member?.alias;
+  const responder = member?.alias ?? item.subjectAlias ?? "the agent";
   const navigation: AttentionNavigation | null =
     target === null
       ? null
@@ -70,7 +102,7 @@ export function AttentionActions({
                 : messageIntent(item, target, false),
           }
         : { kind: "loaded", target };
-  const peek = member === undefined ? null : peekTarget(channel.key, member);
+  const peek = member === null ? null : peekTarget(channel.key, member);
   const controls = threadControls(item);
   const [control, setControl] = useState(idle);
   const busy = control.kind === "pending";
@@ -79,6 +111,8 @@ export function AttentionActions({
   const shown = useRef(control.kind);
   const press = useRef<AbortController | null>(null);
   useEffect(() => () => press.current?.abort(), []);
+  const row = useRef<HTMLDivElement>(null);
+  useWholeLabels(row);
   useLayoutEffect(() => {
     const before = shown.current;
     shown.current = control.kind;
@@ -117,7 +151,7 @@ export function AttentionActions({
     (control.kind === "pending" && control.action === "stop");
   return (
     <>
-      <div className="attention-actions">
+      <div className="attention-actions" ref={row}>
         {navigation !== null && (
           <button
             type="button"
@@ -193,7 +227,6 @@ export function AttentionActions({
           <button
             type="button"
             className="text-button"
-            aria-label={member ? `Respond to ${member.alias}` : undefined}
             aria-disabled={busy}
             onClick={(event) => {
               if (busy) return;
@@ -215,34 +248,15 @@ export function AttentionActions({
                 );
             }}
           >
-            Respond
+            {responseCopy[response.kind](responder)}
           </button>
         )}
-        {response?.kind === "pane" && (
-          <>
-            <span>
-              Respond in{" "}
-              {member?.alias ?? item.subjectAlias ?? response.addressId}
-              {member?.paneLabel ? ` · ${member.paneLabel.text}` : ""} in Herdr.
-            </span>
-            {peek !== null && (
-              <PeekControl
-                target={peek}
-                className="text-button"
-                fallback="none"
-              >
-                Peek
-              </PeekControl>
-            )}
-          </>
+        {response?.kind === "pane" && peek !== null && member && (
+          <PeekControl target={peek} className="text-button" fallback="none">
+            {responseCopy.pane(member.alias)}
+          </PeekControl>
         )}
-        {response?.kind === "local" && (
-          <span>
-            {item.source === "integration_registration"
-              ? "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration."
-              : "Open this workspace in Herdr and choose Namedrop Doctor to review this item."}
-          </span>
-        )}
+        {children}
       </div>
       {control.kind === "failed" && (
         <p

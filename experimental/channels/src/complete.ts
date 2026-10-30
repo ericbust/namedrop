@@ -240,6 +240,8 @@ export function accept(
 
 const ALIAS = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const LABEL = /^#[A-Za-z0-9._-]+$/;
+// A name typed with punctuation stuck to it, as in "@codex," or "@codex:".
+const PUNCTUATED = /^@([A-Za-z0-9-]+)[,.:;!?]+$/;
 const TOKEN_CHAR = /[A-Za-z0-9_-]/;
 const EMBEDDED_AFTER = /[A-Za-z0-9_\\]/;
 type Mentions = {
@@ -296,6 +298,50 @@ function serverMentions(text: string): Mentions {
 export function leadingMentions(text: string): readonly string[] {
   return serverMentions(text).leading;
 }
+// The server lowercases ASCII only, so a name with any other letter stays invalid.
+function asciiLower(text: string): string {
+  return text.replace(/[A-Z]+/g, (upper) => upper.toLowerCase());
+}
+// The hint for leading text the server refuses, read in its order: after any
+// `#label` words, the first `@` word must be a whole name, and no leading name
+// may have capitals. A lowercase name the page doesn't know may be a group,
+// which the frame doesn't carry, so the server decides that one.
+function refusedLeading(
+  text: string,
+  members: ReadonlyMap<AddressId, Member>,
+): string | null {
+  let at = spaceAfter(text, 0);
+  const start = at;
+  while (LABEL.test(wordAt(text, at)))
+    at = spaceAfter(text, at + wordAt(text, at).length);
+  const labeled = at > start;
+  const first = wordAt(text, at);
+  if (first.length > 1 && first.startsWith("@")) {
+    if (!ALIAS.test(asciiLower(first.slice(1)))) {
+      const name = PUNCTUATED.exec(first)?.[1];
+      return name !== undefined && ALIAS.test(asciiLower(name))
+        ? composerCopy.spaceAfter(`@${asciiLower(name)}`)
+        : composerCopy.notMember(first);
+    }
+  }
+  const names: string[] = [];
+  let word = first;
+  while (word.startsWith("@") && ALIAS.test(asciiLower(word.slice(1)))) {
+    names.push(word);
+    at = spaceAfter(text, at + word.length);
+    word = wordAt(text, at);
+  }
+  const capitalized = names.find((name) => name !== asciiLower(name));
+  if (capitalized === undefined) return null;
+  const alias = asciiLower(capitalized);
+  const current = new Set<string>();
+  for (const member of members.values())
+    if (member.kind.type !== "human" && member.activity !== "retired")
+      current.add(member.alias);
+  return labeled || current.has(alias)
+    ? composerCopy.lowercase(alias)
+    : composerCopy.notMember(capitalized);
+}
 
 // The agents a channel post mentions, in the order the text first names them.
 export function mentionedAgents(
@@ -324,6 +370,8 @@ export function postSource(text: string, rule: SendRule): string | null {
 // Where Enter sends the text, in the words of the hint under the box.
 export function composerHint(rule: SendRule, text: string): string {
   if (rule.kind === "thread") return composerCopy.hint;
+  const refused = refusedLeading(text, rule.agents);
+  if (refused !== null) return refused;
   const leading = leadingMentions(text);
   if (leading.length > 0) return composerCopy.sendsOnlyTo(leading);
   const mentioned = mentionedAgents(text, rule.agents);

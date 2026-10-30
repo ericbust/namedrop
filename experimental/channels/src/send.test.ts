@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import type { SpaceKey } from "./model.ts";
 import { createPoster, type Post } from "./send.ts";
@@ -219,16 +221,23 @@ test("deliver: posts the bare aliases for a stored post with the session token, 
   const server = fakeServer(({ url, init }) => {
     if (url === "/api/session") return json(200, { csrf_token: `t${++token}` });
     return new Headers(init?.headers).get("X-Namedrop-Csrf") === "t2"
-      ? json(200, { channel: { state: "unrouted", to: ["codex"] } })
+      ? json(200, {
+          channel: { state: "unrouted", to: ["codex"] },
+          delivered: JSON.parse(String(init?.body)).to,
+        })
       : new Response("Forbidden.\n", { status: 403 });
   });
   const poster = createPoster(server.fetcher);
   assert.deepEqual(
-    Object.fromEntries(await poster.deliver(key, "post 1/a", ["@codex"])),
+    Object.fromEntries(
+      (await poster.deliver(key, "post 1/a", ["@codex"])).results,
+    ),
     { "@codex": { kind: "done" } },
   );
   assert.deepEqual(
-    Object.fromEntries(await poster.deliver(key, "p2", ["@codex", "@claude"])),
+    Object.fromEntries(
+      (await poster.deliver(key, "p2", ["@codex", "@claude"])).results,
+    ),
     { "@codex": { kind: "done" }, "@claude": { kind: "done" } },
   );
   assert.deepEqual(posts(server.seen), [
@@ -253,28 +262,27 @@ test("deliver: posts the bare aliases for a stored post with the session token, 
   ]);
 });
 
-test("deliver: a 200 that lists only some aliases sends the rest back as failed with the server's reason", async () => {
-  const reason = "@claude belongs to a different agent now.";
+test("deliver: a 200 that lists only some aliases sends the rest back as failed, with the post's channel object", async () => {
   const server = fakeServer(({ url }) =>
     url === "/api/session"
       ? json(200, { csrf_token: "t" })
       : json(200, {
           channel: { state: "unrouted", to: ["codex"] },
           delivered: ["codex"],
-          not_delivered: [{ alias: "claude", reason }],
         }),
   );
+  const answer = await createPoster(server.fetcher).deliver(key, "p1", [
+    "@codex",
+    "@claude",
+  ]);
+  assert.deepEqual(Object.fromEntries(answer.results), {
+    "@codex": { kind: "done" },
+    "@claude": { kind: "failed", cause: "left-out" },
+  });
   assert.deepEqual(
-    Object.fromEntries(
-      await createPoster(server.fetcher).deliver(key, "p1", [
-        "@codex",
-        "@claude",
-      ]),
-    ),
-    {
-      "@codex": { kind: "done" },
-      "@claude": { kind: "failed", status: 200, message: reason },
-    },
+    answer.channel,
+    { state: "unrouted", mentioned: [], to: ["@codex"] },
+    "the post's channel object comes back with the answer",
   );
 });
 
@@ -296,7 +304,8 @@ test("deliver: a 200 whose body never finishes or breaks still reads as sent, wi
     const started = Date.now();
     assert.deepEqual(
       Object.fromEntries(
-        await createPoster(server.fetcher, 50).deliver(key, "p1", ["@codex"]),
+        (await createPoster(server.fetcher, 50).deliver(key, "p1", ["@codex"]))
+          .results,
       ),
       { "@codex": { kind: "done" } },
     );
@@ -304,25 +313,64 @@ test("deliver: a 200 whose body never finishes or breaks still reads as sent, wi
   }
 });
 
-test("deliver: a refusal carries the server's message and a network failure reads status 0", async () => {
+test("deliver: a 200 whose body stalls is aborted when the body wait ends, so the server sees its socket close", async () => {
+  const wait = 100;
+  const margin = 1_000;
+  let closed: number | null = null;
+  const server = createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    if (req.url === "/api/session") return res.end('{"csrf_token":"t"}');
+    req.socket.once("close", () => {
+      closed = Date.now();
+    });
+    res.write('{"delivered":');
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const fetcher: typeof fetch = (input, init) =>
+    fetch(`http://127.0.0.1:${port}${String(input)}`, init);
+  try {
+    const started = Date.now();
+    assert.deepEqual(
+      Object.fromEntries(
+        (await createPoster(fetcher, wait).deliver(key, "p1", ["@codex"]))
+          .results,
+      ),
+      { "@codex": { kind: "done" } },
+      "the press still reads as sent",
+    );
+    while (closed === null && Date.now() - started < wait + margin)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    const seen: number | null = closed;
+    assert.ok(
+      seen !== null && seen - started <= wait + margin,
+      `the server saw the socket close within ${wait + margin} ms`,
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("deliver: a refusal carries the server's message, a network failure reads status 0, and a 200 that lists no one readable confirms nothing", async () => {
+  const refused = (status: number, message: string) => ({
+    kind: "failed",
+    cause: "refused",
+    status,
+    message,
+  });
   const cases: [Response | Error, unknown][] = [
     [
       json(400, { error: "@shell is not an agent in this workspace." }),
-      {
-        kind: "failed",
-        status: 400,
-        message: "@shell is not an agent in this workspace.",
-      },
+      refused(400, "@shell is not an agent in this workspace."),
     ],
+    [new Response("Not found.\n", { status: 404 }), refused(404, "Not found.")],
+    [new Response("", { status: 500 }), refused(500, "")],
+    [new Error("offline"), refused(0, "")],
     [
-      new Response("Not found.\n", { status: 404 }),
-      { kind: "failed", status: 404, message: "Not found." },
+      json(200, { channel: { state: "unrouted", to: ["codex"] } }),
+      { kind: "failed", cause: "unconfirmed" },
     ],
-    [
-      new Response("", { status: 500 }),
-      { kind: "failed", status: 500, message: "" },
-    ],
-    [new Error("offline"), { kind: "failed", status: 0, message: "" }],
   ];
   for (const [outcome, expected] of cases) {
     const server = fakeServer(({ url }) => {
@@ -332,10 +380,12 @@ test("deliver: a refusal carries the server's message and a network failure read
     });
     assert.deepEqual(
       Object.fromEntries(
-        await createPoster(server.fetcher).deliver(key, "p1", [
-          "@codex",
-          "@claude",
-        ]),
+        (
+          await createPoster(server.fetcher).deliver(key, "p1", [
+            "@codex",
+            "@claude",
+          ])
+        ).results,
       ),
       { "@codex": expected, "@claude": expected },
     );

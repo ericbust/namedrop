@@ -60,7 +60,9 @@ function Chip({ member }: { member: Member }) {
       ? " is-blocked"
       : member.activity === "offline"
         ? " is-offline"
-        : "";
+        : member.activity === "retired"
+          ? " is-retired"
+          : "";
   return (
     <PeekControl
       target={scope === null ? null : peekTarget(scope, member)}

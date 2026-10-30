@@ -1,12 +1,14 @@
 import type {
   Alias,
+  DeliverAnswer,
+  DeliverFailure,
   DeliverResult,
   SendFailure,
   SpaceKey,
   ThreadAction,
 } from "./model.ts";
 import {
-  parseDelivered,
+  parseDeliverAnswer,
   parseReceipt,
   parseRefusal,
   parseSessionToken,
@@ -25,12 +27,18 @@ export type ControlResult =
   | { kind: "done" }
   | { kind: "failed"; status: number };
 
-// A 2xx status is the server's answer; a body that stalls or breaks after it must not hold the press.
-function bodyWithin(response: Response, ms: number): Promise<string> {
+// A 2xx status is the server's answer; a body that stalls or breaks after it
+// must not hold the press. Reading has locked the body, so only aborting the
+// request releases its connection.
+function bodyWithin(
+  response: Response,
+  ms: number,
+  request: AbortController,
+): Promise<string> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<string>((resolve) => {
     timer = setTimeout(() => {
-      void response.body?.cancel().catch(() => {});
+      request.abort();
       resolve("");
     }, ms);
   });
@@ -130,25 +138,33 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
       key: SpaceKey,
       messageId: string,
       to: readonly Alias[],
-    ): Promise<ReadonlyMap<Alias, DeliverResult>> {
-      const each = (failure: SendFailure) =>
-        new Map(
+    ): Promise<DeliverAnswer> {
+      const each = (failure: DeliverFailure): DeliverAnswer => ({
+        results: new Map(
           to.map((alias): [Alias, DeliverResult] => [
             alias,
             { kind: "failed", ...failure },
           ]),
-        );
+        ),
+        channel: null,
+      });
       try {
+        const request = new AbortController();
         const response = await postWithTokenRetry(
           `/w/${key}/messages/${encodeURIComponent(messageId)}/deliver`,
           { to: to.map((alias) => alias.slice(1)) },
+          request.signal,
         );
-        const body = await bodyWithin(response, bodyWait);
+        const body = await bodyWithin(response, bodyWait, request);
         return response.ok
-          ? parseDelivered(body, to)
-          : each({ status: response.status, message: parseRefusal(body) });
+          ? parseDeliverAnswer(body, to)
+          : each({
+              cause: "refused",
+              status: response.status,
+              message: parseRefusal(body),
+            });
       } catch {
-        return each({ status: 0, message: "" });
+        return each({ cause: "refused", status: 0, message: "" });
       }
     },
   };

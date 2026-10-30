@@ -27,6 +27,7 @@ import type {
   TerminalResult,
   TerminalRun,
 } from "../model.ts";
+import { plainNudge } from "../nudge.ts";
 import { peekTargetOf } from "../peek.ts";
 import {
   type Chat,
@@ -258,7 +259,11 @@ function Receipts({
   return (
     <ul className="receipt" aria-label="Delivery">
       {message.legs.map((leg) => {
-        const copy = receiptCopy(leg.stage, paused);
+        const copy = receiptCopy(
+          leg.stage,
+          participant(directory, leg.to),
+          paused,
+        );
         return (
           <li
             key={leg.to}
@@ -333,6 +338,17 @@ function Reference({
     </button>
   );
 }
+// A delivery part that leaves while it has focus hands focus to its message
+// row, so the next Tab continues from there. React runs a ref's cleanup before
+// it takes the element off the page.
+function focusRowOnLeave(button: HTMLButtonElement) {
+  return () => {
+    if (document.activeElement !== button) return;
+    const row = button.closest<HTMLElement>("article");
+    row?.setAttribute("tabindex", "-1");
+    row?.focus({ preventScroll: true });
+  };
+}
 function partKey(part: RoutePart): string {
   switch (part.kind) {
     case "receipt":
@@ -402,7 +418,11 @@ function Route({
       case "pulled-in":
         return <li>{routeCopy.pulledIn}</li>;
       case "receipt": {
-        const copy = receiptCopy(part.stage, paused);
+        const copy = receiptCopy(
+          part.stage,
+          participant(directory, part.id),
+          paused,
+        );
         return (
           <li
             data-stage={part.stage.stage}
@@ -445,27 +465,26 @@ function Route({
         const { alias, state } = part;
         return (
           <li>
-            <span role="status">
-              {state.kind === "failed" && (
-                <span className="route-failed">
-                  {routeCopy.delivery.failed(alias)}
-                </span>
-              )}
-              <button
-                type="button"
-                className="route-link"
-                data-offer={offerId(alias)}
-                aria-disabled={state.kind !== "failed" || undefined}
-                title={
-                  state.kind === "failed"
-                    ? routeCopy.delivery.why(state)
-                    : undefined
-                }
-                onClick={() => deliveries?.deliver(message, alias)}
-              >
-                {routeCopy.delivery.label[state.kind](alias)}
-              </button>
-            </span>
+            {state.kind === "failed" && (
+              <span className="route-failed">
+                {routeCopy.delivery.failed(alias)}
+              </span>
+            )}
+            <button
+              type="button"
+              className="route-link"
+              ref={focusRowOnLeave}
+              data-offer={offerId(alias)}
+              aria-disabled={state.kind !== "failed" || undefined}
+              title={
+                state.kind === "failed"
+                  ? routeCopy.delivery.why(state)
+                  : undefined
+              }
+              onClick={() => deliveries?.deliver(message, alias)}
+            >
+              {routeCopy.delivery.label[state.kind](alias)}
+            </button>
           </li>
         );
       }
@@ -552,7 +571,8 @@ function SystemRow({
   paused: boolean;
 }) {
   const failed = message.legs.some((leg) => leg.stage.stage === "failed");
-  const { text, truncated } = message.body;
+  const { text: raw, truncated } = message.body;
+  const text = message.kind === "nudge" ? plainNudge(raw) : raw;
   return (
     <article
       className={`system${arrive ? " arrive" : ""}${located ? " located" : ""}`}
@@ -563,7 +583,7 @@ function SystemRow({
       <div className="msg-content">
         <p>
           <strong>{message.kind === "hook" ? "Hook" : "Nudge"}</strong>
-          <span className="body">
+          <span className="body" title={text === raw ? undefined : raw}>
             {formattedText(text, previewLimit(text))}
             {text.length > PREVIEW || truncated ? "…" : null}
           </span>
@@ -634,18 +654,20 @@ function ReplyPreview({
     );
   }
   return (
-    <button
-      type="button"
-      className={`reply-preview${reply === null ? " count-only" : ""}`}
-      data-thread-id={message.threadId}
-      aria-controls={paneId}
-      aria-expanded={expanded}
-      aria-label={label}
-      onClick={(event) => onThread(message.threadId, event.currentTarget)}
-    >
-      {content}
-      <span className="rp-count">{replies}</span>
-    </button>
+    <div className="rp-room">
+      <button
+        type="button"
+        className={`reply-preview${reply === null ? " count-only" : ""}`}
+        data-thread-id={message.threadId}
+        aria-controls={paneId}
+        aria-expanded={expanded}
+        aria-label={label}
+        onClick={(event) => onThread(message.threadId, event.currentTarget)}
+      >
+        {content}
+        <span className="rp-count">{replies}</span>
+      </button>
+    </div>
   );
 }
 function samePerson(

@@ -5,9 +5,11 @@ import type { Delivery } from "./delivery.ts";
 import type {
   Activity,
   Attention,
+  AttentionResponse,
   ChannelSnapshot,
   DeliveryStage,
   Health,
+  Member,
   MemberKind,
   OutgoingPhase,
   Participant,
@@ -60,18 +62,56 @@ const stageCopy = {
   unknown: { label: "Status unknown", icon: "unknown", tone: "muted" },
 } satisfies Record<Exclude<DeliveryStage["stage"], "completed">, ReceiptCopy>;
 const completedCopy: ReadonlyMap<string, ReceiptCopy> = new Map([
-  ["settled", done],
   ["no_reply", { ...done, label: "Done, no reply needed" }],
 ]);
-export function receiptCopy(stage: DeliveryStage, paused = false): ReceiptCopy {
+const ended: ReceiptCopy = {
+  label: "Ended without an answer",
+  icon: "unknown",
+  tone: "muted",
+};
+// A settled turn closed no request. An agent's turn should have answered, as
+// Needs-you says; a terminal's command just finished.
+function settledCopy(recipient: Participant): ReceiptCopy {
+  switch (recipient.kind) {
+    case "operator":
+      return done;
+    case "envoy":
+    case "unknown":
+      return ended;
+    case "member":
+      switch (recipient.member.kind.type) {
+        case "agent":
+          return ended;
+        case "terminal":
+        case "human":
+        case "unknown":
+          return done;
+        default: {
+          const exhaustive: never = recipient.member.kind;
+          return exhaustive;
+        }
+      }
+    default: {
+      const exhaustive: never = recipient;
+      return exhaustive;
+    }
+  }
+}
+export function receiptCopy(
+  stage: DeliveryStage,
+  recipient: Participant,
+  paused = false,
+): ReceiptCopy {
   if (paused && stage.stage === "queued") return stageCopy.held;
   if (stage.stage !== "completed") return stageCopy[stage.stage];
+  if (stage.kind === "settled") return settledCopy(recipient);
   return completedCopy.get(stage.kind) ?? { ...done, title: stage.kind };
 }
 
 export type AttentionCopy = {
   title: string;
   hint: string;
+  hintTitle: string | null;
   details: string | null;
 };
 const SHORT_SUMMARY = 90;
@@ -92,7 +132,7 @@ const unanswered: AttentionRow = {
   namedHint: "It ended its turn without replying.",
 };
 const attentionTable: Record<Attention["source"], AttentionRow> = {
-  agent_status: { ...needsYou, hint: "Open its pane in Herdr to answer." },
+  agent_status: { ...needsYou, hint: "Answer it in its pane in Herdr." },
   agent_disposition: unanswered,
   delivery_attempt: unanswered,
   automatic_reply_limit: {
@@ -103,12 +143,12 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
   coordination: {
     title: "Coordination needs a decision",
     named: (alias) => `${alias}'s coordination needs a decision`,
-    hint: "Review the report and close it from the lead's pane.",
+    hint: "Read the report, then answer the lead.",
   },
   context_grant: {
     title: "Context request waiting",
     named: (alias) => `${alias} is asking for context`,
-    hint: "Approve or decline it from the pane.",
+    hint: "Approve or decline it in the agent's pane in Herdr.",
   },
   pane_binding: {
     title: "An agent's pane changed",
@@ -122,6 +162,53 @@ const attentionTable: Record<Attention["source"], AttentionRow> = {
   },
   unknown: { ...needsYou, hint: "Open Details for the full message." },
 };
+export const responseCopy = {
+  reply: (name: string) => `Reply to ${name}`,
+  message: (name: string) => `Message ${name}`,
+  pane: (name: string) => `See ${name}'s screen`,
+} satisfies Record<
+  Exclude<AttentionResponse["kind"], "local">,
+  (name: string) => string
+>;
+export function answerInPane(name: string | null): string {
+  return name === null
+    ? attentionTable.agent_status.hint
+    : `Answer it in ${name}'s pane in Herdr.`;
+}
+export function paneLabelText(
+  member: Member | null | undefined,
+): string | null {
+  const label = member?.paneLabel;
+  return label ? `${label.text}${label.truncated ? "…" : ""}` : null;
+}
+const localHint =
+  "Open this workspace in Herdr and choose Namedrop Doctor to review this item.";
+const localSetupHint =
+  "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.";
+const pausedHint = "The agents paused after 10 replies in a row.";
+function responseHint(
+  item: Attention,
+  responder: Member | null,
+): Pick<AttentionCopy, "hint" | "hintTitle"> | null {
+  if (item.response?.kind === "local")
+    return {
+      hint:
+        item.source === "integration_registration" ? localSetupHint : localHint,
+      hintTitle: null,
+    };
+  if (item.source === "automatic_reply_limit" && threadControls(item) !== null)
+    return { hint: pausedHint, hintTitle: null };
+  const who = responder?.alias ?? item.subjectAlias;
+  const pane = item.response?.kind === "pane";
+  if (who === null || !(pane || item.source === "agent_status")) return null;
+  return {
+    hint:
+      item.source === "context_grant"
+        ? `Approve or decline it in ${who}'s pane in Herdr.`
+        : answerInPane(who),
+    hintTitle: pane ? paneLabelText(responder) : null,
+  };
+}
 export const threadControlCopy = {
   continue: {
     label: "Allow 10 more replies",
@@ -145,26 +232,37 @@ export const threadControlCopy = {
   { label: string; pending: string; title: string; failed: string }
 > &
   Record<string, unknown>;
-const pausedHint = "The agents paused after 10 replies in a row.";
-export function attentionCopy(item: Attention): AttentionCopy {
+// What an item is about, in the Needs-you table's words, for a row that already names the agent.
+export function attentionKind(item: Attention): string {
+  return attentionTable[item.source].title;
+}
+export function attentionCopy(
+  item: Attention,
+  responder: Member | null = null,
+): AttentionCopy {
   const { text, truncated } = item.summary;
-  const row =
-    item.source === "automatic_reply_limit" && threadControls(item) !== null
-      ? { ...attentionTable[item.source], hint: pausedHint }
-      : attentionTable[item.source];
+  const row = attentionTable[item.source];
+  const response = responseHint(item, responder);
+  const hintTitle = response?.hintTitle ?? null;
   if (
     item.source === "agent_status" &&
     !truncated &&
     text.trim() &&
     text.length <= SHORT_SUMMARY
   )
-    return { title: text, hint: row.hint, details: null };
+    return {
+      title: text,
+      hint: response?.hint ?? row.hint,
+      hintTitle,
+      details: null,
+    };
   const details = `${text}${truncated ? "…" : ""}`;
   return item.subjectAlias === null
-    ? { title: row.title, hint: row.hint, details }
+    ? { title: row.title, hint: response?.hint ?? row.hint, hintTitle, details }
     : {
         title: row.named(item.subjectAlias),
-        hint: row.namedHint ?? row.hint,
+        hint: response?.hint ?? row.namedHint ?? row.hint,
+        hintTitle,
         details,
       };
 }
@@ -204,7 +302,7 @@ export const presenceWord = {
   blocked: "Needs you",
   idle: "Idle",
   offline: "Offline",
-  retired: "Retired",
+  retired: "Pane closed",
   unknown: "Unknown",
 } satisfies Record<Activity, string>;
 
@@ -307,6 +405,9 @@ export const composerCopy = {
     `Enter posts to the channel · Namedrop checks if it's for ${shortList(names)}`,
   sendsOnlyTo: (names: readonly string[]) =>
     `Enter sends only to ${shortList(names)}`,
+  lowercase: (alias: string) => `Names are lowercase: ${alias}`,
+  notMember: (name: string) => `${name} isn't in this channel`,
+  spaceAfter: (alias: string) => `Put a space after ${alias}`,
   sending: "Sending…",
   send: "Send",
   everyWorkspace: "every workspace",
@@ -360,6 +461,9 @@ export const disabledChannelCopy = {
 export function repliesCopy(count: number): string {
   return `${count} ${count === 1 ? "reply" : "replies"}`;
 }
+const sendingTo = (alias: string) => `Sending to ${alias}…`;
+const sentTo = (alias: string) => `Sent to ${alias}`;
+const couldNotSendTo = (alias: string) => `Couldn't send to ${alias}`;
 export const routeCopy = {
   label: "Who got this",
   state: {
@@ -378,26 +482,42 @@ export const routeCopy = {
   sendThis: (alias: string) => `Send this to ${alias}`,
   delivery: {
     label: {
-      sending: (alias: string) => `Sending to ${alias}…`,
-      sent: (alias: string) => `Sent to ${alias}`,
+      sending: sendingTo,
+      sent: sentTo,
       failed: () => "Try again",
     } satisfies Record<
       Exclude<Delivery["kind"], "idle">,
       (alias: string) => string
     >,
-    failed: (alias: string) => `Couldn't send to ${alias}`,
-    why: ({ status, message }: SendFailure) => {
-      if (status === 0) return "Couldn't reach Namedrop.";
-      if (message !== "") return message;
-      return status === 200
-        ? "Namedrop didn't send it. The name may belong to a different agent now."
-        : `HTTP ${status}`;
+    failed: couldNotSendTo,
+    announce: {
+      idle: () => "",
+      sending: sendingTo,
+      sent: sentTo,
+      failed: couldNotSendTo,
+    } satisfies Record<Delivery["kind"], (alias: string) => string>,
+    why: (failure: Extract<Delivery, { kind: "failed" }>) => {
+      switch (failure.cause) {
+        case "refused":
+          if (failure.status === 0) return "Couldn't reach Namedrop.";
+          return failure.message === ""
+            ? `HTTP ${failure.status}`
+            : failure.message;
+        case "left-out":
+          return "Namedrop didn't send it. The name may belong to a different agent now.";
+        case "unconfirmed":
+          return "Namedrop didn't confirm it sent this.";
+        default: {
+          const exhaustive: never = failure;
+          return exhaustive;
+        }
+      }
     },
   },
   tip: {
     router: (name: string) => `Picked by ${name}`,
     unreachable:
-      "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+      "Namedrop couldn't reach its router, so it didn't pick who gets this post. The post is saved.",
   } satisfies Record<RouteTip["kind"], unknown>,
   openReplies: (count: number) => `${repliesCopy(count)}. Open thread`,
 };

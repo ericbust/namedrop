@@ -562,7 +562,8 @@ a:hover {
   color: var(--attention-text);
   font-weight: 500;
 }
-.member.is-offline .alias {
+.member.is-offline .alias,
+.member.is-retired .alias {
   color: var(--text-muted);
 }
 button.member:not(.more):hover {
@@ -756,11 +757,21 @@ button.member:not(.more):hover {
   white-space: pre-wrap;
 }
 .attention-actions {
-  grid-column: 2;
+  grid-column: 2 / 4;
   display: flex;
   flex-wrap: wrap;
-  column-gap: var(--space-4);
+  column-gap: var(--space-3);
   margin-top: 2px;
+}
+.attention-actions:empty {
+  display: none;
+}
+.attention-actions .text-button {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .attention-confirm {
   font-size: var(--text-sm);
@@ -782,9 +793,20 @@ button.member:not(.more):hover {
   min-height: 0;
   overflow-y: auto;
   overflow-anchor: none;
-  padding: var(--space-2) var(--space-6) var(--pad-bottom);
+  padding: 0 var(--space-6);
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px);
   mask-image: linear-gradient(to bottom, transparent, #000 12px);
+}
+/* The space above and below the messages is content, not padding, so a
+   squeezed timeline can shrink to nothing. */
+.timeline::before,
+.timeline::after {
+  content: "";
+  display: block;
+  height: var(--space-2);
+}
+.timeline::after {
+  height: var(--pad-bottom);
 }
 .timeline:focus-visible {
   outline-offset: -2px;
@@ -803,6 +825,18 @@ button.member:not(.more):hover {
   color: var(--text-muted);
 }
 .history-edge .text-button {
+  font-size: var(--text-xs);
+}
+.thread-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+.thread-error .text-button,
+.thread-answer .text-button {
   font-size: var(--text-xs);
 }
 .divider {
@@ -835,7 +869,7 @@ button.member:not(.more):hover {
 }
 .jump-dock {
   position: sticky;
-  bottom: 0;
+  bottom: var(--pad-bottom);
   height: 0;
   display: flex;
   justify-content: center;
@@ -854,7 +888,7 @@ button.member:not(.more):hover {
   font-size: var(--text-sm);
   font-weight: 500;
   box-shadow: var(--shadow-pop);
-  /* The dock sticks above the bottom padding; drop the pill to 16px from the edge. */
+  /* The dock sticks above the bottom space; drop the pill to 16px from the edge. */
   translate: 0 calc(var(--pad-bottom) - 16px);
 }
 .jump-latest:hover {
@@ -1213,6 +1247,9 @@ button.member:not(.more):hover {
   font-size: var(--text-xs);
 }
 
+.rp-room {
+  container-type: inline-size;
+}
 .reply-preview {
   display: grid;
   grid-template-columns: var(--avatar-sm) minmax(0, 1fr) auto;
@@ -1240,19 +1277,40 @@ button.member:not(.more):hover {
   grid-template-columns: minmax(0, 1fr) auto;
   width: auto;
 }
+/* Under 120px of text beside the count, the row shows the count only. The
+   box's 22px of border and padding, the 20px avatar, two 10px gaps and a 49px
+   "2 replies" leave 120px at 231px. */
+@container (width < 231px) {
+  .reply-preview {
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: auto;
+  }
+  .reply-preview > :not(.rp-count) {
+    display: none;
+  }
+}
 .rp-main {
   display: flex;
   flex-direction: column;
   gap: 1px;
   min-width: 0;
+  overflow: hidden;
 }
 .rp-head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   line-height: 18px;
+  white-space: nowrap;
+}
+.rp-head > * {
+  flex: none;
 }
 .rp-author {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-size: var(--text-sm);
   font-weight: 600;
 }
@@ -1516,7 +1574,7 @@ button.member:not(.more):hover {
   grid-template-columns:
     var(--space-3) auto var(--space-3) minmax(0, 1fr)
     var(--space-4) auto var(--space-3);
-  grid-template-rows: 9px auto auto 9px;
+  grid-template-rows: 9px auto auto auto auto 9px;
 }
 .activity-row {
   grid-column: 1 / -1;
@@ -1619,6 +1677,19 @@ button.member:not(.more):hover {
   color: var(--text);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+.activity-item .attention-actions,
+.activity-item .attention-failure {
+  grid-column: 4 / 7;
+  grid-row: 4;
+  margin-top: var(--space-1);
+}
+.activity-item .attention-failure {
+  grid-row: 5;
+}
+.activity-item .attention-actions .text-button,
+.activity-item .attention-confirm {
+  font-size: var(--text-xs);
 }
 
 .empty {
@@ -1791,6 +1862,17 @@ code.inline {
 .composer-guard {
   color: var(--text);
 }
+.thread-answer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  flex: none;
+  padding: 0 var(--space-5) var(--space-3);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  color: var(--text-muted);
+}
 .composer-error {
   display: flex;
   align-items: center;
@@ -1899,6 +1981,12 @@ code.inline {
   }
   .attention {
     margin-inline: var(--space-4);
+  }
+  /* Stacked, the main column is half the window. Once the timeline is gone,
+     the banner shrinks so the composer stays whole. */
+  .app-shell.has-slot .attention {
+    flex-shrink: 1;
+    max-height: 40%;
   }
 }
 @media (max-width: 600px) {

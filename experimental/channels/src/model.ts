@@ -100,9 +100,10 @@ export type DeliveryStage =
 export type Alias = `@${string}`;
 // Where a channel post stands with the router. A message carries one exactly
 // when its wire row has a `channel` object, so a state a newer server invents
-// still marks the post as channel chat. Who got it comes from the legs; the
+// still marks the post as channel chat. Who got it comes from the legs, and
+// from `to` for an agent the server reached before a frame brings its leg; the
 // agents the post names come from the server, which read them when it stored it.
-export type Routing = { mentioned: readonly Alias[] } & (
+export type Routing = { mentioned: readonly Alias[]; to: readonly Alias[] } & (
   | { state: "routing" }
   | { state: "routed"; reason: string | null; router: string | null }
   | { state: "unrouted" }
@@ -202,9 +203,21 @@ export type SendAttempt = {
   inReplyTo: string | null;
 };
 export type SendFailure = { status: number; message: string };
+// Why a deliver press did not reach one agent: the server refused the request
+// (status 0 when it never reached the server), or its 2xx answer left the
+// agent out of `delivered`, or had no `delivered` list it could read.
+export type DeliverFailure =
+  | ({ cause: "refused" } & SendFailure)
+  | { cause: "left-out" | "unconfirmed" };
 export type DeliverResult =
   | { kind: "done" }
-  | ({ kind: "failed" } & SendFailure);
+  | ({ kind: "failed" } & DeliverFailure);
+// A deliver press's answer: each pressed agent's result, and the post's
+// channel object when a 2xx body carried one.
+export type DeliverAnswer = {
+  results: ReadonlyMap<Alias, DeliverResult>;
+  channel: Routing | null;
+};
 // A refused draft keeps its attempt until a success, so the same post reuses
 // its id. The failure shows only until the next edit, and never without an attempt.
 export type Draft = ComposerId & { text: string } & (
@@ -273,6 +286,12 @@ export type Event =
   | { type: "edit"; composer: ComposerId; text: string }
   | { type: "send"; outgoing: Omit<Outgoing, "phase"> }
   | { type: "sent"; requestId: string; messageId: string }
+  | {
+      type: "delivered";
+      key: SpaceKey;
+      messageId: string;
+      answer: DeliverAnswer;
+    }
   | { type: "send-failed"; requestId: string; status: number; message: string };
 export type Sync =
   | { kind: "connecting" | "reconnecting" | "live" | "fallback" }

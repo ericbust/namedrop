@@ -16,7 +16,13 @@ import {
   prepareChannelMessage,
 } from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
-import { composerPlaceholder } from "../copy.ts";
+import {
+  channelMention,
+  composerPlaceholder,
+  paneLabelText,
+  responseCopy,
+  routeCopy,
+} from "../copy.ts";
 import { createDeliveries, deliveryOf } from "../delivery.ts";
 import type {
   ComposerId,
@@ -132,6 +138,9 @@ export function App() {
         signal: controller.signal,
       },
     )
+      .catch(() => {
+        throw new Error("Couldn't reach Namedrop.");
+      })
       .then(async (response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const context = parseMessageContext(
@@ -572,6 +581,7 @@ export function App() {
     focused?.kind === "ready" && focused.request.response?.kind === "message"
       ? focused.request.response
       : null;
+  const preparedCaret = useRef<{ text: string; at: number } | null>(null);
   useLayoutEffect(() => {
     if (
       focused?.kind !== "ready" ||
@@ -584,6 +594,7 @@ export function App() {
       directory,
       state.drafts.get(draftKey(composerId))?.text ?? "",
       pending.length > 0,
+      focused.context,
     );
     focusEvidence({
       type: "message-prepared",
@@ -591,6 +602,7 @@ export function App() {
       result: result.kind,
     });
     if (result.kind === "prepared") {
+      preparedCaret.current = { text: result.text, at: result.caret };
       edit(composerId, result.text);
       main.current?.querySelector("textarea")?.focus();
     }
@@ -603,6 +615,13 @@ export function App() {
     pending,
     edit,
   ]);
+  useLayoutEffect(() => {
+    const box = main.current?.querySelector("textarea");
+    const want = preparedCaret.current;
+    if (want === null || box?.value !== want.text) return;
+    preparedCaret.current = null;
+    box.setSelectionRange(want.at, want.at);
+  });
   const peeking = state.slot.kind === "peek" ? state.slot.target : null;
   const who = peeking === null ? null : peekWho(state.channels, peeking);
   const pane = thread || focused ? "thread" : who ? "peek" : null;
@@ -624,18 +643,25 @@ export function App() {
     [],
   );
   const [deliveries] = useState(() =>
-    createDeliveries(({ key, messageId, alias }) =>
-      poster.deliver(key, messageId, [alias]),
-    ),
+    createDeliveries(async ({ key, messageId, alias }) => {
+      const answer = await poster.deliver(key, messageId, [alias]);
+      dispatch({ type: "delivered", key, messageId, answer });
+      return answer.results;
+    }),
   );
   const shownDeliveries = useSyncExternalStore(
     deliveries.subscribe,
     deliveries.snapshot,
   );
+  const deliveryChange = useSyncExternalStore(
+    deliveries.subscribe,
+    deliveries.latest,
+  );
   useEffect(
     () => deliveries.settle(state.channels),
     [deliveries, state.channels],
   );
+  useEffect(() => deliveries.dispose, [deliveries]);
   const deliveryAccess = useMemo<DeliveryAccess | null>(
     () =>
       current === undefined
@@ -751,6 +777,13 @@ export function App() {
         composerId !== null &&
         (state.drafts.get(draftKey(composerId))?.text.length ?? 0) === 0,
     });
+  const channelDraft =
+    composerId === null
+      ? ""
+      : (state.drafts.get(draftKey(composerId))?.text ?? "");
+  const messaged =
+    (channelResponse && members.get(channelResponse.addressId)?.alias) ??
+    "the agent";
   let threadResponse: ThreadResponse | null = null;
   if (focused?.kind === "ready") {
     const response = focused.request.response;
@@ -761,15 +794,25 @@ export function App() {
       case "message":
         threadResponse = {
           kind: "message",
+          name: messaged,
+          draft:
+            response.preparation === "preserved"
+              ? "kept"
+              : response.preparation === "prepared" && channelDraft !== ""
+                ? "prepared"
+                : "none",
           prepare: prepareResponse,
         };
         break;
-      case "pane":
+      case "pane": {
+        const member = members.get(response.addressId);
         threadResponse = {
           kind: "pane",
-          name: members.get(response.addressId)?.alias ?? response.addressId,
+          name: member?.alias ?? null,
+          pane: paneLabelText(member),
         };
         break;
+      }
       case undefined:
         break;
       default: {
@@ -843,25 +886,6 @@ export function App() {
                     dispatch({ type: "follow", key, atBottom })
                   }
                 />
-                {channelResponse?.preparation === "preserved" && (
-                  <p className="earlier-thread" role="status">
-                    Your channel draft or pending send was kept. Send or clear
-                    it, then retry.{" "}
-                    <button
-                      type="button"
-                      className="text-button"
-                      onClick={prepareResponse}
-                    >
-                      Prepare response
-                    </button>
-                  </p>
-                )}
-                {channelResponse?.preparation === "unavailable" && (
-                  <p className="earlier-thread" role="status">
-                    The responsible agent is no longer available. Use its pane
-                    in Herdr to respond.
-                  </p>
-                )}
                 {completion && composerId && (
                   <Composer
                     key={`composer:${channel.key}`}
@@ -872,7 +896,26 @@ export function App() {
                     placeholder={composerPlaceholder(channel)}
                     label={composerPlaceholder(channel)}
                     rule={channelRule}
-                    onEdit={(text) => edit(composerId, text)}
+                    notice={
+                      channelResponse?.preparation === "preserved" ? (
+                        <p className="composer-guard" role="status">
+                          Your draft is still here. Send or clear it, then press{" "}
+                          {responseCopy.message(messaged)} again.
+                        </p>
+                      ) : channelResponse?.preparation === "unavailable" ? (
+                        <p className="composer-guard" role="status">
+                          The responsible agent is no longer available. Use its
+                          pane in Herdr to respond.
+                        </p>
+                      ) : null
+                    }
+                    onEdit={(text) => {
+                      edit(composerId, text);
+                      focusEvidence({
+                        type: "draft-edited",
+                        key: composerId.key,
+                      });
+                    }}
                     onSend={(source, startedAt) => {
                       if (channel.viewMode === "browsing")
                         dispatch({ type: "latest", key: channel.key });
@@ -954,6 +997,9 @@ export function App() {
             <aside className="slot thread" aria-label="Thread" id={paneId}>
               <header className="thread-head">
                 <h2 className="thread-title">Thread</h2>
+                <span className="thread-where">
+                  in {channelMention(channel)}
+                </span>
                 <button
                   type="button"
                   className="icon-button"
@@ -963,22 +1009,28 @@ export function App() {
                   <Icon name="x" />
                 </button>
               </header>
-              <div className="thread-body" role="status">
-                {focused.kind === "loading" ? (
-                  "Loading conversation…"
-                ) : (
-                  <>
-                    Could not load conversation. {focused.reason}{" "}
+              {focused.kind === "loading" ? (
+                <div className="thread-body" role="status">
+                  Loading conversation…
+                </div>
+              ) : (
+                <div className="thread-body">
+                  <p
+                    className="thread-error"
+                    role="alert"
+                    title={focused.reason}
+                  >
+                    Couldn't load this conversation.{" "}
                     <button
                       type="button"
                       className="text-button"
                       onClick={() => focusEvidence({ type: "retry" })}
                     >
-                      Retry
+                      Try again
                     </button>
-                  </>
-                )}
-              </div>
+                  </p>
+                </div>
+              )}
             </aside>
           )}
           {peeking && who && (
@@ -991,6 +1043,12 @@ export function App() {
               onClose={closePeek}
             />
           )}
+          <p className="sr-only" aria-live="polite">
+            {deliveryChange &&
+              routeCopy.delivery.announce[deliveryChange.state.kind](
+                deliveryChange.offer.alias,
+              )}
+          </p>
         </div>
       </DeliveryContext>
     </PeekContext>

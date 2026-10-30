@@ -4,6 +4,7 @@ import { after, before, test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createServer, type ViteDevServer } from "vite";
+import type { AddressId, Draft, DraftKey } from "./model.ts";
 import { exitFor, initialState, reduce, runsByMessage } from "./store.ts";
 import { parseEvent } from "./wire.ts";
 
@@ -33,6 +34,11 @@ async function fixtures() {
 }
 function text(markup: string): string {
   return markup.replace(/<[^>]*>/g, "");
+}
+function buttons(markup: string): string[] {
+  return [...markup.matchAll(/<button[^>]*>(.*?)<\/button>/gs)].map(
+    ([, inner]) => text(inner ?? "").replaceAll("&#x27;", "'"),
+  );
 }
 function space(value: unknown) {
   const event = parseEvent("space", JSON.stringify(value));
@@ -285,7 +291,7 @@ test("design-b: member chips order by state, end with the operator as You withou
   assert.equal(markup.includes("claude-code"), false);
 });
 
-test("a recently closed member stays listed with retired presence and a Peek button", async () => {
+test("a recently closed member reads Pane closed, muted without a dot, last among agents before You, with a Peek button", async () => {
   const { MemberStrip } = await load<typeof import("./ui/MemberStrip.tsx")>(
     "/src/ui/MemberStrip.tsx",
   );
@@ -293,14 +299,18 @@ test("a recently closed member stays listed with retired presence and a Peek but
     "/src/ui/PeekContext.tsx",
   );
   const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  const agent = fixture.frame.participants[1];
   fixture.frame.participants = [
     {
-      ...fixture.frame.participants[1],
+      ...agent,
       address_id: "closed",
       alias: "@closed",
       activity: "retired",
       recently_closed: true,
     },
+    { ...agent, address_id: "off", alias: "@off", activity: "offline" },
+    { ...agent, address_id: "odd", alias: "@odd", activity: "mystery" },
+    { ...fixture.frame.participants[0], activity: "working" },
   ];
   const event = space(fixture);
   const markup = renderToStaticMarkup(
@@ -310,10 +320,15 @@ test("a recently closed member stays listed with retired presence and a Peek but
       createElement(MemberStrip, { members: event.channel.members }),
     ),
   );
+  assert.deepEqual(
+    [...markup.matchAll(/<li data-address-id="([^"]+)">/g)].map(([, id]) => id),
+    ["off", "odd", "closed", "human"],
+  );
   const chip = markup.match(/<li data-address-id="closed">(.*?)<\/li>/)?.[1];
   assert.ok(chip, markup);
-  assert.equal(text(chip), "C@closedRetired");
-  assert.ok(chip.includes('class="presence" data-activity="retired"'));
+  assert.equal(text(chip), "C@closedPane closed");
+  assert.equal(chip.includes("presence"), false, chip);
+  assert.ok(chip.includes('class="member is-retired"'), chip);
   assert.ok(chip.startsWith('<button type="button"'));
   assert.ok(chip.includes(`data-peek="${event.channel.key}/closed"`));
   assert.ok(chip.endsWith("</button>"));
@@ -383,6 +398,47 @@ test("an escaped mention reads as the plain name in prose, and stays literal in 
   );
   assert.ok(markup.includes(">@codex says 6 times 7 is 42."), markup);
   assert.ok(markup.includes("write \\@codex here"), markup);
+});
+
+test("a nudge shows tracked work in plain words and keeps the server's text in the tooltip", async () => {
+  const { Message } = await load<typeof import("./ui/Message.tsx")>(
+    "/src/ui/Message.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  const raw =
+    "Coordination coordination-1793308769836090626-2129769-1 (revision 3) remains open.\nAssignment assignment-1793308772078455575-2130363-4 revision 4: needs_continuation.";
+  const row = (kind: string, text: string) => {
+    fixture.frame.messages = [
+      {
+        ...fixture.frame.messages[0],
+        kind,
+        body: { text, truncated: false },
+      },
+    ];
+    const { channel } = space(fixture);
+    const message = [...channel.messages.values()][0];
+    assert.ok(message);
+    return renderToStaticMarkup(
+      createElement(Message, {
+        message,
+        directory: { members: channel.members, homes: new Map() },
+        recipients: [],
+        exit: undefined,
+      }),
+    );
+  };
+  const nudge = row("nudge", raw);
+  const body = nudge.match(
+    /<span class="body"( title="[^"]*")?>(.*?)<\/span>/s,
+  );
+  assert.ok(body, nudge);
+  assert.equal(
+    text(body[2] ?? ""),
+    "This coordination (revision 3) remains open.\nAssignment 1, revision 4: needs continuation.",
+  );
+  assert.equal(body[1], ` title="${raw}"`);
+  assert.doesNotMatch(row("nudge", "Please continue"), /title=/);
+  assert.ok(row("hook", raw).includes(raw), "a hook keeps its text");
 });
 
 test("a terminal run for the request decides Exit over the code in the result body", async () => {
@@ -510,10 +566,19 @@ test("attention actions show historical evidence and safe responses for every so
         }),
       ),
     );
-    assert.ok(markup.includes("Show message"), source);
-    assert.equal(markup.includes(">Respond<"), !paneOnly, source);
-    assert.equal(markup.includes(">Peek<"), paneOnly, source);
-    if (paneOnly) assert.ok(markup.includes("Respond in @codex"), markup);
+    assert.deepEqual(
+      buttons(markup),
+      [
+        "Show message",
+        paneOnly
+          ? "See @codex's screen"
+          : source === "coordination"
+            ? "Message @codex"
+            : "Reply to @codex",
+      ],
+      source,
+    );
+    assert.doesNotMatch(markup, /Respond|Peek|in Herdr/, source);
     assert.equal(channel.messages.size, 0);
   }
   value.frame.attention = [
@@ -530,19 +595,102 @@ test("attention actions show historical evidence and safe responses for every so
   const local = renderToStaticMarkup(
     createElement(AttentionActions, { item, channel, onFocus() {}, onControl }),
   );
-  assert.ok(local.includes("Namedrop setup from the command palette"), local);
-  assert.equal(local.includes("Show message"), false);
-  assert.equal(local.includes(">Respond<"), false);
-  const missing = renderToStaticMarkup(
-    createElement(AttentionActions, {
-      item: { ...item, source: "coordination" },
-      channel,
-      onFocus() {},
-      onControl,
-    }),
+  assert.deepEqual(buttons(local), []);
+  assert.doesNotMatch(local, /Namedrop setup|Namedrop Doctor/);
+});
+
+test("a Needs-you item keeps Show message, its response and Details on one action row, and its hint says where to answer", async () => {
+  const { NeedsYou } = await load<typeof import("./ui/NeedsYou.tsx")>(
+    "/src/ui/NeedsYou.tsx",
   );
-  assert.ok(missing.includes("Namedrop Doctor"), missing);
-  assert.equal(missing.includes("repair the integration"), false);
+  const { PeekContext } = await load<typeof import("./ui/PeekContext.tsx")>(
+    "/src/ui/PeekContext.tsx",
+  );
+  const value = JSON.parse((await fixtures())[0] ?? "null");
+  const worker = value.frame.participants[0];
+  worker.alias = "@worker";
+  worker.pane_label = { text: "w1:worker", truncated: false };
+  const conversation = { thread_id: "t", message_id: "m" };
+  const item = (source: string, response: unknown, extra = {}) => ({
+    attention_id: source,
+    source_kind: source,
+    summary: {
+      text: `${"A long server summary ".repeat(6)}end`,
+      truncated: false,
+    },
+    opened_at_ms: 1,
+    conversation,
+    response,
+    ...extra,
+  });
+  value.frame.health = { level: "needs_you", items: 3 };
+  value.frame.attention = [
+    item("context_grant", { kind: "pane", address_id: worker.address_id }),
+    item(
+      "delivery_attempt",
+      { kind: "reply", ...conversation, address_id: worker.address_id },
+      { subject_alias: "quiet" },
+    ),
+    item("integration_registration", { kind: "local" }, { conversation: null }),
+  ];
+  const render = () => {
+    const { channel } = space(value);
+    const markup = renderToStaticMarkup(
+      createElement(
+        PeekContext,
+        { value: { scope: channel.key, open() {} } },
+        createElement(NeedsYou, { channel, onFocus() {}, onControl }),
+      ),
+    );
+    return [...markup.matchAll(/<li class="attention-item">(.*?)<\/li>/gs)].map(
+      ([, inner]) => inner ?? "",
+    );
+  };
+  const items = render();
+  assert.equal(items.length, 3);
+  const rows = items.map((inner) => [
+    ...inner.matchAll(/<div class="attention-actions">(.*?)<\/div>/gs),
+  ]);
+  assert.deepEqual(
+    rows.map((found) => found.map(([, row]) => buttons(row ?? ""))),
+    [
+      [["Show message", "See @worker's screen", "Details"]],
+      [["Show message", "Reply to @worker", "Details"]],
+      [["Details"]],
+    ],
+  );
+  const hint = (inner: string) =>
+    inner.match(/<p class="attention-hint"( title="[^"]*")?>(.*?)<\/p>/s);
+  assert.deepEqual(hint(items[0] ?? "")?.slice(1), [
+    ' title="w1:worker"',
+    "Approve or decline it in @worker&#x27;s pane in Herdr.",
+  ]);
+  assert.deepEqual(hint(items[1] ?? "")?.slice(1), [
+    undefined,
+    "It ended its turn without replying.",
+  ]);
+  assert.deepEqual(hint(items[2] ?? "")?.slice(1), [
+    undefined,
+    "Open this workspace in Herdr and choose Namedrop setup from the command palette to repair the integration.",
+  ]);
+  value.frame.attention = [
+    item(
+      "automatic_reply_limit",
+      { kind: "pane", address_id: worker.address_id },
+      { thread_id: "t", actions: ["continue", "stop"] },
+    ),
+    item("pane_binding", { kind: "pane", address_id: worker.address_id }),
+  ];
+  const [limit, binding] = render();
+  assert.deepEqual(
+    hint(limit ?? "")?.slice(1),
+    [undefined, "The agents paused after 10 replies in a row."],
+    "beside Continue and Stop the paused hint stands, with no pane tooltip",
+  );
+  assert.deepEqual(hint(binding ?? "")?.slice(1), [
+    ' title="w1:worker"',
+    "Answer it in @worker&#x27;s pane in Herdr.",
+  ]);
 });
 
 test("Activity reuses the attention evidence and response controls", async () => {
@@ -580,7 +728,7 @@ test("Activity reuses the attention evidence and response controls", async () =>
     }),
   );
   assert.ok(markup.includes("Show message"), markup);
-  assert.ok(markup.includes(">Respond<"), markup);
+  assert.ok(markup.includes(">Message @codex<"), markup);
 });
 
 test("focused tracked evidence exposes the channel response path without a rejected thread composer", async () => {
@@ -631,21 +779,106 @@ test("focused tracked evidence exposes the channel response path without a rejec
   } satisfies Parameters<typeof ThreadPane>[0];
   const ordinary = renderToStaticMarkup(createElement(ThreadPane, props));
   assert.ok(ordinary.includes("textarea"));
-  const markup = renderToStaticMarkup(
+  const answer = (response: Parameters<typeof ThreadPane>[0]["response"]) => {
+    const markup = renderToStaticMarkup(
+      createElement(ThreadPane, { ...props, response }),
+    );
+    assert.equal(markup.includes("textarea"), false);
+    const line = markup.match(
+      /<p class="thread-answer" role="status"( title="[^"]*")?>(.*?)<\/p>/s,
+    );
+    assert.ok(line, markup);
+    return {
+      text: text(line[2] ?? "").replaceAll("&#x27;", "'"),
+      title: line[1],
+      buttons: buttons(line[2] ?? ""),
+    };
+  };
+  assert.deepEqual(
+    answer({ kind: "message", name: "@codex", draft: "none", prepare() {} }),
+    {
+      text: "Answer tracked work in the channel. Message @codex",
+      title: undefined,
+      buttons: ["Message @codex"],
+    },
+  );
+  assert.deepEqual(
+    answer({
+      kind: "message",
+      name: "@codex",
+      draft: "prepared",
+      prepare() {},
+    }),
+    {
+      text: "Answer tracked work in the channel. Your message to @codex is ready there.",
+      title: undefined,
+      buttons: [],
+    },
+  );
+  assert.deepEqual(
+    answer({ kind: "message", name: "@codex", draft: "kept", prepare() {} }),
+    {
+      text: "Answer tracked work in the channel.",
+      title: undefined,
+      buttons: [],
+    },
+    "the channel's kept-draft notice names the card's button as the retry",
+  );
+  assert.deepEqual(
+    answer({ kind: "pane", name: "@terminal", pane: "w1:term" }),
+    {
+      text: "Answer it in @terminal's pane in Herdr.",
+      title: ' title="w1:term"',
+      buttons: [],
+    },
+  );
+  const reply = {
+    kind: "reply",
+    intent: {
+      kind: "reply",
+      threadId: "tracked",
+      messageId: "tracked-message",
+      addressId: [...channel.members.keys()][0] ?? ("" as AddressId),
+    },
+  } as const;
+  const gone = renderToStaticMarkup(
     createElement(ThreadPane, {
       ...props,
-      response: { kind: "message", prepare() {} },
+      directory: { ...directory, members: new Map() },
+      response: reply,
     }),
   );
-  assert.ok(markup.includes("Respond in the channel"));
-  assert.ok(markup.includes("Prepare response"));
-  assert.equal(markup.includes("textarea"), false);
-  const pane = renderToStaticMarkup(
+  assert.equal(gone.includes("textarea"), false);
+  assert.ok(
+    gone.includes(
+      '<p class="thread-answer" role="status">The responsible agent is no longer available. Use its pane in Herdr to respond.</p>',
+    ),
+    gone,
+  );
+  const kept = renderToStaticMarkup(
     createElement(ThreadPane, {
       ...props,
-      response: { kind: "pane", name: "@terminal" },
+      drafts: new Map<DraftKey, Draft>([
+        [
+          "thread:tracked",
+          {
+            key: channel.key,
+            thread: "tracked",
+            text: "my words",
+            attempt: null,
+            failure: null,
+          },
+        ],
+      ]),
+      response: reply,
     }),
   );
-  assert.ok(pane.includes("Respond in @terminal in Herdr"));
-  assert.equal(pane.includes("textarea"), false);
+  assert.ok(kept.includes("textarea"), kept);
+  assert.ok(
+    kept.includes(
+      '<div class="composer-status"><p role="status">Your existing draft was kept. Send or clear it before preparing this reply.</p></div>',
+    ),
+    kept,
+  );
+  assert.equal(kept.includes("thread-answer"), false);
 });

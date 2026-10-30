@@ -4,6 +4,7 @@ import {
   type ActivityList,
   activityOf,
   activitySummary,
+  lineDetail,
   lineText,
 } from "./activity.ts";
 import type { Channel, Home, SpaceKey, State } from "./model.ts";
@@ -212,16 +213,6 @@ test("member activity uses the subject summary and keeps older and stored text i
     [{ subject_summary: { text: "Waiting", truncated: true } }, "Waiting…"],
     [{}, full],
     [{ subject_summary: null }, full],
-    [
-      {
-        source_kind: "coordination",
-        summary: {
-          text: "Keep @claude in this stored message",
-          truncated: false,
-        },
-      },
-      "Keep @claude in this stored message",
-    ],
   ] satisfies [Record<string, unknown>, string][]) {
     const list = activityOf(
       load(
@@ -234,6 +225,55 @@ test("member activity uses the subject summary and keeps older and stored text i
     );
     assert.equal(line(list, "@claude"), expected);
   }
+});
+
+test("activity rows: an item the server describes in its own terms reads in plain words, with the server's text in the tooltip", () => {
+  const server =
+    "Coordination coordination-1793308769836090626-2129769-1 needs a decision: the report is saved and waits for the lead.";
+  for (const [source, expected] of [
+    ["coordination", "Coordination needs a decision"],
+    ["agent_disposition", "Unanswered request"],
+    ["delivery_attempt", "Unanswered request"],
+    ["automatic_reply_limit", "Reply limit reached"],
+    ["context_grant", "Context request waiting"],
+    ["pane_binding", "An agent's pane changed"],
+    ["integration_registration", "Agent setup incomplete"],
+  ] satisfies [string, string][]) {
+    const list = activityOf(
+      load(
+        space("a", "alpha", [lane("a1", "@claude", "blocked")], {
+          attention: [
+            {
+              ...blocker,
+              source_kind: source,
+              summary: { text: server, truncated: false },
+            },
+          ],
+        }),
+      ),
+    );
+    const row = list.groups
+      .flatMap((group) => group.rows)
+      .find((r) => r.member.alias === "@claude");
+    assert.ok(row, source);
+    assert.equal(lineText(row.line, new Map()), expected, source);
+    assert.equal(lineDetail(row.line), server, source);
+  }
+  const list = activityOf(
+    load(
+      space("a", "alpha", [lane("a1", "@claude", "blocked")], {
+        attention: [blocker],
+      }),
+    ),
+  );
+  const row = list.groups.flatMap((group) => group.rows)[0];
+  assert.ok(row);
+  assert.equal(
+    lineText(row.line, new Map()),
+    "Waiting for permission to run a command",
+    "an agent's own words stay",
+  );
+  assert.equal(lineDetail(row.line), null);
 });
 
 test("activity rows: held marks the oldest item when it is held, or queued in a paused channel", () => {

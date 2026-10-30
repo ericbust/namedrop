@@ -7,10 +7,12 @@ import {
   evidenceReduce,
   evidenceThread,
   type FocusedEvidence,
+  type MessageIntent,
   messageIntent,
   prepareChannelMessage,
   replyPrefill,
 } from "./attention.ts";
+import { timeOfDay } from "./copy.ts";
 import type { Attention, MessageContext } from "./model.ts";
 import { parseEvent, parseMessageContext } from "./wire.ts";
 
@@ -227,7 +229,7 @@ test("legacy attention links only to an available loaded message and does not in
   );
 });
 
-test("tracked response prepares visible channel text with the owner and exact item reference", () => {
+test("tracked response prepares plain words on the first line, the caret at its end, and the exact reference on a last line", () => {
   const item: Attention = {
     rowKey: "decision",
     source: "coordination",
@@ -245,23 +247,61 @@ test("tracked response prepares visible channel text with the owner and exact it
   const intent = messageIntent(item, target, true);
   assert.ok(intent);
   const directory = { members: channel.members, homes: new Map() };
-  assert.deepEqual(prepareChannelMessage(intent, directory, "", false), {
-    kind: "prepared",
-    text: `${member.alias} Regarding coordination coordination-1: `,
-  });
+  const first = `${member.alias} About your coordination report: `;
   assert.deepEqual(
-    prepareChannelMessage(intent, directory, "My authored draft", false),
+    prepareChannelMessage(intent, directory, "", false, context),
+    {
+      kind: "prepared",
+      text: `${first}\nRef: coordination-1`,
+      caret: first.length,
+    },
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      directory,
+      "My authored draft",
+      false,
+      context,
+    ),
     { kind: "preserved" },
   );
-  assert.deepEqual(prepareChannelMessage(intent, directory, "", true), {
-    kind: "preserved",
-  });
+  assert.deepEqual(
+    prepareChannelMessage(intent, directory, "", true, context),
+    { kind: "preserved" },
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      directory,
+      `${first}\nRef: coordination-1`,
+      false,
+      context,
+    ),
+    {
+      kind: "prepared",
+      text: `${first}\nRef: coordination-1`,
+      caret: first.length,
+    },
+    "the message this item prepared is not someone else's draft",
+  );
+  assert.deepEqual(
+    prepareChannelMessage(
+      intent,
+      directory,
+      `${first}ship it\nRef: coordination-1`,
+      false,
+      context,
+    ),
+    { kind: "preserved" },
+  );
   assert.deepEqual(
     prepareChannelMessage(
       intent,
       { ...directory, members: new Map() },
       "",
       false,
+      context,
     ),
     { kind: "unavailable" },
   );
@@ -276,6 +316,7 @@ test("tracked response prepares visible channel text with the owner and exact it
       },
       "",
       false,
+      context,
     ),
     { kind: "unavailable" },
   );
@@ -286,10 +327,15 @@ test("tracked response prepares visible channel text with the owner and exact it
   );
   assert.ok(message);
   assert.equal(message.preparation, "idle");
-  assert.deepEqual(prepareChannelMessage(message, directory, "", false), {
-    kind: "prepared",
-    text: `${member.alias} Regarding message old-message: `,
-  });
+  const about = `${member.alias} About your message at ${timeOfDay(anchor.at_ms)}: `;
+  assert.deepEqual(
+    prepareChannelMessage(message, directory, "", false, context),
+    {
+      kind: "prepared",
+      text: `${about}\nRef: old-message`,
+      caret: about.length,
+    },
+  );
 });
 test("channel preparation retries after preserved drafts without losing the tracked evidence boundary", () => {
   const response = {
@@ -345,6 +391,54 @@ test("channel preparation retries after preserved drafts without losing the trac
     }),
     sent,
   );
+});
+
+test("an edit of the channel box ends a preserved preparation, so the kept-draft notice gives way, and leaves every other state alone", () => {
+  for (const preparation of [
+    "idle",
+    "requested",
+    "prepared",
+    "preserved",
+    "unavailable",
+  ] as const) {
+    const response: MessageIntent = {
+      kind: "message",
+      addressId: member.id,
+      reference: { kind: "coordination", id: "coordination-1" },
+      preparation,
+    };
+    const state = evidenceReduce(
+      evidenceReduce(
+        { kind: "closed", version: 0 },
+        { type: "open", request: { ...request, response } },
+      ),
+      { type: "loaded", version: 1, context },
+    );
+    assert.ok(state.kind === "ready");
+    const edited = evidenceReduce(state, {
+      type: "draft-edited",
+      key: channel.key,
+    });
+    if (preparation !== "preserved") {
+      assert.equal(edited, state, preparation);
+      continue;
+    }
+    assert.deepEqual(edited, {
+      ...state,
+      request: {
+        ...state.request,
+        response: { ...response, preparation: "idle" },
+      },
+    });
+    assert.equal(
+      evidenceReduce(state, {
+        type: "draft-edited",
+        key: "b".repeat(20) as typeof channel.key,
+      }),
+      state,
+      "another channel's box",
+    );
+  }
 });
 
 test("channel preparation is idempotent while requested or already prepared", () => {

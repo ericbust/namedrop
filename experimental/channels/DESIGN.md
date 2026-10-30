@@ -129,6 +129,14 @@ sidebar list, the Needs-you details, the timeline, the thread, the activity list
 and the screen text. Each of them is the containing block of what it scrolls, so
 hidden text inside it never stretches the page.
 
+Below 860px of window width, an open thread pane or peek drawer stacks under
+the main column, and each gets half the window's height. Nothing in the main
+column paints outside it. The Needs-you banner takes at most 40 percent of the
+main column. When the column is short, the timeline shrinks first, down to
+nothing, and then the banner, which scrolls inside itself. The composer always
+stays whole. Side by side, from 860px up, the banner's cap is 40 percent of the
+window's height.
+
 ### Landing and navigation
 
 - Open the channel the URL names. With no channel in the URL, or one that has
@@ -216,8 +224,9 @@ that have not settled yet.
 
 Under the header, one wrapping line of member chips. Each chip is 28px tall: a
 20px avatar with its presence dot as a badge, the alias at 13px 500, and the
-status word at 12px muted. Order: needs you, working, waiting, idle, offline.
-The operator chip reads "You", shows no presence, and comes last. The chip's
+status word at 12px muted. Order: needs you, working, waiting, idle, offline,
+unknown, pane closed. The operator chip reads "You", shows no presence, and
+comes last. The chip's
 tooltip names the runtime in words: "Claude Code", "Codex", "OpenCode", "Pi",
 or "Terminal". An unknown runtime id is shown with its first letter capitalized. After two lines, end with a
 "+N more" chip that expands the strip. Remove the "Members" and "Status"
@@ -226,17 +235,19 @@ member. The operator chip is not a button.
 
 ### Presence
 
-| Activity | Dot                                                          | Word      |
-| -------- | ------------------------------------------------------------ | --------- |
-| working  | filled `--working`, a slow 2.4s opacity pulse from 1 to 0.55 | Working   |
-| waiting  | filled `--waiting`                                           | Waiting   |
-| blocked  | filled `--blocked`                                           | Needs you |
-| idle     | 1.5px ring `--idle`, hollow                                  | Idle      |
-| offline  | filled `--offline`, chip text `--text-muted`                 | Offline   |
-| retired  | not shown in the strip                                       | Retired   |
-| unknown  | 1.5px dashed ring `--idle`                                   | Unknown   |
+| Activity | Dot                                                          | Word        |
+| -------- | ------------------------------------------------------------ | ----------- |
+| working  | filled `--working`, a slow 2.4s opacity pulse from 1 to 0.55 | Working     |
+| waiting  | filled `--waiting`                                           | Waiting     |
+| blocked  | filled `--blocked`                                           | Needs you   |
+| idle     | 1.5px ring `--idle`, hollow                                  | Idle        |
+| offline  | filled `--offline`, chip text `--text-muted`                 | Offline     |
+| retired  | none, chip text `--text-muted`                               | Pane closed |
+| unknown  | 1.5px dashed ring `--idle`                                   | Unknown     |
 
 The dot is 8px, or 10px with a 2px `--bg` ring when it is a badge on an avatar.
+A retired member shows in the strip for 5 minutes after its pane closes, with
+the word "Pane closed", then leaves it. Its messages keep its name.
 
 ### Avatar
 
@@ -312,6 +323,11 @@ click.
   replies, latest from @codex at 11:03 PM. Open thread". A terminal reply's
   preview shows its Exit chip and the first two lines of stdout. On hover it
   gets `--bg-hover` and a `--line-strong` border.
+- **Narrow previews**: the reply count never shrinks and nothing covers it.
+  The author, time and reply text take the width left beside it, the author
+  and text ending in an ellipsis. When less than 120px is left for them, as in
+  a 390px window, the box shows the count alone and hugs it, the look of a
+  request whose latest reply is not loaded.
 - **Hover**: the row background becomes `--bg-hover` at 50 percent.
 - **Arrival**: a message that arrives live fades in and rises 4px over
   `--duration` with `--ease-out`. History pages and channel switches do not
@@ -319,19 +335,27 @@ click.
 
 ### Receipt copy
 
-| Wire stage                   | Shown as              | Icon               | Tone                       |
-| ---------------------------- | --------------------- | ------------------ | -------------------------- |
-| `queued`                     | Queued                | clock              | muted                      |
-| `delivered`                  | Delivered             | check              | muted                      |
-| `working`                    | Working on it         | half-filled circle | `--working` icon           |
-| `replied`                    | Replied               | reply arrow        | muted, links to the thread |
-| `completed`, kind `settled`  | Done                  | check-circle       | muted                      |
-| `completed`, kind `no_reply` | Done, no reply needed | check-circle       | muted                      |
-| `completed`, any other kind  | Done                  | check-circle       | muted, raw kind in `title` |
-| `held`                       | Held while paused     | pause              | `--held-text`              |
-| `failed`                     | Not delivered         | alert              | `--failed-text`            |
-| `cancelled`                  | Cancelled             | slash-circle       | muted                      |
-| `unknown`                    | Status unknown        | dashed circle      | muted                      |
+| Wire stage                                 | Shown as                | Icon               | Tone                       |
+| ------------------------------------------ | ----------------------- | ------------------ | -------------------------- |
+| `queued`                                   | Queued                  | clock              | muted                      |
+| `delivered`                                | Delivered               | check              | muted                      |
+| `working`                                  | Working on it           | half-filled circle | `--working` icon           |
+| `replied`                                  | Replied                 | reply arrow        | muted, links to the thread |
+| `completed`, kind `settled`, to an agent   | Ended without an answer | dashed circle      | muted                      |
+| `completed`, kind `settled`, to a terminal | Done                    | check-circle       | muted                      |
+| `completed`, kind `no_reply`               | Done, no reply needed   | check-circle       | muted                      |
+| `completed`, any other kind                | Done                    | check-circle       | muted, raw kind in `title` |
+| `held`                                     | Held while paused       | pause              | `--held-text`              |
+| `failed`                                   | Not delivered           | alert              | `--failed-text`            |
+| `cancelled`                                | Cancelled               | slash-circle       | muted                      |
+| `unknown`                                  | Status unknown          | dashed circle      | muted                      |
+
+`settled` means the recipient's turn ended without closing the request. For an
+agent that is an interruption or a forgotten answer, which Needs-you reports as
+"didn't answer a request", so the receipt never says Done. For a terminal the
+command finished. An agent in another workspace, or an id the page cannot
+place, counts as an agent; the operator and a member of a kind the page does
+not know read Done.
 
 ### Report card
 
@@ -347,27 +371,41 @@ A nudge or hook is one 13px muted line. The avatar column holds a 16px drawn ico
 a bell for a nudge, a plug for a hook. The text reads "Nudge" or "Hook" in 600,
 then the body on the same line. System rows have no receipts unless one failed.
 
+A nudge never shows a raw id. "Coordination coordination-… (revision 3)
+remains open." reads "This coordination (revision 3) remains open.", and each
+"Assignment assignment-… revision 4: needs_continuation." reads "Assignment 1,
+revision 4: needs continuation.", numbered in order of appearance. Any other
+id (`coordination-`, `assignment-`, `message-`, `thread-`, `delivery-`,
+`attempt-`, `delivery-attempt-` or `request-`, then three digit groups) is
+dropped with the space around it. The server's text is the body's tooltip.
+
 ### Needs-you banner
 
 When the channel needs you, show a banner between the member strip and the
 timeline, 24px from the sides. It uses `--attention-bg`, a 1px `--attention-line`
 border, and `--radius-lg`. Each item is one row: a 16px drawn alert icon in
 `--blocked`, the title at 14px 600 in `--text`, the hint in 13px muted, and the
-age at the right, such as "4 min". A **Details** text button reveals the server's
-full summary in 13px muted text. Show three items, then a "Show N more" button.
-The banner takes at most 40 percent of the window height and scrolls inside.
+age at the right, such as "4 min". Under the hint, the item's actions sit on one
+wrapping row of 13px text buttons, 12px apart, such as "Show message · Reply to
+@quiet · Details". **Details** is always on that row; it reveals the server's
+full summary in 13px muted text. On a narrow window the row wraps between
+buttons, never inside a label, and a button never shrinks below its label. Only
+a label wider than the whole column ends in an ellipsis, with the full label as
+its tooltip. Show three items, then a "Show N more" button.
+The banner takes at most 40 percent of the main column's height and scrolls
+inside (see App shell for the stacked layout).
 Announce new items through a polite live region.
 
-| `source`                                | Title                                                                                                | Hint                                                 |
-| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Open its pane in Herdr to answer.                    |
-| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.            |
-| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.          |
-| `coordination`                          | Coordination needs a decision                                                                        | Review the report and close it from the lead's pane. |
-| `context_grant`                         | Context request waiting                                                                              | Approve or decline it from the pane.                 |
-| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                 |
-| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                    |
-| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                   |
+| `source`                                | Title                                                                                                | Hint                                                |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| `agent_status`                          | the server summary, which is already short, such as "@claude is waiting on an approval or question." | Answer it in its pane in Herdr.                     |
+| `agent_disposition`, `delivery_attempt` | Unanswered request                                                                                   | An agent ended its turn without replying.           |
+| `automatic_reply_limit`                 | Reply limit reached                                                                                  | Continue or stop this thread from its pane.         |
+| `coordination`                          | Coordination needs a decision                                                                        | Read the report, then answer the lead.              |
+| `context_grant`                         | Context request waiting                                                                              | Approve or decline it in the agent's pane in Herdr. |
+| `pane_binding`                          | An agent's pane changed                                                                              | Name the pane again to reconnect it.                |
+| `integration_registration`              | Agent setup incomplete                                                                               | Start a new session in that pane.                   |
+| `unknown`                               | Something needs you                                                                                  | Open Details for the full message.                  |
 
 Never cut the server's summary mid-word into the visible line. When an
 `agent_status` summary is longer than 90 characters, use the `unknown` title and
@@ -377,9 +415,12 @@ When the item names its agent (`subject_alias`), the title names it too. For an
 unanswered request that reads "@codex didn't answer a request", with the hint
 "It ended its turn without replying." When the item names a message
 (`message_id`) that is loaded in the timeline, a **Show message** text button
-follows the hint. It scrolls the message to the middle of the timeline, tints it
+starts the action row. It scrolls the message to the middle of the timeline, tints it
 with `--bg-selected` for 1.5 seconds, and opens its thread. When that message is
-not loaded, the button is absent.
+not loaded, the button is absent. A conversation the item opens in the thread
+pane marks its target the same way: `--bg-selected` for 1.5 seconds, then it
+fades. Under reduced motion the tint holds still and leaves after 1.5 seconds.
+The tint never stays.
 
 | `source`                                   | Title when the item names its agent                                          |
 | ------------------------------------------ | ---------------------------------------------------------------------------- |
@@ -393,7 +434,36 @@ not loaded, the button is absent.
 | `unknown`                                  | "@codex needs you"                                                           |
 
 A short `agent_status` summary already names the agent, so it stays as the
-server wrote it. Hints keep their wording from the first table.
+server wrote it. Hints keep their wording from the first table, except where
+the item's response decides them below.
+
+**Response.** An item's `response` names the most direct answer the page can
+offer, and its button names the action and the person:
+
+| `response` | Button                 | What it does                                                         |
+| ---------- | ---------------------- | -------------------------------------------------------------------- |
+| `reply`    | "Reply to @quiet"      | Opens the conversation with the reply box addressed to that agent.   |
+| `message`  | "Message @claude"      | Opens the conversation and prepares a channel message to that agent. |
+| `pane`     | "See @worker's screen" | Opens the peek drawer for that agent.                                |
+| `local`    | none                   | Its setup step becomes the hint.                                     |
+
+A `pane` response is answered in Herdr, so its hint names the agent's pane,
+with the pane label, such as `w1:worker`, as the hint's tooltip. A `local`
+response's hint reads "Open this workspace in Herdr and choose Namedrop setup
+from the command palette to repair the integration." for
+`integration_registration`, and "Open this workspace in Herdr and choose
+Namedrop Doctor to review this item." otherwise.
+
+**Which hint wins.** The first row that fits the item gives its hint:
+
+| Item                                                  | Hint                                                | Tooltip        |
+| ----------------------------------------------------- | --------------------------------------------------- | -------------- |
+| A `local` response                                    | Its setup step, as above                            | none           |
+| `automatic_reply_limit` with Continue or Stop on page | "The agents paused after 10 replies in a row."      | none           |
+| `context_grant` with a `pane` response                | "Approve or decline it in @worker's pane in Herdr." | the pane label |
+| Any other source with a `pane` response               | "Answer it in @worker's pane in Herdr."             | the pane label |
+| `agent_status` whose agent is known                   | "Answer it in @claude's pane in Herdr."             | none           |
+| Anything else, or no agent known                      | The first table's hint, or the named hint above     | none           |
 
 **Reply limit.** A reply-limit item that names its thread (`thread_id`) and
 lists the actions the browser may take (`actions`) can be continued or stopped
@@ -420,6 +490,18 @@ when its action is listed:
 - The same row shows in All activity. An item without a thread or actions
   keeps the hint "Continue or stop this thread from its pane."
 
+**Prepared message.** A channel message prepared for a tracked item never puts
+a raw id where the operator writes. The first line is plain words and the
+caret ends it; the id the agent needs sits on a last line of its own, so typing
+goes above it:
+
+| Anchor       | First line                                 | Last line             |
+| ------------ | ------------------------------------------ | --------------------- |
+| coordination | "@claude About your coordination report: " | "Ref: coordination-…" |
+| message      | "@codex About your message at 5:54 PM: "   | "Ref: message-…"      |
+
+The time uses the page's local time format, as message headers do.
+
 ### Thread pane
 
 400px wide, with a 1px `--line` left border. The header is 52px: "Thread" at 15px
@@ -431,6 +513,25 @@ divider reads "No replies yet". Replies use the message component without a
 reply preview. The pane slides in from 16px right with a fade over `--duration`.
 Below 860px of window width, the pane stacks under the timeline instead of
 beside it.
+
+A Needs-you conversation that is answered somewhere else says where, in the
+composer's place: one 12px muted line, 20px from the sides and 12px from the
+bottom. Only one place offers an action at a time. While the channel box shows
+its kept-draft notice, which names the card's button as the retry, the line has
+no button. Once the notice goes, the button comes back.
+
+| The item's answer               | The line                                                                          |
+| ------------------------------- | --------------------------------------------------------------------------------- |
+| A channel message, ready        | "Answer tracked work in the channel. Your message to @claude is ready there."     |
+| A channel message, not prepared | "Answer tracked work in the channel." then a **Message @claude** text button      |
+| A channel message, draft kept   | "Answer tracked work in the channel." alone                                       |
+| The agent's pane                | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip       |
+| A reply to an agent now gone    | "The responsible agent is no longer available. Use its pane in Herdr to respond." |
+
+When a reply's thread already holds a draft, the composer stays and its status
+row reads, 12px muted: "Your existing draft was kept. Send or clear it before
+preparing this reply." The line stays until the box changes or its text is
+sent; then the box's hint returns.
 
 ### History window
 
@@ -482,6 +583,17 @@ main column, under the timeline, and at the bottom of the thread pane.
 - **Hint**: while the box has focus, a 12px muted line under it says where Enter
   sends the text. In the thread pane it reads "Enter to send · Shift+Enter for
   a new line". The channel composer's hints are in Channel chat below.
+- **Kept draft**: when a Needs-you **Message @claude** finds the channel box
+  already holding other text, the text stays and the status row under the box
+  reads, in 12px `--text` like the recipient guard: "Your draft is still here.
+  Send or clear it, then press Message @claude again.", with the pressed
+  button's own label. There is no link in it; the card's button is the retry.
+  The notice stays until the next edit of the box, a send, or a clear; then the
+  recipient guard and the hint return, so "@Codex hi" typed after it reads
+  "Names are lowercase: @codex". The message that button prepared is not
+  another draft, so pressing it again never warns. When the agent is gone, the
+  same row reads "The responsible agent is no longer available. Use its pane
+  in Herdr to respond."
 - The Jump to latest pill floats 16px above the composer, not above the
   timeline's bottom edge.
 
@@ -644,19 +756,23 @@ Names in it are peek buttons at 12px 600 in `--text`.
 | Post, `unrouted`, mentioning agents            | "Mentioned @codex, not sent · Send anyway"                              | inbox                  |
 | Post, `router_failed`                          | "Couldn't check who this is for · Send to @codex"                       | alert, `--failed-text` |
 | Post, Send anyway pressed, server not answered | "Sending to @codex…"                                                    | the post's icon        |
-| Post, delivery taken by the server             | "Sent to @codex", until a frame shows the post reached @codex           | the post's icon        |
+| Post, delivery confirmed, line names @codex    | "@codex · Queued · Sent to @codex", then "@codex · Queued" after 1.5 s  | arrow                  |
+| Post, delivery confirmed, no frame names it    | "Sent to @codex", until a frame names @codex                            | the post's icon        |
 | Post, delivery refused or not reached          | "Couldn't send to @codex · Try again"                                   | the post's icon        |
 | Post, `router_failed`, one of two pressed      | "Couldn't check who this is for · Send to @claude · Sending to @codex…" | alert, `--failed-text` |
+| Post, `router_failed`, Send to reached @codex  | "Couldn't check who this is for · @codex · Queued · Send to @claude"    | alert, `--failed-text` |
 | Reply or follow-up that woke a new member      | "@codex · pulled in"                                                    | arrow                  |
 | Answer to the agent that asked                 | "@claude"                                                               | arrow                  |
 | Follow-up sent to members                      | "@codex"                                                                | arrow                  |
 | Reply to the operator only                     | No line                                                                 | none                   |
 - The names are the message's recipients: its legs, without the operator, all
-  of them, with no "+N". "pulled in" shows when the message woke a member who
-  joins the conversation with it: one that had not written in the thread or
-  been sent a message in it before. An `unrouted` post that still has
-  recipients reads like a routed one with no reason. The line's accessible name
-  is "Who got this".
+  of them, with no "+N". An agent the post's `channel.to` lists before a frame
+  brings its leg, as right after Send anyway, is named too, with the receipt
+  Queued: the server lists it there only once it has queued the delivery.
+  "pulled in" shows when the message woke a member who joins the conversation
+  with it: one that had not written in the thread or been sent a message in it
+  before. An `unrouted` post that still has recipients reads like a routed one
+  with no reason. The line's accessible name is "Who got this".
 - An agent that pulls another in hears back. When @claude asks @codex, the
   answer goes to the room and to @claude and reads "→ @claude", because
   "pulled in" marks only members who join with that message.
@@ -684,8 +800,14 @@ Names in it are peek buttons at 12px 600 in `--text`.
   button in 12px 600 `--accent-text` that opens the thread pane. Its accessible
   name is "3 replies. Open thread". A post with no line shows the count alone.
 - `router_failed` colors the icon and its words in `--failed-text`, because the
-  post reached no one it named and the operator should act. Its tooltip reads
-  "Namedrop couldn't reach its router. The post is saved, and no one got it."
+  router reached no one the post named and the operator should act. Its
+  tooltip reads "Namedrop couldn't reach its router, so it didn't pick who gets
+  this post. The post is saved." It stays true after a Send to.
+- A `router_failed` post that a Send to reached keeps its state part, then
+  names the agents reached with their receipts, as a routed line does, then
+  the offers still left: "Couldn't check who this is for · @codex · Queued ·
+  Send to @claude". With no one left to offer, it ends at the receipts:
+  "Couldn't check who this is for · @codex · Queued".
 
 **Send anyway.** A post offers to send itself to each agent it mentions that
 did not get it and that the operator has not pressed yet. Once a later message
@@ -708,25 +830,48 @@ uses the "Send to" form. Each offer is a text button in 12px 600
   go.
 - Each pressed agent then has its own part, after the offer and in the order
   the post names the agents. The part is a text button in the same style:
-  - "Sending to @codex…", then "Sent to @codex", in `--text-muted` and inert,
-    until a frame shows the post reached the agent. The line then names the
-    agent with its receipt, and the part goes.
+  - "Sending to @codex…", then "Sent to @codex", in `--text-muted` and inert.
+    The press is confirmed by whichever comes first: a 2xx answer that lists
+    the agent as delivered, or a frame, or the answer's channel object, that
+    shows the post reached the agent. From then on the same part reads "Sent
+    to @codex" for 1.5 seconds, while the line may already name the agent with
+    its receipt, as in "@codex · Queued · Sent to @codex". Then the part goes.
+    The hold is the same in either order, and it is not an animation, so
+    reduced motion changes nothing. A later answer changes nothing, even a
+    failure, because the frame is the final word that the agent has the post.
+  - When the answer confirms the press before anything names the agent, as
+    when its body is empty, the part keeps reading "Sent to @codex" after the
+    1.5 seconds, until a frame names the agent, so the line never offers the
+    agent again.
+  - A 2xx answer carries the post's channel object, so when its `to` lists
+    every agent it delivered, the line names them at once. The page ignores
+    that object when the stored post already lists them, because a frame may
+    be newer, and the next frame is the final word.
   - A failure reads "Couldn't send to @codex" in `--failed-text`, then a "Try
     again" button. Its tooltip is the server's message, "HTTP 500" when the
     server gives none, or "Couldn't reach Namedrop." when the request never
     reached it.
-  - When the server answers but did not send the post to that agent, as when
-    the name now belongs to a different agent, the part shows the same failure
-    with the server's reason as its tooltip, or "Namedrop didn't send it. The
-    name may belong to a different agent now." when the server gives none.
-  - A 2xx answer whose body stalls for 5 seconds or breaks reads as sent. The
-    status is the server's answer, and the line updates when the frame shows
-    the agent reached.
+  - When the server answers 2xx and its `delivered` list leaves that agent out,
+    as when the name now belongs to a different agent, the part shows the same
+    failure with the tooltip "Namedrop didn't send it. The name may belong to a
+    different agent now."
+  - A 2xx answer whose JSON body has no `delivered` list of strings confirms
+    nothing, so it shows the same failure for every pressed agent with the
+    tooltip "Namedrop didn't confirm it sent this." Deliver is idempotent, so
+    Try again is safe.
+  - A 2xx answer whose body is empty, is not JSON, or stalls for 5 seconds or
+    breaks reads as sent. The status is the server's answer, and the line
+    updates when the frame shows the agent reached. At 5 seconds the page
+    aborts the request, so a stalled body never holds a connection.
 - Focus moves from the pressed offer to the agent's part and stays there
   through sending, sent and failed, because "Try again" is the same button.
-  When the part goes, nothing moves focus.
-- Each part sits in a polite status region, so a screen reader hears "Sent to
-  @codex" or the failure.
+  When the part goes while it has focus, focus moves to its message row, so the
+  next Tab continues from there. When focus has moved elsewhere, it stays there.
+- One visually hidden polite live region for the whole page announces each
+  change: "Sending to @codex…", "Sent to @codex", or "Couldn't send to @codex".
+  It says "Sent to @codex" once per press, whichever of the answer and the
+  frame confirmed it. The parts have no live region of their own, so nothing
+  is announced twice.
 - The timeline, the thread pane, and a Needs-you conversation show one state
   for the same post and agent.
 
@@ -757,6 +902,24 @@ Enter sends:
 - Text that starts with mentions: "Enter sends only to @codex", "Enter sends
   only to @codex, @shell", or "Enter sends only to @codex, @shell +2". The
   names are the leading aliases as typed, without `#label` tokens.
+- Text that starts with something the server refuses, read the way the server
+  reads leading names (after any `#label` words, each `@name` that is an alias
+  once its ASCII letters are lowercased), checked in the server's order:
+  - A first `@` word with punctuation stuck to a name: "Put a space after
+    @codex", for "@codex, hi" or "@codex: hi". The server reads whole words.
+  - Any other first `@` word that is no name at all: "@codex_x isn't in this
+    channel", as typed.
+  - A name with capitals: "Names are lowercase: @codex", with the member's
+    alias, when its lowercase form is a current member or a `#label` names
+    another channel. Otherwise "@Nobody isn't in this channel", as typed.
+    Retired members are not current.
+  - A lowercase name the page doesn't know keeps "Enter sends only to
+    @name". It may be a group, which the page can't see, so the server
+    decides.
+
+  Enter still sends such text. The server stays the authority, and its
+  refusal shows under the box with the text kept. Names later in the text keep
+  the hints above.
 
 **Pending post.** A channel post's pending row reads "Sending…", then "Sent",
 like any post. The server answers before the router runs, so the stored post's
@@ -860,8 +1023,12 @@ The one view that spans every channel. It answers "who is busy, and on what?"
     13px "#alpha" button that opens that channel at its newest message.
   - Line 2, 13px `--text-muted`, one line with an ellipsis and the full text in
     the tooltip. The first case that applies:
-    1. In Needs you, the summary of that channel's newest attention item about
-       this member, in `--attention-text`.
+    1. In Needs you, that channel's newest attention item about this member,
+       in `--attention-text`. An agent's own status keeps its words ("Waiting
+       for permission to run a command"). Every other item reads as the
+       Needs-you table's title without the name, which line 1 already shows:
+       "Coordination needs a decision", "Unanswered request". The server's own
+       text, which can hold ids and error codes, is the tooltip.
     2. A member waiting on others: "Waiting on @codex". Names follow
        [Recipients and envoys](#recipients-and-envoys), with at most two names
        and then "+N".
@@ -873,6 +1040,9 @@ The one view that spans every channel. It answers "who is busy, and on what?"
     the oldest mailbox item arrived. It is absolute, so nothing ticks.
   - When that oldest item is held, or is queued in a paused channel, line 2 ends
     with the pause icon and "Held while paused" in `--held-text`.
+  - A Needs-you row whose item has actions shows them under line 2, in the text
+    column and aligned with the alias: the item's action row as 12px text
+    buttons, 12px apart. The avatar column and the alias never move.
 - A row is one button that opens the peek drawer, except for the channel
   button, which sits beside it, not inside it. The row whose drawer is open has
   the selected background. Hover is `--bg-hover`.
@@ -973,10 +1143,15 @@ Motion shows state and nothing else.
 | Channel with no messages      | Title "No messages yet". Body "Post here to talk with the agents in this workspace. Mention @name to bring one in."                |
 | Loading older messages        | A 12px muted "Loading earlier messages…" line at the top of the timeline.                                                          |
 | History error                 | "Couldn't load earlier messages." and a **Try again** button, in the same line.                                                    |
+| Conversation error            | "Couldn't load this conversation." and a **Try again** button, in the thread pane.                                                 |
 | Missing range                 | A hairline divider with "Some messages are missing here" and a **Load them** button.                                               |
 | Reconnecting                  | A 36px bar at the top of the main column in `--warning-bg` and `--warning-text`: "Reconnecting… Showing updates up to 10:42 PM."   |
 | Server-shortened text         | A 12px muted line "Shortened by Namedrop."                                                                                         |
 | All activity, nothing active  | The pulse icon, title "Every agent is idle", body "Agents show up here while they work, wait on each other, or need you."          |
+
+The conversation error line is 12px muted with `role="alert"`, like the history
+error. Its tooltip is the status, such as "HTTP 503", or "Couldn't reach
+Namedrop." when the server never answered. The pane header keeps "in #alpha".
 
 ## Accessibility
 

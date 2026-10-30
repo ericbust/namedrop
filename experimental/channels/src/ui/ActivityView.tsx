@@ -3,6 +3,7 @@ import {
   type ActivityList,
   type ActivityRow,
   activitySummary,
+  lineDetail,
   lineText,
 } from "../activity.ts";
 import { activityCopy, presenceWord } from "../copy.ts";
@@ -59,7 +60,7 @@ const Row = memo(function Row({
           <span
             className={`activity-line${line.kind === "attention" ? " is-attention" : ""}`}
           >
-            <span className="activity-text" title={text}>
+            <span className="activity-text" title={lineDetail(line) ?? text}>
               {text}
             </span>
             {held && (
