@@ -345,6 +345,10 @@ int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) if (!strcmp(argv[i-1], "-o")) output = argv[i];
     const char *result = strstr(payload, "TEST_EMPTY") ? "{\"to\":[],\"reason\":\"room statement\"}" :
         "{\"to\":[\"claude\",\"ghost\",\"terminal\",\"retired\",\"operator\",\"codex\",\"claude\"],\"reason\":\"build question\"}";
+    if (strstr(payload, "assert_eq!(actual, expected)"))
+        result = "{\"to\":[\"codex\"],\"reason\":\"Please investigate the failed test and suggest a fix\"}";
+    if (strstr(payload, "these proposed instructions"))
+        result = "{\"to\":[\"claude\"],\"reason\":\"Claude review request\"}";
     if (strstr(payload, "TEST_GARBAGE")) result = "not JSON";
     if (output) {
         FILE *file = fopen(output, "w"); if (!file) return 4;
@@ -440,6 +444,28 @@ fn fake_cli_routes_with_isolation_receipts_and_deadline() {
                     .all(|record| record["metrics"]["input_tokens"].is_u64())
             );
             assert_eq!(records[0]["candidates"], json!(["claude"]));
+            assert!(records.iter().all(|record| {
+                record["expected_topic"]
+                    == json!({"min_words": 2, "max_words": 4, "omit_names": true})
+            }));
+            for record in &records {
+                let topic = &record["topic_compliance"];
+                match record["id"].as_str().unwrap() {
+                    "request-with-code" => {
+                        assert_eq!(record["matches"], true);
+                        assert_eq!(record["topic_matches"], false);
+                        assert_eq!(topic["word_bounds_match"], false);
+                        assert_eq!(topic["names_omitted"], true);
+                    }
+                    "quoted-instructions" => {
+                        assert_eq!(record["matches"], true);
+                        assert_eq!(record["topic_matches"], false);
+                        assert_eq!(topic["word_bounds_match"], true);
+                        assert_eq!(topic["names_omitted"], false);
+                    }
+                    _ => assert_eq!(record["topic_matches"], true),
+                }
+            }
             return;
         }
         let mut rows = rows();

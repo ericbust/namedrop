@@ -7,8 +7,98 @@ struct Case {
     id: String,
     source: String,
     expected: Vec<String>,
+    expected_topic: TopicExpectation,
     #[serde(default)]
     recap: Vec<String>,
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct TopicExpectation {
+    min_words: usize,
+    max_words: usize,
+    omit_names: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TopicCompliance {
+    word_count: usize,
+    word_bounds_match: bool,
+    names_omitted: bool,
+    matches: bool,
+}
+
+fn topic_words(text: &str) -> Vec<String> {
+    // English-style word boundaries split punctuation, including hyphens.
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn topic_compliance(
+    topic: &str,
+    expected: &TopicExpectation,
+    aliases: &[String],
+) -> TopicCompliance {
+    let words = topic_words(topic);
+    let word_count = words.len();
+    let word_bounds_match = (expected.min_words..=expected.max_words).contains(&word_count);
+    let names_omitted = !expected.omit_names
+        || !aliases
+            .iter()
+            .map(String::as_str)
+            .chain(["claude", "codex"])
+            .any(|name| {
+                let name = topic_words(name);
+                !name.is_empty() && words.windows(name.len()).any(|window| window == name)
+            });
+    TopicCompliance {
+        word_count,
+        word_bounds_match,
+        names_omitted,
+        matches: word_bounds_match && names_omitted,
+    }
+}
+
+#[test]
+fn topic_checker_accepts_short_topics_and_detects_ticket_reasons_and_names() {
+    let expected = TopicExpectation {
+        min_words: 2,
+        max_words: 4,
+        omit_names: true,
+    };
+    let aliases = vec!["build-helper".to_owned()];
+    for topic in [
+        "build question",
+        "review request",
+        "parser regression test review",
+        "terminal build check",
+        "operator reply test",
+    ] {
+        assert!(
+            topic_compliance(topic, &expected, &aliases).matches,
+            "{topic}"
+        );
+    }
+    let verbose = topic_compliance(
+        "Please review the parser and explain why the build failed",
+        &expected,
+        &aliases,
+    );
+    assert!(!verbose.word_bounds_match);
+    assert!(verbose.names_omitted);
+    for topic in ["Claude review request", "ask @CODEX", "build-helper review"] {
+        let result = topic_compliance(topic, &expected, &aliases);
+        assert!(result.word_bounds_match, "{topic}");
+        assert!(!result.names_omitted, "{topic}");
+        assert!(!result.matches, "{topic}");
+    }
+    for topic in ["", "review", "a b c d e"] {
+        assert!(
+            !topic_compliance(topic, &expected, &aliases).matches,
+            "{topic}"
+        );
+    }
 }
 
 #[test]
@@ -142,6 +232,11 @@ pub(super) fn real_host_router_corpus() {
                         actual.sort();
                         actual == expected
                     });
+                    let topic_compliance = reason.as_deref().map(|reason| {
+                        topic_compliance(reason, &case.expected_topic, &input.aliases)
+                    });
+                    let topic_matches =
+                        topic_compliance.as_ref().is_some_and(|topic| topic.matches);
                     let provider_envelope = serde_json::from_str::<Value>(&capture.raw_stdout).ok();
                     let provider_duration_api_ms = provider_envelope
                         .as_ref()
@@ -150,6 +245,8 @@ pub(super) fn real_host_router_corpus() {
                         "id": case.id, "repetition": repetition + 1, "host": host, "format": format,
                         "candidates": input.aliases, "expected": case.expected, "actual": actual,
                         "matches": matches, "outcome": outcome, "reason": reason, "error": error,
+                        "expected_topic": case.expected_topic,
+                        "topic_matches": topic_matches, "topic_compliance": topic_compliance,
                         "worker_error": worker_error, "error_category": metrics.outcome,
                         "metrics": metrics, "provider_usage": worker_usage(&capture.raw_stdout),
                         "provider_stdout": bounded_text(&capture.raw_stdout, 4096),
@@ -161,7 +258,7 @@ pub(super) fn real_host_router_corpus() {
                     output.flush().unwrap();
                     output.sync_data().unwrap();
                     eprintln!(
-                        "{} {} {} repetition {} matches={matches}",
+                        "{} {} {} repetition {} matches={matches} topic_matches={topic_matches}",
                         case.id,
                         host,
                         format,
