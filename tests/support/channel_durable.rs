@@ -402,8 +402,10 @@ import json, os, subprocess, sys, time
 root = os.path.dirname(__file__)
 sys.stdin.read()
 child = subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])
-with open(os.path.join(root,'descendant-pids.json'),'w') as out:
+pids_path = os.path.join(root,'descendant-pids.json')
+with open(pids_path + '.tmp','w') as out:
     json.dump([os.getpid(),child.pid],out)
+os.replace(pids_path + '.tmp',pids_path)
 while True:
     time.sleep(.01)
 "#,

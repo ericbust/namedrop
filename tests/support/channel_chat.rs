@@ -32,8 +32,118 @@ fn publish_executable(path: &Path, contents: &str) -> std::io::Result<()> {
     fs::rename(staging, path)
 }
 
+fn wait_for_start_claim(state: &Path, deadline: Instant) -> Result<(), String> {
+    let path = state.join("dashboard/server.lock");
+    let claim = match fs::OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("could not open {}: {error}", path.display())),
+    };
+    loop {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for predecessor to release {}",
+                path.display()
+            ));
+        }
+        match claim.try_lock() {
+            Ok(()) => {
+                return claim.unlock().map_err(|error| {
+                    format!("could not release probe {}: {error}", path.display())
+                });
+            }
+            Err(fs::TryLockError::WouldBlock) => thread::sleep(Duration::from_millis(20)),
+            Err(error) => return Err(format!("could not probe {}: {error}", path.display())),
+        }
+    }
+}
+
+fn start_server(
+    command: &mut Command,
+    state: &Path,
+    stderr: &Path,
+    timeout: Duration,
+) -> Result<(Child, Value), String> {
+    let started = Instant::now();
+    let deadline = started + timeout;
+    wait_for_start_claim(state, deadline).map_err(|error| {
+        let info = fs::read_to_string(state.join("dashboard/server.json"));
+        format!(
+            "dashboard not spawned: {error}; elapsed={:?}; server.json={info:?}; stderr={}",
+            started.elapsed(),
+            stderr.display(),
+        )
+    })?;
+    if Instant::now() >= deadline {
+        return Err(format!(
+            "dashboard not spawned: startup budget expired; elapsed={:?}; server.json={:?}; stderr={}",
+            started.elapsed(),
+            fs::read_to_string(state.join("dashboard/server.json")),
+            stderr.display(),
+        ));
+    }
+    let mut child = command.spawn().map_err(|error| {
+        format!(
+            "could not spawn dashboard: {error}; stderr={}",
+            stderr.display()
+        )
+    })?;
+    let info = wait_for_server(&mut child, state, stderr, started, deadline)?;
+    Ok((child, info))
+}
+
+fn wait_for_server(
+    child: &mut Child,
+    state: &Path,
+    stderr: &Path,
+    started: Instant,
+    deadline: Instant,
+) -> Result<Value, String> {
+    let (reason, status) = loop {
+        let status = child.try_wait();
+        match status {
+            Ok(Some(_)) => break ("exited before startup", status),
+            Err(_) => break ("could not inspect startup process", status),
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            break ("timed out before startup", status);
+        }
+        if let Ok(bytes) = fs::read(state.join("dashboard/server.json"))
+            && let Ok(info) = serde_json::from_slice::<Value>(&bytes)
+            && info["pid"] == child.id()
+        {
+            return Ok(info);
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let kill = if matches!(status, Ok(Some(_))) {
+        None
+    } else {
+        Some(child.kill())
+    };
+    let reaped = child.wait();
+    let status = match status {
+        Ok(Some(status)) => status.to_string(),
+        Ok(None) => "running".to_owned(),
+        Err(error) => format!("unavailable ({error})"),
+    };
+    let output = fs::read_to_string(stderr)
+        .unwrap_or_else(|error| format!("could not read stderr: {error}"));
+    let info = fs::read_to_string(state.join("dashboard/server.json"))
+        .unwrap_or_else(|error| format!("could not read server.json: {error}"));
+    Err(format!(
+        "dashboard {reason}; elapsed={:?}; pid={}; status before cleanup={status}; kill={kill:?}; reaped={reaped:?}; server.json={info}; stderr ({}):\n{output}",
+        started.elapsed(),
+        child.id(),
+        stderr.display(),
+    ))
+}
+
 impl Server {
+    #[track_caller]
     pub(super) fn start(f: &Fixture, response: &str, off: bool) -> Self {
+        let caller = std::panic::Location::caller();
         fs::create_dir_all(f.root.join("home/.codex")).unwrap();
         let mut responses = serde_json::Map::new();
         for args in [
@@ -101,6 +211,11 @@ else:
 "#,
         )
         .unwrap();
+        let stderr_path = f.root.join(format!(
+            "dashboard-server-{}.stderr",
+            ProcessIds::default().next_id("startup")
+        ));
+        let stderr = fs::File::create_new(&stderr_path).unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         command
             .arg("--plugin-state")
@@ -115,7 +230,7 @@ else:
             .env_remove("HERDR_PLUGIN_STATE_DIR")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(stderr);
         let router = f.root.join("fake-router");
         fs::write(f.root.join("router-response.json"), response).unwrap();
         publish_executable(
@@ -162,22 +277,18 @@ else:
         } else {
             command.env_remove("NAMEDROP_CHANNEL_ROUTER");
         }
-        let mut child = command.spawn().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let info = loop {
-            if let Ok(bytes) = fs::read(f.state.join("dashboard/server.json"))
-                && let Ok(info) = serde_json::from_slice::<Value>(&bytes)
-                && info["pid"] == child.id()
-            {
-                break info;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("dashboard did not start");
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
+        let (child, info) = start_server(
+            &mut command,
+            &f.state,
+            &stderr_path,
+            Duration::from_secs(10),
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error}; start requested at {caller}; test={:?}",
+                thread::current().name()
+            )
+        });
         let port = info["port"].as_u64().unwrap() as u16;
         let session = fs::read_to_string(f.state.join("dashboard/session")).unwrap();
         let mut server = Self {
@@ -490,6 +601,176 @@ pub(super) fn context(server: &Server, message: &str) -> Value {
     );
     assert_eq!(response.status, 200, "{}", response.body);
     serde_json::from_str(&response.body).unwrap()
+}
+
+#[test]
+fn startup_reports_claim_deadline_without_spawning_a_child() {
+    let f = Fixture::new();
+    fs::create_dir_all(f.state.join("dashboard")).unwrap();
+    let claim = fs::File::create_new(f.state.join("dashboard/server.lock")).unwrap();
+    claim.lock().unwrap();
+    let spawned = f.root.join("unexpected-child");
+    let stderr = f.root.join("claim-timeout.stderr");
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "touch \"$1\"", "probe"])
+        .arg(&spawned)
+        .stderr(fs::File::create_new(&stderr).unwrap());
+    let error = start_server(&mut command, &f.state, &stderr, Duration::from_millis(200))
+        .expect_err("predecessor keeps its claim past the deadline");
+    assert!(
+        error.contains("dashboard not spawned: timed out waiting for predecessor"),
+        "{error}"
+    );
+    assert!(!spawned.exists(), "child must not run while claim is held");
+    assert!(!error.contains("status before cleanup="), "{error}");
+}
+
+#[test]
+fn startup_waits_for_predecessor_claim_release_before_launching_a_successor() {
+    struct ClaimHolder {
+        child: Child,
+        release: std::path::PathBuf,
+    }
+    impl Drop for ClaimHolder {
+        fn drop(&mut self) {
+            let _ = fs::write(&self.release, "");
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    let f = fixture();
+    fs::create_dir_all(f.state.join("dashboard")).unwrap();
+    let entered = f.root.join("claim-entered");
+    let release = f.root.join("claim-release");
+    let mut holder = ClaimHolder {
+        child: Command::new("/usr/bin/python3")
+            .args([
+                "-c",
+                "import fcntl, os, sys, time\nwith open(sys.argv[1], 'a') as claim:\n fcntl.flock(claim, fcntl.LOCK_EX)\n open(sys.argv[2], 'w').close()\n while not os.path.exists(sys.argv[3]): time.sleep(0.01)",
+            ])
+            .arg(f.state.join("dashboard/server.lock"))
+            .arg(&entered)
+            .arg(&release)
+            .spawn()
+            .unwrap(),
+        release,
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !entered.exists() {
+        assert!(holder.child.try_wait().unwrap().is_none());
+        assert!(Instant::now() < deadline, "claim holder did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    thread::scope(|scope| {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let fixture = &f;
+        scope.spawn(move || {
+            let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                Server::start(fixture, "{}", false)
+            }))
+            .map_err(|error| {
+                error
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .unwrap_or_else(|| "startup panicked".to_owned())
+            });
+            sender.send(started).unwrap();
+        });
+        let before_release = receiver.recv_timeout(Duration::from_millis(200));
+        fs::write(&holder.release, "").unwrap();
+        assert!(holder.child.wait().unwrap().success());
+        match before_release {
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(Err(error)) => {
+                panic!("startup returned before predecessor released its claim: {error}")
+            }
+            Ok(Ok(_)) => panic!("successor started while predecessor still held its claim"),
+            Err(error) => panic!("startup worker failed: {error}"),
+        }
+        let server = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("startup completes after predecessor releases its claim")
+            .unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(
+            server
+                .request("GET", "/api/session", &[("Cookie", &server.cookie)], "")
+                .status,
+            200
+        );
+    });
+}
+
+#[test]
+fn startup_diagnostics_report_early_exit_and_stderr_without_waiting_for_timeout() {
+    let f = Fixture::new();
+    let stderr = f.root.join("early-exit.stderr");
+    let mut child = Command::new("/usr/bin/python3")
+        .args([
+            "-c",
+            "import os; os.write(2, b'x' * 262144); os.write(2, b'\\nstartup failure marker\\n'); raise SystemExit(69)",
+        ])
+        .stderr(fs::File::create_new(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    let started = Instant::now();
+    let error = wait_for_server(
+        &mut child,
+        &f.state,
+        &stderr,
+        started,
+        started + Duration::from_secs(10),
+    )
+    .expect_err("child exited before publishing server.json");
+    assert!(error.contains("exited before startup"), "{error}");
+    assert!(
+        error.contains("status before cleanup=exit status: 69"),
+        "{error}"
+    );
+    assert!(error.contains("startup failure marker"), "{error}");
+    assert!(error.contains(&"x".repeat(262144)));
+    assert_eq!(child.wait().unwrap().code(), Some(69));
+}
+
+#[test]
+fn startup_diagnostics_distinguish_timeout_from_the_cleanup_signal_and_reap_child() {
+    let f = Fixture::new();
+    let stderr = f.root.join("timeout.stderr");
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf 'startup blocked marker\\n' >&2; exec /bin/sleep 30",
+        ])
+        .stderr(fs::File::create_new(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    let ready = Instant::now() + Duration::from_secs(10);
+    while !fs::read_to_string(&stderr)
+        .unwrap()
+        .contains("startup blocked marker")
+    {
+        if Instant::now() >= ready || child.try_wait().unwrap().is_some() {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("timeout fixture did not emit its ready marker");
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let started = Instant::now();
+    let error = wait_for_server(
+        &mut child,
+        &f.state,
+        &stderr,
+        started,
+        started + Duration::from_millis(200),
+    )
+    .expect_err("live child never published server.json");
+    assert!(error.contains("timed out before startup"), "{error}");
+    assert!(error.contains("status before cleanup=running"), "{error}");
+    assert!(error.contains("startup blocked marker"), "{error}");
+    assert!(error.contains("reaped=Ok("), "{error}");
+    assert!(!child.wait().unwrap().success());
 }
 
 #[test]
