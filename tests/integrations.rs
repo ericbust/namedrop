@@ -627,6 +627,104 @@ fn registration_gate_timeout_keeps_the_same_challenge_retryable() {
 }
 
 #[test]
+fn registration_final_discovery_failure_keeps_the_challenge_retryable() {
+    use std::{os::fd::AsRawFd, sync::atomic::AtomicBool};
+
+    struct FailingDiscovery {
+        herdr: ProductionHerdr,
+        lock: fs::File,
+        fail: AtomicBool,
+    }
+
+    impl HerdrCommandExecutor for FailingDiscovery {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            if args == ["pane", "list", "--workspace", "workspace-1"]
+                && self.fail.load(Ordering::Relaxed)
+            {
+                let acquired =
+                    unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+                if acquired == 0 {
+                    assert_eq!(
+                        unsafe { libc::flock(self.lock.as_raw_fd(), libc::LOCK_UN) },
+                        0
+                    );
+                } else {
+                    assert_eq!(
+                        std::io::Error::last_os_error().raw_os_error(),
+                        Some(libc::EWOULDBLOCK)
+                    );
+                    self.fail.store(false, Ordering::Relaxed);
+                    return Err("injected discovery failure while holding pane gate".to_owned());
+                }
+            }
+            self.herdr.execute(args)
+        }
+    }
+
+    let directory = TestDirectory::new();
+    setup_registered_address(&directory);
+    let herdr = FailingDiscovery {
+        herdr: ProductionHerdr::default(),
+        lock: registration_pane_lock(&directory),
+        fail: AtomicBool::new(true),
+    };
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-agent"),
+        session_socket_id: "socket-a",
+        herdr: &herdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    let challenge = issue_registration_challenge(
+        &PaneAddressId::new("address-agent"),
+        AgentRuntime::Codex,
+        &runtime,
+    )
+    .unwrap();
+    let error = execute_lifecycle_operation(
+        "event.agent-status-changed",
+        status_event("codex"),
+        &runtime,
+    )
+    .unwrap_err();
+    assert!(error.contains("injected discovery failure"), "{error}");
+    assert!(herdr.herdr.prompts.lock().unwrap().is_empty());
+    let transitions = StateStore::open(directory.path())
+        .unwrap()
+        .transaction(|transaction| transaction.transition_facts(&space_namespace()))
+        .unwrap();
+    assert_eq!(
+        transitions
+            .iter()
+            .rev()
+            .find(|fact| fact.entity_id == challenge.registration_id)
+            .unwrap()
+            .transition_kind,
+        namedrop::TransitionKind::Challenged,
+        "discovery failure claimed a challenge without sending its prompt"
+    );
+
+    execute_lifecycle_operation(
+        "event.agent-status-changed",
+        status_event("codex"),
+        &runtime,
+    )
+    .unwrap();
+    let prompts = herdr.herdr.registration_prompts();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    assert_eq!(
+        registration_input_from_prompt(&prompts[0])["nonce"],
+        challenge.nonce
+    );
+}
+
+#[test]
 fn production_onboarding_challenges_registers_and_drains_queued_work() {
     let directory = TestDirectory::new();
     let herdr = ProductionHerdr::default();
