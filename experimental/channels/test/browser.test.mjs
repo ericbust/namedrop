@@ -3262,7 +3262,7 @@ test("design-b: the layout gives the timeline the room, wraps members in two lin
   );
 });
 
-test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column keeps the Needs-you banner and the composer inside its half", async (t) => {
+test("DESIGN-R2 C1, UI-R4 L1 and L3: stacked under a thread or the peek drawer on a narrow, tall window, the main column keeps the Needs-you banner, the timeline's three lines and the composer inside its half", async (t) => {
   const value = team(1, "alpha");
   const at = Date.now() - 60 * 60_000;
   value.frame.health = { level: "needs_you", items: 8 };
@@ -3349,8 +3349,8 @@ test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column k
   const squeezed = [];
   const stacked = async (state) => {
     for (const [width, height] of [
-      [390, 844],
-      [640, 600],
+      [768, 1024],
+      [860, 900],
     ]) {
       await ui.page.setViewportSize({ width, height });
       const at = `${state} at ${width}x${height}`;
@@ -3375,12 +3375,15 @@ test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column k
         `the banner is capped at 40% of the column with ${at}: ${JSON.stringify(shown)}`,
       );
       assert.ok(shown.bannerScrolls, `the banner scrolls inside with ${at}`);
+      assert.ok(
+        shown.timeline.height >= 112 - 0.5,
+        `the timeline keeps its three lines with ${at}: ${JSON.stringify(shown)}`,
+      );
       if (shown.banner.height < cap - 0.5) {
         squeezed.push(at);
-        assert.equal(
-          shown.timeline.height,
-          0,
-          `the timeline gives up all its room before the banner with ${at}: ${JSON.stringify(shown)}`,
+        assert.ok(
+          Math.abs(shown.timeline.height - 112) < 0.5,
+          `the banner gives way only once the timeline is at its floor with ${at}: ${JSON.stringify(shown)}`,
         );
       }
     }
@@ -3403,9 +3406,9 @@ test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column k
   await drawer(ui).waitFor();
   await stacked("the peek drawer open");
   assert.deepEqual(
-    squeezed.filter((at) => at.endsWith("640x600")),
-    ["a thread open at 640x600", "the peek drawer open at 640x600"],
-    "the 300px column squeezes the banner",
+    squeezed.filter((at) => at.endsWith("860x900")),
+    ["a thread open at 860x900", "the peek drawer open at 860x900"],
+    "the 450px column squeezes the banner",
   );
 });
 
