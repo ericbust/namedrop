@@ -847,6 +847,8 @@ fn capture_worker(
         let stdout = capture_file()?;
         let stderr = capture_file()?;
         capture = Some(stdout.try_clone().map_err(|error| error.to_string())?);
+        #[cfg(target_os = "linux")]
+        let _parent_lifetime = protect_worker_group(command)?;
         let mut child = command
             .stdin(Stdio::from(input_file))
             .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
@@ -877,6 +879,7 @@ fn capture_worker(
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    stop_process_group(&mut child);
                     if !status.success() {
                         let detail = read_capture(stderr).unwrap_or_default();
                         let detail = sanitize_text(&detail);
@@ -927,6 +930,92 @@ fn capture_worker(
         raw_stdout,
         failure,
     }
+}
+
+#[cfg(target_os = "linux")]
+static WORKER_LIFETIME_LEASE: Mutex<Option<std::sync::Arc<fs::File>>> = Mutex::new(None);
+
+#[cfg(target_os = "linux")]
+pub(crate) fn set_worker_lifetime_lease(lease: Option<std::sync::Arc<fs::File>>) {
+    *WORKER_LIFETIME_LEASE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = lease;
+}
+
+#[cfg(target_os = "linux")]
+fn protect_worker_group(
+    command: &mut Command,
+) -> Result<(fs::File, fs::File, Option<std::sync::Arc<fs::File>>), String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let mut pipe = [0; 2];
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(format!(
+            "worker lifetime pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let reader = unsafe { fs::File::from_raw_fd(pipe[0]) };
+    let writer = unsafe { fs::File::from_raw_fd(pipe[1]) };
+    let read_fd = reader.as_raw_fd();
+    let write_fd = writer.as_raw_fd();
+    let lease = WORKER_LIFETIME_LEASE
+        .lock()
+        .map_err(|_| "worker lifetime lease poisoned".to_owned())?
+        .clone();
+    let lease_fd = lease.as_ref().map(|file| file.as_raw_fd());
+    let parent = unsafe { libc::getpid() };
+    // Only async-signal-safe syscalls run between fork and exec. The watchdog
+    // retains only the parent pipe and manager lease until it kills the group.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != parent {
+                libc::_exit(125);
+            }
+            let group = libc::getpid();
+            let watchdog = libc::fork();
+            if watchdog < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if watchdog == 0 {
+                libc::close(write_fd);
+                let (low, high) =
+                    lease_fd.map_or((read_fd, read_fd), |fd| (fd.min(read_fd), fd.max(read_fd)));
+                let close = |first: u32, last: u32| {
+                    if first <= last && libc::syscall(libc::SYS_close_range, first, last, 0u32) != 0
+                    {
+                        libc::kill(-group, libc::SIGKILL);
+                        libc::_exit(126);
+                    }
+                };
+                if low > 3 {
+                    close(3, (low - 1) as u32);
+                }
+                if high > low + 1 {
+                    close((low + 1) as u32, (high - 1) as u32);
+                }
+                close((high + 1) as u32, u32::MAX);
+                let mut byte = 0u8;
+                loop {
+                    let count = libc::read(read_fd, (&mut byte as *mut u8).cast(), 1);
+                    if count == 0 {
+                        break;
+                    }
+                    if count < 0 && *libc::__errno_location() != libc::EINTR {
+                        break;
+                    }
+                }
+                libc::kill(-group, libc::SIGKILL);
+                libc::_exit(0);
+            }
+            libc::close(read_fd);
+            libc::close(write_fd);
+            Ok(())
+        });
+    }
+    Ok((reader, writer, lease))
 }
 
 fn worker_usage(raw: &str) -> Option<Value> {

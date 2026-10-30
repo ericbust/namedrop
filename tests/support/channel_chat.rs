@@ -15,13 +15,13 @@ use std::{
 pub(super) struct Server {
     child: Child,
     port: u16,
-    cookie: String,
+    pub(super) cookie: String,
     csrf: String,
 }
 
-struct Response {
-    status: u16,
-    body: String,
+pub(super) struct Response {
+    pub(super) status: u16,
+    pub(super) body: String,
 }
 
 impl Server {
@@ -49,6 +49,15 @@ impl Server {
 import json, os, sys, time
 args = sys.argv[1:]
 root = os.path.dirname(__file__)
+if args == ['pane', 'list', '--workspace', 'w1']:
+    gate = os.path.join(root, 'discovery-gate')
+    if os.path.exists(gate):
+        open(os.path.join(root, 'discovery-entered'), 'w').close()
+        deadline = time.monotonic() + 15
+        while os.path.exists(gate):
+            if time.monotonic() >= deadline:
+                sys.exit('discovery gate timed out')
+            time.sleep(0.01)
 with open(os.path.join(root, 'http-herdr-responses.json')) as source:
     responses = json.load(source)
 key = ' '.join(args)
@@ -57,7 +66,7 @@ if key in responses:
 elif args[:2] == ['worktree', 'list']:
     sys.stderr.write('{"error":{"code":"not_git_worktree"}}')
     sys.exit(1)
-elif args[:2] in [['agent', 'prompt'], ['pane', 'report-metadata'], ['notification', 'show']]:
+elif args[:2] in [['agent', 'prompt'], ['agent', 'send-keys'], ['pane', 'report-metadata'], ['notification', 'show']]:
     with open(os.path.join(root, 'http-herdr-invocations.jsonl'), 'a') as log:
         log.write(json.dumps({'args': args, 'socket': os.environ.get('HERDR_SOCKET_PATH')}) + '\n')
     if args[:2] == ['agent', 'prompt'] and os.path.exists(os.path.join(root, 'prompt-gate')):
@@ -187,7 +196,13 @@ else:
         }
     }
 
-    fn request(&self, method: &str, path: &str, headers: &[(&str, &str)], body: &str) -> Response {
+    pub(super) fn request(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &str,
+    ) -> Response {
         let mut request = format!("{method} {path} HTTP/1.1\r\n");
         if !headers
             .iter()
@@ -210,7 +225,7 @@ else:
         self.raw(&request)
     }
 
-    fn post(&self, path: &str, body: &str, extra: &[(&str, &str)]) -> Response {
+    pub(super) fn post(&self, path: &str, body: &str, extra: &[(&str, &str)]) -> Response {
         let mut headers = vec![
             ("Cookie", self.cookie.as_str()),
             ("X-Namedrop-Csrf", self.csrf.as_str()),
@@ -235,7 +250,7 @@ pub(super) fn fixture() -> Fixture {
     f
 }
 
-pub(super) fn post(
+pub(super) fn raw_post(
     server: &Server,
     request: &str,
     source: &str,
@@ -255,6 +270,30 @@ pub(super) fn post(
         response.status,
         serde_json::from_str(&response.body).unwrap(),
     )
+}
+
+pub(super) fn post(
+    server: &Server,
+    request: &str,
+    source: &str,
+    parent: Option<&str>,
+) -> (u16, Value) {
+    let (status, mut receipt) = raw_post(server, request, source, parent);
+    if status != 200 {
+        return (status, receipt);
+    }
+    let replay = receipt["idempotent_replay"].clone();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while receipt["channel"]["state"] == "routing" {
+        assert!(
+            Instant::now() < deadline,
+            "routing did not finish: {receipt}"
+        );
+        thread::sleep(Duration::from_millis(10));
+        receipt = raw_post(server, request, source, parent).1;
+    }
+    receipt["idempotent_replay"] = replay;
+    (status, receipt)
 }
 
 pub(super) fn calls(f: &Fixture) -> Vec<Value> {

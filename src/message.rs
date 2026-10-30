@@ -453,12 +453,6 @@ impl MessagePreparation {
     }
 }
 
-struct PlainRouting {
-    decision: crate::agent_status_model::channel_router::RoutingDecision,
-    candidates: Vec<crate::RoutingAddressSnapshot>,
-    participants: Vec<crate::PaneAddressId>,
-}
-
 struct PreparedMessageOperation {
     request_id: String,
     authored_source: String,
@@ -578,7 +572,8 @@ where
 }
 
 pub(crate) fn is_plain_channel_post(source: &str) -> bool {
-    parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
+    !source.trim_start().starts_with('@')
+        && parse_mentions(source).is_err_and(|error| error == MISSING_RECIPIENTS)
 }
 
 pub(crate) fn send_operator_channel_message_observing_commit<E, C, I, R>(
@@ -1016,76 +1011,17 @@ where
         Ok((author, replayed, tracked_home))
     })?;
     if let Some(committed) = replayed {
-        let mut presented = present_committed(
+        let presented = present_committed(
             committed,
             &mut store,
             &namespace,
             &disposition_attempt_id,
             runtime,
         )?;
-        if grammar_version == MessageGrammar::Channel {
-            channel_receipt(&mut presented.0, &mut store, &namespace, &authored_source)?;
-        }
         return Ok(presented);
     }
-    let channel_routing = if preparation == MessagePreparation::OperatorPlain {
-        let (rows, candidates, participants, host) = store.transaction(|transaction| {
-            let participants = in_reply_to
-                .as_ref()
-                .map(|message| {
-                    let route = transaction.message_route(&namespace, message)?;
-                    transaction.thread_agent_participants(&namespace, &route.thread_id)
-                })
-                .transpose()?
-                .unwrap_or_default();
-            let candidates = transaction
-                .channel_members(&namespace)?
-                .into_iter()
-                .filter(|member| {
-                    !participants
-                        .iter()
-                        .any(|participant| participant.address_id == member.address_id)
-                        && parsed.context_mentions.iter().any(|mention| {
-                            mention.workspace.is_none() && mention.alias == member.alias
-                        })
-                })
-                .collect::<Vec<_>>();
-            Ok((
-                transaction.dashboard_rows(&namespace)?,
-                candidates,
-                participants,
-                transaction.preferred_router_host()?,
-            ))
-        })?;
-        let run = crate::agent_status_model::channel_router::route(
-            crate::agent_status_model::channel_router::RouterRequest {
-                host,
-                rows: &rows,
-                source: &authored_source,
-                candidates: &candidates,
-            },
-        );
-        if let Some(attempt) = run.attempt {
-            crate::dashboard::snapshot::channel_routing::record_attempt(
-                runtime.state_directory,
-                &namespace,
-                &request_id,
-                &runtime.ids.next_id("router-call"),
-                attempt,
-            );
-        }
-        Some(PlainRouting {
-            decision: run.decision,
-            candidates,
-            participants: participants
-                .into_iter()
-                .map(|participant| participant.address_id)
-                .collect(),
-        })
-    } else {
-        None
-    };
-    let routing = if channel_routing.is_some() {
+    let plain_channel = preparation == MessagePreparation::OperatorPlain;
+    let routing = if plain_channel {
         crate::spaces::RoutePlan {
             sender_label: WorkspaceLabel::from_herdr(namespace.space_id.as_str()),
             legs: Vec::new(),
@@ -1191,33 +1127,36 @@ where
                 thread_id
             }
         };
-        let mut recipients = if channel_routing.is_some() {
+        let mut recipients = if plain_channel {
             Vec::new()
         } else {
             routing.resolve(transaction, &namespace, &author.address_id, runtime.clock.now_unix_ms())?
         };
         let channel_reply = author_kind == ActorKind::AgentSession
             && reply_route.as_ref().is_some_and(|route| route.reply_mode == crate::DeliveryReplyMode::Channel);
-        if let Some(plain) = &channel_routing {
+        let pending_channel = if plain_channel {
+            let members = transaction.channel_members(&namespace)?;
             if let Some(route) = &reply_route {
-                recipients.extend(transaction.thread_agent_participants(&namespace, &route.thread_id)?
-                    .into_iter().filter(|participant| plain.participants.contains(&participant.address_id)));
+                recipients.extend(transaction.thread_agent_participants(&namespace, &route.thread_id)?);
             }
-            if let crate::agent_status_model::channel_router::RoutingDecision::Routed { to, .. } = &plain.decision {
-                let current = transaction.channel_members(&namespace)?;
-                for alias in to {
-                    if let Some(member) = current.iter().find(|member| &member.alias == alias && plain.candidates.contains(member))
-                        && !recipients.iter().any(|recipient| recipient.address_id == member.address_id) {
-                        recipients.push(member.clone());
-                    }
-                }
-            }
-            if in_reply_to.is_some() && recipients.is_empty() {
+            let candidates = members.iter().any(|member| !recipients.iter().any(|p|p.address_id == member.address_id)
+                && parsed.context_mentions.iter().any(|mention| mention.workspace.is_none() && mention.alias == member.alias));
+            if in_reply_to.is_some() && recipients.is_empty() && !candidates {
                 return Err(crate::StoreError::invalid_input(MISSING_RECIPIENTS));
             }
-        }
+            if candidates { recipients.clear(); }
+            candidates
+        } else { false };
         if channel_reply {
-            for member in transaction.channel_members(&namespace)? {
+            let asker = reply_route.as_ref().and_then(|route| route.participants.first());
+            let members = transaction.channel_members(&namespace)?;
+            if let Some(member) = members.iter().find(|member| {
+                asker.is_some_and(|asker| asker.address_id == member.address_id)
+                    && member.address_id != author.address_id
+            }) && !recipients.iter().any(|recipient| recipient.address_id == member.address_id) {
+                recipients.push(member.clone());
+            }
+            for member in members {
                 if member.address_id != author.address_id && member.alias != "operator"
                     && parsed.context_mentions.iter().any(|mention| mention.workspace.is_none() && mention.alias == member.alias)
                     && !recipients.iter().any(|recipient| recipient.address_id == member.address_id) {
@@ -1330,7 +1269,11 @@ where
                 &attribution,
             )?;
         }
-        let receipt = transaction.append_message(&namespace, &draft, &attribution)?;
+        let receipt = if pending_channel {
+            transaction.append_pending_channel(&namespace, &draft, &attribution)?
+        } else {
+            transaction.append_message(&namespace, &draft, &attribution)?
+        };
         crate::coordination::track_message(transaction, &namespace, &draft, &tracking, disposition_attempt_id.as_ref(), &live, runtime)?;
         if let Some(attempt_id) = &disposition_attempt_id {
             transaction.record_reply_disposition(
@@ -1536,6 +1479,7 @@ where
             })
             .transpose()?;
         Ok(Committed {
+            channel: transaction.channel_projection(&namespace,&draft.message_id)?,
             routed: crate::RoutedMessageReceipt {
                 receipt,
                 recipients,
@@ -1550,45 +1494,13 @@ where
     });
     match routed {
         Ok(committed) => {
-            let won = !committed.routed.receipt.idempotent_replay;
-            let mut presented = present_committed(
+            let presented = present_committed(
                 committed,
                 &mut store,
                 &namespace,
                 &disposition_attempt_id,
                 runtime,
             )?;
-            if let Some(plain) = channel_routing {
-                if grammar_version == MessageGrammar::Channel {
-                    channel_receipt(&mut presented.0, &mut store, &namespace, &authored_source)?;
-                }
-                if won {
-                    use crate::agent_status_model::channel_router::RoutingDecision;
-                    let note = match plain.decision {
-                        RoutingDecision::Unrouted => None,
-                        RoutingDecision::Failed { router } => {
-                            Some(json!({"router": router, "router_failed": true}))
-                        }
-                        RoutingDecision::Routed {
-                            reason,
-                            router,
-                            usage,
-                            ..
-                        } => {
-                            if let Some(usage) = usage {
-                                presented.0["routing_usage"] = usage;
-                            }
-                            Some(
-                                json!({"reason": reason, "router": router, "router_failed": false}),
-                            )
-                        }
-                    };
-                    if let Some(note) = note.filter(|_| grammar_version == MessageGrammar::Channel)
-                    {
-                        presented.0["_channel_routing_note"] = note;
-                    }
-                }
-            }
             Ok(presented)
         }
         Err(error) => {
@@ -1599,6 +1511,7 @@ where
 }
 
 struct Committed {
+    channel: Option<crate::store::channel_routing::ChannelProjection>,
     routed: crate::RoutedMessageReceipt,
     outlook: Vec<RecipientOutlook>,
     relay: Option<RelayPresentation>,
@@ -1660,6 +1573,7 @@ impl Replay<'_> {
         )?;
         let outlook = routed_recipient_outlooks(transaction, namespace, &replay.recipients)?;
         Ok(Some(Committed {
+            channel: transaction.channel_projection(namespace, &replay.receipt.message_id)?,
             routed: replay,
             outlook,
             relay: None,
@@ -1739,6 +1653,7 @@ where
     E: crate::HerdrCommandExecutor,
 {
     let Committed {
+        channel,
         routed,
         outlook,
         relay,
@@ -1755,6 +1670,9 @@ where
         ))
     })?;
     let mut response = receipt_json(routed, outlook);
+    if let Some(channel) = channel {
+        response["channel"] = json!(channel);
+    }
     if !forwarded.is_empty() {
         response["forwarded"] = json!(&forwarded);
     }
@@ -1917,23 +1835,6 @@ fn resolve_aliases(
         .collect()
 }
 
-fn channel_receipt(
-    receipt: &mut Value,
-    store: &mut StateStore,
-    namespace: &StateNamespace,
-    source: &str,
-) -> Result<(), crate::StoreError> {
-    let to: Vec<_> = receipt["recipients"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|recipient| recipient["alias"].as_str())
-        .collect();
-    receipt["channel"] = json!({"state": if to.is_empty() { "unrouted" } else { "routed" }, "to": to,
-            "mentioned": store.transaction(|transaction| transaction.channel_mentioned(namespace, source))?});
-    Ok(())
-}
-
 fn receipt_json(routed: crate::RoutedMessageReceipt, outlook: Vec<RecipientOutlook>) -> Value {
     let crate::RoutedMessageReceipt {
         receipt,
@@ -2057,6 +1958,12 @@ fn mention_token_end(text: &str, at: usize) -> usize {
 /// looked up: a token that is not alias-shaped is not Mention-shaped, so it stays literal prose
 /// instead of rejecting the send, and no valid alias prefix is taken out of it.
 pub(crate) fn context_mentions(body: &str) -> Vec<BodyMention> {
+    context_mention_spans(body)
+        .into_iter()
+        .map(|(mention, _)| mention)
+        .collect()
+}
+pub(crate) fn context_mention_spans(body: &str) -> Vec<(BodyMention, std::ops::Range<usize>)> {
     let mut mentions = Vec::new();
     let mut qualified_run: Option<(usize, WorkspaceLabel)> = None;
     for anchor in mention_anchors(body) {
@@ -2072,10 +1979,13 @@ pub(crate) fn context_mentions(body: &str) -> Vec<BodyMention> {
         }
         let token = &body[anchor + 1..end];
         if validate_alias(token).is_ok() {
-            mentions.push(BodyMention {
-                alias: token.to_owned(),
-                workspace,
-            });
+            mentions.push((
+                BodyMention {
+                    alias: token.to_owned(),
+                    workspace,
+                },
+                anchor..end,
+            ));
         }
     }
     mentions

@@ -242,28 +242,39 @@ pub(crate) fn finish_post(state: &Path, namespace: &StateNamespace, receipt: &mu
     let Some(message_id) = receipt["message_id"].as_str() else {
         return;
     };
+    let marked = match crate::StateStore::open_read_only(state) {
+        Ok(Some(mut store)) => store
+            .transaction(|tx| {
+                tx.channel_routing_state(namespace, &crate::MessageId::new(message_id))
+            })
+            .map(|state| state.is_some())
+            .unwrap_or(true),
+        Ok(None) => false,
+        Err(_) => true,
+    };
     if let Some(internal) = internal {
         let note = Note {
             space: SpaceKey::of(namespace).as_str().to_owned(),
             message_id: message_id.to_owned(),
             reason: internal["reason"]
                 .as_str()
-                .map(|reason| SafeText::from_untrusted(reason, 60).text),
+                .map(|reason| SafeText::from_untrusted(reason, 60).text)
+                .filter(|reason| !reason.trim().is_empty()),
             router: internal["router"]
                 .as_str()
                 .map(|router| SafeText::from_untrusted(router, 80).text),
             router_failed: internal["router_failed"].as_bool().unwrap_or(false),
         };
         let _ = append(state, note.clone());
-        apply_receipt(receipt, &note);
+        apply_receipt(receipt, &note, marked);
     } else if let Some(note) = notes(state, namespace).get(message_id) {
-        apply_receipt(receipt, note);
+        apply_receipt(receipt, note, marked);
     }
 }
 
-fn apply_receipt(receipt: &mut Value, note: &Note) {
+fn apply_receipt(receipt: &mut Value, note: &Note, marked: bool) {
     let channel = &mut receipt["channel"];
-    if note.router_failed && channel["to"].as_array().is_some_and(Vec::is_empty) {
+    if !marked && note.router_failed && channel["to"].as_array().is_some_and(Vec::is_empty) {
         channel["state"] = "router_failed".into();
     }
     if let Some(reason) = &note.reason {
@@ -280,7 +291,7 @@ pub(crate) fn merge(state: &Path, namespace: &StateNamespace, messages: &mut [Me
         if let Some(channel) = &mut message.channel
             && let Some(note) = notes.get(&message.message_id)
         {
-            if note.router_failed && channel.to.is_empty() {
+            if !channel.durable && note.router_failed && channel.to.is_empty() {
                 channel.state = ChannelRoutingState::RouterFailed;
             }
             channel.reason = note
@@ -326,6 +337,29 @@ mod tests {
             usage_complete: false,
             provider_usd: None,
         }
+    }
+
+    #[test]
+    fn unreadable_routing_facts_do_not_let_optional_notes_replace_receipt_state() {
+        let state = directory();
+        let namespace = StateNamespace::for_space("synthetic", "w1");
+        append(
+            &state,
+            Note {
+                space: SpaceKey::of(&namespace).as_str().to_owned(),
+                message_id: "post-1".to_owned(),
+                reason: None,
+                router: None,
+                router_failed: true,
+            },
+        )
+        .unwrap();
+        fs::write(state.join("namedrop.sqlite3"), "invalid database").unwrap();
+        let mut receipt =
+            serde_json::json!({"message_id":"post-1","channel":{"state":"unrouted","to":[]}});
+        finish_post(&state, &namespace, &mut receipt);
+        assert_eq!(receipt["channel"]["state"], "unrouted");
+        fs::remove_dir_all(state).unwrap();
     }
 
     #[test]

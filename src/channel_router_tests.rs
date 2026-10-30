@@ -123,7 +123,7 @@ fn input_uses_explicit_host_and_only_supplied_candidates() {
             source: "request",
             candidates: &members
         })
-        .is_none()
+        .is_err()
     );
     assert!(matches!(
         route(RouterRequest {
@@ -202,9 +202,9 @@ fn response_only_selects_unique_roster_aliases_and_caps_its_reason() {
 fn response_normalizes_empty_single_word_unicode_and_control_topics_idempotently() {
     let input = test_input(&rows(), "ask several");
     for (raw, expected) in [
-        ("".to_owned(), "General topic".to_owned()),
-        (" \n\t ".to_owned(), "General topic".to_owned()),
-        ("?!...---".to_owned(), "General topic".to_owned()),
+        ("".to_owned(), String::new()),
+        (" \n\t ".to_owned(), String::new()),
+        ("?!...---".to_owned(), String::new()),
         ("Review".to_owned(), "Review topic".to_owned()),
         ("é".repeat(80), format!("{} topic", "é".repeat(54))),
         (
@@ -237,7 +237,7 @@ fn response_normalizes_empty_single_word_unicode_and_control_topics_idempotently
         assert_eq!(to, ["codex", "claude"]);
         assert_eq!(reason, expected, "raw topic: {raw:?}");
         assert!(reason.chars().count() <= 60);
-        assert!((2..=4).contains(&topic_words(&reason).count()));
+        assert!(reason.is_empty() || (2..=4).contains(&topic_words(&reason).count()));
         assert!(!reason.chars().any(char::is_control));
         let normalized = json!({"to": to, "reason": reason});
         assert_eq!(
@@ -250,7 +250,7 @@ fn response_normalizes_empty_single_word_unicode_and_control_topics_idempotently
 #[test]
 fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
     let mut rows = rows();
-    for index in 0..50 {
+    for index in 0..10 {
         let alias = format!("member-{index}");
         rows.addresses.push(AddressRow {
             address_id: alias.clone(),
@@ -275,6 +275,7 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
     for index in 0..10 {
         rows.messages.push(MessageRow {
             channel_to: None,
+            channel_state: None,
             channel_mentioned: None,
             woke: Vec::new(),
             message_id: index.to_string(),
@@ -298,6 +299,7 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
     }
     rows.messages.push(MessageRow {
         channel_to: None,
+        channel_state: None,
         channel_mentioned: None,
         woke: Vec::new(),
         message_id: "unrelated".to_owned(),
@@ -309,7 +311,7 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
         grammar_version: "mention/v1".to_owned(),
         body: "PRIVATE_NON_CHANNEL_BODY".to_owned(),
     });
-    let input = test_input(&rows, &"😀".repeat(10_000));
+    let input = test_input(&rows, &"😀".repeat(100));
     assert!(!input.aliases.is_empty());
     assert!(input.payload.len() + input.schema.len() + INSTRUCTIONS.len() <= MAX_INPUT_BYTES);
     let payload: Value = serde_json::from_str(&input.payload).unwrap();
@@ -336,6 +338,168 @@ fn input_caps_post_roster_and_channel_recap_including_unicode_and_controls() {
             <= 1_200
     );
     assert!(!input.payload.contains("PRIVATE_NON_CHANNEL_BODY"));
+    let source = "😀".repeat(500);
+    let input = test_input(&rows, &source);
+    let payload: Value = serde_json::from_str(&input.payload).unwrap();
+    assert_eq!(payload["post"], source);
+    assert!(payload["recap"].as_array().unwrap().len() < 6);
+    assert_eq!(
+        payload["roster"].as_array().unwrap().len(),
+        candidates(&rows).len()
+    );
+}
+
+#[test]
+fn input_keeps_late_mention_and_its_request() {
+    let rows = rows();
+    let source = format!(
+        "{}\nPlease ask @claude to review the parser regression.\n{}",
+        "😀 unrelated. ".repeat(2_000),
+        "Afterward. ".repeat(2_000)
+    );
+    let input = test_input(&rows, &source);
+    let payload: Value = serde_json::from_str(&input.payload).unwrap();
+    assert!(
+        payload["post"]
+            .as_str()
+            .unwrap()
+            .contains("Please ask @claude to review the parser regression.")
+    );
+    assert!(input.payload.len() + input.schema.len() + INSTRUCTIONS.len() <= MAX_INPUT_BYTES);
+}
+
+#[test]
+fn input_rejects_roster_over_cap_instead_of_dropping_candidates() {
+    let mut rows = rows();
+    add_members(&mut rows, 31, "review");
+    let members = candidates(&rows);
+    let source = members
+        .iter()
+        .map(|member| format!("Ask @{} to review.", member.alias))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(matches!(
+        build_input(RouterRequest {
+            host: Some(AgentRuntime::ClaudeCode),
+            rows: &rows,
+            source: &source,
+            candidates: &members
+        }),
+        Err(InputError::TooLarge)
+    ));
+}
+
+#[test]
+fn input_preserves_all_aliases_and_schema_under_emoji_budget_pressure() {
+    let mut rows = rows();
+    add_members(&mut rows, 30, "Build and review");
+    let members = candidates(&rows);
+    let source = members
+        .iter()
+        .map(|member| {
+            format!(
+                "{} Please ask @{} to review parser changes. ",
+                "😀".repeat(600),
+                member.alias
+            )
+        })
+        .collect::<String>();
+    let input = test_input(&rows, &source);
+    let payload: Value = serde_json::from_str(&input.payload).unwrap();
+    let schema: Value = serde_json::from_str(&input.schema).unwrap();
+    let aliases: Vec<_> = members.iter().map(|member| member.alias.as_str()).collect();
+    assert_eq!(input.aliases, aliases);
+    assert_eq!(schema["properties"]["to"]["items"]["enum"], json!(aliases));
+    assert_eq!(payload["roster"].as_array().unwrap().len(), 32);
+    let mentions = crate::message::context_mentions(payload["post"].as_str().unwrap());
+    for alias in aliases {
+        assert!(
+            mentions
+                .iter()
+                .any(|mention| mention.alias == alias && mention.workspace.is_none()),
+            "missing {alias}"
+        );
+    }
+    assert!(input.payload.len() + input.schema.len() + INSTRUCTIONS.len() <= MAX_INPUT_BYTES);
+}
+
+#[test]
+fn input_rejects_minimum_roster_or_mention_context_over_budget() {
+    let mut rows = rows();
+    add_members(&mut rows, 30, &"😀".repeat(1_000));
+    assert!(matches!(
+        build_input(RouterRequest {
+            host: Some(AgentRuntime::ClaudeCode),
+            rows: &rows,
+            source: "ask @claude",
+            candidates: &candidates(&rows),
+        }),
+        Err(InputError::TooLarge)
+    ));
+    let rows = self::rows();
+    let source = format!("Ask @claude to review. {} ", "😀".repeat(100)).repeat(1_000);
+    assert!(matches!(
+        build_input(RouterRequest {
+            host: Some(AgentRuntime::ClaudeCode),
+            rows: &rows,
+            source: &source,
+            candidates: &candidates(&rows),
+        }),
+        Err(InputError::TooLarge)
+    ));
+}
+
+#[test]
+fn mention_windows_follow_canonical_byte_spans_and_qualification() {
+    let source = "😀 \\@claude `@codex` #other @claude @codex. Then ask @claude to review. `unterminated @codex";
+    let mentions = crate::message::context_mention_spans(source);
+    let tokens: Vec<_> = mentions
+        .iter()
+        .map(|(_, span)| &source[span.clone()])
+        .collect();
+    assert_eq!(tokens, ["@claude", "@codex", "@claude"]);
+    assert!(mentions[0].0.workspace.is_some());
+    assert!(mentions[1].0.workspace.is_some());
+    assert!(mentions[2].0.workspace.is_none());
+    assert_eq!(
+        crate::message::context_mentions(source),
+        mentions
+            .iter()
+            .map(|(mention, _)| mention.clone())
+            .collect::<Vec<_>>()
+    );
+    let source = format!(
+        "ESCAPED \\@claude. `CODE @codex`. #other @claude @codex. {} Then ask @claude to review.",
+        "😀 unrelated. ".repeat(1_000)
+    );
+    let input = test_input(&rows(), &source);
+    let payload: Value = serde_json::from_str(&input.payload).unwrap();
+    let post = payload["post"].as_str().unwrap();
+    assert!(post.contains("Then ask @claude to review."));
+    assert!(!post.contains("ESCAPED"));
+    assert!(!post.contains("CODE"));
+    assert!(!post.contains("#other"));
+}
+
+fn add_members(rows: &mut DashboardRows, count: usize, persona: &str) {
+    for index in 0..count {
+        let alias = format!("member-{index}");
+        rows.addresses.push(AddressRow {
+            address_id: alias.clone(),
+            alias: alias.clone(),
+            role_name: alias,
+            persona: Some(persona.to_owned()),
+            pane_type: PaneType::Agent,
+            retired: false,
+            closed_at_ms: None,
+            bound: true,
+            occupied: true,
+            agent_status: None,
+            blocked_since_ms: None,
+            blocked_message_id: None,
+            blocked_conversation: None,
+        });
+    }
 }
 
 #[test]
@@ -473,9 +637,9 @@ fn run_fake_case(case: &str, directory: &Path) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    if matches!(case, "off" | "nohost") {
+    if matches!(case, "off" | "nohost" | "overcap" | "oversized") {
         assert!(!record.exists(), "{case} must not spawn a worker");
-    } else {
+    } else if case != "cancelled" {
         let recorded = fs::read_to_string(record).unwrap();
         assert!(!recorded.contains("LEAKED<"), "{case}: {recorded}");
         assert!(!recorded.contains("synthetic-secret"), "{case}: {recorded}");
@@ -567,6 +731,11 @@ fn fake_cli_routes_with_isolation_receipts_and_deadline() {
             return;
         }
         let mut rows = rows();
+        if case == "overcap" {
+            add_members(&mut rows, 31, "review");
+        } else if case == "oversized" {
+            add_members(&mut rows, 30, &"😀".repeat(1_000));
+        }
         if matches!(
             case.as_str(),
             "codex" | "partial" | "missing" | "plaincodex"
@@ -611,11 +780,19 @@ fn fake_cli_routes_with_isolation_receipts_and_deadline() {
         };
         let run = if matches!(case.as_str(), "plainclaude" | "plaincodex") {
             run_input(build_input(request).unwrap(), DEADLINE, false)
+        } else if case == "cancelled" {
+            route_with_cancel(request, &AtomicBool::new(true))
         } else {
             route(request)
         };
         match case.as_str() {
-            "off" | "nohost" => assert!(run.attempt.is_none()),
+            "off" | "nohost" | "overcap" | "oversized" => assert!(run.attempt.is_none()),
+            "cancelled" => {
+                assert_eq!(
+                    run.attempt.as_ref().unwrap().outcome,
+                    RouterOutcome::Cancelled
+                );
+            }
             "exit" => {
                 let attempt = run.attempt.as_ref().unwrap();
                 assert_eq!(attempt.outcome, RouterOutcome::Failed);
@@ -665,7 +842,8 @@ fn fake_cli_routes_with_isolation_receipts_and_deadline() {
         let decision = run.decision;
         match case.as_str() {
             "off" | "nohost" => assert!(matches!(decision, RoutingDecision::Unrouted)),
-            "garbage" | "timeout" | "exit" | "partial" | "missing" => {
+            "garbage" | "timeout" | "exit" | "partial" | "missing" | "overcap" | "oversized"
+            | "cancelled" => {
                 let RoutingDecision::Failed { router } = decision else {
                     panic!("{decision:?}")
                 };
@@ -745,6 +923,9 @@ fn fake_cli_routes_with_isolation_receipts_and_deadline() {
         "garbage",
         "off",
         "nohost",
+        "overcap",
+        "oversized",
+        "cancelled",
         "timeout",
         "exit",
         "partial",
@@ -756,4 +937,42 @@ fn fake_cli_routes_with_isolation_receipts_and_deadline() {
         run_fake_case(case, &directory);
     }
     fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn input_preserves_short_post_cancellations_and_reference_framing() {
+    let rows = rows();
+    for source in [
+        "Please ask @claude for a review. Actually, cancel that request and wake nobody.",
+        "For reference only. This was already completed yesterday:\nPlease ask @claude for a review.",
+    ] {
+        let input = test_input(&rows, source);
+        let payload: Value = serde_json::from_str(&input.payload).unwrap();
+        assert_eq!(payload["post"], source);
+    }
+    let source = format!(
+        "{}\nFor reference only. Already completed yesterday.\nAsk @claude for a review. Actually cancel that request and wake nobody.\n{}",
+        "x".repeat(5000),
+        "y".repeat(5000)
+    );
+    let input = test_input(&rows, &source);
+    let payload: Value = serde_json::from_str(&input.payload).unwrap();
+    let post = payload["post"].as_str().unwrap();
+    assert!(post.contains("Already completed yesterday."), "{post}");
+    assert!(
+        post.contains("cancel that request and wake nobody"),
+        "{post}"
+    );
+}
+
+#[test]
+fn input_keeps_complete_posts_above_old_prefix_limit_when_they_fit() {
+    let rows = rows();
+    let source = format!(
+        "{} Please ask @claude for a review. Actually cancel that request and wake nobody.",
+        "x".repeat(4500)
+    );
+    let input = test_input(&rows, &source);
+    let payload: Value = serde_json::from_str(&input.payload).unwrap();
+    assert_eq!(payload["post"], source);
 }

@@ -1410,7 +1410,17 @@ fn fix_forward_stalled_asset_writer_times_out() {
         .unwrap();
     dashboard.open(Some(&ui));
     let pid = dashboard.info()["pid"].as_u64().unwrap();
-    let thread_count = || fs::read_dir(format!("/proc/{pid}/task")).unwrap().count();
+    let thread_count = || {
+        fs::read_dir(format!("/proc/{pid}/task"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|task| {
+                !fs::read_to_string(task.path().join("comm"))
+                    .unwrap_or_default()
+                    .starts_with("channel-router-")
+            })
+            .count()
+    };
     eventually(|| (thread_count() == 2).then_some(())).expect("initial health workers finish");
     let mut stream = connect(dashboard.port(), "/large.bin", &[]);
     let mut byte = [0];

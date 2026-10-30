@@ -15,7 +15,7 @@ fn plain_post_routes_verbatim_and_replay_does_not_call_router_again() {
     assert_eq!(receipt["channel"]["to"], json!(["planner", "lead"]));
     assert_eq!(receipt["channel"]["reason"], "needs a plan");
     assert!(receipt.get("_channel_routing_note").is_none());
-    assert_eq!(receipt["routing_usage"]["input_tokens"], 123);
+    assert_eq!(attempt_records(&f)[0]["input_tokens"], 123);
     let (status, replay) = post(&server, "plain", source, None);
     assert_eq!(status, 200, "{replay}");
     assert_eq!(replay["message_id"], receipt["message_id"]);
@@ -66,7 +66,7 @@ fn plain_post_routes_verbatim_and_replay_does_not_call_router_again() {
 }
 
 #[test]
-fn failed_routing_attempt_keeps_provider_receipt_before_post_commit() {
+fn failed_routing_attempt_keeps_provider_receipt_after_post_commit() {
     let f = fixture();
     let server = Server::start(
         &f,
@@ -121,7 +121,7 @@ pub(super) fn attempt_records(f: &Fixture) -> Vec<Value> {
 }
 
 #[test]
-fn concurrent_replays_audit_both_calls_and_commit_one_post() {
+fn concurrent_replays_audit_one_call_and_commit_one_post() {
     let f = fixture();
     let server = Server::start(&f, "delayed", false);
     thread::scope(|scope| {
@@ -142,10 +142,10 @@ fn concurrent_replays_audit_both_calls_and_commit_one_post() {
             )
         });
         let deadline = Instant::now() + Duration::from_secs(5);
-        while calls(&f).len() < 2 {
+        while calls(&f).is_empty() {
             assert!(
                 Instant::now() < deadline,
-                "both actual workers must start before either commits"
+                "one actual worker must start for the committed post"
             );
             thread::sleep(Duration::from_millis(10));
         }
@@ -157,9 +157,8 @@ fn concurrent_replays_audit_both_calls_and_commit_one_post() {
         assert_eq!(first["message_id"], second["message_id"]);
     });
     let records = attempt_records(&f);
-    assert_eq!(records.len(), 2);
-    assert_eq!(records[0]["request_id"], records[1]["request_id"]);
-    assert_ne!(records[0]["call_id"], records[1]["call_id"]);
+    assert_eq!(records.len(), 1);
+    assert_eq!(calls(&f).len(), 1);
     assert!(records.iter().all(|record| record["outcome"] == "routed"));
     assert_eq!(history(&server).as_array().unwrap().len(), 1);
     assert_eq!(
@@ -172,35 +171,19 @@ fn concurrent_replays_audit_both_calls_and_commit_one_post() {
 }
 
 #[test]
-fn routing_cost_receipt_survives_a_later_message_commit_failure() {
+fn failed_initial_commit_never_launches_a_model_or_records_cost() {
     let f = fixture();
     let server = Server::start(&f, "delayed", false);
-    thread::scope(|scope| {
-        let pending = scope.spawn(|| {
-            post(
-                &server,
-                "audit-rollback",
-                "Please ask @planner to plan this.",
-                None,
-            )
-        });
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while calls(&f).is_empty() {
-            assert!(
-                Instant::now() < deadline,
-                "worker must start before injecting the store failure"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
-        f.db().execute_batch("CREATE TRIGGER reject_audit_post BEFORE INSERT ON collaboration_messages BEGIN SELECT RAISE(ABORT, 'synthetic commit failure'); END;").unwrap();
-        fs::write(f.root.join("router-release"), "continue").unwrap();
-        let (status, _) = pending.join().unwrap();
-        assert_ne!(status, 200);
-    });
-    let records = attempt_records(&f);
-    assert_eq!(records.len(), 1);
-    assert_eq!(records[0]["request_id"], "audit-rollback");
-    assert_eq!(records[0]["outcome"], "routed");
+    f.db().execute_batch("CREATE TRIGGER reject_audit_post BEFORE INSERT ON collaboration_messages BEGIN SELECT RAISE(ABORT, 'synthetic commit failure'); END;").unwrap();
+    let (status, _) = support::raw_post(
+        &server,
+        "audit-rollback",
+        "Please ask @planner to plan this.",
+        None,
+    );
+    assert_ne!(status, 200);
+    assert!(calls(&f).is_empty());
+    assert!(attempt_records(&f).is_empty());
     assert!(history(&server).as_array().unwrap().is_empty());
     assert!(!f.state.join("dashboard/channel-routing.jsonl").exists());
 }

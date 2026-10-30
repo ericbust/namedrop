@@ -1,3 +1,9 @@
+#[path = "support/channel_controls.rs"]
+mod channel_controls;
+#[path = "support/channel_durable.rs"]
+mod channel_durable;
+#[path = "support/channel_fix2.rs"]
+mod channel_fix2;
 #[path = "support/channel_merge.rs"]
 mod channel_merge;
 #[path = "support/channel_router_attempts.rs"]
@@ -217,7 +223,11 @@ fn channel_replies_keep_the_existing_ten_reply_allowance_and_attention() {
             &format!("reply-{index}"),
             &parent,
             pane,
-            &format!("@operator Please ask @{mention} next."),
+            &if index == 0 {
+                format!("@operator Please ask @{mention} next.")
+            } else {
+                "@operator Continue the exchange.".to_owned()
+            },
         )
         .unwrap();
     }
@@ -287,7 +297,7 @@ fn recap_is_explicitly_untrusted_and_bounded_across_channel_conversation() {
     assert!(!instruction.contains("recap-"));
     assert!(
         instruction
-            .contains("Independent Namedrop sends in this workspace also appear in the channel.")
+            .contains("@name anywhere in your reply wakes that member (costs one reply); write \\@name to mention without waking; answer the asker by name")
     );
     assert!(recap.lines().all(|line| line.chars().count() <= 194));
 }
@@ -619,7 +629,7 @@ fn implicit_followup_routes_only_new_mentions_and_keeps_existing_participants() 
     let (status, followup) = post(&server, "new-member", source, root["message_id"].as_str());
     assert_eq!(status, 200, "{followup}");
     assert_eq!(recipient_aliases(&followup), ["planner", "lead"]);
-    assert!(followup.get("channel").is_none());
+    assert_eq!(followup["channel"]["state"], "routed");
     let input: Value =
         serde_json::from_str(calls(&f).last().unwrap()["stdin"].as_str().unwrap()).unwrap();
     assert_eq!(input["roster"].as_array().unwrap().len(), 1);
@@ -869,7 +879,7 @@ fn codex_routes_when_the_only_claude_registration_is_inactive() {
     assert_eq!(status, 200, "{receipt}");
     assert_eq!(receipt["channel"]["to"], json!(["planner"]));
     assert_eq!(receipt["channel"]["router"], "codex-gpt-5.6-luna");
-    assert_eq!(receipt["routing_usage"]["input_tokens"], 100);
+    assert_eq!(attempt_records(&f)[0]["input_tokens"], 100);
 }
 
 #[test]
@@ -915,7 +925,7 @@ fn remote_terminal_only_threads_refuse_implicit_followups_without_new_commands()
 }
 
 #[test]
-fn a_captured_router_pick_does_not_follow_rebinding_or_session_changes() {
+fn a_captured_router_pick_survives_rebinding_or_session_changes() {
     for rebound in [false, true] {
         let f = fixture();
         let server = Server::start(&f, "delayed", false);
@@ -957,8 +967,8 @@ fn a_captured_router_pick_does_not_follow_rebinding_or_session_changes() {
             fs::write(f.root.join("router-release"), "continue").unwrap();
             let (status, receipt) = posted.join().unwrap();
             assert_eq!(status, 200, "{receipt}");
-            assert_eq!(receipt["channel"]["state"], "unrouted");
-            assert_eq!(receipt["deliveries"], json!([]));
+            assert_eq!(receipt["channel"]["state"], "routed");
+            assert_eq!(recipient_aliases(&receipt), ["planner"]);
         });
     }
 }
