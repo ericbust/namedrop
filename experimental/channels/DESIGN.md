@@ -914,7 +914,13 @@ Enter sends:
   Mention @name to bring someone in".
 - Text that mentions agents but does not start with them: "Enter posts to the
   channel · Namedrop checks if it's for @codex", with at most two names, then
-  "+N".
+  "+N". A name right after a `#label` word, with only whitespace between them,
+  names someone in that workspace, as do the names that follow it with only
+  whitespace between, so the server counts none of them as a channel mention:
+  "see #alpha @codex" and "see #alpha @codex @claude" read "Enter posts to the
+  channel · Mention @name to bring someone in". A word with a mark after the
+  label, as in "see #alpha, @codex", is no label, and neither is `#all`, so
+  "see #all @codex" still reads "Namedrop checks if it's for @codex".
 - Text that starts with mentions: "Enter sends only to @codex", "Enter sends
   only to @codex, @shell", or "Enter sends only to @codex, @shell +2". The
   names are the leading aliases as typed, without `#label` tokens. A leading
@@ -932,7 +938,9 @@ Enter sends:
     channel", as typed.
   - After a `#label` run, neither of the two rules above applies: the server
     posts "#alpha @codex; hi" to the channel as it is, so the hints for a
-    channel post apply.
+    channel post apply. Its @codex follows the `#label` word, so the post
+    mentions no one: "Enter posts to the channel · Mention @name to bring
+    someone in".
   - A name with capitals: "Names are lowercase: @codex", the name with its
     ASCII letters lowercased. The server refuses the capital before it looks
     the name up, so this is the reason for a current member, a closed one, a

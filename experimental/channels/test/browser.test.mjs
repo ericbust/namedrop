@@ -8851,6 +8851,40 @@ test("R3 U1: a leading name may end in one comma or colon, so the hint says Ente
   );
 });
 
+test("R3 fix1 F1: a name right after a #label word is that workspace's, so the hint promises no check for it, and a #label with a mark or #all keeps the check", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const room = "Enter posts to the channel · Mention @name to bring someone in";
+  const hints = [
+    ["#alpha @codex; hi", room],
+    ["see #alpha @codex", room],
+    ["see #alpha @codex @claude", room],
+    [
+      "see #alpha, @codex",
+      "Enter posts to the channel · Namedrop checks if it's for @codex",
+    ],
+    [
+      "see #all @codex",
+      "Enter posts to the channel · Namedrop checks if it's for @codex",
+    ],
+    ["#alpha, @codex x", "Enter sends only to @codex"],
+  ];
+  for (const [text, hint] of hints) {
+    await box.fill(text);
+    assert.equal(await status.textContent(), hint, JSON.stringify(text));
+  }
+  await box.fill("#alpha @codex; hi");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(
+    JSON.parse(ui.posts.attempts[0].raw).source,
+    "#alpha @codex; hi",
+    "it posts to the channel as typed",
+  );
+});
+
 test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {
   const at = Date.now() - 600_000;
   const { ui } = await chatRoom(t, [

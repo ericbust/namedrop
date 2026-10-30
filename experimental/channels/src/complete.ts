@@ -268,6 +268,17 @@ function afterLabels(text: string): number {
     at = spaceAfter(text, at + wordAt(text, at).length);
   return at;
 }
+// The server's workspace_label_before: an `@` after whitespace that follows a
+// `#label` word, `#all` aside, names someone in that workspace.
+function afterLabelWord(text: string, at: number): boolean {
+  let end = at;
+  while (end > 0 && WHITESPACE.test(text.charAt(end - 1))) end--;
+  if (end === at) return false;
+  let start = end;
+  while (start > 0 && !WHITESPACE.test(text.charAt(start - 1))) start--;
+  const word = text.slice(start, end);
+  return LABEL.test(word) && foldLabel(word.slice(1)) !== "all";
+}
 function serverMentions(text: string): Mentions {
   let at = afterLabels(text);
   const leading = new Set<string>();
@@ -277,7 +288,11 @@ function serverMentions(text: string): Mentions {
     at = spaceAfter(text, at + word.length);
     word = wordAt(text, at);
   }
+  // Channel mentions, as the server's context_mention_spans counts them. A name
+  // after a `#label` word, and each name after it with only whitespace between,
+  // belongs to that workspace, so it is not one.
   const anywhere = new Set<string>();
+  let qualifiedEnd: number | null = null;
   let cursor = 0;
   while (cursor < text.length) {
     const char = text.charAt(cursor);
@@ -292,8 +307,12 @@ function serverMentions(text: string): Mentions {
     ) {
       let end = cursor + 1;
       while (end < text.length && TOKEN_CHAR.test(text.charAt(end))) end++;
+      const qualified: boolean =
+        (qualifiedEnd !== null && spaceAfter(text, qualifiedEnd) === cursor) ||
+        afterLabelWord(text, cursor);
+      qualifiedEnd = qualified ? end : null;
       const alias = text.slice(cursor + 1, end);
-      if (ALIAS.test(alias)) anywhere.add(`@${alias}`);
+      if (!qualified && ALIAS.test(alias)) anywhere.add(`@${alias}`);
       cursor = end;
     } else cursor++;
   }

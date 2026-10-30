@@ -578,14 +578,8 @@ test("complete: the hint names leading text the server refuses, reading leading 
     ["@codex,, hi", "Put a space after @codex"],
     ["@codex:: hi", "Put a space after @codex"],
     ["@codex,: hi", "Put a space after @codex"],
-    [
-      "#alpha @codex; hi",
-      "Enter posts to the channel · Namedrop checks if it's for @codex",
-    ],
-    [
-      "#alpha @codex,, hi",
-      "Enter posts to the channel · Namedrop checks if it's for @codex",
-    ],
+    ["#alpha @codex; hi", room],
+    ["#alpha @codex,, hi", room],
     ["#alpha @codex_x hi", room],
     ["@codex_x hi", "@codex_x isn't in this channel"],
     ["@ hi", room],
@@ -613,6 +607,43 @@ test("complete: the hint names leading text the server refuses, reading leading 
     "Names are lowercase: @codex",
     "a closed member is refused for its capital too",
   );
+});
+
+test("complete: a name right after a #label word names someone in that workspace, so it is no channel mention, as the server's workspace_label_before reads it", () => {
+  const channel = { kind: "channel", agents: alpha.members } as const;
+  const hint = (text: string) => composerHint(channel, text);
+  const named = (text: string) =>
+    mentionedAgents(text, alpha.members).map((member) => member.alias);
+  const room = "Enter posts to the channel · Mention @name to bring someone in";
+  const checks = (names: string) =>
+    `Enter posts to the channel · Namedrop checks if it's for ${names}`;
+  const cases: [string, string, string[]][] = [
+    ["#alpha @codex; hi", room, []],
+    ["see #alpha @codex", room, []],
+    ["#alpha @codex,, hi", room, []],
+    ["#alpha, @codex x", "Enter sends only to @codex", ["@codex"]],
+    ["see #alpha, @codex", checks("@codex"), ["@codex"]],
+    ["see #alpha: @codex", checks("@codex"), ["@codex"]],
+    ["see #all @codex", checks("@codex"), ["@codex"]],
+    ["see #ALL @codex", checks("@codex"), ["@codex"]],
+    ["see #all. @codex", room, []],
+    ["see #al!pha @codex", checks("@codex"), ["@codex"]],
+    ["see # @codex", checks("@codex"), ["@codex"]],
+    ["see #alpha\n\t@codex", room, []],
+    ["see #alpha @codex", room, []],
+    ["see #alpha@codex", room, []],
+    ["#alpha @codex; ask @claude", checks("@claude"), ["@claude"]],
+    ["see #alpha @codex @claude", room, []],
+    ["see #alpha @Codex @claude", room, []],
+    ["see #alpha @codex, @claude", checks("@claude"), ["@claude"]],
+    ["see #alpha @codex `x` @claude", checks("@claude"), ["@claude"]],
+    ["see #alpha `@codex` @claude", checks("@claude"), ["@claude"]],
+    ["see #beta @codex and @claude", checks("@claude"), ["@claude"]],
+  ];
+  for (const [text, expected, mentioned] of cases) {
+    assert.equal(hint(text), expected, JSON.stringify(text));
+    assert.deepEqual(named(text), mentioned, JSON.stringify(text));
+  }
 });
 
 test("complete: disabled copy follows the server reason despite sanitized or identical names", () => {
