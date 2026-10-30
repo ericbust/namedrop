@@ -319,6 +319,7 @@ enum ConnectionState {
 }
 
 struct Published {
+    expires_at_ms: Option<i64>,
     hash: [u8; 32],
     frame: Arc<str>,
 }
@@ -575,7 +576,12 @@ impl Hub<'_> {
             .retain(|key| self.live_spaces.contains_key(key));
         self.metadata_dirty |= previous != self.live_spaces;
         let metadata_changed = std::mem::take(&mut self.metadata_dirty);
-        if !database_changed && !metadata_changed && incoming.is_none() {
+        let retention_expired = self.published.values().any(|published| {
+            published
+                .expires_at_ms
+                .is_some_and(|expiry| now_ms() >= expiry)
+        });
+        if !database_changed && !metadata_changed && !retention_expired && incoming.is_none() {
             self.complete_replays();
             return true;
         }
@@ -920,6 +926,8 @@ impl Hub<'_> {
             self.open_store();
         }
         let label = self.files.labels().remove(key.as_str());
+        let now = now_ms();
+        let mut expires_at_ms = None;
         let mut snapshot = match self.namespace(key) {
             Some(namespace) => {
                 let rows = match self.store.as_mut()?.dashboard_rows(&namespace) {
@@ -929,9 +937,15 @@ impl Hub<'_> {
                         return None;
                     }
                 };
-                snapshot::build(&rows, label.as_deref(), 0)
+                expires_at_ms = rows
+                    .addresses
+                    .iter()
+                    .filter_map(snapshot::closed_member_expires_at)
+                    .filter(|expiry| *expiry > now)
+                    .min();
+                snapshot::build(&rows, label.as_deref(), now)
             }
-            None => DashboardSnapshot::unknown(key.clone(), label.as_deref(), 0),
+            None => DashboardSnapshot::unknown(key.clone(), label.as_deref(), now),
         };
         let live_label = self
             .live_spaces
@@ -941,16 +955,20 @@ impl Hub<'_> {
             snapshot.space.workspace_id = space.namespace.space_id.as_str().to_owned();
         }
         let workspace_id = snapshot.space.workspace_id.clone();
-        snapshot
-            .space
-            .set_live_label(&workspace_id, live_label, self.addressable_label(key));
+        snapshot.space.set_live_label(
+            &workspace_id,
+            live_label,
+            self.addressability(key, snapshot.space.state),
+        );
         // Hash without the timestamp, so an unchanged space sends no frame.
+        snapshot.generated_at_ms = 0;
         let hash: [u8; 32] = Sha256::digest(serde_json::to_vec(&snapshot).ok()?).into();
-        snapshot.generated_at_ms = now_ms();
+        snapshot.generated_at_ms = now;
         let frame: Arc<str> = serde_json::to_string(&snapshot).ok()?.into();
         self.published.insert(
             key.clone(),
             Published {
+                expires_at_ms,
                 hash,
                 frame: frame.clone(),
             },
@@ -958,11 +976,28 @@ impl Hub<'_> {
         Some(frame)
     }
 
-    fn addressable_label(&self, key: &SpaceKey) -> Option<String> {
+    fn addressability(
+        &self,
+        key: &SpaceKey,
+        state: snapshot::SpaceState,
+    ) -> Result<String, snapshot::NotAddressableReason> {
         use crate::spaces::{SpaceDirectory, SpaceEntry, names_in_scope, workspace_token};
-        let target = self.live_spaces.get(key)?;
-        let folded = crate::WorkspaceLabel::from_herdr(target.label.as_deref()?);
-        let label = crate::WorkspaceLabel::from_token(folded.as_str())?;
+        use snapshot::NotAddressableReason as Reason;
+        let target = self.live_spaces.get(key).ok_or(Reason::Unavailable)?;
+        let raw_label = target.label.as_deref().ok_or(Reason::MissingLabel)?;
+        let label = crate::WorkspaceLabel::from_herdr(raw_label);
+        if label.as_str().is_empty() {
+            return Err(Reason::EmptyLabel);
+        }
+        if label.as_str() == "all" {
+            return Err(Reason::ReservedAll);
+        }
+        if !self.spaces.get(key).is_some_and(|space| space.activated) {
+            return Err(match state {
+                snapshot::SpaceState::Deactivated => Reason::NotActive,
+                _ => Reason::NotActivated,
+            });
+        }
         let entries: Vec<_> = self
             .live_spaces
             .values()
@@ -990,17 +1025,34 @@ impl Hub<'_> {
                 .iter()
                 .map(|entry| (&entry.space, entry.label.as_ref())),
         );
+        let collision_reason = if entries.iter().any(|entry| {
+            entry.space != target.namespace.space_id && entry.label.as_ref() == Some(&label)
+        }) {
+            Reason::SharedLabel
+        } else {
+            Reason::IdCollision
+        };
         if token != label {
-            return None;
+            return Err(collision_reason);
         }
         let mut others = entries;
         let index = others
             .iter()
-            .position(|entry| entry.space == target.namespace.space_id)?;
+            .position(|entry| entry.space == target.namespace.space_id)
+            .ok_or(Reason::Unavailable)?;
         let here = others.swap_remove(index);
         let directory = SpaceDirectory::new(here, others);
-        names_in_scope(&crate::SpaceScope::Named(vec![label.clone()]), &directory).ok()?;
-        Some(label.as_str().to_owned())
+        names_in_scope(&crate::SpaceScope::Named(vec![label.clone()]), &directory).map_err(
+            |refusal| match refusal {
+                crate::spaces::RouteRefusal::DuplicateLabel { .. } => collision_reason,
+                crate::spaces::RouteRefusal::NotActivated { .. } => match state {
+                    snapshot::SpaceState::Deactivated => Reason::NotActive,
+                    _ => Reason::NotActivated,
+                },
+                _ => Reason::Unavailable,
+            },
+        )?;
+        Ok(label.as_str().to_owned())
     }
 
     fn namespace(&mut self, key: &SpaceKey) -> Option<StateNamespace> {
@@ -1403,6 +1455,120 @@ mod tests {
     }
 
     #[test]
+    fn retained_member_expiry_republishes_without_a_database_change() {
+        let state =
+            std::env::temp_dir().join(format!("namedrop-hub-expiry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let namespace = StateNamespace::for_space("socket-a", "w1");
+        let at = MutationAttribution::new(ActorKind::Plugin, "test", 1);
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| tx.activate_worktree(&namespace, &at))
+            .unwrap();
+        add_address(&state, &namespace, "closed");
+        add_address(&state, &namespace, "reader");
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                let thread = crate::ThreadId::new("history-thread");
+                tx.create_thread(&namespace, &thread, "History", &at)?;
+                tx.append_message(
+                    &namespace,
+                    &crate::MessageDraft {
+                        thread_id: thread,
+                        message_id: crate::MessageId::new("history-message"),
+                        in_reply_to: None,
+                        author_address_id: PaneAddressId::new("address-closed"),
+                        author_kind: ActorKind::AgentSession,
+                        author_alias_snapshot: "closed".to_owned(),
+                        author_agent_session_snapshot: None,
+                        request_id: "history-request".to_owned(),
+                        authored_source: "History".to_owned(),
+                        body: "History".to_owned(),
+                        grammar_version: "note/v1".to_owned(),
+                        recipients: vec![crate::MessageRecipientDraft {
+                            address_id: PaneAddressId::new("address-reader"),
+                            alias_snapshot: "reader".to_owned(),
+                            agent_session_snapshot: None,
+                            delivery_id: crate::DeliveryId::new("history-delivery"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &at,
+                )
+                .map(|_| ())
+            })
+            .unwrap();
+        let closed_at = u64::try_from(now_ms() - 300_000 + 1_500).unwrap();
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                let address = PaneAddressId::new("address-closed");
+                tx.bind_pane(
+                    &namespace,
+                    &crate::PaneBindingId::new("binding-closed"),
+                    &address,
+                    "p1",
+                    &at,
+                )?;
+                tx.retire_pane_address(
+                    &namespace,
+                    &address,
+                    &MutationAttribution::new(ActorKind::Plugin, "test", closed_at),
+                )
+            })
+            .unwrap();
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = test_hub(&files);
+        let (frames, inbox) = sync_channel(8);
+        hub.handle(HubCommand::Subscribe {
+            id: 1,
+            subscription: Subscription::Space(SpaceKey::of(&namespace)),
+            frames,
+            notify: std::sync::mpsc::channel().0,
+        });
+        let Frame::Snapshot(initial) = inbox.recv().unwrap() else {
+            panic!("snapshot")
+        };
+        let initial: serde_json::Value = serde_json::from_str(&initial).unwrap();
+        assert!(
+            initial["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| member["alias"] == "@closed")
+        );
+        let referenced = |frame: &serde_json::Value| {
+            frame["participants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|member| member["alias"] == "@closed")
+                .cloned()
+                .expect("history must keep its retired author")
+        };
+        assert_eq!(referenced(&initial)["activity"], "retired");
+        assert_eq!(referenced(&initial)["recently_closed"], true);
+        let version = hub.data_version;
+        freeze_discovery(&mut hub);
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let expired = loop {
+            hub.refresh(None);
+            if let Ok(Frame::Snapshot(frame)) = inbox.try_recv() {
+                break frame;
+            }
+            assert!(Instant::now() < deadline, "expiry did not publish a frame");
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert_eq!(hub.data_version, version);
+        let expired: serde_json::Value = serde_json::from_str(&expired).unwrap();
+        assert_eq!(referenced(&expired)["activity"], "retired");
+        assert_eq!(referenced(&expired)["recently_closed"], false);
+        assert_eq!(expired["messages"][0]["author"], "address-closed");
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn a_failed_read_is_retried_on_the_next_tick() {
         let state = std::env::temp_dir().join(format!("namedrop-hub-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
@@ -1461,7 +1627,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pending_join_retries_after_a_read_failure_with_an_unchanged_legacy_cache() {
+    fn a_pending_join_retries_after_a_read_failure_and_updates_legacy_addressability() {
         let state = std::env::temp_dir().join(format!("namedrop-hub-join-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
         let namespace = StateNamespace::for_space("socket-a", "w1");
@@ -1531,9 +1697,15 @@ mod tests {
             }
             _ => panic!("the rejoined workspace never arrived after the read recovered"),
         }
+        let Ok(Frame::Snapshot(frame)) = legacy.try_recv() else {
+            panic!("the recovered discovery must update legacy addressability");
+        };
+        let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        assert_eq!(frame["space"]["not_addressable_reason"], "missing_label");
+        hub.refresh(None);
         assert!(
             legacy.try_recv().is_err(),
-            "unchanged legacy content sends no new frame"
+            "unchanged content sends no new frame"
         );
         let _ = fs::remove_dir_all(&state);
     }

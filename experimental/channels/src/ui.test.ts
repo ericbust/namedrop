@@ -278,8 +278,84 @@ test("design-b: member chips order by state, end with the operator as You withou
   assert.ok(chip("f").includes('title="Codex"'));
   assert.ok(chip("g").includes('title="Terminal"'));
   assert.ok(chip("g").includes("avatar sm id-terminal"));
-  assert.equal(markup.includes("@gone"), false);
+  assert.equal(chip("d"), "");
   assert.equal(markup.includes("claude-code"), false);
+});
+
+test("a recently closed member stays listed with retired presence and a Peek button", async () => {
+  const { MemberStrip } = await load<typeof import("./ui/MemberStrip.tsx")>(
+    "/src/ui/MemberStrip.tsx",
+  );
+  const { PeekContext } = await load<typeof import("./ui/PeekContext.tsx")>(
+    "/src/ui/PeekContext.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  fixture.frame.participants = [
+    {
+      ...fixture.frame.participants[1],
+      address_id: "closed",
+      alias: "@closed",
+      activity: "retired",
+      recently_closed: true,
+    },
+  ];
+  const event = space(fixture);
+  const markup = renderToStaticMarkup(
+    createElement(
+      PeekContext.Provider,
+      { value: { scope: event.channel.key, open() {} } },
+      createElement(MemberStrip, { members: event.channel.members }),
+    ),
+  );
+  const chip = markup.match(/<li data-address-id="closed">(.*?)<\/li>/)?.[1];
+  assert.ok(chip, markup);
+  assert.equal(text(chip), "C@closedRetired");
+  assert.ok(chip.includes('class="presence" data-activity="retired"'));
+  assert.ok(chip.startsWith('<button type="button"'));
+  assert.ok(chip.includes(`data-peek="${event.channel.key}/closed"`));
+  assert.ok(chip.endsWith("</button>"));
+});
+
+test("an old retired member leaves the strip but remains the author of its history", async () => {
+  const { MemberStrip } = await load<typeof import("./ui/MemberStrip.tsx")>(
+    "/src/ui/MemberStrip.tsx",
+  );
+  const { Message } = await load<typeof import("./ui/Message.tsx")>(
+    "/src/ui/Message.tsx",
+  );
+  const fixture = JSON.parse((await fixtures())[3] ?? "null");
+  fixture.frame.participants = [
+    {
+      ...fixture.frame.participants[1],
+      address_id: "closed",
+      alias: "@closed",
+      activity: "retired",
+      recently_closed: false,
+    },
+  ];
+  fixture.frame.messages = [
+    {
+      ...fixture.frame.messages[0],
+      author: "closed",
+    },
+  ];
+  const { channel } = space(fixture);
+  const strip = renderToStaticMarkup(
+    createElement(MemberStrip, { members: channel.members }),
+  );
+  assert.equal(strip.includes('data-address-id="closed"'), false);
+  assert.equal(channel.members.size, 1);
+  const message = [...channel.messages.values()][0];
+  assert.ok(message);
+  const history = renderToStaticMarkup(
+    createElement(Message, {
+      message,
+      directory: { members: channel.members, homes: new Map() },
+      recipients: [],
+      exit: undefined,
+    }),
+  );
+  assert.ok(history.includes("@closed"), history);
 });
 
 test("a terminal run for the request decides Exit over the code in the result body", async () => {

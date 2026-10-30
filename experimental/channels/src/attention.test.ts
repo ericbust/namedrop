@@ -207,6 +207,7 @@ test("legacy attention links only to an available loaded message and does not in
     messageId: target.messageId,
     subjectAlias: member.alias,
     summary: { text: "Old", truncated: false },
+    subjectSummary: null,
     openedAt: 1,
   };
   assert.equal(attentionConversation(attention, channel), null);
@@ -226,6 +227,7 @@ test("tracked response prepares visible channel text with the owner and exact it
     response: { kind: "message", addressId: member.id },
     conversation: target,
     summary: { text: "Decision", truncated: false },
+    subjectSummary: null,
     openedAt: 1,
     subjectAlias: null,
     messageId: null,

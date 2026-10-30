@@ -51,6 +51,7 @@ pub struct AddressRow {
     pub persona: Option<String>,
     pub pane_type: crate::PaneType,
     pub retired: bool,
+    pub closed_at_ms: Option<i64>,
     pub bound: bool,
     pub occupied: bool,
     pub agent_status: Option<String>,
@@ -660,7 +661,11 @@ impl StateTransaction<'_> {
                        AND s.address_id = a.address_id AND s.active = 1 AND s.state = 'acknowledged'
                        AND attempt.binding_id = b.binding_id
                        AND attempt.agent_session_id = o.agent_session_id
-                       AND o.agent_session_id <> '') AS blocked_message_id
+                       AND o.agent_session_id <> '') AS blocked_message_id,
+                    (SELECT MAX(closed.unbound_at_ms) FROM pane_bindings closed
+                     WHERE closed.session_socket_id = a.session_socket_id
+                       AND closed.worktree_id = a.worktree_id
+                       AND closed.address_id = a.address_id) AS closed_at_ms
              FROM pane_addresses a
              JOIN pane_roles r USING (session_socket_id, worktree_id, role_id)
              -- A retired agent's alias can be released for reuse; its lane keeps the last one.
@@ -698,12 +703,13 @@ impl StateTransaction<'_> {
                         crate::PaneType::Agent
                     },
                     retired: row.get(5)?,
+                    closed_at_ms: row.get(11)?,
                     bound: row.get(6)?,
                     occupied: row.get(7)?,
                     agent_status: row.get(8)?,
                     blocked_since_ms: row.get(9)?,
                     blocked_message_id: row.get(10)?,
-                    blocked_conversation: match row.get::<_, Option<String>>(11)? {
+                    blocked_conversation: match row.get::<_, Option<String>>(12)? {
                         Some(thread_id) => Some(ConversationRow { thread_id, message_id: row.get(10)? }),
                         None => None,
                     },
@@ -968,6 +974,7 @@ impl StateTransaction<'_> {
             persona: None,
             pane_type: crate::PaneType::Agent,
             retired: false,
+            closed_at_ms: None,
             bound: false,
             occupied: false,
             agent_status: None,

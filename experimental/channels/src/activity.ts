@@ -90,7 +90,11 @@ function lineFor(
   const about =
     group === "needs_you" ? newestAbout(channel.attention, member) : undefined;
   if (about !== undefined)
-    return { kind: "attention", summary: about.summary, attention: about };
+    return {
+      kind: "attention",
+      summary: about.subjectSummary ?? about.summary,
+      attention: about,
+    };
   const work = channel.work.get(member.id);
   if (work !== undefined && work.waitingOn.length > 0)
     return { kind: "waiting", on: work.waitingOn };

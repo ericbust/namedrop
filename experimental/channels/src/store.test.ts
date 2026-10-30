@@ -264,6 +264,37 @@ for (const source of ["agent_status", "future_attention"]) {
     assert.equal(channel?.messages.size, 1);
   });
 }
+test("attention rejects malformed subject summaries", () => {
+  const base = snapshot();
+  for (const subject_summary of [
+    "Waiting",
+    { text: 7, truncated: false },
+    { text: "Waiting", truncated: 1 },
+    { text: "Waiting" },
+  ]) {
+    assert.equal(
+      parseEvent(
+        "space",
+        JSON.stringify({
+          ...base,
+          frame: {
+            ...base.frame,
+            attention: [
+              {
+                source_kind: "agent_status",
+                summary: { text: "@claude is waiting", truncated: false },
+                subject_summary,
+                opened_at_ms: 42,
+              },
+            ],
+          },
+        }),
+      ),
+      null,
+    );
+  }
+});
+
 test("fix5: attention row keys distinguish duplicate content and stay stable across distinct insertion and reorder", () => {
   const base = snapshot();
   function row(source_kind: string, text = "Same request", truncated = false) {
@@ -497,6 +528,72 @@ test("parser accepts opaque human IDs, all activities, safe text, null addressab
     "<script>alert(1)</script>",
   );
   assert.equal(parsed(snapshot()).addressableLabel, "alpha");
+  assert.equal(parsed(snapshot()).notAddressableReason, "unavailable");
+  const reasonFrame = snapshot();
+  assert.equal(
+    parsed({
+      ...reasonFrame,
+      frame: {
+        ...reasonFrame.frame,
+        space: {
+          ...reasonFrame.frame.space,
+          addressable_label: null,
+          not_addressable_reason: "shared_label",
+        },
+      },
+    }).notAddressableReason,
+    "shared_label",
+  );
+});
+test("unknown addressability reasons fall back without losing the space frame", () => {
+  const base = snapshot();
+  const expected = parsed(base);
+  for (const reason of ["future_reason", "", 8, true, [], {}]) {
+    const channel = parsed({
+      ...base,
+      frame: {
+        ...base.frame,
+        space: { ...base.frame.space, not_addressable_reason: reason },
+      },
+    });
+    assert.equal(channel.notAddressableReason, "unavailable");
+    assert.deepEqual(channel, expected);
+  }
+});
+test("member closure recency follows the server boolean and defaults false for older frames", () => {
+  const base = snapshot();
+  for (const value of [true, false, undefined, null, "true", 1, {}]) {
+    const channel = parsed({
+      ...base,
+      frame: {
+        ...base.frame,
+        participants: [
+          { ...participant("closed", "retired"), recently_closed: value },
+        ],
+      },
+    });
+    assert.equal(
+      [...channel.members.values()][0]?.recentlyClosed,
+      value === true,
+    );
+  }
+});
+test("a grace expiry updates retained members without discarding their messages", () => {
+  const base = snapshot();
+  const frame = (recently_closed: boolean) => ({
+    ...base,
+    frame: {
+      ...base.frame,
+      participants: [{ ...participant("agent-1", "retired"), recently_closed }],
+    },
+  });
+  const state = apply(initialState(), frame(true));
+  const next = apply(state, frame(false));
+  const channel = [...next.channels.values()][0];
+  assert.ok(channel);
+  assert.notEqual(next, state);
+  assert.equal([...channel.members.values()][0]?.recentlyClosed, false);
+  assert.equal(channel.messages.get("m1")?.author, "agent-1");
 });
 test("new channels establish a baseline while background message, member, and activity changes mark unread", () => {
   const state = twoChannels();

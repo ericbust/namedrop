@@ -1,7 +1,7 @@
 #[path = "support/xws.rs"]
 mod xws;
 
-use namedrop::{HerdrCommandExecutor, StateNamespace, dashboard::snapshot::SpaceKey};
+use namedrop::{HerdrCommandExecutor, StateNamespace, StateStore, dashboard::snapshot::SpaceKey};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -851,4 +851,45 @@ fn sixteen_pending_peeks_include_followers_and_leave_other_routes_available() {
     }
     configure(&f, json!({"stdout": "recovered"}));
     assert_eq!(server.get(&target).body, "recovered");
+}
+
+#[test]
+fn a_recently_retired_member_stays_in_the_roster_and_peek_reports_closed() {
+    let f = Fixture::new();
+    let ns = StateNamespace::for_space("socket-a", "w1");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis();
+    let mut store = StateStore::open(&f.state).unwrap();
+    store
+        .transaction(|tx| {
+            tx.retire_pane_address(
+                &ns,
+                &namedrop::PaneAddressId::new(xws::address_id("w1", "lead")),
+                &namedrop::MutationAttribution::new(
+                    namedrop::ActorKind::Plugin,
+                    "test",
+                    u64::try_from(now).unwrap(),
+                ),
+            )
+        })
+        .unwrap();
+    let frame = namedrop::dashboard::snapshot::build(
+        &store.dashboard_rows(&ns).unwrap(),
+        None,
+        i64::try_from(now).unwrap(),
+    );
+    let member = frame
+        .participants
+        .iter()
+        .find(|member| member.alias == "@lead")
+        .expect("closed member remains available for Peek");
+    assert_eq!(
+        member.activity,
+        namedrop::dashboard::snapshot::Activity::Retired
+    );
+    let server = Server::start(&f);
+    assert_eq!(server.get(&path("socket-a", "w1", "lead")).status, 410);
+    assert!(invocations(&f).is_empty());
 }

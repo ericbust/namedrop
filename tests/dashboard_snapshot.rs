@@ -639,6 +639,13 @@ fn a_permission_blocked_agent_needs_the_human_until_its_status_changes() {
     assert_eq!(json["attention"][0]["opened_at_ms"], 20);
     assert_eq!(json["attention"][0]["subject_alias"], "a");
     assert_eq!(
+        json["attention"][0]["subject_summary"],
+        serde_json::json!({
+            "text": "Waiting on an approval or question.",
+            "truncated": false
+        })
+    );
+    assert_eq!(
         json["attention"][0].get("message_id"),
         Some(&serde_json::Value::Null)
     );
@@ -1242,6 +1249,11 @@ fn nonmessage_attention_uses_its_source_and_serializes_absent_links_as_null() {
     let cards = json["attention"].as_array().unwrap();
     assert_eq!(cards.len(), 11);
     for (number, card) in cards.iter().enumerate() {
+        assert_eq!(
+            card["summary"]["text"],
+            "@misleading mentions should not determine attribution"
+        );
+        assert!(card.get("subject_summary").is_none());
         let expected = match number {
             0 => serde_json::json!("a"),
             1 | 2 => serde_json::json!("reviewer"),
@@ -2055,6 +2067,79 @@ fn terminal_links_use_the_namespace_when_delivery_and_attempt_ids_repeat() {
         assert_eq!(frame.terminal_runs.len(), 1);
         assert_eq!(frame.terminal_runs[0].message_id.as_deref(), Some(want));
     }
+}
+
+#[test]
+fn recently_closed_members_expire_at_five_minutes_but_references_keep_them() {
+    let directory = TestDirectory::new();
+    let mut store = StateStore::open(directory.path()).unwrap();
+    let ns = seed_space(&mut store, "w1", &["a", "b"]);
+    store
+        .transaction(|tx| {
+            tx.retire_pane_address(
+                &ns,
+                &id(&ns, "b"),
+                &MutationAttribution::new(ActorKind::Plugin, "test", 1_000),
+            )
+        })
+        .unwrap();
+    let rows = store.dashboard_rows(&ns).unwrap();
+    let before = build(&rows, None, 300_999);
+    assert_eq!(lane(&before, "@b").activity, Activity::Retired);
+    assert_eq!(
+        serde_json::to_value(lane(&before, "@b")).unwrap()["recently_closed"],
+        true
+    );
+    assert_eq!(
+        serde_json::to_value(lane(&before, "@a")).unwrap()["recently_closed"],
+        false
+    );
+    let expired = build(&rows, None, 301_000);
+    assert!(
+        !expired
+            .participants
+            .iter()
+            .any(|member| member.alias == "@b")
+    );
+    send(&mut store, &ns, "reference", "a", "a", "history", None);
+    let mut rows = store.dashboard_rows(&ns).unwrap();
+    rows.messages[0].author_address_id = id(&ns, "b").as_str().to_owned();
+    for (now, recently_closed) in [(300_999, true), (301_000, false), (301_001, false)] {
+        let frame = build(&rows, None, now);
+        let member = lane(&frame, "@b");
+        assert_eq!(member.activity, Activity::Retired);
+        assert_eq!(
+            serde_json::to_value(member).unwrap()["recently_closed"],
+            recently_closed,
+            "at {now}"
+        );
+        assert_eq!(frame.messages[0].author, id(&ns, "b").as_str());
+    }
+
+    rows.addresses
+        .iter_mut()
+        .find(|a| a.address_id == id(&ns, "a").as_str())
+        .unwrap()
+        .closed_at_ms = Some(1_000);
+    assert_eq!(
+        serde_json::to_value(lane(&build(&rows, None, 300_999), "@a")).unwrap()["recently_closed"],
+        false
+    );
+    rows.addresses
+        .iter_mut()
+        .find(|a| a.address_id == id(&ns, "b").as_str())
+        .unwrap()
+        .closed_at_ms = None;
+    assert_eq!(
+        serde_json::to_value(lane(&build(&rows, None, 300_999), "@b")).unwrap()["recently_closed"],
+        false
+    );
+
+    rows.addresses[0].address_id = namedrop::dashboard::snapshot::HUMAN.to_owned();
+    assert_eq!(
+        serde_json::to_value(lane(&build(&rows, None, 300_999), "you")).unwrap()["recently_closed"],
+        false
+    );
 }
 
 #[test]

@@ -427,6 +427,10 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
     let mut all = server.events("/api/events");
     all.space();
     all.space();
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "missing_label"
+    );
 
     let mut unknown = server.events(&format!("/w/{}/events", key("unknown")));
     let (event, mut actual) = unknown.next(WAIT).unwrap();
@@ -435,6 +439,7 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
     let header = actual["space"].as_object_mut().unwrap();
     header.remove("display_name");
     header.remove("addressable_label");
+    header.remove("not_addressable_reason");
     actual["generated_at_ms"] = json!(0);
     let mut expected =
         serde_json::to_value(namedrop::dashboard::snapshot::DashboardSnapshot::unknown(
@@ -446,6 +451,7 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
     let header = expected["space"].as_object_mut().unwrap();
     header.remove("display_name");
     header.remove("addressable_label");
+    header.remove("not_addressable_reason");
     expected["space"]["workspace_id"] = json!("unknown");
     assert_eq!(actual, expected);
 
@@ -454,9 +460,16 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
         all.next(WAIT).unwrap(),
         ("gone".to_owned(), json!({"key": key("a")}))
     );
-    assert!(legacy.next(Duration::from_millis(350)).is_none());
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "unavailable"
+    );
     server.set_workspaces(&[("a", None), ("unknown", None)]);
     assert_eq!(all.space()["key"], key("a"));
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "missing_label"
+    );
     assert!(legacy.next(Duration::from_millis(350)).is_none());
 }
 
@@ -552,6 +565,10 @@ fn discovery_runs_only_for_all_space_subscribers_and_stops_with_the_last_one() {
     );
     let mut all = server.events("/api/events");
     all.space();
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "missing_label"
+    );
     assert!(!calls(directory.path()).is_empty());
     drop(all);
     thread::sleep(Duration::from_millis(1400));
@@ -561,6 +578,10 @@ fn discovery_runs_only_for_all_space_subscribers_and_stops_with_the_last_one() {
         calls(directory.path()).len(),
         before,
         "discovery continued after the last all-space tab closed"
+    );
+    assert_eq!(
+        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
+        "unavailable"
     );
     assert!(legacy.next(Duration::from_millis(50)).is_none());
 }
@@ -1483,4 +1504,114 @@ fn json_parse_and_output_limit_errors_complete_partial_replay() {
         );
         assert!(all.next_raw(Duration::from_millis(100)).is_none());
     }
+}
+
+#[test]
+fn addressability_reasons_come_from_raw_labels_and_routing_state() {
+    let directory = TestDirectory::new();
+    for id in ["all-a", "all-b", "collision", "good", "deactivated"] {
+        activate(&directory.path().join("state"), id);
+    }
+    StateStore::open(directory.path().join("state"))
+        .unwrap()
+        .transaction(|tx| tx.deactivate_worktree(&namespace("deactivated"), &attribution()))
+        .unwrap();
+    let live = [
+        ("all-a", Some("all")),
+        ("all-b", Some("ALL")),
+        ("invisible-a", Some("same\u{200b}name")),
+        ("invisible-b", Some("same name")),
+        ("missing", None),
+        ("empty", Some("日本語")),
+        ("collision", Some("other-id")),
+        ("other-id", None),
+        ("inactive", Some("lonely")),
+        ("good", Some("good label")),
+        ("deactivated", Some("off")),
+    ];
+    let server = Server::start(directory.path(), &live);
+    let mut all = server.events("/api/events");
+    let frames: Vec<_> = (0..live.len()).map(|_| all.space()).collect();
+    for (id, reason) in [
+        ("all-a", "reserved_all"),
+        ("all-b", "reserved_all"),
+        ("invisible-a", "not_activated"),
+        ("invisible-b", "not_activated"),
+        ("missing", "missing_label"),
+        ("empty", "empty_label"),
+        ("collision", "id_collision"),
+        ("inactive", "not_activated"),
+        ("deactivated", "not_active"),
+    ] {
+        let frame = frames.iter().find(|frame| frame["key"] == key(id)).unwrap();
+        assert_eq!(
+            frame["frame"]["space"]["not_addressable_reason"], reason,
+            "{id}"
+        );
+        assert!(frame["frame"]["space"]["addressable_label"].is_null());
+    }
+    let good = frames
+        .iter()
+        .find(|frame| frame["key"] == key("good"))
+        .unwrap();
+    assert_eq!(good["frame"]["space"]["addressable_label"], "good-label");
+    assert!(good["frame"]["space"]["not_addressable_reason"].is_null());
+}
+
+#[test]
+fn inactive_twins_report_activation_before_name_collisions() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    for id in ["active-a", "active-b", "deactivated"] {
+        activate(&state, id);
+    }
+    StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| tx.deactivate_worktree(&namespace("deactivated"), &attribution()))
+        .unwrap();
+    let live = [
+        ("inactive-a", Some("same name")),
+        ("inactive-b", Some("same\u{200b}name")),
+        ("active-a", Some("active twin")),
+        ("active-b", Some("active\u{200b}twin")),
+        ("deactivated", Some("same name")),
+        ("id-collision", Some("active-a")),
+    ];
+    let server = Server::start(directory.path(), &live);
+    let mut all = server.events("/api/events");
+    let frames: Vec<_> = (0..live.len()).map(|_| all.space()).collect();
+    for (id, reason) in [
+        ("inactive-a", "not_activated"),
+        ("inactive-b", "not_activated"),
+        ("active-a", "shared_label"),
+        ("active-b", "shared_label"),
+        ("deactivated", "not_active"),
+        ("id-collision", "not_activated"),
+    ] {
+        let frame = frames.iter().find(|frame| frame["key"] == key(id)).unwrap();
+        assert_eq!(
+            frame["frame"]["space"]["not_addressable_reason"], reason,
+            "{id}"
+        );
+        assert!(frame["frame"]["space"]["addressable_label"].is_null());
+    }
+}
+
+#[test]
+fn secret_like_workspace_labels_never_become_addressable_tokens() {
+    let directory = TestDirectory::new();
+    activate(&directory.path().join("state"), "sensitive");
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    let server = Server::start(directory.path(), &[("sensitive", Some(secret))]);
+    let mut all = server.events("/api/events");
+    let frame = all.space();
+    assert!(
+        !frame.to_string().contains(secret),
+        "addressable tokens must keep the frame's secret redaction"
+    );
+    assert!(frame["frame"]["space"]["addressable_label"].is_null());
+    assert_eq!(
+        frame["frame"]["space"]["not_addressable_reason"],
+        "unavailable"
+    );
 }

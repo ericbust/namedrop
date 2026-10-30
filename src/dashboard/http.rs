@@ -748,8 +748,19 @@ fn route(
     if !matches!(page, Some((_, "messages")))
         && let Some(nonce) = request.query("n")
     {
+        let query: Vec<_> = request
+            .query
+            .as_deref()
+            .unwrap_or_default()
+            .split('&')
+            .filter(|pair| !pair.starts_with("n="))
+            .collect();
         return Ok(Route::Redeem {
-            location: path.to_owned(),
+            location: if query.is_empty() {
+                path.to_owned()
+            } else {
+                format!("{path}?{}", query.join("&"))
+            },
             nonce: nonce.to_owned(),
         });
     }
