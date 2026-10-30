@@ -15,6 +15,7 @@ use std::{
         unix::fs::MetadataExt,
     },
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -1103,14 +1104,29 @@ fn send_operator_post(
         ids: &ids,
     };
     let target = post.in_reply_to.map(crate::MessageId::new);
-    match crate::send_operator_message(&post.request_id, &post.source, target.as_ref(), &runtime) {
-        Ok(receipt) => respond(
-            writer,
-            "200 OK",
-            "application/json",
-            "",
-            receipt.to_string().as_bytes(),
-        ),
+    writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+    match crate::message::send_operator_message_observing_commit(
+        &post.request_id,
+        &post.source,
+        target.as_ref(),
+        &runtime,
+        |receipt| {
+            respond(
+                writer,
+                "200 OK",
+                "application/json",
+                "",
+                receipt.to_string().as_bytes(),
+            )
+        },
+    ) {
+        Ok((receipt, response)) => {
+            if let Err(error) = wake_mailboxes_after_send(front.files.state(), &namespace, &receipt)
+            {
+                eprintln!("Message saved; could not wake delivery: {error}");
+            }
+            response
+        }
         Err(error) => respond(
             writer,
             match error.kind() {
@@ -1125,6 +1141,63 @@ fn send_operator_post(
                 .as_bytes(),
         ),
     }
+}
+
+fn wake_mailboxes_after_send(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    receipt: &serde_json::Value,
+) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+
+    let needs_watcher = |value: &serde_json::Value| {
+        serde_json::from_value::<crate::DrainReport>(value.clone())
+            .is_ok_and(|report| report.awaits_terminal() || report.next_grace_due_ms().is_some())
+    };
+    let mut spaces = Vec::new();
+    if needs_watcher(&receipt["drain"]) {
+        spaces.push(namespace.space_id.clone());
+    }
+    if let Some(drains) = receipt["drains"].as_object()
+        && drains.values().any(needs_watcher)
+    {
+        let message = crate::MessageId::new(
+            receipt["message_id"]
+                .as_str()
+                .ok_or("send receipt has no message ID")?,
+        );
+        let mut store = StateStore::open(state).map_err(|error| error.to_string())?;
+        let copies = store
+            .transaction(|tx| tx.forwarded_copies(namespace, &message))
+            .map_err(|error| error.to_string())?;
+        spaces.extend(copies.into_iter().filter_map(|copy| {
+            drains
+                .get(copy.workspace.as_str())
+                .filter(|report| needs_watcher(report))
+                .map(|_| copy.space)
+        }));
+    }
+    for space in spaces {
+        let mut child = Command::new(crate::runtime_executable()?)
+            .args(["hook", "mailbox-wake", "--state-directory"])
+            .arg(state)
+            .env("HERDR_PLUGIN_STATE_DIR", state)
+            .env("HERDR_SOCKET_PATH", &namespace.session_socket_id)
+            .env("HERDR_WORKSPACE_ID", space.as_str())
+            .env_remove("HERDR_PANE_ID")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        thread::spawn(move || {
+            if let Err(error) = child.wait() {
+                eprintln!("could not reap mailbox wake: {error}");
+            }
+        });
+    }
+    Ok(())
 }
 
 fn serve_asset(
