@@ -61,8 +61,28 @@ fn capitalized_leading_aliases_report_the_original_unknown_mention() {
     let (status, mixed) = post(&server, "mixed-leading", "@planner @Codex inspect", None);
     assert_eq!(status, 400, "{mixed}");
     assert_eq!(mixed["error"], "unknown Mention: @Codex");
+    for (index, source) in ["#ws1 @Codex inspect", "#ws1 @planner @Codex inspect"]
+        .iter()
+        .enumerate()
+    {
+        let (status, scoped) = post(&server, &format!("scoped-leading-{index}"), source, None);
+        assert_eq!(status, 400, "{scoped}");
+        assert_eq!(scoped["error"], "unknown Mention: @Codex");
+    }
     assert_eq!(f.count("SELECT COUNT(*) FROM collaboration_messages"), 0);
     assert_eq!(f.count("SELECT COUNT(*) FROM mailbox_deliveries"), 0);
+    for (index, source) in [
+        "@planner Inspect @Codex",
+        "@planner @Codex! stays body text.",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(&server, &format!("capitalized-body-{index}"), source, None);
+        assert_eq!(status, 200, "{receipt}");
+        assert_eq!(recipient_aliases(&receipt), ["planner"]);
+        assert_eq!(receipt["context_references"], json!([]));
+    }
     assert!(calls(&f).is_empty());
 }
 

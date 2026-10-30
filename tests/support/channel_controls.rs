@@ -109,6 +109,13 @@ fn browser_controls_continue_and_stop_release_the_reply_limit_mailbox_hold() {
 fn browser_followup_receipt_reports_reply_limit_hold_until_continue() {
     let f = fixture();
     let parent = held_thread(&f);
+    assert!(
+        parent["delivery_outlook"][0]["statement"]
+            .as_str()
+            .unwrap()
+            .contains("Continue"),
+        "the reply that exhausts the allowance must report its own hold: {parent}"
+    );
     let server = Server::start(&f, "not json", true);
     let source = "Continue the discussion.";
     let (status, receipt) = post(
