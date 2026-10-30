@@ -399,9 +399,10 @@ fn the_mailbox_wake_hook_drains_the_space_after_its_hook_shell_has_exited() {
         waited += 1;
     }
     let _ = hook.kill();
-    let _ = hook.wait();
+    let status = hook.wait().unwrap();
     other.kill().unwrap();
     other.wait().unwrap();
+    assert!(status.success(), "mailbox wake failed: {status}");
     assert!(
         drained(&calls),
         "the wake never asked Herdr for the space's panes, so nothing was drained; Herdr calls: {:?}",
