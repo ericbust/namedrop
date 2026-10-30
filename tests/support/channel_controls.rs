@@ -49,6 +49,14 @@ fn controls(f: &Fixture, parent: &Value) -> Value {
     .unwrap()
 }
 
+fn wait_for(description: &str, ready: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready() {
+        assert!(Instant::now() < deadline, "{description}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn browser_controls_continue_and_stop_release_the_reply_limit_mailbox_hold() {
     for action in ["continue", "stop"] {
@@ -61,6 +69,18 @@ fn browser_controls_continue_and_stop_release_the_reply_limit_mailbox_hold() {
         assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='later-thread')"), 0);
         let response = server.post(&control_path("w1", &parent, action), "{}", &[]);
         assert_eq!(response.status, 200, "{}", response.body);
+        let released_request = if action == "continue" {
+            "controls-reply-9"
+        } else {
+            "later-thread"
+        };
+        wait_for("released mailbox head was not acknowledged", || {
+            f.db().query_row(
+                "SELECT count(*) FROM delivery_attempt_state a JOIN delivery_attempts USING(session_socket_id,worktree_id,attempt_id,address_id) JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) JOIN collaboration_messages m USING(session_socket_id,worktree_id,message_id) WHERE m.request_id=?1 AND a.state='acknowledged'",
+                [released_request],
+                |row| row.get::<_, i64>(0),
+            ).unwrap() == 1
+        });
         let before_replay = f.count("SELECT count(*) FROM transition_facts");
         let replay = server.post(&control_path("w1", &parent, action), "{}", &[]);
         assert_eq!(replay.status, 200, "{}", replay.body);
@@ -210,6 +230,14 @@ fn browser_controls_stop_interrupts_only_the_proven_current_thread_response_once
     }
 }
 
+struct PromptGate(std::path::PathBuf);
+
+impl Drop for PromptGate {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
 struct DiscoveryGate(std::path::PathBuf);
 
 impl DiscoveryGate {
@@ -344,12 +372,6 @@ fn browser_controls_stop_rechecks_the_binding_after_discovery() {
 #[test]
 fn browser_thread_controls_refuse_mutations_during_handoff() {
     use std::{io::Read, os::fd::AsRawFd, sync::mpsc};
-    struct PromptGate(std::path::PathBuf);
-    impl Drop for PromptGate {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
     for action in ["stop", "continue"] {
         let f = fixture();
         let server = Server::start(&f, "not json", true);
@@ -402,63 +424,59 @@ fn browser_thread_controls_refuse_mutations_during_handoff() {
     }
 }
 
+fn queue_unrelated_delivery(f: &Fixture, alias: &str) {
+    let namespace = StateNamespace::for_space("socket-a", "w1");
+    let thread = namedrop::ThreadId::new("unrelated-control-drain");
+    let author = f.text("SELECT author_address_id FROM collaboration_messages WHERE author_kind='human' LIMIT 1").unwrap();
+    StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            let at = namedrop::MutationAttribution::new(
+                namedrop::ActorKind::Human,
+                "test",
+                namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
+            );
+            tx.create_thread(&namespace, &thread, "Unrelated task", &at)?;
+            tx.append_message(
+                &namespace,
+                &namedrop::MessageDraft {
+                    thread_id: thread.clone(),
+                    message_id: namedrop::MessageId::new("unrelated-control-post"),
+                    in_reply_to: None,
+                    author_address_id: namedrop::PaneAddressId::new(&author),
+                    author_kind: namedrop::ActorKind::Human,
+                    author_alias_snapshot: "operator".into(),
+                    author_agent_session_snapshot: None,
+                    request_id: "after-held".into(),
+                    authored_source: format!("@{alias} A different task."),
+                    body: "A different task.".into(),
+                    grammar_version: "mention/v1".into(),
+                    recipients: vec![namedrop::MessageRecipientDraft {
+                        address_id: namedrop::PaneAddressId::new(format!("address-w1-{alias}")),
+                        alias_snapshot: alias.into(),
+                        agent_session_snapshot: Some(namedrop::AgentSessionId::new(xws::session(
+                            &format!("pane-1-{alias}"),
+                        ))),
+                        delivery_id: namedrop::DeliveryId::new("unrelated-control-delivery"),
+                    }],
+                    context_references: vec![],
+                },
+                &at,
+            )
+        })
+        .unwrap();
+}
+
 #[test]
 fn controls_answer_before_their_delivery_drain_finishes() {
     use std::sync::mpsc;
-    struct PromptGate(std::path::PathBuf);
-    impl Drop for PromptGate {
-        fn drop(&mut self) {
-            let _ = fs::remove_file(&self.0);
-        }
-    }
     let mut observed = Vec::new();
     for action in ["continue", "stop"] {
         let f = fixture();
         let parent = held_thread(&f);
         let server = Server::start(&f, "not json", true);
         if action == "stop" {
-            let namespace = StateNamespace::for_space("socket-a", "w1");
-            let thread = namedrop::ThreadId::new("unrelated-control-drain");
-            let author = f.text("SELECT author_address_id FROM collaboration_messages WHERE author_kind='human' LIMIT 1").unwrap();
-            StateStore::open(&f.state)
-                .unwrap()
-                .transaction(|tx| {
-                    let at = namedrop::MutationAttribution::new(
-                        namedrop::ActorKind::Human,
-                        "test",
-                        namedrop::Clock::now_unix_ms(&namedrop::SystemClock),
-                    );
-                    tx.create_thread(&namespace, &thread, "Unrelated task", &at)?;
-                    tx.append_message(
-                        &namespace,
-                        &namedrop::MessageDraft {
-                            thread_id: thread.clone(),
-                            message_id: namedrop::MessageId::new("unrelated-control-post"),
-                            in_reply_to: None,
-                            author_address_id: namedrop::PaneAddressId::new(&author),
-                            author_kind: namedrop::ActorKind::Human,
-                            author_alias_snapshot: "operator".into(),
-                            author_agent_session_snapshot: None,
-                            request_id: "after-held".into(),
-                            authored_source: "@planner A different task.".into(),
-                            body: "A different task.".into(),
-                            grammar_version: "mention/v1".into(),
-                            recipients: vec![namedrop::MessageRecipientDraft {
-                                address_id: namedrop::PaneAddressId::new("address-w1-planner"),
-                                alias_snapshot: "planner".into(),
-                                agent_session_snapshot: Some(namedrop::AgentSessionId::new(
-                                    xws::session("pane-1-planner"),
-                                )),
-                                delivery_id: namedrop::DeliveryId::new(
-                                    "unrelated-control-delivery",
-                                ),
-                            }],
-                            context_references: vec![],
-                        },
-                        &at,
-                    )
-                })
-                .unwrap();
+            queue_unrelated_delivery(&f, "planner");
         }
         let (sender, receiver) = mpsc::channel();
         let early = thread::scope(|scope| {
@@ -478,7 +496,32 @@ fn controls_answer_before_their_delivery_drain_finishes() {
                 thread::yield_now();
             }
             let early = receiver.recv_timeout(Duration::from_secs(2));
-            drop(gate);
+            if early.is_ok() {
+                assert!(gate.0.exists());
+                assert_eq!(
+                    controls(&f, &parent)["reply_allowance"],
+                    if action == "continue" { 10 } else { 0 }
+                );
+                let (admission_sender, admission_receiver) = mpsc::channel();
+                let server = &server;
+                let missing = control_path("w1", &parent, action)
+                    .replace(parent["thread_id"].as_str().unwrap(), "missing");
+                scope.spawn(move || {
+                    admission_sender
+                        .send(server.post(&missing, "{}", &[]))
+                        .unwrap();
+                });
+                let admission = admission_receiver.recv_timeout(Duration::from_secs(2));
+                drop(gate);
+                assert_eq!(
+                    admission
+                        .expect("control drain held mutation admission")
+                        .status,
+                    404
+                );
+            } else {
+                drop(gate);
+            }
             if early.is_err() {
                 let _ = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
             }
@@ -498,4 +541,90 @@ fn controls_answer_before_their_delivery_drain_finishes() {
         assert!(receipt.get("drain").is_none(), "{receipt}");
         assert_eq!(receipt["state"]["stopped"], action == "stop");
     }
+}
+
+#[test]
+fn browser_continue_grants_ten_more_replies_then_holds_again() {
+    let f = fixture();
+    let mut parent = held_thread(&f);
+    let server = Server::start(&f, "not json", true);
+    let response = server.post(&control_path("w1", &parent, "continue"), "{}", &[]);
+    assert_eq!(response.status, 200, "{}", response.body);
+    assert_eq!(controls(&f, &parent)["reply_allowance"], 10);
+    for index in 10..20 {
+        let (pane, mention) = if index % 2 == 0 {
+            ("pane-1-planner", "lead")
+        } else {
+            ("pane-1-lead", "planner")
+        };
+        parent = agent_reply(
+            &f,
+            &format!("controls-reply-{index}"),
+            &parent,
+            pane,
+            &format!("@operator Ask @{mention} next."),
+        )
+        .unwrap();
+        assert_eq!(controls(&f, &parent)["reply_allowance"], 19 - index);
+    }
+    assert_eq!(controls(&f, &parent)["reply_limit_paused"], true);
+    assert_eq!(f.count("SELECT count(*) FROM attention_items WHERE source_kind='automatic_reply_limit' AND resolved_at_ms IS NULL"), 1);
+    assert_eq!(f.count("SELECT count(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='controls-reply-19')"), 0);
+}
+
+#[test]
+fn committed_stop_drains_after_the_client_disconnects() {
+    use std::{io::Write, net::TcpStream, os::fd::AsRawFd};
+    let f = fixture();
+    let parent = plain_root(&f, "disconnect-stop", "Please inspect.");
+    f.status("pane-1-planner", "working");
+    let server = Server::start(&f, "not json", true);
+    queue_unrelated_delivery(&f, "lead");
+    let discovery = DiscoveryGate::new(&f);
+    let prompt_gate = PromptGate(f.root.join("prompt-gate"));
+    fs::write(&prompt_gate.0, "").unwrap();
+    let session = server.request("GET", "/api/session", &[("Cookie", &server.cookie)], "");
+    let csrf = serde_json::from_str::<Value>(&session.body).unwrap()["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let port: u16 = server
+        .cookie
+        .strip_prefix("namedrop_dashboard_")
+        .unwrap()
+        .split('=')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(stream, "POST {} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {}\r\nX-Namedrop-Csrf: {csrf}\r\nContent-Length: 2\r\n\r\n{{}}", control_path("w1", &parent, "stop"), server.cookie).unwrap();
+    discovery.wait();
+    assert_eq!(controls(&f, &parent)["stopped"], true);
+    let linger = libc::linger {
+        l_onoff: 1,
+        l_linger: 0,
+    };
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                &linger as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&linger) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    drop(stream);
+    drop(discovery);
+    wait_for(
+        "committed Stop did not drain after client disconnect",
+        || f.root.join("prompt-entered").exists(),
+    );
+    drop(prompt_gate);
+    wait_for("unrelated delivery was not acknowledged", || {
+        f.count("SELECT count(*) FROM delivery_attempt_state a JOIN delivery_attempts USING(session_socket_id,worktree_id,attempt_id,address_id) JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.delivery_id='unrelated-control-delivery' AND a.state='acknowledged'") == 1
+    });
 }

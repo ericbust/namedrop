@@ -64,19 +64,6 @@ pub(super) fn apply(
     drop(store);
     let herdr =
         crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
-    let ids = crate::ProcessIds::default();
-    let runtime = crate::LifecycleRuntime {
-        state_directory: state,
-        home_directory: None,
-        agent_config: crate::AgentConfigDirectories::default(),
-        cwd: Path::new("/"),
-        workspace_id: Some(namespace.space_id.as_str()),
-        current_pane_id: None,
-        session_socket_id: &namespace.session_socket_id,
-        herdr: &herdr,
-        clock: &crate::SystemClock,
-        ids: &ids,
-    };
     let mut receipt = json!({"state": control});
     if let Some(stopped) = stopped {
         let mut interrupted = Vec::new();
@@ -132,6 +119,5 @@ pub(super) fn apply(
         receipt["interrupted_pane_ids"] = json!(interrupted);
         receipt["warnings"] = json!(warnings);
     }
-    receipt["drain"] = crate::drain_receipt(&runtime);
     Ok((namespace, receipt))
 }

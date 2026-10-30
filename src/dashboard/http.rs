@@ -969,24 +969,23 @@ fn serve_connection(
             thread_id,
             action,
         }) => {
-            let _admitted = match front.admit_mutation() {
+            let admitted = match front.admit_mutation() {
                 Ok(guard) => guard,
                 Err(status) => return respond_status(&mut writer, status),
             };
+            writer.set_write_timeout(Some(Duration::from_secs(1)))?;
             match super::thread_controls::apply(front.files.state(), &key, &thread_id, action) {
                 Ok((namespace, receipt)) => {
-                    if let Err(error) =
-                        wake_mailboxes_after_send(front.files.state(), &namespace, &receipt)
-                    {
-                        eprintln!("Thread control saved; could not wake delivery: {error}");
-                    }
-                    respond(
+                    let response = respond(
                         &mut writer,
                         "200 OK",
                         "application/json",
                         "",
                         receipt.to_string().as_bytes(),
-                    )
+                    );
+                    drop(admitted);
+                    super::channel_service::drain(front.files.state(), &namespace);
+                    response
                 }
                 Err(super::thread_controls::ControlError::NotFound) => {
                     respond_status(&mut writer, Status::NotFound)
