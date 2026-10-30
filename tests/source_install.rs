@@ -999,3 +999,60 @@ fn activation_shows_the_shared_app_server_advice_on_the_update_and_first_install
         }
     }
 }
+
+#[test]
+fn run_script_respects_explicit_host_before_environment_routing() {
+    let fixture = Fixture::new();
+    let checkout = fixture.checkout();
+    fs::create_dir_all(checkout.join("bin")).unwrap();
+    let fake = fixture.stub("namedrop", "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
+    fs::copy(fake, checkout.join("bin/namedrop")).unwrap();
+    for flags in [
+        vec!["--host", "tui"],
+        vec!["--host=tui"],
+        vec!["--host", "hc"],
+        vec!["--host=hc"],
+        vec![],
+    ] {
+        for tui_env in [false, true] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .arg(checkout.join("scripts/run.sh"))
+                .args(&flags)
+                .arg("reconcile")
+                .env_clear()
+                .env("PATH", &fixture.tools)
+                .env("NAMEDROP_HOST", "hc")
+                .env("HC_TERMINAL_ID", "hc-terminal");
+            if tui_env {
+                command
+                    .env("HERDR_PANE_ID", "tui-pane")
+                    .env("HERDR_SOCKET_PATH", "tui-socket");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let explicit_tui = flags == ["--host", "tui"] || flags == ["--host=tui"];
+            let mut expected = Vec::new();
+            if explicit_tui && tui_env {
+                expected.extend(["--herdr-pane", "tui-pane"]);
+            }
+            if flags.is_empty() {
+                expected.extend(["--host", "hc"]);
+            }
+            expected.extend(flags.iter().copied());
+            expected.push("reconcile");
+            assert_eq!(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .lines()
+                    .collect::<Vec<_>>(),
+                expected,
+                "flags={flags:?}, tui_env={tui_env}"
+            );
+        }
+    }
+}

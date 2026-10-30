@@ -9,7 +9,7 @@ struct Fixture {
     terminals: RefCell<Vec<Value>>,
     calls: RefCell<Vec<Vec<String>>>,
     send_error: Option<String>,
-    fail_clear: std::cell::Cell<bool>,
+    clear_error: RefCell<Option<String>>,
 }
 impl Default for Fixture {
     fn default() -> Self {
@@ -19,7 +19,7 @@ impl Default for Fixture {
             ]),
             calls: RefCell::new(Vec::new()),
             send_error: None,
-            fail_clear: std::cell::Cell::new(false),
+            clear_error: RefCell::new(None),
         }
     }
 }
@@ -49,8 +49,10 @@ impl HerdrCommandExecutor for Fixture {
             }
             ["--version"] => "herdr-core 0.1.14\n".to_owned(),
             ["label", id, labels @ ..] => {
-                if self.fail_clear.get() && labels.contains(&"namedrop.name=") {
-                    return Err("label clear failed".into());
+                if labels.contains(&"namedrop.name=")
+                    && let Some(error) = self.clear_error.borrow().as_ref()
+                {
+                    return Err(error.clone());
                 }
                 let mut terminals = self.terminals.borrow_mut();
                 let terminal = terminals
@@ -382,7 +384,7 @@ fn release_and_removal_clear_name_mirrors_after_store_mutation() {
             })
             .unwrap();
         if remove {
-            fixture.fail_clear.set(true);
+            *fixture.clear_error.borrow_mut() = Some("label clear failed".into());
             assert!(
                 namedrop::execute_lifecycle_operation(
                     "address.remove",
@@ -408,7 +410,7 @@ fn release_and_removal_clear_name_mirrors_after_store_mutation() {
                 fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
                 "alice"
             );
-            fixture.fail_clear.set(false);
+            *fixture.clear_error.borrow_mut() = None;
             namedrop::execute_lifecycle_operation(
                 "address.remove",
                 json!({"address_id":address_id}),
@@ -902,4 +904,201 @@ fn removal_serializes_with_a_name_request_already_being_read() {
     );
     assert!(fixture.record.lock().unwrap()["labels"]["namedrop.name"].is_null());
     std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn session_generation_is_checked_by_discovery_and_caller_identity() {
+    let fixture = Fixture::default();
+    let host = HcHost::new(&fixture);
+    let claim = CallerClaim {
+        workspace: None,
+        pane: None,
+        inherited_pane: Some("stale-terminal".into()),
+        agent_sessions: vec!["fixture-session".into()],
+    };
+    for (companion, valid) in [(None, true), (Some("123"), false), (Some("456"), true)] {
+        let mut terminals = fixture.terminals.borrow_mut();
+        terminals[0]["pid"] = json!(456);
+        if let Some(pid) = companion {
+            terminals[0]["labels"]["namedrop.session.pid"] = json!(pid);
+        } else {
+            terminals[0]["labels"]
+                .as_object_mut()
+                .unwrap()
+                .remove("namedrop.session.pid");
+        }
+        drop(terminals);
+        assert_eq!(
+            host.panes(PaneScope::All).unwrap()[0]
+                .agent_session_id
+                .is_some(),
+            valid,
+            "{companion:?}"
+        );
+        assert_eq!(host.caller_identity(&claim).is_ok(), valid, "{companion:?}");
+    }
+}
+
+#[test]
+fn snapshots_and_missed_events_clear_stale_sessions_before_naming() {
+    let fixture = Fixture::default();
+    let state = std::env::temp_dir().join(format!("namedrop-hc-resnapshot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&state);
+    let clock = namedrop::SystemClock;
+    let ids = namedrop::ProcessIds::default();
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&state),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+    namedrop::StateStore::open(&state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.activate_worktree(
+                &namespace,
+                &namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "test", 1),
+            )
+        })
+        .unwrap();
+    fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["codex"]);
+    let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+    for snapshot in [true, false] {
+        for (session, companion) in [
+            ("stale", Some("123")),
+            ("fresh", Some("456")),
+            ("legacy", None),
+        ] {
+            {
+                let mut terminals = fixture.terminals.borrow_mut();
+                terminals[0]["pid"] = json!(456);
+                terminals[0]["labels"]["namedrop.session"] = json!(session);
+                terminals[0]["labels"]["namedrop.name"] =
+                    json!(format!("name-{snapshot}-{session}"));
+                if let Some(pid) = companion {
+                    terminals[0]["labels"]["namedrop.session.pid"] = json!(pid);
+                } else {
+                    terminals[0]["labels"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("namedrop.session.pid");
+                }
+            }
+            if session == "fresh" {
+                runtime.host.publish_session(&state, "t1", session).unwrap();
+            }
+            let line = if snapshot {
+                json!({"terminals": *fixture.terminals.borrow()}).to_string()
+            } else {
+                json!({"method":"missed", "params":{"seq":99}}).to_string()
+            };
+            subscriber.handle_line(&line, &runtime).unwrap();
+            let expected = if session == "stale" {
+                None
+            } else {
+                Some(session)
+            };
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"]["namedrop.session"]
+                    .as_str()
+                    .filter(|s| !s.is_empty()),
+                expected,
+                "snapshot={snapshot}, session={session}"
+            );
+            let addresses = namedrop::StateStore::open(&state)
+                .unwrap()
+                .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+                .unwrap();
+            let address = addresses
+                .iter()
+                .find(|address| address.alias == format!("name-{snapshot}-{session}"))
+                .unwrap();
+            assert_eq!(
+                address.agent_session_id.as_ref().map(|id| id.as_str()),
+                expected
+            );
+        }
+    }
+    std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn removing_or_releasing_a_gone_terminal_succeeds_but_other_clear_errors_roll_back() {
+    for remove in [true, false] {
+        for kind in ["gone", "not_found", "finished", "unavailable", "transport"] {
+            let fixture = Fixture::default();
+            let state = std::env::temp_dir().join(format!(
+                "namedrop-hc-absent-{}-{remove}-{kind}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&state);
+            let clock = namedrop::SystemClock;
+            let ids = namedrop::ProcessIds::default();
+            let runtime = namedrop::LifecycleRuntime {
+                state_directory: &state,
+                home_directory: Some(&state),
+                agent_config: namedrop::AgentConfigDirectories::default(),
+                cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+                workspace_id: Some("fixture-space"),
+                current_pane_id: Some("t1"),
+                session_socket_id: "hc:fixture",
+                host: HcHost::new(&fixture),
+                clock: &clock,
+                ids: &ids,
+            };
+            let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+            namedrop::execute_lifecycle_operation(
+                "name",
+                json!({"alias":"alice", "pane_type":"terminal"}),
+                &runtime,
+            )
+            .unwrap();
+            let addresses = || {
+                namedrop::StateStore::open(&state)
+                    .unwrap()
+                    .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+                    .unwrap()
+            };
+            let address_id = addresses()[0].id.clone();
+            if !remove {
+                namedrop::execute_lifecycle_operation(
+                    "address.retire",
+                    json!({"address_id":address_id}),
+                    &runtime,
+                )
+                .unwrap();
+            }
+            if kind == "gone" {
+                fixture.terminals.borrow_mut().clear();
+            } else {
+                *fixture.clear_error.borrow_mut() = Some(if kind == "transport" {
+                    "connection refused".into()
+                } else {
+                    json!({"error":{"kind":kind,"message":"clear rejected","hint":""}}).to_string()
+                });
+            }
+            let before = addresses();
+            let (operation, input) = if remove {
+                ("address.remove", json!({"address_id":address_id}))
+            } else {
+                ("address.release-alias", json!({"alias":"alice"}))
+            };
+            let result = namedrop::execute_lifecycle_operation(operation, input, &runtime);
+            let absent = matches!(kind, "gone" | "not_found" | "finished");
+            assert_eq!(result.is_ok(), absent, "{operation} {kind}: {result:?}");
+            if absent {
+                assert!(addresses().iter().all(|address| address.alias != "alice"));
+            } else {
+                assert_eq!(addresses(), before, "{operation} {kind} must roll back");
+            }
+            std::fs::remove_dir_all(state).unwrap();
+        }
+    }
 }
