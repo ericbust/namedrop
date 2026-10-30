@@ -394,14 +394,27 @@ fn the_mailbox_wake_hook_drains_the_space_after_its_hook_shell_has_exited() {
             .any(|call| call.starts_with("pane list"))
     };
     let mut waited = 0;
-    while !drained(&calls) && hook.try_wait().unwrap().is_none() && waited < 200 {
+    while hook.try_wait().unwrap().is_none() && waited < 200 {
         std::thread::sleep(std::time::Duration::from_millis(50));
         waited += 1;
     }
-    let _ = hook.kill();
-    let _ = hook.wait();
+    if waited == 200 {
+        hook.kill().unwrap();
+    }
+    let status = hook.wait().unwrap();
     other.kill().unwrap();
     other.wait().unwrap();
+    assert!(status.success(), "mailbox wake failed: {status}");
+    for scope in fs::read_dir(f.0.join("state/agent-status-reconciliation")).unwrap() {
+        for entry in fs::read_dir(scope.unwrap().path()).unwrap() {
+            let entry = entry.unwrap();
+            assert!(
+                !entry.file_name().to_string_lossy().starts_with("pending-"),
+                "mailbox wake left a pending reconciliation: {}",
+                entry.path().display()
+            );
+        }
+    }
     assert!(
         drained(&calls),
         "the wake never asked Herdr for the space's panes, so nothing was drained; Herdr calls: {:?}",

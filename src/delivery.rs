@@ -23,6 +23,8 @@ pub struct DrainReport {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pane_lock_deferred: Vec<crate::PaneAddressId>,
     pub requeued: Vec<DeliveryAttemptId>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_without_event: bool,
     pub failed: Vec<DeliveryAttemptId>,
     pub settled: Vec<DeliveryAttemptId>,
     pub held: Vec<DeliveryAttemptId>,
@@ -47,6 +49,7 @@ impl Default for DrainReport {
             submitted: Vec::new(),
             pane_lock_deferred: Vec::new(),
             requeued: Vec::new(),
+            retry_without_event: false,
             failed: Vec::new(),
             settled: Vec::new(),
             held: Vec::new(),
@@ -58,7 +61,14 @@ impl Default for DrainReport {
 
 impl DrainReport {
     pub fn awaits_retry(&self) -> bool {
-        !self.requeued.is_empty() || self.awaits_terminal()
+        !self.pane_lock_deferred.is_empty() || !self.requeued.is_empty() || self.awaits_terminal()
+    }
+
+    pub fn needs_mailbox_worker(&self) -> bool {
+        !self.pane_lock_deferred.is_empty()
+            || self.retry_without_event
+            || self.awaits_terminal()
+            || self.next_grace_due_ms().is_some()
     }
 
     pub fn awaits_terminal(&self) -> bool {
@@ -421,9 +431,9 @@ where
             runtime.session_socket_id,
             &first.pane_id,
         ) {
-            Ok(effects) => effects,
-            Err(error) => {
-                eprintln!("mailbox drain deferred {}: {error}", address_id.as_str());
+            Ok(effects) => Ok(effects),
+            Err(crate::pane_effects::AcquireError::Fault(error)) => Err(error),
+            Err(crate::pane_effects::AcquireError::Contended) => {
                 report.pane_lock_deferred.push(address_id);
                 continue;
             }
@@ -459,6 +469,64 @@ where
         let now = runtime.clock.now_unix_ms();
         let attribution = MutationAttribution::new(ActorKind::Plugin, "namedrop-dispatch", now);
         let attempt_id = DeliveryAttemptId::new(runtime.ids.next_id("delivery-attempt"));
+        let lease = LeaseDraft {
+            attempt_id: attempt_id.clone(),
+            binding_id: second.binding_id.clone(),
+            agent_session_id: second.agent_session_id.clone(),
+            retry_of_attempt_id: second.retry_of_attempt_id.clone(),
+            owner: format!("dispatcher:{}", runtime.session_socket_id),
+            acquired_at_ms: now,
+            expires_at_ms: now.saturating_add(LEASE_DURATION_MS),
+        };
+        let effects = match effects {
+            Ok(effects) => effects,
+            Err(error) => {
+                let summary = format!(
+                    "Could not send to @{}. {error}. Check the state directory permissions and available file descriptors, then send the message again.",
+                    second.alias,
+                );
+                let failed = store
+                    .transaction(|transaction| {
+                        if transaction
+                            .dispatch_candidate(&namespace, &address_id)?
+                            .as_ref()
+                            != Some(&second)
+                            || !transaction.coordination_wake_message_eligible(
+                                &namespace,
+                                &second.message_id,
+                                &live.with_here(second_discovery.clone()),
+                            )?
+                        {
+                            return Ok(None);
+                        }
+                        let Some(leased) = transaction.lease_mailbox_head(
+                            &namespace,
+                            &address_id,
+                            &lease,
+                            &attribution,
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        transaction.transition_delivery_attempt(
+                            &namespace,
+                            &leased.attempt_id,
+                            DeliveryState::Failed,
+                            &attribution,
+                        )?;
+                        transaction.open_delivery_attempt_attention(
+                            &namespace,
+                            &leased.attempt_id,
+                            &summary,
+                            &attribution,
+                        )?;
+                        Ok(Some(leased.attempt_id))
+                    })
+                    .map_err(|error| error.to_string())?;
+                report.failed.extend(failed);
+                continue;
+            }
+        };
         let tool = IntegrationToolInvocation::new(
             collaboration_executable()?,
             tool_environment(
@@ -480,15 +548,7 @@ where
                 let leased = transaction.lease_mailbox_head(
                     &namespace,
                     &address_id,
-                    &LeaseDraft {
-                        attempt_id: attempt_id.clone(),
-                        binding_id: second.binding_id.clone(),
-                        agent_session_id: second.agent_session_id.clone(),
-                        retry_of_attempt_id: second.retry_of_attempt_id.clone(),
-                        owner: format!("dispatcher:{}", runtime.session_socket_id),
-                        acquired_at_ms: now,
-                        expires_at_ms: now.saturating_add(LEASE_DURATION_MS),
-                    },
+                    &lease,
                     &attribution,
                 )?;
                 leased
@@ -567,6 +627,8 @@ where
             // A runner's durable claim/result outranks a late transport error.
             continue;
         }
+        let prompt_result =
+            prompt_result.map_err(|error| runtime.herdr.classify_prompt_failure(&error));
         match prompt_result {
             Ok(_) => {
                 store
@@ -600,10 +662,7 @@ where
                     .map_err(|error| error.to_string())?;
                 report.submitted.push(leased.attempt_id);
             }
-            Err(error)
-                if runtime.herdr.classify_prompt_failure(&error)
-                    == PromptFailureKind::TemporaryPreInvocation =>
-            {
+            Err(kind) if kind.is_temporary_pre_invocation() => {
                 store
                     .transaction(|transaction| {
                         transaction.return_delivery_attempt_to_queue(
@@ -614,11 +673,10 @@ where
                     })
                     .map_err(|error| error.to_string())?;
                 report.requeued.push(leased.attempt_id);
+                report.retry_without_event |=
+                    kind == PromptFailureKind::TemporaryPreInvocationWithoutEvent;
             }
-            Err(error)
-                if runtime.herdr.classify_prompt_failure(&error)
-                    == PromptFailureKind::DefinitiveNonRetryable =>
-            {
+            Err(PromptFailureKind::DefinitiveNonRetryable) => {
                 store
                     .transaction(|transaction| {
                         transaction.transition_delivery_attempt(

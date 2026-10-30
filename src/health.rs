@@ -3,7 +3,7 @@ use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
 use crate::{
     AgentSessionId, AttentionSourceKind, Clock, HerdrCommandExecutor, IdGenerator,
-    LifecycleRuntime, PaneAddressLifecycle, PromptFailureKind, StateStore, discover_worktree,
+    LifecycleRuntime, PaneAddressLifecycle, StateStore, discover_worktree,
     discover_worktree_for_workspace,
 };
 use serde::{Deserialize, Serialize};
@@ -603,7 +603,8 @@ where
         runtime.state_directory,
         runtime.session_socket_id,
         pane_id,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     let live = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
@@ -616,8 +617,10 @@ where
     ) {
         Ok(_) => Ok(()),
         Err(error)
-            if runtime.herdr.classify_prompt_failure(&error)
-                == PromptFailureKind::TemporaryPreInvocation =>
+            if runtime
+                .herdr
+                .classify_prompt_failure(&error)
+                .is_temporary_pre_invocation() =>
         {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }

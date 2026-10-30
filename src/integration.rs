@@ -1,7 +1,7 @@
 use crate::{
     AgentSessionId, DeliveryAttemptId, DiscoveredPane, DiscoveredWorktree, LifecycleRuntime,
-    MessageId, MutationAttribution, PaneAddressId, PromptFailureKind, StateNamespace, StateStore,
-    ThreadId, TransitionKind, discover_worktree, discover_worktree_for_workspace,
+    MessageId, MutationAttribution, PaneAddressId, StateNamespace, StateStore, ThreadId,
+    TransitionKind, discover_worktree, discover_worktree_for_workspace,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -552,7 +552,8 @@ where
         runtime.state_directory,
         runtime.session_socket_id,
         &pane.pane_id,
-    )?;
+    )
+    .map_err(|error| error.to_string())?;
     let current = integration_discovery(runtime)?;
     let still_settled = current.panes.iter().any(|current| {
         current.pane_id == pane.pane_id
@@ -603,8 +604,10 @@ where
             &attribution,
         ),
         Err(error)
-            if runtime.herdr.classify_prompt_failure(&error)
-                == PromptFailureKind::TemporaryPreInvocation =>
+            if runtime
+                .herdr
+                .classify_prompt_failure(&error)
+                .is_temporary_pre_invocation() =>
         {
             finish_challenge_prompt(
                 runtime,

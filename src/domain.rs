@@ -728,6 +728,8 @@ pub struct LeasedDelivery {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DispatchCandidate {
+    pub alias: String,
+    pub delivery_id: DeliveryId,
     pub pane_type: PaneType,
     pub address_id: PaneAddressId,
     pub binding_id: PaneBindingId,

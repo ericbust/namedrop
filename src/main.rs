@@ -370,8 +370,14 @@ fn drain_report(result: &serde_json::Value) -> Result<namedrop::DrainReport, Str
 }
 
 fn needs_mailbox_watcher(result: &serde_json::Value) -> bool {
-    drain_report(result)
-        .is_ok_and(|report| report.awaits_terminal() || report.next_grace_due_ms().is_some())
+    let needs_worker =
+        |value| drain_report(value).is_ok_and(|report| report.needs_mailbox_worker());
+    needs_worker(result)
+        || result.get("delivery").is_some_and(needs_worker)
+        || result
+            .get("drains")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|drains| drains.values().any(needs_worker))
 }
 
 #[cfg(test)]
@@ -379,6 +385,53 @@ mod drain_report_tests {
     use super::{drain_report, needs_mailbox_watcher};
     use namedrop::{DeliveryAttemptId, DrainReport, GraceDeadline};
     use serde_json::json;
+
+    #[test]
+    fn deferred_pane_locks_start_a_worker_but_settled_reports_do_not() {
+        let deferred = DrainReport {
+            pane_lock_deferred: vec![namedrop::PaneAddressId::new("address-1")],
+            ..DrainReport::default()
+        };
+        assert!(deferred.awaits_retry());
+        assert!(needs_mailbox_watcher(&json!({"drain": deferred})));
+        assert!(!needs_mailbox_watcher(&json!(DrainReport::default())));
+    }
+
+    #[test]
+    fn nested_operation_receipts_start_a_worker() {
+        let deferred = DrainReport {
+            pane_lock_deferred: vec![namedrop::PaneAddressId::new("address-1")],
+            ..DrainReport::default()
+        };
+        assert!(needs_mailbox_watcher(&json!({"delivery": deferred})));
+        assert!(needs_mailbox_watcher(&json!({
+            "drain": DrainReport::default(),
+            "delivery": deferred,
+        })));
+        assert!(needs_mailbox_watcher(
+            &json!({"drain": DrainReport::default(), "drains": {
+                "a-settled-space": DrainReport::default(),
+                "z-deferred-space": deferred,
+            }})
+        ));
+    }
+
+    #[test]
+    fn retry_without_event_round_trips_and_old_reports_need_no_worker() {
+        let old = json!(DrainReport::default());
+        assert!(old.get("retry_without_event").is_none());
+        assert!(!drain_report(&old).unwrap().retry_without_event);
+        assert!(!needs_mailbox_watcher(&old));
+        let retry = DrainReport {
+            requeued: vec![DeliveryAttemptId::new("attempt-1")],
+            retry_without_event: true,
+            ..DrainReport::default()
+        };
+        let restored = drain_report(&json!(retry)).unwrap();
+        assert!(restored.retry_without_event);
+        assert!(restored.needs_mailbox_worker());
+        assert!(restored.awaits_retry());
+    }
 
     #[test]
     fn an_operation_result_carries_the_drain_report_it_serialized() {
@@ -965,10 +1018,16 @@ fn run_agent_status_worker() -> ExitCode {
                     wait_for_marker_or_deadline(&directory, due);
                     continue;
                 }
-                deadline_ms =
-                    with_runtime_options(&RuntimeOptions::default(), namedrop::drain_mailboxes)
-                        .ok()
-                        .and_then(|report| report.next_grace_due_ms());
+                if queue_agent_status_reconciliation(
+                    &directory,
+                    &serde_json::json!({"operation":"mailbox-wake"}),
+                )
+                .is_ok()
+                {
+                    deadline_ms = None;
+                } else {
+                    wait_for_reconciliation_retry(&mut failures);
+                }
                 continue;
             }
             let _ = lock.unlock();
