@@ -36,8 +36,14 @@ pub struct Cli {
 
 /// Explicit transport context for permission-matchable direct invocations.
 /// Omitted values retain the existing Herdr environment behavior.
-#[derive(Debug, Default, Args)]
+#[derive(Clone, Debug, Default, Args)]
 pub struct RuntimeOptions {
+    #[arg(long, global = true, value_enum)]
+    pub host: Option<crate::runtime::HostKind>,
+    #[arg(long, global = true, value_name = "TERMINAL")]
+    pub hc_terminal: Option<String>,
+    #[arg(long, global = true, value_name = "SPACE")]
+    pub hc_space: Option<String>,
     #[arg(long, value_name = "PATH")]
     pub plugin_state: Option<PathBuf>,
     #[arg(long, global = true, value_name = "SOCKET")]

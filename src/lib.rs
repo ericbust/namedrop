@@ -29,7 +29,7 @@ pub mod linux_sandbox;
 mod message;
 mod persona;
 mod ports;
-mod runtime;
+pub mod runtime;
 mod shortcuts;
 mod spaces;
 mod store;

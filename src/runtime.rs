@@ -9,6 +9,65 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
+pub enum HostKind {
+    Tui,
+    Hc,
+}
+
+impl HostKind {
+    pub fn detect(
+        explicit: Option<Self>,
+        variable: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self, String> {
+        if let Some(host) = explicit {
+            return Ok(host);
+        }
+        if variable("HERDR_SOCKET_PATH").is_some() || variable("HERDR_PANE_ID").is_some() {
+            return Ok(Self::Tui);
+        }
+        if variable("HC_TERMINAL_ID").is_some() {
+            return Ok(Self::Hc);
+        }
+        Err(
+            "Host is unknown. Set HERDR_SOCKET_PATH or HC_TERMINAL_ID, or pass --host tui|hc."
+                .to_owned(),
+        )
+    }
+
+    pub fn from_environment(explicit: Option<Self>) -> Result<Self, String> {
+        Self::detect(explicit, |key| env::var(key).ok())
+    }
+}
+
+pub fn hc_state_directory(
+    variable: impl Fn(&str) -> Option<String>,
+) -> Result<std::path::PathBuf, String> {
+    let root = variable("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            variable("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
+        })
+        .ok_or_else(|| "Set XDG_STATE_HOME, HOME, or --plugin-state for hc.".to_owned())?;
+    let session = variable("HC_SESSION").unwrap_or_default();
+    let session = session.trim();
+    let session = if session.is_empty() {
+        "default"
+    } else {
+        session
+    };
+    if session == "."
+        || session == ".."
+        || session
+            .chars()
+            .any(|c| c.is_control() || "/\\:*?\"<>|".contains(c))
+    {
+        return Err("HC_SESSION is not a valid session name.".to_owned());
+    }
+    Ok(root.join("namedrop/hc").join(session))
+}
+
 static NEXT_HERDR_OUTPUT_FILE: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_HERDR_TIMEOUT_MS: u64 = 10_000;
 const MAX_HERDR_TIMEOUT_MS: u64 = 60_000;
@@ -394,5 +453,74 @@ mod bounded_read_tests {
         let state = String::from_utf8_lossy(&state);
         let state = state.trim();
         !state.is_empty() && !state.starts_with('Z')
+    }
+}
+
+#[cfg(test)]
+mod host_selection_tests {
+    use super::*;
+
+    #[test]
+    fn detection_obeys_explicit_then_innermost_host() {
+        let cases = [
+            (None, vec![], None),
+            (None, vec!["HC_SESSION", "HC_SOCKET"], None),
+            (None, vec!["HC_TERMINAL_ID"], Some(HostKind::Hc)),
+            (
+                None,
+                vec!["HERDR_PANE_ID", "HC_TERMINAL_ID"],
+                Some(HostKind::Tui),
+            ),
+            (None, vec!["HERDR_SOCKET_PATH"], Some(HostKind::Tui)),
+            (
+                Some(HostKind::Hc),
+                vec!["HERDR_PANE_ID"],
+                Some(HostKind::Hc),
+            ),
+            (
+                Some(HostKind::Tui),
+                vec!["HC_TERMINAL_ID"],
+                Some(HostKind::Tui),
+            ),
+        ];
+        for (explicit, keys, expected) in cases {
+            assert_eq!(
+                HostKind::detect(explicit, |key| keys.contains(&key).then(|| "value".into())).ok(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn hc_state_uses_xdg_and_default_session() {
+        let vars = |key: &str| match key {
+            "XDG_STATE_HOME" => Some("/state".into()),
+            "HOME" => Some("/home/test".into()),
+            _ => None,
+        };
+        assert_eq!(
+            hc_state_directory(vars).unwrap(),
+            std::path::Path::new("/state/namedrop/hc/default")
+        );
+        assert_eq!(
+            hc_state_directory(|key| match key {
+                "HOME" => Some("/home/test".into()),
+                "HC_SESSION" => Some(" lane ".into()),
+                _ => None,
+            })
+            .unwrap(),
+            std::path::Path::new("/home/test/.local/state/namedrop/hc/lane")
+        );
+        assert!(
+            hc_state_directory(|key| Some(
+                if key == "HC_SESSION" {
+                    "../escape"
+                } else {
+                    "/state"
+                }
+                .into()
+            ))
+            .is_err()
+        );
     }
 }
