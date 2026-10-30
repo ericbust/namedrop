@@ -917,6 +917,14 @@ export function App() {
               onClick={closeDrawer}
             />
           )}
+          {connection === "reconnecting" && (
+            <div className="reconnect" role="status" inert={drawerOpen}>
+              <Icon name="refresh" />
+              Reconnecting…
+              {updatedAt !== null &&
+                ` Showing updates up to ${new Date(updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`}
+            </div>
+          )}
           <main
             className="main"
             id="main-content"
@@ -924,14 +932,6 @@ export function App() {
             ref={main}
             inert={drawerOpen}
           >
-            {connection === "reconnecting" && (
-              <div className="reconnect" role="status">
-                <Icon name="refresh" />
-                Reconnecting…
-                {updatedAt !== null &&
-                  ` Showing updates up to ${new Date(updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`}
-              </div>
-            )}
             {state.selection.kind === "activity" && state.channels.size > 0 ? (
               <ActivityView
                 toggle={mainToggle}
