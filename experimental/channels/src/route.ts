@@ -205,6 +205,7 @@ export function routeLine(
         tip: { kind: "unreachable" },
         parts: [
           { kind: "state", state: "failed" },
+          ...(reached.length === 0 ? [] : [names, ...receipts()]),
           ...(idle.length === 0
             ? []
             : [{ kind: "send", aliases: idle, form: "to" } as const]),

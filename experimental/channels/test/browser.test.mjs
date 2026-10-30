@@ -7788,6 +7788,41 @@ for (const [where, { move, focused }] of Object.entries(elsewhere))
     ]);
   });
 
+test("DESIGN-R2 D1: a Send to on a router_failed post keeps who it reached, with the receipt, before the offers still left", async (t) => {
+  const failed = { state: "router_failed" };
+  const both = channelPost("p1", "can @codex and @claude look?", failed);
+  const one = channelPost("p2", "can @codex look?", failed);
+  const { ui } = await chatRoom(t, [both, one], {
+    onDeliver: ({ to }, { path }) => ({
+      channel: { ...(path === deliverPath("p1") ? both : one).channel, to },
+    }),
+  });
+  const first = routeOf(ui, "p1");
+  await first.route
+    .getByRole("button", { name: "Send this to @codex" })
+    .click();
+  await readsAs(
+    first.route,
+    "Couldn't check who this is for · @codex · Queued · Send to @claude",
+  );
+  assert.deepEqual(await first.icon(), [iconShape.alert]);
+  const second = routeOf(ui, "p2");
+  await second.route
+    .getByRole("button", { name: "Send this to @codex" })
+    .click();
+  await readsAs(
+    second.route,
+    "Couldn't check who this is for · @codex · Queued",
+  );
+  assert.deepEqual(await second.parts(), [
+    "Couldn't check who this is for",
+    "@codex",
+    "Queued",
+  ]);
+  assert.equal(ui.posts.deliveries.length, 2);
+  assert.equal(ui.connections.length, 1, "no new frame or connection");
+});
+
 test("CH-fix-3 item 1: a refused delivery reads Couldn't send to @codex · Try again with focus on Try again, its title is the server's message, and Try again delivers", async (t) => {
   const refusal = "@codex is not an agent in this workspace.";
   const outcomes = [{ status: 400, error: refusal }, { status: 200 }];

@@ -740,6 +740,7 @@ Names in it are peek buttons at 12px 600 in `--text`.
 | Post, delivery taken by the server             | "Sent to @codex", until the answer or a frame shows @codex reached      | the post's icon        |
 | Post, delivery refused or not reached          | "Couldn't send to @codex · Try again"                                   | the post's icon        |
 | Post, `router_failed`, one of two pressed      | "Couldn't check who this is for · Send to @claude · Sending to @codex…" | alert, `--failed-text` |
+| Post, `router_failed`, Send to reached @codex  | "Couldn't check who this is for · @codex · Queued · Send to @claude"    | alert, `--failed-text` |
 | Reply or follow-up that woke a new member      | "@codex · pulled in"                                                    | arrow                  |
 | Answer to the agent that asked                 | "@claude"                                                               | arrow                  |
 | Follow-up sent to members                      | "@codex"                                                                | arrow                  |
@@ -781,6 +782,11 @@ Names in it are peek buttons at 12px 600 in `--text`.
 - `router_failed` colors the icon and its words in `--failed-text`, because the
   post reached no one it named and the operator should act. Its tooltip reads
   "Namedrop couldn't reach its router. The post is saved, and no one got it."
+- A `router_failed` post that a Send to reached keeps its state part, then
+  names the agents reached with their receipts, as a routed line does, then
+  the offers still left: "Couldn't check who this is for · @codex · Queued ·
+  Send to @claude". With no one left to offer, it ends at the receipts:
+  "Couldn't check who this is for · @codex · Queued".
 
 **Send anyway.** A post offers to send itself to each agent it mentions that
 did not get it and that the operator has not pressed yet. Once a later message
