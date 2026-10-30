@@ -163,7 +163,7 @@ export function Composer({
   const text = draft?.text ?? "";
   const failure = draft?.failure ?? null;
   const sending = inFlight(outbox, composer);
-  const named = leadingMentions(text).length > 0;
+  const leading = leadingMentions(text);
   const source = postSource(text, rule);
 
   const completion = useMemo(
@@ -318,9 +318,11 @@ export function Composer({
             ))}
           </div>
         )}
-        {rule.kind === "thread" && rule.to.length > 0 && !named && (
-          <span className="composer-to">{recipientsLabel(rule.to)}</span>
-        )}
+        {rule.kind === "thread" &&
+          rule.to.length > 0 &&
+          leading.length === 0 && (
+            <span className="composer-to">{recipientsLabel(rule.to)}</span>
+          )}
         <textarea
           ref={box}
           rows={1}
@@ -364,7 +366,15 @@ export function Composer({
         ) : sending ? (
           <p>{composerCopy.sending}</p>
         ) : guarded && source === null && text.trim() !== "" ? (
-          <p className="composer-guard">{composerCopy.needsRecipient}</p>
+          <p className="composer-guard">
+            {leading.length > 0
+              ? composerCopy.needsMessage(leading)
+              : composerCopy.needsRecipient}
+          </p>
+        ) : draft?.kept ? (
+          <p className="composer-guard" role="status">
+            {composerCopy.draftKept}
+          </p>
         ) : focused ? (
           <p>{composerHint(rule, text)}</p>
         ) : null}

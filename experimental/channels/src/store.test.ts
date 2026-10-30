@@ -2487,6 +2487,8 @@ test("drafts: each composer keeps its own text across switches, and an emptied d
         key: alphaKey,
         thread: null,
         text: "hello",
+        inReplyTo: null,
+        kept: false,
         attempt: null,
         failure: null,
       },
@@ -2494,6 +2496,8 @@ test("drafts: each composer keeps its own text across switches, and an emptied d
         key: alphaKey,
         thread: "t1",
         text: "half a reply",
+        inReplyTo: null,
+        kept: false,
         attempt: null,
         failure: null,
       },
@@ -2550,6 +2554,8 @@ test("drafts: a refused send returns to its composer's draft with the error and 
     key: alphaKey,
     thread: null,
     text: "@codex hi",
+    inReplyTo: null,
+    kept: false,
     attempt: attempt1,
     failure: { status: 400, message: "Nope" },
   });
@@ -2570,6 +2576,8 @@ test("drafts: a refused send returns to its composer's draft with the error and 
       key: alphaKey,
       thread: null,
       text: "@codex hi",
+      inReplyTo: null,
+      kept: false,
       attempt: attempt1,
       failure: null,
     },
@@ -2590,6 +2598,8 @@ test("drafts: a refused send returns to its composer's draft with the error and 
       key: alphaKey,
       thread: null,
       text: "@codex hi!",
+      inReplyTo: null,
+      kept: false,
       attempt: attempt1,
       failure: null,
     },
@@ -2611,6 +2621,8 @@ test("drafts: a refused draft keeps its attempt through edits that empty or rest
       key: alphaKey,
       thread: null,
       text: "",
+      inReplyTo: null,
+      kept: false,
       attempt: attempt1,
       failure: null,
     },
@@ -2635,6 +2647,8 @@ test("drafts: a refused draft keeps its attempt through edits that empty or rest
       key: alphaKey,
       thread: null,
       text: "@codex hi!",
+      inReplyTo: null,
+      kept: false,
       attempt: { requestId: "r2", source: "@codex hi!", inReplyTo: null },
       failure: { status: 503, message: "" },
     },
@@ -2708,6 +2722,8 @@ test("drafts: an accepted send clears its composer's draft, and a refusal with n
     key: alphaKey,
     thread: "t1",
     text: "#alpha @codex thanks",
+    inReplyTo: null,
+    kept: false,
     attempt: {
       requestId: "r2",
       source: "#alpha @codex thanks",
@@ -3512,39 +3528,95 @@ test("conversations: request threads still collapse under their parent with the 
     ["ask to preview:out", "cmd to preview:cmd-reply"],
   );
 });
-test("fill: writes a draft only when it is empty, keeps a remembered attempt, and repeats as a no-op", () => {
+test("fill: writes an empty draft with the message it answers, and flags a draft that has text until the next edit", () => {
   const state = apply(initialState(), snapshot());
   const composer: ComposerId = { key: activeChannel(state).key, thread: "t" };
-  const fill = (from: State, text: string) =>
-    reduce(from, { type: "fill", composer, text });
+  const fill = (from: State, text: string, inReplyTo = "post") =>
+    reduce(from, { type: "fill", composer, text, inReplyTo });
+  const draft = (from: State) => from.drafts.get(draftKey(composer));
+  const fresh = { ...composer, attempt: null, failure: null };
   const filled = fill(state, "@codex hello");
-  assert.equal(filled.drafts.get(draftKey(composer))?.text, "@codex hello");
+  assert.deepEqual(draft(filled), {
+    ...fresh,
+    text: "@codex hello",
+    inReplyTo: "post",
+    kept: false,
+  });
   assert.equal(
-    fill(filled, "@claude hello"),
+    fill(filled, "@codex hello"),
     filled,
-    "a second fill is a no-op",
+    "the same fill is a no-op",
   );
-  const typed = reduce(state, { type: "edit", composer, text: "my words" });
-  assert.equal(fill(typed, "@codex hello"), typed, "typed text stays");
-  const refused = reduce(
-    reduce(typed, {
+  const other = fill(filled, "@claude hello");
+  assert.deepEqual(
+    draft(other),
+    { ...fresh, text: "@codex hello", inReplyTo: "post", kept: true },
+    "another fill keeps the text and says so",
+  );
+  assert.equal(fill(other, "@claude hello"), other, "and says it once");
+  const typed = reduce(other, { type: "edit", composer, text: "@codex hi" });
+  assert.deepEqual(
+    draft(typed),
+    { ...fresh, text: "@codex hi", inReplyTo: "post", kept: false },
+    "the next edit clears the notice and keeps the message it answers",
+  );
+  assert.equal(
+    draft(reduce(typed, { type: "edit", composer, text: "" })),
+    undefined,
+    "emptying the box forgets the message it answers",
+  );
+  const send = (from: State, requestId: string) =>
+    reduce(from, {
       type: "send",
       outgoing: {
-        requestId: "r1",
+        requestId,
         composer,
-        source: "my words",
-        inReplyTo: "m1",
+        source: "@codex hi",
+        inReplyTo: "post",
         at: 1,
       },
-    }),
-    { type: "send-failed", requestId: "r1", status: 500, message: "" },
+    });
+  const refused = reduce(send(typed, "r1"), {
+    type: "send-failed",
+    requestId: "r1",
+    status: 500,
+    message: "",
+  });
+  const attempt = { requestId: "r1", source: "@codex hi", inReplyTo: "post" };
+  assert.deepEqual(
+    draft(refused),
+    {
+      ...composer,
+      text: "@codex hi",
+      inReplyTo: "post",
+      kept: false,
+      attempt,
+      failure: { status: 500, message: "" },
+    },
+    "a refused reply keeps the message it answers for the retry",
   );
   const emptied = reduce(refused, { type: "edit", composer, text: "" });
-  const refilled = fill(emptied, "@codex hello");
-  assert.deepEqual(refilled.drafts.get(draftKey(composer)), {
+  assert.deepEqual(draft(emptied), {
     ...composer,
-    text: "@codex hello",
-    attempt: { requestId: "r1", source: "my words", inReplyTo: "m1" },
+    text: "",
+    inReplyTo: null,
+    kept: false,
+    attempt,
     failure: null,
   });
+  const refilled = fill(emptied, "@codex hello", "post-2");
+  assert.deepEqual(draft(refilled), {
+    ...composer,
+    text: "@codex hello",
+    inReplyTo: "post-2",
+    kept: false,
+    attempt,
+    failure: null,
+  });
+  const sent = reduce(send(refilled, "r2"), {
+    type: "sent",
+    requestId: "r2",
+    messageId: "m2",
+  });
+  assert.equal(draft(sent), undefined, "a sent reply forgets it");
 });

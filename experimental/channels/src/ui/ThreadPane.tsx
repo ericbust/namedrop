@@ -270,7 +270,10 @@ export function ThreadPane({
                 {
                   composer,
                   source,
-                  inReplyTo: activeReply?.messageId ?? latest.id,
+                  inReplyTo:
+                    activeReply?.messageId ??
+                    drafts.get(draftKey(composer))?.inReplyTo ??
+                    latest.id,
                 },
                 startedAt,
               )

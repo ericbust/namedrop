@@ -240,10 +240,20 @@ export function accept(
 // The server's send grammar: any `#label` tokens, then at least one valid `@alias`.
 const LEADING = /^\s*(?:#[\w.-]+\s+)*((?:@[a-z0-9]+(?:-[a-z0-9]+)*(?:\s+|$))+)/;
 
-// The aliases a post starts with, as typed. A post that has some goes only to them.
+// The aliases a post starts with, as typed, and the message after them.
+function leadingRun(text: string): {
+  aliases: readonly string[];
+  rest: string;
+} {
+  const match = LEADING.exec(text);
+  const run = match?.[1];
+  return match === null || run === undefined
+    ? { aliases: [], rest: text }
+    : { aliases: run.trim().split(/\s+/), rest: text.slice(match[0].length) };
+}
+// A post that starts with aliases goes only to them.
 export function leadingMentions(text: string): readonly string[] {
-  const run = LEADING.exec(text)?.[1];
-  return run === undefined ? [] : run.trim().split(/\s+/);
+  return leadingRun(text).aliases;
 }
 
 // A mention anywhere: not inside a word or an email address, not escaped, and not the start of a longer alias.
@@ -266,13 +276,13 @@ export function mentionedAgents(
   return [...mentioned];
 }
 
-// The text Enter sends, or null when it must stay in the box.
+// The text Enter sends, or null when it must stay in the box. The server
+// refuses names with no message after them.
 export function postSource(text: string, rule: SendRule): string | null {
   const body = text.trim();
-  if (body === "") return null;
-  return rule.kind === "thread" &&
-    rule.to.length === 0 &&
-    leadingMentions(body).length === 0
+  const { aliases, rest } = leadingRun(body);
+  if (aliases.length > 0) return rest.trim() === "" ? null : body;
+  return body === "" || (rule.kind === "thread" && rule.to.length === 0)
     ? null
     : body;
 }

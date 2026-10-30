@@ -281,6 +281,10 @@ export const composerCopy = {
   send: "Send",
   everyWorkspace: "every workspace",
   needsRecipient: "Start with @name to choose who gets this.",
+  needsMessage: (names: readonly string[]) =>
+    `Add a message after ${shortList(names)}.`,
+  draftKept:
+    "Your draft is still here. Send or clear it, then press Send anyway again.",
   postNotSent: "A post wasn't sent",
   replyNotSent: "Reply not sent · Open thread",
 };
@@ -344,6 +348,8 @@ export const routeCopy = {
     string
   >,
   sendThis: (alias: string) => `Send this to ${alias}`,
+  // The reply Send anyway prepares: the agent reads the post from its thread.
+  note: "Please read my post.",
   tip: {
     router: (name: string) => `Picked by ${name}`,
     unreachable:

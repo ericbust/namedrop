@@ -15,7 +15,7 @@ import {
   prepareChannelMessage,
 } from "../attention.ts";
 import { type CompletionContext, channelOptions } from "../complete.ts";
-import { composerPlaceholder } from "../copy.ts";
+import { composerPlaceholder, routeCopy } from "../copy.ts";
 import type {
   ComposerId,
   Directory,
@@ -76,6 +76,11 @@ const noRows: readonly TimelineRow[] = [];
 const noPending: readonly Outgoing[] = [];
 const noMembers: Directory["members"] = new Map();
 const POSTED_LIMIT = 200;
+// Where focus goes once an opened pane renders. The reply box selects the
+// prepared note, from `from` to its end, while it still holds that note.
+type PaneFocus =
+  | { kind: "pane" }
+  | { kind: "composer"; note: string; from: number };
 const MAIN_SCROLLER = "main .timeline, main .activity-list";
 function go(route: Route) {
   if (!sameRoute(routeOf(location), route))
@@ -609,14 +614,13 @@ export function App() {
     button: HTMLButtonElement;
     threadId: string;
   } | null>(null);
-  // Where focus goes once an opened pane renders.
-  const focusIntent = useRef<"pane" | "composer" | null>(null);
+  const focusIntent = useRef<PaneFocus | null>(null);
   const [, requestFocus] = useReducer((count: number) => count + 1, 0);
   const openThread = useCallback(
     (
       threadId: string,
       button: HTMLButtonElement,
-      focus: "pane" | "composer" = "pane",
+      focus: PaneFocus = { kind: "pane" },
     ) => {
       focusEvidence({ type: "close" });
       returnFocus.current = { button, threadId };
@@ -629,23 +633,28 @@ export function App() {
   const sendTo = useCallback(
     (post: Message, alias: string, button: HTMLButtonElement) => {
       if (current === undefined) return;
-      // The trailing space keeps the caret off a mention the post ends with,
-      // so the member list stays closed and Enter sends.
+      const note = `${alias} ${routeCopy.note}`;
       dispatch({
         type: "fill",
         composer: { key: current, thread: post.threadId },
-        text: `${alias} ${post.body.text} `,
+        text: note,
+        inReplyTo: post.id,
       });
+      const focus: PaneFocus = {
+        kind: "composer",
+        note,
+        from: alias.length + 1,
+      };
       // A loaded conversation pane already shows this thread, and the timeline may not hold it.
       if (
         focused?.kind === "ready" &&
         focused.context.threadId === post.threadId
       ) {
-        focusIntent.current = "composer";
+        focusIntent.current = focus;
         requestFocus();
         return;
       }
-      openThread(post.threadId, button, "composer");
+      openThread(post.threadId, button, focus);
     },
     [current, focused, openThread],
   );
@@ -698,7 +707,7 @@ export function App() {
     (target: PeekTarget, element: HTMLElement, startedAt: number) => {
       focusEvidence({ type: "close" });
       opening.current = { element, key: peekKey(target), startedAt };
-      focusIntent.current = "pane";
+      focusIntent.current = { kind: "pane" };
       requestFocus();
       dispatch({ type: "peek", target });
     },
@@ -726,11 +735,16 @@ export function App() {
   const view = viewOf(state.selection);
   const shownView = useRef(view);
   useLayoutEffect(() => {
-    if (pane !== null && focusIntent.current !== null) {
+    const intent = focusIntent.current;
+    if (pane !== null && intent !== null) {
       const opened = document.getElementById(paneId);
       const box = opened?.querySelector("textarea");
-      if (pane === "thread" && focusIntent.current === "composer" && box) {
-        box.setSelectionRange(box.value.length, box.value.length);
+      if (pane === "thread" && intent.kind === "composer" && box) {
+        const end = box.value.length;
+        box.setSelectionRange(
+          box.value === intent.note ? intent.from : end,
+          end,
+        );
         box.focus();
       } else
         opened

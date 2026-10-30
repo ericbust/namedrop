@@ -783,7 +783,7 @@ function step(state: State, event: Event): State {
       if (
         known === undefined
           ? event.text === ""
-          : known.text === event.text && known.failure === null
+          : known.text === event.text && known.failure === null && !known.kept
       )
         return state;
       const drafts = new Map(state.drafts);
@@ -793,16 +793,37 @@ function step(state: State, event: Event): State {
         drafts.set(at, {
           ...event.composer,
           text: event.text,
+          inReplyTo: event.text === "" ? null : (known?.inReplyTo ?? null),
+          kept: false,
           attempt,
           failure: null,
         });
       return { ...state, drafts };
     }
     case "fill": {
-      const known = state.drafts.get(draftKey(event.composer));
-      return known === undefined || known.text === ""
-        ? step(state, { ...event, type: "edit" })
-        : state;
+      const at = draftKey(event.composer);
+      const known = state.drafts.get(at);
+      if (known !== undefined && known.text !== "") {
+        const same =
+          known.text === event.text && known.inReplyTo === event.inReplyTo;
+        return same || known.kept
+          ? state
+          : {
+              ...state,
+              drafts: new Map(state.drafts).set(at, { ...known, kept: true }),
+            };
+      }
+      return {
+        ...state,
+        drafts: new Map(state.drafts).set(at, {
+          ...event.composer,
+          text: event.text,
+          inReplyTo: event.inReplyTo,
+          kept: false,
+          attempt: known?.attempt ?? null,
+          failure: null,
+        }),
+      };
     }
     case "send": {
       const { outgoing } = event;
@@ -845,9 +866,12 @@ function step(state: State, event: Event): State {
       outbox.delete(event.requestId);
       const at = draftKey(known.composer);
       const drafts = new Map(state.drafts);
+      const draft = state.drafts.get(at);
       drafts.set(at, {
         ...known.composer,
-        text: state.drafts.get(at)?.text ?? known.source,
+        text: draft?.text ?? known.source,
+        inReplyTo: draft?.inReplyTo ?? null,
+        kept: false,
         attempt: {
           requestId: event.requestId,
           source: known.source,

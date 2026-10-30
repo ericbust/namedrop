@@ -5620,13 +5620,16 @@ test("CH-2: Send anyway in a conversation outside the timeline fills that pane's
   await eventually(
     async () =>
       (await reply.count()) === 1 &&
-      (await reply.inputValue()) ===
-        "@codex the deploy notes @codex wrote last week were clear ",
+      (await reply.inputValue()) === "@codex Please read my post.",
     "the filled reply box in the conversation pane",
   );
-  assert.equal(
-    await reply.evaluate((box) => box === document.activeElement),
-    true,
+  assert.deepEqual(
+    await reply.evaluate((box) => [
+      box.selectionStart,
+      box.selectionEnd,
+      box === document.activeElement,
+    ]),
+    ["@codex ".length, "@codex Please read my post.".length, true],
   );
 });
 
@@ -6205,7 +6208,78 @@ test("CH-2: replies read as their own rows in time order, with a reference above
   );
 });
 
-test("CH-2: Send anyway opens the thread with the post addressed and the caret at the end, and keeps a draft that has text", async (t) => {
+const NOTE = "@codex Please read my post.";
+const threadPane = (ui) =>
+  ui.page.getByRole("complementary", { name: "Thread", exact: true });
+const boxState = (box) =>
+  box.evaluate((element) => [
+    element.value,
+    element.selectionStart,
+    element.selectionEnd,
+    document.activeElement === element,
+  ]);
+
+test("CH-fix-2 item 1: Send anyway selects a short note in the thread box and replies to the post itself", async (t) => {
+  const at = Date.now() - 600_000;
+  const post = channelPost(
+    "p1",
+    `${"a long post the server cuts for display ".repeat(60)}then @codex`,
+    { state: "unrouted", to: [] },
+    {
+      at_ms: at,
+      body: { text: "a long post the server cut", truncated: true },
+    },
+  );
+  const reply = answer("r1", "p1", "p1", "claude", "agreed, nice one", {
+    at_ms: at + 60_000,
+    legs: [{ to: "human", stage: { stage: "delivered" } }],
+  });
+  const { ui, value } = await chatRoom(t, [post, reply]);
+  const offer = ui.page
+    .locator("main")
+    .getByRole("button", { name: "Send this to @codex" });
+  await offer.click();
+  const pane = threadPane(ui);
+  const box = pane.getByRole("combobox");
+  await box.waitFor();
+  assert.deepEqual(
+    await boxState(box),
+    [NOTE, "@codex ".length, NOTE.length, true],
+    "the note after the name is selected",
+  );
+  assert.equal(await ui.page.getByRole("listbox").count(), 0, "no member list");
+  assert.equal(
+    await pane.locator(".composer-to").count(),
+    0,
+    "the leading mention replaces the To label",
+  );
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the sent note");
+  const posted = JSON.parse(ui.posts.attempts[0].raw);
+  assert.equal(posted.source, NOTE, "Enter sends the note as is");
+  assert.equal(
+    posted.in_reply_to,
+    "p1",
+    "the reply answers the post, not the thread's latest message",
+  );
+  value.frame.messages = [
+    post,
+    reply,
+    {
+      ...ui.posts.postedRow(posted.request_id, at + 120_000),
+      author: "human",
+    },
+  ];
+  ui.connections[0].send("space", value);
+  await ui.page
+    .locator("main")
+    .getByRole("button", {
+      name: "Reply to You: a long post the server cut. Open thread",
+    })
+    .waitFor();
+});
+
+test("CH-fix-2 item 1: Send anyway keeps a draft that has text and says so until the next edit, and a name alone stays in the box", async (t) => {
   const { ui } = await chatRoom(t, [
     channelPost("p1", "nice catch by @codex on the cache", {
       state: "unrouted",
@@ -6215,40 +6289,12 @@ test("CH-2: Send anyway opens the thread with the post addressed and the caret a
   const offer = ui.page
     .locator("main")
     .getByRole("button", { name: "Send this to @codex" });
-  await offer.click();
-  const pane = ui.page.getByRole("complementary", {
-    name: "Thread",
-    exact: true,
-  });
+  const pane = threadPane(ui);
   const box = pane.getByRole("combobox");
+  const status = pane.locator(".composer-status");
+  await offer.click();
   await box.waitFor();
-  const filled = "@codex nice catch by @codex on the cache ";
-  assert.deepEqual(
-    await box.evaluate((element) => [
-      element.value,
-      element.selectionStart,
-      element.selectionEnd,
-      document.activeElement === element,
-    ]),
-    [filled, filled.length, filled.length, true],
-  );
-  assert.equal(await ui.page.getByRole("listbox").count(), 0, "no member list");
-  assert.equal(
-    await pane.locator(".composer-to").count(),
-    0,
-    "the leading mention replaces the To label",
-  );
-  assert.equal(
-    await pane.locator(".composer-status").textContent(),
-    "Enter to send · Shift+Enter for a new line",
-  );
-  await box.press("!");
-  assert.equal(await box.inputValue(), `${filled}!`, "typed at the end");
-  assert.equal(
-    await ui.page.getByRole("listbox").count(),
-    0,
-    "still no member list",
-  );
+  await box.fill("my own words");
   await ui.page.keyboard.press("Escape");
   await pane.waitFor({ state: "detached" });
   assert.equal(
@@ -6258,50 +6304,57 @@ test("CH-2: Send anyway opens the thread with the post addressed and the caret a
   );
   await offer.click();
   await box.waitFor();
-  assert.equal(await box.inputValue(), `${filled}!`, "a draft with text stays");
-  await box.press("Enter");
-  await until(() => ui.posts.attempts.length === 1, "the sent post");
-  assert.deepEqual(JSON.parse(ui.posts.attempts[0].raw), {
-    request_id: JSON.parse(ui.posts.attempts[0].raw).request_id,
-    source: `${filled}!`.trim(),
-    in_reply_to: "p1",
-  });
-  await pane.locator("article.pending").getByText("Sent").waitFor();
-  await box.pressSequentially("@c ");
-  await box.press("Enter");
-  await until(() => ui.posts.attempts.length === 2, "the short reply");
-  await ui.page.waitForFunction(
-    () => document.querySelector("aside textarea")?.value === "",
+  assert.deepEqual(
+    await boxState(box),
+    ["my own words", 12, 12, true],
+    "the draft stays, focused, with the caret at its end",
   );
+  const notice = status.getByRole("status");
+  assert.equal(
+    await notice.textContent(),
+    "Your draft is still here. Send or clear it, then press Send anyway again.",
+  );
+  assert.deepEqual(
+    await notice.evaluate((element) => [
+      getComputedStyle(element).fontSize,
+      getComputedStyle(element).color,
+    ]),
+    ["12px", await tokenColor(ui.page, "--text")],
+  );
+  await box.press("!");
+  assert.equal(
+    await status.textContent(),
+    "Enter to send · Shift+Enter for a new line",
+    "the next edit clears the notice",
+  );
+  await box.fill("");
   await offer.click();
-  await ui.page.waitForFunction(
-    (text) => document.querySelector("aside textarea")?.value === text,
-    filled,
+  await eventually(
+    async () => (await box.inputValue()) === NOTE,
+    "an empty draft takes the note",
+  );
+  await box.pressSequentially("can you check?");
+  assert.equal(
+    await box.inputValue(),
+    "@codex can you check?",
+    "typing replaces the note",
+  );
+  await box.fill("@codex ");
+  await box.press("Enter");
+  assert.equal(
+    await status.textContent(),
+    "Add a message after @codex.",
+    "a name alone says what is missing",
   );
   assert.equal(
-    await ui.page.getByRole("listbox").count(),
-    0,
-    "the caret moved to the end, so no member list opens on the leading mention",
+    await pane.getByRole("button", { name: "Send", exact: true }).isDisabled(),
+    true,
   );
-});
-
-test("CH-2: Send anyway on a post that ends with a mention still sends on Enter", async (t) => {
-  const { ui } = await chatRoom(t, [
-    channelPost("p1", "nice work by @codex", { state: "unrouted", to: [] }),
-  ]);
-  await ui.page
-    .locator("main")
-    .getByRole("button", { name: "Send this to @codex" })
-    .click();
-  await ui.page.waitForFunction(
-    () => document.activeElement?.matches("aside textarea") === true,
-  );
-  assert.equal(await ui.page.getByRole("listbox").count(), 0, "no member list");
-  await ui.page.keyboard.press("Enter");
-  await until(() => ui.posts.attempts.length === 1, "the sent post");
-  const posted = JSON.parse(ui.posts.attempts[0].raw);
-  assert.equal(posted.source, "@codex nice work by @codex");
-  assert.equal(posted.in_reply_to, "p1");
+  assert.equal(ui.posts.attempts.length, 0, "a name alone never posts");
+  await box.pressSequentially("hi");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the reply");
+  assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@codex hi");
 });
 
 test("CH-2: the channel composer says where Enter sends, posts plain text, and a post that mentions agents waits on Checking who this is for", async (t) => {

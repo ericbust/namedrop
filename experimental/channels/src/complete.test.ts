@@ -420,6 +420,13 @@ test("complete: a channel post sends as typed, a thread reply needs agents or it
   assert.equal(postSource("@shell ls -la", nobody), "@shell ls -la");
   assert.equal(postSource("#alpha @shell ls", nobody), "#alpha @shell ls");
   assert.equal(postSource("   ", agents), null);
+  for (const rule of [channel, agents, nobody])
+    for (const text of ["@codex", " @codex  ", "#alpha @codex @shell\n"])
+      assert.equal(
+        postSource(text, rule),
+        null,
+        `${JSON.stringify(text)} names someone but has no message`,
+      );
 });
 
 test("complete: the hint says where Enter sends the text", () => {
