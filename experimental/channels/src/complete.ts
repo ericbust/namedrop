@@ -240,7 +240,7 @@ export function accept(
 
 const ALIAS = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const LABEL = /^#[A-Za-z0-9._-]+$/;
-// A name typed with punctuation stuck to it, as in "@codex," or "@codex:".
+// A name typed with punctuation stuck to it, as in "@codex;" or "@codex,,".
 const PUNCTUATED = /^@([A-Za-z0-9-]+)[,.:;!?]+$/;
 const TOKEN_CHAR = /[A-Za-z0-9_-]/;
 const EMBEDDED_AFTER = /[A-Za-z0-9_\\]/;
@@ -258,14 +258,22 @@ function spaceAfter(text: string, at: number): number {
   while (at < text.length && WHITESPACE.test(text.charAt(at))) at++;
   return at;
 }
-function serverMentions(text: string): Mentions {
+// A leading `#label` or `@name` word may end in one `,` or `:`, which is not part of it.
+function recipient(word: string): string {
+  return /[,:]$/.test(word) ? word.slice(0, -1) : word;
+}
+function afterLabels(text: string): number {
   let at = spaceAfter(text, 0);
-  while (LABEL.test(wordAt(text, at)))
+  while (LABEL.test(recipient(wordAt(text, at))))
     at = spaceAfter(text, at + wordAt(text, at).length);
+  return at;
+}
+function serverMentions(text: string): Mentions {
+  let at = afterLabels(text);
   const leading = new Set<string>();
   let word = wordAt(text, at);
-  while (word.startsWith("@") && ALIAS.test(word.slice(1))) {
-    leading.add(word);
+  while (word.startsWith("@") && ALIAS.test(recipient(word).slice(1))) {
+    leading.add(recipient(word));
     at = spaceAfter(text, at + word.length);
     word = wordAt(text, at);
   }
@@ -310,14 +318,11 @@ function refusedLeading(
   text: string,
   members: ReadonlyMap<AddressId, Member>,
 ): string | null {
-  let at = spaceAfter(text, 0);
-  const start = at;
-  while (LABEL.test(wordAt(text, at)))
-    at = spaceAfter(text, at + wordAt(text, at).length);
-  const labeled = at > start;
+  let at = afterLabels(text);
+  const labeled = at > spaceAfter(text, 0);
   const first = wordAt(text, at);
   if (first.length > 1 && first.startsWith("@")) {
-    if (!ALIAS.test(asciiLower(first.slice(1)))) {
+    if (!ALIAS.test(asciiLower(recipient(first).slice(1)))) {
       const name = PUNCTUATED.exec(first)?.[1];
       return name !== undefined && ALIAS.test(asciiLower(name))
         ? composerCopy.spaceAfter(`@${asciiLower(name)}`)
@@ -326,8 +331,11 @@ function refusedLeading(
   }
   const names: string[] = [];
   let word = first;
-  while (word.startsWith("@") && ALIAS.test(asciiLower(word.slice(1)))) {
-    names.push(word);
+  while (
+    word.startsWith("@") &&
+    ALIAS.test(asciiLower(recipient(word).slice(1)))
+  ) {
+    names.push(recipient(word));
     at = spaceAfter(text, at + word.length);
     word = wordAt(text, at);
   }

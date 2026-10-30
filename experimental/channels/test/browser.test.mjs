@@ -8658,6 +8658,37 @@ test("DESIGN-R2 B1: the channel hint names a capitalized or unknown leading name
   assert.equal(await box.inputValue(), "@Nobody hi there", "the text stays");
 });
 
+test("R3 U1: a leading name may end in one comma or colon, so the hint says Enter sends only to it and Enter sends the text as typed", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const hints = [
+    ["@codex, hi", "Enter sends only to @codex"],
+    ["@codex: hi", "Enter sends only to @codex"],
+    ["@claude, @codex, compare notes", "Enter sends only to @claude, @codex"],
+    ["#alpha @codex, x", "Enter sends only to @codex"],
+    ["@codex,, hi", "Put a space after @codex"],
+    ["@codex; hi", "Put a space after @codex"],
+    ["@Codex, hi", "Names are lowercase: @codex"],
+  ];
+  for (const [text, hint] of hints) {
+    await box.fill(text);
+    assert.equal(await status.textContent(), hint, JSON.stringify(text));
+  }
+  await box.fill("@codex,");
+  await box.press("Enter");
+  await readsAs(status, "Add a message after @codex.");
+  assert.equal(await box.inputValue(), "@codex,", "a name alone never sends");
+  await box.fill("@claude, @codex, compare notes");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(
+    JSON.parse(ui.posts.attempts[0].raw).source,
+    "@claude, @codex, compare notes",
+  );
+});
+
 test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {
   const at = Date.now() - 600_000;
   const { ui } = await chatRoom(t, [

@@ -623,8 +623,8 @@ main column, under the timeline, and at the bottom of the thread pane.
   the hint line read "Start with @name to choose who gets this." in `--text`.
   Typing clears it, so it never nags while a recipient is still being typed. A
   channel post always sends, as Channel chat says.
-- Names with no message after them, as in `@codex` or `#alpha @codex`, never
-  send in any composer, because the server refuses them. After Enter the hint
+- Names with no message after them, as in `@codex`, `@codex,` or
+  `#alpha @codex`, never send in any composer, because the server refuses them. After Enter the hint
   line reads "Add a message after @codex." in `--text`, and typing clears it.
 - A refused draft remembers its latest attempt: the request id and the exact
   text and reply target it tried. Sending that same text again reuses the id,
@@ -901,12 +901,17 @@ Enter sends:
   "+N".
 - Text that starts with mentions: "Enter sends only to @codex", "Enter sends
   only to @codex, @shell", or "Enter sends only to @codex, @shell +2". The
-  names are the leading aliases as typed, without `#label` tokens.
+  names are the leading aliases as typed, without `#label` tokens. A leading
+  name or `#label` may end in one `,` or `:`, which is not part of it, so
+  "@codex, hi", "@codex: hi" and "@claude, @codex, compare notes" all start
+  with mentions.
 - Text that starts with something the server refuses, read the way the server
   reads leading names (after any `#label` words, each `@name` that is an alias
-  once its ASCII letters are lowercased), checked in the server's order:
-  - A first `@` word with punctuation stuck to a name: "Put a space after
-    @codex", for "@codex, hi" or "@codex: hi". The server reads whole words.
+  once one trailing `,` or `:` is dropped and its ASCII letters are
+  lowercased), checked in the server's order:
+  - A first `@` word with other punctuation stuck to a name, or two marks:
+    "Put a space after @codex", for "@codex; hi", "@codex. hi" or
+    "@codex,, hi". The server reads whole words.
   - Any other first `@` word that is no name at all: "@codex_x isn't in this
     channel", as typed.
   - A name with capitals: "Names are lowercase: @codex", with the member's

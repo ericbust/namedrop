@@ -374,7 +374,22 @@ test("complete: a post names its recipients only the way the server's grammar re
     ["#alpha", []],
     ["#42 fix the build", []],
     ["@Codex hi", []],
-    ["@codex, hi", []],
+    ["@codex, hi", ["@codex"]],
+    ["@codex: hi", ["@codex"]],
+    ["@codex,", ["@codex"]],
+    ["@claude, @codex, compare notes", ["@claude", "@codex"]],
+    ["@claude: @codex hi", ["@claude", "@codex"]],
+    ["#alpha @codex, x", ["@codex"]],
+    ["#alpha, @codex hi", ["@codex"]],
+    ["#alpha: #beta, @codex: hi", ["@codex"]],
+    ["@codex,, hi", []],
+    ["@codex:: hi", []],
+    ["@codex,: hi", []],
+    ["@codex; hi", []],
+    ["@codex. hi", []],
+    ["@codex,hi", []],
+    ["@codex @claude; hi", ["@codex"]],
+    ["#alpha,, @codex hi", []],
     ["@-codex hi", []],
     ["@co--dex hi", []],
     ["#alpha hi @codex", []],
@@ -464,6 +479,7 @@ test("complete: a channel post sends as typed, a thread reply needs agents or it
   assert.equal(postSource("  hello room ", channel), "hello room");
   assert.equal(postSource("can @codex look?", channel), "can @codex look?");
   assert.equal(postSource("@codex hi", channel), "@codex hi");
+  assert.equal(postSource("@codex, hi", channel), "@codex, hi");
   assert.equal(postSource("  \n ", channel), null);
   const agents = { kind: "thread", to: ["@lead · #alpha"] } as const;
   assert.equal(postSource(" thanks ", agents), "thanks", "never prefixed");
@@ -476,7 +492,14 @@ test("complete: a channel post sends as typed, a thread reply needs agents or it
   assert.equal(postSource("#alpha @shell ls", nobody), "#alpha @shell ls");
   assert.equal(postSource("   ", agents), null);
   for (const rule of [channel, agents, nobody])
-    for (const text of ["@codex", " @codex  ", "#alpha @codex @shell\n"])
+    for (const text of [
+      "@codex",
+      " @codex  ",
+      "#alpha @codex @shell\n",
+      "@codex,",
+      "@codex:",
+      "@claude, @codex:",
+    ])
       assert.equal(
         postSource(text, rule),
         null,
@@ -531,12 +554,23 @@ test("complete: the hint names leading text the server refuses, reading leading 
     ["@nobody @Codex hi", "Names are lowercase: @codex"],
     ["@codex @nobody hi", "Enter sends only to @codex, @nobody"],
     ["@ghost come back", "Enter sends only to @ghost"],
-    ["@codex, hi", "Put a space after @codex"],
-    ["@codex: can you look", "Put a space after @codex"],
-    ["@Codex, hi", "Put a space after @codex"],
-    ["#alpha @codex, hi", "Put a space after @codex"],
+    ["@codex, hi", "Enter sends only to @codex"],
+    ["@codex: hi", "Enter sends only to @codex"],
+    ["@codex: can you look", "Enter sends only to @codex"],
+    ["@claude, @codex, compare notes", "Enter sends only to @claude, @codex"],
+    ["#alpha @codex, x", "Enter sends only to @codex"],
+    ["#alpha: @codex hi", "Enter sends only to @codex"],
+    ["@codex @claude, hi", "Enter sends only to @codex, @claude"],
+    ["@Codex, hi", "Names are lowercase: @codex"],
+    ["@Codex: hi", "Names are lowercase: @codex"],
+    ["@codex, @Claude: hi", "Names are lowercase: @claude"],
+    ["@codex; hi", "Put a space after @codex"],
+    ["@codex. hi", "Put a space after @codex"],
+    ["@codex,, hi", "Put a space after @codex"],
+    ["@codex:: hi", "Put a space after @codex"],
+    ["@codex,: hi", "Put a space after @codex"],
+    ["#alpha @codex; hi", "Put a space after @codex"],
     ["@codex_x hi", "@codex_x isn't in this channel"],
-    ["@codex @claude, hi", "Enter sends only to @codex"],
     ["@ hi", room],
     ["#alpha @Codex hi", "Names are lowercase: @codex"],
     ["#beta @Coder hi", "Names are lowercase: @coder"],
@@ -547,7 +581,7 @@ test("complete: the hint names leading text the server refuses, reading leading 
   ];
   for (const [text, expected] of cases)
     assert.equal(hint(text), expected, JSON.stringify(text));
-  for (const text of ["@Codex quick check", "@codex, hi", "@nobody hi there"])
+  for (const text of ["@Codex quick check", "@codex; hi", "@nobody hi there"])
     assert.equal(postSource(text, channel), text, "Enter still sends it");
 });
 
