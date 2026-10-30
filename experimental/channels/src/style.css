@@ -457,12 +457,15 @@ a:hover {
   background: var(--working);
 }
 
+/* Below the floors of a short window, the column scrolls as a whole, so the
+   composer is never out of reach. */
 .main {
   grid-row: 2;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden auto;
 }
 .main:focus-visible {
   outline-offset: -2px;
@@ -1352,6 +1355,7 @@ button.member:not(.more):hover {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden auto;
   border-left: 1px solid var(--line);
   background: var(--bg);
   animation: slot-in var(--duration) var(--ease-out);
@@ -2090,6 +2094,19 @@ code.inline {
     z-index: 2;
     background: var(--scrim);
     animation: backdrop-in var(--duration) var(--ease-out);
+  }
+}
+/* A window this short lowers the floors, so the composer stays whole down to
+   300 px tall. */
+@media (max-height: 420px) {
+  .channel-header {
+    height: 48px;
+  }
+  .attention {
+    min-height: 40px;
+  }
+  .timeline {
+    min-height: 48px;
   }
 }
 @keyframes backdrop-in {
