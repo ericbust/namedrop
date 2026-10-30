@@ -24,7 +24,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-type TuiRuntime<'a> = LifecycleRuntime<'a, TuiHost<ProcessHerdr>, SystemClock, ProcessIds>;
+type TuiRuntime<'a> = LifecycleRuntime<'a, TuiHost<&'a ProcessHerdr>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
     if env::args_os().skip(1).eq(["--runtime-info"]) {
@@ -175,10 +175,14 @@ fn main() -> ExitCode {
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
-        return run_context_hook(state_directory, execute_user_prompt_submit_hook);
+        return run_context_hook(state_directory, |input, runtime| {
+            execute_user_prompt_submit_hook(input, runtime)
+        });
     }
     if let Some(state_directory) = cli.session_start_hook_state_directory() {
-        return run_context_hook(state_directory, execute_session_start_hook);
+        return run_context_hook(state_directory, |input, runtime| {
+            execute_session_start_hook(input, runtime)
+        });
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
         return run_mailbox_wake_hook(state_directory);
@@ -433,7 +437,9 @@ fn choose_name_type(cli: &Cli) -> Result<Option<namedrop::PaneType>, String> {
     if cli.name_pane_type().is_some() || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Ok(cli.name_pane_type());
     }
-    let default = with_runtime_options(&cli.runtime, namedrop::default_pane_type)?;
+    let default = with_runtime_options(&cli.runtime, |runtime: &TuiRuntime<'_>| {
+        namedrop::default_pane_type(runtime)
+    })?;
     loop {
         eprint!(
             "Pane type: terminal / agent{}: ",
@@ -630,7 +636,8 @@ fn with_runtime_options<T>(
     let claude_config = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let codex_config = env::var_os("CODEX_HOME").map(PathBuf::from);
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
-    let host = TuiHost::new(ProcessHerdr::default().with_socket(options.herdr_socket.clone()));
+    let transport = ProcessHerdr::default().with_socket(options.herdr_socket.clone());
+    let host = TuiHost::new(&transport);
     let identity = host.caller_identity(&namedrop::CallerClaim {
         workspace: options
             .herdr_workspace
@@ -660,7 +667,7 @@ fn with_runtime_options<T>(
         workspace_id: workspace_id.as_deref(),
         current_pane_id: pane_id.as_deref(),
         session_socket_id: &socket_id,
-        host: &host,
+        host,
         clock: &clock,
         ids: &ids,
     })
@@ -713,7 +720,8 @@ fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
 /// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
 fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
     let wake = || -> Result<(), String> {
-        let host = TuiHost::new(ProcessHerdr::default());
+        let transport = ProcessHerdr::default();
+        let host = TuiHost::new(&transport);
         let socket_id = session_socket_id(None, &host);
         let space_id = match env::var("HERDR_WORKSPACE_ID") {
             Ok(space_id) => space_id,
@@ -914,10 +922,11 @@ fn run_agent_status_worker() -> ExitCode {
                     wait_for_marker_or_deadline(&directory, due);
                     continue;
                 }
-                deadline_ms =
-                    with_runtime_options(&RuntimeOptions::default(), namedrop::drain_mailboxes)
-                        .ok()
-                        .and_then(|report| report.next_grace_due_ms());
+                deadline_ms = with_runtime_options(&RuntimeOptions::default(), |runtime| {
+                    namedrop::drain_mailboxes(runtime)
+                })
+                .ok()
+                .and_then(|report| report.next_grace_due_ms());
                 continue;
             }
             let _ = lock.unlock();

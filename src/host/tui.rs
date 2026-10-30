@@ -3,6 +3,7 @@ use crate::{AgentSessionId, HerdrCommandExecutor, HerdrCommandOutput, WorktreeId
 use serde::Deserialize;
 use serde_json::Value;
 
+#[derive(Clone, Copy)]
 pub struct TuiHost<E: HerdrCommandExecutor> {
     transport: E,
 }
@@ -975,7 +976,7 @@ mod tests {
                 workspace_id: Some("w1"),
                 current_pane_id: Some("w1:p1"),
                 session_socket_id: "/test/socket",
-                host: &host,
+                host,
                 clock: &(),
                 ids: &(),
             },

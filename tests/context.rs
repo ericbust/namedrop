@@ -288,7 +288,7 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some(pane_id),
         session_socket_id: "socket-a",
-        host: Box::leak(Box::new(namedrop::TuiHost::new(herdr))),
+        host: namedrop::TuiHost::new(herdr),
         clock: &FixedClock,
         ids,
     }

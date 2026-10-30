@@ -54,7 +54,7 @@ pub struct LifecycleRuntime<'a, H, C, I> {
     pub workspace_id: Option<&'a str>,
     pub current_pane_id: Option<&'a str>,
     pub session_socket_id: &'a str,
-    pub host: &'a H,
+    pub host: H,
     pub clock: &'a C,
     pub ids: &'a I,
 }
@@ -241,7 +241,7 @@ pub fn execute_lifecycle_operation<H, C, I>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    H: Host,
+    H: Host + Copy,
     C: Clock,
     I: IdGenerator,
 {
@@ -421,7 +421,7 @@ where
                     &pane.tab_id,
                     &address_id,
                     &format!("@{alias}"),
-                    runtime.host,
+                    &runtime.host,
                 )
             } else {
                 json!({"status": "unchanged", "reason": "tab_has_multiple_agents"})
@@ -506,7 +506,7 @@ where
                 false,
             )?;
             let shortcuts =
-                crate::shortcuts::activate_shortcuts(runtime.home_directory, runtime.host);
+                crate::shortcuts::activate_shortcuts(runtime.home_directory, &runtime.host);
             // After the shortcuts, so the tour's reopen shortcut already works
             // when the popup mentions it. It reports instead of failing.
             let tour = crate::tour::show_for_first_agent(runtime, &discovered, None);

@@ -199,7 +199,7 @@ fn live_origin_probe() {
         workspace_id: Some(&workspace),
         current_pane_id: Some(&pane_id),
         session_socket_id: &socket,
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &clock,
         ids: &ids,
     };

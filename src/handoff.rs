@@ -100,7 +100,7 @@ where
     let remote = store
         .transaction(|tx| tx.queued_remote_seat_spaces(&namespace))
         .map_err(|e| e.to_string())?;
-    let live = crate::spaces::LiveSpaces::load(runtime.host, discovered.clone(), &remote);
+    let live = crate::spaces::LiveSpaces::load(&runtime.host, discovered.clone(), &remote);
     store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx, &namespace, pane, &discovered)?;
         if let Some(id) = coordination_id { return tx.coordination_report(&namespace,&id,&author); }
@@ -183,7 +183,7 @@ where
         .ok_or("Namedrop has no saved state")?;
     let reference_aliases = crate::message::body_reference_aliases(
         &parsed,
-        &crate::spaces::HerdrWorkspaces::new(runtime.host),
+        &crate::spaces::HerdrWorkspaces::new(&runtime.host),
     );
     store.transaction(|tx| {
         let author = crate::context::registered_current_address(tx,&namespace,pane,&discovered)?;

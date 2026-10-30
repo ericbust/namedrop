@@ -448,12 +448,12 @@ pub fn execute_message_operation<H, C, I>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    H: crate::Host,
+    H: crate::Host + Copy,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     let input = parse_operation_input(operation, input)?;
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.host);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(&runtime.host);
     if operation == "send"
         && let Some(scope) = scope_without_mention(&input.source)
     {
@@ -559,7 +559,7 @@ where
             .to_owned()
             .into());
     }
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.host);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(&runtime.host);
     if let Some(scope) = workspace_prompt_scope(&input.source) {
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces));
     }
@@ -794,7 +794,7 @@ where
         let spaces = store
             .transaction(|transaction| routing.remote_spaces(transaction, &namespace))
             .map_err(|error| error.to_string())?;
-        crate::spaces::LiveSpaces::load(runtime.host, discovered.clone(), &spaces)
+        crate::spaces::LiveSpaces::load(&runtime.host, discovered.clone(), &spaces)
     } else {
         crate::spaces::LiveSpaces::here(discovered.clone())
     };

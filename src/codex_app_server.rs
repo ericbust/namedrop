@@ -199,7 +199,7 @@ pub(crate) fn served_codex_panes<H: Host, C, I>(
     };
     let pane_ids = codex
         .into_iter()
-        .filter(|pane| !pane_runs_in_process(runtime.host, &pane.pane_id))
+        .filter(|pane| !pane_runs_in_process(&runtime.host, &pane.pane_id))
         .map(|pane| pane.pane_id.clone())
         .collect::<Vec<_>>();
     (!pane_ids.is_empty()).then_some(ServedPanes { server, pane_ids })
@@ -565,7 +565,7 @@ mod tests {
             workspace_id: Some("w1"),
             current_pane_id: None,
             session_socket_id: "default",
-            host: &crate::TuiHost::new(herdr),
+            host: crate::TuiHost::new(herdr),
             clock: &(),
             ids: &(),
         };

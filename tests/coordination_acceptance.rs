@@ -102,7 +102,7 @@ impl Fixture {
             workspace_id: Some("synthetic-workspace"),
             current_pane_id: Some(pane),
             session_socket_id: "synthetic-socket",
-            host: Box::leak(Box::new(namedrop::TuiHost::new(self))),
+            host: namedrop::TuiHost::new(self),
             clock: self,
             ids: self,
         }

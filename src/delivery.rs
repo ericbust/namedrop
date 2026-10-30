@@ -327,7 +327,7 @@ where
                 .transaction(|tx| tx.terminal_result(&namespace, &attempt.attempt_id))
                 .map_err(|e| e.to_string())?
                 .is_none()
-            && crate::terminal::shell_is_available(runtime.host, &attempt.pane_id)
+            && crate::terminal::shell_is_available(&runtime.host, &attempt.pane_id)
         {
             store
                 .transaction(|tx| {
@@ -365,7 +365,7 @@ where
         .transaction(|transaction| transaction.remote_seat_spaces(&namespace))
         .map_err(|error| error.to_string())?;
     let live =
-        crate::spaces::LiveSpaces::load(runtime.host, first_discovery.clone(), &remote_seats);
+        crate::spaces::LiveSpaces::load(&runtime.host, first_discovery.clone(), &remote_seats);
     store
         .transaction(|transaction| {
             transaction.complete_ready_result_sets(
@@ -400,7 +400,7 @@ where
         };
         if !live_candidate_matches(&first, &first_discovery)
             || (first.pane_type == crate::PaneType::Terminal
-                && !crate::terminal::shell_is_available(runtime.host, &first.pane_id))
+                && !crate::terminal::shell_is_available(&runtime.host, &first.pane_id))
         {
             if first.pane_type == crate::PaneType::Terminal {
                 report.terminal_waiting.push(address_id);
@@ -432,7 +432,7 @@ where
                         .iter()
                         .find(|p| p.pane_id == second.pane_id)
                         .map(|p| &p.terminal_id)
-                    || !crate::terminal::shell_is_available(runtime.host, &second.pane_id)))
+                    || !crate::terminal::shell_is_available(&runtime.host, &second.pane_id)))
         {
             if second.pane_type == crate::PaneType::Terminal {
                 report.terminal_waiting.push(address_id);

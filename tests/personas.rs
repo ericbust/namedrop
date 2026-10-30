@@ -103,7 +103,7 @@ fn a_persona_survives_renaming_rebinding_and_restart_until_it_is_cleared() {
         workspace_id: Some("w1"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        host: &namedrop::TuiHost::new(&Host),
+        host: namedrop::TuiHost::new(&Host),
         clock: &Time,
         ids: &ids,
     };
@@ -179,7 +179,7 @@ fn persona_input_is_bounded_control_safe_and_never_clears_by_accident() {
         workspace_id: Some("w1"),
         current_pane_id: Some(pane_id),
         session_socket_id: "socket",
-        host: Box::leak(Box::new(namedrop::TuiHost::new(&Host))),
+        host: namedrop::TuiHost::new(&Host),
         clock: &Time,
         ids: &ids,
     };
@@ -300,7 +300,7 @@ fn upgrading_keeps_custom_descriptions_and_starts_native_names_generic() {
         workspace_id: Some("w1"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        host: &namedrop::TuiHost::new(&Host),
+        host: namedrop::TuiHost::new(&Host),
         clock: &Time,
         ids: &ids,
     };

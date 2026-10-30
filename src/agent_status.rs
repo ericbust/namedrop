@@ -136,7 +136,7 @@ where
     });
 
     let ordered = wait_first_order(&visible, origin, &waits);
-    let rows = pane_rows(runtime.host, &ordered, &addresses, &reads, &mut warnings);
+    let rows = pane_rows(&runtime.host, &ordered, &addresses, &reads, &mut warnings);
 
     // Identities are re-read after the excerpts, so every pane in the snapshot
     // is one whose space, terminal and session held for the whole collection.
@@ -198,10 +198,6 @@ where
         .map_err(String::from)
 }
 
-/// Spends one collection budget across every read, so a slow pane cannot
-/// consume the whole panel's latency budget. Reads made through the existing
-/// discovery helpers pass through here too, and the state store is handed the
-/// same remaining budget.
 struct Deadline<'a, C> {
     clock: &'a C,
     deadline_ms: u64,
@@ -209,25 +205,12 @@ struct Deadline<'a, C> {
 }
 
 impl<C: Clock> Deadline<'_, C> {
-    fn remaining(&self) -> Result<Duration, String> {
-        if self.cancelled.load(Ordering::Relaxed) {
-            return Err(CANCELLED.to_owned());
-        }
-        let remaining = self.deadline_ms.saturating_sub(self.clock.now_unix_ms());
-        if remaining == 0 {
-            return Err(format!(
-                "Reading this space took longer than its {COLLECTION_BUDGET_MS} ms budget."
-            ));
-        }
-        Ok(Duration::from_millis(remaining))
-    }
-
     /// What an excerpt read may be given: the remaining budget less the reserve
     /// the closing identity check needs. Checking only whether a read may
     /// *start* is not enough, because a stalled read spends whatever timeout it
     /// was handed, so the reserve has to come out of the timeout itself.
     fn remaining_before_verification(&self) -> Result<Duration, String> {
-        self.remaining()?
+        crate::Budget::remaining(self)?
             .checked_sub(Duration::from_millis(VERIFY_RESERVE_MS))
             .filter(|left| !left.is_zero())
             .ok_or_else(|| {
@@ -243,7 +226,16 @@ impl<C: Clock> crate::Budget for Deadline<'_, C> {
     /// Discovery, including the closing identity check, may use everything that
     /// is left: it is the one read the snapshot cannot do without.
     fn remaining(&self) -> Result<Duration, String> {
-        self.remaining()
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Err(CANCELLED.to_owned());
+        }
+        let remaining = self.deadline_ms.saturating_sub(self.clock.now_unix_ms());
+        if remaining == 0 {
+            return Err(format!(
+                "Reading this space took longer than its {COLLECTION_BUDGET_MS} ms budget."
+            ));
+        }
+        Ok(Duration::from_millis(remaining))
     }
     fn cancelled(&self) -> &AtomicBool {
         self.cancelled
@@ -356,7 +348,7 @@ where
     // The state read gets a share of the budget rather than all of it, and it
     // stops between report rows once that share is gone.
     let state_deadline_ms = now.saturating_add(STATE_BUDGET_MS).min(reads.deadline_ms);
-    let budget = match reads.remaining() {
+    let budget = match crate::Budget::remaining(reads) {
         Ok(budget) => budget.min(Duration::from_millis(STATE_BUDGET_MS)),
         Err(error) => {
             warnings.push(format!("{REQUESTS_UNKNOWN} {error}"));

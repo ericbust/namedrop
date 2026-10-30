@@ -134,7 +134,7 @@ fn confirmed_cancel_held_is_exact_and_never_retries_or_stops_an_agent() {
             workspace_id: None,
             current_pane_id: Some("pane-sender"),
             session_socket_id: "socket-a",
-            host: &namedrop::TuiHost::new(&herdr),
+            host: namedrop::TuiHost::new(&herdr),
             clock: &FixedClock,
             ids: &ids,
         };
@@ -334,7 +334,7 @@ fn a_human_can_acknowledge_a_missing_disposition_only_for_a_retired_recipient() 
         workspace_id: None,
         current_pane_id: Some("pane-sender"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -494,7 +494,7 @@ fn expired_unsent_delivery_has_truthful_health_and_confirmed_exact_cancellation(
         workspace_id: None,
         current_pane_id: Some("pane-sender"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &LateClock,
         ids: &ids,
     };
@@ -1118,7 +1118,7 @@ fn control_operations_mutate_durable_state_and_stop_only_a_proven_thread_respons
         workspace_id: None,
         current_pane_id: Some("pane-sender"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };

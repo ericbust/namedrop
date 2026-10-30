@@ -176,7 +176,7 @@ fn runtime<'a>(
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: Box::leak(Box::new(namedrop::TuiHost::new(&FakeHerdr))),
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids,
     }
@@ -523,7 +523,7 @@ fn production_onboarding_challenges_registers_and_drains_queued_work() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -739,7 +739,7 @@ fn replacement_registration_clears_superseded_failure_attention() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -823,7 +823,7 @@ fn registered_working_recipient_drains_on_settle_without_explicit_reconciliation
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -916,7 +916,7 @@ fn production_onboarding_failure_keeps_delivery_queued_and_opens_attention() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -979,7 +979,7 @@ fn accepted_registration_prompt_that_settles_unregistered_opens_attention() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1074,7 +1074,7 @@ fn working_observation_during_prompt_dispatch_still_opens_attention_after_settle
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -1147,7 +1147,7 @@ fn production_onboarding_recognizes_claude_code_sessions() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2602,7 +2602,7 @@ fn a_registration_under_a_smaller_profile_is_expired_and_re_challenged() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -2727,7 +2727,7 @@ fn older_complete_profiles_stay_registered_and_registerable() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3033,7 +3033,7 @@ fn activation_installs_both_shared_packages_before_challenging_either_runtime() 
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3110,7 +3110,7 @@ fn repeated_lifecycle_events_never_rewrite_an_unchanged_package() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3170,7 +3170,7 @@ fn a_previous_version_package_is_replaced_without_touching_unrelated_files() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3217,7 +3217,7 @@ fn an_unowned_package_blocks_its_runtime_until_a_later_refresh_succeeds() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3350,7 +3350,7 @@ fn naming_reports_its_failed_runtime_without_claiming_readiness() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3772,7 +3772,7 @@ fn an_unwritable_skill_root_blocks_its_runtime_and_recovers() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -3876,7 +3876,7 @@ fn a_registered_runtime_stops_delivering_while_its_package_refresh_fails() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -4022,7 +4022,7 @@ fn a_failed_package_leaves_the_other_runtime_delivering() {
         workspace_id: None,
         current_pane_id: Some("pane-agent"),
         session_socket_id: "socket-a",
-        host: &namedrop::TuiHost::new(&herdr),
+        host: namedrop::TuiHost::new(&herdr),
         clock: &FixedClock,
         ids: &ids,
     };

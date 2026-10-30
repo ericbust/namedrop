@@ -761,7 +761,7 @@ fn concurrent_native_registration_completes_one_profile() {
         workspace_id: Some("space"),
         current_pane_id: Some("pane"),
         session_socket_id: "socket",
-        host: &crate::TuiHost::new(&Host),
+        host: crate::TuiHost::new(&Host),
         clock: &crate::SystemClock,
         ids: &crate::ProcessIds::default(),
     };

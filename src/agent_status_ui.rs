@@ -144,10 +144,6 @@ pub(crate) enum Identity {
     Unconfirmed(String),
 }
 
-/// Forwards `discover_worktree_for_workspace`'s ordinary reads through bounded
-/// ones. That call makes up to two Herdr requests on the default ten-second
-/// timeout; here they share one short deadline and the pass's cancellation
-/// flag, so closing the popup ends the recheck instead of waiting it out.
 struct BoundedReads<'a> {
     deadline: Instant,
     cancelled: &'a AtomicBool,

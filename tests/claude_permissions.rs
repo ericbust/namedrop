@@ -113,7 +113,7 @@ print(json.dumps({'result':result}))
             workspace_id: None,
             current_pane_id: Some("pane-1"),
             session_socket_id: "socket-a",
-            host: Box::leak(Box::new(namedrop::TuiHost::new(&Host))),
+            host: namedrop::TuiHost::new(&Host),
             clock: &Time,
             ids: &self.ids,
         }

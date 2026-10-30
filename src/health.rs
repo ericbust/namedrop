@@ -363,7 +363,7 @@ where
             {
                 if pane.agent.is_none()
                     && pane.agent_session_id.is_none()
-                    && crate::terminal::shell_is_available(runtime.host, &pane.pane_id)
+                    && crate::terminal::shell_is_available(&runtime.host, &pane.pane_id)
                 {
                     available_terminals += 1;
                 } else {
