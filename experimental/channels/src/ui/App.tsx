@@ -9,6 +9,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { flushSync } from "react-dom";
 import { type ActivityList, activityOf } from "../activity.ts";
 import {
   absence,
@@ -722,9 +723,13 @@ export function App() {
     },
     [openThread],
   );
+  // Where the pane covers the channel, the channel shows again only once React
+  // commits the close, and a hidden button can't take focus.
   const closeThread = useCallback(() => {
-    focusEvidence({ type: "close" });
-    dispatch({ type: "thread", threadId: null });
+    flushSync(() => {
+      focusEvidence({ type: "close" });
+      dispatch({ type: "thread", threadId: null });
+    });
     const saved = returnFocus.current;
     if (!saved) return;
     const button = saved.button.isConnected
@@ -752,7 +757,7 @@ export function App() {
     [],
   );
   const closePeek = useCallback(() => {
-    dispatch({ type: "peek", target: null });
+    flushSync(() => dispatch({ type: "peek", target: null }));
     const saved = opening.current;
     const control =
       saved === null

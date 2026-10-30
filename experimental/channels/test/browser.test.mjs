@@ -9260,3 +9260,66 @@ test("UI-R4 L4: at every size, with a banner, a thread open or the drawer open, 
   }
   assert.deepEqual(problems, []);
 });
+
+test("UI-R4 L1: on a phone or a short narrow window, the thread and the screen take the channel's place, and closing them brings back the channel with its draft, scroll and focus", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const main = ui.page.getByRole("main");
+  const timeline = main.getByRole("region", { name: "Message history" });
+  const box = main.getByRole("combobox");
+  const focused = (locator) =>
+    locator.evaluate((element) => element === document.activeElement);
+  for (const [width, height] of [
+    [390, 844],
+    [640, 460],
+  ]) {
+    const at = `${width}x${height}`;
+    await ui.page.setViewportSize({ width, height });
+    await box.fill(`draft at ${at}`);
+    const reply = timeline.getByRole("button", { name: /^1 reply from/ });
+    const scroller = ui.page.locator("main .timeline");
+    const scrollTop = () => scroller.evaluate((element) => element.scrollTop);
+    for (const close of ["Escape", "Close thread"]) {
+      await reply.click();
+      await threadPane(ui).waitFor();
+      const scrolled = await scrollTop();
+      assert.equal(
+        await main.isVisible(),
+        false,
+        `the thread takes the channel's place at ${at}`,
+      );
+      assert.equal(
+        await threadPane(ui).getByText("in #alpha").count(),
+        1,
+        `the thread names its channel at ${at}`,
+      );
+      if (close === "Escape") await ui.page.keyboard.press("Escape");
+      else await threadPane(ui).getByRole("button", { name: close }).click();
+      await threadPane(ui).waitFor({ state: "detached" });
+      assert.equal(await main.isVisible(), true, `${close} returns at ${at}`);
+      assert.ok(
+        await focused(reply),
+        `${close} puts focus back on the reply button at ${at}`,
+      );
+      assert.equal(await box.inputValue(), `draft at ${at}`);
+      assert.equal(
+        await scrollTop(),
+        scrolled,
+        `${close} keeps the channel's scroll at ${at}`,
+      );
+    }
+    const chip = main
+      .getByRole("list", { name: "Members" })
+      .getByRole("button", { name: /@codex/ });
+    await chip.click();
+    await drawer(ui).waitFor();
+    assert.equal(await main.isVisible(), false, `the screen fills ${at}`);
+    await ui.page.keyboard.press("Escape");
+    await drawer(ui).waitFor({ state: "detached" });
+    assert.ok(
+      await focused(chip),
+      `Escape puts focus back on the member at ${at}`,
+    );
+  }
+});
