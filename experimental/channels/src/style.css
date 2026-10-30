@@ -81,6 +81,7 @@
   --shadow-pop:
     0 8px 24px -6px oklch(0.2 0.02 275 / 0.18),
     0 2px 6px -2px oklch(0.2 0.02 275 / 0.12);
+  --scrim: oklch(0.2 0.02 275 / 0.32);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -119,6 +120,7 @@
     --id-terminal: oklch(0.42 0.02 278);
     --shadow-pop:
       0 10px 28px -6px oklch(0 0 0 / 0.55), 0 2px 8px -2px oklch(0 0 0 / 0.4);
+    --scrim: oklch(0 0 0 / 0.5);
   }
 }
 
@@ -157,6 +159,7 @@
   --id-terminal: oklch(0.42 0.02 278);
   --shadow-pop:
     0 10px 28px -6px oklch(0 0 0 / 0.55), 0 2px 8px -2px oklch(0 0 0 / 0.4);
+  --scrim: oklch(0 0 0 / 0.5);
 }
 
 * {
@@ -2006,21 +2009,96 @@ code.inline {
     visibility: hidden;
   }
 }
+.channels-toggle {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin-left: calc(-1 * var(--space-2));
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  flex: none;
+}
+.thread-head .channels-toggle,
+.peek-head .channels-toggle {
+  margin-left: calc(-1 * var(--space-3));
+}
+.channels-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.channels-toggle .dot,
+.channels-toggle .connection-dot {
+  position: absolute;
+  right: 3px;
+  border: 2px solid var(--bg);
+}
+.channels-toggle .dot {
+  top: 3px;
+  width: 12px;
+  height: 12px;
+}
+.channels-toggle .connection-dot {
+  bottom: 4px;
+  width: 10px;
+  height: 10px;
+}
+.channels-toggle:hover .dot,
+.channels-toggle:hover .connection-dot {
+  border-color: var(--bg-hover);
+}
+/* A phone has no room for a sidebar column: the sidebar becomes a drawer over
+   the channel. */
 @media (max-width: 600px) {
   .app-shell,
   .app-shell.has-slot {
-    grid-template-columns: 160px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
   }
   .channel-header .health {
     display: none;
+  }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 3;
+    width: min(280px, calc(100vw - var(--space-10)));
+    box-shadow: var(--shadow-pop);
+    translate: -100% 0;
+    visibility: hidden;
+    transition:
+      translate var(--duration) var(--ease-out),
+      visibility 0s var(--duration);
+  }
+  .drawer-open .sidebar {
+    translate: none;
+    visibility: visible;
+    transition: translate var(--duration) var(--ease-out);
+  }
+  .drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2;
+    background: var(--scrim);
+    animation: backdrop-in var(--duration) var(--ease-out);
+  }
+}
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
   }
 }
 @media (prefers-reduced-motion: reduce) {
   .presence[data-activity="working"],
   .arrive,
   .slot,
-  .attention {
+  .attention,
+  .drawer-backdrop {
     animation: none;
+  }
+  .sidebar,
+  .drawer-open .sidebar {
+    transition: none;
   }
   .located,
   .located:hover,

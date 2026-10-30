@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useLayoutEffect, useRef } from "react";
+import { type KeyboardEvent, useEffect, useLayoutEffect, useRef } from "react";
 import { activityCopy, attentionCopy, composerCopy } from "../copy.ts";
 import type { Channel, SpaceKey, State } from "../model.ts";
 import { channelSuffix, connectionStatus, sortedChannels } from "../store.ts";
@@ -11,17 +11,66 @@ function reason(channel: Channel): string {
   const more = channel.attention.length - 1;
   return `${attentionCopy(first).title}${more > 0 ? ` · ${more} more` : ""}`;
 }
+function needsYouOf(channels: Channel[]): Channel[] {
+  return channels.filter((channel) => channel.health.level === "needs_you");
+}
+const TABBABLE = "a[href], button:not([disabled])";
+
+// On a phone the sidebar is a drawer, and the connection dot moves to the
+// button that opens it.
+type Drawer = { open: boolean; onClose: () => void };
 type Props = {
   state: State;
   busy: number;
+  id: string;
+  drawer: Drawer | null;
   onSelect: (key: SpaceKey) => void;
   onActivity: () => void;
 };
-export function Sidebar({ state, busy, onSelect, onActivity }: Props) {
+export function Sidebar({
+  state,
+  busy,
+  id,
+  drawer,
+  onSelect,
+  onActivity,
+}: Props) {
   const sidebar = useRef<HTMLElement>(null);
   const focusedRow = useRef<HTMLButtonElement | null>(null);
   const connection = connectionStatus(state);
   const channels = sortedChannels(state);
+  const modal = drawer?.open === true;
+  const close = drawer?.onClose;
+  useLayoutEffect(() => {
+    if (!modal) return;
+    const element = sidebar.current;
+    (
+      element?.querySelector<HTMLElement>(
+        '.channels-navigation [aria-current="page"], .activity-entry[aria-current="page"]',
+      ) ?? element?.querySelector<HTMLElement>(TABBABLE)
+    )?.focus();
+  }, [modal]);
+  useEffect(() => {
+    if (!modal || close === undefined) return;
+    const onEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      close();
+    };
+    document.addEventListener("keydown", onEscape);
+    return () => document.removeEventListener("keydown", onEscape);
+  }, [modal, close]);
+  function trap(event: KeyboardEvent<HTMLElement>) {
+    if (event.key !== "Tab") return;
+    const stops = [
+      ...event.currentTarget.querySelectorAll<HTMLElement>(TABBABLE),
+    ].filter((element) => element.tabIndex >= 0);
+    const at = stops.indexOf(document.activeElement as HTMLElement);
+    const edge = event.shiftKey ? 0 : stops.length - 1;
+    if (at !== -1 && at !== edge) return;
+    event.preventDefault();
+    (event.shiftKey ? stops.at(-1) : stops[0])?.focus();
+  }
   useLayoutEffect(() => {
     const row = focusedRow.current;
     if (
@@ -37,9 +86,7 @@ export function Sidebar({ state, busy, onSelect, onActivity }: Props) {
         ?.focus();
     }
   });
-  const needsYou = channels.filter(
-    (channel) => channel.health.level === "needs_you",
-  );
+  const needsYou = needsYouOf(channels);
   const notSent = new Set<SpaceKey>();
   for (const draft of state.drafts.values())
     if (draft.failure !== null) notSent.add(draft.key);
@@ -71,7 +118,8 @@ export function Sidebar({ state, busy, onSelect, onActivity }: Props) {
     }
     event.preventDefault();
     target?.focus();
-    target?.click();
+    // In the drawer, choosing a channel closes it, so arrows only move.
+    if (drawer === null) target?.click();
   }
   function tabKey(items: Channel[]) {
     return items.some((channel) => channel.key === state.selection.key)
@@ -92,7 +140,12 @@ export function Sidebar({ state, busy, onSelect, onActivity }: Props) {
   return (
     <aside
       className="sidebar"
+      id={id}
       ref={sidebar}
+      role={modal ? "dialog" : undefined}
+      aria-label={modal ? "Channels" : undefined}
+      tabIndex={modal ? -1 : undefined}
+      onKeyDown={modal ? trap : undefined}
       onFocusCapture={(event) => {
         const target = event.target;
         focusedRow.current =
@@ -232,7 +285,9 @@ export function Sidebar({ state, busy, onSelect, onActivity }: Props) {
         </nav>
       </div>
       <footer className="sidebar-footer">
-        <span className={`connection-dot ${connection}`} aria-hidden="true" />
+        {drawer === null && (
+          <span className={`connection-dot ${connection}`} aria-hidden="true" />
+        )}
         {connection === "live"
           ? "Live"
           : connection === "connecting"
@@ -240,5 +295,38 @@ export function Sidebar({ state, busy, onSelect, onActivity }: Props) {
             : "Reconnecting…"}
       </footer>
     </aside>
+  );
+}
+
+export function ChannelsToggle({
+  state,
+  open,
+  controls,
+  onOpen,
+}: {
+  state: State;
+  open: boolean;
+  controls: string;
+  onOpen: () => void;
+}) {
+  const needsYou = needsYouOf(sortedChannels(state)).length;
+  return (
+    <button
+      type="button"
+      className="channels-toggle"
+      aria-label={
+        needsYou === 0
+          ? "Channels"
+          : `Channels, ${needsYou} need${needsYou === 1 ? "s" : ""} you`
+      }
+      aria-haspopup="dialog"
+      aria-expanded={open}
+      aria-controls={controls}
+      onClick={onOpen}
+    >
+      <Icon name="menu" />
+      {needsYou > 0 && <span className="dot dot-alert" />}
+      <span className={`connection-dot ${connectionStatus(state)}`} />
+    </button>
   );
 }

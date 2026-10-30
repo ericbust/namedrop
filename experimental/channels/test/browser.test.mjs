@@ -2527,7 +2527,9 @@ test("DESIGN-R2 B2: the reply count is never covered: the preview text takes the
     });
   };
   for (const [width, height, text] of [
-    [390, 844, "count only"],
+    // A 390 px phone at 140 percent zoom is about 280 CSS px wide.
+    [280, 640, "count only"],
+    [390, 844, true],
     [599, 844, true],
     [640, 800, true],
     [1440, 900, true],
@@ -4344,7 +4346,7 @@ test("UI-3: the box re-fits a wrapped placeholder when the viewport narrows and 
   };
   const wide = await fit(1440);
   assert.equal(wide.height, 32, "one line when wide");
-  const narrow = await fit(480);
+  const narrow = await fit(360);
   assert.ok(
     Math.abs(narrow.scrollHeight - narrow.clientHeight) <= 1,
     `the narrow box fits its placeholder: ${JSON.stringify(narrow)}`,
@@ -6257,7 +6259,8 @@ test("DESIGN-R2 D3: a narrow action row wraps between whole labels, and only a l
       `${width}px keeps one row of whole labels`,
     );
   }
-  await ui.page.setViewportSize({ width: 390, height: 844 });
+  // A 390 px phone at 140 percent zoom is about 280 CSS px wide.
+  await ui.page.setViewportSize({ width: 280, height: 844 });
   const buttons = async () => (await read()).map((row) => row.buttons);
   const cut = labels.map((row) =>
     row.map((label) =>
@@ -9088,6 +9091,17 @@ function layoutChannel() {
   ];
   return value;
 }
+// matchMedia reports a resize in the next frame's rendering steps, so the page
+// settles a frame after the viewport changes.
+async function resize(page, width, height) {
+  await page.setViewportSize({ width, height });
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+}
 const layoutSizes = [
   [390, 844],
   [390, 460],
@@ -9198,7 +9212,7 @@ test("UI-R4 L4: at every size, with a banner, a thread open or the drawer open, 
       .evaluate((element) => element.scrollTo({ top: 0 }));
   const problems = [];
   for (const [width, height] of layoutSizes) {
-    await ui.page.setViewportSize({ width, height });
+    await resize(ui.page, width, height);
     const at = `${width}x${height}`;
     await scrollUp();
     await ui.page
@@ -9320,6 +9334,155 @@ test("UI-R4 L1: on a phone or a short narrow window, the thread and the screen t
     assert.ok(
       await focused(chip),
       `Escape puts focus back on the member at ${at}`,
+    );
+  }
+});
+
+test("UI-R4 L2: on a phone the Channels button opens the sidebar as a modal drawer that Escape, the backdrop or a choice closes, and focus returns to the button", async (t) => {
+  const alpha = layoutChannel();
+  const beta = team(2, "beta");
+  let client;
+  const ui = await open(t, (connected) => {
+    client = connected;
+    replay(connected, [alpha, beta]);
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  const page = ui.page;
+  const toggle = page.getByRole("button", { name: /^Channels/ });
+  const drawer = page.getByRole("dialog", { name: "Channels" });
+  const heading = page.getByRole("main").getByRole("heading", { level: 1 });
+  const onToggle = () =>
+    toggle.evaluate((element) => element === document.activeElement);
+  const inDrawer = () =>
+    page.evaluate(
+      () => document.activeElement?.closest('[role="dialog"]') !== null,
+    );
+  assert.equal(
+    await toggle.getAttribute("aria-label"),
+    "Channels, 1 needs you",
+  );
+  assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(
+    await page
+      .getByRole("navigation", { name: "Channels", exact: true })
+      .count(),
+    0,
+    "the sidebar is not on screen",
+  );
+  assert.equal(
+    await toggle.locator(".dot-alert").count(),
+    1,
+    "the button shows the Needs-you dot",
+  );
+
+  await toggle.click();
+  await drawer.waitFor();
+  assert.equal(
+    await drawer.evaluate((element) => element.getBoundingClientRect().left),
+    0,
+    "with reduced motion the drawer is in place at once",
+  );
+  assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+  assert.ok(await inDrawer(), "focus moves into the drawer");
+  assert.equal(
+    await page.evaluate(() => document.querySelector("main").inert),
+    true,
+    "the channel behind the drawer is inert",
+  );
+  for (const key of ["Tab", "Shift+Tab"])
+    for (let n = 0; n < 6; n++) {
+      await page.keyboard.press(key);
+      assert.ok(await inDrawer(), `${key} ${n + 1} stays in the drawer`);
+    }
+  await page.keyboard.press("Escape");
+  await drawer.waitFor({ state: "hidden" });
+  assert.ok(await onToggle(), "Escape returns focus to the button");
+  assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+
+  await toggle.click();
+  await drawer.waitFor();
+  await page.mouse.click(380, 600);
+  await drawer.waitFor({ state: "hidden" });
+  assert.ok(await onToggle(), "the backdrop returns focus to the button");
+  assert.equal(
+    await heading.textContent(),
+    "alpha",
+    "the backdrop chooses nothing",
+  );
+
+  await toggle.click();
+  await drawer.getByRole("button", { name: "beta" }).click();
+  await drawer.waitFor({ state: "hidden" });
+  assert.equal(await heading.textContent(), "beta");
+  assert.ok(await onToggle(), "choosing a channel returns focus to the button");
+
+  await toggle.click();
+  await drawer.getByRole("link", { name: "All activity" }).click();
+  await drawer.waitFor({ state: "hidden" });
+  assert.equal(await heading.textContent(), "All activity");
+  assert.ok(await onToggle(), "All activity has the button too");
+
+  await toggle.click();
+  await drawer
+    .getByRole("button", { name: /^alpha/ })
+    .first()
+    .click();
+  await drawer.waitFor({ state: "hidden" });
+  const timeline = page.getByRole("region", { name: "Message history" });
+  await timeline.getByRole("button", { name: /^1 reply from/ }).click();
+  const paneToggle = threadPane(ui).getByRole("button", { name: /^Channels/ });
+  await paneToggle.waitFor();
+  assert.equal(await toggle.count(), 1, "one Channels button, in the thread");
+  await paneToggle.click();
+  await drawer.waitFor();
+  assert.equal(
+    await page.evaluate(() => document.querySelector(".slot").inert),
+    true,
+    "the thread behind the drawer is inert",
+  );
+  await page.keyboard.press("Escape");
+  await drawer.waitFor({ state: "hidden" });
+  assert.ok(
+    await paneToggle.evaluate((element) => element === document.activeElement),
+    "Escape returns focus to the button in the thread, which stays open",
+  );
+  await threadPane(ui).getByRole("button", { name: "Close thread" }).click();
+  await threadPane(ui).waitFor({ state: "detached" });
+
+  const calm = structuredClone(alpha);
+  calm.frame.health = { level: "calm" };
+  calm.frame.attention = [];
+  client.send("space", calm);
+  await page.getByRole("button", { name: "Channels", exact: true }).waitFor();
+  assert.equal(await toggle.locator(".dot-alert").count(), 0);
+
+  for (const [width, phone] of [
+    [600, true],
+    [601, false],
+  ]) {
+    await resize(page, width, 844);
+    assert.equal(
+      await toggle.count(),
+      phone ? 1 : 0,
+      `the Channels button at ${width} px`,
+    );
+    assert.equal(
+      await page
+        .getByRole("navigation", { name: "Channels", exact: true })
+        .count(),
+      phone ? 0 : 1,
+      `the sidebar column at ${width} px`,
+    );
+    assert.deepEqual(
+      await page.evaluate(() =>
+        [...document.querySelectorAll(".connection-dot")].map((dot) =>
+          dot.checkVisibility({ visibilityProperty: true }),
+        ),
+      ),
+      [true],
+      `one connection dot shows at ${width} px`,
     );
   }
 });

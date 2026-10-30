@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, type ReactNode } from "react";
 import {
   type ActivityList,
   type ActivityRow,
@@ -98,6 +98,7 @@ const Row = memo(function Row({
 });
 
 export function ActivityView({
+  toggle,
   list,
   homes,
   open,
@@ -106,6 +107,7 @@ export function ActivityView({
   onFocus,
   onControl,
 }: {
+  toggle: ReactNode;
   list: ActivityList;
   homes: ReadonlyMap<string, Home>;
   open: PeekKey | null;
@@ -118,6 +120,7 @@ export function ActivityView({
   return (
     <>
       <header className="channel-header">
+        {toggle}
         <Icon name="pulse" className="channel-icon" />
         <h1>{activityCopy.title}</h1>
         {summary !== "" && <span className="health">{summary}</span>}

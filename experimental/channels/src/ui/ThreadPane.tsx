@@ -1,4 +1,5 @@
 import {
+  type ReactNode,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -71,6 +72,8 @@ export function ThreadPane({
   onSend,
   onClose,
   paneId,
+  toggle,
+  inert,
   response = null,
   target = null,
   earlierOmitted = false,
@@ -90,6 +93,8 @@ export function ThreadPane({
   ) => void;
   onClose: () => void;
   paneId: string;
+  toggle: ReactNode;
+  inert: boolean;
   response?: ThreadResponse | null;
   target?: { messageId: string } | null;
   earlierOmitted?: boolean;
@@ -172,8 +177,15 @@ export function ThreadPane({
   const unloaded =
     thread.knownCount > thread.parents.length + thread.replies.length;
   return (
-    <aside className="slot thread" aria-label="Thread" id={paneId} ref={pane}>
+    <aside
+      className="slot thread"
+      aria-label="Thread"
+      id={paneId}
+      ref={pane}
+      inert={inert}
+    >
       <header className="thread-head">
+        {toggle}
         <h2 className="thread-title">Thread</h2>
         <span className="thread-where">
           in{" "}

@@ -34,6 +34,7 @@ export type IconName =
   | "done"
   | "hash"
   | "inbox"
+  | "menu"
   | "pause"
   | "plug"
   | "prompt"

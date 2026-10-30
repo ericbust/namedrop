@@ -33,6 +33,7 @@ const shapes = {
   ),
   hash: <path d="M6.2 2.5 4.6 13.5M11.4 2.5 9.8 13.5M2.8 6h11M2.2 10h11" />,
   inbox: <path d="M2.5 9.5h3l1 1.5h3l1-1.5h3M3.6 3.5h8.8l1.1 6v3.5h-11V9.5z" />,
+  menu: <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" />,
   pause: (
     <>
       <circle cx="8" cy="8" r="6" />

@@ -1,17 +1,21 @@
+import type { ReactNode } from "react";
 import { healthCopy } from "../copy.ts";
 import type { ChannelSnapshot } from "../model.ts";
 import { Icon } from "./Icons.tsx";
 
 export function ChannelHeader({
+  toggle,
   channel,
   suffix,
 }: {
+  toggle: ReactNode;
   channel: ChannelSnapshot;
   suffix: string | null;
 }) {
   const health = healthCopy(channel.health);
   return (
     <header className="channel-header" data-selected-channel={channel.key}>
+      {toggle}
       <Icon name="hash" className="channel-icon" />
       <h1 id="channel-heading">
         {channel.displayName}

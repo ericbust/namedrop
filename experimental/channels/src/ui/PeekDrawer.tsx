@@ -1,4 +1,5 @@
 import {
+  type ReactNode,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -67,6 +68,8 @@ type Props = {
   reader: ScreenReader;
   startedAt: number;
   paneId: string;
+  toggle: ReactNode;
+  inert: boolean;
   onClose: () => void;
 };
 export function PeekDrawer({
@@ -74,6 +77,7 @@ export function PeekDrawer({
   who,
   reader,
   paneId,
+  inert,
   onClose,
   ...rest
 }: Props) {
@@ -86,6 +90,7 @@ export function PeekDrawer({
       aria-label={peekCopy.label(who.alias)}
       id={paneId}
       ref={pane}
+      inert={inert}
     >
       <PeekScreen
         key={`${retention.id}/${peekKey(target)}`}
@@ -180,7 +185,8 @@ function PeekScreen({
   startedAt,
   onClose,
   retention,
-}: Omit<Props, "paneId"> & { retention: Retention }) {
+  toggle,
+}: Omit<Props, "paneId" | "inert"> & { retention: Retention }) {
   const { read, again } = usePeekRead(target, reader, retention);
   const view = peekView(read, who);
   const { body } = view;
@@ -212,6 +218,7 @@ function PeekScreen({
   return (
     <>
       <header className="peek-head">
+        {toggle}
         <Avatar
           alias={who.alias}
           type={who.kind}
