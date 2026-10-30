@@ -11,6 +11,104 @@ fn until(mut ready: impl FnMut() -> bool) {
     }
 }
 
+fn stop_routing_thread(server: &Server, receipt: &Value) {
+    let key =
+        namedrop::dashboard::snapshot::SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+    let response = server.post(
+        &format!(
+            "/w/{}/threads/{}/stop",
+            key.as_str(),
+            receipt["thread_id"].as_str().unwrap()
+        ),
+        "{}",
+        &[],
+    );
+    assert_eq!(response.status, 200, "{}", response.body);
+}
+
+#[test]
+fn stop_during_routing_prevents_selected_and_baseline_deliveries_and_releases_mailbox() {
+    for with_baseline in [false, true] {
+        let f = fixture();
+        let server = Server::start(&f, "delayed", false);
+        let parent = with_baseline.then(|| {
+            let (status, receipt) = post(&server, "baseline-root", "@lead Begin here.", None);
+            assert_eq!(status, 200, "{receipt}");
+            receipt
+        });
+        let parent_id = parent.as_ref().and_then(|p| p["message_id"].as_str());
+        let source = "Could @planner review this?";
+        let (status, pending) = support::raw_post(&server, "stopped-route", source, parent_id);
+        assert_eq!(status, 200, "{pending}");
+        until(|| calls(&f).len() == 1);
+        stop_routing_thread(&server, &pending);
+        fs::write(f.root.join("router-release"), "").unwrap();
+        let (status, replay) = post(&server, "stopped-route", source, parent_id);
+        assert_eq!(status, 200, "{replay}");
+        assert_eq!(replay["message_id"], pending["message_id"]);
+        assert_eq!(replay["idempotent_replay"], true);
+        assert_eq!(replay["channel"]["state"], "router_failed");
+        assert_eq!(replay["recipients"], json!([]));
+        assert_eq!(replay["deliveries"], json!([]));
+        let id = pending["message_id"].as_str().unwrap();
+        for table in ["message_recipients", "mailbox_deliveries"] {
+            assert_eq!(
+                f.db()
+                    .query_row(
+                        &format!("SELECT COUNT(*) FROM {table} WHERE message_id=?1"),
+                        [id],
+                        |row| row.get::<_, i64>(0)
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+        let (status, later) = post(&server, "later-task", "@planner New task.", None);
+        assert_eq!(status, 200, "{later}");
+        assert_ne!(later["thread_id"], pending["thread_id"]);
+        until(|| {
+            f.count("SELECT COUNT(*) FROM delivery_attempts a JOIN mailbox_deliveries d USING(session_socket_id,worktree_id,address_id,delivery_id) WHERE d.message_id=(SELECT message_id FROM collaboration_messages WHERE request_id='later-task')") == 1
+        });
+        assert_eq!(calls(&f).len(), 1);
+        eprintln!(
+            "stop evidence: baseline={with_baseline}, stopped route failed with zero recipients and deliveries; later planner task reached a delivery attempt"
+        );
+    }
+}
+
+#[test]
+fn stopped_queued_route_fails_without_starting_another_model() {
+    let f = fixture();
+    let server = Server::start(&f, "delayed", false);
+    let source = "Could @planner review this?";
+    for index in 0..4 {
+        let (status, receipt) = support::raw_post(&server, &format!("busy-{index}"), source, None);
+        assert_eq!(status, 200, "{receipt}");
+    }
+    until(|| calls(&f).len() == 4);
+    let (status, pending) = support::raw_post(&server, "stopped-queued", source, None);
+    assert_eq!(status, 200, "{pending}");
+    assert_eq!(pending["channel"]["state"], "routing");
+    stop_routing_thread(&server, &pending);
+    fs::write(f.root.join("router-release"), "").unwrap();
+    let (status, replay) = post(&server, "stopped-queued", source, None);
+    assert_eq!(status, 200, "{replay}");
+    assert_eq!(replay["message_id"], pending["message_id"]);
+    assert_eq!(replay["channel"]["state"], "router_failed");
+    assert_eq!(replay["recipients"], json!([]));
+    assert_eq!(replay["deliveries"], json!([]));
+    for index in 0..4 {
+        assert_eq!(
+            post(&server, &format!("busy-{index}"), source, None).1["channel"]["state"],
+            "routed"
+        );
+    }
+    assert_eq!(calls(&f).len(), 4);
+    eprintln!(
+        "queue stop evidence: four models ran; stopped fifth post failed with zero recipients and deliveries and no fifth model call"
+    );
+}
+
 #[test]
 fn four_workers_claim_four_processes_while_extra_posts_remain_durable() {
     let f = fixture();
