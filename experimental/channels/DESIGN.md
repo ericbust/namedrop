@@ -86,8 +86,9 @@ Use the 4px scale `--space-1` through `--space-10`. The density is comfortable,
 not airy.
 
 - Sidebar rows are 32px tall. Section gaps are 20px.
-- The channel header is 56px. The member strip under it is 36px per line, at
-  most two lines, or one line in a window under 560px tall.
+- The channel header is 56px, or 48px in a window under 420px tall. The member
+  strip under it is 36px per line, at most two lines, or one line in a window
+  under 560px tall.
 - A message group has 16px above it. Messages inside a group sit about 6px
   apart, which keeps the hover padding.
 - The timeline scroller fades its top 12px with a `mask-image` gradient, so a
@@ -129,6 +130,13 @@ sidebar list, the Needs-you details, the timeline, the thread, the activity list
 and the screen text. Each of them is the containing block of what it scrolls, so
 hidden text inside it never stretches the page.
 
+The grid's first row holds the Reconnecting bar and is empty without it. The
+bar spans every column right of the sidebar, so it sits over the channel and
+any pane beside it, stacked under it, or covering it. There is one bar and one
+`role="status"` at every size, and it is inert behind the phone drawer like the
+rest of the page. The sidebar spans every row. The main column and a pane
+share the last row, or take one row each when they stack.
+
 The window's size decides where an open pane (the thread pane or the peek
 drawer) goes:
 
@@ -156,6 +164,17 @@ The Jump to latest pill lies inside the timeline, so with the timeline's floor
 it never covers the banner, the member strip or the composer. Nothing in the
 main column paints outside it.
 
+Those floors add up to 373px: the 56px header, the 39px one-line member strip,
+the banner's 56px and its two 12px gaps, the timeline's 112px and the 86px
+composer. A window under 420px tall, such as a phone in landscape, lowers them:
+the header is 48px, the banner's floor 40px and the timeline's 48px, 285px in
+all. The member strip keeps its one line and the gaps stay 12px. So the
+composer stays whole down to a 300px column, the Reconnecting bar included.
+Under that, as the last resort, the main column and a pane scroll as a whole
+(`overflow-y: auto`) instead of clipping, so the composer and the thread's
+composer can always be scrolled to. The page still never scrolls, and in any
+taller window neither column ever has to.
+
 ### Phone drawer
 
 At 600px wide or less the sidebar column goes away and the main column takes
@@ -171,7 +190,13 @@ the whole width.
   background, like a presence badge. Exactly one connection dot exists at every
   width.
 - The button opens the `Sidebar` itself as a drawer from the left,
-  `min(280px, 100vw - 40px)` wide, over a `--scrim` backdrop. The drawer is a
+  `min(280px, 100vw - 40px)` wide, over a `--scrim` backdrop. Its right edge is
+  a 1px `--drawer-edge` line: `--line` in light mode and `--line-strong` in dark
+  mode. In dark mode the drawer's surface and the dimmed page are almost the
+  same color (1.03:1, measured from pixels), so the edge does the separating: it
+  reads 1.80:1 against the dimmed page, where `--line` read 1.37:1. Light mode
+  keeps `--line` (1.65:1), because the scrim already parts the surfaces there
+  (1.96:1) and `--line-strong` would drop the edge to 1.32:1. The drawer is a
   modal dialog (`aria-modal="true"`) named "Channels". Its list of channels is
   the "Channel list" navigation at every width, so no landmark in the drawer
   repeats the dialog's name. Focus moves to the selected row, Tab and Shift+Tab
@@ -181,7 +206,10 @@ the whole width.
   only move focus between rows, and Enter chooses.
 - The drawer slides in over `--duration` and the backdrop fades in. With
   reduced motion it appears in place.
-- Over 600px nothing changes: no button, and the sidebar column stays.
+- Over 600px nothing changes: no button, and the sidebar column stays. A
+  drawer open when the window grows past 600px closes. If focus was in the
+  sidebar column when the window narrows to a phone, it moves to the Channels
+  button.
 
 ### Landing and navigation
 
@@ -441,7 +469,8 @@ buttons, never inside a label, and a button never shrinks below its label. Only
 a label wider than the whole column ends in an ellipsis, with the full label as
 its tooltip. Show three items, then a "Show N more" button.
 The banner takes at most 40 percent of the window's height, shrinks before the
-timeline would drop under 112px, and scrolls inside. 12px separate it from the
+timeline would drop under 112px (48px in a window under 420px tall), and
+scrolls inside. 12px separate it from the
 timeline. See App shell for each layout.
 Announce new items through a polite live region.
 
@@ -1282,7 +1311,7 @@ Motion shows state and nothing else.
 | History error                 | "Couldn't load earlier messages." and a **Try again** button, in the same line.                                                    |
 | Conversation error            | "Couldn't load this conversation." and a **Try again** button, in the thread pane.                                                 |
 | Missing range                 | A hairline divider with "Some messages are missing here" and a **Load them** button.                                               |
-| Reconnecting                  | A 36px bar at the top of the main column in `--warning-bg` and `--warning-text`: "Reconnecting… Showing updates up to 10:42 PM."   |
+| Reconnecting                  | A 36px bar over the channel and any pane in `--warning-bg` and `--warning-text`: "Reconnecting… Showing updates up to 10:42 PM."   |
 | Server-shortened text         | A 12px muted line "Shortened by Namedrop."                                                                                         |
 | All activity, nothing active  | The pulse icon, title "Every agent is idle", body "Agents show up here while they work, wait on each other, or need you."          |
 
