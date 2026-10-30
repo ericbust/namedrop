@@ -1726,6 +1726,114 @@ else:
     }
 
     #[test]
+    fn contended_pane_lock_retries_without_an_unrelated_event() {
+        use sha2::{Digest, Sha256};
+        use std::os::{fd::AsRawFd, unix::fs::OpenOptionsExt};
+
+        let f = Fixture::new();
+        f.register_all();
+        let server = Server::start(&f, None);
+        let directory = f.state.join("pane-effects");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let key = namedrop::lower_hex(&Sha256::digest(
+            serde_json::to_vec(&("socket-a", "pane-1-planner")).unwrap(),
+        ));
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(directory.join(format!("{key}.lock")))
+            .unwrap();
+        assert_eq!(
+            unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let started = Instant::now();
+        let response = server.post(
+            &format!("/w/{}/messages", key.as_str()),
+            &json!({"request_id":"contended", "source":"@planner inspect"}).to_string(),
+            &[],
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        wait_until("contended drain finishes publishing metadata", || {
+            fs::read_to_string(f.root.join("http-herdr-invocations.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .any(|call| call["args"][0] == "pane" && call["args"][1] == "report-metadata")
+        });
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert_eq!(f.texts("SELECT state FROM mailbox_deliveries"), ["queued"]);
+        assert!(prompts(&f).is_empty());
+        drop(lock);
+
+        wait_for_submitted(&f, 1);
+        let calls = prompts(&f);
+        let envelope: Value = serde_json::from_str(calls[0]["args"][3].as_str().unwrap()).unwrap();
+        f.reply_to("w1", "pane-1-planner", &envelope, "@operator done");
+        let scope = namedrop::lower_hex(&Sha256::digest("socket-a\0w1"));
+        let worker_directory = f.state.join("agent-status-reconciliation").join(scope);
+        wait_until("settled mailbox watcher clears pending work", || {
+            let Ok(entries) = fs::read_dir(&worker_directory) else {
+                return false;
+            };
+            !entries
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().starts_with("pending-"))
+        });
+        let invocations = f.root.join("http-herdr-invocations.jsonl");
+        let settled_calls = fs::read(&invocations).unwrap();
+        thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            fs::read(&invocations).unwrap(),
+            settled_calls,
+            "settled watcher must stop polling Herdr"
+        );
+        assert_eq!(prompts(&f).len(), 1);
+        assert_eq!(
+            f.count("SELECT COUNT(*) FROM delivery_attempts WHERE address_id='address-w1-planner'"),
+            1
+        );
+    }
+
+    #[test]
+    fn unsafe_pane_effects_directory_fails_with_a_durable_diagnostic() {
+        let f = Fixture::new();
+        f.register_all();
+        let directory = f.state.join("pane-effects");
+        fs::create_dir_all(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let response = server.post(
+            &format!("/w/{}/messages", key.as_str()),
+            &json!({"request_id":"unsafe-effects", "source":"@planner inspect"}).to_string(),
+            &[],
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+        wait_until("permanent pane lock fault fails the delivery", || {
+            f.texts("SELECT state FROM mailbox_deliveries") == ["failed"]
+        });
+        let mut store = StateStore::open(&f.state).unwrap();
+        let rows = store
+            .dashboard_rows(&StateNamespace::for_space("socket-a", "w1"))
+            .unwrap();
+        assert!(
+            rows.attention.iter().any(|row| {
+                let summary = row.item.summary.to_lowercase();
+                summary.contains("pane")
+                    && (summary.contains("unsafe") || summary.contains("permission"))
+            }),
+            "permanent pane lock failure needs an actionable durable diagnostic"
+        );
+        assert!(prompts(&f).is_empty());
+    }
+
+    #[test]
     fn terminal_fast_pair_settles_without_an_unrelated_drain() {
         terminal_posts_finish(&["true", "true"], "w1");
     }
