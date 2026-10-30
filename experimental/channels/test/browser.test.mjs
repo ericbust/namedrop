@@ -7807,13 +7807,21 @@ const unsent = () =>
     state: "unrouted",
     to: [],
   });
+// The page's delivery announcer: two polite regions that take turns, so at
+// most one of them holds text.
 const announcer = '.app-shell > [aria-live="polite"]';
+const announcement = (page) =>
+  page.$$eval(announcer, (regions) =>
+    regions.map((region) => region.textContent).join(""),
+  );
 // Every text the page's delivery announcer shows, in order, from now on.
 const recordAnnouncements = (page) =>
   page.evaluate((announcer) => {
     window.announced = [];
     new MutationObserver(() => {
-      const text = document.querySelector(announcer)?.textContent ?? "";
+      const text = [...document.querySelectorAll(announcer)]
+        .map((region) => region.textContent)
+        .join("");
       if (text !== "" && text !== window.announced.at(-1))
         window.announced.push(text);
     }).observe(document.body, {
@@ -7823,6 +7831,63 @@ const recordAnnouncements = (page) =>
     });
   }, announcer);
 const announced = (page) => page.evaluate(() => window.announced);
+// Every text newly put into one of the page's delivery announcer regions, from
+// now on. A region whose text stays the same puts nothing new, so a screen
+// reader has nothing to speak.
+const recordInsertions = (page) =>
+  page.evaluate((announcer) => {
+    window.inserted = [];
+    const regions = [...document.querySelectorAll(announcer)];
+    const shown = new Map(
+      regions.map((region) => [region, region.textContent]),
+    );
+    const observer = new MutationObserver(() => {
+      for (const region of regions) {
+        const text = region.textContent;
+        if (text !== shown.get(region) && text !== "")
+          window.inserted.push(text);
+        shown.set(region, text);
+      }
+    });
+    for (const region of regions)
+      observer.observe(region, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
+  }, announcer);
+
+test("R3 U5: two Send anyway presses on two posts are each announced, so the second Sent to @codex is spoken too", async (t) => {
+  const answers = { p1: held(), p2: held() };
+  const posts = ["p1", "p2"].map((id) =>
+    channelPost(id, `nice catch by @codex on ${id}`, {
+      state: "unrouted",
+      to: [],
+    }),
+  );
+  const { ui } = await chatRoom(t, posts, {
+    onDeliver: async (_asked, { path }) => {
+      await answers[path === deliverPath("p1") ? "p1" : "p2"].gate;
+      return { status: 200 };
+    },
+  });
+  await recordInsertions(ui.page);
+  for (const id of ["p1", "p2"]) {
+    const { route } = routeOf(ui, id);
+    await route.getByRole("button", { name: "Send this to @codex" }).click();
+    await readsAs(route, "Sending to @codex…");
+  }
+  for (const id of ["p1", "p2"]) {
+    answers[id].release();
+    await readsAs(routeOf(ui, id).route, "Sent to @codex");
+  }
+  assert.deepEqual(await ui.page.evaluate(() => window.inserted), [
+    "Sending to @codex…",
+    "Sending to @codex…",
+    "Sent to @codex",
+    "Sent to @codex",
+  ]);
+});
 
 test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the not-sent part for its own Sending to @codex… then Sent to @codex with focus on it, and the frame's leg replaces it", async (t) => {
   const answered = held();
@@ -7862,10 +7927,7 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
     focused: true,
     connected: true,
   });
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Sending to @codex…",
-  );
+  assert.equal(await announcement(ui.page), "Sending to @codex…");
   assert.equal(await threadPane(ui).count(), 0, "no thread opens");
   assert.equal(
     await ui.page.locator("main textarea").inputValue(),
@@ -7881,10 +7943,7 @@ test("CH-fix-3 item 1: Send anyway delivers the post itself, @codex leaves the n
     connected: true,
   });
   await readsAs(route, "Sent to @codex");
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Sent to @codex",
-  );
+  assert.equal(await announcement(ui.page), "Sent to @codex");
   await button.click({ force: true });
   value.frame.messages = [reached(post, "codex")];
   ui.connections[0].send("space", value);
@@ -8131,11 +8190,16 @@ const recordLabels = (page, id) =>
 const recordAnnouncer = (page) =>
   page.evaluate((announcer) => {
     window.said = [];
-    const region = document.querySelector(announcer);
-    new MutationObserver(() => window.said.push(region.textContent)).observe(
-      region,
-      { subtree: true, childList: true, characterData: true },
+    const regions = [...document.querySelectorAll(announcer)];
+    const observer = new MutationObserver(() =>
+      window.said.push(regions.map((region) => region.textContent).join("")),
     );
+    for (const region of regions)
+      observer.observe(region, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+      });
   }, announcer);
 // A Send anyway press whose answer waits for `answer()`, on a page whose clock
 // stands still, so the test runs the 1.5 s hold itself.
@@ -8326,10 +8390,7 @@ test("CH-fix-3 item 1: a refused delivery reads Couldn't send to @codex · Try a
     focused: true,
     connected: true,
   });
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Couldn't send to @codex",
-  );
+  assert.equal(await announcement(ui.page), "Couldn't send to @codex");
   assert.equal(
     await route
       .getByText("Couldn't send to @codex", { exact: true })
@@ -8362,10 +8423,7 @@ test("CH-fix-3 item 1: Try again's title says Couldn't reach Namedrop. when the 
     async () => (await offerState(button)).title === "HTTP 500",
     "the status in the title",
   );
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Couldn't send to @codex",
-  );
+  assert.equal(await announcement(ui.page), "Couldn't send to @codex");
 });
 
 test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @codex · Try again, says the name may belong to a different agent now, and Try again sends it", async (t) => {
@@ -8386,10 +8444,7 @@ test("CH-fix-4: a 200 that did not deliver to @codex reads Couldn't send to @cod
     focused: true,
     connected: true,
   });
-  assert.equal(
-    await ui.page.locator(announcer).textContent(),
-    "Couldn't send to @codex",
-  );
+  assert.equal(await announcement(ui.page), "Couldn't send to @codex");
   await button.click();
   assert.equal((await offerReads(button, "Sent to @codex")).focused, true);
   await readsAs(route, "Sent to @codex");

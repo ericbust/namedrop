@@ -877,11 +877,15 @@ uses the "Send to" form. Each offer is a text button in 12px 600
   through sending, sent and failed, because "Try again" is the same button.
   When the part goes while it has focus, focus moves to its message row, so the
   next Tab continues from there. When focus has moved elsewhere, it stays there.
-- One visually hidden polite live region for the whole page announces each
-  change: "Sending to @codex…", "Sent to @codex", or "Couldn't send to @codex".
-  It says "Sent to @codex" once per press, whichever of the answer and the
-  frame confirmed it. The parts have no live region of their own, so nothing
-  is announced twice.
+- The page announces each change through a pair of visually hidden polite
+  live regions: "Sending to @codex…", "Sent to @codex", or "Couldn't send to
+  @codex". The two take turns. Each new change goes into the empty one and the
+  other is cleared, so a change in the same words as the last, such as "Sent
+  to @codex" for another post, is a fresh insertion and is spoken again. A
+  change is new when the press's state changes, not when the words do. It
+  says "Sent to @codex" once per press, whichever of the answer and the frame
+  confirmed it. The parts have no live region of their own, so nothing is
+  announced twice.
 - The timeline, the thread pane, and a Needs-you conversation show one state
   for the same post and agent.
 
