@@ -2658,6 +2658,24 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     .unwrap_err();
     assert!(oversized.contains("65536 bytes"), "{oversized}");
     assert_eq!(attention_items(&directory), 1);
+    let failure = StateStore::open(&directory.state)
+        .unwrap()
+        .transaction(|transaction| transaction.unresolved_attention_items(&namespace))
+        .unwrap()
+        .into_iter()
+        .find(|item| item.source_kind == namedrop::AttentionSourceKind::ContextGrant)
+        .unwrap();
+    assert!(
+        failure.summary.starts_with("Shared context failed:"),
+        "{}",
+        failure.summary
+    );
+    assert!(failure.summary.contains("65536 bytes"));
+    assert!(
+        failure
+            .summary
+            .contains("Ask the sender to fix the problem and share the context again.")
+    );
 
     // The correctly addressed in-thread fulfillment then succeeds and resolves
     // the failure Attention Item.

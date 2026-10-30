@@ -441,6 +441,39 @@ fn doctor_uses_current_package_evidence_without_rewriting_stale_attention() {
 }
 
 #[test]
+fn doctor_names_failed_context_sharing_and_how_to_retry() {
+    let f = Fixture::new();
+    f.register();
+    StateStore::open(&f.root)
+        .unwrap()
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &StateNamespace::for_space("socket-a", "workspace-1"),
+                &AttentionItemDraft {
+                    id: AttentionItemId::new("failed-context"),
+                    source_kind: AttentionSourceKind::ContextGrant,
+                    source_id: "grant-1".into(),
+                    summary: "Context Grant activation failed: snapshot exceeds 65536 bytes".into(),
+                },
+                &MutationAttribution::new(ActorKind::Plugin, "test", 100),
+            )
+        })
+        .unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-CONTEXT-001")
+        .unwrap();
+    assert_eq!(issue.summary, "Shared context failed.");
+    assert!(issue.explanation.contains("65536 bytes"));
+    assert_eq!(
+        issue.repair.prompt,
+        "Ask the sender to fix the problem and share the context again?"
+    );
+}
+
+#[test]
 fn doctor_keeps_individual_attention_causes_and_operation_inputs() {
     let f = Fixture::new();
     f.register();

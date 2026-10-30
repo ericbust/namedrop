@@ -2023,7 +2023,9 @@ else:
                 summary.contains("@planner")
                     && !summary.contains("address-w1-planner")
                     && !summary.contains("gate")
-                    && summary.contains("send the message again")
+                    && !summary.contains("pane effects:")
+                    && !summary.contains("send the message again")
+                    && summary.contains("review the conversation before retrying delivery")
                     && (summary.contains("unsafe") || summary.contains("permission"))
             }),
             "permanent pane lock failure needs an actionable durable diagnostic"
