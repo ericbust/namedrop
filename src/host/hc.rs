@@ -150,6 +150,18 @@ impl Terminal {
             .unwrap_or_else(|| self.workspace().to_owned())
     }
 
+    fn session(&self) -> Option<&str> {
+        if let Some(pid) = self.labels.get("namedrop.session.pid")
+            && self.pid.map(|pid| pid.to_string()).as_ref() != Some(pid)
+        {
+            return None;
+        }
+        self.labels
+            .get("namedrop.session")
+            .map(String::as_str)
+            .filter(|session| !session.is_empty())
+    }
+
     fn pane(&self) -> DiscoveredPane {
         let app = self
             .status
@@ -202,11 +214,7 @@ impl Terminal {
                 .labels
                 .get("namedrop.name")
                 .map(|alias| format!("@{alias}")),
-            agent_session_id: self
-                .labels
-                .get("namedrop.session")
-                .filter(|session| !session.is_empty())
-                .map(|session| AgentSessionId::new(session.clone())),
+            agent_session_id: self.session().map(AgentSessionId::new),
             occupant_label: agent.clone(),
             agent,
             agent_status: self
@@ -634,12 +642,12 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
             let matches: Vec<_> = terminals
                 .iter()
                 .filter(|terminal| {
-                    terminal
-                        .labels
-                        .get("namedrop.session")
-                        .is_some_and(|session| {
-                            !session.is_empty() && claim.agent_sessions.contains(session)
-                        })
+                    terminal.session().is_some_and(|session| {
+                        claim
+                            .agent_sessions
+                            .iter()
+                            .any(|claimed| claimed == session)
+                    })
                 })
                 .collect();
             if matches.len() == 1 {

@@ -992,13 +992,18 @@ fn snapshots_and_missed_events_clear_stale_sessions_before_naming() {
                 }
             }
             if session == "fresh" {
-                runtime.host.publish_session(&state, "t1", session).unwrap();
+                let mut terminals = fixture.terminals.borrow_mut();
+                terminals[0]["labels"]["namedrop.session"] = json!("old");
+                terminals[0]["labels"]["namedrop.session.pid"] = json!("123");
             }
             let line = if snapshot {
                 json!({"terminals": *fixture.terminals.borrow()}).to_string()
             } else {
                 json!({"method":"missed", "params":{"seq":99}}).to_string()
             };
+            if session == "fresh" {
+                runtime.host.publish_session(&state, "t1", session).unwrap();
+            }
             subscriber.handle_line(&line, &runtime).unwrap();
             let expected = if session == "stale" {
                 None

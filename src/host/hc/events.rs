@@ -184,15 +184,27 @@ impl Subscriber {
         &mut self,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
-        for space in active_spaces(runtime)? {
+        let spaces = active_spaces(runtime)?;
+        if spaces.is_empty() {
+            return Ok(());
+        }
+        let terminals = runtime.host.terminals(None)?;
+        for terminal in &terminals {
+            if spaces.iter().any(|space| space == terminal.workspace())
+                && terminal.labels.contains_key("namedrop.session.pid")
+            {
+                runtime
+                    .host
+                    .invalidate_session(runtime.state_directory, &terminal.address)?;
+            }
+        }
+        for space in spaces {
             let scoped = LifecycleRuntime {
                 workspace_id: Some(&space),
                 current_pane_id: None,
                 ..*runtime
             };
-            for terminal in runtime
-                .host
-                .terminals(None)?
+            for terminal in terminals
                 .iter()
                 .filter(|terminal| terminal.workspace() == space)
             {

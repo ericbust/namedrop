@@ -2038,7 +2038,7 @@ fn clear_hc_name<H: Host, C, I>(
     if runtime.is_hc()
         && let Some(pane) = pane
     {
-        runtime.host.report_metadata(
+        match runtime.host.report_metadata(
             pane,
             &crate::PaneMetadata::Identity {
                 title: String::new(),
@@ -2047,7 +2047,11 @@ fn clear_hc_name<H: Host, C, I>(
                 blocked: String::new(),
                 unknown: String::new(),
             },
-        )?;
+        ) {
+            Ok(()) => (),
+            Err(error) if matches!(error.code.as_deref(), Some("not_found" | "finished")) => (),
+            Err(error) => return Err(error.into()),
+        }
     }
     Ok(())
 }
