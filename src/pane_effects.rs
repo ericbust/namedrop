@@ -57,6 +57,13 @@ pub(crate) struct PaneEffects {
     pane: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum MarkerOwnership {
+    Match,
+    LegacyAbsent,
+    Reject,
+}
+
 fn checked(file: File, directory: bool) -> io::Result<File> {
     let metadata = file.metadata()?;
     if metadata.uid() != unsafe { libc::geteuid() }
@@ -177,17 +184,28 @@ impl PaneEffects {
         result
     }
 
-    fn owns(&self, expected: &InputOwner) -> bool {
+    fn ownership(&self, expected: &InputOwner) -> MarkerOwnership {
         let file = match open_at(&self.directory, &self.marker, libc::O_RDONLY) {
             Ok(file) => file,
-            Err(error) => return error.kind() == io::ErrorKind::NotFound,
+            Err(error) => {
+                return if error.kind() == io::ErrorKind::NotFound {
+                    MarkerOwnership::LegacyAbsent
+                } else {
+                    MarkerOwnership::Reject
+                };
+            }
         };
         if file.metadata().map_or(true, |meta| meta.len() > MAX_MARKER) {
-            return false;
+            return MarkerOwnership::Reject;
         }
         let mut bytes = Vec::new();
-        file.take(MAX_MARKER + 1).read_to_end(&mut bytes).is_ok()
+        if file.take(MAX_MARKER + 1).read_to_end(&mut bytes).is_ok()
             && serde_json::from_slice::<InputOwner>(&bytes).is_ok_and(|owner| owner == *expected)
+        {
+            MarkerOwnership::Match
+        } else {
+            MarkerOwnership::Reject
+        }
     }
 
     pub(crate) fn prompt(
@@ -270,10 +288,16 @@ pub(crate) fn interrupt_if_current(
                 &response.binding_id,
                 &response.agent_session_id,
             );
-            if !current || !live_matches || !effects.owns(&owner) {
+            if !current || !live_matches {
                 return Err(
                     "the stopped thread could not be proven to own its current response".into(),
                 );
+            }
+            match effects.ownership(&owner) {
+                MarkerOwnership::Match | MarkerOwnership::LegacyAbsent => {}
+                MarkerOwnership::Reject => {
+                    return Err("the stopped thread no longer owns its pane input".into());
+                }
             }
             effects
                 .record(&owner)
@@ -454,9 +478,9 @@ mod tests {
     fn later_auxiliary_input_invalidates_old_delivery_even_on_transport_error() {
         let state = State::new();
         let gate = PaneEffects::acquire(&state.0, "socket", "pane").unwrap();
-        assert!(gate.owns(&delivery()), "legacy absent marker fallback");
+        assert_eq!(gate.ownership(&delivery()), MarkerOwnership::LegacyAbsent);
         gate.record(&delivery()).unwrap();
-        assert!(gate.owns(&delivery()));
+        assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Match);
         let input = FakeInput(Mutex::new(Vec::new()));
         assert!(
             gate.prompt(&input, &InputOwner::Other, "doctor or registration")
@@ -464,7 +488,7 @@ mod tests {
         );
         assert_eq!(input.0.lock().unwrap().len(), 1);
         assert!(
-            !gate.owns(&delivery()),
+            gate.ownership(&delivery()) == MarkerOwnership::Reject,
             "later prompt left old interrupt ownership intact"
         );
         let marker = state
@@ -472,7 +496,7 @@ mod tests {
             .join("pane-effects")
             .join(gate.marker.to_str().unwrap());
         fs::write(&marker, "{malformed").unwrap();
-        assert!(!gate.owns(&delivery()));
+        assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Reject);
         fs::remove_file(&marker).unwrap();
         fs::create_dir(&marker).unwrap();
         assert!(gate.prompt(&input, &delivery(), "forbidden").is_err());
@@ -481,7 +505,7 @@ mod tests {
             1,
             "physical input occurred after failed marker write"
         );
-        assert!(!gate.owns(&delivery()));
+        assert_eq!(gate.ownership(&delivery()), MarkerOwnership::Reject);
     }
 
     #[test]
@@ -501,25 +525,56 @@ mod tests {
         assert!(!state.0.join("outside").exists());
     }
 
-    #[test]
-    fn physical_input_argv_is_owned_here() {
-        for source in [
-            include_str!("delivery.rs"),
-            include_str!("integration.rs"),
-            include_str!("health.rs"),
-            include_str!("controls.rs"),
-            include_str!("dashboard/thread_controls.rs"),
-        ] {
-            for raw in [
-                "\"agent\", \"prompt\"",
-                "\"agent\", \"send-keys\"",
-                "\"pane\", \"run\"",
-            ] {
-                assert!(
-                    !source.contains(raw),
-                    "raw physical input bypassed pane_effects: {raw}"
-                );
+    fn raw_input_paths(directory: &Path, owner: &Path) -> Vec<std::path::PathBuf> {
+        let mut violations = Vec::new();
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                violations.extend(raw_input_paths(&path, owner));
+            } else if path.extension().is_some_and(|extension| extension == "rs") && path != owner {
+                let compact: String = fs::read_to_string(&path)
+                    .unwrap()
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect();
+                if [
+                    r#".execute(&["agent","prompt""#,
+                    r#".execute(&["agent","send-keys""#,
+                    r#".execute(&["pane","run""#,
+                ]
+                .iter()
+                .any(|raw| compact.contains(raw))
+                {
+                    violations.push(path);
+                }
             }
         }
+        violations
+    }
+
+    #[test]
+    fn direct_literal_physical_input_calls_are_owned_here() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        assert_eq!(
+            raw_input_paths(&source, &source.join("pane_effects.rs")),
+            Vec::<std::path::PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn raw_input_check_detects_new_nested_files_and_formatting() {
+        let state = State::new();
+        let nested = state.0.join("new/module");
+        fs::create_dir_all(&nested).unwrap();
+        let owner = state.0.join("pane_effects.rs");
+        let bypass = nested.join("input.rs");
+        for (kind, operation) in [("agent", "prompt"), ("agent", "send-keys"), ("pane", "run")] {
+            let source = format!("herdr.execute ( & [ \"{kind}\" ,\n \"{operation}\", pane ] )");
+            fs::write(&owner, &source).unwrap();
+            fs::write(&bypass, &source).unwrap();
+            assert_eq!(raw_input_paths(&state.0, &owner), vec![bypass.clone()]);
+        }
+        fs::write(&bypass, "effects.prompt(herdr, owner, body)").unwrap();
+        assert!(raw_input_paths(&state.0, &owner).is_empty());
     }
 }
