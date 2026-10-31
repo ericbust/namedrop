@@ -1290,3 +1290,157 @@ fn agent_not_ready_retries_without_another_event() {
 fn repeated_eventless_rejections_deliver_when_the_recipient_becomes_ready() {
     temporary_prompt_rejection_retries_without_another_event("server_busy", 7);
 }
+
+#[test]
+fn eventless_backoff_serves_new_markers_and_other_recipients_grace() {
+    let fixture = Fixture::new();
+    fixture.initialize();
+    fixture.connect_recipient();
+    fixture.queue_message();
+    let script = fs::read_to_string(fixture.root.join("herdr")).unwrap();
+    fixture.set_herdr(&format!(
+        r#"if [ "$1 $2" = 'agent prompt' ]; then
+             printf 'x' >> "$NAMEDROP_TEST_FIXTURE/prompts"
+             if [ "$(wc -c < "$NAMEDROP_TEST_FIXTURE/prompts")" -eq 4 ]; then
+               while [ ! -f "$NAMEDROP_TEST_FIXTURE/grace-ready" ]; do sleep 0.01; done
+             fi
+             printf '%s\n' '{{"error":{{"code":"server_busy"}}}}' >&2
+             exit 1
+           fi
+           if [ "$1 $2" = 'pane list' ]; then
+             printf '%s\n' '{{"result":{{"panes":[{{"pane_id":"pane-recipient","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"workspace-1","agent":"claude","agent_session":{{"value":"session-1"}},"agent_status":"idle"}},{{"pane_id":"pane-grace","terminal_id":"terminal-2","tab_id":"tab-2","workspace_id":"workspace-1","agent_session":{{"value":"session-grace"}},"agent_status":"idle"}}]}}}}'
+             exit 0
+           fi
+           {script}"#
+    ));
+    let first = fixture.queue_status("a-rejected-recipient");
+    let _worker = fixture.worker();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    while fixture.prompt_counts().0 < 4 {
+        assert!(
+            Instant::now() < deadline,
+            "worker did not reach the grace setup barrier"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let namespace = fixture.namespace();
+    let created = now_ms() - 27_000;
+    let due = created + 30_000;
+    let attempt = DeliveryAttemptId::new("grace-attempt");
+    let attribution = MutationAttribution::new(ActorKind::Plugin, "fixture", created);
+    StateStore::open(fixture.state())
+        .unwrap()
+        .transaction(|tx| {
+            tx.bind_pane(
+                &namespace,
+                &PaneBindingId::new("binding-grace"),
+                &PaneAddressId::new("author"),
+                "pane-grace",
+                &attribution,
+            )?;
+            tx.observe_agent_session(
+                &namespace,
+                "grace-observation",
+                &PaneAddressId::new("author"),
+                &AgentSessionId::new("session-grace"),
+                "working",
+                &attribution,
+            )?;
+            tx.append_message(
+                &namespace,
+                &MessageDraft {
+                    thread_id: ThreadId::new("thread-1"),
+                    message_id: MessageId::new("grace-message"),
+                    in_reply_to: None,
+                    author_address_id: PaneAddressId::new("recipient"),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: "recipient".to_owned(),
+                    author_agent_session_snapshot: None,
+                    request_id: "grace-request".to_owned(),
+                    authored_source: "@author review".to_owned(),
+                    body: "review".to_owned(),
+                    grammar_version: "mention/v1".to_owned(),
+                    recipients: vec![MessageRecipientDraft {
+                        address_id: PaneAddressId::new("author"),
+                        alias_snapshot: "author".to_owned(),
+                        agent_session_snapshot: Some(AgentSessionId::new("session-grace")),
+                        delivery_id: DeliveryId::new("grace-delivery"),
+                    }],
+                    context_references: vec![],
+                },
+                &attribution,
+            )?;
+            assert!(
+                tx.lease_mailbox_head(
+                    &namespace,
+                    &PaneAddressId::new("author"),
+                    &LeaseDraft {
+                        attempt_id: attempt.clone(),
+                        binding_id: PaneBindingId::new("binding-grace"),
+                        agent_session_id: AgentSessionId::new("session-grace"),
+                        retry_of_attempt_id: None,
+                        owner: "fixture".to_owned(),
+                        acquired_at_ms: created,
+                        expires_at_ms: created + 30_000,
+                    },
+                    &attribution,
+                )?
+                .is_some()
+            );
+            tx.transition_delivery_attempt(
+                &namespace,
+                &attempt,
+                DeliveryState::Submitted,
+                &attribution,
+            )?;
+            tx.acknowledge_delivery_attempt(
+                &namespace,
+                &attempt,
+                "grace-receipt",
+                &AgentSessionId::new("session-grace"),
+                &attribution,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    fs::write(fixture.root.join("grace-ready"), "ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while fixture.prompt_counts().0 < 5 {
+        assert!(
+            Instant::now() < deadline,
+            "worker did not reach the five-second retry delay, prompts={:?}, first_marker={}, grace={:?}",
+            fixture.prompt_counts(),
+            first.exists(),
+            fixture.attempt_state(&attempt)
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(fixture.attempt_state(&attempt), DeliveryState::Acknowledged);
+    let second = fixture.queue_status_for("z-fresh-status", "pane-grace");
+    let marker_deadline = Instant::now() + Duration::from_secs(1);
+    while second.exists() && Instant::now() < marker_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let served_marker = !second.exists();
+    while now_ms() < due + 1_000 && fixture.attempt_state(&attempt) != DeliveryState::Settled {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let state = fixture.attempt_state(&attempt);
+    eprintln!(
+        "fresh marker served={served_marker}, grace state={state:?}, prompts={:?}",
+        fixture.prompt_counts()
+    );
+    assert!(
+        served_marker,
+        "a fresh status marker was blocked by eventless backoff"
+    );
+    assert!(
+        !first.exists(),
+        "a successfully processed status marker was retained"
+    );
+    assert_eq!(
+        state,
+        DeliveryState::Settled,
+        "eventless backoff delayed another recipient's grace"
+    );
+}
