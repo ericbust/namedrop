@@ -171,7 +171,6 @@ fn doctor_explains_overlong_socket_paths_without_launching_hc() {
     let max_bytes = address.sun_path.len() - 1;
     for source in [
         "HC_SOCKET",
-        "HC_TERMINAL_SOCKET",
         "XDG_RUNTIME_DIR",
         "config",
     ] {
@@ -247,7 +246,7 @@ fn socket_path_at_platform_byte_limit_can_connect() {
 
 #[test]
 fn socket_precedence_and_child_routing() {
-    for selected in ["explicit", "inherited", "config", "runtime"] {
+    for selected in ["explicit", "config", "runtime"] {
         let f = Fixture::new();
         let path = if selected == "runtime" {
             "run/herdr-core/default.sock"
@@ -266,7 +265,7 @@ fn socket_precedence_and_child_routing() {
         if selected == "explicit" {
             extra.push(("HC_SOCKET", explicit.to_str().unwrap()));
         }
-        if matches!(selected, "explicit" | "inherited") {
+        if matches!(selected, "explicit" | "config" | "runtime") {
             extra.push(("HC_TERMINAL_SOCKET", inherited.to_str().unwrap()));
         }
         if selected == "runtime" {
@@ -282,13 +281,13 @@ fn socket_precedence_and_child_routing() {
 }
 
 #[test]
-fn invalid_session_or_config_never_launches() {
-    for config in ["socket = 42", "socket = ["] {
+fn invalid_config_falls_back_but_invalid_session_never_launches() {
+    for config in ["socket = 42", "socket = [", "socket = '/wrong.sock'\nnotes = 3", "socket = '/wrong.sock'\nwait_timeout = 'bad'", "socket = '/wrong.sock'\ndetach_key = false", "socket = '/wrong.sock'\nheadless = 42", "socket = '/wrong.sock'\nhistory_mb = []", "socket = '/wrong.sock'\nnotes_quiet = false", "socket = '/wrong.sock'\nmachine_timeout = 'bad'"] {
         let f = Fixture::new();
         let _listener = f.listener("run/herdr-core/default.sock");
         f.write(".config/herdr-core/config.toml", config);
-        f.run(&[], "stopped");
-        f.no_calls();
+        f.run(&[], "ok");
+        assert!(f.0.join("calls").exists(), "config {config:?}");
     }
     let f = Fixture::new();
     let _listener = f.listener("endpoint");
@@ -419,5 +418,32 @@ fn full_accept_queue_obeys_deadline_and_cancellation() {
         let _queued = UnixStream::connect(f.0.join("run/herdr-core/default.sock")).unwrap();
         f.run(&[], expected);
         f.no_calls();
+    }
+}
+
+#[test]
+fn socket_config_load_matches_core_types_and_io_fallbacks() {
+    let f = Fixture::new();
+    let path = f.0.join(".config/herdr-core/config.toml");
+    let resolve = || hc_socket_path(|key| match key {
+        "HOME" => Some(f.0.to_str().unwrap().into()),
+        "XDG_RUNTIME_DIR" => Some(f.0.join("run").to_str().unwrap().into()),
+        "HC_TERMINAL_SOCKET" => Some("/ignored.sock".into()),
+        _ => None,
+    }).unwrap();
+    let fallback = f.0.join("run/herdr-core/default.sock");
+    assert_eq!(resolve(), fallback);
+    fs::create_dir_all(&path).unwrap();
+    assert_eq!(resolve(), fallback);
+    fs::remove_dir(&path).unwrap();
+    fs::write(&path, [0xff]).unwrap();
+    assert_eq!(resolve(), fallback);
+    for (config, expected) in [
+        ("socket = ''", ""),
+        ("socket = '/chosen.sock'\nunknown = []", "/chosen.sock"),
+        ("socket = '/chosen.sock'\nnotes = true\nwait_timeout = 3\nnotes_quiet = 1.5\nhistory_mb = nan\nmachine_timeout = inf\nheadless = 'not-validated-by-load'\ndetach_key = 'also-not-validated'", "/chosen.sock"),
+    ] {
+        fs::write(&path, config).unwrap();
+        assert_eq!(resolve(), PathBuf::from(expected), "{config}");
     }
 }
