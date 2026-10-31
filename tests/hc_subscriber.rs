@@ -2457,15 +2457,21 @@ fn due_mailbox_tick_does_not_retry_an_unavailable_dead_owner() {
         result.unwrap();
         let connection =
             rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
-        let state: String = connection
+        let attempt: String = connection
             .query_row(
-                "SELECT state FROM delivery_attempts WHERE pane_id='t2'",
+                "SELECT attempt_id FROM delivery_attempts WHERE delivery_id='live-delivery'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
+        let state = store
+            .transaction(|tx| {
+                tx.delivery_attempt_state(&namespace, &DeliveryAttemptId::new(attempt))
+            })
+            .unwrap();
         assert_eq!(
-            state, "settled",
+            state,
+            DeliveryState::Held,
             "independent delivery grace must still run"
         );
         assert_eq!(
