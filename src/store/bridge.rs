@@ -999,6 +999,16 @@ impl StateTransaction<'_> {
             ],
         )? == 1;
         if updated {
+            if state == DeliveryState::Failed {
+                crate::diagnostic_evidence::record(
+                    self.state_directory,
+                    serde_json::json!({
+                        "kind": "Failed", "phase": "sql_write_in_open_transaction",
+                        "namespace": origin, "entity": "MailboxDelivery", "id": delivery_id,
+                        "source": "end_envoy_delivery", "previous": DeliveryState::Settled, "target": "Failed", "attribution": attribution,
+                    }),
+                );
+            }
             self.append_transition(
                 origin,
                 TransitionEntityKind::MailboxDelivery,

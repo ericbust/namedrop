@@ -26,6 +26,7 @@ impl TestDirectory {
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
+        namedrop::diagnostic_evidence::enable(&path).unwrap();
         let home = path.join("home");
         fs::create_dir(&home).unwrap();
         Self { path, home }
@@ -44,6 +45,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.path);
         fs::remove_dir_all(&self.path).unwrap();
     }
 }

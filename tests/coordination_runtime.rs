@@ -36,6 +36,7 @@ impl Fixture {
         let state = root.join("state");
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
+        namedrop::diagnostic_evidence::enable(&root).unwrap();
         let f = Self {
             root,
             state,
@@ -439,6 +440,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.root);
         let _ = fs::remove_dir_all(&self.root);
     }
 }

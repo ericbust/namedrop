@@ -130,45 +130,59 @@ impl PaneEffects {
         pane: &str,
         timeout: Duration,
     ) -> Result<Self, AcquireError> {
-        std::fs::DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(state)?;
-        let state = checked(
-            OpenOptions::new()
-                .read(true)
-                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                .open(state)?,
-            true,
-        )?;
-        let created = unsafe { libc::mkdirat(state.as_raw_fd(), c"pane-effects".as_ptr(), 0o700) };
-        if created != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
-            return Err(io::Error::last_os_error().into());
+        let result = (|| {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(state)?;
+            let state = checked(
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(state)?,
+                true,
+            )?;
+            let created =
+                unsafe { libc::mkdirat(state.as_raw_fd(), c"pane-effects".as_ptr(), 0o700) };
+            if created != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
+                return Err(io::Error::last_os_error().into());
+            }
+            let fd = unsafe {
+                libc::openat(
+                    state.as_raw_fd(),
+                    c"pane-effects".as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            let directory = checked(unsafe { File::from_raw_fd(fd) }, true)?;
+            let key = Sha256::digest(serde_json::to_vec(&(socket, pane)).map_err(io::Error::from)?)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let lock_name = CString::new(format!("{key}.lock")).map_err(io::Error::from)?;
+            let lock = open_at(&directory, &lock_name, libc::O_RDWR | libc::O_CREAT)?;
+            acquire_flock(lock.as_raw_fd(), timeout)?;
+            Ok(Self {
+                _lock: lock,
+                directory,
+                marker: CString::new(format!("{key}.json")).map_err(io::Error::from)?,
+                pane: pane.into(),
+            })
+        })();
+        if let Err(AcquireError::Fault(error)) = &result {
+            crate::diagnostic_evidence::record(
+                state,
+                serde_json::json!({
+                    "kind": "Fault", "classification": "Fault", "error_kind": format!("{:?}", error.kind()),
+                    "raw_errno": error.raw_os_error(), "error": format!("{error:?}"),
+                    "socket": socket, "pane": pane,
+                }),
+            );
         }
-        let fd = unsafe {
-            libc::openat(
-                state.as_raw_fd(),
-                c"pane-effects".as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        let directory = checked(unsafe { File::from_raw_fd(fd) }, true)?;
-        let key = Sha256::digest(serde_json::to_vec(&(socket, pane)).map_err(io::Error::from)?)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let lock_name = CString::new(format!("{key}.lock")).map_err(io::Error::from)?;
-        let lock = open_at(&directory, &lock_name, libc::O_RDWR | libc::O_CREAT)?;
-        acquire_flock(lock.as_raw_fd(), timeout)?;
-        Ok(Self {
-            _lock: lock,
-            directory,
-            marker: CString::new(format!("{key}.json")).map_err(io::Error::from)?,
-            pane: pane.into(),
-        })
+        result
     }
 
     fn record(&self, owner: &InputOwner) -> io::Result<()> {
@@ -267,6 +281,13 @@ pub(crate) fn interrupt_if_current(
     herdr: &impl HerdrCommandExecutor,
     cwd: Option<&Path>,
 ) -> InterruptReport {
+    crate::diagnostic_evidence::record(
+        state,
+        serde_json::json!({
+            "kind": "InterruptObservation", "phase": "entry", "response_count": responses.len(),
+            "namespace": namespace,
+        }),
+    );
     let mut report = InterruptReport::default();
     for response in responses {
         let result = (|| -> Result<(), String> {
@@ -312,12 +333,27 @@ pub(crate) fn interrupt_if_current(
                 &response.binding_id,
                 &response.agent_session_id,
             );
+            crate::diagnostic_evidence::record(
+                state,
+                serde_json::json!({
+                    "kind": "InterruptObservation", "phase": "predicates", "pane": response.pane_id,
+                    "current": current, "live_matches": live_matches,
+                }),
+            );
             if !current || !live_matches {
                 return Err(
                     "the stopped thread could not be proven to own its current response".into(),
                 );
             }
-            match effects.ownership(&owner) {
+            let ownership = effects.ownership(&owner);
+            crate::diagnostic_evidence::record(
+                state,
+                serde_json::json!({
+                    "kind": "InterruptObservation", "phase": "ownership", "pane": response.pane_id,
+                    "ownership": format!("{ownership:?}"),
+                }),
+            );
+            match ownership {
                 MarkerOwnership::Match | MarkerOwnership::LegacyAbsent => {}
                 MarkerOwnership::Reject => {
                     return Err("the stopped thread no longer owns its pane input".into());
@@ -329,6 +365,13 @@ pub(crate) fn interrupt_if_current(
             herdr.execute(&["agent", "send-keys", &effects.pane, "ctrl+c"])?;
             Ok(())
         })();
+        crate::diagnostic_evidence::record(
+            state,
+            serde_json::json!({
+                "kind": "InterruptObservation", "phase": "outcome", "pane": response.pane_id,
+                "interrupted": result.is_ok(), "error": result.as_ref().err(),
+            }),
+        );
         match result {
             Ok(()) => report.interrupted_pane_ids.push(response.pane_id.clone()),
             Err(error) => report.warnings.push(format!(
@@ -378,6 +421,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn diagnostic_fault_with_non_utf8_state_preserves_acquisition_error() {
+        use std::os::unix::ffi::OsStrExt;
+        let root = State::new();
+        let state = root.0.join(std::ffi::OsStr::from_bytes(b"\xff"));
+        fs::write(&state, b"file").unwrap();
+        assert!(matches!(
+            PaneEffects::acquire_for(&state, "socket", "pane", Duration::ZERO),
+            Err(AcquireError::Fault(_))
+        ));
+        let files: Vec<_> = fs::read_dir(root.0.join(".namedrop-diagnostic-evidence"))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(files.len(), 1);
+        let event: serde_json::Value =
+            serde_json::from_slice(&fs::read(files[0].path()).unwrap()).unwrap();
+        assert_eq!(event["event"]["classification"], "Fault");
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture"]
+    fn diagnostic_fault_child() {
+        struct NoCalls;
+        impl HerdrCommandExecutor for NoCalls {
+            fn execute(&self, _: &[&str]) -> Result<HerdrCommandOutput, String> {
+                panic!("fault must precede host calls")
+            }
+        }
+        let root =
+            std::path::PathBuf::from(std::env::var_os("NAMEDROP_DIAGNOSTIC_CHILD_ROOT").unwrap());
+        let state = root.join("not-a-directory");
+        fs::write(&state, b"file").unwrap();
+        let report = interrupt_if_current(
+            &state,
+            &StateNamespace::for_space("socket", "space"),
+            &[ActiveThreadResponse {
+                attempt_id: DeliveryAttemptId::new("attempt"),
+                binding_id: PaneBindingId::new("binding"),
+                pane_id: "stop-pane".into(),
+                agent_session_id: AgentSessionId::new("session"),
+                binding_active: true,
+            }],
+            &NoCalls,
+            None,
+        );
+        assert_eq!(report.warnings.len(), 1);
+        assert!(report.interrupted_pane_ids.is_empty());
+    }
+
+    #[test]
+    #[ignore = "intentional unrelated panic in subprocess"]
+    fn diagnostic_unrelated_failure() {
+        {
+            let state = State::new();
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "pane_effects::tests::diagnostic_fault_child",
+                    "--ignored",
+                ])
+                .env("NAMEDROP_DIAGNOSTIC_CHILD_ROOT", &state.0)
+                .output()
+                .unwrap();
+            assert!(
+                child.status.success(),
+                "{}",
+                String::from_utf8_lossy(&child.stdout)
+            );
+        }
+        assert_eq!(
+            std::process::id(),
+            0,
+            "unrelated assertion after fixture drop"
+        );
+    }
+
+    #[test]
+    fn diagnostic_default_capture_replays_child_stop_fault_after_early_drop() {
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "pane_effects::tests::diagnostic_unrelated_failure",
+                "--ignored",
+            ])
+            .output()
+            .unwrap();
+        assert!(!child.status.success());
+        let stdout = String::from_utf8(child.stdout).unwrap();
+        for expected in [
+            "unrelated assertion",
+            "diagnostic-event",
+            "\"classification\":\"Fault\"",
+            "\"raw_errno\":",
+            "\"error_kind\":",
+            "stop-pane",
+            "InterruptObservation",
+            "\"response_count\":1",
+            "\"interrupted\":false",
+        ] {
+            assert!(stdout.contains(expected), "missing {expected}: {stdout}");
+        }
+        println!("{stdout}");
+    }
+
     struct State(std::path::PathBuf);
     impl State {
         fn new() -> Self {
@@ -388,11 +536,13 @@ mod tests {
             ));
             fs::create_dir(&path).unwrap();
             fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+            crate::diagnostic_evidence::enable(&path).unwrap();
             Self(path)
         }
     }
     impl Drop for State {
         fn drop(&mut self) {
+            crate::diagnostic_evidence::dump(&self.0);
             let _ = fs::remove_dir_all(&self.0);
         }
     }

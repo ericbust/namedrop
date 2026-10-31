@@ -51,6 +51,7 @@ impl TestDirectory {
         let home = root.join("home");
         fs::create_dir_all(&repo).unwrap();
         fs::create_dir_all(&home).unwrap();
+        namedrop::diagnostic_evidence::enable(&root).unwrap();
         Self {
             root,
             repo,
@@ -62,6 +63,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.root);
         let _ = fs::remove_dir_all(&self.root);
     }
 }

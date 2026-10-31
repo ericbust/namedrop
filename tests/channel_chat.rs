@@ -29,6 +29,62 @@ use support::{
 use xws::Fixture;
 
 #[test]
+#[ignore = "intentional unrelated failure in subprocess"]
+fn diagnostic_unrelated_panic_after_process_fault() {
+    {
+        let f = fixture();
+        fs::write(f.state.join("pane-effects"), "not a directory").unwrap();
+        let server = Server::start(&f, "not json", true);
+        let (status, receipt) = post(
+            &server,
+            "diagnostic-process-fault",
+            "@planner Inspect.",
+            None,
+        );
+        assert_eq!(status, 200);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while f.delivery_states("w1", &receipt["message_id"]) != ["failed"] {
+            assert!(Instant::now() < deadline, "delivery did not finish");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert_eq!(
+        std::process::id(),
+        0,
+        "unrelated assertion after child process and xws fixture drop"
+    );
+}
+
+#[test]
+fn diagnostic_default_capture_contains_process_fault_after_xws_drop() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "diagnostic_unrelated_panic_after_process_fault",
+            "--ignored",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "unrelated assertion",
+        "diagnostic-event",
+        "\"classification\":\"Fault\"",
+        "\"error_kind\":\"NotADirectory\"",
+        "transition_delivery_attempt",
+        "sql_write_in_open_transaction",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected}: {stdout}");
+    }
+    assert!(
+        stdout.contains(&format!("\"raw_errno\":{}", libc::ENOTDIR)),
+        "{stdout}"
+    );
+    println!("{stdout}");
+}
+
+#[test]
 fn diagnostic_failed_receipt_reports_unsafe_permissions_without_errno() {
     let f = fixture();
     let directory = f.state.join("pane-effects");

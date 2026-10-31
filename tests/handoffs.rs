@@ -34,6 +34,7 @@ impl TestDirectory {
         let home = root.join("home");
         fs::create_dir_all(repo.join("src")).unwrap();
         fs::create_dir_all(&home).unwrap();
+        namedrop::diagnostic_evidence::enable(&root).unwrap();
         fs::write(
             repo.join("src/notes.txt"),
             "safe line\nTOKEN=top-secret-value\nghp_abcdefghijklmnopqrstuvwxyz1234567890\n",
@@ -51,6 +52,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.root);
         fs::remove_dir_all(&self.root).unwrap();
     }
 }

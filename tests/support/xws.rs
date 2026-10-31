@@ -304,6 +304,7 @@ impl Fixture {
         for path in ["state", "home", "repo"] {
             fs::create_dir_all(root.join(path)).unwrap();
         }
+        namedrop::diagnostic_evidence::enable(&root).unwrap();
         let repo = root.join("repo");
         for args in [
             &["init", "-q", "-b", "main"][..],
@@ -654,6 +655,7 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.root);
         let _ = fs::remove_dir_all(&self.root);
     }
 }

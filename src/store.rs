@@ -221,7 +221,10 @@ impl StateStore {
             TransactionBehavior::Immediate
         };
         let transaction = self.connection.transaction_with_behavior(behavior)?;
-        let mut state_transaction = StateTransaction { transaction };
+        let mut state_transaction = StateTransaction {
+            transaction,
+            state_directory: &self.state_directory,
+        };
         let value = operation(&mut state_transaction)?;
         state_transaction.transaction.commit()?;
         Ok(value)
@@ -246,7 +249,10 @@ impl StateStore {
         let summary = purge_summary(&transaction, namespace)?;
         validate_purge(&summary, namespace, typed_space_id)?;
         {
-            let mut state = StateTransaction { transaction };
+            let mut state = StateTransaction {
+                transaction,
+                state_directory: &self.state_directory,
+            };
             state.cancel_purged_copies(namespace, attribution)?;
             delete_namespace_rows(&state.transaction, "main", namespace)?;
             state.transaction.commit()?;
@@ -269,6 +275,7 @@ impl StateStore {
 
 pub struct StateTransaction<'connection> {
     transaction: Transaction<'connection>,
+    state_directory: &'connection Path,
 }
 
 impl StateTransaction<'_> {
@@ -5692,6 +5699,14 @@ impl StateTransaction<'_> {
                 attempt_id.as_str()
             ],
         )?;
+        crate::diagnostic_evidence::record(
+            self.state_directory,
+            serde_json::json!({
+                "kind": "Failed", "phase": "sql_write_in_open_transaction",
+                "namespace": namespace, "entity": "DeliveryAttempt", "id": attempt_id,
+                "source": "return_delivery_attempt_to_queue", "previous": state, "target": "Failed", "attribution": attribution,
+            }),
+        );
         self.transaction.execute(
             "UPDATE mailbox_deliveries SET state = 'queued'
              WHERE session_socket_id = ?1 AND worktree_id = ?2 AND delivery_id = ?3",
@@ -5834,6 +5849,16 @@ impl StateTransaction<'_> {
                 active
             ],
         )?;
+        if next == DeliveryState::Failed {
+            crate::diagnostic_evidence::record(
+                self.state_directory,
+                serde_json::json!({
+                    "kind": "Failed", "phase": "sql_write_in_open_transaction",
+                    "namespace": namespace, "entity": "DeliveryAttempt", "id": attempt_id,
+                    "source": "transition_delivery_attempt", "previous": current, "target": "Failed", "attribution": attribution,
+                }),
+            );
+        }
         self.transaction.execute(
             "UPDATE mailbox_deliveries SET state = ?4
              WHERE session_socket_id = ?1 AND worktree_id = ?2 AND delivery_id = ?3",
@@ -5844,6 +5869,16 @@ impl StateTransaction<'_> {
                 delivery_state_name(next)
             ],
         )?;
+        if next == DeliveryState::Failed {
+            crate::diagnostic_evidence::record(
+                self.state_directory,
+                serde_json::json!({
+                    "kind": "Failed", "phase": "sql_write_in_open_transaction",
+                    "namespace": namespace, "entity": "MailboxDelivery", "id": delivery_id,
+                    "source": "transition_delivery_attempt", "previous": mailbox_current, "target": "Failed", "attribution": attribution,
+                }),
+            );
+        }
         if next != DeliveryState::Dispatching {
             self.transaction.execute(
                 "DELETE FROM leases
@@ -8121,12 +8156,14 @@ mod tests {
                 NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir(&path).unwrap();
+            crate::diagnostic_evidence::enable(&path).unwrap();
             Self(path)
         }
     }
 
     impl Drop for TestDirectory {
         fn drop(&mut self) {
+            crate::diagnostic_evidence::dump(&self.0);
             let _ = fs::remove_dir_all(&self.0);
         }
     }

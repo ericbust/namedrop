@@ -44,6 +44,7 @@ impl Fixture {
             prompts: Mutex::new(Vec::new()),
         };
         fs::create_dir_all(&f.home).unwrap();
+        namedrop::diagnostic_evidence::enable(&f.root).unwrap();
         let by = MutationAttribution::new(ActorKind::Human, "synthetic-user", 1);
         StateStore::open(&f.state)
             .unwrap()
@@ -228,6 +229,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.root);
         let _ = fs::remove_dir_all(&self.root);
     }
 }

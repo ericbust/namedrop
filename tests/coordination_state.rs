@@ -25,6 +25,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
+        namedrop::diagnostic_evidence::enable(&root).unwrap();
         let f = Self {
             state: root.join("state"),
             home: root.join("home"),
@@ -258,6 +259,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.root);
         let _ = fs::remove_dir_all(&self.root);
     }
 }

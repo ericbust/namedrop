@@ -9,6 +9,8 @@ mod controls;
 mod coordination;
 pub mod dashboard;
 mod delivery;
+#[doc(hidden)]
+pub mod diagnostic_evidence;
 mod domain;
 mod groups;
 mod handoff;

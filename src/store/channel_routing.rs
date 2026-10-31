@@ -71,7 +71,10 @@ impl StateStore {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)?;
-        let tx = StateTransaction { transaction };
+        let tx = StateTransaction {
+            transaction,
+            state_directory: &self.state_directory,
+        };
         let current = tx.channel_fact(&claim.namespace, &claim.draft.message_id)?
             == Some((claim.token, "dispatching".to_owned()));
         let rows = if current

@@ -450,6 +450,14 @@ impl StateTransaction<'_> {
         for (delivery, message) in queued {
             self.transaction.execute("UPDATE mailbox_deliveries SET state='failed' WHERE session_socket_id=?1 AND worktree_id=?2 AND delivery_id=?3",
                 params![ns.session_socket_id,ns.space_id.as_str(),delivery])?;
+            crate::diagnostic_evidence::record(
+                self.state_directory,
+                serde_json::json!({
+                    "kind": "Failed", "phase": "sql_write_in_open_transaction",
+                    "namespace": ns, "entity": "MailboxDelivery", "id": delivery,
+                    "source": "deny_remote_commands", "previous": DeliveryState::Queued, "target": "Failed", "attribution": at,
+                }),
+            );
             self.append_transition(
                 ns,
                 TransitionEntityKind::MailboxDelivery,

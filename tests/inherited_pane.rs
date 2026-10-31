@@ -67,6 +67,7 @@ impl Fixture {
             std::process::id()
         ));
         fs::create_dir_all(root.join("home")).unwrap();
+        namedrop::diagnostic_evidence::enable(&root).unwrap();
         let host = root.join("herdr");
         fs::write(
             &host,
@@ -169,6 +170,7 @@ esac
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.0);
         fs::remove_dir_all(&self.0).unwrap();
     }
 }

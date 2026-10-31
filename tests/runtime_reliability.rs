@@ -33,6 +33,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&root).unwrap();
+        namedrop::diagnostic_evidence::enable(&root).unwrap();
         fs::create_dir(root.join("home")).unwrap();
         let fixture = Self { root };
         fixture.set_herdr(HERDR_SCRIPT);
@@ -394,6 +395,7 @@ impl Drop for Worker {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.root);
         fs::remove_dir_all(&self.root).unwrap();
     }
 }

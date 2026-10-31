@@ -554,6 +554,7 @@ impl TestDirectory {
             NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
+        namedrop::diagnostic_evidence::enable(&path).unwrap();
         let home = path.join("home");
         fs::create_dir(&home).unwrap();
         Self { path, home }
@@ -572,6 +573,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.path);
         fs::remove_dir_all(&self.path).unwrap();
     }
 }
@@ -952,6 +954,10 @@ impl HerdrCommandExecutor for FakeHerdr {
 
 #[test]
 fn control_operations_mutate_durable_state_and_stop_only_a_proven_thread_response() {
+    run_control_operations(false);
+}
+
+fn run_control_operations(stop_fault: bool) {
     let directory = TestDirectory::new();
     let namespace = StateNamespace::for_space("socket-a", "workspace-1");
     let thread_id = ThreadId::new("thread-1");
@@ -1157,6 +1163,9 @@ fn control_operations_mutate_durable_state_and_stop_only_a_proven_thread_respons
     )
     .unwrap();
     assert_eq!(resumed["state"]["paused"], false);
+    if stop_fault {
+        fs::write(directory.path().join("pane-effects"), b"not a directory").unwrap();
+    }
     let stopped = execute_control_operation(
         "thread.stop",
         serde_json::json!({"thread_id": "thread-1"}),
@@ -1165,6 +1174,13 @@ fn control_operations_mutate_durable_state_and_stop_only_a_proven_thread_respons
     .unwrap();
 
     assert_eq!(stopped["state"]["stopped"], true);
+    if stop_fault {
+        assert_eq!(stopped["interrupted_pane_ids"], serde_json::json!([]));
+        assert_eq!(stopped["warnings"].as_array().unwrap().len(), 1);
+        assert!(herdr.interrupted.lock().unwrap().is_empty());
+        return;
+    }
+
     assert_eq!(
         stopped["interrupted_pane_ids"],
         serde_json::json!(["pane-recipient"])
@@ -1263,4 +1279,46 @@ fn ambiguous_binding_recovery_opens_one_attention_item_until_an_explicit_rebind(
             .len(),
         0
     );
+}
+
+#[test]
+#[ignore = "intentional unrelated panic in subprocess"]
+fn diagnostic_controls_stop_fault_child() {
+    run_control_operations(true);
+    assert_eq!(
+        std::process::id(),
+        0,
+        "unrelated assertion after controls fixture drop"
+    );
+}
+
+#[test]
+fn diagnostic_default_capture_contains_controls_stop_fault() {
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "diagnostic_controls_stop_fault_child",
+            "--ignored",
+        ])
+        .output()
+        .unwrap();
+    assert!(!child.status.success());
+    let stdout = String::from_utf8(child.stdout).unwrap();
+    for expected in [
+        "unrelated assertion after controls fixture drop",
+        "diagnostic-event",
+        "\"classification\":\"Fault\"",
+        "\"raw_errno\":",
+        "\"error_kind\":",
+        "\"error\":",
+        "pane-recipient",
+        "InterruptObservation",
+        "\"phase\":\"entry\"",
+        "\"response_count\":1",
+        "\"phase\":\"outcome\"",
+        "\"interrupted\":false",
+    ] {
+        assert!(stdout.contains(expected), "missing {expected}: {stdout}");
+    }
+    println!("{stdout}");
 }

@@ -125,6 +125,7 @@ impl Fixture {
         )));
         let home = root.join("home");
         fs::create_dir_all(&home).unwrap();
+        namedrop::diagnostic_evidence::enable(&root).unwrap();
         Self {
             root,
             home,
@@ -233,6 +234,7 @@ fn stale_runtime(report: &HealthReport) -> Option<&HealthIssue> {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        namedrop::diagnostic_evidence::dump(&self.root);
         update_profile::cleanup(&self.root);
     }
 }
