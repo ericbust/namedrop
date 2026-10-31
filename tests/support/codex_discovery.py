@@ -67,6 +67,8 @@ try:
     assert len(skills) == len(expected), skills
     for skill in skills:
         assert skill["enabled"], skill
+        if skill["name"] == "namedrop:namedrop-app":
+            assert Path(skill["path"]) == root / "home/.agents/skills/namedrop-app/SKILL.md", skill
         print(json.dumps({key: skill.get(key) for key in ["name", "path", "enabled", "pluginId"]}))
 
     result = request(3, "plugin/list", dict(cwds=[str(root / "home")], marketplaceKinds=["local"]))
@@ -85,7 +87,7 @@ try:
             assert hook["key"].startswith("namedrop@" + marketplace["name"] + ":"), hook
             print(hook["key"])
         if marketplace["name"] == "namedrop-app":
-            assert len(plugin["skills"]) == 1, plugin
+            assert len(plugin["skills"]) == 0, plugin
 finally:
     server.terminate()
     try:

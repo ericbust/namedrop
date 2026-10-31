@@ -199,4 +199,41 @@ printf '%s\n' "$@"
         }
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn hc_bootstrap_updates_development_fallback_without_touching_tui() {
+        let root = std::env::temp_dir().join(format!(
+            "namedrop-bootstrap-fallback-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for name in ["first", "second"] {
+            let executable = root.join(name);
+            fs::write(
+                &executable,
+                format!("#!/bin/sh\nprintf '%s\\n' {name} \"$@\"\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            install_shell_command(
+                &root,
+                &executable,
+                &root.join(name).with_extension("state"),
+                true,
+            )
+            .unwrap();
+            let output = Command::new(root.join(".local/bin/namedrop-app"))
+                .args(["doctor", "--host", "hc"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("{name}\ndoctor\n--host\nhc\n")
+            );
+            assert!(!root.join(".local/bin/namedrop").exists());
+            assert!(!root.join(".bashrc").exists());
+            assert!(!root.join(".profile").exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }

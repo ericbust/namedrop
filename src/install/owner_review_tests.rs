@@ -104,7 +104,7 @@ fn hc_package_symlinks_cannot_refresh_tui_packages_or_permissions() {
         "[marketplaces.namedrop]\nsource_type = \"local\"\nsource = {:?}\n[plugins.\"namedrop@namedrop\"]\nenabled = true\n",
         codex_package.to_str().unwrap()
     )).unwrap();
-    let tui_context = PackageContext::new(&home, &tui_state, false);
+    let tui_context = PackageContext::new(&home, false);
     assert!(codex_configuration_current(
         &tui_context,
         AgentConfigDirectories::default()
@@ -112,7 +112,7 @@ fn hc_package_symlinks_cannot_refresh_tui_packages_or_permissions() {
     for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
         std::os::unix::fs::symlink(
             package_directory(&home, agent),
-            PackageContext::new(&home, &hc_state, true).directory(agent),
+            PackageContext::new(&home, true).directory(agent),
         )
         .unwrap();
     }
@@ -173,7 +173,7 @@ fn hc_inspection_rejects_package_symlinks_even_when_packages_match() {
     let moved = root.join("moved-packages");
     fs::create_dir_all(&moved).unwrap();
     for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
-        let owned = PackageContext::new(&home, &state, true).directory(agent);
+        let owned = PackageContext::new(&home, true).directory(agent);
         let target = moved.join(agent.as_str());
         fs::rename(&owned, &target).unwrap();
         std::os::unix::fs::symlink(&target, &owned).unwrap();
@@ -206,7 +206,7 @@ fn hc_package_files_are_preserved_and_block_both_agents() {
     fs::create_dir_all(&state).unwrap();
     fs::create_dir_all(&home).unwrap();
     let owned = [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
-        .map(|agent| PackageContext::new(&home, &state, true).directory(agent));
+        .map(|agent| PackageContext::new(&home, true).directory(agent));
     for path in &owned {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, "user data").unwrap();
@@ -252,7 +252,7 @@ fn package_installation_accepts_explicit_home_and_state_symlinks() {
     std::os::unix::fs::symlink(&real_state, &state_base).unwrap();
     let executable = PathBuf::from(crate::collaboration_executable().unwrap());
     for hc in [false, true] {
-        let context = PackageContext::new(&home, &state, hc);
+        let context = PackageContext::new(&home, hc);
         for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
             install_integration_package_with_config(
                 &context,
@@ -317,7 +317,7 @@ fn hc_refresh_does_not_change_tui_packages_and_owns_private_packages() {
             "HC changed TUI package"
         );
         assert!(
-            PackageContext::new(&home, &hc_state, true)
+            PackageContext::new(&home, true)
                 .directory(agent)
                 .join(INSTRUCTIONS_FILE)
                 .exists()
@@ -351,7 +351,7 @@ fn native_codex_accepts_tui_and_one_stable_hc_marketplace_across_states() {
     let contexts = [("tui", false), ("hc-one", true), ("hc-two", true)].map(|(name, hc)| {
         let state = root.join(name);
         fs::create_dir_all(&state).unwrap();
-        let context = PackageContext::new(&home, &state, hc);
+        let context = PackageContext::new(&home, hc);
         for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
             install_integration_package_with_config(&context, runtime, &executable, &state, config)
                 .unwrap();
@@ -458,6 +458,28 @@ fn native_codex_accepts_tui_and_one_stable_hc_marketplace_across_states() {
             );
         }
     }
+    for arguments in [
+        vec!["activate"],
+        vec!["--plugin-state", "/state", "register"],
+        vec![],
+    ] {
+        let output = std::process::Command::new("codex")
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex)
+            .args(["execpolicy", "check", "--rules"])
+            .arg(codex.join("rules/namedrop-app.rules"))
+            .arg("--")
+            .arg(home.join(".local/bin/namedrop-app"))
+            .args(&arguments)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_ne!(
+            result["decision"], "allow",
+            "HC policy granted a broad command prefix: {arguments:?}"
+        );
+    }
     for (context, state_name) in contexts.iter().zip(["tui", "hc-one", "hc-two"]).rev() {
         for runtime in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
             install_integration_package_with_config(
@@ -511,7 +533,7 @@ fn hc_wrappers_derive_runtime_state_without_claiming_the_inherited_terminal() {
     )
     .unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-    let context = PackageContext::new(&home, &state, true);
+    let context = PackageContext::new(&home, true);
     install_shell_command(&home, &executable, &state, true).unwrap();
     for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
         let package = install_integration_package_with_config(
@@ -569,9 +591,12 @@ fn tui_cache_inspection_ignores_unowned_nested_skill_files() {
         }
     }
     fs::create_dir_all(installed.join("skills/namedrop")).unwrap();
-    fs::write(installed.join(HC_CODEX_SKILL_FILE), "unowned TUI file").unwrap();
-    assert!(codex_snapshot_matches(&installed, &cached, false));
-    assert!(!codex_snapshot_matches(&installed, &cached, true));
+    fs::write(
+        installed.join("skills/namedrop/SKILL.md"),
+        "unowned TUI file",
+    )
+    .unwrap();
+    assert!(codex_snapshot_matches(&installed, &cached));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -582,8 +607,8 @@ fn hc_addendum_package_is_stable_across_states_and_executables() {
     let home = root.join("home");
     let first_state = root.join("session-one");
     let second_state = root.join("session-two");
-    let first = PackageContext::new(&home, &first_state, true);
-    let second = PackageContext::new(&home, &second_state, true);
+    let first = PackageContext::new(&home, true);
+    let second = PackageContext::new(&home, true);
     assert_eq!(
         first.directory(AgentRuntime::ClaudeCode),
         home.join(".claude/skills/namedrop-app")
@@ -594,7 +619,7 @@ fn hc_addendum_package_is_stable_across_states_and_executables() {
     );
     assert_eq!(first.marketplace, "namedrop-app");
     for agent in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
-        let one = prepare_integration_package(
+        let one = install_integration_package_with_config(
             &first,
             agent,
             Path::new("/development/one"),
@@ -602,7 +627,10 @@ fn hc_addendum_package_is_stable_across_states_and_executables() {
             AgentConfigDirectories::default(),
         )
         .unwrap();
-        let two = prepare_integration_package(
+        let snapshot = tree_snapshot(&one);
+        let rules = home.join(".codex/rules/namedrop-app.rules");
+        let policy = fs::read(&rules).ok();
+        let two = install_integration_package_with_config(
             &second,
             agent,
             Path::new("/development/two"),
@@ -610,13 +638,15 @@ fn hc_addendum_package_is_stable_across_states_and_executables() {
             AgentConfigDirectories::default(),
         )
         .unwrap();
-        assert_eq!(one.directory, two.directory);
+        assert_eq!(one, two);
         assert_eq!(
-            one.files, two.files,
-            "cached HC package must not depend on state or executable"
+            tree_snapshot(&two),
+            snapshot,
+            "installed package bytes and modes must stay stable"
         );
-        assert_eq!(one.codex_policy, two.codex_policy);
+        assert_eq!(fs::read(&rules).ok(), policy);
     }
+    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -651,7 +681,7 @@ fn hc_permission_ownership_survives_state_changes_and_deactivation() {
     let home = root.join("home");
     let first = root.join("session-one");
     let second = root.join("session-two");
-    let context = PackageContext::new(&home, &first, true);
+    let context = PackageContext::new(&home, true);
     let executable = root.join("first-executable");
     install_integration_package_with_config(
         &context,
@@ -666,7 +696,7 @@ fn hc_permission_ownership_survives_state_changes_and_deactivation() {
     let expected = fs::read(&settings).unwrap();
     let ownership = fs::read(&journal).unwrap();
     install_integration_package_with_config(
-        &PackageContext::new(&home, &second, true),
+        &PackageContext::new(&home, true),
         AgentRuntime::ClaudeCode,
         &root.join("other-executable"),
         &second,
@@ -681,5 +711,80 @@ fn hc_permission_ownership_survives_state_changes_and_deactivation() {
     assert_eq!(fs::read(&journal).unwrap(), ownership);
     assert!(!first.join("claude-permissions.json").exists());
     assert!(!second.join("claude-permissions.json").exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[path = "../../tests/support/bash_rules.rs"]
+mod bash_rules;
+
+#[test]
+fn hc_command_forms_match_only_operation_scoped_permissions() {
+    let root = owner_review_root("hc-operation-rules");
+    let home = root.join("home with spaces");
+    let state = root.join("session state");
+    let context = PackageContext::new(&home, true);
+    let executable = crate::integration::tool_executable(Some(&home), true).unwrap();
+    install_integration_package_with_config(
+        &context,
+        AgentRuntime::ClaudeCode,
+        Path::new("/development/namedrop"),
+        &state,
+        AgentConfigDirectories::default(),
+    )
+    .unwrap();
+    let settings: Value =
+        serde_json::from_slice(&fs::read(home.join(".claude/settings.json")).unwrap()).unwrap();
+    let allowed = |command: &str| {
+        settings["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|rule| bash_rules::bash_rule_matches(rule.as_str().unwrap(), command))
+    };
+    let catalog = crate::operation_catalog();
+    let operations = catalog.operations.iter().chain(
+        catalog
+            .management_operations
+            .iter()
+            .filter(|op| op.automatic_permission),
+    );
+    let tool = json!({
+        "executable": executable,
+        "environment": crate::integration::tool_environment(&state, "hc:session", "space", "terminal"),
+        "input_flag": "--input-json",
+        "operations": operations.map(|op| json!({"token":op.token, "argv":op.argv, "input":{}})).collect::<Vec<_>>()
+    });
+    let guidance = crate::integration::delivery_command_guidance(&tool).unwrap();
+    for line in guidance.lines().skip(1) {
+        let (_, command) = line.split_once(": ").unwrap();
+        assert!(
+            allowed(command),
+            "HC guidance is outside managed policy: {command}"
+        );
+        assert!(command.find("--plugin-state").unwrap() > command.find("namedrop-app'").unwrap());
+    }
+    let registration = crate::integration::registration_command(
+        &state,
+        "hc:session",
+        "space",
+        "terminal",
+        Path::new(&executable),
+        AgentRuntime::ClaudeCode,
+        "nonce",
+    )
+    .unwrap();
+    assert!(allowed(&registration), "{registration}");
+    for operation in [
+        "activate",
+        "deactivate",
+        "name other",
+        "--plugin-state /state register",
+        "snapshot",
+    ] {
+        assert!(
+            !allowed(&format!("{} {operation}", shell_single_quote(&executable))),
+            "broad HC permission for {operation}"
+        );
+    }
     fs::remove_dir_all(root).unwrap();
 }

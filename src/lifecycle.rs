@@ -501,13 +501,9 @@ where
         "activate" => {
             let input: ActivateInput = parse_input(input)?;
             if !input.confirmed {
-                let package_context = runtime.home_directory.map(|home| {
-                    crate::install::PackageContext::new(
-                        home,
-                        runtime.state_directory,
-                        runtime.is_hc(),
-                    )
-                });
+                let package_context = runtime
+                    .home_directory
+                    .map(|home| crate::install::PackageContext::new(home, runtime.is_hc()));
                 let hook_activation = crate::install::hook_activation_guidance(
                     package_context.as_ref(),
                     runtime.agent_config,

@@ -616,7 +616,7 @@ root = Path(__file__).parent
 args = sys.argv[1:]
 assert 'HC_TERMINAL_ID' not in os.environ
 assert 'HC_TERMINAL_SOCKET' not in os.environ
-assert os.environ['HC_SESSION'] == 'hook-core'
+assert os.environ['HC_SESSION'] in ('hook-core', 'other-hook-core')
 assert os.environ['HC_SOCKET'] == 'hook-socket'
 with (root / 'hc-calls').open('a') as out:
     out.write(json.dumps(args) + '\n')
@@ -643,7 +643,7 @@ elif args[0] == 'run':
 elif args[0] == 'send':
     assert 'HC_TERMINAL_ID' not in os.environ
     assert 'HC_TERMINAL_SOCKET' not in os.environ
-    assert os.environ['HC_SESSION'] == 'hook-core'
+    assert os.environ['HC_SESSION'] in ('hook-core', 'other-hook-core')
     assert os.environ['HC_SOCKET'] == 'hook-socket'
     print(json.dumps({'started':True}))
 else: raise AssertionError(args)
@@ -794,11 +794,17 @@ else: raise AssertionError(args)
         "{}",
         text(&tui_doctor)
     );
+    let hc_package = Path::new(
+        result["data"]["integration_packages"]["codex"]["path"]
+            .as_str()
+            .unwrap(),
+    );
+    let hc_snapshot = integration_snapshot(hc_package);
     let foreign_state = f.0.join("foreign-hc");
     let mut foreign = Command::new(env!("CARGO_BIN_EXE_namedrop"));
     f.host(&mut foreign)
         .env("HC_BIN_PATH", &hc)
-        .env("HC_SESSION", "hook-core")
+        .env("HC_SESSION", "other-hook-core")
         .env("HC_SOCKET", "hook-socket")
         .arg("--plugin-state")
         .arg(&foreign_state)
@@ -814,6 +820,11 @@ else: raise AssertionError(args)
     let foreign = foreign.output().unwrap();
     assert!(foreign.status.success(), "{}", text(&foreign));
     let foreign: serde_json::Value = serde_json::from_slice(&foreign.stdout).unwrap();
+    assert_eq!(
+        integration_snapshot(hc_package),
+        hc_snapshot,
+        "another session changed the shared HC package"
+    );
     assert_eq!(fs::read_to_string(&launcher).unwrap(), tui_fallback);
     let mut fallback = Command::new(&launcher);
     f.host(&mut fallback)
@@ -1063,6 +1074,24 @@ else: raise AssertionError(args)
     assert!(
         !calls.lines().any(|line| line.starts_with("[\"label\"")),
         "stale inherited terminal wrote a label: {calls}"
+    );
+    let selected_runtime = hc_state.join("runtime/namedrop");
+    fs::create_dir_all(selected_runtime.parent().unwrap()).unwrap();
+    fs::write(
+        &selected_runtime,
+        "#!/bin/sh\nprintf '%s\\n' selected-runtime \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&selected_runtime, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = inherited_hook(
+        &f.0.join("home/.local/bin/namedrop-app"),
+        &["doctor", "--host", "hc"],
+        "",
+    );
+    assert!(output.status.success(), "{}", text(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "selected-runtime\ndoctor\n--host\nhc\n"
     );
 }
 

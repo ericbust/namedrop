@@ -110,6 +110,24 @@ fn main() -> ExitCode {
             );
         }
     };
+    if arguments
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .filter(|argument| {
+            *argument == "--plugin-state"
+                || argument.as_encoded_bytes().starts_with(b"--plugin-state=")
+        })
+        .count()
+        > 1
+    {
+        return write_result(
+            &CommandResult::invalid_request(
+                "--plugin-state cannot be supplied more than once".to_owned(),
+            ),
+            64,
+            cli.human_output(io::stdout().is_terminal()),
+        );
+    }
     if cli.print_host() {
         return match cli.runtime.host_kind() {
             Ok(host) => {

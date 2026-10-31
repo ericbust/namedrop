@@ -200,7 +200,7 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
             package_issue.diagnostic = serde_json::json!({
                 "source_id": crate::integration_package_attention_source(agent_runtime),
                 "runtime": agent_runtime,
-                "path": runtime.home_directory.map(|home| crate::install::PackageContext::new(home, runtime.state_directory, runtime.is_hc()).directory(agent_runtime)),
+                "path": runtime.home_directory.map(|home| crate::install::PackageContext::new(home, runtime.is_hc()).directory(agent_runtime)),
             });
             add_operation(
                 &mut package_issue,
@@ -214,11 +214,7 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
         } else if agent_runtime == crate::AgentRuntime::Codex
             && runtime.home_directory.is_some_and(|home| {
                 !crate::install::codex_configuration_current(
-                    &crate::install::PackageContext::new(
-                        home,
-                        runtime.state_directory,
-                        runtime.is_hc(),
-                    ),
+                    &crate::install::PackageContext::new(home, runtime.is_hc()),
                     runtime.agent_config,
                 )
             })
@@ -234,13 +230,7 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
             hook_issue.diagnostic = crate::install::hook_activation_guidance(
                 runtime
                     .home_directory
-                    .map(|home| {
-                        crate::install::PackageContext::new(
-                            home,
-                            runtime.state_directory,
-                            runtime.is_hc(),
-                        )
-                    })
+                    .map(|home| crate::install::PackageContext::new(home, runtime.is_hc()))
                     .as_ref(),
                 runtime.agent_config,
             )["codex"]

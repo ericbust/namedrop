@@ -29,7 +29,6 @@ const CLAUDE_MANIFEST_FILE: &str = ".claude-plugin/plugin.json";
 const HOOKS_FILE: &str = "hooks/hooks.json";
 const HOOK_SCRIPT_FILE: &str = "scripts/user-prompt-submit";
 const SESSION_START_SCRIPT_FILE: &str = "scripts/session-start";
-const HC_CODEX_SKILL_FILE: &str = "skills/namedrop/SKILL.md";
 const MARKETPLACE_FILE: &str = ".agents/plugins/marketplace.json";
 const CODEX_RULES_MARKER: &str = "# Managed by Namedrop: collaboration command permissions.\n";
 const INSTALLED_COMMAND_MARKER: &str = "<!-- namedrop-installed-command -->";
@@ -78,7 +77,7 @@ pub(crate) struct PackageContext {
 }
 
 impl PackageContext {
-    pub(crate) fn new(home: &Path, _state: &Path, hc: bool) -> Self {
+    pub(crate) fn new(home: &Path, hc: bool) -> Self {
         Self {
             home: home.to_owned(),
             marketplace: if hc { "namedrop-app" } else { PACKAGE_OWNER }.to_owned(),
@@ -218,7 +217,7 @@ pub(crate) fn user_hook_activation_guidance(
     home_directory: Option<&Path>,
     config: AgentConfigDirectories<'_>,
 ) -> Value {
-    let context = home_directory.map(|home| PackageContext::new(home, Path::new(""), false));
+    let context = home_directory.map(|home| PackageContext::new(home, false));
     hook_activation_guidance(context.as_ref(), config)
 }
 
@@ -379,7 +378,7 @@ fn codex_plugin_configuration(
                 .join(&context.marketplace)
                 .join(PACKAGE_OWNER)
                 .join(version);
-            codex_snapshot_matches(package, &cached_package, context.hc).then_some(())
+            codex_snapshot_matches(package, &cached_package).then_some(())
         })
         .is_some();
     (
@@ -389,23 +388,19 @@ fn codex_plugin_configuration(
     )
 }
 
-fn codex_snapshot_matches(installed: &Path, cached: &Path, hc: bool) -> bool {
-    CODEX_SNAPSHOT_FILES
+fn codex_snapshot_matches(installed: &Path, cached: &Path) -> bool {
+    CODEX_SNAPSHOT_FILES.into_iter().all(|relative| {
+        fs::read(installed.join(relative))
+            .ok()
+            .zip(fs::read(cached.join(relative)).ok())
+            .is_some_and(|(installed, cached)| installed == cached)
+    }) && [HOOK_SCRIPT_FILE, SESSION_START_SCRIPT_FILE]
         .into_iter()
-        .chain(hc.then_some(HC_CODEX_SKILL_FILE))
-        .all(|relative| {
-            fs::read(installed.join(relative))
-                .ok()
-                .zip(fs::read(cached.join(relative)).ok())
-                .is_some_and(|(installed, cached)| installed == cached)
-        })
-        && [HOOK_SCRIPT_FILE, SESSION_START_SCRIPT_FILE]
-            .into_iter()
-            .all(|script| {
-                fs::metadata(cached.join(script)).is_ok_and(|metadata| {
-                    metadata.is_file() && metadata.permissions().mode() & 0o100 != 0
-                })
+        .all(|script| {
+            fs::metadata(cached.join(script)).is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o100 != 0
             })
+        })
 }
 
 fn paths_resolve_to_same_target(configured: &Path, installed: &Path) -> bool {
@@ -443,7 +438,7 @@ pub fn install_integration_package(
     state_directory: &Path,
 ) -> Result<PathBuf, String> {
     install_integration_package_with_config(
-        &PackageContext::new(root, state_directory, false),
+        &PackageContext::new(root, false),
         runtime,
         executable,
         state_directory,
@@ -532,8 +527,15 @@ fn prepare_integration_package(
             state_directory.display()
         ));
     }
-    if runtime == AgentRuntime::ClaudeCode && !context.hc {
-        validate_claude_permission_paths(executable, state_directory)?;
+    if runtime == AgentRuntime::ClaudeCode {
+        validate_claude_permission_paths(
+            &context.command(executable),
+            if context.hc {
+                Path::new("")
+            } else {
+                state_directory
+            },
+        )?;
     }
     let directory = verified_package_directory(context, runtime)?;
     let package = integration_package(runtime);
@@ -548,7 +550,7 @@ fn prepare_integration_package(
     let hook = hook_script_for_context(context, runtime, executable, state_directory, false)?;
     let session_start =
         hook_script_for_context(context, runtime, executable, state_directory, true)?;
-    let mut cache_inputs = vec![
+    let cache_inputs = [
         runtime.as_str(),
         &instructions,
         package.tool_descriptor,
@@ -556,19 +558,12 @@ fn prepare_integration_package(
         &hook,
         &session_start,
     ];
-    let hc_manifest = context.hc.then(|| codex_manifest("", true));
-    cache_inputs.extend(hc_manifest.as_deref());
     let codex_version = codex_cache_version(&cache_inputs);
-    let nested_skill = (context.hc && runtime == AgentRuntime::Codex).then(|| instructions.clone());
-    let mut files = vec![
+    let files = vec![
         (OWNERSHIP_MARKER_FILE, ownership_marker(), None),
         (INSTRUCTIONS_FILE, instructions, None),
         (DESCRIPTOR_FILE, package.tool_descriptor.to_owned(), None),
-        (
-            CODEX_MANIFEST_FILE,
-            codex_manifest(&codex_version, context.hc),
-            None,
-        ),
+        (CODEX_MANIFEST_FILE, codex_manifest(&codex_version), None),
         (
             CLAUDE_MANIFEST_FILE,
             claude_manifest(if context.hc {
@@ -587,11 +582,7 @@ fn prepare_integration_package(
             None,
         ),
     ];
-    let mut directories = PACKAGE_DIRECTORIES.to_vec();
-    if let Some(instructions) = nested_skill {
-        files.push((HC_CODEX_SKILL_FILE, instructions, None));
-        directories.extend(["skills", "skills/namedrop"]);
-    }
+    let directories = PACKAGE_DIRECTORIES.to_vec();
     verify_owned_plugin_targets(&directory, &files, &directories)?;
     let codex_policy = if runtime == AgentRuntime::Codex {
         Some(prepare_codex_policy(
@@ -621,7 +612,7 @@ pub(crate) fn inspect_integration_package(
     let home = home.ok_or("no absolute user home directory is available")?;
     let executable = PathBuf::from(crate::collaboration_executable()?);
     let prepared = prepare_integration_package(
-        &PackageContext::new(home, state, hc),
+        &PackageContext::new(home, hc),
         runtime,
         &executable,
         state,
@@ -634,7 +625,7 @@ pub(crate) fn inspect_integration_package(
         inspect_installed_file(&path, &contents, Some(0o600))?;
     }
     if runtime == AgentRuntime::ClaudeCode {
-        PackageContext::new(home, state, hc).inspect_permissions(config, &executable, state)?;
+        PackageContext::new(home, hc).inspect_permissions(config, &executable, state)?;
     }
     Ok(())
 }
@@ -932,7 +923,7 @@ where
     let executable = crate::collaboration_executable().map(PathBuf::from);
     let context = runtime
         .home_directory
-        .map(|home| PackageContext::new(home, runtime.state_directory, runtime.is_hc()));
+        .map(|home| PackageContext::new(home, runtime.is_hc()));
     let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
         let outcome = match (context.as_ref(), &executable) {
             (Some(context), _) if !current => verified_package_directory(context, agent_runtime),
@@ -1019,8 +1010,8 @@ fn ownership_marker() -> String {
     )
 }
 
-fn codex_manifest(version: &str, hc: bool) -> String {
-    let mut manifest = json!({
+fn codex_manifest(version: &str) -> String {
+    let manifest = json!({
         "name": PACKAGE_OWNER,
         "version": version,
         "description": "Route @mention prompts through Namedrop.",
@@ -1035,9 +1026,6 @@ fn codex_manifest(version: &str, hc: bool) -> String {
             "defaultPrompt": "Ask @reviewer to inspect this change."
         }
     });
-    if hc {
-        manifest["skills"] = json!("./skills/");
-    }
     format!("{manifest}\n")
 }
 

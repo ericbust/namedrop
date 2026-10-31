@@ -1072,6 +1072,23 @@ fn run_script_respects_explicit_host_before_environment_routing() {
             "flags={flags:?}, tui_env={tui_env}, hc_env={hc_env}"
         );
     }
+    for flags in [
+        vec!["--herdr-socket", "tui", "--hc-space", "hc"],
+        vec!["--hc-terminal=terminal", "--herdr-pane=pane"],
+    ] {
+        let output = Command::new("/bin/sh")
+            .arg(checkout.join("scripts/run.sh"))
+            .args(flags)
+            .arg("doctor")
+            .env_clear()
+            .env("PATH", &fixture.tools)
+            .env("HERDR_PANE_ID", "ambient-pane")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(64));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("conflict"));
+    }
     let output = Command::new("/bin/sh")
         .arg(checkout.join("scripts/run.sh"))
         .arg("reconcile")
