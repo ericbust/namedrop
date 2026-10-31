@@ -763,8 +763,17 @@ else: raise AssertionError(args)
     .unwrap();
     assert!(activated.status.success(), "{}", text(&activated));
     fs::write(f.0.join("hc-calls"), "").unwrap();
+    fs::write(hc_state.join("update-check.json"), serde_json::json!({
+        "schema_version":1,"checked_at":100,"last_success_at":100,"last_error":null,"remote_version":"9.99.99"
+    }).to_string()).unwrap();
     let active = run_hook();
     assert!(active.status.success(), "{}", text(&active));
+    assert!(
+        !String::from_utf8_lossy(&active.stdout).contains("herdr plugin action invoke update"),
+        "{}",
+        text(&active)
+    );
+    assert!(!hc_state.join("update-notice.json").exists());
     assert!(
         !active.stdout.is_empty(),
         "active hook should supply the session policy"
