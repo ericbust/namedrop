@@ -551,3 +551,38 @@ fn tui_cache_inspection_ignores_unowned_nested_skill_files() {
     assert!(!codex_snapshot_matches(&installed, &cached, true));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn hc_addendum_package_is_stable_across_states_and_executables() {
+    let root = std::env::temp_dir().join(format!("namedrop-addendum-stable-{}", std::process::id()));
+    let home = root.join("home");
+    let first_state = root.join("session-one");
+    let second_state = root.join("session-two");
+    let first = PackageContext::new(&home, &first_state, true);
+    let second = PackageContext::new(&home, &second_state, true);
+    assert_eq!(first.directory(AgentRuntime::ClaudeCode), home.join(".claude/skills/namedrop-app"));
+    assert_eq!(first.directory(AgentRuntime::Codex), home.join(".agents/skills/namedrop-app"));
+    assert_eq!(first.marketplace, "namedrop-app");
+    for agent in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let one = prepare_integration_package(&first, agent, Path::new("/development/one"), &first_state, AgentConfigDirectories::default()).unwrap();
+        let two = prepare_integration_package(&second, agent, Path::new("/development/two"), &second_state, AgentConfigDirectories::default()).unwrap();
+        assert_eq!(one.directory, two.directory);
+        assert_eq!(one.files, two.files, "cached HC package must not depend on state or executable");
+        assert_eq!(one.codex_policy, two.codex_policy);
+    }
+}
+
+#[test]
+fn hc_addendum_activation_writes_only_its_own_bootstrap() {
+    let root = std::env::temp_dir().join(format!("namedrop-addendum-launcher-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join(".local/bin")).unwrap();
+    fs::write(root.join(".local/bin/namedrop"), "#!/bin/sh\n# Managed by Namedrop: shell command.\nexit 41\n").unwrap();
+    let before = fs::read(root.join(".local/bin/namedrop")).unwrap();
+    install_shell_command(&root, Path::new("/development/namedrop"), &root.join("state"), true).unwrap();
+    assert_eq!(fs::read(root.join(".local/bin/namedrop")).unwrap(), before);
+    assert!(root.join(".local/bin/namedrop-app").is_file());
+    assert!(!root.join(".bashrc").exists());
+    assert!(!root.join(".profile").exists());
+    fs::remove_dir_all(root).unwrap();
+}
