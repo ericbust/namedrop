@@ -310,7 +310,10 @@ else:
         .env("CODEX_HOME", root.join("codex"))
         .env("CLAUDE_CONFIG_DIR", root.join("claude"))
         .env("HC_BIN_PATH", &hc)
-        .env("HC_TERMINAL_SOCKET", &socket)
+        .env("HC_SOCKET", &socket)
+        .env("HC_TERMINAL_SOCKET", "unused")
+        .env("HC_SCOPE", "terminal-lifetime-token")
+        .env("HC_RUNTIME", "terminal-runtime-token")
         .env("HC_TERMINAL_ID", "forbidden")
         .env("HERDR_SOCKET_PATH", "forbidden")
         .env("HERDR_CUSTOM", "forbidden")
@@ -446,12 +449,15 @@ fn detached_subscriber_child() {
     let replacement = root.join("replacement");
     std::fs::copy(&binary, &replacement).unwrap();
     std::fs::rename(replacement, &binary).unwrap();
-    namedrop::host::hc::events::start(&host, &binary, &state).unwrap();
+    let doctor = std::process::Command::new(&binary)
+        .args(["--host", "hc", "--plugin-state"]).arg(&state)
+        .args(["--hc-space", "fixture-space", "doctor"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&doctor.stdout).contains("ND-HC-SUBSCRIBER-001"), "{}", String::from_utf8_lossy(&doctor.stdout));
     let second = record();
     let second_pid = second["pid"].as_u64().unwrap() as i32;
     assert_ne!(
         second["pid"], first["pid"],
-        "activation retained stale subscriber"
+        "doctor retained stale subscriber"
     );
     let replacement = root.join("replacement");
     std::fs::copy(&binary, &replacement).unwrap();
@@ -773,7 +779,42 @@ fn snapshot_repairs_a_missing_name_mirror() {
     check("mirror", |fixture, runtime| {
         fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("");
         namedrop::host::hc::events::Subscriber::default()
-            .handle_line(r#"{"method":"missed","params":{}}"#, runtime).unwrap();
+            .handle_line(r#"{"method":"missed","params":{}}"#, runtime)
+            .unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+            "alice"
+        );
+    });
+}
+
+#[test]
+fn failed_store_commit_restores_the_applied_name() {
+    check("commit-failure", |fixture, runtime| {
+        let connection = rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
+        connection.execute_batch("CREATE TABLE failure_parent (id INTEGER PRIMARY KEY);
+            CREATE TABLE failure_child (id INTEGER REFERENCES failure_parent(id) DEFERRABLE INITIALLY DEFERRED);
+            CREATE TRIGGER fail_rename_commit AFTER INSERT ON alias_claims WHEN NEW.alias='bob'
+            BEGIN INSERT INTO failure_child VALUES(1); END;").unwrap();
+        let error = namedrop::execute_lifecycle_operation("name", json!({"alias":"bob", "pane_type":"terminal"}), runtime).unwrap_err();
+        assert!(error.contains("FOREIGN KEY"), "{error}");
+        assert!(fixture.calls.borrow().iter().any(|call| call.iter().any(|arg| arg == "namedrop.name=bob")));
         assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.name"], "alice");
+        namedrop::host::hc::events::Subscriber::default().handle_line(&labels(), runtime).unwrap();
+        let alias: String = connection.query_row("SELECT alias FROM alias_claims WHERE claim_state='active'", [], |row| row.get(0)).unwrap();
+        assert_eq!(alias, "alice");
+    });
+}
+
+#[test]
+fn doctor_repair_uses_the_discovered_checkout_space() {
+    check("doctor-space", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["foreground"]["cwd"] = json!(env!("CARGO_MANIFEST_DIR"));
+        let runtime = namedrop::LifecycleRuntime { workspace_id: None, current_pane_id: None, ..*runtime };
+        let mut report = namedrop::diagnose_collaboration(&runtime);
+        namedrop::append_hc_diagnostics(&mut report, &runtime, &runtime.host);
+        let repair = &report.issues.iter().find(|issue| issue.code == "ND-HC-SUBSCRIBER-001").unwrap().repair;
+        let command = repair.command.as_ref().unwrap();
+        assert!(command.windows(2).any(|part| part == ["--hc-space", "fixture-space"]), "{command:?}");
     });
 }
