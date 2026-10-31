@@ -86,7 +86,19 @@ impl EnvironmentSnapshot {
     pub fn hc_endpoint(&self) -> Result<&Path, String> {
         self.0
             .hc_endpoint
-            .get_or_init(|| crate::runtime::hc_socket_path_os(|key| self.var_os(key)))
+            .get_or_init(|| {
+                crate::runtime::hc_socket_path_os(|key| {
+                    let root = match key {
+                        "HOME" => &self.0.home,
+                        "XDG_STATE_HOME" => &self.0.state,
+                        "XDG_CONFIG_HOME" => &self.0.config,
+                        "XDG_DATA_HOME" => &self.0.data,
+                        "XDG_RUNTIME_DIR" => &self.0.runtime,
+                        _ => return self.var_os(key),
+                    };
+                    root.as_ref().map(|path| path.as_os_str().to_owned())
+                })
+            })
             .as_deref()
             .map_err(Clone::clone)
     }
