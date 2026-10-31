@@ -10,6 +10,7 @@ use std::{
 };
 
 struct Fixture {
+    _shell: process::AgentProcess,
     terminals: RefCell<Vec<Value>>,
     unavailable: Cell<bool>,
     sends: RefCell<Vec<String>>,
@@ -22,11 +23,15 @@ impl Fixture {
         agent["labels"]["namedrop.session.start"] = json!(process::start(pid));
         agent["foreground"] = json!({"pid":pid,"argv":["codex"],"name":"codex"});
         agent["status"] = json!({"state":"idle"});
+        let shell_process = process::AgentProcess::shell();
         let mut shell: Value =
             serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
         shell["address"] = json!("t2");
+        shell["pid"] = json!(shell_process.pid());
+        shell["foreground"]["pid"] = json!(shell_process.pid());
         shell["labels"] = json!({"herdr.space":"fixture-space","herdr.tab":"healthy-tab"});
         Self {
+            _shell: shell_process,
             terminals: RefCell::new(vec![agent, shell]),
             unavailable: Cell::new(false),
             sends: RefCell::default(),

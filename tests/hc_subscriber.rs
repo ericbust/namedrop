@@ -19,7 +19,8 @@ struct Fixture {
 impl Default for Fixture {
     fn default() -> Self {
         let shell = process::AgentProcess::shell();
-        let mut terminal: Value = serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
+        let mut terminal: Value =
+            serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
         terminal["pid"] = json!(shell.pid());
         terminal["foreground"]["pid"] = json!(shell.pid());
         Self {
@@ -488,12 +489,20 @@ fn detached_subscriber_child() {
     let cooperative = record();
     let mut stale_request = cooperative.clone();
     stale_request["process_start"] = json!("recycled-pid");
-    std::fs::write(directory.join("stop-request.json"), stale_request.to_string()).unwrap();
+    std::fs::write(
+        directory.join("stop-request.json"),
+        stale_request.to_string(),
+    )
+    .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(600));
     namedrop::host::hc::events::status(&state, "hc:628bcf8129aa037b1fa5aad3504926a6").unwrap();
     let mut wrong_binary = cooperative.clone();
     wrong_binary["binary"]["inode"] = json!(0);
-    std::fs::write(directory.join("stop-request.json"), wrong_binary.to_string()).unwrap();
+    std::fs::write(
+        directory.join("stop-request.json"),
+        wrong_binary.to_string(),
+    )
+    .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(600));
     namedrop::host::hc::events::status(&state, "hc:628bcf8129aa037b1fa5aad3504926a6").unwrap();
     std::fs::write(directory.join("stop-request.json"), cooperative.to_string()).unwrap();

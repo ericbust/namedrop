@@ -273,10 +273,18 @@ fn missing_or_empty_start_cannot_own_a_session() {
         if let Some(start) = start {
             fixture.terminal.borrow_mut()["labels"]["namedrop.session.start"] = json!(start);
         } else {
-            fixture.terminal.borrow_mut()["labels"].as_object_mut().unwrap().remove("namedrop.session.start");
+            fixture.terminal.borrow_mut()["labels"]
+                .as_object_mut()
+                .unwrap()
+                .remove("namedrop.session.start");
         }
         let host = HcHost::new(&fixture);
-        assert!(host.panes(PaneScope::All).unwrap()[0].agent_session_id.is_none(), "legacy session without start identity was accepted");
+        assert!(
+            host.panes(PaneScope::All).unwrap()[0]
+                .agent_session_id
+                .is_none(),
+            "legacy session without start identity was accepted"
+        );
         assert!(host.prompt("t1", "old session prompt").is_err());
         assert!(fixture.calls("send").is_empty());
         assert_eq!(fixture.terminal.borrow()["labels"]["namedrop.session"], "");
@@ -290,8 +298,15 @@ fn non_shell_terminal_root_never_receives_runner_text() {
         let fixture = Fixture::new(process.pid(), program);
         fixture.terminal.borrow_mut()["pid"] = json!(process.pid());
         let host = HcHost::new(&fixture);
-        assert!(host.run_in_pane("t1", "namedrop terminal-execute attempt").is_err(), "direct {program} terminal accepted shell text");
-        assert!(host.process_info("t1").is_none(), "direct {program} terminal advertised an available shell");
+        assert!(
+            host.run_in_pane("t1", "namedrop terminal-execute attempt")
+                .is_err(),
+            "direct {program} terminal accepted shell text"
+        );
+        assert!(
+            host.process_info("t1").is_none(),
+            "direct {program} terminal advertised an available shell"
+        );
         assert!(fixture.calls("send").is_empty());
     }
 }
@@ -302,7 +317,103 @@ fn lost_terminal_clears_even_a_live_session_owner() {
     let fixture = Fixture::new(agent.pid(), "codex");
     fixture.terminal.borrow_mut()["state"] = json!("lost");
     let state = std::env::temp_dir().join(format!("hc-lost-owner-{}", std::process::id()));
-    HcHost::new(&fixture).invalidate_session(&state, "t1").unwrap();
-    assert_eq!(fixture.terminal.borrow()["labels"]["namedrop.session"], "", "lost terminal retained its live orphan's session");
+    HcHost::new(&fixture)
+        .invalidate_session(&state, "t1")
+        .unwrap();
+    assert_eq!(
+        fixture.terminal.borrow()["labels"]["namedrop.session"],
+        "",
+        "lost terminal retained its live orphan's session"
+    );
+    std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn non_shell_root_does_not_create_delivery_attempts() {
+    use namedrop::*;
+    let program = process::AgentProcess::with_program("python3");
+    let fixture = Fixture::new(program.pid(), "python3");
+    fixture.terminal.borrow_mut()["pid"] = json!(program.pid());
+    let state = std::env::temp_dir().join(format!("hc-nonshell-delivery-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&state);
+    let clock = SystemClock;
+    let ids = ProcessIds::default();
+    let runtime = LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&state),
+        agent_config: AgentConfigDirectories::default(),
+        cwd: std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    execute_lifecycle_operation(
+        "name",
+        json!({"alias":"build","pane_type":"terminal"}),
+        &runtime,
+    )
+    .unwrap();
+    let ns = StateNamespace::for_space("hc:fixture", "fixture-space");
+    let attribution = MutationAttribution::new(ActorKind::Human, "fixture", clock.now_unix_ms());
+    StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| {
+            let binding = tx.active_pane_bindings(&ns)?.remove(0);
+            tx.create_thread(&ns, &ThreadId::new("thread"), "fixture", &attribution)?;
+            tx.append_message(
+                &ns,
+                &MessageDraft {
+                    thread_id: ThreadId::new("thread"),
+                    message_id: MessageId::new("message"),
+                    in_reply_to: None,
+                    author_address_id: binding.address_id.clone(),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: "build".into(),
+                    author_agent_session_snapshot: None,
+                    request_id: "request".into(),
+                    authored_source: "true".into(),
+                    body: "true".into(),
+                    grammar_version: "mention/v1".into(),
+                    context_references: vec![],
+                    recipients: vec![MessageRecipientDraft {
+                        address_id: binding.address_id,
+                        alias_snapshot: "build".into(),
+                        agent_session_snapshot: None,
+                        delivery_id: DeliveryId::new("delivery"),
+                    }],
+                },
+                &attribution,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    let result = drain_mailboxes(&runtime).unwrap();
+    assert!(result.submitted.is_empty());
+    assert!(fixture.calls("send").is_empty());
+    let db = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+    for table in ["delivery_attempts", "terminal_executions"] {
+        let count: i64 = db
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "non-shell root created a {table} row");
+    }
+    let shell = process::AgentProcess::shell();
+    fixture.terminal.borrow_mut()["pid"] = json!(shell.pid());
+    fixture.terminal.borrow_mut()["foreground"] =
+        json!({"pid":shell.pid(),"name":"bash","argv":["bash"]});
+    let result = drain_mailboxes(&runtime).unwrap();
+    assert_eq!(
+        result.submitted.len(),
+        1,
+        "real shell did not receive queued runner"
+    );
+    assert_eq!(fixture.calls("send").len(), 1);
+    assert!(fixture.calls("send")[0][2].contains("terminal-execute"));
+    drop(db);
     std::fs::remove_dir_all(state).unwrap();
 }

@@ -21,7 +21,8 @@ struct Fixture {
 impl Default for Fixture {
     fn default() -> Self {
         let shell = process::AgentProcess::shell();
-        let mut terminal: Value = serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
+        let mut terminal: Value =
+            serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
         terminal["pid"] = json!(shell.pid());
         terminal["foreground"]["pid"] = json!(shell.pid());
         Self {
@@ -671,7 +672,12 @@ fn events_reconcile_names_preserve_lost_aliases_and_clear_sessions() {
         json!({"jsonrpc":"2.0", "method":"event", "params":{"type":kind,"terminal":"t1", "data":{}}}).to_string()
     };
     fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("bad name");
-    subscriber.handle_line(&event("labels"), &runtime).unwrap();
+    assert!(
+        subscriber
+            .handle_line(&event("labels"), &runtime)
+            .unwrap_err()
+            .contains("alias must")
+    );
     assert_eq!(
         fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
         "alice"
@@ -776,53 +782,29 @@ fn events_reconcile_names_preserve_lost_aliases_and_clear_sessions() {
 }
 
 #[test]
-fn subscriber_start_is_idempotent_only_for_name_taken() {
-    struct StartTransport {
-        error: Option<&'static str>,
-    }
+fn subscriber_start_propagates_core_preflight_failure_before_launch() {
+    struct StartTransport;
     impl HerdrCommandExecutor for StartTransport {
         fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-            assert_eq!(
-                args,
-                [
-                    "run",
-                    "--bg",
-                    "--no-parent",
-                    "--rm",
-                    "--name",
-                    "namedrop-events",
-                    "--",
-                    "/namedrop",
-                    "--host",
-                    "hc",
-                    "--plugin-state",
-                    "/state",
-                    "events"
-                ]
-            );
-            match self.error {
-                Some(kind) => Err(json!({"error":{"kind":kind,"message":"rejected"}}).to_string()),
-                None => Ok(HerdrCommandOutput {
-                    stdout: "{}".into(),
-                }),
-            }
+            assert_eq!(args, ["server", "status", "--json"]);
+            Err(
+                json!({"error":{"kind":"unavailable","message":"fixture core unavailable"}})
+                    .to_string(),
+            )
         }
     }
-    for (kind, success) in [
-        (None, true),
-        (Some("name_taken"), true),
-        (Some("invalid_params"), false),
-    ] {
-        assert_eq!(
-            namedrop::host::hc::events::start(
-                &HcHost::new(StartTransport { error: kind }),
-                Path::new("/namedrop"),
-                Path::new("/state")
-            )
-            .is_ok(),
-            success
-        );
-    }
+    let root = std::env::temp_dir().join(format!("hc-preflight-no-launch-{}", std::process::id()));
+    let error = namedrop::host::hc::events::start(
+        &HcHost::new(StartTransport),
+        &root.join("missing-binary"),
+        &root,
+    )
+    .unwrap_err();
+    assert!(error.message.contains("fixture core unavailable"));
+    assert!(
+        !root.exists(),
+        "failed core preflight created subscriber state"
+    );
 }
 
 #[test]
@@ -1123,6 +1105,8 @@ fn session_generation_is_checked_by_discovery_and_caller_identity() {
     };
     let agent = process::AgentProcess::new();
     let owner = agent.pid().to_string();
+    fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session.start"] =
+        json!(process::start(agent.pid()));
     for (companion, valid) in [
         (None, false),
         (Some("4000000000"), false),
