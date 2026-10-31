@@ -770,7 +770,9 @@ fn hc_command_forms_match_only_operation_scoped_permissions() {
         "input_flag": "--input-json",
         "operations": operations.map(|op| json!({"token":op.token, "argv":op.argv, "input":{}})).collect::<Vec<_>>()
     });
+    assert_eq!(tool["environment"]["NAMEDROP_HOST"], "hc");
     let guidance = crate::integration::delivery_command_guidance(&tool).unwrap();
+    assert!(guidance.lines().count() > 1);
     for line in guidance.lines().skip(1) {
         let (_, command) = line.split_once(": ").unwrap();
         assert!(
@@ -778,6 +780,7 @@ fn hc_command_forms_match_only_operation_scoped_permissions() {
             "HC guidance is outside managed policy: {command}"
         );
         assert!(command.find("--plugin-state").unwrap() > command.find("namedrop-app'").unwrap());
+        assert!(command.contains("--host 'hc'"), "{command}");
     }
     let registration = crate::integration::registration_command(
         &state,
@@ -790,6 +793,28 @@ fn hc_command_forms_match_only_operation_scoped_permissions() {
     )
     .unwrap();
     assert!(allowed(&registration), "{registration}");
+    assert!(registration.contains("--host hc"), "{registration}");
+    let runtime = LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&home),
+        agent_config: AgentConfigDirectories::default(),
+        cwd: &home,
+        workspace_id: Some("space"),
+        current_pane_id: Some("terminal"),
+        session_socket_id: "hc:session",
+        host: crate::HcHost::new(&NoCalls),
+        clock: &crate::SystemClock,
+        ids: &crate::ProcessIds::default(),
+    };
+    let runner = crate::terminal::runner_command(
+        &runtime,
+        "space",
+        "terminal",
+        &crate::DeliveryAttemptId::new("attempt"),
+    )
+    .unwrap();
+    assert!(runner.contains("'--plugin-state'"), "{runner}");
+    assert!(runner.contains("'--host' 'hc'"), "{runner}");
     for operation in [
         "activate",
         "deactivate",
@@ -929,4 +954,95 @@ fn hc_bootstrap_inspection_accepts_another_states_activated_executable() {
     }
     assert_eq!(tree_snapshot(&home), before);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "requires NAMEDROP_TEST_BINARY pointing to the built CLI"]
+fn generated_hc_hooks_decline_tui_context_before_locked_state() {
+    use std::{
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    let binary =
+        PathBuf::from(std::env::var_os("NAMEDROP_TEST_BINARY").expect("set NAMEDROP_TEST_BINARY"));
+    let root = owner_review_root("generated-hc-hook-origin");
+    let home = root.join("home");
+    let state = root.join("state");
+    fs::create_dir_all(state.join("runtime")).unwrap();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state.join("runtime/commands.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let marker = root.join("contacted");
+    let tripwire = root.join("tripwire");
+    fs::write(
+        &tripwire,
+        format!(
+            "#!/bin/sh\nprintf touched > '{}'\nexit 97\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&tripwire, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::copy(&tripwire, state.join("runtime/namedrop")).unwrap();
+    let context = PackageContext::new(&home, true);
+    install_shell_command(&home, &binary, &state, true).unwrap();
+    let mut failures = Vec::new();
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let package = install_integration_package_with_config(
+            &context,
+            runtime,
+            &binary,
+            &state,
+            AgentConfigDirectories::default(),
+        )
+        .unwrap();
+        for script in [HOOK_SCRIPT_FILE, SESSION_START_SCRIPT_FILE] {
+            use std::os::unix::process::CommandExt;
+            let mut child = Command::new(package.join(script))
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &home)
+                .env("HC_TERMINAL_ID", "outer-hc")
+                .env("HERDR_SOCKET_PATH", "inner-tui")
+                .env("NAMEDROP_STATE_DIR", &state)
+                .env("HC_BIN_PATH", &tripwire)
+                .env("HERDR_BIN_PATH", &tripwire)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            if child.try_wait().unwrap().is_none() {
+                unsafe {
+                    libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                failures.push(format!(
+                    "{runtime:?} {script} entered the locked runtime gate"
+                ));
+            }
+            let output = child.wait_with_output().unwrap();
+            println!(
+                "{runtime:?} {script}: status={:?}, contacted={}",
+                output.status.code(),
+                marker.exists()
+            );
+            if !output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty() {
+                failures.push(format!("{runtime:?} {script} did not quietly decline"));
+            }
+        }
+    }
+    assert!(!marker.exists(), "generated HC hook contacted runtime/host");
+    drop(lock);
+    fs::remove_dir_all(root).unwrap();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
