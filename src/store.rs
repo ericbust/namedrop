@@ -41,6 +41,9 @@ UPDATE pane_addresses SET persona = (
 );
 "#;
 
+#[cfg(test)]
+mod mailbox_tests;
+
 mod bridge;
 pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
 pub(crate) use groups::addressed_recipients;
@@ -7928,10 +7931,10 @@ mod tests {
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
-    struct TestDirectory(PathBuf);
+    pub(super) struct TestDirectory(pub(super) PathBuf);
 
     impl TestDirectory {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "namedrop-store-test-{}-{}",
                 std::process::id(),
