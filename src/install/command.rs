@@ -224,6 +224,22 @@ mod tests {
                 state.display()
             )
         );
+        for flag in ["--herdr-socket", "--herdr-workspace", "--herdr-pane"] {
+            for args in [vec![flag.to_owned(), "value".to_owned()], vec![format!("{flag}=value")]] {
+                let output = Command::new(&launcher).args(&args).arg("doctor")
+                    .env_remove("HERDR_SOCKET_PATH").env_remove("HERDR_PANE_ID")
+                    .env("HC_TERMINAL_ID", "t1").env_remove("NAMEDROP_HOST").output().unwrap();
+                assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("tui\n--plugin-state\n{}\n{}\ndoctor\n", state.display(), args.join("\n")));
+            }
+        }
+        for flag in ["--hc-terminal", "--hc-space"] {
+            for args in [vec![flag.to_owned(), "value".to_owned()], vec![format!("{flag}=value")]] {
+                let output = Command::new(&launcher).args(&args).arg("doctor")
+                    .env("HERDR_SOCKET_PATH", "tui").env_remove("HC_TERMINAL_ID")
+                    .env_remove("NAMEDROP_HOST").output().unwrap();
+                assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("hc\n--host\nhc\n{}\ndoctor\n", args.join("\n")));
+            }
+        }
         fs::remove_dir_all(root).unwrap();
     }
 }
