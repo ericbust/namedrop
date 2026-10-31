@@ -4,7 +4,7 @@ use crate::{HerdrCommandExecutor, runtime::HostKind};
 #[derive(Clone, Copy)]
 pub enum RuntimeHost<E: HerdrCommandExecutor> {
     Tui(TuiHost<E>),
-    Hc(HcHost<E>),
+    Hc(HcHost<'static, E>),
 }
 
 impl<E: HerdrCommandExecutor> RuntimeHost<E> {

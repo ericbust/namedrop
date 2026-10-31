@@ -9,8 +9,21 @@ use std::sync::mpsc;
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum StreamLine {
-    Snapshot { terminals: Vec<Terminal> },
-    Notification { method: Method, params: Value },
+    Notification {
+        method: Method,
+        params: Value,
+    },
+    Snapshot {
+        terminals: Vec<Terminal>,
+        seq: Option<u64>,
+    },
+    SnapshotWithoutTerminals(EmptySnapshot),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptySnapshot {
+    seq: u64,
 }
 
 #[derive(Deserialize)]
@@ -26,6 +39,7 @@ struct Event {
     #[serde(rename = "type")]
     kind: Kind,
     terminal: Option<String>,
+    seq: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -45,6 +59,7 @@ enum Kind {
 
 #[derive(Clone, Default)]
 struct DirtyTerminal {
+    seq: Option<u64>,
     resume: bool,
     unavailable: bool,
     removed: bool,
@@ -53,6 +68,7 @@ struct DirtyTerminal {
 #[derive(Clone, Default)]
 struct Pending {
     snapshot: Option<Vec<Terminal>>,
+    seq: Option<u64>,
     full: bool,
     dirty: BTreeMap<String, DirtyTerminal>,
 }
@@ -62,14 +78,26 @@ impl Pending {
         match serde_json::from_str::<StreamLine>(line)
             .map_err(|error| format!("Invalid hc event: {error}"))?
         {
-            StreamLine::Snapshot { terminals } => {
-                self.snapshot = Some(terminals);
-                self.full = false;
+            StreamLine::Snapshot { terminals, seq } => self.accept_snapshot(Some(terminals), seq),
+            StreamLine::SnapshotWithoutTerminals(EmptySnapshot { seq }) => {
+                self.accept_snapshot(None, Some(seq))
             }
             StreamLine::Notification {
                 method: Method::Missed,
-                ..
-            } => self.full = true,
+                params,
+            } => {
+                let seq = params
+                    .get("seq")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|error| format!("Invalid snapshot sequence: {error}"))?;
+                let terminals = params
+                    .get("terminals")
+                    .map(|value| serde_json::from_value(value.clone()))
+                    .transpose()
+                    .map_err(|error| format!("Invalid snapshot terminals: {error}"))?;
+                self.accept_snapshot(terminals, seq);
+            }
             StreamLine::Notification {
                 method: Method::Heartbeat,
                 ..
@@ -80,12 +108,20 @@ impl Pending {
             } => {
                 let event: Event =
                     serde_json::from_value(params).map_err(|error| error.to_string())?;
+                if event
+                    .seq
+                    .zip(self.seq)
+                    .is_some_and(|(event, snapshot)| event <= snapshot)
+                {
+                    return Ok(());
+                }
                 if !matches!(event.kind, Kind::Ignored) {
                     let pane = event.terminal.ok_or("hc terminal event has no terminal")?;
                     if pane.contains('/') {
                         return Ok(());
                     }
                     let dirty = self.dirty.entry(pane).or_default();
+                    dirty.seq = dirty.seq.max(event.seq);
                     dirty.resume |= matches!(event.kind, Kind::Status | Kind::Turn);
                     dirty.unavailable |=
                         matches!(event.kind, Kind::Lost | Kind::Finished | Kind::Removed);
@@ -94,6 +130,22 @@ impl Pending {
             }
         }
         Ok(())
+    }
+
+    fn accept_snapshot(&mut self, terminals: Option<Vec<Terminal>>, seq: Option<u64>) {
+        if seq
+            .zip(self.seq)
+            .is_some_and(|(incoming, current)| incoming < current)
+        {
+            return;
+        }
+        if let Some(seq) = seq {
+            self.dirty
+                .retain(|_, change| change.seq.is_none_or(|event| event > seq));
+        }
+        self.snapshot = terminals;
+        self.full = self.snapshot.is_none();
+        self.seq = seq.or(self.seq);
     }
 
     fn is_empty(&self) -> bool {
@@ -307,6 +359,7 @@ impl Subscriber {
             return Ok(());
         }
         let mut pending = std::mem::take(&mut self.pending);
+        self.pending.seq = pending.seq;
         if !self.initialized && pending.snapshot.is_none() {
             pending.full = true;
         }
@@ -374,47 +427,6 @@ impl Subscriber {
                     terminals.insert(pane.clone(), terminal.clone());
                 }
             }
-            if !pending.full {
-                for (pane, spaces) in &bound_spaces {
-                    if terminals.get(pane).is_some_and(|terminal| {
-                        terminal.state == "live"
-                            && spaces.iter().all(|space| space == terminal.workspace())
-                    }) {
-                        continue;
-                    }
-                    match runtime.host.terminal(pane, None) {
-                        Ok(terminal) => {
-                            terminals.insert(pane.clone(), terminal);
-                        }
-                        Err(error)
-                            if matches!(error.code.as_deref(), Some("not_found" | "finished")) =>
-                        {
-                            terminals.remove(pane);
-                        }
-                        Err(error) => {
-                            self.unavailable.insert(pane.clone(), error.to_string());
-                            if let Some(terminal) = self.terminals.get(pane) {
-                                terminals.insert(pane.clone(), terminal.clone());
-                            }
-                        }
-                    }
-                }
-            }
-            for (pane, terminal) in &mut terminals {
-                if self.unavailable.contains_key(pane)
-                    || !active_spaces.contains(terminal.workspace())
-                {
-                    continue;
-                }
-                if let Err(error) = runtime.host.reconcile_session(
-                    runtime.state_directory,
-                    runtime.session_socket_id,
-                    terminal,
-                ) {
-                    self.unavailable.insert(pane.clone(), error.to_string());
-                    errors.push(error.to_string());
-                }
-            }
             self.terminals = terminals;
             self.initialized = true;
             affected.extend(active_spaces.iter().cloned());
@@ -436,63 +448,86 @@ impl Subscriber {
             BTreeMap::new()
         };
         for (pane, change) in &pending.dirty {
-            if let Some(space) = self.spaces.get(pane) {
-                affected.insert(space.clone());
-            }
-            match runtime.host.terminal(pane, None) {
-                Ok(mut terminal) => {
-                    if active_spaces.contains(terminal.workspace())
-                        && let Err(error) = runtime.host.reconcile_session(
-                            runtime.state_directory,
-                            runtime.session_socket_id,
-                            &mut terminal,
-                        )
-                    {
-                        self.unavailable.insert(pane.clone(), error.to_string());
-                        errors.push(error.to_string());
-                        continue;
-                    }
-                    self.unavailable.remove(pane);
-                    self.terminals.insert(pane.clone(), terminal);
-                }
-                Err(_) if change.removed => {
-                    self.terminals.remove(pane);
-                    self.unavailable.remove(pane);
-                }
-                Err(error) => {
-                    self.unavailable.insert(pane.clone(), error.to_string());
-                    continue;
-                }
-            }
             let accumulated = dirty.entry(pane.clone()).or_default();
             accumulated.resume |= change.resume;
             accumulated.unavailable |= change.unavailable;
             accumulated.removed = change.removed;
         }
-        if !full {
-            for (pane, terminal) in &mut self.terminals {
-                if pending.dirty.contains_key(pane)
-                    || self.unavailable.contains_key(pane)
-                    || !active_spaces.contains(terminal.workspace())
-                {
-                    continue;
+        if full {
+            for pane in bound_spaces.keys() {
+                dirty.entry(pane.clone()).or_default();
+            }
+        }
+        for (pane, change) in &dirty {
+            if let Some(space) = self.spaces.get(pane) {
+                affected.insert(space.clone());
+            }
+            let refresh = if pending.full {
+                false
+            } else if pending.dirty.contains_key(pane) {
+                true
+            } else if let Some(terminal) = self.terminals.get(pane) {
+                let namespace = crate::StateNamespace::for_space(
+                    runtime.session_socket_id,
+                    terminal.workspace(),
+                );
+                let stored = committed_alias(runtime.state_directory, &namespace, pane)?;
+                HcHost::<E>::session_needs_reconciliation(terminal)
+                    || stored.as_deref().unwrap_or("")
+                        != terminal
+                            .labels
+                            .get("namedrop.name")
+                            .map_or("", String::as_str)
+                    || bound_spaces.get(pane).is_some_and(|spaces| {
+                        terminal.state != "live"
+                            || spaces.iter().any(|space| space != terminal.workspace())
+                    })
+            } else {
+                true
+            };
+            if refresh {
+                match runtime.host.terminal(pane, None) {
+                    Ok(terminal) => {
+                        self.terminals.insert(pane.clone(), terminal);
+                        self.unavailable.remove(pane);
+                    }
+                    Err(error)
+                        if change.removed
+                            || (full
+                                && matches!(
+                                    error.code.as_deref(),
+                                    Some("not_found" | "finished")
+                                )) =>
+                    {
+                        self.terminals.remove(pane);
+                        self.unavailable.remove(pane);
+                    }
+                    Err(error) => {
+                        self.unavailable.insert(pane.clone(), error.to_string());
+                    }
                 }
-                match runtime.host.reconcile_session(
+            }
+            if self.unavailable.contains_key(pane) {
+                continue;
+            }
+            if let Some(terminal) = self.terminals.get_mut(pane)
+                && active_spaces.contains(terminal.workspace())
+                && let Err(error) = runtime.host.reconcile_session_fresh(
                     runtime.state_directory,
                     runtime.session_socket_id,
                     terminal,
-                ) {
-                    Ok(true) => {
-                        self.unavailable.remove(pane);
-                        dirty.entry(pane.clone()).or_default();
-                    }
-                    Ok(false) => (),
-                    Err(error) => {
-                        pending.dirty.entry(pane.clone()).or_default();
-                        self.unavailable.insert(pane.clone(), error.to_string());
-                        errors.push(error.to_string());
-                    }
-                }
+                    &_lock,
+                )
+            {
+                self.unavailable.insert(pane.clone(), error.to_string());
+                errors.push(error.to_string());
+            }
+        }
+        for (pane, terminal) in &self.terminals {
+            if !dirty.contains_key(pane) && HcHost::<E>::session_needs_reconciliation(terminal) {
+                self.unavailable
+                    .entry(pane.clone())
+                    .or_insert_with(|| "Session observation awaits a terminal event".to_owned());
             }
         }
         for (pane, change) in &dirty {
@@ -721,24 +756,26 @@ impl Subscriber {
         if stored.as_deref().unwrap_or("") == requested {
             return Ok(());
         }
-        let current = runtime.host.terminal(pane, None)?;
-        if current.workspace() != terminal.workspace() || current.state != "live" {
-            return Ok(());
-        }
-        self.terminals.insert(pane.to_owned(), current.clone());
-        let requested = current
-            .labels
-            .get("namedrop.name")
-            .map_or("", String::as_str);
+        let observation = std::sync::Mutex::new(terminal.clone());
+        let runtime = &LifecycleRuntime {
+            host: HcHost {
+                transport: runtime.host.transport,
+                label_observation: Some(&observation),
+            },
+            ..*runtime
+        };
         if requested.is_empty() {
             if let Some(alias) = stored {
                 runtime
                     .host
                     .set_labels(pane, &[("namedrop.name", &alias)])?;
             }
-            return Ok(());
-        }
-        if stored.as_deref() == Some(requested) {
+            self.terminals.insert(
+                pane.to_owned(),
+                observation
+                    .into_inner()
+                    .map_err(|_| "Label observation lock poisoned")?,
+            );
             return Ok(());
         }
         let scoped = LifecycleRuntime {
@@ -746,18 +783,46 @@ impl Subscriber {
             ..*runtime
         };
         let snapshot = self.snapshots(&scoped)?;
-        let result = crate::lifecycle::execute_lifecycle_operation_with_discovery(
-            "event.name",
-            json!({"alias":requested}),
-            &scoped,
-            Some(&snapshot),
-        );
+        let pane_type = StateStore::open(runtime.state_directory)
+            .map_err(|error| error.to_string())?
+            .transaction(|transaction| {
+                Ok(transaction
+                    .list_pane_addresses(&namespace)?
+                    .into_iter()
+                    .find(|address| address.pane_id.as_deref() == Some(pane))
+                    .map(|address| address.pane_type))
+            })
+            .map_err(|error| error.to_string())?
+            .or_else(|| match terminal.occupancy() {
+                Occupancy::Agent { .. } => Some(crate::PaneType::Agent),
+                Occupancy::Terminal => terminal
+                    .pid
+                    .filter(|pid| {
+                        *pid > 0
+                            && process_is_shell(*pid)
+                            && terminal.foreground.as_ref().is_some_and(|foreground| {
+                                i64::from(foreground.pid) == i64::from(*pid)
+                            })
+                    })
+                    .map(|_| crate::PaneType::Terminal),
+            });
+        let result = match pane_type {
+            Some(pane_type) => crate::lifecycle::execute_lifecycle_operation_with_discovery(
+                "event.name",
+                json!({"alias":requested, "pane_type":pane_type}),
+                &scoped,
+                Some(&snapshot),
+            ),
+            None => {
+                Err("pane type is uncertain; choose --type terminal or --type agent".to_owned())
+            }
+        };
         if let Ok(value) = &result
             && let Some(drain) = value.get("drain")
         {
             self.remember_drain(drain, runtime.clock.now_unix_ms());
         }
-        match result {
+        let result = match result {
             Err(error) => {
                 let committed = committed_alias(runtime.state_directory, &namespace, pane)
                     .map_err(|read| format!("{error}; could not read committed name: {read}"))?;
@@ -784,7 +849,14 @@ impl Subscriber {
                     .set_labels(pane, &[("namedrop.name.error", "")])?;
                 Ok(())
             }
-        }
+        };
+        self.terminals.insert(
+            pane.to_owned(),
+            observation
+                .into_inner()
+                .map_err(|_| "Label observation lock poisoned")?,
+        );
+        result
     }
 }
 

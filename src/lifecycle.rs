@@ -569,6 +569,9 @@ where
             } else {
                 false
             };
+            if runtime.is_hc() && operation == "event.name" && snapshot.is_some() {
+                return Ok(json!({"drain": reconciliation.drain}));
+            }
             Ok(json!({
                 "alias": format!("@{alias}"),
                 "pane_type": pane_type,

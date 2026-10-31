@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
 #[derive(Clone, Copy)]
-pub struct HcHost<E: HerdrCommandExecutor> {
+pub struct HcHost<'a, E: HerdrCommandExecutor> {
     transport: E,
+    label_observation: Option<&'a std::sync::Mutex<Terminal>>,
 }
 
 #[derive(Deserialize)]
@@ -389,9 +390,12 @@ pub(crate) fn label_lock(state: &Path) -> Result<std::rc::Rc<std::fs::File>, Str
     Ok(file)
 }
 
-impl<E: HerdrCommandExecutor> HcHost<E> {
+impl<E: HerdrCommandExecutor> HcHost<'_, E> {
     pub fn new(transport: E) -> Self {
-        Self { transport }
+        Self {
+            transport,
+            label_observation: None,
+        }
     }
 
     pub fn core_identity(&self) -> Result<String, HostError> {
@@ -581,6 +585,20 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
     }
 
     pub fn set_labels(&self, pane: &str, labels: &[(&str, &str)]) -> Result<(), HostError> {
+        if let Some(observation) = self.label_observation {
+            let mut terminal = observation
+                .lock()
+                .map_err(|_| "Label observation lock poisoned".to_owned())?;
+            if terminal.address == pane {
+                self.update_labels(&terminal, labels)?;
+                for (key, value) in labels {
+                    terminal
+                        .labels
+                        .insert((*key).to_owned(), (*value).to_owned());
+                }
+                return Ok(());
+            }
+        }
         let terminal = self.terminal(pane, None)?;
         self.update_labels(&terminal, labels)
     }
@@ -665,8 +683,19 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
         session_socket_id: &str,
         terminal: &mut Terminal,
     ) -> Result<bool, HostError> {
-        if (terminal.state == "live" && terminal.session().is_some())
-            || ![
+        if !Self::session_needs_reconciliation(terminal) {
+            return Ok(false);
+        }
+        let _lock = label_lock(state)?;
+        let mut current = self.terminal(&terminal.address, None)?;
+        self.reconcile_session_fresh(state, session_socket_id, &mut current, &_lock)?;
+        *terminal = current;
+        Ok(true)
+    }
+
+    fn session_needs_reconciliation(terminal: &Terminal) -> bool {
+        !(terminal.state == "live" && terminal.session().is_some())
+            && [
                 "namedrop.session",
                 "namedrop.session.pid",
                 "namedrop.session.start",
@@ -678,22 +707,28 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
                     .get(*key)
                     .is_some_and(|value| !value.is_empty())
             })
-        {
+    }
+
+    pub(super) fn reconcile_session_fresh(
+        &self,
+        state: &Path,
+        session_socket_id: &str,
+        terminal: &mut Terminal,
+        _label_lock: &std::rc::Rc<std::fs::File>,
+    ) -> Result<bool, HostError> {
+        if !Self::session_needs_reconciliation(terminal) {
             return Ok(false);
         }
-        let _lock = label_lock(state)?;
-        let mut current = self.terminal(&terminal.address, None)?;
-        let namespace = crate::StateNamespace::for_space(session_socket_id, current.workspace());
+        let namespace = crate::StateNamespace::for_space(session_socket_id, terminal.workspace());
         let active = crate::StateStore::open(state)
             .map_err(|error| error.to_string())?
             .transaction(|transaction| transaction.worktree_state(&namespace))
             .map_err(|error| error.to_string())?
             .is_some_and(|state| state.activated && !state.deactivated);
-        if active && (current.state != "live" || current.session().is_none()) {
-            self.clear_session(&mut current)?;
+        if active {
+            self.clear_session(terminal)?;
         }
-        *terminal = current;
-        Ok(true)
+        Ok(active)
     }
 
     fn clear_session(&self, terminal: &mut Terminal) -> Result<(), HostError> {
@@ -738,7 +773,7 @@ fn git_root(cwd: &Path) -> Option<PathBuf> {
     ))
 }
 
-impl<E: HerdrCommandExecutor> Host for HcHost<E> {
+impl<E: HerdrCommandExecutor> Host for HcHost<'_, E> {
     fn kind(&self) -> crate::runtime::HostKind {
         crate::runtime::HostKind::Hc
     }
