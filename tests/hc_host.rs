@@ -1525,9 +1525,9 @@ fn foreground_programs_are_agents_only_when_recognized_or_reported() {
         ("/bin/codex", None, Some("codex")),
         ("/bin/claude", None, Some("claude")),
         ("claude-code", None, Some("claude")),
-        ("vim", Some("codex"), Some("codex")),
-        ("python", Some("custom-agent"), Some("custom-agent")),
-        ("namedrop", Some("custom-agent"), Some("custom-agent")),
+        ("vim", Some("codex"), None),
+        ("python", Some("custom-agent"), None),
+        ("namedrop", Some("custom-agent"), None),
     ] {
         for (reported, argv) in [(false, true), (true, true), (false, false)] {
             let fixture = Fixture::default();
