@@ -110,6 +110,24 @@ fn main() -> ExitCode {
             );
         }
     };
+    if cli.print_host() {
+        return match cli.runtime.host_kind() {
+            Ok(host) => {
+                println!(
+                    "{}",
+                    match host {
+                        HostKind::Tui => "tui",
+                        HostKind::Hc => "hc",
+                    }
+                );
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(64)
+            }
+        };
+    }
     let hook_state = cli
         .user_prompt_submit_hook_state_directory()
         .or_else(|| cli.mailbox_wake_hook_state_directory())

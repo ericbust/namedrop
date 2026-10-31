@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Parser)]
 #[command(name = "namedrop", version, about)]
 pub struct Cli {
+    #[arg(long, global = true, hide = true)]
+    print_host: bool,
+
     /// Print the complete JSON response, including when running in a terminal.
     #[arg(long, global = true, conflicts_with = "human")]
     pub json: bool,
@@ -59,19 +62,14 @@ pub struct RuntimeOptions {
 impl RuntimeOptions {
     pub fn host_kind(&self) -> Result<crate::runtime::HostKind, String> {
         use crate::runtime::HostKind;
-        let explicit = self.host.or_else(|| {
-            if self.herdr_socket.is_some()
+        HostKind::detect(
+            self.host,
+            self.herdr_socket.is_some()
                 || self.herdr_workspace.is_some()
-                || self.herdr_pane.is_some()
-            {
-                Some(HostKind::Tui)
-            } else if self.hc_terminal.is_some() || self.hc_space.is_some() {
-                Some(HostKind::Hc)
-            } else {
-                None
-            }
-        });
-        HostKind::from_environment(explicit)
+                || self.herdr_pane.is_some(),
+            self.hc_terminal.is_some() || self.hc_space.is_some(),
+            |key| std::env::var(key).ok(),
+        )
     }
 
     pub fn state_directory(&self) -> Result<PathBuf, String> {
@@ -98,6 +96,10 @@ impl RuntimeOptions {
 }
 
 impl Cli {
+    pub fn print_host(&self) -> bool {
+        self.print_host
+    }
+
     pub fn human_output(&self, terminal: bool) -> bool {
         self.human || (!self.json && terminal && !self.machine_operation())
     }

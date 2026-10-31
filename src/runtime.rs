@@ -18,10 +18,23 @@ pub enum HostKind {
 impl HostKind {
     pub fn detect(
         explicit: Option<Self>,
+        tui_flags: bool,
+        hc_flags: bool,
         variable: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
         if let Some(host) = explicit {
             return Ok(host);
+        }
+        match (tui_flags, hc_flags) {
+            (true, true) => {
+                return Err(
+                    "Host flags conflict: --herdr-socket/--herdr-workspace/--herdr-pane and --hc-terminal/--hc-space require --host tui|hc."
+                        .to_owned(),
+                );
+            }
+            (true, false) => return Ok(Self::Tui),
+            (false, true) => return Ok(Self::Hc),
+            (false, false) => {}
         }
         if variable("HERDR_SOCKET_PATH").is_some() || variable("HERDR_PANE_ID").is_some() {
             return Ok(Self::Tui);
@@ -29,14 +42,11 @@ impl HostKind {
         if variable("HC_TERMINAL_ID").is_some() {
             return Ok(Self::Hc);
         }
-        Err(
-            "Host is unknown. Set HERDR_SOCKET_PATH or HC_TERMINAL_ID, or pass --host tui|hc."
-                .to_owned(),
-        )
+        Ok(Self::Tui)
     }
 
     pub fn from_environment(explicit: Option<Self>) -> Result<Self, String> {
-        Self::detect(explicit, |key| env::var(key).ok())
+        Self::detect(explicit, false, false, |key| env::var(key).ok())
     }
 }
 
@@ -177,7 +187,7 @@ impl ProcessHerdr {
 
     fn command_timeout(&self, args: &[&str]) -> Duration {
         if self.host == HostKind::Hc && args.first() == Some(&"send") {
-            self.timeout.max(Duration::from_secs(15))
+            Duration::from_secs(20)
         } else {
             self.timeout
         }
@@ -643,7 +653,10 @@ mod host_selection_tests {
         ];
         for (explicit, keys, expected) in cases {
             assert_eq!(
-                HostKind::detect(explicit, |key| keys.contains(&key).then(|| "value".into())).ok(),
+                HostKind::detect(explicit, false, false, |key| {
+                    keys.contains(&key).then(|| "value".into())
+                })
+                .ok(),
                 expected
             );
         }
