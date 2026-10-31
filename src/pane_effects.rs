@@ -125,6 +125,20 @@ fn open_at(directory: &File, name: &CString, flags: i32) -> io::Result<File> {
     checked(raw_open_at(directory, name, flags)?, false)
 }
 
+fn raw_open_directory(state: &File) -> io::Result<File> {
+    let fd = unsafe {
+        libc::openat(
+            state.as_raw_fd(),
+            c"pane-effects".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
 impl PaneEffects {
     pub(crate) fn acquire(state: &Path, socket: &str, pane: &str) -> Result<Self, AcquireError> {
         Self::acquire_for(state, socket, pane, ACQUIRE_TIMEOUT)
@@ -144,6 +158,17 @@ impl PaneEffects {
         socket: &str,
         pane: &str,
         timeout: Duration,
+        open_lock: impl FnMut(&File, &CString, i32) -> io::Result<File>,
+    ) -> Result<Self, AcquireError> {
+        Self::acquire_for_with_opens(state, socket, pane, timeout, raw_open_directory, open_lock)
+    }
+
+    fn acquire_for_with_opens(
+        state: &Path,
+        socket: &str,
+        pane: &str,
+        timeout: Duration,
+        mut open_directory: impl FnMut(&File) -> io::Result<File>,
         mut open_lock: impl FnMut(&File, &CString, i32) -> io::Result<File>,
     ) -> Result<Self, AcquireError> {
         std::fs::DirBuilder::new()
@@ -161,17 +186,7 @@ impl PaneEffects {
         if created != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
             return Err(io::Error::last_os_error().into());
         }
-        let fd = unsafe {
-            libc::openat(
-                state.as_raw_fd(),
-                c"pane-effects".as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(io::Error::last_os_error().into());
-        }
-        let directory = checked(unsafe { File::from_raw_fd(fd) }, true)?;
+        let directory = checked(open_directory(&state)?, true)?;
         let key = Sha256::digest(serde_json::to_vec(&(socket, pane)).map_err(io::Error::from)?)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -493,6 +508,91 @@ mod tests {
             let mut release = String::new();
             io::stdin().lock().read_line(&mut release).unwrap();
         }
+    }
+
+    #[test]
+    fn transient_directory_open_enoent_recovers_with_exclusion() {
+        let state = State::new();
+        fs::create_dir(state.0.join("pane-effects")).unwrap();
+        let mut calls = 0;
+        let mut first_fd = None;
+        let gate = PaneEffects::acquire_for_with_opens(
+            &state.0,
+            "socket",
+            "pane",
+            Duration::ZERO,
+            |state| {
+                calls += 1;
+                if calls == 1 {
+                    first_fd = Some(state.as_raw_fd());
+                    Err(io::Error::from_raw_os_error(libc::ENOENT))
+                } else {
+                    assert_eq!(Some(state.as_raw_fd()), first_fd);
+                    raw_open_directory(state)
+                }
+            },
+            raw_open_at,
+        )
+        .unwrap_or_else(|error| panic!("directory ENOENT must recover: {error}"));
+        assert_eq!(calls, 2);
+        assert_eq!(gate.directory.metadata().unwrap().mode() & 0o777, 0o700);
+        assert!(matches!(
+            PaneEffects::acquire_for(&state.0, "socket", "pane", Duration::ZERO),
+            Err(AcquireError::Contended)
+        ));
+        let _other =
+            PaneEffects::acquire_for(&state.0, "socket", "other-pane", Duration::ZERO).unwrap();
+        drop(gate);
+        PaneEffects::acquire_for(&state.0, "socket", "pane", Duration::ZERO).unwrap();
+    }
+
+    #[test]
+    fn raw_directory_open_faults_have_bounded_attempts() {
+        for (errno, expected_calls) in [(libc::ENOENT, 2), (libc::EACCES, 1), (libc::ELOOP, 1)] {
+            let state = State::new();
+            let mut directory_calls = 0;
+            let mut lock_calls = 0;
+            let result = PaneEffects::acquire_for_with_opens(
+                &state.0,
+                "socket",
+                "pane",
+                Duration::ZERO,
+                |_| {
+                    directory_calls += 1;
+                    Err(io::Error::from_raw_os_error(errno))
+                },
+                |directory, name, flags| {
+                    lock_calls += 1;
+                    raw_open_at(directory, name, flags)
+                },
+            );
+            assert_eq!(directory_calls, expected_calls, "errno {errno}");
+            assert_eq!(lock_calls, 0);
+            assert!(matches!(
+                result,
+                Err(AcquireError::Fault(error)) if error.raw_os_error() == Some(errno)
+            ));
+        }
+    }
+
+    #[test]
+    fn unsafe_lock_error_names_pane_without_misdiagnosing_hard_links() {
+        let state = State::new();
+        let gate = PaneEffects::acquire(&state.0, "socket", "@planner").unwrap();
+        let lock = state
+            .0
+            .join("pane-effects")
+            .join(gate.marker.to_str().unwrap().replace(".json", ".lock"));
+        drop(gate);
+        fs::hard_link(&lock, state.0.join("extra-link")).unwrap();
+        let error = match PaneEffects::acquire(&state.0, "socket", "@planner") {
+            Err(error) => error,
+            Ok(_) => panic!("hard-linked lock must be refused"),
+        };
+        assert_eq!(
+            error.to_string(),
+            "Namedrop's pane lock for @planner is not private to you"
+        );
     }
 
     #[test]
