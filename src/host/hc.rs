@@ -637,6 +637,19 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
         )
     }
 
+    fn prompt_state_directory(&self) -> Result<std::path::PathBuf, HostError> {
+        if let Some(state) = self.transport.state_directory() {
+            return Ok(state.to_owned());
+        }
+        self.transport
+            .environment_snapshot()
+            .ok_or_else(|| {
+                HostError::from("hc session cleanup requires a captured state directory".to_owned())
+            })?
+            .hc_state_directory()
+            .map_err(Into::into)
+    }
+
     pub fn invalidate_session(&self, state: &Path, pane: &str) -> Result<(), HostError> {
         let _lock = label_lock(state)?;
         let mut terminal = self.terminal(pane, None)?;
@@ -819,26 +832,8 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
                 ..
             }
         ) {
-            let captured_state;
-            let state = match self.transport.state_directory() {
-                Some(state) => state,
-                None => {
-                    captured_state = self
-                        .transport
-                        .environment_snapshot()
-                        .ok_or_else(|| {
-                            pre_invocation(
-                                "hc session cleanup requires a captured state directory"
-                                    .to_owned()
-                                    .into(),
-                            )
-                        })?
-                        .hc_state_directory()
-                        .map_err(|error| pre_invocation(error.into()))?;
-                    &captured_state
-                }
-            };
-            self.invalidate_session(state, pane)
+            let state = self.prompt_state_directory().map_err(pre_invocation)?;
+            self.invalidate_session(&state, pane)
                 .map_err(pre_invocation)?;
             return Err(pre_invocation(
                 "hc terminal has no live session owner".to_owned().into(),
@@ -864,10 +859,34 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         } else {
             vec!["send", pane, text, "--json"]
         };
-        self.transport
-            .execute(&args)
-            .map(|_| ())
-            .map_err(|raw| prompt_failure(raw, PromptTarget::Agent(terminal.status_ms)))
+        let failure = match self.transport.execute(&args) {
+            Ok(_) => return Ok(()),
+            Err(raw) => prompt_failure(raw, PromptTarget::Agent(terminal.status_ms)),
+        };
+        if matches!(failure.kind, PromptFailureKind::DeferredUntilSettle { .. }) {
+            let state = self.prompt_state_directory().map_err(pre_invocation)?;
+            let _lock = label_lock(&state).map_err(|error| pre_invocation(error.into()))?;
+            let current = self.terminal(pane, None).map_err(pre_invocation)?;
+            let original_owner_live = current.state == "live"
+                && current.session().is_some()
+                && [
+                    "namedrop.session",
+                    "namedrop.session.pid",
+                    "namedrop.session.start",
+                ]
+                .iter()
+                .all(|key| current.labels.get(*key) == terminal.labels.get(*key));
+            if !original_owner_live {
+                self.invalidate_session(&state, pane)
+                    .map_err(pre_invocation)?;
+                return Err(pre_invocation(
+                    "hc terminal no longer has the original live session owner"
+                        .to_owned()
+                        .into(),
+                ));
+            }
+        }
+        Err(failure)
     }
 
     fn run_in_pane(&self, pane: &str, command: &str) -> Result<(), PromptFailure> {

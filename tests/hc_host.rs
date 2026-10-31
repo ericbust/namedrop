@@ -14,6 +14,8 @@ use namedrop::{
 use serde_json::{Value, json};
 use std::{cell::RefCell, path::Path};
 
+type FixtureSendHook = Box<dyn Fn(&Fixture)>;
+
 struct Fixture {
     environment: namedrop::environment::EnvironmentSnapshot,
     popup: Option<PopupFixture>,
@@ -25,7 +27,7 @@ struct Fixture {
     session_clear_error: RefCell<Option<String>>,
     read_text: Option<String>,
     on_send: RefCell<Option<Box<dyn Fn()>>>,
-    on_send_fixture: RefCell<Option<Box<dyn Fn(&Fixture)>>>,
+    on_send_fixture: RefCell<Option<FixtureSendHook>>,
     retire_when_leased: RefCell<Option<std::path::PathBuf>>,
     clear_error: RefCell<Option<String>>,
     rename_error: RefCell<bool>,
