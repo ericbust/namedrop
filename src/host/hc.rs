@@ -183,31 +183,26 @@ impl Terminal {
                     .or(Some(foreground.name.as_str()))
             })
             .or_else(|| self.argv.first().map(String::as_str));
-        let agent = app.or(program).and_then(|program| {
-            let name = Path::new(program).file_name()?.to_str()?;
-            match name {
-                "claude-code" | "claude" => Some("claude".to_owned()),
-                "codex" => Some("codex".to_owned()),
-                "sh" | "bash" | "zsh" | "fish" | "dash" | "nu" if !self.reported => None,
-                _ => Some(name.to_owned()),
-            }
-        });
-        let shell_runner = !self.reported
-            && self
-                .argv
-                .first()
-                .and_then(|program| Path::new(program).file_name())
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| matches!(name, "sh" | "bash" | "zsh" | "fish" | "dash" | "nu"))
-            && self.foreground.as_ref().is_some_and(|foreground| {
-                foreground
-                    .argv
-                    .first()
-                    .and_then(|program| Path::new(program).file_name())
-                    .is_some_and(|name| name == "namedrop")
-                    && foreground.argv.iter().any(|arg| arg == "terminal-execute")
+        let agent = app
+            .map(|app| match app {
+                "claude-code" => "claude".to_owned(),
+                _ => app.to_owned(),
+            })
+            .or_else(|| {
+                let name = Path::new(program?).file_name()?.to_str()?;
+                let name = if name == "claude" {
+                    "claude-code"
+                } else {
+                    name
+                };
+                crate::AgentRuntime::parse(name).ok().map(|agent| {
+                    match agent {
+                        crate::AgentRuntime::ClaudeCode => "claude",
+                        crate::AgentRuntime::Codex => "codex",
+                    }
+                    .to_owned()
+                })
             });
-        let agent = if shell_runner { None } else { agent };
         DiscoveredPane {
             pane_id: self.address.clone(),
             terminal_id: self.address.clone(),
