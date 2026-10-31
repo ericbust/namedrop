@@ -779,7 +779,19 @@ fn fixture_executable_can_be_replaced_while_its_previous_version_runs() {
     let executable = f.root.join("running-shim");
     fs::copy("/bin/sleep", &executable).unwrap();
     fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-    let mut previous = Command::new(&executable).arg("30").spawn().unwrap();
+    let mut command = Command::new(&executable);
+    command.arg("30");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut previous = loop {
+        match command.spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(20));
+            }
+            result => break result.unwrap(),
+        }
+    };
     let published = publish_executable(&executable, "#!/bin/sh\nprintf 'replacement-version\\n'\n");
     let replacement = published
         .as_ref()
