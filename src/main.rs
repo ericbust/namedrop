@@ -846,6 +846,10 @@ fn with_runtime_options<T>(
         None
     });
     let host = RuntimeHost::new(kind, &transport);
+    let hc_socket_id = match host {
+        RuntimeHost::Hc(host) => Some(host.core_identity()?),
+        RuntimeHost::Tui(_) => None,
+    };
     let identity = host.caller_identity(&namedrop::CallerClaim {
         workspace: match kind {
             HostKind::Tui => options
@@ -874,10 +878,8 @@ fn with_runtime_options<T>(
     })?;
     let workspace_id = identity.workspace;
     let pane_id = identity.pane;
-    let socket_id = match host {
-        RuntimeHost::Hc(host) => host.core_identity()?,
-        RuntimeHost::Tui(_) => session_socket_id(options.herdr_socket.clone(), &host),
-    };
+    let socket_id =
+        hc_socket_id.unwrap_or_else(|| session_socket_id(options.herdr_socket.clone(), &host));
     let clock = SystemClock;
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
