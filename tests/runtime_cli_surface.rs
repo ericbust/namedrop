@@ -12,7 +12,11 @@ fn run(arguments: &[&str]) -> std::process::Output {
 fn tui_help_hides_the_internal_subscriber_command() {
     for arguments in [vec!["--help"], vec![]] {
         let output = run(&arguments);
-        let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         assert!(!text.contains("  events"), "{text}");
     }
 }
@@ -33,5 +37,10 @@ fn print_host_is_not_a_product_flag() {
     let output = run(&["--json", "--print-host", "describe"]);
     assert_eq!(output.status.code(), Some(64));
     let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(body["error"]["message"].as_str().unwrap().contains("unexpected argument '--print-host'"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected argument '--print-host'")
+    );
 }

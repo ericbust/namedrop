@@ -264,7 +264,12 @@ esac
             .env("NAMEDROP_STATE_DIR", root.join("state"))
             .env("HOST_FLAGS", serde_json::to_string(&case.flags).unwrap())
             .env("EXPECTED_HOST", case.expected.unwrap_or("conflict"))
-            .args(["--ignored", "--exact", "snapshot_host_detection_child", "--nocapture"])
+            .args([
+                "--ignored",
+                "--exact",
+                "snapshot_host_detection_child",
+                "--nocapture",
+            ])
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -432,7 +437,10 @@ fn describe_validates_conflicts_before_runtime_dispatch_and_keeps_explicit_state
     .unwrap();
     fs::set_permissions(&tripwire, fs::Permissions::from_mode(0o700)).unwrap();
     fs::copy(&tripwire, root.join("state/runtime/namedrop")).unwrap();
-    for flags in [vec!["--hc-terminal", "terminal", "--herdr-pane", "pane"], vec![]] {
+    for flags in [
+        vec!["--hc-terminal", "terminal", "--herdr-pane", "pane"],
+        vec![],
+    ] {
         let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .env_clear()
             .env("HC_TERMINAL_ID", "terminal")
@@ -469,15 +477,35 @@ fn describe_validates_conflicts_before_runtime_dispatch_and_keeps_explicit_state
 fn snapshot_host_detection_child() {
     use clap::Parser;
     let flags: Vec<String> = serde_json::from_str(&std::env::var("HOST_FLAGS").unwrap()).unwrap();
-    let cli = namedrop::cli::Cli::try_parse_from(std::iter::once("namedrop".to_owned()).chain(flags.clone()).chain(["describe".to_owned()])).unwrap();
+    let cli = namedrop::cli::Cli::try_parse_from(
+        std::iter::once("namedrop".to_owned())
+            .chain(flags.clone())
+            .chain(["describe".to_owned()]),
+    )
+    .unwrap();
     let expected = std::env::var("EXPECTED_HOST").unwrap();
     if expected == "conflict" {
         let error = cli.runtime.host_kind().unwrap_err();
-        for flag in ["--herdr-socket", "--herdr-workspace", "--herdr-pane", "--hc-terminal", "--hc-space", "--plugin-state"] {
-            assert_eq!(error.contains(flag), flags.iter().any(|arg| arg == flag), "conflict should name only supplied flags: {error}");
+        for flag in [
+            "--herdr-socket",
+            "--herdr-workspace",
+            "--herdr-pane",
+            "--hc-terminal",
+            "--hc-space",
+            "--plugin-state",
+        ] {
+            assert_eq!(
+                error.contains(flag),
+                flags.iter().any(|arg| arg == flag),
+                "conflict should name only supplied flags: {error}"
+            );
         }
     } else {
-        let expected = if expected == "hc" { namedrop::runtime::HostKind::Hc } else { namedrop::runtime::HostKind::Tui };
+        let expected = if expected == "hc" {
+            namedrop::runtime::HostKind::Hc
+        } else {
+            namedrop::runtime::HostKind::Tui
+        };
         assert_eq!(cli.runtime.host_kind().unwrap(), expected);
     }
 }

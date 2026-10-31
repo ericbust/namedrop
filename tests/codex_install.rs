@@ -340,12 +340,25 @@ fn global_state_binding_rejects_duplicates_across_command_levels_for_both_hosts(
                 failures.push(format!("{host} {arguments:?}"));
             }
         }
-        let root = std::env::temp_dir().join(format!("namedrop-state-binding-{}-{host}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "namedrop-state-binding-{}-{host}",
+            std::process::id()
+        ));
         let state = root.to_str().unwrap();
         for arguments in [
-            vec!["--plugin-state".to_owned(), state.to_owned(), "describe".to_owned()],
+            vec![
+                "--plugin-state".to_owned(),
+                state.to_owned(),
+                "describe".to_owned(),
+            ],
             vec!["describe".to_owned(), format!("--plugin-state={state}")],
-            vec!["describe".to_owned(), "--plugin-state".to_owned(), state.to_owned(), "--".to_owned(), "--plugin-state=literal-operation".to_owned()],
+            vec![
+                "describe".to_owned(),
+                "--plugin-state".to_owned(),
+                state.to_owned(),
+                "--".to_owned(),
+                "--plugin-state=literal-operation".to_owned(),
+            ],
         ] {
             let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
                 .env_clear()
@@ -355,9 +368,17 @@ fn global_state_binding_rejects_duplicates_across_command_levels_for_both_hosts(
                 .unwrap();
             let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(body["protocol_version"], "collab/v1");
-            if arguments.last().is_some_and(|arg| arg == "--plugin-state=literal-operation") {
+            if arguments
+                .last()
+                .is_some_and(|arg| arg == "--plugin-state=literal-operation")
+            {
                 assert_eq!(output.status.code(), Some(65));
-                assert!(!body["error"]["message"].as_str().unwrap().contains("supplied more than once"));
+                assert!(
+                    !body["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("supplied more than once")
+                );
             } else {
                 assert!(output.status.success(), "{host} {arguments:?}: {output:?}");
             }

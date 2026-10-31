@@ -282,7 +282,11 @@ fn hc_children_drop_captured_and_late_lifetime_tokens() {
     const CHILD: &str = "NAMEDROP_LIFETIME_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "hc_children_drop_captured_and_late_lifetime_tokens", "--nocapture"])
+            .args([
+                "--exact",
+                "hc_children_drop_captured_and_late_lifetime_tokens",
+                "--nocapture",
+            ])
             .env_clear()
             .env(CHILD, "1")
             .env("HC_SCOPE", "captured-scope")
@@ -293,8 +297,14 @@ fn hc_children_drop_captured_and_late_lifetime_tokens() {
             .env("HC_SOCKET", "/private/core.sock")
             .env("HC_BIN_PATH", "/usr/bin/python3")
             .env("UNRELATED", "kept")
-            .output().unwrap();
-        assert!(output.status.success(), "{} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         return;
     }
     let snapshot = namedrop::environment::EnvironmentSnapshot::capture();
@@ -303,14 +313,31 @@ fn hc_children_drop_captured_and_late_lifetime_tokens() {
         std::env::set_var("HC_TERMINAL_LATE", "late-terminal");
         std::env::set_var("HERDR_LATE", "late-tui");
     }
-    let output = namedrop::ProcessHerdr::from_snapshot(HostKind::Hc, &snapshot).command()
-        .args(["-c", "import json,os,sys; print(json.dumps({'env':dict(os.environ),'argv':sys.argv[1:]}))", "events", "--json"])
-        .output().unwrap();
+    let output = namedrop::ProcessHerdr::from_snapshot(HostKind::Hc, &snapshot)
+        .command()
+        .args([
+            "-c",
+            "import json,os,sys; print(json.dumps({'env':dict(os.environ),'argv':sys.argv[1:]}))",
+            "events",
+            "--json",
+        ])
+        .output()
+        .unwrap();
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let env = result["env"].as_object().unwrap();
-    let leaked: Vec<_> = env.keys().filter(|key| key.starts_with("HERDR_") || key.starts_with("HC_TERMINAL_") || matches!(key.as_str(), "HC_SCOPE" | "HC_RUNTIME")).collect();
-    assert!(leaked.is_empty(), "child inherited lifetime tokens: {leaked:?}");
+    let leaked: Vec<_> = env
+        .keys()
+        .filter(|key| {
+            key.starts_with("HERDR_")
+                || key.starts_with("HC_TERMINAL_")
+                || matches!(key.as_str(), "HC_SCOPE" | "HC_RUNTIME")
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "child inherited lifetime tokens: {leaked:?}"
+    );
     assert_eq!(env["HC_SESSION"], "kept-session");
     assert_eq!(env["HC_SOCKET"], "/private/core.sock");
     assert_eq!(env["UNRELATED"], "kept");
@@ -322,7 +349,11 @@ fn tui_children_drop_all_captured_and_late_hc_keys() {
     const CHILD: &str = "NAMEDROP_TUI_SCRUB_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "tui_children_drop_all_captured_and_late_hc_keys", "--nocapture"])
+            .args([
+                "--exact",
+                "tui_children_drop_all_captured_and_late_hc_keys",
+                "--nocapture",
+            ])
             .env_clear()
             .env(CHILD, "1")
             .env("HERDR_BIN_PATH", "/usr/bin/python3")
@@ -332,21 +363,45 @@ fn tui_children_drop_all_captured_and_late_hc_keys() {
             .env("HC_TERMINAL_ID", "terminal")
             .env("HC_SCOPE", "scope")
             .env("HC_CUSTOM", "custom")
-            .output().unwrap();
-        assert!(output.status.success(), "{} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
         return;
     }
     let snapshot = namedrop::environment::EnvironmentSnapshot::capture();
-    assert_eq!(snapshot.hc_endpoint().unwrap(), std::path::Path::new("/hc.sock"));
+    assert_eq!(
+        snapshot.hc_endpoint().unwrap(),
+        std::path::Path::new("/hc.sock")
+    );
     // SAFETY: this child runs one test and has no concurrent environment readers.
-    unsafe { std::env::set_var("HC_LATE", "late"); }
+    unsafe {
+        std::env::set_var("HC_LATE", "late");
+    }
     let script = "import json,os; print(json.dumps(dict(os.environ)))";
-    let output = namedrop::ProcessHerdr::from_snapshot(HostKind::Tui, &snapshot).command().args(["-c", script]).output().unwrap();
+    let output = namedrop::ProcessHerdr::from_snapshot(HostKind::Tui, &snapshot)
+        .command()
+        .args(["-c", script])
+        .output()
+        .unwrap();
     let env: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    let leaked: Vec<_> = env.as_object().unwrap().keys().filter(|key| key.starts_with("HC_")).collect();
+    let leaked: Vec<_> = env
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|key| key.starts_with("HC_"))
+        .collect();
     assert!(leaked.is_empty(), "TUI child inherited HC keys: {leaked:?}");
     assert_eq!(env["HERDR_SOCKET_PATH"], "/tui.sock");
-    let neutral = snapshot.command("/usr/bin/python3").args(["-c", script]).output().unwrap();
+    let neutral = snapshot
+        .command("/usr/bin/python3")
+        .args(["-c", script])
+        .output()
+        .unwrap();
     let neutral: serde_json::Value = serde_json::from_slice(&neutral.stdout).unwrap();
     assert_eq!(neutral["HC_SOCKET"], "/hc.sock");
 }
@@ -357,10 +412,18 @@ fn tui_children_remove_synthesized_hc_socket_after_identity_resolution() {
         ("HERDR_BIN_PATH".into(), "/usr/bin/python3".into()),
         ("XDG_RUNTIME_DIR".into(), "/private/runtime".into()),
     ]);
-    assert_eq!(snapshot.hc_endpoint().unwrap(), std::path::Path::new("/private/runtime/herdr-core/default.sock"));
-    let output = namedrop::ProcessHerdr::from_snapshot(HostKind::Tui, &snapshot).command()
-        .args(["-c", "import os; print(os.environ.get('HC_SOCKET', 'unset'))"])
-        .output().unwrap();
+    assert_eq!(
+        snapshot.hc_endpoint().unwrap(),
+        std::path::Path::new("/private/runtime/herdr-core/default.sock")
+    );
+    let output = namedrop::ProcessHerdr::from_snapshot(HostKind::Tui, &snapshot)
+        .command()
+        .args([
+            "-c",
+            "import os; print(os.environ.get('HC_SOCKET', 'unset'))",
+        ])
+        .output()
+        .unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "unset\n");
 }
