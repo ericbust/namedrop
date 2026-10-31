@@ -431,6 +431,19 @@ mod drain_report_tests {
         assert!(drain_report(&result).unwrap().awaits_retry());
         assert!(!needs_mailbox_watcher(&result));
     }
+
+    #[test]
+    fn a_live_lease_does_not_start_an_acknowledgement_grace_watcher() {
+        let lease = DrainReport {
+            next_lease_due_ms: Some(31_000),
+            ..DrainReport::default()
+        };
+        let result = json!({"drain": lease});
+        let report = drain_report(&result).unwrap();
+        assert_eq!(report.next_lease_due_ms, Some(31_000));
+        assert_eq!(report.next_grace_due_ms(), None);
+        assert!(!needs_mailbox_watcher(&result));
+    }
 }
 
 fn wake_runtime_mailboxes(runtime: &ProcessRuntime<'_>) -> Result<(), String> {

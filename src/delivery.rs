@@ -25,9 +25,11 @@ pub struct DrainReport {
     pub held: Vec<DeliveryAttemptId>,
     pub expired: Vec<crate::DeliveryId>,
     pub pending_grace: Vec<GraceDeadline>,
+    pub next_lease_due_ms: Option<u64>,
 }
 
-/// The next lease or acknowledgement deadline for an inflight attempt.
+/// An idle submitted or acknowledged attempt still inside the acknowledgement
+/// grace. The drain observes it again at `due_at_ms`.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct GraceDeadline {
     pub attempt_id: DeliveryAttemptId,
@@ -47,6 +49,7 @@ impl Default for DrainReport {
             held: Vec::new(),
             expired: Vec::new(),
             pending_grace: Vec::new(),
+            next_lease_due_ms: None,
         }
     }
 }
@@ -123,6 +126,7 @@ pub(crate) struct DeliveryReconciliationReport {
     pub settled: Vec<DeliveryAttemptId>,
     pub held: Vec<DeliveryAttemptId>,
     pub pending_grace: Vec<GraceDeadline>,
+    pub next_lease_due_ms: Option<u64>,
 }
 
 pub(crate) fn reconcile_delivery_state(
@@ -194,6 +198,13 @@ pub(crate) fn reconcile_delivery_state(
                 attempt_id: attempt.attempt_id,
                 due_at_ms,
             }),
+            Observation::PendingLease { due_at_ms } => {
+                report.next_lease_due_ms = Some(
+                    report
+                        .next_lease_due_ms
+                        .map_or(due_at_ms, |previous| previous.min(due_at_ms)),
+                );
+            }
             Observation::Unchanged => {}
         }
     }
@@ -205,6 +216,7 @@ enum Observation {
     Hold,
     Settle,
     PendingGrace { due_at_ms: u64 },
+    PendingLease { due_at_ms: u64 },
     Unchanged,
 }
 
@@ -229,7 +241,7 @@ fn observe_agent_attempt(
     match attempt.state {
         _ if !same_session => Observation::Hold,
         DeliveryState::Dispatching if restart || lease_expired => Observation::Hold,
-        DeliveryState::Dispatching => Observation::PendingGrace {
+        DeliveryState::Dispatching => Observation::PendingLease {
             due_at_ms: attempt
                 .lease_expires_at_ms
                 .expect("unexpired lease checked"),
@@ -394,6 +406,7 @@ where
         held: reconciled.held,
         expired,
         pending_grace: reconciled.pending_grace,
+        next_lease_due_ms: reconciled.next_lease_due_ms,
         ..DrainReport::default()
     };
 

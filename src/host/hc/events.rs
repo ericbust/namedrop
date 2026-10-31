@@ -146,7 +146,11 @@ impl Subscriber {
             let due = if report.awaits_retry() {
                 Some(now.saturating_add(500))
             } else {
-                report.next_grace_due_ms()
+                report
+                    .next_grace_due_ms()
+                    .into_iter()
+                    .chain(report.next_lease_due_ms)
+                    .min()
             };
             if let Some(due) = due {
                 self.next_wake_ms =

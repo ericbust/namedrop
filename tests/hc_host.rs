@@ -1236,6 +1236,9 @@ fn check_dispatch_lease(event: &str, expires: bool) {
         std::fs::remove_dir_all(state).unwrap();
         return;
     }
+    let report = namedrop::drain_mailboxes(&runtime).unwrap();
+    assert!(report.pending_grace.is_empty());
+    assert_eq!(report.next_lease_due_ms, Some(now + 30_000));
     let line = match event {
         "snapshot" => json!({"terminals": *fixture.terminals.borrow()}),
         "missed" => json!({"method":"missed", "params":{"seq":99}}),
