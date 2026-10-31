@@ -1601,6 +1601,48 @@ fn eventless_rejections_keep_pane_lock_deferrals_on_the_short_retry() {
             .unwrap();
         lock.try_lock().unwrap();
         pane_lock = Some(lock);
+        let challenge = StateStore::open(fixture.state())
+            .unwrap()
+            .transaction(|tx| {
+                tx.issue_integration_challenge(
+                    &namespace,
+                    "registration-other",
+                    &PaneAddressId::new("author"),
+                    namedrop::AgentRuntime::ClaudeCode,
+                    "nonce-other",
+                    &attribution,
+                )
+            })
+            .unwrap();
+        let registered = fixture
+            .command()
+            .env("HERDR_PANE_ID", "pane-grace")
+            .args(["register", "--input-json"])
+            .arg(
+                serde_json::json!({
+                    "runtime": "claude-code",
+                    "protocol_version": "collab/v1",
+                    "nonce": challenge.nonce,
+                    "capabilities": namedrop::complete_capability_profile(),
+                })
+                .to_string(),
+            )
+            .output()
+            .unwrap();
+        assert!(registered.status.success(), "{registered:?}");
+        let scope = namedrop::lower_hex(&Sha256::digest("test-socket\0workspace-1"));
+        let directory = fixture
+            .state()
+            .join("agent-status-reconciliation")
+            .join(scope);
+        // Keep only setup events so the rejection deadline schedules the next drain.
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name.starts_with("pending-") && !name.starts_with("pending-setup-") {
+                fs::remove_file(path).unwrap();
+            }
+        }
     });
     fs::write(fixture.root.join("release-capped-retry"), "ready").unwrap();
     wait_for_runtime("mixed drain did not finish its marker", 30, || {

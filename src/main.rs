@@ -972,14 +972,13 @@ fn queue_agent_status_reconciliation(
 
 fn pending_agent_status_reconciliations(directory: &Path) -> io::Result<Vec<PathBuf>> {
     let mut markers = fs::read_dir(directory)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("pending-"))
-        })
-        .collect::<Vec<_>>();
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<io::Result<Vec<_>>>()?;
+    markers.retain(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("pending-"))
+    });
     markers.sort();
     Ok(markers)
 }
@@ -992,17 +991,17 @@ fn pending_agent_status_reconciliations_with_retry(
     loop {
         match scan(directory) {
             Ok(pending) => return Ok(pending),
-            Err(error)
-                if !matches!(
-                    error.raw_os_error(),
-                    Some(libc::EMFILE | libc::ENFILE | libc::EINTR | libc::EAGAIN | libc::ENOMEM)
-                ) =>
-            {
-                return Err(error);
-            }
+            Err(error) if !retryable_queue_scan(&error) => return Err(error),
             Err(_) => wait_for_reconciliation_retry(failures, false),
         }
     }
+}
+
+fn retryable_queue_scan(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::EINTR | libc::EAGAIN | libc::ENOMEM)
+    )
 }
 
 fn run_agent_status_worker() -> ExitCode {
@@ -1043,7 +1042,7 @@ fn run_agent_status_worker_queue(
         let Some(marker) = pending.first() else {
             if let Some(due) = deadline_ms {
                 if SystemClock.now_unix_ms() < due {
-                    wait_for_marker_or_deadline(directory, due);
+                    wait_for_marker_or_deadline(directory, due, &mut scan);
                     continue;
                 }
                 if queue_agent_status_reconciliation(
@@ -1108,8 +1107,10 @@ fn run_agent_status_worker_queue(
                         failures = 0;
                     }
                     let retry_due_ms = report.awaits_retry().then(|| {
-                        let delay =
-                            reconciliation_retry_delay(failures, report.retry_without_event);
+                        let rejection_only = report.retry_without_event
+                            && report.pane_lock_deferred.is_empty()
+                            && !report.awaits_terminal();
+                        let delay = reconciliation_retry_delay(failures, rejection_only);
                         failures = failures.saturating_add(1);
                         SystemClock
                             .now_unix_ms()
@@ -1138,16 +1139,20 @@ fn run_agent_status_worker_queue(
     }
 }
 
-fn wait_for_marker_or_deadline(directory: &Path, due_ms: u64) {
+fn wait_for_marker_or_deadline(
+    directory: &Path,
+    due_ms: u64,
+    scan: &mut impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
+) {
     loop {
         let now = SystemClock.now_unix_ms();
         if now >= due_ms {
             return;
         }
-        match pending_agent_status_reconciliations(directory) {
+        match scan(directory) {
             Ok(pending) if pending.is_empty() => {}
             Ok(_) => return,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) if !retryable_queue_scan(&error) => return,
             Err(_) => {}
         }
         thread::sleep(Duration::from_millis((due_ms - now).min(100)));
@@ -1259,6 +1264,28 @@ mod worker_shutdown_tests {
     }
 
     #[test]
+    fn a_permanent_outer_scan_stops_the_worker_and_releases_ownership() {
+        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+            let queue = QueueFixture::new(&format!("worker-permanent-{errno}"));
+            let lock = queue.lock();
+            let mut scans = 0;
+            assert_eq!(
+                run_agent_status_worker_queue(&queue.0, lock, |_| {
+                    scans += 1;
+                    if scans == 1 {
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        Ok(Vec::new())
+                    }
+                }),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(scans, 1, "permanent errno={errno} kept the worker scanning");
+            queue.lock();
+        }
+    }
+
+    #[test]
     fn an_unlock_recheck_retries_transient_errors_and_reclaims_queued_work() {
         for errno in [
             libc::EMFILE,
@@ -1359,50 +1386,83 @@ mod worker_shutdown_tests {
     }
 
     #[test]
-    fn an_unreadable_queue_keeps_waiting_until_the_grace_deadline() {
-        let directory =
-            env::temp_dir().join(format!("namedrop-unreadable-queue-{}", std::process::id()));
-        fs::write(&directory, b"not a directory").unwrap();
-        assert_eq!(
-            fs::read_dir(&directory).unwrap_err().kind(),
-            io::ErrorKind::NotADirectory
-        );
-        let due = SystemClock.now_unix_ms() + 250;
-        wait_for_marker_or_deadline(&directory, due);
-        let returned_at = SystemClock.now_unix_ms();
-        fs::remove_file(&directory).unwrap();
-        assert!(
-            returned_at >= due,
-            "a queue read error ended the wait before its grace deadline"
-        );
+    fn a_transient_queue_error_preserves_the_grace_deadline() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EINTR,
+            libc::EAGAIN,
+            libc::ENOMEM,
+        ] {
+            let due = SystemClock.now_unix_ms() + 250;
+            wait_for_marker_or_deadline(Path::new("unused"), due, &mut |_| {
+                Err(io::Error::from_raw_os_error(errno))
+            });
+            assert!(
+                SystemClock.now_unix_ms() >= due,
+                "errno={errno} ended the grace wait early"
+            );
+        }
+    }
+
+    #[test]
+    fn a_permanent_queue_error_stops_a_grace_wait_without_retrying() {
+        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+            let mut scans = 0;
+            wait_for_marker_or_deadline(
+                Path::new("unused"),
+                SystemClock.now_unix_ms() + 10_000,
+                &mut |_| {
+                    scans += 1;
+                    if scans == 1 {
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        Ok(vec![PathBuf::from("pending-test")])
+                    }
+                },
+            );
+            assert_eq!(
+                scans, 1,
+                "permanent errno={errno} kept the deadline wait alive"
+            );
+        }
     }
 
     #[test]
     fn a_recovered_queue_wakes_a_grace_wait_when_a_marker_arrives() {
-        let directory =
-            env::temp_dir().join(format!("namedrop-recovered-queue-{}", std::process::id()));
-        let restored = directory.with_extension("restored");
-        let replacement = directory.with_extension("replacement");
-        fs::write(&directory, b"not a directory").unwrap();
-        fs::create_dir(&restored).unwrap();
-        fs::write(restored.join("pending-test"), b"{}").unwrap();
-        std::os::unix::fs::symlink(&restored, &replacement).unwrap();
-        let queue = directory.clone();
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let queue = QueueFixture::new("grace-recovered");
+        let directory = queue.0.clone();
+        let available = Arc::new(AtomicBool::new(false));
+        let reader_available = available.clone();
         let (done, finished) = std::sync::mpsc::channel();
         let waiter = thread::spawn(move || {
-            wait_for_marker_or_deadline(&queue, SystemClock.now_unix_ms() + 10_000);
+            wait_for_marker_or_deadline(
+                &directory,
+                SystemClock.now_unix_ms() + 10_000,
+                &mut |directory| {
+                    if reader_available.load(Ordering::Acquire) {
+                        pending_agent_status_reconciliations(directory)
+                    } else {
+                        Err(io::Error::from_raw_os_error(libc::EMFILE))
+                    }
+                },
+            );
             done.send(()).unwrap();
         });
         let early = finished.recv_timeout(Duration::from_millis(250));
-        fs::rename(&replacement, &directory).unwrap();
+        fs::write(queue.0.join("pending-test"), b"{}").unwrap();
+        available.store(true, Ordering::Release);
         let recovered = finished.recv_timeout(Duration::from_secs(1));
-        fs::remove_file(&directory).unwrap();
-        fs::remove_dir_all(&restored).unwrap();
         waiter.join().unwrap();
         assert_eq!(
             early,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout),
-            "a queue read error must preserve the grace wait"
+            "a transient queue read error must preserve the grace wait"
         );
         recovered.expect("a recovered queue's pending marker must wake the worker");
     }
@@ -1415,7 +1475,11 @@ mod worker_shutdown_tests {
         fs::remove_dir(&directory).unwrap();
         let (done, finished) = std::sync::mpsc::channel();
         thread::spawn(move || {
-            wait_for_marker_or_deadline(&directory, u64::MAX);
+            wait_for_marker_or_deadline(
+                &directory,
+                u64::MAX,
+                &mut pending_agent_status_reconciliations,
+            );
             done.send(()).unwrap();
         });
         finished
