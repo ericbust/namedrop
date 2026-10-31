@@ -5,8 +5,6 @@ use std::{env, fs, io::ErrorKind, os::unix::fs::PermissionsExt, path::Path};
 const OWNER: &str = "#!/bin/sh\n# Managed by Namedrop: shell command.\n";
 const PATH_SETUP: &str = "# Namedrop CLI\ncase \":$PATH:\" in\n  *:\"$HOME/.local/bin\":*) ;;\n  *) export PATH=\"$HOME/.local/bin:$PATH\" ;;\nesac\n";
 
-/// The launcher supplies installation state while preserving the invoking pane's
-/// Herdr context. Runtime permissions continue to use the real executable.
 pub(crate) fn install_shell_command(
     home: &Path,
     executable: &Path,
@@ -89,7 +87,6 @@ pub(crate) fn install_shell_command(
 if [ "$namedrop_selected_host" = hc ]; then
   exec {executable} "$@"
 fi
-# TUI command
 exec {executable} --plugin-state {state} "$@"
 "#
     );

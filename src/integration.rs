@@ -1387,13 +1387,6 @@ const COMMAND_GUIDANCE: &str = "Namedrop commands: the operations this delivery 
 /// This never travels inside the envelope. A delivery authenticates by exact
 /// equality against that reconstruction, so a field added to the envelope would
 /// stop a prompt dispatched before an upgrade from ever matching again.
-///
-/// The order is not cosmetic. The installed Codex approval rule is a prefix over
-/// `[executable, "--plugin-state", state, ...argv]`, so anything placed between
-/// the state directory and the operation's own argv leaves the command outside
-/// that rule: it is then refused by the sandbox rather than by Namedrop, which
-/// is exactly how one live handoff stalled. Location flags therefore follow the
-/// argv, and the input flag is last.
 pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
     let executable = tool.get("executable")?.as_str()?;
     let environment = tool.get("environment")?.as_object()?;
@@ -1598,8 +1591,6 @@ pub(crate) fn tool_executable(home: Option<&Path>, hc: bool) -> Result<String, S
     }
 }
 
-/// Installed snapshots advertise their stable launcher; source invocations use
-/// the actual executable. Neither path is guessed from the working directory.
 pub(crate) fn collaboration_executable() -> Result<String, String> {
     crate::installed_runtime::executable()
         .map_err(|error| {

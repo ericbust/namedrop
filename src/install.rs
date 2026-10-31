@@ -1029,11 +1029,6 @@ fn codex_manifest(version: &str) -> String {
     format!("{manifest}\n")
 }
 
-/// Codex snapshots installed plugins by manifest version. The generated wrapper
-/// contains the absolute executable and state paths, so a stable Cargo version
-/// would let Codex reuse an obsolete cached hook after Herdr refreshes it.
-/// Deriving build metadata from the actual generated files makes identical
-/// packages stable while any routing-relevant change gets a new cache key.
 fn codex_cache_version(contents: &[&str]) -> String {
     let mut digest = Sha256::new();
     digest.update(b"namedrop-codex-plugin-v1");
