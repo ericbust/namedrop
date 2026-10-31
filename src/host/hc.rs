@@ -649,6 +649,7 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
     pub(super) fn reconcile_session(
         &self,
         state: &Path,
+        session_socket_id: &str,
         terminal: &mut Terminal,
     ) -> Result<bool, HostError> {
         if (terminal.state == "live" && terminal.session().is_some())
@@ -670,7 +671,13 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
         let _lock = label_lock(state)?;
         // Cached observations can predate a replacement SessionStart publication.
         let mut current = self.terminal(&terminal.address, None)?;
-        if current.state != "live" || current.session().is_none() {
+        let namespace = crate::StateNamespace::for_space(session_socket_id, current.workspace());
+        let active = crate::StateStore::open(state)
+            .map_err(|error| error.to_string())?
+            .transaction(|transaction| transaction.worktree_state(&namespace))
+            .map_err(|error| error.to_string())?
+            .is_some_and(|state| state.activated && !state.deactivated);
+        if active && (current.state != "live" || current.session().is_none()) {
             self.clear_session(&current)?;
             for key in [
                 "namedrop.session",

@@ -239,10 +239,11 @@ impl Subscriber {
                 if !active.contains(terminal.workspace()) {
                     continue;
                 }
-                match runtime
-                    .host
-                    .reconcile_session(runtime.state_directory, terminal)
-                {
+                match runtime.host.reconcile_session(
+                    runtime.state_directory,
+                    runtime.session_socket_id,
+                    terminal,
+                ) {
                     Ok(true) => {
                         self.pending.dirty.entry(pane.clone()).or_default();
                     }
@@ -338,10 +339,11 @@ impl Subscriber {
                 if !active_spaces.contains(terminal.workspace()) {
                     continue;
                 }
-                if let Err(error) = runtime
-                    .host
-                    .reconcile_session(runtime.state_directory, terminal)
-                {
+                if let Err(error) = runtime.host.reconcile_session(
+                    runtime.state_directory,
+                    runtime.session_socket_id,
+                    terminal,
+                ) {
                     self.unavailable.insert(pane.clone(), error.to_string());
                     errors.push(error.to_string());
                 }
@@ -382,9 +384,11 @@ impl Subscriber {
             match runtime.host.terminal(pane, None) {
                 Ok(mut terminal) => {
                     if active_spaces.contains(terminal.workspace())
-                        && let Err(error) = runtime
-                            .host
-                            .reconcile_session(runtime.state_directory, &mut terminal)
+                        && let Err(error) = runtime.host.reconcile_session(
+                            runtime.state_directory,
+                            runtime.session_socket_id,
+                            &mut terminal,
+                        )
                     {
                         self.unavailable.insert(pane.clone(), error.to_string());
                         errors.push(error.to_string());
