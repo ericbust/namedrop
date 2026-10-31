@@ -386,7 +386,7 @@ def main():
         for old, new in (contracts(True), contracts(False)):
             assert runtime.live_compatible(old, new)
             assert runtime.live_compatible(dict(new), new)
-            for prior in (dict(old, state_schema=2), dict(old, state_schema=8),
+            for prior in (dict(old, state_schema=2), dict(old, state_schema=7),
                           dict(old, live_upgrade_epoch=2), dict(old, collaboration_protocol='unknown')):
                 assert not runtime.live_compatible(prior, new)
             assert not runtime.live_compatible(old, dict(new, command_gate=0))

@@ -23,9 +23,9 @@ use std::{
 };
 
 const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
-pub(crate) const SCHEMA_VERSION: u32 = 7;
+pub(crate) const SCHEMA_VERSION: u32 = 6;
 
-const TRANSITION_ENTITY_INDEX: &str = "CREATE INDEX transition_facts_by_entity
+const TRANSITION_ENTITY_INDEX: &str = "CREATE INDEX IF NOT EXISTS transition_facts_by_entity
     ON transition_facts (session_socket_id, worktree_id, entity_kind, entity_id, worktree_order DESC);";
 
 /// Personas live on the Pane Address, which survives renaming and rebinding,
@@ -7424,18 +7424,24 @@ fn initialize_schema(
         (6, bridge::SCHEMA),
         (6, bridge::DELIVERY_SEATS_SCHEMA),
         (6, terminal::REMOTE_SCHEMA),
-        (7, TRANSITION_ENTITY_INDEX),
     ] {
         if version < introduced_in {
             transaction.execute_batch(schema)?;
         }
     }
-    if version >= 6 {
+    if version == SCHEMA_VERSION {
         for gap in pre_release_schema_6_gaps(&transaction)? {
             transaction.execute_batch(gap.ddl)?;
         }
     }
-    let transaction = if version < 7 {
+    let had_entity_index: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema
+         WHERE type = 'index' AND name = 'transition_facts_by_entity')",
+        [],
+        |row| row.get(0),
+    )?;
+    transaction.execute_batch(TRANSITION_ENTITY_INDEX)?;
+    let transaction = if !had_entity_index {
         let mut migration = StateTransaction { transaction };
         migration.migrate_mailbox_deferrals()?;
         migration.transaction
@@ -7483,19 +7489,17 @@ struct SchemaGap {
 
 fn check_read_only_schema(connection: &Connection) -> Result<(), StoreError> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version == 6 || version == SCHEMA_VERSION {
-        let gaps = pre_release_schema_6_gaps(connection)?;
-        if !gaps.is_empty() {
-            let names: Vec<&str> = gaps.iter().map(|gap| gap.name).collect();
-            return Err(StoreError::unsupported_schema(format!(
-                "state has pre-release schema 6 without {}; activating Namedrop completes it",
-                names.join(" and ")
-            )));
-        }
-    }
     if version != SCHEMA_VERSION {
         return Err(StoreError::unsupported_schema(format!(
             "state has schema {version}; expected {SCHEMA_VERSION}"
+        )));
+    }
+    let gaps = pre_release_schema_6_gaps(connection)?;
+    if !gaps.is_empty() {
+        let names: Vec<&str> = gaps.iter().map(|gap| gap.name).collect();
+        return Err(StoreError::unsupported_schema(format!(
+            "state has pre-release schema 6 without {}; activating Namedrop completes it",
+            names.join(" and ")
         )));
     }
     Ok(())
@@ -8368,6 +8372,12 @@ mod tests {
         let directory = TestDirectory::new();
         let store = StateStore::open(&directory.0).unwrap();
         let shape = schema_shape(&store.connection);
+        let additive_index = "index transition_facts_by_entity: CREATE INDEX transition_facts_by_entity ON transition_facts (session_socket_id, worktree_id, entity_kind, entity_id, worktree_order DESC)\n";
+        assert!(
+            shape.contains(additive_index),
+            "missing or changed additive index"
+        );
+        let shape = shape.replacen(additive_index, "", 1);
         let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("src/store/schema-v{SCHEMA_VERSION}.txt"));
         if std::env::var_os("NAMEDROP_WRITE_SCHEMA_GOLDEN").is_some() {

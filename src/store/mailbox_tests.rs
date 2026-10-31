@@ -379,23 +379,57 @@ fn writable_reopen_restores_entity_index_without_changing_version_or_facts() {
     );
 }
 
+unsafe extern "C" fn record_transition_queries(
+    _: u32,
+    context: *mut std::ffi::c_void,
+    statement: *mut std::ffi::c_void,
+    _: *mut std::ffi::c_void,
+) -> i32 {
+    let sql = unsafe { rusqlite::ffi::sqlite3_sql(statement.cast()) };
+    if !sql.is_null() {
+        let sql = unsafe { std::ffi::CStr::from_ptr(sql) }.to_string_lossy();
+        if sql.contains("FROM transition_facts") {
+            unsafe { &mut *context.cast::<Vec<String>>() }.push(sql.into_owned());
+        }
+    }
+    0
+}
+
+#[test]
+fn repeated_writable_initialization_skips_transition_history_after_index_creation() {
+    let directory = super::tests::TestDirectory::new();
+    let mut store = StateStore::open(&directory.0).unwrap();
+    store
+        .connection
+        .execute_batch("DROP INDEX transition_facts_by_entity;")
+        .unwrap();
+    let mut queries = Vec::<String>::new();
+    unsafe {
+        rusqlite::ffi::sqlite3_trace_v2(
+            store.connection.handle(),
+            rusqlite::ffi::SQLITE_TRACE_STMT,
+            Some(record_transition_queries),
+            (&mut queries as *mut Vec<String>).cast(),
+        );
+    }
+    initialize_schema(&mut store.connection, &directory.0).unwrap();
+    assert_eq!(queries.len(), 1, "{queries:?}");
+    queries.clear();
+    initialize_schema(&mut store.connection, &directory.0).unwrap();
+    unsafe {
+        rusqlite::ffi::sqlite3_trace_v2(
+            store.connection.handle(),
+            0,
+            None,
+            std::ptr::null_mut(),
+        );
+    }
+    assert!(queries.is_empty(), "{queries:?}");
+    assert_eq!(store.schema_version().unwrap(), 6);
+}
+
 #[test]
 fn tui_dispatch_and_lease_skip_settle_queries_and_hc_queries_only_selected_heads() {
-    unsafe extern "C" fn trace(
-        _: u32,
-        context: *mut std::ffi::c_void,
-        statement: *mut std::ffi::c_void,
-        _: *mut std::ffi::c_void,
-    ) -> i32 {
-        let sql = unsafe { rusqlite::ffi::sqlite3_sql(statement.cast()) };
-        if !sql.is_null() {
-            let sql = unsafe { std::ffi::CStr::from_ptr(sql) }.to_string_lossy();
-            if sql.contains("FROM transition_facts gate") {
-                unsafe { &mut *context.cast::<Vec<String>>() }.push(sql.into_owned());
-            }
-        }
-        0
-    }
     for kind in [crate::runtime::HostKind::Tui, crate::runtime::HostKind::Hc] {
         let directory = super::tests::TestDirectory::new();
         let ns = StateNamespace::for_space("hc:prefix-is-not-host-kind", "space");
@@ -412,7 +446,7 @@ fn tui_dispatch_and_lease_skip_settle_queries_and_hc_queries_only_selected_heads
             rusqlite::ffi::sqlite3_trace_v2(
                 store.connection.handle(),
                 rusqlite::ffi::SQLITE_TRACE_STMT,
-                Some(trace),
+                Some(record_transition_queries),
                 (&mut queries as *mut Vec<String>).cast(),
             );
         }
@@ -636,7 +670,7 @@ fn v6_mailbox_deferrals_migrate_exact_facts_and_latest_resume_state() {
             .unwrap();
         store
             .connection
-            .execute_batch("DROP INDEX transition_facts_by_entity; PRAGMA user_version=6;")
+            .execute_batch("DROP INDEX transition_facts_by_entity;")
             .unwrap();
         drop(store);
         let mut store = StateStore::open(&directory.0).unwrap();
@@ -683,7 +717,7 @@ fn v6_mailbox_deferrals_migrate_exact_facts_and_latest_resume_state() {
         );
         reopened
             .connection
-            .execute_batch("DROP INDEX transition_facts_by_entity; PRAGMA user_version=6;")
+            .execute_batch("DROP INDEX transition_facts_by_entity;")
             .unwrap();
         drop(reopened);
         assert_eq!(
@@ -711,7 +745,7 @@ fn v6_unused_refusal_remains_cancellable_after_upgrade() {
         .unwrap();
     store
         .connection
-        .execute_batch("DROP INDEX transition_facts_by_entity; PRAGMA user_version=6;")
+        .execute_batch("DROP INDEX transition_facts_by_entity;")
         .unwrap();
     drop(store);
     StateStore::open(&directory.0)
@@ -755,7 +789,7 @@ fn v6_migration_does_not_reclassify_unproven_prompt_facts() {
             .unwrap();
         store
             .connection
-            .execute_batch("DROP INDEX transition_facts_by_entity; PRAGMA user_version=6;")
+            .execute_batch("DROP INDEX transition_facts_by_entity;")
             .unwrap();
         drop(store);
         assert_eq!(

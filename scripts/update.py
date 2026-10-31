@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 6
 
 
 def prepare_target(before, directory):
@@ -151,7 +151,7 @@ def durable_state(panes, other_servers=False):
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2) as db:
         db.execute('BEGIN')
         schema = db.execute("PRAGMA user_version").fetchone()[0]
-        require(schema in (3, 4, 5, 6, SCHEMA_VERSION),
+        require(schema in (3, 4, 5, SCHEMA_VERSION),
                 "Unknown collaboration database schema; use the matching Namedrop release to inspect unfinished work.")
         deliveries = db.execute("""SELECT session_socket_id, worktree_id, delivery_id, state FROM mailbox_deliveries d
             WHERE state NOT IN ('settled', 'failed', 'cancelled') OR
