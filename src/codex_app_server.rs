@@ -289,8 +289,6 @@ mod tests {
         }
     }
 
-    /// A spawned process group that the test kills on drop. Spawning waits
-    /// until all requested arguments are visible, including in-process flags.
     struct Process(Child);
     impl Process {
         fn spawn(command: &mut Command) -> Self {
