@@ -699,6 +699,19 @@ pub(crate) mod hc_socket_fixture;
 mod bounded_read_tests {
     use super::*;
 
+    #[test]
+    fn malformed_hc_socket_paths_remain_invalid() {
+        for path in ["", "bad\0socket"] {
+            let error = connect_hc_socket(
+                Path::new(path),
+                Instant::now() + Duration::from_secs(1),
+                &AtomicBool::new(false),
+            )
+            .unwrap_err();
+            assert_eq!(error, format!("Invalid hc socket path: {path}"));
+        }
+    }
+
     fn run_with_hc_socket(test: &str) -> bool {
         if env::var("NAMEDROP_TEST_HC_SOCKET").as_deref() == Ok(test) {
             return false;

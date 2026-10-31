@@ -161,6 +161,82 @@ fn plain_file_and_stale_socket_never_launch() {
 }
 
 #[test]
+fn doctor_explains_overlong_socket_paths_without_launching_hc() {
+    // SAFETY: an all-zero sockaddr_un is valid for inspecting its pathname capacity.
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let max_bytes = address.sun_path.len() - 1;
+    for source in ["HC_SOCKET", "HC_TERMINAL_SOCKET", "XDG_RUNTIME_DIR", "config"] {
+        for character in ["x", "é"] {
+            let f = Fixture::new();
+            let long_path = format!("/{}", character.repeat(max_bytes.div_ceil(character.len())));
+            let socket = if source == "XDG_RUNTIME_DIR" {
+                format!("{long_path}/herdr-core/default.sock")
+            } else {
+                long_path.clone()
+            };
+            let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+            command
+                .args(["--host", "hc", "--plugin-state"])
+                .arg(f.0.join("state"))
+                .args(["doctor", "--json"])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &f.0)
+                .env("XDG_RUNTIME_DIR", f.0.join("run"))
+                .env("HC_BIN_PATH", f.0.join("hc"))
+                .env("LOG", f.0.join("calls"));
+            if source == "config" {
+                f.write(
+                    ".config/herdr-core/config.toml",
+                    &format!("socket = {long_path:?}"),
+                );
+            } else {
+                command.env(source, &long_path);
+            }
+            let output = command.output().unwrap();
+            f.no_calls();
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let message = report["error"]["message"].as_str().unwrap();
+            for expected in [
+                "hc socket path is too long".to_owned(),
+                format!("{} bytes", socket.len()),
+                format!("maximum {max_bytes} bytes"),
+                "HC_SOCKET".to_owned(),
+                "shorter path".to_owned(),
+                socket,
+            ] {
+                assert!(
+                    message.contains(&expected),
+                    "{source} doctor message lacks {expected:?}: {message}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn socket_path_at_platform_byte_limit_can_connect() {
+    // SAFETY: an all-zero sockaddr_un is valid for inspecting its pathname capacity.
+    let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let max_bytes = address.sun_path.len() - 1;
+    for character in ["x", "é"] {
+        let f = Fixture::new();
+        let remaining = max_bytes - f.0.as_os_str().len() - 1;
+        let filename = format!(
+            "{}{}",
+            character.repeat(remaining / character.len()),
+            "x".repeat(remaining % character.len())
+        );
+        let endpoint = f.0.join(&filename);
+        assert_eq!(endpoint.as_os_str().len(), max_bytes);
+        let _listener = f.listener(&filename);
+        f.run(&[("HC_SOCKET", endpoint.to_str().unwrap())], "ok");
+        assert!(f.0.join("calls").exists());
+    }
+}
+
+#[test]
 fn socket_precedence_and_child_routing() {
     for selected in ["explicit", "inherited", "config", "runtime"] {
         let f = Fixture::new();
