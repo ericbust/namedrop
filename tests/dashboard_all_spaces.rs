@@ -356,7 +356,7 @@ fn labels_are_live_and_ambiguity_updates_both_workspaces() {
     let initial: Vec<_> = (0..3).map(|_| events.space()).collect();
     for data in &initial {
         let space = &data["frame"]["space"];
-        assert!(space["addressable_label"].is_null());
+        assert_eq!(space["addressable_label"], space["workspace_id"]);
         match space["workspace_id"].as_str().unwrap() {
             "a" => {
                 assert_eq!(space["display_name"], "Same Label");
@@ -428,8 +428,8 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
     all.space();
     all.space();
     assert_eq!(
-        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
-        "missing_label"
+        legacy.next(WAIT).unwrap().1["space"]["addressable_label"],
+        "a"
     );
 
     let mut unknown = server.events(&format!("/w/{}/events", key("unknown")));
@@ -467,8 +467,8 @@ fn an_unchanged_workspace_rejoins_while_a_legacy_subscription_keeps_its_cache() 
     server.set_workspaces(&[("a", None), ("unknown", None)]);
     assert_eq!(all.space()["key"], key("a"));
     assert_eq!(
-        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
-        "missing_label"
+        legacy.next(WAIT).unwrap().1["space"]["addressable_label"],
+        "a"
     );
     assert!(legacy.next(Duration::from_millis(350)).is_none());
 }
@@ -566,8 +566,8 @@ fn discovery_runs_only_for_all_space_subscribers_and_stops_with_the_last_one() {
     let mut all = server.events("/api/events");
     all.space();
     assert_eq!(
-        legacy.next(WAIT).unwrap().1["space"]["not_addressable_reason"],
-        "missing_label"
+        legacy.next(WAIT).unwrap().1["space"]["addressable_label"],
+        "a"
     );
     assert!(!calls(directory.path()).is_empty());
     drop(all);
@@ -798,14 +798,12 @@ fn addressable_labels_are_typeable_tokens_with_actual_socket_scoped_resolution()
         other["frame"]["space"]["addressable_label"], "my-project",
         "another socket's label must not create ambiguity"
     );
-    for id in [
-        "reserved",
-        "colliding",
-        "dup-a",
-        "dup-b",
-        "own-id",
-        "own-id-peer",
-    ] {
+    for id in ["colliding", "dup-a"] {
+        let frame = frames.iter().find(|frame| frame["key"] == key(id)).unwrap();
+        assert_eq!(frame["frame"]["space"]["addressable_label"], id);
+        assert!(frame["frame"]["space"]["not_addressable_reason"].is_null());
+    }
+    for id in ["reserved", "dup-b", "own-id", "own-id-peer"] {
         let frame = frames.iter().find(|frame| frame["key"] == key(id)).unwrap();
         assert!(
             frame["frame"]["space"]["addressable_label"].is_null(),
@@ -1509,7 +1507,15 @@ fn json_parse_and_output_limit_errors_complete_partial_replay() {
 #[test]
 fn addressability_reasons_come_from_raw_labels_and_routing_state() {
     let directory = TestDirectory::new();
-    for id in ["all-a", "all-b", "collision", "good", "deactivated"] {
+    for id in [
+        "all-a",
+        "all-b",
+        "missing",
+        "empty",
+        "collision",
+        "good",
+        "deactivated",
+    ] {
         activate(&directory.path().join("state"), id);
     }
     StateStore::open(directory.path().join("state"))
@@ -1533,13 +1539,8 @@ fn addressability_reasons_come_from_raw_labels_and_routing_state() {
     let mut all = server.events("/api/events");
     let frames: Vec<_> = (0..live.len()).map(|_| all.space()).collect();
     for (id, reason) in [
-        ("all-a", "reserved_all"),
-        ("all-b", "reserved_all"),
         ("invisible-a", "not_activated"),
         ("invisible-b", "not_activated"),
-        ("missing", "missing_label"),
-        ("empty", "empty_label"),
-        ("collision", "id_collision"),
         ("inactive", "not_activated"),
         ("deactivated", "not_active"),
     ] {
@@ -1549,6 +1550,11 @@ fn addressability_reasons_come_from_raw_labels_and_routing_state() {
             "{id}"
         );
         assert!(frame["frame"]["space"]["addressable_label"].is_null());
+    }
+    for id in ["all-a", "all-b", "missing", "empty", "collision"] {
+        let frame = frames.iter().find(|frame| frame["key"] == key(id)).unwrap();
+        assert_eq!(frame["frame"]["space"]["addressable_label"], id);
+        assert!(frame["frame"]["space"]["not_addressable_reason"].is_null());
     }
     let good = frames
         .iter()
@@ -1584,7 +1590,6 @@ fn inactive_twins_report_activation_before_name_collisions() {
         ("inactive-a", "not_activated"),
         ("inactive-b", "not_activated"),
         ("active-a", "shared_label"),
-        ("active-b", "shared_label"),
         ("deactivated", "not_active"),
         ("id-collision", "not_activated"),
     ] {
@@ -1595,6 +1600,12 @@ fn inactive_twins_report_activation_before_name_collisions() {
         );
         assert!(frame["frame"]["space"]["addressable_label"].is_null());
     }
+    let active_b = frames
+        .iter()
+        .find(|frame| frame["key"] == key("active-b"))
+        .unwrap();
+    assert_eq!(active_b["frame"]["space"]["addressable_label"], "active-b");
+    assert!(active_b["frame"]["space"]["not_addressable_reason"].is_null());
 }
 
 #[test]

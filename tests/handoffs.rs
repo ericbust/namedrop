@@ -861,6 +861,46 @@ fn groups_expand_atomically_and_replay_keeps_the_original_members() {
     assert_eq!(replay["recipients"], first["recipients"]);
 }
 
+#[test]
+fn a_group_cannot_take_a_closed_agents_last_alias() {
+    let directory = TestDirectory::new();
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let source = runtime(&directory, &herdr, &ids, "pane-source");
+    let namespace = StateNamespace::for_space("socket-a", "workspace-1");
+    StateStore::open(&directory.state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.remove_pane_address(
+                &namespace,
+                &PaneAddressId::new("address-reviewer"),
+                &MutationAttribution::new(ActorKind::Human, "test", 100),
+            )
+        })
+        .unwrap();
+    let result = namedrop::execute_group_operation(
+        "group.set",
+        serde_json::json!({"alias":"reviewer", "members":["researcher"]}),
+        &source,
+    );
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.contains("@reviewer") && error.contains("closed")),
+        "a closed agent's name must not silently route to a group: {result:?}"
+    );
+    let groups =
+        namedrop::execute_group_operation("group.list", serde_json::json!({}), &source).unwrap();
+    assert_eq!(groups["groups"], serde_json::json!([]));
+    namedrop::execute_group_operation(
+        "group.set",
+        serde_json::json!({"alias":"review-team", "members":["researcher"]}),
+        &source,
+    )
+    .unwrap();
+}
+
 fn git(repo: &std::path::Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .arg("-C")

@@ -469,8 +469,40 @@ fn doctor_names_failed_context_sharing_and_how_to_retry() {
     assert!(issue.explanation.contains("65536 bytes"));
     assert_eq!(
         issue.repair.prompt,
-        "Ask the sender to fix the problem and share the context again?"
+        "Ask the sender to fix the problem and share the context again."
     );
+}
+
+#[test]
+fn doctor_shows_a_generic_context_failure_once_with_a_manual_next_step() {
+    let f = Fixture::new();
+    f.register();
+    StateStore::open(&f.root)
+        .unwrap()
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &StateNamespace::for_space("socket-a", "workspace-1"),
+                &AttentionItemDraft {
+                    id: AttentionItemId::new("generic-context-failure"),
+                    source_kind: AttentionSourceKind::ContextGrant,
+                    source_id: "grant-generic".into(),
+                    summary: "Shared context failed.".into(),
+                },
+                &MutationAttribution::new(ActorKind::Plugin, "test", 100),
+            )
+        })
+        .unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let text = render_health_report_to_text(&report);
+    assert_eq!(text.matches("Shared context failed.").count(), 1, "{text}");
+    assert!(text.contains("Ask the sender to fix the problem and share the context again."));
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-CONTEXT-001")
+        .unwrap();
+    assert!(issue.repair.operation.is_none());
+    assert!(!issue.repair.prompt.ends_with('?'));
 }
 
 #[test]

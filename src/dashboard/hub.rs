@@ -1176,6 +1176,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fallback_workspace_tokens_are_addressable_in_frames() {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-hub-fallback-tokens-{}",
+            std::process::id()
+        ));
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = test_hub(&files);
+        for label in [None, Some(""), Some("all")] {
+            let namespace = StateNamespace::for_space("socket-a", "w1");
+            let key = SpaceKey::of(&namespace);
+            hub.live_spaces.insert(
+                key.clone(),
+                LiveSpace {
+                    namespace: namespace.clone(),
+                    label: label.map(str::to_owned),
+                },
+            );
+            hub.spaces.insert(
+                key.clone(),
+                KnownSpace {
+                    namespace,
+                    activated: true,
+                },
+            );
+            assert_eq!(
+                hub.addressability(&key, snapshot::SpaceState::Active),
+                Ok("w1".to_owned()),
+                "the send grammar accepts #w1 for label {label:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&state);
+    }
+
     fn freeze_discovery(hub: &mut Hub<'_>) {
         hub.discovery = None;
         hub.discovery = Some(Discovery {
@@ -1713,7 +1747,7 @@ mod tests {
             panic!("the recovered discovery must update legacy addressability");
         };
         let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        assert_eq!(frame["space"]["not_addressable_reason"], "missing_label");
+        assert_eq!(frame["space"]["addressable_label"], "w1");
         hub.refresh(None);
         assert!(
             legacy.try_recv().is_err(),
