@@ -565,9 +565,7 @@ pub fn start<E: HerdrCommandExecutor>(
     executable: &Path,
     state: &Path,
 ) -> Result<(), HostError> {
-    let socket = host
-        .socket_id()
-        .ok_or("hc did not report its core identity".to_owned())?;
+    let socket = host.core_identity()?;
     let endpoint = crate::runtime::hc_socket_path(|key| std::env::var(key).ok())?;
     let directory = subscriber_directory(state, &socket);
     let launch = lock_file(&directory, "launch.lock")?;
@@ -643,9 +641,7 @@ extern "C" fn request_stop(_: libc::c_int) {
 pub fn run(state: &Path) -> Result<(), String> {
     let transport = crate::ProcessHerdr::for_host(crate::runtime::HostKind::Hc);
     let host = HcHost::new(&transport);
-    let socket = host
-        .socket_id()
-        .ok_or("hc did not report its core identity")?;
+    let socket = host.core_identity()?;
     let directory = subscriber_directory(state, &socket);
     let lifetime = lock_file(&directory, "lifetime.lock")?;
     match lifetime.try_lock() {

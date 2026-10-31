@@ -874,11 +874,9 @@ fn with_runtime_options<T>(
     })?;
     let workspace_id = identity.workspace;
     let pane_id = identity.pane;
-    let socket_id = match kind {
-        HostKind::Tui => session_socket_id(options.herdr_socket.clone(), &host),
-        HostKind::Hc => host
-            .socket_id()
-            .ok_or_else(|| "hc did not report its core identity".to_owned())?,
+    let socket_id = match host {
+        RuntimeHost::Hc(host) => host.core_identity()?,
+        RuntimeHost::Tui(_) => session_socket_id(options.herdr_socket.clone(), &host),
     };
     let clock = SystemClock;
     let ids = ProcessIds::default();
@@ -992,10 +990,9 @@ fn run_mailbox_wake_hook(state_directory: &Path, options: &RuntimeOptions) -> Ex
         let kind = options.host_kind()?;
         let transport = ProcessHerdr::for_host(kind).with_socket(options.herdr_socket.clone());
         let host = RuntimeHost::new(kind, &transport);
-        let socket_id = if kind == HostKind::Hc {
-            host.socket_id().ok_or("hc core identity is missing")?
-        } else {
-            session_socket_id(options.herdr_socket.clone(), &host)
+        let socket_id = match host {
+            RuntimeHost::Hc(host) => host.core_identity()?,
+            RuntimeHost::Tui(_) => session_socket_id(options.herdr_socket.clone(), &host),
         };
         let workspace = match kind {
             HostKind::Tui => options

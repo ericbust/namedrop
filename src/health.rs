@@ -445,6 +445,14 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
     let mut available_agents = 0;
     let mut available_terminals = 0;
     for address in setup.addresses.iter().filter(|address| !address.retired) {
+        if !address.collaboration_disabled
+            && address
+                .pane_id
+                .as_ref()
+                .is_some_and(|pane| setup.unavailable_panes.contains(pane))
+        {
+            continue;
+        }
         if address.collaboration_disabled {
             let mut disabled = issue(
                 "ND-ADDRESS-001",
@@ -535,6 +543,7 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
         }
     }
     if supported_agents == 0
+        && setup.unavailable_panes.is_empty()
         && !setup
             .addresses
             .iter()
