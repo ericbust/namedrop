@@ -15,6 +15,7 @@ use rusqlite::{
 };
 use serde::Serialize;
 use std::{
+    collections::HashSet,
     error::Error,
     fmt, fs,
     os::unix::fs::PermissionsExt,
@@ -2611,8 +2612,12 @@ impl StateTransaction<'_> {
         }
 
         let mut ancestors = Vec::new();
+        let mut visited = HashSet::new();
         let mut current_id = message_id.clone();
         loop {
+            if !visited.insert(current_id.clone()) {
+                return Err(StoreError::internal("reply ancestry contains a cycle"));
+            }
             let message = self
                 .transaction
                 .query_row(

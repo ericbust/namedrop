@@ -984,14 +984,14 @@ where
     let PreparedMessageOperation {
         request_id,
         authored_source,
-        mut parsed,
+        parsed,
         author_kind,
         in_reply_to,
         disposition_attempt_id,
         context,
         request_context,
         decline_context_request,
-        mut preparation,
+        preparation,
         tracking,
     } = input;
     if context.is_some() && author_kind != ActorKind::AgentSession {
@@ -1058,23 +1058,6 @@ where
             runtime,
         )?;
         return Ok(presented);
-    }
-    if preparation == MessagePreparation::OperatorPlain {
-        let leading = authored_source.trim_start();
-        if let Some(token) = leading.split_whitespace().next() {
-            let alias = token.strip_suffix([',', ':']).unwrap_or(token);
-            if validate_alias(alias).is_ok()
-                && store.transaction(|transaction| {
-                    Ok(transaction
-                        .channel_members(&namespace)?
-                        .iter()
-                        .any(|member| member.alias == alias))
-                })?
-            {
-                parsed = parse_mentions(&format!("@{leading}")).map_err(SendError::Input)?;
-                preparation = MessagePreparation::Mention;
-            }
-        }
     }
     let grammar_version = preparation.grammar(in_reply_to.as_ref());
     let plain_channel = preparation == MessagePreparation::OperatorPlain;
