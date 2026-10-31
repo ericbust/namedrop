@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{cell::RefCell, path::Path};
 
 struct Fixture {
+    _shell: process::AgentProcess,
     terminals: RefCell<Vec<Value>>,
     calls: RefCell<Vec<Vec<String>>>,
     send_error: Option<String>,
@@ -19,10 +20,13 @@ struct Fixture {
 }
 impl Default for Fixture {
     fn default() -> Self {
+        let shell = process::AgentProcess::shell();
+        let mut terminal: Value = serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
+        terminal["pid"] = json!(shell.pid());
+        terminal["foreground"]["pid"] = json!(shell.pid());
         Self {
-            terminals: RefCell::new(vec![
-                serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap(),
-            ]),
+            _shell: shell,
+            terminals: RefCell::new(vec![terminal]),
             calls: RefCell::new(Vec::new()),
             send_error: None,
             read_text: None,
@@ -93,6 +97,7 @@ impl Fixture {
     fn agent(&self, pid: u32) {
         let mut terminals = self.terminals.borrow_mut();
         terminals[0]["labels"]["namedrop.session.pid"] = json!(pid.to_string());
+        terminals[0]["labels"]["namedrop.session.start"] = json!(process::start(pid));
         terminals[0]["foreground"] = json!({"pid":pid,"argv":["codex"],"name":"codex"});
         terminals[0]["status"] = json!({"state":"idle","app":"codex"});
     }
@@ -1667,7 +1672,7 @@ fn hc_naming_recognizes_its_process_group_without_pid_membership() {
             .as_object_mut()
             .unwrap()
             .remove("namedrop.session");
-        terminals[0]["pid"] = json!(group + 1);
+        assert_ne!(terminals[0]["pid"], json!(group));
         terminals[0]["foreground"]["pid"] = json!(group);
         terminals[0]["foreground"]["argv"] = json!(["namedrop", "terminal-execute"]);
     }

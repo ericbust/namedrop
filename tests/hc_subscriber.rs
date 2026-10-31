@@ -1,8 +1,12 @@
+#[allow(dead_code)]
+#[path = "fixtures/hc/process.rs"]
+mod process;
 use namedrop::{HcHost, HerdrCommandExecutor, HerdrCommandOutput};
 use serde_json::{Value, json};
 use std::{cell::RefCell, path::Path};
 
 struct Fixture {
+    _shell: process::AgentProcess,
     terminals: RefCell<Vec<Value>>,
     calls: RefCell<Vec<Vec<String>>>,
     send_error: Option<String>,
@@ -14,10 +18,13 @@ struct Fixture {
 }
 impl Default for Fixture {
     fn default() -> Self {
+        let shell = process::AgentProcess::shell();
+        let mut terminal: Value = serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
+        terminal["pid"] = json!(shell.pid());
+        terminal["foreground"]["pid"] = json!(shell.pid());
         Self {
-            terminals: RefCell::new(vec![
-                serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap(),
-            ]),
+            _shell: shell,
+            terminals: RefCell::new(vec![terminal]),
             calls: RefCell::new(Vec::new()),
             send_error: None,
             get_failure: RefCell::new(None),

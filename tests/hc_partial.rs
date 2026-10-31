@@ -19,6 +19,7 @@ impl Fixture {
         let mut agent: Value =
             serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
         agent["labels"]["namedrop.session.pid"] = json!(pid.to_string());
+        agent["labels"]["namedrop.session.start"] = json!(process::start(pid));
         agent["foreground"] = json!({"pid":pid,"argv":["codex"],"name":"codex"});
         agent["status"] = json!({"state":"idle"});
         let mut shell: Value =

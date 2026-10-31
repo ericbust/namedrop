@@ -17,6 +17,7 @@ impl Fixture {
         terminal["pid"] = json!(std::os::unix::process::parent_id());
         terminal["foreground"] = json!({"pid":pid,"name":program,"argv":[program]});
         terminal["labels"]["namedrop.session.pid"] = json!(pid.to_string());
+        terminal["labels"]["namedrop.session.start"] = json!(process::start(pid));
         terminal["status"] = json!({"state":"idle","app":"codex"});
         terminal["reported"] = json!(true);
         Self {
@@ -65,7 +66,8 @@ impl HerdrCommandExecutor for Fixture {
 
 #[test]
 fn stale_shell_owner_cannot_receive_agent_prompts() {
-    let fixture = Fixture::new(std::process::id(), "bash");
+    let shell = process::AgentProcess::shell();
+    let fixture = Fixture::new(shell.pid(), "bash");
     let host = HcHost::new(&fixture);
     let pane = host.panes(PaneScope::All).unwrap().remove(0);
     assert!(
@@ -85,7 +87,7 @@ fn stale_shell_owner_cannot_receive_agent_prompts() {
         fixture.terminal.borrow()["labels"]["namedrop.session.pid"],
         ""
     );
-    fixture.terminal.borrow_mut()["pid"] = json!(std::process::id());
+    fixture.terminal.borrow_mut()["pid"] = json!(shell.pid());
     let clock = namedrop::SystemClock;
     let ids = namedrop::ProcessIds::default();
     let runtime = namedrop::LifecycleRuntime {
@@ -292,4 +294,15 @@ fn non_shell_terminal_root_never_receives_runner_text() {
         assert!(host.process_info("t1").is_none(), "direct {program} terminal advertised an available shell");
         assert!(fixture.calls("send").is_empty());
     }
+}
+
+#[test]
+fn lost_terminal_clears_even_a_live_session_owner() {
+    let agent = process::AgentProcess::new();
+    let fixture = Fixture::new(agent.pid(), "codex");
+    fixture.terminal.borrow_mut()["state"] = json!("lost");
+    let state = std::env::temp_dir().join(format!("hc-lost-owner-{}", std::process::id()));
+    HcHost::new(&fixture).invalidate_session(&state, "t1").unwrap();
+    assert_eq!(fixture.terminal.borrow()["labels"]["namedrop.session"], "", "lost terminal retained its live orphan's session");
+    std::fs::remove_dir_all(state).unwrap();
 }

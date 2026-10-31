@@ -29,6 +29,18 @@ impl AgentProcess {
         }
         agent
     }
+    pub fn shell() -> Self {
+        use std::io::BufRead;
+        let mut child = Command::new("/bin/bash")
+            .args(["--noprofile", "--norc", "-c", "printf 'ready\\n'; read -r _"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn().unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert_eq!(ready, "ready\n");
+        Self(child)
+    }
     pub fn pid(&self) -> u32 {
         self.0.id()
     }
@@ -64,4 +76,20 @@ pub fn in_process_tree(test: &str, program: &str) -> bool {
         String::from_utf8_lossy(&output.stderr)
     );
     true
+}
+
+#[cfg(target_os = "linux")]
+pub fn start(pid: u32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap()
+        .rsplit_once(')').unwrap().1.split_whitespace().nth(19).unwrap().to_owned()
+}
+
+#[cfg(target_os = "macos")]
+pub fn start(pid: u32) -> String {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let written = unsafe { libc::proc_pidinfo(pid.try_into().unwrap(), libc::PROC_PIDTBSDINFO, 0, info.as_mut_ptr().cast(), size) };
+    assert_eq!(written, size);
+    let info = unsafe { info.assume_init() };
+    format!("{}:{:06}", info.pbi_start_tvsec, info.pbi_start_tvusec)
 }
