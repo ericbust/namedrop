@@ -970,9 +970,8 @@ fn queue_agent_status_reconciliation(
     Ok(())
 }
 
-fn pending_agent_status_reconciliations(directory: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut markers = fs::read_dir(directory)
-        .map_err(|error| error.to_string())?
+fn pending_agent_status_reconciliations(directory: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut markers = fs::read_dir(directory)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -1108,7 +1107,9 @@ fn wait_for_marker_or_deadline(directory: &Path, due_ms: u64) {
         }
         match pending_agent_status_reconciliations(directory) {
             Ok(pending) if pending.is_empty() => {}
-            _ => return,
+            Ok(_) => return,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(_) => {}
         }
         thread::sleep(Duration::from_millis((due_ms - now).min(100)));
     }
