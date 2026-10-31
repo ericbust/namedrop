@@ -55,7 +55,7 @@ try:
     (root / "skills-list.json").write_text(json.dumps(result, indent=2))
     marketplaces = tomllib.loads((root / "codex/config.toml").read_text())["marketplaces"]
     expected = {"namedrop:namedrop"} | {
-        "namedrop:" + name for name in marketplaces if name.startswith("namedrop-hc-")
+        "namedrop:" + name for name in marketplaces if name == "namedrop-app"
     }
     skills = [
         skill
@@ -84,7 +84,7 @@ try:
         for hook in plugin["hooks"]:
             assert hook["key"].startswith("namedrop@" + marketplace["name"] + ":"), hook
             print(hook["key"])
-        if marketplace["name"].startswith("namedrop-hc-"):
+        if marketplace["name"] == "namedrop-app":
             assert len(plugin["skills"]) == 1, plugin
 finally:
     server.terminate()

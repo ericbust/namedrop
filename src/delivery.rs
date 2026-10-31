@@ -3,7 +3,7 @@ use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate, Host,
     IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation, LeaseDraft, LifecycleRuntime,
     MutationAttribution, PromptFailureKind, StateNamespace, StateStore, StateTransaction,
-    StoreError, collaboration_executable, tool_environment,
+    StoreError, tool_environment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -463,7 +463,7 @@ where
         let attribution = MutationAttribution::new(ActorKind::Plugin, "namedrop-dispatch", now);
         let attempt_id = DeliveryAttemptId::new(runtime.ids.next_id("delivery-attempt"));
         let tool = IntegrationToolInvocation::new(
-            collaboration_executable()?,
+            crate::integration::tool_executable(runtime.home_directory, runtime.is_hc())?,
             tool_environment(
                 runtime.state_directory,
                 runtime.session_socket_id,

@@ -42,14 +42,14 @@ pub struct Cli {
 #[derive(Clone, Debug, Default, Args)]
 pub struct RuntimeOptions {
     #[arg(long, global = true, hide = true)]
-    pub hc_hook: Option<String>,
+    pub hc_hook: bool,
     #[arg(long, global = true, value_enum)]
     pub host: Option<crate::runtime::HostKind>,
     #[arg(long, global = true, value_name = "TERMINAL")]
     pub hc_terminal: Option<String>,
     #[arg(long, global = true, value_name = "SPACE")]
     pub hc_space: Option<String>,
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, global = true, value_name = "PATH")]
     pub plugin_state: Option<PathBuf>,
     #[arg(long, global = true, value_name = "SOCKET")]
     pub herdr_socket: Option<String>,

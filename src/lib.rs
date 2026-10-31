@@ -62,8 +62,6 @@ pub use hook::{
 pub(crate) use install::user_hook_activation_guidance;
 
 #[doc(hidden)]
-pub use install::hc_package_identity;
-
 pub use install::{AgentConfigDirectories, install_integration_package, package_directory};
 pub(crate) use install::{
     IntegrationPackageInstallation, integration_package_attention_source,

@@ -1005,7 +1005,7 @@ fn run_script_respects_explicit_host_before_environment_routing() {
     let fixture = Fixture::new();
     let checkout = fixture.checkout();
     fs::create_dir_all(checkout.join("bin")).unwrap();
-    let fake = fixture.stub("namedrop", "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
+    let fake = fixture.stub("namedrop", &format!("#!/bin/sh\nif [ \"${{1-}}\" = --print-host ]; then exec '{}' \"$@\"; fi\nprintf '%s\\n' \"$@\"\n", env!("CARGO_BIN_EXE_namedrop")));
     fs::copy(fake, checkout.join("bin/namedrop")).unwrap();
     for (flags, tui_env, hc_env, prefix) in [
         (vec!["--host", "tui"], false, true, vec![]),
@@ -1026,16 +1026,11 @@ fn run_script_respects_explicit_host_before_environment_routing() {
         (vec!["--host=hc"], true, false, vec![]),
         (vec!["--host", "hc"], false, true, vec![]),
         (vec!["--host=hc"], false, true, vec![]),
-        (vec![], false, false, vec!["--host", "hc"]),
+        (vec![], false, false, vec![]),
         (vec![], true, false, vec!["--herdr-pane", "tui-pane"]),
         (vec![], true, true, vec!["--herdr-pane", "tui-pane"]),
-        (
-            vec!["--hc-space", "space"],
-            true,
-            false,
-            vec!["--host", "hc"],
-        ),
-        (vec!["--hc-terminal=t1"], true, true, vec!["--host", "hc"]),
+        (vec!["--hc-space", "space"], true, false, vec![]),
+        (vec!["--hc-terminal=t1"], true, true, vec![]),
         (vec!["--herdr-socket", "socket"], false, true, vec![]),
         (vec!["--herdr-workspace=space"], false, true, vec![]),
         (vec!["--herdr-pane", "pane"], false, true, vec![]),

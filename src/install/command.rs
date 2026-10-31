@@ -19,7 +19,7 @@ pub(crate) fn install_shell_command(
         );
     }
     let bin = home.join(".local/bin");
-    let launcher = bin.join("namedrop");
+    let launcher = bin.join(if hc { "namedrop-app" } else { "namedrop" });
     let existing = read_target(home, &launcher)?;
     if existing
         .as_ref()
@@ -31,6 +31,17 @@ pub(crate) fn install_shell_command(
         ));
     }
 
+    if hc {
+        fs::create_dir_all(&bin).map_err(|e| conflict(&bin, &e.to_string()))?;
+        let executable =
+            shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?);
+        replace_if_changed(
+            &launcher,
+            &format!("{OWNER}exec {executable} \"$@\"\n"),
+            Some(0o755),
+        )?;
+        return Ok(json!({"path": launcher, "shell_startup_files": [], "path_configured": false}));
+    }
     let shell = env::var("SHELL").unwrap_or_default();
     let mut startup_files = Vec::new();
     match Path::new(&shell).file_name().and_then(|name| name.to_str()) {
@@ -72,39 +83,15 @@ pub(crate) fn install_shell_command(
         .collect::<Result<Vec<_>, String>>()?;
     fs::create_dir_all(&bin).map_err(|e| conflict(&bin, &e.to_string()))?;
     let executable = shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?);
-    let tui = if hc {
-        existing.as_ref().map(|(text, _)| text.split_once("# TUI command\n").map_or_else(|| text.strip_prefix(OWNER).unwrap_or(text), |(_, command)| command).to_owned()).unwrap_or_else(|| format!("exec {executable} --host tui --plugin-state \"${{HERDR_PLUGIN_STATE_DIR:-${{XDG_STATE_HOME:-$HOME/.local/state}}/herdr/plugins/namedrop}}\" \"$@\"\n"))
-    } else {
-        format!(
-            "exec {executable} --plugin-state {} \"$@\"\n",
-            shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?)
-        )
-    };
+    let state = shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?);
     let script = format!(
-        r#"{OWNER}namedrop_explicit_host=
-namedrop_transport_host=
-namedrop_previous_arg=
-for namedrop_arg do
-  if [ "$namedrop_previous_arg" = --host ]; then
-    namedrop_explicit_host=$namedrop_arg
-    break
-  fi
-  case "$namedrop_arg" in
-    --host=*) namedrop_explicit_host=${{namedrop_arg#--host=}}; break ;;
-    --herdr-socket|--herdr-socket=*|--herdr-workspace|--herdr-workspace=*|--herdr-pane|--herdr-pane=*) namedrop_transport_host=tui ;;
-    --hc-terminal|--hc-terminal=*|--hc-space|--hc-space=*)
-      [ "$namedrop_transport_host" = tui ] || namedrop_transport_host=hc ;;
-
-  esac
-  namedrop_previous_arg=$namedrop_arg
-done
-namedrop_selected_host=${{namedrop_explicit_host:-$namedrop_transport_host}}
-if [ "$namedrop_selected_host" = hc ] || {{ [ -z "$namedrop_selected_host" ] && [ -z "${{HERDR_SOCKET_PATH-}}${{HERDR_PANE_ID-}}" ] && [ -n "${{HC_TERMINAL_ID-}}" ]; }}; then
-  if [ -z "$namedrop_explicit_host" ]; then set -- --host hc "$@"; fi
+        r#"{OWNER}namedrop_selected_host=$({executable} --print-host "$@") || exit $?
+if [ "$namedrop_selected_host" = hc ]; then
   exec {executable} "$@"
 fi
 # TUI command
-{tui}"#
+exec {executable} --plugin-state {state} "$@"
+"#
     );
     replace_if_changed(&launcher, &script, Some(0o755))?;
     for (path, text, mode) in &updates {
@@ -162,137 +149,53 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn hc_activation_preserves_tui_launcher_and_is_idempotent() {
+    fn launcher_queries_original_arguments_before_adding_tui_state() {
         let root =
-            std::env::temp_dir().join(format!("namedrop-launcher-hosts-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
+            std::env::temp_dir().join(format!("namedrop-launcher-query-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
-        let tui = root.join("tui-binary");
-        let hc = root.join("hc-binary");
-        for (path, tag) in [(&tui, "tui"), (&hc, "hc")] {
-            fs::write(path, format!("#!/bin/sh\nprintf '%s\\n' {tag} \"$@\"\n")).unwrap();
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let state = root.join("old-tui-state");
-        install_shell_command(&root, &tui, &state, false).unwrap();
-        install_shell_command(&root, &hc, &root.join("hc-state"), true).unwrap();
-        let launcher = root.join(".local/bin/namedrop");
-        let first = fs::read(&launcher).unwrap();
-        install_shell_command(&root, &hc, &root.join("other-hc-state"), true).unwrap();
-        assert_eq!(fs::read(&launcher).unwrap(), first);
-        let tui_output = Command::new(&launcher)
-            .arg("doctor")
-            .env("HERDR_SOCKET_PATH", "tui-socket")
-            .env_remove("NAMEDROP_HOST")
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8(tui_output.stdout).unwrap(),
-            format!("tui\n--plugin-state\n{}\ndoctor\n", state.display())
-        );
-        let hc_output = Command::new(&launcher)
-            .arg("doctor")
-            .env_remove("HERDR_SOCKET_PATH")
-            .env_remove("HERDR_PANE_ID")
-            .env("HC_TERMINAL_ID", "t1")
-            .env_remove("NAMEDROP_HOST")
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8(hc_output.stdout).unwrap(),
-            "hc\n--host\nhc\ndoctor\n"
-        );
-        for flags in [vec!["--host", "hc"], vec!["--host=hc"]] {
-            let output = Command::new(&launcher)
-                .args(&flags)
-                .arg("doctor")
-                .env("HERDR_SOCKET_PATH", "tui")
-                .env_remove("NAMEDROP_HOST")
+        let executable = root.join("executable");
+        fs::write(
+            &executable,
+            r#"#!/bin/sh
+if [ "$1" = --print-host ]; then
+  shift
+  printf '%s\n' "$@" > "$HOME/query"
+  if [ "$NAMEDROP_TEST_HOST" = conflict ]; then exit 64; fi
+  printf '%s\n' "$NAMEDROP_TEST_HOST"
+  exit
+fi
+printf '%s\n' "$@"
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        let state = root.join("state");
+        install_shell_command(&root, &executable, &state, false).unwrap();
+        for selected in ["tui", "hc", "conflict"] {
+            let output = Command::new(root.join(".local/bin/namedrop"))
+                .args(["--hc-space", "space", "doctor"])
+                .env("HOME", &root)
+                .env("NAMEDROP_TEST_HOST", selected)
                 .output()
                 .unwrap();
             assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                format!("hc\n{}\ndoctor\n", flags.join("\n"))
+                fs::read_to_string(root.join("query")).unwrap(),
+                "--hc-space\nspace\ndoctor\n"
             );
-        }
-        let output = Command::new(&launcher)
-            .args(["--host", "tui", "doctor"])
-            .env("HC_TERMINAL_ID", "t1")
-            .env_remove("HERDR_SOCKET_PATH")
-            .env_remove("HERDR_PANE_ID")
-            .env_remove("NAMEDROP_HOST")
-            .output()
-            .unwrap();
-        assert_eq!(
-            String::from_utf8(output.stdout).unwrap(),
-            format!(
-                "tui\n--plugin-state\n{}\n--host\ntui\ndoctor\n",
-                state.display()
-            )
-        );
-        for flag in ["--herdr-socket", "--herdr-workspace", "--herdr-pane"] {
-            for args in [
-                vec![flag.to_owned(), "value".to_owned()],
-                vec![format!("{flag}=value")],
-            ] {
-                let output = Command::new(&launcher)
-                    .args(&args)
-                    .arg("doctor")
-                    .env_remove("HERDR_SOCKET_PATH")
-                    .env_remove("HERDR_PANE_ID")
-                    .env("HC_TERMINAL_ID", "t1")
-                    .env_remove("NAMEDROP_HOST")
-                    .output()
-                    .unwrap();
-                assert_eq!(
-                    String::from_utf8(output.stdout).unwrap(),
-                    format!(
-                        "tui\n--plugin-state\n{}\n{}\ndoctor\n",
-                        state.display(),
-                        args.join("\n")
-                    )
-                );
-            }
-        }
-        for flag in ["--hc-terminal", "--hc-space"] {
-            for args in [
-                vec![flag.to_owned(), "value".to_owned()],
-                vec![format!("{flag}=value")],
-            ] {
-                let output = Command::new(&launcher)
-                    .args(&args)
-                    .arg("doctor")
-                    .env("HERDR_SOCKET_PATH", "tui")
-                    .env_remove("HC_TERMINAL_ID")
-                    .env_remove("NAMEDROP_HOST")
-                    .output()
-                    .unwrap();
-                assert_eq!(
-                    String::from_utf8(output.stdout).unwrap(),
-                    format!("hc\n--host\nhc\n{}\ndoctor\n", args.join("\n"))
-                );
-            }
-        }
-        for tui_environment in [true, false] {
-            let mut command = Command::new(&launcher);
-            command.arg("doctor").env("NAMEDROP_HOST", "hc");
-            if tui_environment {
-                command
-                    .env("HERDR_SOCKET_PATH", "tui")
-                    .env("HERDR_PANE_ID", "p1")
-                    .env("HC_TERMINAL_ID", "t1");
+            if selected == "conflict" {
+                assert_eq!(output.status.code(), Some(64));
+                assert!(output.stdout.is_empty());
             } else {
-                command
-                    .env_remove("HERDR_SOCKET_PATH")
-                    .env_remove("HERDR_PANE_ID")
-                    .env_remove("HC_TERMINAL_ID");
+                let prefix = if selected == "tui" {
+                    format!("--plugin-state\n{}\n", state.display())
+                } else {
+                    String::new()
+                };
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap(),
+                    format!("{prefix}--hc-space\nspace\ndoctor\n")
+                );
             }
-            let output = command.output().unwrap();
-            assert_eq!(
-                String::from_utf8(output.stdout).unwrap(),
-                format!("tui\n--plugin-state\n{}\ndoctor\n", state.display()),
-                "NAMEDROP_HOST is not a host selector"
-            );
         }
         fs::remove_dir_all(root).unwrap();
     }

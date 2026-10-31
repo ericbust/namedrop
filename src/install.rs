@@ -70,44 +70,74 @@ impl AgentConfigDirectories<'_> {
     }
 }
 
-pub fn hc_package_identity(state: &Path) -> String {
-    format!(
-        "namedrop-hc-{}",
-        &crate::lower_hex(&Sha256::digest(state.as_os_str().as_encoded_bytes()))[..16]
-    )
-}
-
 #[derive(Clone)]
 pub(crate) struct PackageContext {
     home: PathBuf,
-    root: PathBuf,
     marketplace: String,
     hc: bool,
 }
 
 impl PackageContext {
-    pub(crate) fn new(home: &Path, state: &Path, hc: bool) -> Self {
-        let marketplace = if hc {
-            hc_package_identity(state)
-        } else {
-            PACKAGE_OWNER.to_owned()
-        };
+    pub(crate) fn new(home: &Path, _state: &Path, hc: bool) -> Self {
         Self {
             home: home.to_owned(),
-            root: if hc {
-                state.join("integrations")
-            } else {
-                home.to_owned()
-            },
-            marketplace,
+            marketplace: if hc { "namedrop-app" } else { PACKAGE_OWNER }.to_owned(),
             hc,
         }
     }
     pub(crate) fn directory(&self, runtime: AgentRuntime) -> PathBuf {
-        package_directory(&self.root, runtime)
+        let mut components = package_components(runtime);
+        components[2] = &self.marketplace;
+        components
+            .iter()
+            .fold(self.home.clone(), |path, component| path.join(component))
     }
     fn plugin_key(&self) -> String {
         format!("namedrop@{}", self.marketplace)
+    }
+    fn command(&self, executable: &Path) -> PathBuf {
+        if self.hc {
+            self.home.join(".local/bin/namedrop-app")
+        } else {
+            executable.to_owned()
+        }
+    }
+    fn permission_owner(&self, state: &Path) -> PathBuf {
+        if self.hc {
+            self.home.join(".local/state/namedrop-app")
+        } else {
+            state.to_owned()
+        }
+    }
+    fn permission_rules(&self, executable: &Path, state: &Path) -> Result<Vec<String>, String> {
+        if self.hc {
+            let command = self.command(executable);
+            validate_claude_permission_paths(&command, Path::new(""))?;
+            Ok(collaboration_permission_operations()
+                .map(|operation| {
+                    format!(
+                        "Bash({} {} *)",
+                        shell_single_quote(&command.to_string_lossy()),
+                        operation.join(" ")
+                    )
+                })
+                .collect())
+        } else {
+            claude_allow_rules(executable, state)
+        }
+    }
+    fn inspect_permissions(
+        &self,
+        config: AgentConfigDirectories<'_>,
+        executable: &Path,
+        state: &Path,
+    ) -> Result<(), String> {
+        claude_permissions::inspect_with_rules(
+            &config.claude(&self.home),
+            &self.permission_owner(state),
+            self.permission_rules(executable, state)?,
+        )
+        .map_err(|error| format!("{error}; {}", claude_permissions::REPAIR_GUIDANCE))
     }
 }
 
@@ -135,13 +165,6 @@ pub fn package_directory(root: &Path, runtime: AgentRuntime) -> PathBuf {
         .fold(root.to_path_buf(), |path, component| path.join(component))
 }
 
-/// The two shared user-level package directories, in the order the activation
-/// confirmation discloses them.
-fn user_package_directories(home_directory: &Path) -> [(AgentRuntime, PathBuf); 2] {
-    [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
-        .map(|runtime| (runtime, package_directory(home_directory, runtime)))
-}
-
 /// The disclosure the first Worktree activation must show before anything is
 /// written, naming both package targets and their shared configuration files.
 pub(crate) fn disclosed_package_targets(
@@ -152,22 +175,39 @@ pub(crate) fn disclosed_package_targets(
         return "unavailable: no user home directory resolved".to_owned();
     };
     let home_directory = &context.home;
-    let packages = user_package_directories(&context.root)
+    let packages = [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
         .iter()
-        .map(|(runtime, directory)| format!("{}: {}", runtime.as_str(), directory.display()))
+        .map(|runtime| {
+            format!(
+                "{}: {}",
+                runtime.as_str(),
+                context.directory(*runtime).display()
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let codex_home = config.codex(home_directory);
     let claude_settings = claude_permissions::settings_path(&config.claude(home_directory))
         .unwrap_or_else(|_| home_directory.join(".claude/settings.json"));
+    let profiles = if context.hc {
+        ""
+    } else {
+        ", PATH entries in zsh/bash startup files"
+    };
     format!(
-        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, shell command: {}, PATH entries in zsh/bash startup files",
+        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, shell command: {}{profiles}",
         claude_settings.display(),
         codex_home
             .join("rules")
             .join(format!("{}.rules", context.marketplace))
             .display(),
-        home_directory.join(".local/bin/namedrop").display()
+        home_directory
+            .join(if context.hc {
+                ".local/bin/namedrop-app"
+            } else {
+                ".local/bin/namedrop"
+            })
+            .display()
     )
 }
 
@@ -448,8 +488,11 @@ fn install_integration_package_with_config(
         replace_if_changed(&path, &contents, Some(0o600))?;
     }
     if runtime == AgentRuntime::ClaudeCode
-        && let Err(error) =
-            claude_permissions::refresh(&config.claude(&context.home), executable, state_directory)
+        && let Err(error) = claude_permissions::refresh_with_rules(
+            &config.claude(&context.home),
+            &context.permission_owner(state_directory),
+            context.permission_rules(executable, state_directory)?,
+        )
     {
         eprintln!(
             "Namedrop skipped Claude Code permissions: {error}; {}",
@@ -489,7 +532,7 @@ fn prepare_integration_package(
             state_directory.display()
         ));
     }
-    if runtime == AgentRuntime::ClaudeCode {
+    if runtime == AgentRuntime::ClaudeCode && !context.hc {
         validate_claude_permission_paths(executable, state_directory)?;
     }
     let directory = verified_package_directory(context, runtime)?;
@@ -497,7 +540,7 @@ fn prepare_integration_package(
     let instructions = installed_instructions(
         package.instructions,
         runtime,
-        executable,
+        &context.command(executable),
         state_directory,
         context.hc.then_some(context.marketplace.as_str()),
     )?;
@@ -553,7 +596,7 @@ fn prepare_integration_package(
     let codex_policy = if runtime == AgentRuntime::Codex {
         Some(prepare_codex_policy(
             &config.codex(&context.home),
-            executable,
+            &context.command(executable),
             state_directory,
             &context.marketplace,
         )?)
@@ -591,7 +634,7 @@ pub(crate) fn inspect_integration_package(
         inspect_installed_file(&path, &contents, Some(0o600))?;
     }
     if runtime == AgentRuntime::ClaudeCode {
-        claude_permissions::inspect(&config.claude(home), &executable, state)?;
+        PackageContext::new(home, state, hc).inspect_permissions(config, &executable, state)?;
     }
     Ok(())
 }
@@ -716,7 +759,18 @@ fn prepare_codex_policy(
         _ => {}
     }
     let mut contents = CODEX_RULES_MARKER.to_owned();
-    for pattern in collaboration_permission_patterns(executable, state) {
+    let patterns = if marketplace == "namedrop-app" {
+        collaboration_permission_operations()
+            .map(|argv| {
+                let mut pattern = vec![executable.to_string_lossy().into_owned()];
+                pattern.extend(argv);
+                pattern
+            })
+            .collect()
+    } else {
+        collaboration_permission_patterns(executable, state)
+    };
+    for pattern in patterns {
         contents.push_str(&format!("prefix_rule(pattern={}, decision=\"allow\", justification=\"Namedrop local collaboration\")\n", serde_json::to_string(&pattern).map_err(|error| error.to_string())?));
     }
     Ok((path, contents))
@@ -741,11 +795,15 @@ fn installed_instructions(
             runtime.as_str()
         ));
     }
-    let command_prefix = format!(
-        "{} --plugin-state {}",
-        shell_single_quote(&executable.to_string_lossy()),
-        shell_single_quote(&state_directory.to_string_lossy())
-    );
+    let command_prefix = if hc_owner.is_some() {
+        shell_single_quote(&executable.to_string_lossy())
+    } else {
+        format!(
+            "{} --plugin-state {}",
+            shell_single_quote(&executable.to_string_lossy()),
+            shell_single_quote(&state_directory.to_string_lossy())
+        )
+    };
     let body = body.replace(
         INSTALLED_COMMAND_MARKER,
         &format!(
@@ -759,7 +817,7 @@ fn installed_instructions(
     let (state_variable, location_flags) = if hc_owner.is_some() {
         (
             "NAMEDROP_STATE_DIR",
-            "For bound operations, append `--host hc`, `--hc-space`, and `--hc-terminal` with the exact `control.tool.environment` values. The operation follows the installed prefix; host and location flags follow the operation.",
+            "For bound operations, append `--plugin-state`, `--host hc`, `--hc-space`, and `--hc-terminal` with the exact `control.tool.environment` values. The operation follows the installed prefix; host and location flags follow the operation.",
         )
     } else {
         (
@@ -767,8 +825,13 @@ fn installed_instructions(
             "Append `--herdr-socket`, `--herdr-workspace`, and `--herdr-pane` with the exact `control.tool.environment` values.",
         )
     };
+    let state_position = if hc_owner.is_some() {
+        "after"
+    } else {
+        "before"
+    };
     let body = format!(
-        "{body}\n## Invocation\n\nUse the installed executable directly with `--plugin-state <{state_variable}>` before the bound operation. {location_flags} Keep operation tokens and flags as shown; single-quote literal values. For long JSON, write and verify a file in a separate tool call, then use `--input-json-file <absolute-path>` instead of `--input-json`; retain all bound fields. Use no environment prefix, shell substitution, pipes or wrappers. An OS sandbox access error is not an approval decision: request normal host approval for this exact invocation. If approval policy rejects it, report the blocker and keep the reply pending; do not broaden permissions or relay around the denial.\n"
+        "{body}\n## Invocation\n\nUse the installed executable directly with `--plugin-state <{state_variable}>` {state_position} the bound operation. {location_flags} Keep operation tokens and flags as shown; single-quote literal values. For long JSON, write and verify a file in a separate tool call, then use `--input-json-file <absolute-path>` instead of `--input-json`; retain all bound fields. Use no environment prefix, shell substitution, pipes or wrappers. An OS sandbox access error is not an approval decision: request normal host approval for this exact invocation. If approval policy rejects it, report the blocker and keep the reply pending; do not broaden permissions or relay around the denial.\n"
     );
     if runtime != AgentRuntime::ClaudeCode {
         return Ok(format!(
@@ -805,9 +868,12 @@ impl IntegrationPackageInstallation {
             let permissions = if *runtime == AgentRuntime::ClaudeCode {
                 let inspection = home_directory
                     .ok_or_else(|| "no user home directory is available".to_owned())
-                    .and_then(|home| {
+                    .and_then(|_home| {
                         let executable = PathBuf::from(crate::collaboration_executable()?);
-                        claude_permissions::inspect(&config.claude(home), &executable, state)
+                        self.context
+                            .as_ref()
+                            .ok_or("no package context")?
+                            .inspect_permissions(config, &executable, state)
                     });
                 Some(
                     json!({"current": inspection.is_ok(), "repair": if inspection.is_ok() { "Re-run activation." } else { claude_permissions::REPAIR_GUIDANCE }, "error": inspection.err()}),
@@ -1132,12 +1198,8 @@ fn hook_script(
         safe_context.push_str(&forward_marked_context("UserPromptSubmit", marker));
     }
     let preamble = if hc.is_some() { HC_HOOK_PREAMBLE } else { "" };
-    let invocation = if let Some(owner) = hc {
-        format!(
-            "{} --host hc --hc-hook {}",
-            shell_single_quote(executable),
-            shell_single_quote(owner)
-        )
+    let invocation = if hc.is_some() {
+        "\"$HOME/.local/bin/namedrop-app\" --host hc --hc-hook".to_owned()
     } else {
         shell_single_quote(executable)
     };
@@ -1192,12 +1254,8 @@ fn session_start_script(
     };
     let update_notice = forward_update_notice(runtime);
     let preamble = if hc.is_some() { HC_HOOK_PREAMBLE } else { "" };
-    let invocation = if let Some(owner) = hc {
-        format!(
-            "{} --host hc --hc-hook {}",
-            shell_single_quote(executable),
-            shell_single_quote(owner)
-        )
+    let invocation = if hc.is_some() {
+        "\"$HOME/.local/bin/namedrop-app\" --host hc --hc-hook".to_owned()
     } else {
         shell_single_quote(executable)
     };
@@ -1305,7 +1363,7 @@ fn verified_package_directory(
     context: &PackageContext,
     runtime: AgentRuntime,
 ) -> Result<PathBuf, String> {
-    let root = &context.root;
+    let root = &context.home;
     if !root.is_absolute() {
         return Err(format!(
             "the {} Agent Integration package requires an absolute installation root, not {}",
@@ -1313,18 +1371,12 @@ fn verified_package_directory(
             root.display()
         ));
     }
-    let mut path = if context.hc {
-        root.parent()
-            .expect("HC integration root has a state directory parent")
-            .to_path_buf()
-    } else {
-        root.to_path_buf()
-    };
-    for component in context
-        .hc
-        .then_some("integrations")
-        .into_iter()
-        .chain(package_components(runtime))
+    let directory = context.directory(runtime);
+    let mut path = root.to_path_buf();
+    for component in directory
+        .strip_prefix(root)
+        .expect("package is below HOME")
+        .components()
     {
         path.push(component);
         match fs::symlink_metadata(&path) {
@@ -1339,7 +1391,6 @@ fn verified_package_directory(
             Err(error) => return Err(conflict(&path, &format!("cannot be inspected: {error}"))),
         }
     }
-    let directory = package_directory(root, runtime);
     if fs::symlink_metadata(&directory).is_ok() {
         verify_ownership(&directory)?;
     }

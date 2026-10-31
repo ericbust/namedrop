@@ -588,12 +588,7 @@ fn hc_hooks_write_sessions_only_in_active_spaces_and_preserve_core_routing() {
         (path, snapshot)
     });
     let launcher = f.0.join("home/.local/bin/namedrop");
-    let tui_fallback = fs::read_to_string(&launcher)
-        .unwrap()
-        .split_once("# TUI command\n")
-        .unwrap()
-        .1
-        .to_owned();
+    let tui_fallback = fs::read_to_string(&launcher).unwrap();
     let tui_rules = fs::read(f.0.join("home/.codex/rules/namedrop.rules")).unwrap();
 
     let hc = f.0.join("hc");
@@ -663,6 +658,8 @@ else: raise AssertionError(args)
             .arg(&hc_state)
             .args(args);
         command
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PANE_ID")
             .env("HC_BIN_PATH", &hc)
             .env("HC_TERMINAL_ID", "t1")
             .env("HC_TERMINAL_SOCKET", "inherited-terminal-socket")
@@ -675,6 +672,7 @@ else: raise AssertionError(args)
             &mut command(&[
                 "--host",
                 "hc",
+                "--hc-hook",
                 "--hc-terminal",
                 "t1",
                 "--hc-space",
@@ -816,14 +814,7 @@ else: raise AssertionError(args)
     let foreign = foreign.output().unwrap();
     assert!(foreign.status.success(), "{}", text(&foreign));
     let foreign: serde_json::Value = serde_json::from_slice(&foreign.stdout).unwrap();
-    assert_eq!(
-        fs::read_to_string(&launcher)
-            .unwrap()
-            .split_once("# TUI command\n")
-            .unwrap()
-            .1,
-        tui_fallback
-    );
+    assert_eq!(fs::read_to_string(&launcher).unwrap(), tui_fallback);
     let mut fallback = Command::new(&launcher);
     f.host(&mut fallback)
         .env_remove("HERDR_SOCKET_PATH")
@@ -873,9 +864,13 @@ else: raise AssertionError(args)
                 .unwrap(),
         );
         let tui_package = &tui_packages[usize::from(runtime == "codex")].0;
+        assert_eq!(
+            active_package, foreign_package,
+            "HC sessions share one package"
+        );
         for order in [
-            [tui_package.as_path(), active_package, foreign_package],
-            [foreign_package, active_package, tui_package.as_path()],
+            [tui_package.as_path(), active_package],
+            [active_package, tui_package.as_path()],
         ] {
             for event in ["session-start", "user-prompt-submit", "mailbox-wake"] {
                 fs::write(f.0.join("hc-calls"), "").unwrap();
@@ -903,17 +898,7 @@ else: raise AssertionError(args)
                         };
                         let mut args = vec!["--host".to_owned(), "hc".to_owned()];
                         if package != tui_package {
-                            args.extend([
-                                "--hc-hook".into(),
-                                serde_json::from_slice::<serde_json::Value>(
-                                    &fs::read(package.join(".agents/plugins/marketplace.json"))
-                                        .unwrap(),
-                                )
-                                .unwrap()["name"]
-                                    .as_str()
-                                    .unwrap()
-                                    .to_owned(),
-                            ]);
+                            args.push("--hc-hook".into());
                         }
                         args.extend([
                             "hook".into(),
@@ -995,19 +980,6 @@ else: raise AssertionError(args)
     .output()
     .unwrap();
     assert!(recipient.status.success(), "{}", text(&recipient));
-    let packages = [
-        tui_packages[0].0.clone(),
-        PathBuf::from(
-            result["data"]["integration_packages"]["claude-code"]["path"]
-                .as_str()
-                .unwrap(),
-        ),
-        PathBuf::from(
-            foreign["data"]["integration_packages"]["claude-code"]["path"]
-                .as_str()
-                .unwrap(),
-        ),
-    ];
     let db = rusqlite::Connection::open(hc_state.join("namedrop.sqlite3")).unwrap();
     let count = || {
         db.query_row("SELECT COUNT(*) FROM collaboration_messages", [], |row| {
@@ -1015,19 +987,12 @@ else: raise AssertionError(args)
         })
         .unwrap()
     };
-    for order in [[0, 1, 2], [2, 1, 0]] {
+    for order in [[0, 1], [1, 0]] {
         let before = count();
         for index in order {
             let mut args = vec!["--host".to_owned(), "hc".to_owned()];
             if index != 0 {
-                let manifest: serde_json::Value = serde_json::from_slice(
-                    &fs::read(packages[index].join(".agents/plugins/marketplace.json")).unwrap(),
-                )
-                .unwrap();
-                args.extend([
-                    "--hc-hook".into(),
-                    manifest["name"].as_str().unwrap().to_owned(),
-                ]);
+                args.push("--hc-hook".into());
             }
             args.extend([
                 "hook".into(),

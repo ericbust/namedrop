@@ -1,6 +1,6 @@
-use super::{
-    ReplacementError, claude_allow_rules, conflict, replace_if_changed, replace_with_status,
-};
+#[cfg(test)]
+use super::claude_allow_rules;
+use super::{ReplacementError, conflict, replace_if_changed, replace_with_status};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
@@ -379,8 +379,15 @@ fn publish(
     // still owns the intended inserted occurrences and refresh can finish it.
     write_record(state, &next)
 }
+#[cfg(test)]
 pub(super) fn refresh(directory: &Path, executable: &Path, state: &Path) -> Result<(), String> {
-    let desired = claude_allow_rules(executable, state)?;
+    refresh_with_rules(directory, state, claude_allow_rules(executable, state)?)
+}
+pub(super) fn refresh_with_rules(
+    directory: &Path,
+    state: &Path,
+    desired: Vec<String>,
+) -> Result<(), String> {
     let path = settings_path(directory)?;
     let _guard = lock(state)?;
     let owned = recover(state)?;
@@ -445,14 +452,12 @@ pub(crate) fn remove_claude_permissions(state: &Path) -> Result<usize, String> {
     publish(state, owned, vec![settings.update()?])?;
     Ok(removed)
 }
-pub(super) fn inspect(directory: &Path, executable: &Path, state: &Path) -> Result<(), String> {
-    inspect_rules(directory, executable, state)
-        .map_err(|error| format!("{error}; {REPAIR_GUIDANCE}"))
-}
-
-fn inspect_rules(directory: &Path, executable: &Path, state: &Path) -> Result<(), String> {
+pub(super) fn inspect_with_rules(
+    directory: &Path,
+    state: &Path,
+    desired: Vec<String>,
+) -> Result<(), String> {
     let path = settings_path(directory)?;
-    let desired = claude_allow_rules(executable, state)?;
     let owned = read_record(state)?;
     if owned.pending.is_some() {
         return Err(conflict(

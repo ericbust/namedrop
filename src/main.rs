@@ -132,24 +132,20 @@ fn main() -> ExitCode {
         .user_prompt_submit_hook_state_directory()
         .or_else(|| cli.mailbox_wake_hook_state_directory())
         .or_else(|| cli.session_start_hook_state_directory());
-    let selected_state = if let Some(owner) = cli.runtime.hc_hook.as_deref() {
-        if hook_state.is_none() || HostKind::from_environment(None) != Ok(HostKind::Hc) {
-            return ExitCode::SUCCESS;
-        }
-        let Ok(state) = cli.runtime.state_directory() else {
-            return ExitCode::SUCCESS;
-        };
-        if namedrop::hc_package_identity(&state) != owner {
-            return ExitCode::SUCCESS;
-        }
-        Some(state)
-    } else {
-        if hook_state.is_some()
-            && cli.runtime.plugin_state.is_none()
-            && cli.runtime.host_kind() == Ok(HostKind::Hc)
+    if hook_state.is_some() {
+        let ambient = HostKind::from_environment(None);
+        if (cli.runtime.hc_hook && ambient == Ok(HostKind::Tui))
+            || (!cli.runtime.hc_hook && ambient == Ok(HostKind::Hc))
         {
             return ExitCode::SUCCESS;
         }
+    }
+    let selected_state = if cli.runtime.hc_hook {
+        let Ok(state) = cli.runtime.state_directory() else {
+            return ExitCode::SUCCESS;
+        };
+        Some(state)
+    } else {
         cli.runtime
             .plugin_state
             .clone()
@@ -800,7 +796,7 @@ fn run_context_hook(
     }
     let hc = options.host_kind() == Ok(HostKind::Hc);
     let mut hc_active = false;
-    let resolved_state = if options.hc_hook.is_some() {
+    let resolved_state = if options.hc_hook {
         options.state_directory().ok()
     } else {
         options.plugin_state.clone()
@@ -881,7 +877,7 @@ fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
 /// pane: it reconciles the whole space and takes no identity from the
 /// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
 fn run_mailbox_wake_hook(state_directory: &Path, options: &RuntimeOptions) -> ExitCode {
-    let resolved_state = if options.hc_hook.is_some() {
+    let resolved_state = if options.hc_hook {
         options.state_directory().ok()
     } else {
         options.plugin_state.clone()

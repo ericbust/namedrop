@@ -592,7 +592,7 @@ where
         );
     }
 
-    let executable = collaboration_executable()?;
+    let executable = tool_executable(runtime.home_directory, runtime.is_hc())?;
     let prompt = registration_prompt(
         runtime.state_directory,
         runtime.session_socket_id,
@@ -898,8 +898,18 @@ pub(crate) fn registration_command(
             shell_single_quote(pane_id)
         )
     };
+    let prefix = if session_socket_id.starts_with("hc:") {
+        "register --plugin-state"
+    } else {
+        "--plugin-state"
+    };
+    let suffix = if session_socket_id.starts_with("hc:") {
+        ""
+    } else {
+        " register"
+    };
     Ok(format!(
-        "{} --plugin-state {} register {location} --input-json {}",
+        "{} {prefix} {}{suffix} {location} --input-json {}",
         shell_single_quote(&executable.to_string_lossy()),
         shell_single_quote(&state_directory.to_string_lossy()),
         shell_single_quote(&input.to_string())
@@ -1000,7 +1010,7 @@ where
     let pane_id = runtime
         .current_pane_id
         .ok_or_else(|| "the current Herdr pane is required for registration".to_owned())?;
-    let executable = collaboration_executable()?;
+    let executable = tool_executable(runtime.home_directory, runtime.is_hc())?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let registration = match store.transaction(|transaction| {
         let address = transaction.routing_author_for_pane(&namespace, pane_id)?;
@@ -1223,7 +1233,7 @@ where
         .current_pane_id
         .ok_or_else(|| "the current Herdr pane is required for delivery.inbox".to_owned())?;
     let tool = IntegrationToolInvocation::new(
-        collaboration_executable()?,
+        tool_executable(runtime.home_directory, runtime.is_hc())?,
         tool_environment(
             runtime.state_directory,
             runtime.session_socket_id,
@@ -1399,15 +1409,20 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
         } else {
             "HERDR_PLUGIN_STATE_DIR"
         };
-        if let Some(state_directory) = located(state_key) {
-            command.push_str(&format!(
-                " --plugin-state {}",
-                shell_single_quote(state_directory)
-            ));
+        let state_argument = located(state_key)
+            .map(|state_directory| {
+                format!(" --plugin-state {}", shell_single_quote(state_directory))
+            })
+            .unwrap_or_default();
+        if located("NAMEDROP_HOST") != Some("hc") {
+            command.push_str(&state_argument);
         }
         for argument in operation.get("argv")?.as_array()? {
             command.push(' ');
             command.push_str(&shell_argument(argument.as_str()?));
+        }
+        if located("NAMEDROP_HOST") == Some("hc") {
+            command.push_str(&state_argument);
         }
         for (flag, key) in [
             ("--host", "NAMEDROP_HOST"),
@@ -1568,6 +1583,19 @@ fn delivery_inputs(
         }));
     }
     Ok(inputs)
+}
+
+pub(crate) fn tool_executable(home: Option<&Path>, hc: bool) -> Result<String, String> {
+    if hc {
+        home.filter(|home| home.is_absolute())
+            .ok_or_else(|| "HC collaboration requires an absolute HOME".to_owned())?
+            .join(".local/bin/namedrop-app")
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "HC collaboration command path is not UTF-8".to_owned())
+    } else {
+        collaboration_executable()
+    }
 }
 
 /// Installed snapshots advertise their stable launcher; source invocations use
