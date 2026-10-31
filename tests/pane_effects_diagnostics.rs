@@ -12,6 +12,8 @@ fn fixture_cleanup_child() {
     let directory = TestDirectory::new();
     let path = directory.path().to_owned();
     std::fs::write(path.join("pane-effects-retries.log"), RECORD).unwrap();
+    std::fs::create_dir(path.join("state")).unwrap();
+    std::fs::write(path.join("state/pane-effects-retries.log"), RECORD).unwrap();
     drop(directory);
     assert!(!path.exists());
 }
@@ -25,5 +27,5 @@ fn fixture_cleanup_preserves_retry_records_in_raw_stderr() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stderr).unwrap(), RECORD);
+    assert_eq!(String::from_utf8(output.stderr).unwrap(), RECORD.repeat(2));
 }
