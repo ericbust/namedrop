@@ -192,17 +192,12 @@ impl Drop for Fixture {
                 namedrop::host::hc::events::stop(&state, "hc:hook-test").unwrap();
             }
         }
-        for pid in fs::read_to_string(self.0.join("events-pids"))
+        for line in fs::read_to_string(self.0.join("hc-calls"))
             .unwrap_or_default()
             .lines()
         {
-            let args = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
-            assert!(
-                !args
-                    .split(|byte| *byte == 0)
-                    .any(|arg| arg == self.0.join("hc").as_os_str().as_encoded_bytes()),
-                "fixture HC event stream {pid} did not stop"
-            );
+            let args: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_ne!(args[0], "events", "subscriber invoked hc events");
         }
         assert!(!self.0.join("path/unexpected-app.log").exists());
         fs::remove_dir_all(&self.0).unwrap();
@@ -695,11 +690,6 @@ elif args[0] == 'label':
         else: record['labels'].pop(key, None)
     record_path.write_text(json.dumps(record))
     print(json.dumps(record))
-elif args[0] == 'events':
-    import signal
-    with (root / 'events-pids').open('a') as out:
-        out.write(str(os.getpid()) + '\n')
-    signal.pause()
 elif args[0] == 'send':
     assert 'HC_TERMINAL_ID' not in os.environ
     assert 'HC_TERMINAL_SOCKET' not in os.environ
