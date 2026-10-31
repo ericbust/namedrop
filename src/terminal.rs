@@ -64,6 +64,7 @@ pub fn execute_terminal<H: Host, C: Clock, I: IdGenerator>(
     if !runner_in_foreground(
         &runtime.host,
         &pane.pane_id,
+        runtime.is_hc(),
         std::time::Duration::from_secs(2),
     ) {
         return Err(
@@ -156,7 +157,12 @@ fn copy_output(mut reader: impl Read, mut writer: impl Write) -> Result<String, 
     Ok(text)
 }
 
-fn runner_in_foreground(host: &impl Host, pane: &str, budget: std::time::Duration) -> bool {
+fn runner_in_foreground(
+    host: &impl Host,
+    pane: &str,
+    _hc: bool,
+    budget: std::time::Duration,
+) -> bool {
     let deadline = std::time::Instant::now() + budget;
     loop {
         if host.process_info(pane).is_some_and(|info| {
@@ -401,18 +407,69 @@ mod foreground_transition_tests {
     }
 
     #[test]
-    fn runner_waits_for_positive_foreground_membership_evidence() {
+    fn tui_runner_requires_one_positive_foreground_sample() {
         let samples = DelayedSample(Cell::new(0));
-        assert!(runner_in_foreground(
+        assert!(!runner_in_foreground(
             &crate::TuiHost::new(&samples),
             "pane",
+            false,
             Duration::from_millis(300)
         ));
-        assert_eq!(samples.0.get(), 2);
+        assert_eq!(samples.0.get(), 1);
         samples.0.set(0);
         assert!(!runner_in_foreground(
             &crate::TuiHost::new(&samples),
             "pane",
+            false,
+            Duration::ZERO
+        ));
+        assert_eq!(samples.0.get(), 1);
+        assert!(runner_in_foreground(
+            &crate::TuiHost::new(&samples),
+            "pane",
+            false,
+            Duration::ZERO
+        ));
+        assert_eq!(samples.0.get(), 2);
+    }
+    struct HcSamples(Cell<usize>);
+    impl crate::HerdrCommandExecutor for HcSamples {
+        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
+            assert_eq!(args, ["get", "remote/t1", "--json"]);
+            let sample = self.0.get();
+            self.0.set(sample + 1);
+            let mut terminal: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/hc/get-labeled.stdout"))
+                    .unwrap();
+            let group = unsafe { libc::getpgid(0) };
+            assert_ne!(group as u32, std::process::id());
+            terminal["foreground"]["pid"] =
+                serde_json::json!(if sample == 0 { group + 1 } else { group });
+            Ok(crate::HerdrCommandOutput {
+                stdout: terminal.to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn hc_runner_retries_lagging_group_sample_without_member_enumeration() {
+        let samples = HcSamples(Cell::new(0));
+        assert!(runner_in_foreground(
+            &crate::HcHost::new(&samples),
+            "remote/t1",
+            true,
+            Duration::from_millis(300)
+        ));
+        assert_eq!(samples.0.get(), 2);
+    }
+
+    #[test]
+    fn hc_runner_rejects_another_group_at_deadline() {
+        let samples = HcSamples(Cell::new(0));
+        assert!(!runner_in_foreground(
+            &crate::HcHost::new(&samples),
+            "remote/t1",
+            true,
             Duration::ZERO
         ));
         assert_eq!(samples.0.get(), 1);

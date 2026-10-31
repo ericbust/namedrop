@@ -175,8 +175,25 @@ impl ProcessHerdr {
         Ok(bytes)
     }
 
+    fn command_timeout(&self, _args: &[&str]) -> Duration {
+        self.timeout
+    }
+
     fn output(&self, args: &[&str]) -> Result<Output, String> {
-        self.output_bounded(args, self.timeout, &AtomicBool::new(false), usize::MAX)
+        self.output_bounded(
+            args,
+            self.command_timeout(args),
+            &AtomicBool::new(false),
+            usize::MAX,
+        )
+    }
+
+    fn bounded_timeout(&self, timeout: Duration) -> Duration {
+        if self.host == HostKind::Hc {
+            timeout
+        } else {
+            timeout.min(self.timeout)
+        }
     }
 
     fn output_bounded(
@@ -191,11 +208,7 @@ impl ProcessHerdr {
         }
         let mut command = self.command();
         command.args(args).process_group(0);
-        let timeout = if self.host == HostKind::Hc {
-            timeout
-        } else {
-            timeout.min(self.timeout)
-        };
+        let timeout = self.bounded_timeout(timeout);
         let stdout = self.output_file("stdout")?;
         let stderr = self.output_file("stderr")?;
         let mut child = command
@@ -392,6 +405,14 @@ mod bounded_read_tests {
             timeout: Duration::from_millis(10),
             socket: None,
         };
+        assert_eq!(
+            executor.bounded_timeout(Duration::from_secs(120)),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            executor.bounded_timeout(Duration::MAX),
+            Duration::from_secs(60)
+        );
         let output = executor
             .execute_bounded(
                 &["-c", "sleep 0.05; printf done"],
@@ -401,6 +422,65 @@ mod bounded_read_tests {
             )
             .unwrap();
         assert_eq!(output.stdout, "done");
+        assert!(
+            executor
+                .execute_bounded(
+                    &["-c", "sleep 1"],
+                    Duration::from_millis(20),
+                    &AtomicBool::new(false),
+                    100
+                )
+                .unwrap_err()
+                .contains("timed out after 20 ms")
+        );
+    }
+
+    #[test]
+    fn only_hc_sends_receive_the_longer_bounded_deadline() {
+        for host in [HostKind::Hc, HostKind::Tui] {
+            let executor = ProcessHerdr {
+                host,
+                timeout: Duration::from_secs(10),
+                ..ProcessHerdr::default()
+            };
+            let send_timeout = executor
+                .bounded_timeout(executor.command_timeout(&["send", "t1", "hello", "--json"]));
+            if host == HostKind::Hc {
+                assert!(send_timeout > Duration::from_millis(10_200));
+                assert!(send_timeout <= Duration::from_secs(60));
+            } else {
+                assert_eq!(send_timeout, Duration::from_secs(10));
+                assert_eq!(
+                    executor.bounded_timeout(Duration::from_secs(120)),
+                    Duration::from_secs(10)
+                );
+            }
+            assert_eq!(
+                executor.command_timeout(&["get", "t1", "--json"]),
+                Duration::from_secs(10)
+            );
+        }
+    }
+
+    #[test]
+    fn hc_send_survives_the_fixed_server_waits() {
+        use crate::Host;
+        let root = env::temp_dir().join(format!("namedrop-hc-send-timeout-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let binary = root.join("fake-hc");
+        fs::write(&binary, "#!/bin/sh\nsleep 10.3\nprintf '{}'\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
+        let executor = ProcessHerdr {
+            binary: binary.to_string_lossy().into_owned(),
+            host: HostKind::Hc,
+            remove_env: Vec::new(),
+            timeout: Duration::from_millis(DEFAULT_HERDR_TIMEOUT_MS),
+            socket: None,
+        };
+        let result = crate::HcHost::new(executor).prompt("t1", "hello");
+        fs::remove_dir_all(root).unwrap();
+        assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]

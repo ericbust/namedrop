@@ -9,6 +9,7 @@ struct Fixture {
     terminals: RefCell<Vec<Value>>,
     calls: RefCell<Vec<Vec<String>>>,
     send_error: Option<String>,
+    read_text: Option<String>,
     clear_error: RefCell<Option<String>>,
 }
 impl Default for Fixture {
@@ -19,6 +20,7 @@ impl Default for Fixture {
             ]),
             calls: RefCell::new(Vec::new()),
             send_error: None,
+            read_text: None,
             clear_error: RefCell::new(None),
         }
     }
@@ -37,7 +39,11 @@ impl HerdrCommandExecutor for Fixture {
                 .find(|terminal| terminal["address"] == *id)
                 .ok_or_else(|| include_str!("fixtures/hc/not-found.stderr").to_owned())?
                 .to_string(),
-            ["read", ..] => include_str!("fixtures/hc/read.stdout").to_owned(),
+            ["read", ..] => self
+                .read_text
+                .as_ref()
+                .map(|text| json!({"text":text}).to_string())
+                .unwrap_or_else(|| include_str!("fixtures/hc/read.stdout").to_owned()),
             ["send", ..] => {
                 if let Some(error) = &self.send_error {
                     return Err(error.clone());
@@ -238,11 +244,6 @@ fn errors_classify_by_kind_and_pretyping_hint() {
         ),
         (
             "unavailable",
-            "the program was lost",
-            PromptFailureKind::TemporaryPreInvocation,
-        ),
-        (
-            "unavailable",
             "try again",
             PromptFailureKind::AmbiguousInvocation,
         ),
@@ -434,26 +435,6 @@ fn release_and_removal_clear_name_mirrors_after_store_mutation() {
         assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.name"], "");
     }
     std::fs::remove_dir_all(state).unwrap();
-}
-
-#[test]
-fn unknown_programs_and_reporting_shells_are_not_shell_recipients() {
-    let fixture = Fixture::default();
-    fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["vim"]);
-    assert_eq!(
-        HcHost::new(&fixture).panes(PaneScope::All).unwrap()[0]
-            .agent
-            .as_deref(),
-        Some("vim")
-    );
-    fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["bash"]);
-    fixture.terminals.borrow_mut()[0]["reported"] = json!(true);
-    assert_eq!(
-        HcHost::new(&fixture).panes(PaneScope::All).unwrap()[0]
-            .agent
-            .as_deref(),
-        Some("bash")
-    );
 }
 
 #[test]
@@ -1313,4 +1294,219 @@ fn check_dispatch_lease(event: &str, expires: bool) {
         DeliveryState::Acknowledged
     );
     std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn lost_terminal_send_is_pre_invocation() {
+    let fixture = Fixture {
+        send_error: Some(include_str!("fixtures/hc/lost-send.stderr").to_owned()),
+        ..Fixture::default()
+    };
+    for result in [
+        HcHost::new(&fixture).prompt("t2", "hello"),
+        HcHost::new(&fixture).run_in_pane("t2", "echo hello"),
+    ] {
+        assert_eq!(
+            result.unwrap_err().kind,
+            PromptFailureKind::TemporaryPreInvocation
+        );
+    }
+}
+
+#[test]
+fn screen_reads_return_only_the_requested_tail() {
+    for (text, lines, expected) in [
+        ("first\nsecond\nthird", 2, "second\nthird"),
+        ("first\nsecond\nthird\n", 2, "second\nthird\n"),
+        ("first\nsecond\nthird\n", 0, ""),
+        ("first\nsecond\nthird", 0, ""),
+        ("first\n\n", 1, "\n"),
+        ("first\n", 5, "first\n"),
+        ("", 5, ""),
+    ] {
+        let fixture = Fixture {
+            read_text: Some(text.to_owned()),
+            ..Fixture::default()
+        };
+        assert_eq!(
+            HcHost::new(&fixture).read("t1", lines, None).unwrap(),
+            expected,
+            "lines={lines} text={text:?}"
+        );
+    }
+}
+
+#[test]
+fn foreground_programs_are_agents_only_when_recognized_or_reported() {
+    for (program, app, expected) in [
+        ("vim", None, None),
+        ("npm", None, None),
+        ("python", None, None),
+        ("bash", None, None),
+        ("/bin/codex", None, Some("codex")),
+        ("/bin/claude", None, Some("claude")),
+        ("claude-code", None, Some("claude")),
+        ("vim", Some("codex"), Some("codex")),
+        ("python", Some("custom-agent"), Some("custom-agent")),
+        ("namedrop", Some("custom-agent"), Some("custom-agent")),
+    ] {
+        for (reported, argv) in [(false, true), (true, true), (false, false)] {
+            let fixture = Fixture::default();
+            {
+                let mut terminals = fixture.terminals.borrow_mut();
+                terminals[0]["foreground"]["argv"] = if argv {
+                    json!([program, "terminal-execute"])
+                } else {
+                    json!([])
+                };
+                terminals[0]["foreground"]["name"] = json!(program);
+                terminals[0]["status"] =
+                    app.map_or(Value::Null, |app| json!({"state":"idle", "app":app}));
+                terminals[0]["reported"] = json!(reported);
+            }
+            let pane = HcHost::new(&fixture)
+                .panes(PaneScope::All)
+                .unwrap()
+                .remove(0);
+            assert_eq!(
+                pane.agent.as_deref(),
+                expected,
+                "program={program} app={app:?} reported={reported}"
+            );
+        }
+    }
+}
+
+#[test]
+fn hc_process_info_reports_the_group_leader_without_enumerating_members() {
+    let fixture = Fixture::default();
+    let group = unsafe { libc::getpgid(0) };
+    fixture.terminals.borrow_mut()[0]["foreground"]["pid"] = json!(group);
+    let info = HcHost::new(&fixture).process_info("t1").unwrap();
+    assert_eq!(info.foreground_process_group_id, group as u64);
+    assert_eq!(
+        info.foreground_processes
+            .iter()
+            .map(|process| process.pid)
+            .collect::<Vec<_>>(),
+        vec![group as u32]
+    );
+}
+
+#[test]
+fn hc_naming_recognizes_its_process_group_without_pid_membership() {
+    let fixture = Fixture::default();
+    let group = unsafe { libc::getpgid(0) };
+    assert_ne!(group as u32, std::process::id());
+    {
+        let mut terminals = fixture.terminals.borrow_mut();
+        terminals[0]["address"] = json!("remote/t1");
+        terminals[0]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove("namedrop.session");
+        terminals[0]["pid"] = json!(group + 1);
+        terminals[0]["foreground"]["pid"] = json!(group);
+        terminals[0]["foreground"]["argv"] = json!(["namedrop", "terminal-execute"]);
+    }
+    let clock = namedrop::SystemClock;
+    let ids = namedrop::ProcessIds::default();
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: Path::new("/unused"),
+        home_directory: None,
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("remote/t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    assert_eq!(
+        namedrop::detect_pane_type(&runtime).unwrap(),
+        Some(namedrop::PaneType::Terminal)
+    );
+}
+
+#[test]
+fn screen_and_history_reads_share_the_remaining_budget() {
+    use std::{cell::Cell, sync::atomic::AtomicBool, time::Duration};
+    struct ReadBudget {
+        remaining: Cell<u64>,
+        cancelled: AtomicBool,
+    }
+    impl namedrop::Budget for ReadBudget {
+        fn remaining(&self) -> Result<Duration, String> {
+            let remaining = self.remaining.get();
+            self.remaining.set(remaining - 10);
+            Ok(Duration::from_millis(remaining))
+        }
+        fn cancelled(&self) -> &AtomicBool {
+            &self.cancelled
+        }
+        fn max_output_bytes(&self) -> usize {
+            4096
+        }
+    }
+    struct Bounded<'a> {
+        fixture: &'a Fixture,
+        budget: &'a ReadBudget,
+        calls: Cell<u64>,
+    }
+    impl HerdrCommandExecutor for Bounded<'_> {
+        fn execute(&self, _: &[&str]) -> Result<HerdrCommandOutput, String> {
+            panic!("read lost its budget")
+        }
+        fn execute_bounded(
+            &self,
+            args: &[&str],
+            timeout: Duration,
+            cancelled: &AtomicBool,
+            limit: usize,
+        ) -> Result<HerdrCommandOutput, String> {
+            let call = self.calls.get();
+            self.calls.set(call + 1);
+            assert_eq!(timeout, Duration::from_millis(100 - call * 10));
+            assert!(std::ptr::eq(cancelled, &self.budget.cancelled));
+            assert_eq!(limit, 4096);
+            self.fixture.execute(args)
+        }
+    }
+    for lines in [2, 130] {
+        let fixture = Fixture {
+            read_text: Some("one\ntwo\nthree\n".into()),
+            ..Fixture::default()
+        };
+        let budget = ReadBudget {
+            remaining: Cell::new(100),
+            cancelled: AtomicBool::new(false),
+        };
+        let executor = Bounded {
+            fixture: &fixture,
+            budget: &budget,
+            calls: Cell::new(0),
+        };
+        let result = HcHost::new(&executor)
+            .read("t1", lines, Some(&budget))
+            .unwrap();
+        assert_eq!(
+            result,
+            if lines == 2 {
+                "two\nthree\n"
+            } else {
+                "one\ntwo\nthree\n"
+            }
+        );
+        let calls = fixture.take_calls();
+        assert_eq!(calls[0], ["get", "t1", "--json"]);
+        assert_eq!(
+            calls[1],
+            if lines == 2 {
+                vec!["read", "t1", "--json"]
+            } else {
+                vec!["read", "t1", "--lines", "130", "--json"]
+            }
+        );
+    }
 }
