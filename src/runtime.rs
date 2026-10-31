@@ -175,8 +175,12 @@ impl ProcessHerdr {
         Ok(bytes)
     }
 
-    fn command_timeout(&self, _args: &[&str]) -> Duration {
-        self.timeout
+    fn command_timeout(&self, args: &[&str]) -> Duration {
+        if self.host == HostKind::Hc && args.first() == Some(&"send") {
+            self.timeout.max(Duration::from_secs(15))
+        } else {
+            self.timeout
+        }
     }
 
     fn output(&self, args: &[&str]) -> Result<Output, String> {
