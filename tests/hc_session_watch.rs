@@ -18,7 +18,7 @@ use std::{
 struct Agent(Child);
 impl Agent {
     fn new(home: &Path) -> Self {
-        let mut child = Command::new("/bin/bash")
+        let child = Command::new("/bin/bash")
             .arg0("codex")
             .args([
                 "--noprofile",
@@ -34,12 +34,13 @@ while IFS= read -r line; do :; done
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        let mut agent = Self(child);
         let mut ready = String::new();
-        std::io::BufReader::new(child.stdout.as_mut().unwrap())
+        std::io::BufReader::new(agent.0.stdout.as_mut().unwrap())
             .read_line(&mut ready)
             .unwrap();
         assert_eq!(ready, "ready\n");
-        Self(child)
+        agent
     }
     fn pid(&self) -> u32 {
         self.0.id()
