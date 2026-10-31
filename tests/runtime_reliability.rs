@@ -1196,7 +1196,7 @@ fn status_worker_serves_a_marker_written_during_a_grace_wait_without_delay() {
     assert_eq!(fixture.attempt_state(&attempt), DeliveryState::Settled);
 }
 
-fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
+fn temporary_prompt_rejection_retries_without_another_event(code: &str, rejections: usize) {
     let fixture = Fixture::new();
     fixture.initialize();
     fixture.connect_recipient();
@@ -1205,8 +1205,7 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
     fixture.set_herdr(&format!(
         r#"if [ "$1 $2" = 'agent prompt' ]; then
              printf 'x' >> "$NAMEDROP_TEST_FIXTURE/prompts"
-             if [ ! -f "$NAMEDROP_TEST_FIXTURE/rejected-once" ]; then
-             touch "$NAMEDROP_TEST_FIXTURE/rejected-once"
+             if [ "$(wc -c < "$NAMEDROP_TEST_FIXTURE/prompts")" -le {rejections} ]; then
              printf '%s\n' '{{"error":{{"code":"{code}"}}}}' >&2
              exit 1
              fi
@@ -1220,7 +1219,7 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
         Some(1),
         "{code}: {rejected}"
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(if rejections > 1 { 30 } else { 5 });
     while fixture.prompt_counts().1 == 0 {
         assert!(
             Instant::now() < deadline,
@@ -1229,7 +1228,7 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(fixture.prompt_counts(), (2, 1), "{code}");
+    assert_eq!(fixture.prompt_counts(), (rejections + 1, 1), "{code}");
     let deadline = Instant::now() + Duration::from_secs(5);
     let inbox = loop {
         let inbox = fixture.inbox();
@@ -1269,20 +1268,25 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(fixture.prompt_counts(), (2, 1), "{code}");
+    assert_eq!(fixture.prompt_counts(), (rejections + 1, 1), "{code}");
 }
 
 #[test]
 fn server_busy_retries_without_another_event() {
-    temporary_prompt_rejection_retries_without_another_event("server_busy");
+    temporary_prompt_rejection_retries_without_another_event("server_busy", 1);
 }
 
 #[test]
 fn conflict_retries_without_another_event() {
-    temporary_prompt_rejection_retries_without_another_event("conflict");
+    temporary_prompt_rejection_retries_without_another_event("conflict", 1);
 }
 
 #[test]
 fn agent_not_ready_retries_without_another_event() {
-    temporary_prompt_rejection_retries_without_another_event("agent_not_ready");
+    temporary_prompt_rejection_retries_without_another_event("agent_not_ready", 1);
+}
+
+#[test]
+fn repeated_eventless_rejections_deliver_when_the_recipient_becomes_ready() {
+    temporary_prompt_rejection_retries_without_another_event("server_busy", 7);
 }

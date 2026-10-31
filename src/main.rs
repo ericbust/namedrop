@@ -986,9 +986,15 @@ fn pending_agent_status_reconciliations(directory: &Path) -> io::Result<Vec<Path
 
 fn pending_agent_status_reconciliations_with_retry(
     directory: &Path,
-    _failures: &mut usize,
+    failures: &mut usize,
 ) -> io::Result<Vec<PathBuf>> {
-    pending_agent_status_reconciliations(directory)
+    loop {
+        match pending_agent_status_reconciliations(directory) {
+            Ok(pending) => return Ok(pending),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(error),
+            Err(_) => wait_for_reconciliation_retry(failures, false),
+        }
+    }
 }
 
 fn run_agent_status_worker() -> ExitCode {
@@ -1144,6 +1150,10 @@ mod worker_shutdown_tests {
             "persistent rejection caused {drains} drains in ten minutes"
         );
         assert_eq!(
+            reconciliation_retry_delay(usize::MAX, true),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
             reconciliation_retry_delay(usize::MAX, false),
             Duration::from_secs(5)
         );
@@ -1263,8 +1273,12 @@ mod worker_shutdown_tests {
     }
 }
 
-fn reconciliation_retry_delay(failures: usize, _retry_without_event: bool) -> Duration {
-    let delays = [100, 250, 500, 1_000, 5_000];
+fn reconciliation_retry_delay(failures: usize, retry_without_event: bool) -> Duration {
+    let delays: &[u64] = if retry_without_event {
+        &[100, 250, 500, 1_000, 5_000, 10_000, 30_000, 60_000]
+    } else {
+        &[100, 250, 500, 1_000, 5_000]
+    };
     Duration::from_millis(delays[failures.min(delays.len() - 1)])
 }
 
