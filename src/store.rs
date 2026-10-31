@@ -8171,6 +8171,86 @@ mod tests {
     }
 
     #[test]
+    fn channel_route_rejects_corrupt_parent_cycles() {
+        for parent in ["first", "second"] {
+            let directory = TestDirectory::new();
+            let mut store = StateStore::open(&directory.0).unwrap();
+            let ns = StateNamespace::for_space("socket", "workspace");
+            let at = MutationAttribution::new(ActorKind::Human, "test", 1);
+            store
+                .transaction(|tx| {
+                    tx.activate_worktree(&ns, &at)?;
+                    tx.ensure_operator_author(&ns, &at)?;
+                    tx.create_pane_address(
+                        &ns,
+                        &PaneAddressDraft {
+                            id: PaneAddressId::new("agent"),
+                            role_id: crate::PaneRoleId::new("agent"),
+                            role_name: "agent".to_owned(),
+                            role_description: "agent".to_owned(),
+                            alias: "agent".to_owned(),
+                        },
+                        &at,
+                    )?;
+                    let root = MessageDraft {
+                        thread_id: ThreadId::new("cycle-thread"),
+                        message_id: MessageId::new("root"),
+                        in_reply_to: None,
+                        author_address_id: PaneAddressId::new("operator:local"),
+                        author_kind: ActorKind::Human,
+                        author_alias_snapshot: "operator".to_owned(),
+                        author_agent_session_snapshot: None,
+                        request_id: "root".to_owned(),
+                        authored_source: "A channel statement.".to_owned(),
+                        body: "A channel statement.".to_owned(),
+                        grammar_version: "channel/v1".to_owned(),
+                        recipients: Vec::new(),
+                        context_references: Vec::new(),
+                    };
+                    tx.create_thread(&ns, &root.thread_id, "corrupt conversation", &at)?;
+                    tx.append_message(&ns, &root, &at)?;
+                    for (id, in_reply_to) in [("first", "root"), ("second", "first")] {
+                        tx.append_message(
+                            &ns,
+                            &MessageDraft {
+                                message_id: MessageId::new(id),
+                                request_id: id.to_owned(),
+                                in_reply_to: Some(MessageId::new(in_reply_to)),
+                                author_address_id: PaneAddressId::new("agent"),
+                                author_kind: ActorKind::AgentSession,
+                                author_alias_snapshot: "agent".to_owned(),
+                                grammar_version: "mention/v1".to_owned(),
+                                recipients: vec![crate::MessageRecipientDraft {
+                                    address_id: PaneAddressId::new("operator:local"),
+                                    alias_snapshot: "operator".to_owned(),
+                                    agent_session_snapshot: None,
+                                    delivery_id: crate::DeliveryId::new(format!("delivery-{id}")),
+                                }],
+                                ..root.clone()
+                            },
+                            &at,
+                        )?;
+                    }
+                    tx.message_route(&ns, &MessageId::new("second"))?;
+                    tx.transaction
+                        .execute_batch("DROP TRIGGER immutable_messages_update")?;
+                    tx.transaction.execute(
+                        "UPDATE collaboration_messages SET in_reply_to=?1 WHERE message_id='first'",
+                        [parent],
+                    )?;
+                    let error = tx
+                        .message_route(&ns, &MessageId::new("second"))
+                        .err()
+                        .expect("corrupt parent cycle must be refused");
+                    assert_eq!(error.kind(), StoreErrorKind::Internal);
+                    assert_eq!(error.message(), "reply ancestry contains a cycle");
+                    Ok(())
+                })
+                .unwrap();
+        }
+    }
+
+    #[test]
     fn channel_route_handles_4096_parent_replies_on_dashboard_stack() {
         std::thread::Builder::new()
             .stack_size(2 * 1024 * 1024)

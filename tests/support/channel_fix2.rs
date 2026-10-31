@@ -4,18 +4,26 @@ use std::sync::mpsc;
 #[test]
 fn leading_punctuation_posts_explicitly_without_router_calls() {
     let f = fixture();
+    f.rename("w1", "lead", "codex");
     let server = Server::start(&f, "not json", false);
     for (index, source) in [
         "@planner, inspect \\@lead,",
         "@planner: inspect \\@lead,",
         "#ws1, @planner: inspect \\@lead,",
+        "@codex, inspect \\@lead,",
+        "@codex: inspect \\@lead,",
     ]
     .iter()
     .enumerate()
     {
         let (status, receipt) = post(&server, &format!("punctuation-{index}"), source, None);
         assert_eq!(status, 200, "{source}: {receipt}");
-        assert_eq!(recipient_aliases(&receipt), ["planner"]);
+        let expected = if source.starts_with("@codex") {
+            "codex"
+        } else {
+            "planner"
+        };
+        assert_eq!(recipient_aliases(&receipt), [expected]);
         assert_eq!(receipt["context_references"], json!([]));
         assert!(receipt.get("channel").is_none());
     }
@@ -581,21 +589,28 @@ fn manually_delivered_router_followup_under_a_mention_root_keeps_agent_thread_mo
 }
 
 #[test]
-fn bare_member_with_leading_punctuation_routes_without_a_model() {
+fn bare_member_names_remain_channel_posts_without_a_model() {
     let f = fixture();
+    f.rename("w1", "lead", "codex");
     let server = Server::start(&f, "not json", false);
-    for (index, source) in ["planner inspect", "planner, inspect", "planner: inspect"]
-        .iter()
-        .enumerate()
+    for (index, source) in [
+        "codex, hi",
+        "planner inspect",
+        "planner, inspect",
+        "planner: inspect",
+        "planner is still busy, so hold off",
+    ]
+    .iter()
+    .enumerate()
     {
         let (status, receipt) = post(&server, &format!("bare-member-{index}"), source, None);
         assert_eq!(status, 200, "{source}: {receipt}");
         assert_eq!(
             recipient_aliases(&receipt),
-            ["planner"],
+            Vec::<String>::new(),
             "{source}: {receipt}"
         );
-        assert!(receipt.get("channel").is_none());
+        assert_eq!(receipt["channel"]["state"], "unrouted");
         let stored: (String, String) = f
             .db()
             .query_row(
@@ -604,9 +619,26 @@ fn bare_member_with_leading_punctuation_routes_without_a_model() {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(stored, (source.to_string(), "inspect".to_string()));
+        assert_eq!(stored, (source.to_string(), source.to_string()));
     }
     assert!(calls(&f).is_empty());
+    assert_eq!(f.count("SELECT COUNT(*) FROM mailbox_deliveries"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 0);
+}
+
+#[test]
+fn bare_single_member_names_remain_channel_posts() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in ["planner", "planner,", "planner:"].iter().enumerate() {
+        let (status, receipt) = post(&server, &format!("bare-single-{index}"), source, None);
+        assert_eq!(status, 200, "{source}: {receipt}");
+        assert_eq!(recipient_aliases(&receipt), Vec::<String>::new());
+        assert_eq!(receipt["channel"]["state"], "unrouted");
+    }
+    assert!(calls(&f).is_empty());
+    assert_eq!(f.count("SELECT COUNT(*) FROM mailbox_deliveries"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 0);
 }
 
 #[test]
