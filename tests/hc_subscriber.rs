@@ -1708,3 +1708,50 @@ fn queued_snapshot_does_not_revert_committed_rename() {
         );
     });
 }
+
+#[test]
+fn coalesced_session_loss_and_removal_close_the_pane_without_retrying() {
+    for kind in ["lost", "restarted"] {
+        check(&format!("coalesced-{kind}-removed"), |fixture, runtime| {
+            fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+            let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+            subscriber
+                .handle_line(
+                    &json!({"terminals":*fixture.terminals.borrow()}).to_string(),
+                    runtime,
+                )
+                .unwrap();
+            fixture.terminals.borrow_mut().clear();
+            fixture.calls.borrow_mut().clear();
+            let events = [kind, "removed"].map(|kind| {
+                json!({"method":"event", "params":{"type":kind,"terminal":"t1"}}).to_string()
+            });
+            subscriber
+                .handle_lines(events.iter().map(String::as_str), runtime)
+                .unwrap();
+            let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+            let bindings = namedrop::StateStore::open(runtime.state_directory)
+                .unwrap()
+                .transaction(|tx| tx.active_pane_bindings(&namespace))
+                .unwrap();
+            assert!(bindings.is_empty(), "removed pane kept an active binding");
+            assert_eq!(
+                fixture
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| call[0] == "get")
+                    .count(),
+                1
+            );
+            fixture.calls.borrow_mut().clear();
+            subscriber
+                .handle_line(r#"{"method":"heartbeat","params":{}}"#, runtime)
+                .unwrap();
+            assert!(
+                fixture.calls.borrow().is_empty(),
+                "removed pane remained pending for retry"
+            );
+        });
+    }
+}
