@@ -485,6 +485,9 @@ def check_terminal_answer_wait():
         def save(self, *args):
             pass
 
+        def wait_agent(self, *args):
+            return False
+
         store = type("Store", (), {"terminal_runs": lambda self, since: (ran,),
                                     "backlog": lambda self: live.Backlog(0, 0, 0)})()
 
