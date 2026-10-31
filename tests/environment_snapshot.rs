@@ -316,3 +316,37 @@ fn hc_children_drop_captured_and_late_lifetime_tokens() {
     assert_eq!(env["UNRELATED"], "kept");
     assert_eq!(result["argv"], serde_json::json!(["events", "--json"]));
 }
+
+#[test]
+fn tui_children_drop_all_captured_and_late_hc_keys() {
+    const CHILD: &str = "NAMEDROP_TUI_SCRUB_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "tui_children_drop_all_captured_and_late_hc_keys", "--nocapture"])
+            .env_clear()
+            .env(CHILD, "1")
+            .env("HERDR_BIN_PATH", "/usr/bin/python3")
+            .env("HERDR_SOCKET_PATH", "/tui.sock")
+            .env("HC_SOCKET", "/hc.sock")
+            .env("HC_SESSION", "captured")
+            .env("HC_TERMINAL_ID", "terminal")
+            .env("HC_SCOPE", "scope")
+            .env("HC_CUSTOM", "custom")
+            .output().unwrap();
+        assert!(output.status.success(), "{} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let snapshot = namedrop::environment::EnvironmentSnapshot::capture();
+    assert_eq!(snapshot.hc_endpoint().unwrap(), std::path::Path::new("/hc.sock"));
+    // SAFETY: this child runs one test and has no concurrent environment readers.
+    unsafe { std::env::set_var("HC_LATE", "late"); }
+    let script = "import json,os; print(json.dumps(dict(os.environ)))";
+    let output = namedrop::ProcessHerdr::from_snapshot(HostKind::Tui, &snapshot).command().args(["-c", script]).output().unwrap();
+    let env: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let leaked: Vec<_> = env.as_object().unwrap().keys().filter(|key| key.starts_with("HC_")).collect();
+    assert!(leaked.is_empty(), "TUI child inherited HC keys: {leaked:?}");
+    assert_eq!(env["HERDR_SOCKET_PATH"], "/tui.sock");
+    let neutral = snapshot.command("/usr/bin/python3").args(["-c", script]).output().unwrap();
+    let neutral: serde_json::Value = serde_json::from_slice(&neutral.stdout).unwrap();
+    assert_eq!(neutral["HC_SOCKET"], "/hc.sock");
+}
