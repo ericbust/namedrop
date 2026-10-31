@@ -912,7 +912,7 @@ else: raise AssertionError(args)
                         } else {
                             hc_state.clone()
                         };
-                        let mut args = vec!["--host".to_owned(), "hc".to_owned()];
+                        let mut args = Vec::new();
                         if package != tui_package {
                             args.push("--hc-hook".into());
                         }
@@ -1007,7 +1007,7 @@ else: raise AssertionError(args)
     for order in [[0, 1], [1, 0]] {
         let before = count();
         for index in order {
-            let mut args = vec!["--host".to_owned(), "hc".to_owned()];
+            let mut args = Vec::new();
             if index != 0 {
                 args.push("--hc-hook".into());
             }
@@ -1166,15 +1166,30 @@ esac
         })
         .unwrap();
     for (flag, value) in [("--hc-terminal", "t1"), ("--hc-space", "fixture-space")] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         let output = fixture
-            .namedrop_command(&[flag, value, "address", "list"])
+            .host(&mut command)
+            .args([flag, value, "address", "list"])
+            .env("NAMEDROP_STATE_DIR", fixture.0.join("state"))
+            .env_remove("HERDR_PLUGIN_STATE_DIR")
             .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_PANE_ID")
             .env_remove("HC_TERMINAL_ID")
+            .env_remove("NAMEDROP_HOST")
             .env("HC_BIN_PATH", &hc)
             .output()
             .unwrap();
         assert!(output.status.success(), "{flag}: {}", text(&output));
+
+        let conflict = run(&[flag, value, "address", "list"]);
+        assert_eq!(conflict.status.code(), Some(64), "{}", text(&conflict));
+        let error: serde_json::Value = serde_json::from_slice(&conflict.stdout).unwrap();
+        assert_eq!(error["error"]["code"], "invalid_request");
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(message.contains("conflict"), "{message}");
+        assert!(message.contains("--plugin-state"), "{message}");
+        assert!(message.contains(flag), "{message}");
     }
     let default_host = run(&["address", "list"]);
     assert!(default_host.status.success(), "{}", text(&default_host));
@@ -1182,13 +1197,24 @@ esac
         "--host",
         "tui",
         "--hc-space",
-        "ignored",
+        "fixture-space",
         "--herdr-workspace",
         "w1",
         "address",
         "list",
     ]);
-    assert!(override_host.status.success(), "{}", text(&override_host));
+    assert_eq!(
+        override_host.status.code(),
+        Some(64),
+        "{}",
+        text(&override_host)
+    );
+    let error: serde_json::Value = serde_json::from_slice(&override_host.stdout).unwrap();
+    assert_eq!(error["error"]["code"], "invalid_request");
+    let message = error["error"]["message"].as_str().unwrap();
+    for expected in ["conflict", "--host", "--hc-space", "--herdr-workspace"] {
+        assert!(message.contains(expected), "{message}");
+    }
 }
 
 #[test]
