@@ -781,11 +781,31 @@ mod bounded_read_tests {
         }
     }
 
+    fn socket_test_root(base: &Path, pid: u32, test: &str) -> PathBuf {
+        base.join(format!("nd-runtime-{pid}-{test}"))
+    }
+
+    #[test]
+    fn socket_fixture_fits_macos_temporary_directory() {
+        use std::os::unix::ffi::OsStrExt;
+        // macOS uses /var/folders/<2 characters>/<30 characters>/T.
+        let base = Path::new("/var/folders/zz/zyxvpxvq6csfxvn_n0000000000000/T");
+        assert_eq!(base.as_os_str().as_bytes().len(), 48);
+        let root = socket_test_root(base, u32::MAX, "hc_bounded_reads_use_the_remaining_budget");
+        let endpoint = root.join("hc.sock");
+        let bytes = endpoint.as_os_str().as_bytes().len();
+        assert!(
+            bytes <= 103,
+            "socket fixture uses {bytes} bytes; macOS permits 103: {}",
+            endpoint.display()
+        );
+    }
+
     fn run_with_hc_socket(test: &str) -> bool {
         if env::var("NAMEDROP_TEST_HC_SOCKET").as_deref() == Ok(test) {
             return false;
         }
-        let root = env::temp_dir().join(format!("nd-runtime-{}-{test}", std::process::id()));
+        let root = socket_test_root(&env::temp_dir(), std::process::id(), test);
         fs::create_dir_all(&root).unwrap();
         let path = root.join("hc.sock");
         let listener = hc_socket_fixture::HcSocket::bind(&path).unwrap();
