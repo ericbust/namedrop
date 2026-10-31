@@ -101,11 +101,15 @@ impl PackageContext {
             executable.to_owned()
         }
     }
-    fn permission_owner(&self, state: &Path) -> PathBuf {
+    fn permission_owner(&self, state: &Path) -> Result<PathBuf, String> {
         if self.hc {
-            self.home.join(".local/state/namedrop-app")
+            crate::runtime::hc_state_root(|key| match key {
+                "HOME" => self.home.to_str().map(str::to_owned),
+                key => std::env::var(key).ok(),
+            })
+            .map(|root| root.join("namedrop-app"))
         } else {
-            state.to_owned()
+            Ok(state.to_owned())
         }
     }
     fn permission_rules(&self, executable: &Path, state: &Path) -> Result<Vec<String>, String> {
@@ -133,7 +137,7 @@ impl PackageContext {
     ) -> Result<(), String> {
         claude_permissions::inspect_with_rules(
             &config.claude(&self.home),
-            &self.permission_owner(state),
+            &self.permission_owner(state)?,
             self.permission_rules(executable, state)?,
         )
         .map_err(|error| format!("{error}; {}", claude_permissions::REPAIR_GUIDANCE))
@@ -485,7 +489,7 @@ fn install_integration_package_with_config(
     if runtime == AgentRuntime::ClaudeCode
         && let Err(error) = claude_permissions::refresh_with_rules(
             &config.claude(&context.home),
-            &context.permission_owner(state_directory),
+            &context.permission_owner(state_directory)?,
             context.permission_rules(executable, state_directory)?,
         )
     {
