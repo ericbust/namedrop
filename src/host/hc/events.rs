@@ -464,7 +464,10 @@ impl Subscriber {
                     continue;
                 }
             }
-            dirty.insert(pane.clone(), change.clone());
+            let accumulated = dirty.entry(pane.clone()).or_default();
+            accumulated.resume |= change.resume;
+            accumulated.unavailable |= change.unavailable;
+            accumulated.removed = change.removed;
         }
         if !full {
             for (pane, terminal) in &mut self.terminals {
