@@ -669,7 +669,6 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
             return Ok(false);
         }
         let _lock = label_lock(state)?;
-        // Cached observations can predate a replacement SessionStart publication.
         let mut current = self.terminal(&terminal.address, None)?;
         let namespace = crate::StateNamespace::for_space(session_socket_id, current.workspace());
         let active = crate::StateStore::open(state)

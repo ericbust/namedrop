@@ -45,13 +45,12 @@ enum Kind {
 
 #[derive(Clone, Default)]
 struct DirtyTerminal {
-    invalidate: bool,
     resume: bool,
     unavailable: bool,
     removed: bool,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Pending {
     snapshot: Option<Vec<Terminal>>,
     full: bool,
@@ -84,7 +83,6 @@ impl Pending {
                 if !matches!(event.kind, Kind::Ignored) {
                     let pane = event.terminal.ok_or("hc terminal event has no terminal")?;
                     let dirty = self.dirty.entry(pane).or_default();
-                    dirty.invalidate |= matches!(event.kind, Kind::Lost | Kind::Restarted);
                     dirty.resume |= matches!(event.kind, Kind::Status | Kind::Turn);
                     dirty.unavailable |=
                         matches!(event.kind, Kind::Lost | Kind::Finished | Kind::Removed);
@@ -229,6 +227,17 @@ impl Subscriber {
         &mut self,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
+        let result = self.tick_due(runtime);
+        if result.is_err() {
+            self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
+        }
+        result
+    }
+
+    fn tick_due<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
+        &mut self,
+        runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
+    ) -> Result<(), String> {
         if self
             .next_wake_ms
             .is_some_and(|due| due <= runtime.clock.now_unix_ms())
@@ -281,7 +290,6 @@ impl Subscriber {
                 }
             }
             if !errors.is_empty() {
-                self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
                 return Err(errors.join("; "));
             }
         }
@@ -295,25 +303,52 @@ impl Subscriber {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let _lock = label_lock(runtime.state_directory)?;
         let mut pending = std::mem::take(&mut self.pending);
         if !self.initialized && pending.snapshot.is_none() {
             pending.full = true;
         }
+        let result = self.reconcile_batch(pending.clone(), runtime);
+        if result.is_err() {
+            self.pending = pending;
+            self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
+        }
+        result
+    }
+
+    fn reconcile_batch<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
+        &mut self,
+        mut pending: Pending,
+        runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
+    ) -> Result<(), String> {
+        let _lock = label_lock(runtime.state_directory)?;
         let full = pending.full || pending.snapshot.is_some();
         let mut errors = Vec::new();
         let mut affected = BTreeSet::new();
         let active_spaces: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
+        let mut store =
+            StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
+        let mut bound_spaces: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for space in &active_spaces {
+            let namespace = crate::StateNamespace::for_space(runtime.session_socket_id, space);
+            for binding in store
+                .transaction(|tx| tx.active_pane_bindings(&namespace))
+                .map_err(|error| error.to_string())?
+            {
+                self.spaces
+                    .entry(binding.pane_id.clone())
+                    .or_insert_with(|| space.clone());
+                bound_spaces
+                    .entry(binding.pane_id)
+                    .or_default()
+                    .insert(space.clone());
+            }
+        }
         if full {
             let discovery = if pending.full {
-                match runtime.host.discover(None) {
-                    Ok(discovery) => discovery,
-                    Err(error) => {
-                        self.pending = pending;
-                        self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
-                        return Err(error.to_string());
-                    }
-                }
+                runtime
+                    .host
+                    .discover(None)
+                    .map_err(|error| error.to_string())?
             } else {
                 TerminalDiscovery {
                     terminals: pending.snapshot.take().unwrap(),
@@ -333,6 +368,32 @@ impl Subscriber {
             for pane in self.unavailable.keys() {
                 if let Some(terminal) = self.terminals.get(pane) {
                     terminals.insert(pane.clone(), terminal.clone());
+                }
+            }
+            if !pending.full {
+                for (pane, spaces) in &bound_spaces {
+                    if terminals.get(pane).is_some_and(|terminal| {
+                        terminal.state == "live"
+                            && spaces.iter().all(|space| space == terminal.workspace())
+                    }) {
+                        continue;
+                    }
+                    match runtime.host.terminal(pane, None) {
+                        Ok(terminal) => {
+                            terminals.insert(pane.clone(), terminal);
+                        }
+                        Err(error)
+                            if matches!(error.code.as_deref(), Some("not_found" | "finished")) =>
+                        {
+                            terminals.remove(pane);
+                        }
+                        Err(error) => {
+                            self.unavailable.insert(pane.clone(), error.to_string());
+                            if let Some(terminal) = self.terminals.get(pane) {
+                                terminals.insert(pane.clone(), terminal.clone());
+                            }
+                        }
+                    }
                 }
             }
             for (pane, terminal) in &mut terminals {
@@ -374,14 +435,6 @@ impl Subscriber {
             }
             match runtime.host.terminal(pane, None) {
                 Ok(mut terminal) => {
-                    if change.invalidate
-                        && (terminal.state != "live" || terminal.session().is_none())
-                        && let Err(error) = runtime.host.clear_session(&mut terminal)
-                    {
-                        self.unavailable.insert(pane.clone(), error.to_string());
-                        errors.push(error.to_string());
-                        continue;
-                    }
                     if active_spaces.contains(terminal.workspace())
                         && let Err(error) = runtime.host.reconcile_session(
                             runtime.state_directory,
@@ -459,6 +512,7 @@ impl Subscriber {
                         &scoped,
                     ) {
                         errors.push(error);
+                        continue;
                     }
                 }
                 if change.removed {
@@ -466,8 +520,6 @@ impl Subscriber {
                 }
             }
         }
-        let mut store =
-            StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
         let attribution = crate::MutationAttribution::new(
             crate::ActorKind::Plugin,
             "namedrop-hc-reconcile",
@@ -515,11 +567,6 @@ impl Subscriber {
         if errors.is_empty() {
             Ok(())
         } else {
-            self.pending.dirty.extend(pending.dirty);
-            if full {
-                self.pending.full = true;
-            }
-            self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
             Err(errors.join("; "))
         }
     }
