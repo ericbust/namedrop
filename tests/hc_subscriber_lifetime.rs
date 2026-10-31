@@ -21,28 +21,20 @@ impl Fixture {
     fn new() -> Self {
         let root = hc_socket::fixture::short_socket_root();
         std::fs::create_dir(root.join("home")).unwrap();
-        let socket = Some(hc_socket::HcSocket::bind(&root.join("core.sock")).unwrap());
+        let socket = Some(
+            hc_socket::HcSocket::rpc(&root.join("core.sock"), "628bcf8129aa037b1fa5aad3504926a6")
+                .unwrap(),
+        );
         std::fs::write(
             root.join("hc"),
             format!(
                 r#"#!/usr/bin/python3
-import json, os, sys, time
+import json, os, sys
 root = os.environ['FIXTURE_ROOT']
 with open(root+'/calls', 'a') as log:
     log.write(json.dumps(sys.argv[1:])+'\n')
 if sys.argv[1:] == ['server', 'status', '--json']:
     print({status:?})
-elif sys.argv[1:] == ['events', '--json']:
-    if os.path.exists(root+'/eof'):
-        raise SystemExit(0)
-    print('{{"method":"heartbeat","params":{{}}}}', flush=True)
-    if os.path.exists(root+'/repeat'):
-        with open(root+'/calls') as log:
-            streams = sum(json.loads(line) == ['events', '--json'] for line in log)
-        if streams < 6:
-            raise SystemExit(0)
-    while not os.path.exists(root+'/disconnect'):
-        time.sleep(.01)
 elif sys.argv[1:] == ['ls', '--json']:
     print('{{"terminals":[]}}')
 else:
@@ -81,11 +73,12 @@ else:
     }
 
     fn streams(&self) -> usize {
-        std::fs::read_to_string(self.root.join("calls"))
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| *line == "[\"events\", \"--json\"]")
-            .count()
+        assert!(
+            !self.root.join("calls").exists(),
+            "subscriber invoked the hc CLI: {}",
+            std::fs::read_to_string(self.root.join("calls")).unwrap_or_default()
+        );
+        hc_socket::subscriptions(&self.root)
     }
 
     fn directory(&self) -> PathBuf {
@@ -253,7 +246,7 @@ fn doctor_does_not_start_subscriber_without_active_worktree() {
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(report["status"], "ok", "{report}");
         assert_eq!(
-            fixture.streams(),
+            hc_socket::subscriptions(&fixture.root),
             0,
             "doctor launched a subscriber without activation"
         );

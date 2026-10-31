@@ -333,23 +333,18 @@ fn detached_subscriber_process_lifecycle() {
     let root = hc_socket::fixture::short_socket_root();
     std::fs::create_dir_all(root.join("home")).unwrap();
     let socket = root.join("core.sock");
-    let _socket = hc_socket::HcSocket::bind(&socket).unwrap();
+    let _socket = hc_socket::HcSocket::rpc(&socket, "628bcf8129aa037b1fa5aad3504926a6").unwrap();
+    std::fs::write(root.join("missed"), "").unwrap();
     let hc = root.join("hc");
     std::fs::write(
         &hc,
         format!(
             r#"#!/usr/bin/python3
-import json, os, sys, time
+import json, os, sys
 with open(os.environ['HC_TEST_LOG'], 'a') as log:
     log.write(json.dumps({{'args':sys.argv[1:], 'env':dict(os.environ)}})+'\n')
 if sys.argv[1:] == ['server', 'status', '--json']:
     print({status:?})
-elif sys.argv[1:] == ['events', '--json']:
-    while not os.path.exists(os.environ['SUBSCRIBER_TEST_ROOT']+'/disconnect'):
-        print('{{"method":"missed","params":{{}}}}', flush=True)
-        time.sleep(.05)
-    with open(os.environ['SUBSCRIBER_TEST_ROOT']+'/stream-ended', 'w') as ended:
-        ended.write(str(os.getpid()))
 elif sys.argv[1:] == ['ls', '--json']:
     print('{{"terminals":[]}}')
 else:
@@ -390,20 +385,12 @@ else:
         String::from_utf8_lossy(&output.stderr)
     );
     let calls = std::fs::read_to_string(root.join("calls.jsonl")).unwrap();
-    let events: Vec<Value> = calls
+    assert!(hc_socket::subscriptions(&root) > 0);
+    for call in calls
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .filter(|call| call["args"] == json!(["events", "--json"]))
-        .collect();
-    assert!(!events.is_empty());
-    for call in events {
-        let env = call["env"].as_object().unwrap();
-        assert!(env.keys().all(|key| !key.starts_with("HERDR_")));
-        assert!(!env.contains_key("HC_TERMINAL_ID"));
-        assert!(!env.contains_key("HC_TERMINAL_SOCKET"));
-        assert_eq!(env["HC_SOCKET"], socket.to_str().unwrap());
-        assert_eq!(env["HOME"], root.join("home").to_str().unwrap());
-        assert_eq!(env["CODEX_HOME"], root.join("codex").to_str().unwrap());
+    {
+        assert_ne!(call["args"], json!(["events", "--json"]));
     }
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -442,11 +429,29 @@ fn detached_subscriber_child() {
     }
     let _cleanup = Cleanup(state.clone());
     let child_environment = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
-    for token in [b"HC_SCOPE=".as_slice(), b"HC_RUNTIME=", b"HC_TERMINAL_"] {
+    for token in [
+        b"HC_SCOPE=".as_slice(),
+        b"HC_RUNTIME=",
+        b"HC_TERMINAL_",
+        b"HERDR_",
+    ] {
         assert!(
             !child_environment
                 .split(|byte| *byte == 0)
                 .any(|entry| entry.starts_with(token))
+        );
+    }
+    for (key, value) in [
+        ("HC_SOCKET", root.join("core.sock")),
+        ("HOME", root.join("home")),
+        ("CODEX_HOME", root.join("codex")),
+    ] {
+        let expected = format!("{key}={}", value.display());
+        assert!(
+            child_environment
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == expected.as_bytes()),
+            "missing {expected}"
         );
     }
 
@@ -651,7 +656,7 @@ fn detached_subscriber_child() {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
-    let calls = || std::fs::read_to_string(root.join("calls.jsonl")).unwrap();
+    let calls = || std::fs::read_to_string(root.join("rpc.jsonl")).unwrap();
     let absent_calls = calls();
     let absent_epoch = epoch();
     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -664,7 +669,8 @@ fn detached_subscriber_child() {
         "subscriber invoked hc while the socket was absent"
     );
     std::fs::remove_file(root.join("disconnect")).unwrap();
-    let _reconnected = hc_socket::HcSocket::bind(&socket).unwrap();
+    let _reconnected =
+        hc_socket::HcSocket::rpc(&socket, "628bcf8129aa037b1fa5aad3504926a6").unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while epoch() <= absent_epoch {
         assert!(
@@ -678,11 +684,15 @@ fn detached_subscriber_child() {
         json!(final_pid),
         "reconnect replaced the subscriber"
     );
-    assert!(
-        calls()[absent_calls.len()..].lines().any(|line| {
-            serde_json::from_str::<Value>(line).unwrap()["args"] == json!(["events", "--json"])
-        }),
-        "subscriber did not reopen the stream"
+    assert_eq!(
+        calls()[absent_calls.len()..]
+            .lines()
+            .filter(|line| {
+                serde_json::from_str::<Value>(line).unwrap()["method"] == "events.subscribe"
+            })
+            .count(),
+        1,
+        "subscriber must re-subscribe once to the same core"
     );
     std::fs::remove_file(&socket).unwrap();
     std::fs::remove_file(root.join("stream-ended")).unwrap();

@@ -623,7 +623,7 @@ fn hc_hooks_write_sessions_only_in_active_spaces_and_preserve_core_routing() {
         return;
     }
     let f = Fixture::new("hc-hooks");
-    let _socket = hc_socket::HcSocket::bind(&f.0.join("hc.sock")).unwrap();
+    let _socket = hc_socket::HcSocket::rpc(&f.0.join("hc.sock"), "hook-test").unwrap();
     f.activate();
     let hc_state = f.0.join("hc-state");
     let tui_packages = [
