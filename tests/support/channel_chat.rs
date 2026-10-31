@@ -480,6 +480,7 @@ pub(super) fn agent_reply(
         }),
         &f.runtime("w1", pane),
     )
+    .map_err(|error| format!("{error}; attention: {:?}", f.texts("SELECT summary FROM attention_items ORDER BY rowid")))
 }
 
 pub(super) fn plain_root(f: &Fixture, request: &str, source: &str) -> Value {

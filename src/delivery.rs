@@ -482,8 +482,10 @@ where
             Ok(effects) => effects,
             Err(error) => {
                 let summary = format!(
-                    "Could not send to @{}. {error}. Check the state directory permissions and available file descriptors, then send the message again.",
+                    "Could not send to @{}. {error}. Check the state directory permissions and available file descriptors, then send the message again. classification=Fault, kind={:?}, errno={:?}, error={error:?}",
                     second.alias,
+                    error.kind(),
+                    error.raw_os_error(),
                 );
                 let failed = store
                     .transaction(|transaction| {

@@ -1695,8 +1695,9 @@ else:
         let deadline = Instant::now() + Duration::from_secs(15);
         let expected = commands.len() as i64;
         while f.count("SELECT COUNT(*) FROM mailbox_deliveries WHERE address_id LIKE 'address-%-shell' AND state='settled'") != expected {
-            assert!(Instant::now() < deadline, "terminal commands stranded: {:?}",
-                f.texts("SELECT state FROM mailbox_deliveries WHERE address_id LIKE 'address-%-shell' ORDER BY rowid"));
+            assert!(Instant::now() < deadline, "terminal commands stranded: {:?}; attention: {:?}",
+                f.texts("SELECT state FROM mailbox_deliveries WHERE address_id LIKE 'address-%-shell' ORDER BY rowid"),
+                f.texts("SELECT summary FROM attention_items ORDER BY rowid"));
             thread::sleep(Duration::from_millis(20));
         }
         let executions = fs::read_to_string(output).unwrap();

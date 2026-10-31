@@ -29,6 +29,65 @@ use support::{
 use xws::Fixture;
 
 #[test]
+fn diagnostic_failed_receipt_reports_unsafe_permissions_without_errno() {
+    let f = fixture();
+    let directory = f.state.join("pane-effects");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+    let server = Server::start(&f, "not json", true);
+    let (status, receipt) = post(&server, "diagnostic-failure", "@planner Inspect.", None);
+    assert_eq!(status, 200, "{receipt}");
+    let error = agent_reply(
+        &f,
+        "diagnostic-reply",
+        &receipt,
+        "pane-1-planner",
+        "@operator Done.",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("delivery receipt cannot be recorded from failed"),
+        "{error}"
+    );
+    assert!(
+        error.contains("unsafe pane effects ownership file"),
+        "{error}"
+    );
+    assert!(error.contains("classification=Fault"), "{error}");
+    assert!(error.contains("kind=Other"), "{error}");
+    assert!(error.contains("errno=None"), "{error}");
+    println!("diagnostic captured known injected fault: {error}");
+}
+
+#[test]
+fn diagnostic_failed_receipt_reports_regular_file_with_enotdir() {
+    let f = fixture();
+    fs::write(f.state.join("pane-effects"), "not a directory").unwrap();
+    let server = Server::start(&f, "not json", true);
+    let (status, receipt) = post(&server, "diagnostic-failure", "@planner Inspect.", None);
+    assert_eq!(status, 200, "{receipt}");
+    let error = agent_reply(
+        &f,
+        "diagnostic-reply",
+        &receipt,
+        "pane-1-planner",
+        "@operator Done.",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("delivery receipt cannot be recorded from failed"),
+        "{error}"
+    );
+    assert!(error.contains("classification=Fault"), "{error}");
+    assert!(error.contains("kind=NotADirectory"), "{error}");
+    assert!(
+        error.contains(&format!("errno=Some({})", libc::ENOTDIR)),
+        "{error}"
+    );
+    println!("diagnostic captured known injected fault: {error}");
+}
+
+#[test]
 fn zero_pick_and_opt_out_store_without_waking_members() {
     for off in [false, true] {
         let f = fixture();
