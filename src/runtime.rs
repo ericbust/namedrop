@@ -440,29 +440,39 @@ mod bounded_read_tests {
     }
 
     #[test]
-    fn only_hc_sends_receive_the_longer_bounded_deadline() {
+    fn only_hc_sends_receive_the_fixed_twenty_second_deadline() {
         for host in [HostKind::Hc, HostKind::Tui] {
-            let executor = ProcessHerdr {
-                host,
-                timeout: Duration::from_secs(10),
-                ..ProcessHerdr::default()
-            };
-            let send_timeout = executor
-                .bounded_timeout(executor.command_timeout(&["send", "t1", "hello", "--json"]));
-            if host == HostKind::Hc {
-                assert!(send_timeout > Duration::from_millis(10_200));
-                assert!(send_timeout <= Duration::from_secs(60));
-            } else {
-                assert_eq!(send_timeout, Duration::from_secs(10));
+            for seconds in [1, 10, 30, 60] {
+                let configured = Duration::from_secs(seconds);
+                let executor = ProcessHerdr {
+                    host,
+                    timeout: configured,
+                    ..ProcessHerdr::default()
+                };
+                let send_timeout = executor
+                    .bounded_timeout(executor.command_timeout(&["send", "t1", "hello", "--json"]));
+                assert_eq!(
+                    send_timeout,
+                    if host == HostKind::Hc {
+                        Duration::from_secs(20)
+                    } else {
+                        configured
+                    },
+                    "{host:?} configured for {seconds} seconds"
+                );
+                assert_eq!(
+                    executor.command_timeout(&["get", "t1", "--json"]),
+                    configured
+                );
                 assert_eq!(
                     executor.bounded_timeout(Duration::from_secs(120)),
-                    Duration::from_secs(10)
+                    if host == HostKind::Hc {
+                        Duration::from_secs(60)
+                    } else {
+                        configured
+                    }
                 );
             }
-            assert_eq!(
-                executor.command_timeout(&["get", "t1", "--json"]),
-                Duration::from_secs(10)
-            );
         }
     }
 
@@ -611,8 +621,8 @@ mod host_selection_tests {
     #[test]
     fn detection_obeys_explicit_then_innermost_host() {
         let cases = [
-            (None, vec![], None),
-            (None, vec!["HC_SESSION", "HC_SOCKET"], None),
+            (None, vec![], Some(HostKind::Tui)),
+            (None, vec!["HC_SESSION", "HC_SOCKET"], Some(HostKind::Tui)),
             (None, vec!["HC_TERMINAL_ID"], Some(HostKind::Hc)),
             (
                 None,

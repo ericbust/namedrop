@@ -1174,12 +1174,8 @@ esac
             .unwrap();
         assert!(output.status.success(), "{flag}: {}", text(&output));
     }
-    let unknown = run(&["address", "list"]);
-    assert!(
-        text(&unknown).contains("Host is unknown"),
-        "{}",
-        text(&unknown)
-    );
+    let default_host = run(&["address", "list"]);
+    assert!(default_host.status.success(), "{}", text(&default_host));
     let override_host = run(&[
         "--host",
         "tui",
