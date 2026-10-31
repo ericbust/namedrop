@@ -290,8 +290,7 @@ mod tests {
     }
 
     /// A spawned process group that the test kills on drop. Spawning waits
-    /// until the kernel shows the new argv: a vfork-based spawn returns while
-    /// exec is still replacing the child's image, which shows no argv or ours.
+    /// until all requested arguments are visible, including in-process flags.
     struct Process(Child);
     impl Process {
         fn spawn(command: &mut Command) -> Self {
@@ -301,20 +300,27 @@ mod tests {
             command: &mut Command,
             mut arguments: impl FnMut(u32) -> Option<Vec<String>>,
         ) -> Self {
-            let child = command
-                .process_group(0)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .unwrap();
+            let expected = command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            let child = Self(
+                command
+                    .process_group(0)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
             let deadline = Instant::now() + Duration::from_secs(5);
-            let ours = crate::terminal::process_arguments(std::process::id());
-            while arguments(child.id()).is_none_or(|argv| Some(argv) == ours) {
+            while arguments(child.pid())
+                .is_none_or(|argv| argv.get(1..) != Some(expected.as_slice()))
+            {
                 assert!(Instant::now() < deadline, "argv never appeared");
                 std::thread::sleep(Duration::from_millis(2));
             }
-            Self(child)
+            child
         }
         fn server(codex_home: &Path) -> Self {
             let program =
