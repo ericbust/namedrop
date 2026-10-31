@@ -2213,6 +2213,20 @@ fn inactive_namespace_preserves_settle_for_reactivation() {
 }
 
 #[test]
+fn ordinary_refusals_share_the_mailbox_return_transition() {
+    let delivery = include_str!("../src/delivery.rs");
+    assert_eq!(
+        delivery.matches(".return_delivery_attempt_to_queue(").count(),
+        2,
+        "both no-input outcomes must use the existing mailbox return transition"
+    );
+    assert!(
+        !include_str!("../src/store.rs").contains("\nmod prompt_deferral;"),
+        "recipient eligibility and challenge rollback belong with their existing owners"
+    );
+}
+
+#[test]
 fn expired_deferred_delivery_can_be_cancelled_with_confirmation() {
     assert_refused_hc_delivery("blocked", "cancel-held");
 }
