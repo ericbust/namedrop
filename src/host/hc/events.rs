@@ -639,6 +639,18 @@ impl Subscriber {
         let namespace =
             crate::StateNamespace::for_space(runtime.session_socket_id, terminal.workspace());
         let stored = committed_alias(runtime.state_directory, &namespace, pane)?;
+        if stored.as_deref().unwrap_or("") == requested {
+            return Ok(());
+        }
+        let current = runtime.host.terminal(pane, None)?;
+        if current.workspace() != terminal.workspace() || current.state != "live" {
+            return Ok(());
+        }
+        self.terminals.insert(pane.to_owned(), current.clone());
+        let requested = current
+            .labels
+            .get("namedrop.name")
+            .map_or("", String::as_str);
         if requested.is_empty() {
             if let Some(alias) = stored {
                 runtime
