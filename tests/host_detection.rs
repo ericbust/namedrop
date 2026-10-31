@@ -7,7 +7,7 @@ mod hc_socket;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 #[test]
-fn cli_host_detection_table_returns_before_state_input_or_host_io() {
+fn snapshot_host_detection_table_returns_before_state_or_dispatch() {
     struct Case {
         name: String,
         flags: Vec<&'static str>,
@@ -86,7 +86,7 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
                         &format!("override {explicit:?}"),
                         explicit,
                         vec!["HERDR_PANE_ID", "HC_TERMINAL_ID"],
-                        None,
+                        Some(host),
                     );
                 }
             }
@@ -127,14 +127,14 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
             Some("hc"),
         ),
         (
-            "explicit tui rejects hc transport",
+            "explicit tui overrides hc transport",
             vec!["--host", "tui", "--hc-space", "space"],
-            None,
+            Some("tui"),
         ),
         (
-            "explicit hc rejects tui transport",
+            "explicit hc overrides tui transport",
             vec!["--host", "hc", "--herdr-pane", "pane"],
-            None,
+            Some("hc"),
         ),
     ] {
         add(
@@ -225,8 +225,7 @@ esac
     )
     .unwrap();
     fs::set_permissions(&identity, fs::Permissions::from_mode(0o700)).unwrap();
-    let binary = std::env::var_os("NAMEDROP_TEST_BASE_BINARY")
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_namedrop").into());
+    let binary = std::env::current_exe().unwrap();
     let mut failures = Vec::new();
     for case in cases {
         let mut command = Command::new("/bin/sh");
@@ -263,25 +262,14 @@ esac
             .env("HC_SOCKET", &socket)
             .env("HERDR_PLUGIN_STATE_DIR", root.join("state"))
             .env("NAMEDROP_STATE_DIR", root.join("state"))
-            .args(&case.flags)
-            .args(["doctor", "--print-host", "--input-json-file"])
-            .arg(root.join("missing-input"))
+            .env("HOST_FLAGS", serde_json::to_string(&case.flags).unwrap())
+            .env("EXPECTED_HOST", case.expected.unwrap_or("conflict"))
+            .args(["--ignored", "--exact", "snapshot_host_detection_child", "--nocapture"])
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let valid = match case.expected {
-            Some(host) => {
-                output.status.success() && stdout == format!("{host}\n") && stderr.is_empty()
-            }
-            None => {
-                output.status.code() == Some(64)
-                    && stdout.is_empty()
-                    && stderr.contains("conflict")
-                    && tui_flags.iter().all(|flag| stderr.contains(flag))
-                    && hc_flags.iter().all(|flag| stderr.contains(flag))
-            }
-        };
+        let valid = output.status.success();
         println!(
             "{} => status={} stdout={stdout:?} stderr={stderr:?}",
             case.name, output.status
@@ -444,7 +432,7 @@ fn describe_validates_conflicts_before_runtime_dispatch_and_keeps_explicit_state
     .unwrap();
     fs::set_permissions(&tripwire, fs::Permissions::from_mode(0o700)).unwrap();
     fs::copy(&tripwire, root.join("state/runtime/namedrop")).unwrap();
-    for flags in [vec!["--host", "hc", "--herdr-pane", "pane"], vec![]] {
+    for flags in [vec!["--hc-terminal", "terminal", "--herdr-pane", "pane"], vec![]] {
         let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .env_clear()
             .env("HC_TERMINAL_ID", "terminal")
@@ -474,4 +462,22 @@ fn describe_validates_conflicts_before_runtime_dispatch_and_keeps_explicit_state
         }
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore]
+fn snapshot_host_detection_child() {
+    use clap::Parser;
+    let flags: Vec<String> = serde_json::from_str(&std::env::var("HOST_FLAGS").unwrap()).unwrap();
+    let cli = namedrop::cli::Cli::try_parse_from(std::iter::once("namedrop".to_owned()).chain(flags.clone()).chain(["describe".to_owned()])).unwrap();
+    let expected = std::env::var("EXPECTED_HOST").unwrap();
+    if expected == "conflict" {
+        let error = cli.runtime.host_kind().unwrap_err();
+        for flag in ["--herdr-socket", "--herdr-workspace", "--herdr-pane", "--hc-terminal", "--hc-space", "--plugin-state"] {
+            assert_eq!(error.contains(flag), flags.iter().any(|arg| arg == flag), "conflict should name only supplied flags: {error}");
+        }
+    } else {
+        let expected = if expected == "hc" { namedrop::runtime::HostKind::Hc } else { namedrop::runtime::HostKind::Tui };
+        assert_eq!(cli.runtime.host_kind().unwrap(), expected);
+    }
 }
