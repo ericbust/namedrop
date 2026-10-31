@@ -2083,9 +2083,6 @@ code.inline {
     box-shadow: var(--shadow-pop);
     translate: -100% 0;
     visibility: hidden;
-    transition:
-      translate var(--duration) var(--ease-out),
-      visibility 0s var(--duration);
   }
   .drawer-open .sidebar {
     translate: none;

@@ -205,7 +205,9 @@ the whole width.
   it. Focus then returns to the Channels button. In the drawer, the arrow keys
   only move focus between rows, and Enter chooses.
 - The drawer slides in over `--duration` and the backdrop fades in. With
-  reduced motion it appears in place.
+  reduced motion it appears in place. It closes at once, so the chosen channel
+  shows without waiting, and a window that narrows past 600px never shows the
+  sidebar sliding away over the page.
 - Over 600px nothing changes: no button, and the sidebar column stays. A
   drawer open when the window grows past 600px closes. If focus was in the
   sidebar column when the window narrows to a phone, it moves to the Channels
@@ -1295,7 +1297,7 @@ Motion shows state and nothing else.
 - The thread pane and the peek drawer enter over 180ms.
 - The Needs-you banner expands and fades over 180ms when it appears.
 - The phone drawer slides in from the left over 180ms while its backdrop fades
-  in.
+  in. It closes with no motion.
 - Under `prefers-reduced-motion: reduce`, remove the pulse and every movement,
   and keep only color changes.
 
