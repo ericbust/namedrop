@@ -2038,9 +2038,8 @@ else:
                         && !summary.contains("gate")
                         && !summary.contains("pane effects")
                         && !summary.contains("retrying delivery")
-                        && summary.contains(
-                            "namedrop's pane lock for pane-1-planner is not private to you",
-                        )
+                        && summary
+                            .contains("namedrop's pane lock for @planner is not private to you")
                         && summary.contains(
                             "send it again, or ask the agent that sent it to send it again",
                         )

@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "pane_effects_diagnostics.rs"]
+mod pane_effects_diagnostics;
+
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
@@ -707,6 +710,7 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop_workers();
+        pane_effects_diagnostics::emit(&self.state);
         let _ = fs::remove_dir_all(&self.root);
     }
 }

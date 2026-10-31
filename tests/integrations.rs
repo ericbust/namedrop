@@ -565,7 +565,7 @@ fn registration_explains_unsafe_lock_permissions_without_internal_terms() {
     .unwrap_err();
     assert_eq!(
         error,
-        "Namedrop's pane lock for pane-agent is not private to you"
+        "Namedrop's pane lock for @implementer is not private to you"
     );
     assert!(!error.contains("pane effects"), "{error}");
     assert!(herdr.prompts.lock().unwrap().is_empty());
