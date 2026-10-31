@@ -83,6 +83,64 @@ where
     report
 }
 
+pub fn append_hc_diagnostics<H: Host, C: Clock, I: IdGenerator, E: crate::HerdrCommandExecutor>(
+    report: &mut HealthReport,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    host: &crate::HcHost<E>,
+) {
+    match host.discovery_warnings() {
+        Ok(warnings) => {
+            for warning in warnings {
+                let mut note = issue(
+                    "ND-HC-DISCOVERY-001",
+                    HealthSeverity::Notice,
+                    "An HC terminal could not be inspected.",
+                    &warning.message,
+                    HealthRepairKind::HumanDecision,
+                    "Check this terminal in Herdr, then run doctor again.",
+                );
+                note.diagnostic =
+                    serde_json::json!({"terminal":warning.terminal,"message":warning.message});
+                report.issues.push(note);
+                report.status = HealthStatus::NeedsAttention;
+            }
+        }
+        Err(error) => {
+            report.issues.push(issue(
+                "ND-HC-DISCOVERY-001",
+                HealthSeverity::Notice,
+                "HC terminal discovery failed.",
+                &error.to_string(),
+                HealthRepairKind::HumanDecision,
+                "Check the HC core, then run doctor again.",
+            ));
+            report.status = HealthStatus::NeedsAttention;
+        }
+    }
+    if let Err(error) =
+        crate::host::hc::events::status(runtime.state_directory, runtime.session_socket_id)
+    {
+        let mut note = issue(
+            "ND-HC-SUBSCRIBER-001",
+            HealthSeverity::Broken,
+            "HC event delivery is not running with the current Namedrop binary.",
+            &error,
+            HealthRepairKind::ProductAction,
+            "Activate Namedrop to restart event delivery.",
+        );
+        add_operation(
+            &mut note,
+            runtime,
+            runtime.workspace_id.unwrap_or("headless"),
+            "activate",
+            serde_json::json!({"confirmed":true}),
+            None,
+        );
+        report.issues.push(note);
+        report.status = HealthStatus::NeedsAttention;
+    }
+}
+
 fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> HealthReport {

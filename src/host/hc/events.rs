@@ -59,10 +59,7 @@ impl Subscriber {
             .map_err(|error| format!("Invalid hc event: {error}"))?
         {
             StreamLine::Snapshot { terminals } => {
-                self.spaces = terminals
-                    .iter()
-                    .map(|terminal| (terminal.address.clone(), terminal.workspace().to_owned()))
-                    .collect();
+                let _ = terminals;
                 self.reconcile_all(runtime)
             }
             StreamLine::Notification {
@@ -88,7 +85,14 @@ impl Subscriber {
                         .host
                         .invalidate_session(runtime.state_directory, &pane)?;
                 }
-                let terminal = runtime.host.terminal(&pane, None).ok();
+                let terminal = match runtime.host.terminal(&pane, None) {
+                    Ok(terminal) => Some(terminal),
+                    Err(_) if matches!(event.kind, Kind::Removed) => None,
+                    Err(error) => return Err(error.to_string()),
+                };
+                if let Some(terminal) = &terminal {
+                    self.reconcile_move(terminal, runtime)?;
+                }
                 let space = terminal
                     .as_ref()
                     .map(|terminal| terminal.workspace().to_owned())
@@ -168,17 +172,24 @@ impl Subscriber {
             .is_some_and(|due| due <= runtime.clock.now_unix_ms())
         {
             self.next_wake_ms = None;
+            let mut errors = Vec::new();
             for space in active_spaces(runtime)? {
                 let scoped = LifecycleRuntime {
                     workspace_id: Some(&space),
                     current_pane_id: None,
                     ..*runtime
                 };
-                let report = crate::drain_mailboxes(&scoped)?;
-                self.remember_drain(
-                    &serde_json::to_value(report).map_err(|error| error.to_string())?,
-                    runtime.clock.now_unix_ms(),
-                );
+                match crate::drain_mailboxes(&scoped) {
+                    Ok(report) => self.remember_drain(
+                        &serde_json::to_value(report).map_err(|error| error.to_string())?,
+                        runtime.clock.now_unix_ms(),
+                    ),
+                    Err(error) => errors.push(error),
+                }
+            }
+            if !errors.is_empty() {
+                self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
+                return Err(errors.join("; "));
             }
         }
         Ok(())
@@ -192,14 +203,23 @@ impl Subscriber {
         if spaces.is_empty() {
             return Ok(());
         }
-        let terminals = runtime.host.terminals(None)?;
+        let discovery = runtime.host.discover(None)?;
+        let terminals = discovery.terminals;
+        let mut errors: Vec<String> = discovery
+            .warnings
+            .into_iter()
+            .map(|warning| format!("{}: {}", warning.terminal, warning.message))
+            .collect();
         for terminal in &terminals {
             if spaces.iter().any(|space| space == terminal.workspace())
                 && terminal.labels.contains_key("namedrop.session.pid")
             {
-                runtime
+                if let Err(error) = runtime
                     .host
-                    .invalidate_session(runtime.state_directory, &terminal.address)?;
+                    .invalidate_session(runtime.state_directory, &terminal.address)
+                {
+                    errors.push(error.to_string());
+                }
             }
         }
         for space in spaces {
@@ -212,11 +232,62 @@ impl Subscriber {
                 .iter()
                 .filter(|terminal| terminal.workspace() == space)
             {
-                self.spaces.insert(terminal.address.clone(), space.clone());
-                self.reconcile_name(&terminal.address, &scoped)?;
+                if let Err(error) = self.reconcile_move(terminal, runtime) {
+                    errors.push(error);
+                    continue;
+                }
+                if let Err(error) = self.reconcile_name(&terminal.address, &scoped) {
+                    errors.push(error);
+                }
             }
-            self.operation("event.reconcile", json!({}), &scoped)?;
+            if let Err(error) = self.operation("event.reconcile", json!({}), &scoped) {
+                errors.push(error);
+            }
         }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    fn reconcile_move<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
+        &mut self,
+        terminal: &Terminal,
+        runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
+    ) -> Result<(), String> {
+        let pane = &terminal.address;
+        let destination = terminal.workspace();
+        let mut previous: BTreeSet<String> = self.spaces.get(pane).cloned().into_iter().collect();
+        let mut store =
+            StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
+        for space in active_spaces(runtime)? {
+            let namespace = crate::StateNamespace::for_space(runtime.session_socket_id, &space);
+            if store
+                .transaction(|transaction| transaction.active_pane_bindings(&namespace))
+                .map_err(|error| error.to_string())?
+                .iter()
+                .any(|binding| binding.pane_id == *pane)
+            {
+                previous.insert(space);
+            }
+        }
+        for source in previous.into_iter().filter(|source| source != destination) {
+            let scoped = LifecycleRuntime {
+                workspace_id: Some(&source),
+                ..*runtime
+            };
+            if active(&scoped)? {
+                self.operation("event.pane-lifecycle", json!({
+                    "type":"pane_moved", "previous_pane_id":pane,
+                    "previous_workspace_id":source, "previous_tab_id":"",
+                    "pane": {"pane_id":pane, "terminal_id":pane, "workspace_id":destination,
+                        "tab_id":terminal.labels.get("herdr.tab").cloned().unwrap_or_default(),
+                        "focused":false, "agent_status":terminal.status.as_ref().map(|status| status.state.as_str()).unwrap_or("unknown"), "revision":0}
+                }), &scoped)?;
+            }
+        }
+        self.spaces.insert(pane.clone(), destination.to_owned());
         Ok(())
     }
 
@@ -237,17 +308,7 @@ impl Subscriber {
         }
         let namespace =
             crate::StateNamespace::for_space(runtime.session_socket_id, terminal.workspace());
-        let mut store =
-            StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
-        let stored = store
-            .transaction(|transaction| {
-                Ok(transaction
-                    .list_pane_addresses(&namespace)?
-                    .into_iter()
-                    .find(|address| !address.retired && address.pane_id.as_deref() == Some(pane))
-                    .map(|address| address.alias))
-            })
-            .map_err(|error| error.to_string())?;
+        let stored = committed_alias(runtime.state_directory, &namespace, pane)?;
         if stored.as_deref() == Some(requested) {
             return Ok(());
         }
@@ -256,7 +317,7 @@ impl Subscriber {
             ..*runtime
         };
         let result = crate::lifecycle::execute_lifecycle_operation_locked(
-            "name",
+            "event.name",
             json!({"alias":requested}),
             &scoped,
         );
@@ -265,14 +326,52 @@ impl Subscriber {
         {
             self.remember_drain(drain, runtime.clock.now_unix_ms());
         }
-        if let Err(error) = result {
-            runtime
-                .host
-                .set_labels(pane, &[("namedrop.name", stored.as_deref().unwrap_or(""))])?;
-            eprintln!("Namedrop rejected hc name request for {pane}: {error}");
+        match result {
+            Err(error) => {
+                let committed = committed_alias(runtime.state_directory, &namespace, pane)
+                    .map_err(|read| format!("{error}; could not read committed name: {read}"))?;
+                let message: String = error.chars().take(1024).collect();
+                let requested: String = requested.chars().take(256).collect();
+                let response = json!({"requested":requested,"message":message}).to_string();
+                runtime
+                    .host
+                    .set_labels(
+                        pane,
+                        &[
+                            ("namedrop.name", committed.as_deref().unwrap_or("")),
+                            ("namedrop.name.error", &response),
+                        ],
+                    )
+                    .map_err(|publish| {
+                        format!("{error}; could not publish name rejection: {publish}")
+                    })?;
+                Err(error)
+            }
+            Ok(_) => {
+                runtime
+                    .host
+                    .set_labels(pane, &[("namedrop.name.error", "")])?;
+                Ok(())
+            }
         }
-        Ok(())
     }
+}
+
+fn committed_alias(
+    state: &Path,
+    namespace: &crate::StateNamespace,
+    pane: &str,
+) -> Result<Option<String>, String> {
+    StateStore::open(state)
+        .map_err(|error| error.to_string())?
+        .transaction(|transaction| {
+            Ok(transaction
+                .list_pane_addresses(namespace)?
+                .into_iter()
+                .find(|address| !address.retired && address.pane_id.as_deref() == Some(pane))
+                .map(|address| address.alias))
+        })
+        .map_err(|error| error.to_string())
 }
 
 fn active<E: HerdrCommandExecutor, C, I>(
@@ -306,40 +405,239 @@ fn active_spaces<E: HerdrCommandExecutor, C, I>(
         .collect())
 }
 
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
+struct BinaryIdentity {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified_seconds: i64,
+    modified_nanoseconds: i64,
+}
+
+impl BinaryIdentity {
+    fn read(path: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+        Ok(Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+        })
+    }
+}
+
+#[derive(Deserialize, serde::Serialize)]
+struct SubscriberRecord {
+    pid: u32,
+    process_start: String,
+    launch_path: PathBuf,
+    launch_identity: BinaryIdentity,
+    binary: BinaryIdentity,
+}
+
+impl SubscriberRecord {
+    fn is_running(&self) -> bool {
+        process_start(self.pid).as_deref() == Ok(self.process_start.as_str())
+            && BinaryIdentity::read(&PathBuf::from(format!("/proc/{}/exe", self.pid))).as_ref()
+                == Ok(&self.binary)
+    }
+
+    fn is_current(&self, state: &Path) -> bool {
+        BinaryIdentity::read(&self.launch_path).as_ref() == Ok(&self.launch_identity)
+            && (!state.join("runtime/namedrop").exists()
+                || BinaryIdentity::read(&state.join("runtime/current/namedrop")).as_ref()
+                    == Ok(&self.binary))
+    }
+}
+
+fn process_start(pid: u32) -> Result<String, String> {
+    let stat =
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|error| error.to_string())?;
+    stat.rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .map(str::to_owned)
+        .ok_or_else(|| "Missing process start identity".to_owned())
+}
+
+fn subscriber_directory(state: &Path, socket: &str) -> PathBuf {
+    use sha2::Digest;
+    state
+        .join("hc-subscribers")
+        .join(crate::lower_hex(&sha2::Sha256::digest(socket.as_bytes())))
+}
+
+fn lock_file(directory: &Path, name: &str) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(directory)
+        .map_err(|error| error.to_string())?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(directory.join(name))
+        .map_err(|error| error.to_string())
+}
+
+fn read_record(directory: &Path) -> Option<SubscriberRecord> {
+    serde_json::from_slice(&std::fs::read(directory.join("subscriber.json")).ok()?).ok()
+}
+
+fn stop_verified(record: &SubscriberRecord) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::FromRawFd;
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, record.pid, 0) };
+        if fd < 0 {
+            if !record.is_running() {
+                return Ok(());
+            }
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        let _fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) };
+        if record.is_running()
+            && unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd,
+                    libc::SIGTERM,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            } < 0
+        {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err("Verified subscriber replacement requires Linux process identities".to_owned())
+}
+
+fn wait_for_lifetime(directory: &Path) -> Result<std::fs::File, String> {
+    let lifetime = lock_file(directory, "lifetime.lock")?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match lifetime.try_lock() {
+            Ok(()) => return Ok(lifetime),
+            Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(format!("Could not stop HC subscriber: {error}")),
+        }
+    }
+}
+
+pub fn stop(state: &Path, socket: &str) -> Result<(), String> {
+    let directory = subscriber_directory(state, socket);
+    if !directory.exists() {
+        return Ok(());
+    }
+    let launch = lock_file(&directory, "launch.lock")?;
+    launch.lock().map_err(|error| error.to_string())?;
+    if let Some(record) = read_record(&directory) {
+        stop_verified(&record)?;
+    }
+    drop(wait_for_lifetime(&directory)?);
+    Ok(())
+}
+
+pub fn status(state: &Path, socket: &str) -> Result<(), String> {
+    let directory = subscriber_directory(state, socket);
+    let record = read_record(&directory).ok_or("The HC event subscriber is missing")?;
+    if !record.is_running() {
+        return Err("The HC event subscriber is stopped".to_owned());
+    }
+    if !record.is_current(state) {
+        return Err("The HC event subscriber is running an older Namedrop binary".to_owned());
+    }
+    Ok(())
+}
+
 pub fn start<E: HerdrCommandExecutor>(
     host: &HcHost<E>,
     executable: &Path,
     state: &Path,
 ) -> Result<(), HostError> {
-    let executable = executable
-        .to_str()
-        .ok_or("Namedrop executable path is not UTF-8".to_owned())?;
-    let state = state
-        .to_str()
-        .ok_or("Namedrop state path is not UTF-8".to_owned())?;
-    let result = host
-        .transport
-        .execute(&[
-            "run",
-            "--bg",
-            "--no-parent",
-            "--rm",
-            "--name",
-            "namedrop-events",
-            "--",
-            executable,
-            "--host",
-            "hc",
-            "--plugin-state",
-            state,
-            "events",
-        ])
-        .map_err(host_error);
-    match result {
-        Ok(_) => Ok(()),
-        Err(error) if error.code.as_deref() == Some("name_taken") => Ok(()),
-        Err(error) => Err(error),
+    let socket = host
+        .socket_id()
+        .ok_or("hc did not report its core identity".to_owned())?;
+    let endpoint = crate::runtime::hc_socket_path(|key| std::env::var(key).ok())?;
+    let directory = subscriber_directory(state, &socket);
+    let launch = lock_file(&directory, "launch.lock")?;
+    launch.lock().map_err(|error| error.to_string())?;
+    let launch_identity = BinaryIdentity::read(executable)?;
+    let binary = BinaryIdentity::read(&if executable == state.join("runtime/namedrop") {
+        state.join("runtime/current/namedrop")
+    } else {
+        executable.to_owned()
+    })?;
+    if let Some(record) = read_record(&directory)
+        && record.is_running()
+    {
+        if record.binary == binary
+            && record.launch_identity == launch_identity
+            && record.launch_path == executable
+            && record.is_current(state)
+        {
+            return Ok(());
+        }
+        stop_verified(&record)?;
     }
+    drop(wait_for_lifetime(&directory)?);
+    let mut command = crate::runtime::hc_command(executable);
+    command
+        .env("HC_SOCKET", endpoint)
+        .env("NAMEDROP_SUBSCRIBER_LAUNCH_PATH", executable)
+        .args(["--host", "hc", "--plugin-state"])
+        .arg(state)
+        .arg("events")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not launch HC subscriber: {error}"))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if read_record(&directory)
+            .is_some_and(|record| record.pid == child.id() && record.is_running())
+        {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            return Err(format!("HC subscriber exited before becoming ready: {status}").into());
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("HC subscriber did not become ready within five seconds"
+                .to_owned()
+                .into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn request_stop(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn run(state: &Path) -> Result<(), String> {
@@ -348,6 +646,45 @@ pub fn run(state: &Path) -> Result<(), String> {
     let socket = host
         .socket_id()
         .ok_or("hc did not report its core identity")?;
+    let directory = subscriber_directory(state, &socket);
+    let lifetime = lock_file(&directory, "lifetime.lock")?;
+    match lifetime.try_lock() {
+        Ok(()) => (),
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    }
+    let running = std::env::current_exe().map_err(|error| error.to_string())?;
+    let launch_path = std::env::var_os("NAMEDROP_SUBSCRIBER_LAUNCH_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| running.clone());
+    let record = SubscriberRecord {
+        launch_identity: BinaryIdentity::read(&launch_path)?,
+        pid: std::process::id(),
+        process_start: process_start(std::process::id())?,
+        launch_path,
+        binary: BinaryIdentity::read(&running)?,
+    };
+    if !record.is_current(state) {
+        return Ok(());
+    }
+    use std::io::Write;
+    let temporary_record = format!(".subscriber-{}.json", record.pid);
+    let mut record_file = lock_file(&directory, &temporary_record)?;
+    record_file.set_len(0).map_err(|error| error.to_string())?;
+    record_file
+        .write_all(&serde_json::to_vec(&record).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    std::fs::rename(
+        directory.join(temporary_record),
+        directory.join("subscriber.json"),
+    )
+    .map_err(|error| error.to_string())?;
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            request_stop as *const () as libc::sighandler_t,
+        );
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from);
@@ -370,9 +707,9 @@ pub fn run(state: &Path) -> Result<(), String> {
         ids: &ids,
     };
     let mut subscriber = Subscriber::default();
-    loop {
+    while !STOP.load(std::sync::atomic::Ordering::Relaxed) && record.is_current(state) {
         let mut child = transport
-            .command()
+            .checked_command()?
             .args(["events", "--json"])
             .process_group(0)
             .stdin(Stdio::null())
@@ -392,8 +729,29 @@ pub fn run(state: &Path) -> Result<(), String> {
                 }
             }
         });
-        loop {
-            match receiver.recv_timeout(Duration::from_millis(250)) {
+        'stream: loop {
+            let line = receiver.recv_timeout(Duration::from_millis(250));
+            if STOP.load(std::sync::atomic::Ordering::Relaxed) || !record.is_current(state) {
+                break;
+            }
+            let guard = loop {
+                match crate::runtime_command_guard(state, Some(Duration::from_millis(250))) {
+                    Ok(guard) => break guard,
+                    Err(error) => {
+                        eprintln!("Namedrop hc runtime: {error}");
+                        if STOP.load(std::sync::atomic::Ordering::Relaxed)
+                            || !record.is_current(state)
+                        {
+                            break 'stream;
+                        }
+                        std::thread::sleep(Duration::from_millis(25));
+                    }
+                }
+            };
+            if STOP.load(std::sync::atomic::Ordering::Relaxed) || !record.is_current(state) {
+                break;
+            }
+            match line {
                 Ok(Ok(line)) => {
                     if let Err(error) = subscriber.handle_line(&line, &runtime) {
                         eprintln!("Namedrop hc event: {error}");
@@ -405,10 +763,12 @@ pub fn run(state: &Path) -> Result<(), String> {
             if let Err(error) = subscriber.tick(&runtime) {
                 eprintln!("Namedrop hc delivery: {error}");
             }
+            drop(guard);
         }
         crate::runtime::stop_process_group(&mut child);
         drop(receiver);
         let _ = reader.join();
         std::thread::sleep(Duration::from_millis(250));
     }
+    Ok(())
 }

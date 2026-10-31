@@ -52,7 +52,8 @@ pub use groups::execute_group_operation;
 pub use handoff::execute_handoff_operation;
 pub use health::{
     HealthIssue, HealthRepair, HealthRepairKind, HealthReport, HealthSeverity, HealthStatus,
-    diagnose_collaboration, render_health_report_to_text, request_doctor_assistance,
+    append_hc_diagnostics, diagnose_collaboration, render_health_report_to_text,
+    request_doctor_assistance,
 };
 pub use hook::{
     execute_codex_app_server_hook, execute_session_start_hook, execute_user_prompt_submit_hook,

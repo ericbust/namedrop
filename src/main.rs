@@ -805,6 +805,7 @@ fn diagnose_runtime(runtime: &ProcessRuntime<'_>) -> namedrop::HealthReport {
     let mut report = diagnose_collaboration(runtime);
     if let RuntimeHost::Hc(host) = runtime.host {
         report.host_version = host.version().ok();
+        namedrop::append_hc_diagnostics(&mut report, runtime, &host);
     }
     report
 }
