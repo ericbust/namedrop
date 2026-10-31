@@ -3,8 +3,7 @@ mod agent_status_ui;
 mod naming_ui;
 mod popup_input;
 use namedrop::{
-    Clock, CommandResult, HerdrCommandExecutor, LifecycleRuntime, ProcessHerdr, ProcessIds,
-    SystemClock,
+    Clock, CommandResult, Host, LifecycleRuntime, ProcessHerdr, ProcessIds, SystemClock, TuiHost,
     cli::{Cli, RuntimeOptions},
     describe_operations, diagnose_collaboration, execute_context_operation,
     execute_control_operation, execute_group_operation, execute_handoff_operation,
@@ -24,6 +23,8 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+type TuiRuntime<'a> = LifecycleRuntime<'a, TuiHost<&'a ProcessHerdr>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
     if env::args_os().skip(1).eq(["--runtime-info"]) {
@@ -174,10 +175,14 @@ fn main() -> ExitCode {
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
-        return run_context_hook(state_directory, execute_user_prompt_submit_hook);
+        return run_context_hook(state_directory, |input, runtime| {
+            execute_user_prompt_submit_hook(input, runtime)
+        });
     }
     if let Some(state_directory) = cli.session_start_hook_state_directory() {
-        return run_context_hook(state_directory, execute_session_start_hook);
+        return run_context_hook(state_directory, |input, runtime| {
+            execute_session_start_hook(input, runtime)
+        });
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
         return run_mailbox_wake_hook(state_directory);
@@ -399,12 +404,15 @@ mod drain_report_tests {
     }
 }
 
-fn wake_runtime_mailboxes(
-    runtime: &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-) -> Result<(), String> {
+fn wake_runtime_mailboxes(runtime: &TuiRuntime<'_>) -> Result<(), String> {
     let here = match runtime.workspace_id {
         Some(id) => id.to_owned(),
-        None => namedrop::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
+        None => {
+            runtime
+                .host
+                .space(runtime.space_locator(), None)?
+                .workspace_id
+        }
     };
     // A terminal finishing here can queue its result in the author's workspace.
     for space in namedrop::spaces_to_wake(runtime.state_directory, runtime.session_socket_id, &here)
@@ -429,7 +437,9 @@ fn choose_name_type(cli: &Cli) -> Result<Option<namedrop::PaneType>, String> {
     if cli.name_pane_type().is_some() || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Ok(cli.name_pane_type());
     }
-    let default = with_runtime_options(&cli.runtime, namedrop::default_pane_type)?;
+    let default = with_runtime_options(&cli.runtime, |runtime: &TuiRuntime<'_>| {
+        namedrop::default_pane_type(runtime)
+    })?;
     loop {
         eprint!(
             "Pane type: terminal / agent{}: ",
@@ -600,9 +610,7 @@ fn run_operation(
 
 fn with_runtime_at<T>(
     state_directory: &Path,
-    action: impl FnOnce(
-        &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    ) -> Result<T, String>,
+    action: impl FnOnce(&TuiRuntime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     with_runtime_options(
         &RuntimeOptions {
@@ -615,9 +623,7 @@ fn with_runtime_at<T>(
 
 fn with_runtime_options<T>(
     options: &RuntimeOptions,
-    action: impl FnOnce(
-        &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    ) -> Result<T, String>,
+    action: impl FnOnce(&TuiRuntime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     let state_directory = options
         .plugin_state
@@ -630,49 +636,24 @@ fn with_runtime_options<T>(
     let claude_config = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let codex_config = env::var_os("CODEX_HOME").map(PathBuf::from);
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
-    let herdr = ProcessHerdr::default().with_socket(options.herdr_socket.clone());
-    let mut workspace_id = options
-        .herdr_workspace
-        .clone()
-        .or_else(|| env::var("HERDR_WORKSPACE_ID").ok());
-    // An explicit --herdr-pane is the caller's assertion. An inherited
-    // HERDR_PANE_ID can be stale: a daemon keeps the variables of the pane it
-    // started in, so it only counts when this process still runs under that
-    // pane's shell.
-    let mut pane_id = match options.herdr_pane.clone() {
-        Some(pane) => Some(pane),
-        None => match env::var("HERDR_PANE_ID") {
-            Ok(pane) => {
-                let sessions: Vec<String> = ["CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
-                    .into_iter()
-                    .filter_map(|key| env::var(key).ok())
-                    .filter(|session| !session.is_empty())
-                    .collect();
-                let sessions: Vec<&str> = sessions.iter().map(String::as_str).collect();
-                namedrop::verify_inherited_pane(&herdr, &pane, &sessions)?;
-                Some(pane)
-            }
-            Err(_) => None,
-        },
-    };
-    if workspace_id.is_none()
-        && let Some(pane) = pane_id.as_deref()
-    {
-        workspace_id = Some(namedrop::pane_workspace(&herdr, pane)?);
-    }
-    // An agent can run commands without the pane's Herdr variables (a shared
-    // Codex app-server keeps the environment it started with). The agent's
-    // own session ID still arrives, and Herdr knows which pane runs it.
-    if workspace_id.is_none()
-        && let Some((space, pane)) = ["CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
+    let transport = ProcessHerdr::default().with_socket(options.herdr_socket.clone());
+    let host = TuiHost::new(&transport);
+    let identity = host.caller_identity(&namedrop::CallerClaim {
+        workspace: options
+            .herdr_workspace
+            .clone()
+            .or_else(|| env::var("HERDR_WORKSPACE_ID").ok()),
+        pane: options.herdr_pane.clone(),
+        inherited_pane: env::var("HERDR_PANE_ID").ok(),
+        agent_sessions: ["CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
             .into_iter()
-            .find_map(|key| env::var(key).ok().filter(|session| !session.is_empty()))
-            .and_then(|session| namedrop::locate_agent_session_pane(&herdr, &session))
-    {
-        workspace_id = Some(space);
-        pane_id = pane_id.or(Some(pane));
-    }
-    let socket_id = session_socket_id(options.herdr_socket.clone(), &herdr);
+            .filter_map(|key| env::var(key).ok())
+            .filter(|session| !session.is_empty())
+            .collect(),
+    })?;
+    let workspace_id = identity.workspace;
+    let pane_id = identity.pane;
+    let socket_id = session_socket_id(options.herdr_socket.clone(), &host);
     let clock = SystemClock;
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
@@ -686,7 +667,7 @@ fn with_runtime_options<T>(
         workspace_id: workspace_id.as_deref(),
         current_pane_id: pane_id.as_deref(),
         session_socket_id: &socket_id,
-        herdr: &herdr,
+        host,
         clock: &clock,
         ids: &ids,
     })
@@ -697,10 +678,7 @@ fn with_runtime_options<T>(
 /// cannot run must not interrupt the person's turn.
 fn run_context_hook(
     state_directory: &Path,
-    execute: fn(
-        &str,
-        &LifecycleRuntime<'_, ProcessHerdr, SystemClock, ProcessIds>,
-    ) -> Option<serde_json::Value>,
+    execute: fn(&str, &TuiRuntime<'_>) -> Option<serde_json::Value>,
 ) -> ExitCode {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
@@ -729,21 +707,11 @@ fn run_context_hook(
 
 /// The socket that scopes this session's state: the caller's, the pane's, or
 /// the one the running Herdr server reports.
-fn session_socket_id(explicit: Option<String>, herdr: &ProcessHerdr) -> String {
+fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
     explicit
         .or_else(|| env::var("HERDR_SOCKET_PATH").ok())
-        .unwrap_or_else(|| {
-            herdr
-                .execute(&["status", "server"])
-                .ok()
-                .and_then(|output| {
-                    output
-                        .stdout
-                        .lines()
-                        .find_map(|line| line.strip_prefix("socket: ").map(str::to_owned))
-                })
-                .unwrap_or_else(|| "default".to_owned())
-        })
+        .or_else(|| host.socket_id())
+        .unwrap_or_else(|| "default".to_owned())
 }
 
 /// The wake the user-prompt-submit wrapper backgrounds once a mention was
@@ -752,13 +720,15 @@ fn session_socket_id(explicit: Option<String>, herdr: &ProcessHerdr) -> String {
 /// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
 fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
     let wake = || -> Result<(), String> {
-        let herdr = ProcessHerdr::default();
-        let socket_id = session_socket_id(None, &herdr);
+        let transport = ProcessHerdr::default();
+        let host = TuiHost::new(&transport);
+        let socket_id = session_socket_id(None, &host);
         let space_id = match env::var("HERDR_WORKSPACE_ID") {
             Ok(space_id) => space_id,
             Err(_) => {
                 let cwd = env::current_dir().map_err(|error| error.to_string())?;
-                namedrop::discover_worktree(&herdr, &cwd)?.workspace_id
+                host.space(namedrop::SpaceLocator::Checkout(&cwd), None)?
+                    .workspace_id
             }
         };
         let mut failures = Vec::new();
@@ -952,10 +922,11 @@ fn run_agent_status_worker() -> ExitCode {
                     wait_for_marker_or_deadline(&directory, due);
                     continue;
                 }
-                deadline_ms =
-                    with_runtime_options(&RuntimeOptions::default(), namedrop::drain_mailboxes)
-                        .ok()
-                        .and_then(|report| report.next_grace_due_ms());
+                deadline_ms = with_runtime_options(&RuntimeOptions::default(), |runtime| {
+                    namedrop::drain_mailboxes(runtime)
+                })
+                .ok()
+                .and_then(|report| report.next_grace_due_ms());
                 continue;
             }
             let _ = lock.unlock();

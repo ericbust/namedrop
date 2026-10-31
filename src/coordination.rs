@@ -97,15 +97,12 @@ pub(crate) struct AdoptInput {
     pub coordination_id: CoordinationId,
 }
 
-pub(crate) fn execute<E: crate::HerdrCommandExecutor, C: crate::Clock, I: crate::IdGenerator>(
+pub(crate) fn execute<H: crate::Host, C: crate::Clock, I: crate::IdGenerator>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String> {
-    let discovered = match runtime.workspace_id {
-        Some(id) => crate::discover_worktree_for_workspace(runtime.herdr, id)?,
-        None => crate::discover_worktree(runtime.herdr, runtime.cwd)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let ns = discovered.namespace(runtime.session_socket_id);
     let pane = runtime
         .current_pane_id
@@ -187,18 +184,14 @@ pub(crate) fn execute<E: crate::HerdrCommandExecutor, C: crate::Clock, I: crate:
 /// Validate and persist alongside append_message, in the same transaction. No
 /// transport acknowledgement changes work state; only these explicit actions do.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn track_message<
-    E: crate::HerdrCommandExecutor,
-    C: crate::Clock,
-    I: crate::IdGenerator,
->(
+pub(crate) fn track_message<H: crate::Host, C: crate::Clock, I: crate::IdGenerator>(
     tx: &mut StateTransaction<'_>,
     ns: &StateNamespace,
     draft: &MessageDraft,
     input: &TrackingInput,
     attempt: Option<&crate::DeliveryAttemptId>,
     live: &crate::spaces::LiveSpaces,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<(), StoreError> {
     let tracked = draft
         .in_reply_to

@@ -21,9 +21,8 @@
 //!   answer, and an ambiguous submission is uncertain rather than undelivered.
 
 use crate::{
-    AgentRuntime, Clock, DeliveryState, DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor,
-    HerdrCommandOutput, IdGenerator, LifecycleRuntime, PaneAddressRecord, StateStore,
-    discover_worktree, discover_worktree_for_workspace,
+    AgentRuntime, Clock, DeliveryState, DiscoveredPane, DiscoveredWorktree, Host, IdGenerator,
+    LifecycleRuntime, PaneAddressRecord, StateStore,
 };
 use serde_json::{Value, json};
 use std::{
@@ -58,7 +57,7 @@ const MAX_PANE_ROWS: usize = 32;
 
 /// Recent unwrapped lines requested per excerpt. The plan's ceiling is 120; a
 /// glance only needs the tail, and every excerpt is byte-capped below.
-const EXCERPT_LINES: &str = "40";
+const EXCERPT_LINES: usize = 40;
 
 /// Bytes kept per excerpt, counted from the end.
 const MAX_EXCERPT_BYTES: usize = 2_048;
@@ -93,20 +92,19 @@ const REQUESTS_UNKNOWN: &str =
 /// `origin`, `observed_at_ms`, `panes`, `waits`, `handoffs_available`,
 /// `warnings` and `omitted_panes`. `waits` rows also carry the recipient
 /// `alias` so the panel can name a recipient whose pane is gone.
-pub fn collect_agent_status<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn collect_agent_status<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     expected_terminal: &str,
     expected_session: Option<&str>,
     cancelled: &AtomicBool,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
     let observed_at_ms = runtime.clock.now_unix_ms();
     let reads = Deadline {
-        herdr: runtime.herdr,
         clock: runtime.clock,
         deadline_ms: observed_at_ms.saturating_add(COLLECTION_BUDGET_MS),
         cancelled,
@@ -138,7 +136,7 @@ where
     });
 
     let ordered = wait_first_order(&visible, origin, &waits);
-    let rows = pane_rows(&ordered, &addresses, &reads, &mut warnings);
+    let rows = pane_rows(&runtime.host, &ordered, &addresses, &reads, &mut warnings);
 
     // Identities are re-read after the excerpts, so every pane in the snapshot
     // is one whose space, terminal and session held for the whole collection.
@@ -185,33 +183,48 @@ where
     }))
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    reads: &Deadline<'_, E, C>,
+fn discover<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    reads: &Deadline<'_, C>,
 ) -> Result<DiscoveredWorktree, String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
-    match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(reads, workspace_id),
-        None => discover_worktree(reads, runtime.cwd),
-    }
+    runtime
+        .host
+        .space(runtime.space_locator(), Some(reads))
+        .map_err(String::from)
 }
 
-/// Spends one collection budget across every read, so a slow pane cannot
-/// consume the whole panel's latency budget. Reads made through the existing
-/// discovery helpers pass through here too, and the state store is handed the
-/// same remaining budget.
-struct Deadline<'a, E, C> {
-    herdr: &'a E,
+struct Deadline<'a, C> {
     clock: &'a C,
     deadline_ms: u64,
     cancelled: &'a AtomicBool,
 }
 
-impl<E: HerdrCommandExecutor, C: Clock> Deadline<'_, E, C> {
+impl<C: Clock> Deadline<'_, C> {
+    /// What an excerpt read may be given: the remaining budget less the reserve
+    /// the closing identity check needs. Checking only whether a read may
+    /// *start* is not enough, because a stalled read spends whatever timeout it
+    /// was handed, so the reserve has to come out of the timeout itself.
+    fn remaining_before_verification(&self) -> Result<Duration, String> {
+        crate::Budget::remaining(self)?
+            .checked_sub(Duration::from_millis(VERIFY_RESERVE_MS))
+            .filter(|left| !left.is_zero())
+            .ok_or_else(|| {
+                format!(
+                    "Only the {VERIFY_RESERVE_MS} ms identity-check reserve is left of this \
+                     snapshot's budget."
+                )
+            })
+    }
+}
+
+impl<C: Clock> crate::Budget for Deadline<'_, C> {
+    /// Discovery, including the closing identity check, may use everything that
+    /// is left: it is the one read the snapshot cannot do without.
     fn remaining(&self) -> Result<Duration, String> {
         if self.cancelled.load(Ordering::Relaxed) {
             return Err(CANCELLED.to_owned());
@@ -224,39 +237,28 @@ impl<E: HerdrCommandExecutor, C: Clock> Deadline<'_, E, C> {
         }
         Ok(Duration::from_millis(remaining))
     }
-
-    /// What an excerpt read may be given: the remaining budget less the reserve
-    /// the closing identity check needs. Checking only whether a read may
-    /// *start* is not enough, because a stalled read spends whatever timeout it
-    /// was handed, so the reserve has to come out of the timeout itself.
-    fn remaining_before_verification(&self) -> Result<Duration, String> {
-        self.remaining()?
-            .checked_sub(Duration::from_millis(VERIFY_RESERVE_MS))
-            .filter(|left| !left.is_zero())
-            .ok_or_else(|| {
-                format!(
-                    "Only the {VERIFY_RESERVE_MS} ms identity-check reserve is left of this \
-                     snapshot's budget."
-                )
-            })
+    fn cancelled(&self) -> &AtomicBool {
+        self.cancelled
     }
-
-    fn bounded(
-        &self,
-        args: &[&str],
-        timeout: Duration,
-        max_output_bytes: usize,
-    ) -> Result<HerdrCommandOutput, String> {
-        self.herdr
-            .execute_bounded(args, timeout, self.cancelled, max_output_bytes)
+    fn max_output_bytes(&self) -> usize {
+        MAX_LIST_OUTPUT_BYTES
     }
 }
 
-impl<E: HerdrCommandExecutor, C: Clock> HerdrCommandExecutor for Deadline<'_, E, C> {
-    /// Discovery, including the closing identity check, may use everything that
-    /// is left: it is the one read the snapshot cannot do without.
-    fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        self.bounded(args, self.remaining()?, MAX_LIST_OUTPUT_BYTES)
+struct ExcerptBudget<'a> {
+    timeout: Duration,
+    cancelled: &'a AtomicBool,
+}
+
+impl crate::Budget for ExcerptBudget<'_> {
+    fn remaining(&self) -> Result<Duration, String> {
+        Ok(self.timeout)
+    }
+    fn cancelled(&self) -> &AtomicBool {
+        self.cancelled
+    }
+    fn max_output_bytes(&self) -> usize {
+        MAX_EXCERPT_OUTPUT_BYTES
     }
 }
 
@@ -328,15 +330,15 @@ fn visible_panes<'a>(
 /// bound to panes, and the origin's outstanding requests. Either half can be
 /// unavailable on its own, and an unavailable half is reported rather than
 /// rendered as emptiness.
-fn read_state<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn read_state<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     discovered: &DiscoveredWorktree,
     origin: &DiscoveredPane,
-    reads: &Deadline<'_, E, C>,
+    reads: &Deadline<'_, C>,
     warnings: &mut Vec<String>,
 ) -> (Vec<PaneAddressRecord>, Option<Vec<Value>>)
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -346,7 +348,7 @@ where
     // The state read gets a share of the budget rather than all of it, and it
     // stops between report rows once that share is gone.
     let state_deadline_ms = now.saturating_add(STATE_BUDGET_MS).min(reads.deadline_ms);
-    let budget = match reads.remaining() {
+    let budget = match crate::Budget::remaining(reads) {
         Ok(budget) => budget.min(Duration::from_millis(STATE_BUDGET_MS)),
         Err(error) => {
             warnings.push(format!("{REQUESTS_UNKNOWN} {error}"));
@@ -602,14 +604,15 @@ fn wait_first_order<'a>(
 /// the excerpt cap and the remaining budget allow. Each row carries the exact
 /// identity its excerpt was read under, which is what [`verified_rows`] checks
 /// afterwards.
-fn pane_rows<E, C>(
+fn pane_rows<H, C>(
+    pane_host: &H,
     ordered: &[&DiscoveredPane],
     addresses: &[PaneAddressRecord],
-    reads: &Deadline<'_, E, C>,
+    reads: &Deadline<'_, C>,
     warnings: &mut Vec<String>,
 ) -> Vec<Value>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
 {
     let listed = ordered.len().min(MAX_PANE_ROWS);
@@ -620,22 +623,17 @@ where
         let mut excerpt = String::new();
         if index < MAX_EXCERPT_PANES {
             match reads.remaining_before_verification() {
-                Ok(timeout) => match reads.bounded(
-                    &[
-                        "pane",
-                        "read",
-                        &pane.pane_id,
-                        "--source",
-                        "recent-unwrapped",
-                        "--lines",
-                        EXCERPT_LINES,
-                    ],
-                    timeout,
-                    MAX_EXCERPT_OUTPUT_BYTES,
+                Ok(timeout) => match pane_host.read(
+                    &pane.pane_id,
+                    EXCERPT_LINES,
+                    Some(&ExcerptBudget {
+                        timeout,
+                        cancelled: reads.cancelled,
+                    }),
                 ) {
-                    Ok(output) => excerpt = excerpt_text(&output.stdout),
+                    Ok(output) => excerpt = excerpt_text(&output),
                     Err(error) => {
-                        read_error.get_or_insert(error);
+                        read_error.get_or_insert(error.into());
                     }
                 },
                 Err(_) => stopped_early = true,
@@ -798,4 +796,59 @@ fn one_line(value: &str, max_chars: usize) -> String {
         .take(max_chars.saturating_sub(1))
         .collect::<String>()
         + "…"
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::Budget;
+    use std::cell::Cell;
+
+    struct TestClock(Cell<u64>);
+    impl Clock for TestClock {
+        fn now_unix_ms(&self) -> u64 {
+            self.0.get()
+        }
+    }
+
+    #[test]
+    fn budget_messages() {
+        assert_eq!(COLLECTION_BUDGET_MS, 2_000);
+        assert_eq!(VERIFY_RESERVE_MS, 250);
+        let clock = TestClock(Cell::new(0));
+        let cancelled = AtomicBool::new(false);
+        let deadline = Deadline {
+            clock: &clock,
+            deadline_ms: COLLECTION_BUDGET_MS,
+            cancelled: &cancelled,
+        };
+        assert_eq!(
+            Budget::remaining(&deadline).unwrap(),
+            Duration::from_millis(2_000)
+        );
+        clock.0.set(1_750);
+        assert_eq!(
+            deadline.remaining_before_verification().unwrap_err(),
+            "Only the 250 ms identity-check reserve is left of this snapshot's budget."
+        );
+        clock.0.set(2_000);
+        assert_eq!(
+            Budget::remaining(&deadline).unwrap_err(),
+            "Reading this space took longer than its 2000 ms budget."
+        );
+        cancelled.store(true, Ordering::Relaxed);
+        assert_eq!(
+            Budget::remaining(&deadline).unwrap_err(),
+            "The agent status snapshot was cancelled."
+        );
+        let host = crate::TuiHost::new(crate::ProcessHerdr::default());
+        let excerpt = ExcerptBudget {
+            timeout: Duration::from_secs(1),
+            cancelled: &cancelled,
+        };
+        assert_eq!(
+            host.read("pane", 40, Some(&excerpt)).unwrap_err().message,
+            "Herdr read cancelled"
+        );
+    }
 }

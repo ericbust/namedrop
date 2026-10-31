@@ -68,24 +68,24 @@ fn is_label_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
 }
 
-pub(crate) struct HerdrWorkspaces<'a, E> {
-    herdr: &'a E,
-    listed: std::cell::OnceCell<Vec<crate::lifecycle::ListedWorkspace>>,
+pub(crate) struct HerdrWorkspaces<'a, H> {
+    herdr: &'a H,
+    listed: std::cell::OnceCell<Vec<crate::ListedWorkspace>>,
 }
 
-impl<'a, E: crate::HerdrCommandExecutor> HerdrWorkspaces<'a, E> {
-    pub(crate) fn new(herdr: &'a E) -> Self {
+impl<'a, H: crate::Host> HerdrWorkspaces<'a, H> {
+    pub(crate) fn new(herdr: &'a H) -> Self {
         Self {
             herdr,
             listed: std::cell::OnceCell::new(),
         }
     }
 
-    fn list(&self) -> Result<&[crate::lifecycle::ListedWorkspace], String> {
+    fn list(&self) -> Result<&[crate::ListedWorkspace], String> {
         if let Some(listed) = self.listed.get() {
             return Ok(listed);
         }
-        let listed = crate::lifecycle::workspace_labels(self.herdr)?;
+        let listed = self.herdr.spaces()?;
         Ok(self.listed.get_or_init(|| listed))
     }
 
@@ -137,9 +137,9 @@ impl SpaceEntry {
 }
 
 impl SpaceDirectory {
-    pub(crate) fn load<E: crate::HerdrCommandExecutor>(
+    pub(crate) fn load<H: crate::Host>(
         store: &mut crate::StateStore,
-        workspaces: &HerdrWorkspaces<'_, E>,
+        workspaces: &HerdrWorkspaces<'_, H>,
         socket: &str,
         here: &SpaceId,
         run: &RecipientRun,
@@ -173,7 +173,7 @@ impl SpaceDirectory {
             return Ok(Self::new(here_entry(None, None), Vec::new()));
         }
         let listed = workspaces.list()?;
-        let entry = |workspace: &crate::lifecycle::ListedWorkspace| {
+        let entry = |workspace: &crate::ListedWorkspace| {
             let space = SpaceId::new(&workspace.id);
             let stored = index.iter().find(|stored| stored.space == space);
             SpaceEntry {
@@ -325,8 +325,8 @@ impl LiveSpaces {
 
     /// Reads each listed workspace once. An empty list issues no Herdr
     /// command, so work that stays in one workspace reads exactly what it did.
-    pub(crate) fn load<E: crate::HerdrCommandExecutor>(
-        herdr: &E,
+    pub(crate) fn load<H: crate::Host>(
+        herdr: &H,
         here: crate::DiscoveredWorktree,
         spaces: &[SpaceId],
     ) -> Self {
@@ -334,7 +334,9 @@ impl LiveSpaces {
             .iter()
             .filter(|space| space.as_str() != here.workspace_id)
             .map(|space| {
-                let discovered = crate::discover_worktree_for_workspace(herdr, space.as_str()).ok();
+                let discovered = herdr
+                    .space(crate::SpaceLocator::Workspace(space.as_str()), None)
+                    .ok();
                 (space.clone(), discovered)
             })
             .collect();
@@ -465,9 +467,9 @@ impl RoutePlan {
     }
 }
 
-pub(crate) fn route<E: crate::HerdrCommandExecutor>(
+pub(crate) fn route<H: crate::Host>(
     store: &mut crate::StateStore,
-    workspaces: &HerdrWorkspaces<'_, E>,
+    workspaces: &HerdrWorkspaces<'_, H>,
     namespace: &StateNamespace,
     (author, in_reply_to): (&crate::PaneAddressId, Option<&crate::MessageId>),
     run: &RecipientRun,
@@ -1200,14 +1202,18 @@ mod tests {
             branch: None,
             panes: Vec::new(),
         };
-        let live = LiveSpaces::load(&NoHerdr, here.clone(), &[SpaceId::new("w1")]);
+        let live = LiveSpaces::load(
+            &crate::TuiHost::new(&NoHerdr),
+            here.clone(),
+            &[SpaceId::new("w1")],
+        );
         assert_eq!(live.of(&SpaceId::new("w1")), Some(&here));
         assert_eq!(
             live.of(&SpaceId::new("w2")),
             None,
             "an unread workspace is unknown"
         );
-        LiveSpaces::load(&NoHerdr, here, &[]);
+        LiveSpaces::load(&crate::TuiHost::new(&NoHerdr), here, &[]);
     }
 
     fn label(token: &str) -> WorkspaceLabel {

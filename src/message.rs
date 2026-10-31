@@ -4,7 +4,7 @@ use crate::{
     DeliveryId, LifecycleRuntime, MessageDraft, MessageRecipientDraft, MutationAttribution,
     PaneAddressLifecycle, PaneAddressRecord, StateNamespace, StateStore, ThreadId,
     context::{MessageContextInput, prepare_message_context, record_snapshot_activation_failure},
-    discover_worktree, discover_worktree_for_workspace, validate_alias,
+    validate_alias,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -48,9 +48,9 @@ impl ParsedMessage {
     }
 }
 
-pub(crate) fn body_reference_aliases<E: crate::HerdrCommandExecutor>(
+pub(crate) fn body_reference_aliases<H: crate::Host>(
     parsed: &ParsedMessage,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> Vec<String> {
     let mut live = Vec::new();
     for label in parsed
@@ -442,18 +442,18 @@ pub fn validate_message_input(operation: &str, input: Value) -> Result<(), Strin
     Ok(())
 }
 
-pub fn execute_message_operation<E, C, I>(
+pub fn execute_message_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host + Copy,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     let input = parse_operation_input(operation, input)?;
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(&runtime.host);
     if operation == "send"
         && let Some(scope) = scope_without_mention(&input.source)
     {
@@ -508,12 +508,12 @@ pub(crate) enum PromptMentionOutcome {
 /// Commits the verbatim leading-Mention shorthand used by native prompt hooks.
 /// `None` when the prompt's `#` run names no Herdr workspace: it never
 /// addressed anyone, so it stays the person's own prompt.
-pub(crate) fn persist_prompt_mention_operation<E, C, I>(
+pub(crate) fn persist_prompt_mention_operation<H, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Option<PromptMentionOutcome>
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -542,12 +542,12 @@ where
     })
 }
 
-fn persist_prompt_mention<E, C, I>(
+fn persist_prompt_mention<H, C, I>(
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Vec<crate::store::ForwardedCopy>, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -559,7 +559,7 @@ where
             .to_owned()
             .into());
     }
-    let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
+    let workspaces = crate::spaces::HerdrWorkspaces::new(&runtime.host);
     if let Some(scope) = workspace_prompt_scope(&input.source) {
         return Err(workspace_prompt_refusal(scope, runtime, &workspaces));
     }
@@ -586,13 +586,13 @@ where
 
 /// A `#` run naming no one is either prose, which stays the person's own
 /// text, or a workspace prompt, refused with the names in its scope.
-fn workspace_prompt_refusal<E, C, I>(
+fn workspace_prompt_refusal<H, C, I>(
     scope: SpaceScope,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> SendError
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -602,23 +602,23 @@ where
     }
 }
 
-fn names_in_prompt_scope<E, C, I>(
+fn names_in_prompt_scope<H, C, I>(
     scope: &SpaceScope,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> Result<Vec<ScopedName>, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
     if !names_workspaces(scope, workspaces) {
         return Err(SendError::NotAMention);
     }
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
-    };
+    let discovered = runtime
+        .host
+        .space(runtime.space_locator(), None)
+        .map_err(String::from)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let directory = crate::spaces::SpaceDirectory::load(
@@ -634,9 +634,9 @@ where
     crate::spaces::names_in_scope(scope, &directory).map_err(SendError::Refused)
 }
 
-fn names_workspaces<E: crate::HerdrCommandExecutor>(
+fn names_workspaces<H: crate::Host>(
     scope: &SpaceScope,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> bool {
     match scope {
         SpaceScope::Named(labels) => labels
@@ -670,13 +670,13 @@ impl std::fmt::Display for SendError {
 
 type PersistedMessage = (Value, Vec<crate::store::ForwardedCopy>);
 
-fn persist_prepared_message_operation<E, C, I>(
+fn persist_prepared_message_operation<H, C, I>(
     input: PreparedMessageOperation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
-    workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    workspaces: &crate::spaces::HerdrWorkspaces<'_, H>,
 ) -> Result<PersistedMessage, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
@@ -726,10 +726,10 @@ where
     let pane_id = runtime
         .current_pane_id
         .ok_or_else(|| "the current Herdr pane is required to resolve the sender".to_owned())?;
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
-    };
+    let discovered = runtime
+        .host
+        .space(runtime.space_locator(), None)
+        .map_err(String::from)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let replay = Replay {
@@ -794,7 +794,7 @@ where
         let spaces = store
             .transaction(|transaction| routing.remote_spaces(transaction, &namespace))
             .map_err(|error| error.to_string())?;
-        crate::spaces::LiveSpaces::load(runtime.herdr, discovered.clone(), &spaces)
+        crate::spaces::LiveSpaces::load(&runtime.host, discovered.clone(), &spaces)
     } else {
         crate::spaces::LiveSpaces::here(discovered.clone())
     };
@@ -1274,12 +1274,12 @@ impl Replay<'_> {
     }
 }
 
-fn sending_author<E, C, I>(
+fn sending_author<H, C, I>(
     transaction: &crate::StateTransaction<'_>,
     namespace: &StateNamespace,
     pane_id: &str,
     request: &Replay<'_>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<(crate::RoutingAddressSnapshot, MutationAttribution), crate::StoreError>
 where
     C: crate::Clock,
@@ -1326,15 +1326,15 @@ where
     Ok((author, attribution))
 }
 
-fn present_committed<E, C, I>(
+fn present_committed<H, C, I>(
     committed: Committed,
     store: &mut StateStore,
     namespace: &StateNamespace,
     disposition_attempt_id: &Option<crate::DeliveryAttemptId>,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<PersistedMessage, SendError>
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
 {
     let Committed {
         routed,
@@ -1383,44 +1383,30 @@ where
     Ok((response, forwarded))
 }
 
-fn present_relay_result<E, C, I>(
+fn present_relay_result<H, C, I>(
     relay: &RelayPresentation,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Value
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
 {
     let title = format!("@{} replied", relay.sender_alias);
     let summary = relay.body.lines().next().unwrap_or_default().trim();
     let summary = summary.chars().take(160).collect::<String>();
-    let token = format!("namedrop-relay=@{}: {summary}", relay.sender_alias);
-    let notification = runtime.herdr.execute(&[
-        "notification",
-        "show",
-        &title,
-        "--body",
-        &relay.body,
-        "--position",
-        "bottom-right",
-        "--sound",
-        "done",
-    ]);
-    let metadata = runtime.herdr.execute(&[
-        "pane",
-        "report-metadata",
+    let text = format!("@{}: {summary}", relay.sender_alias);
+    let notification = runtime.host.notify(&title, &relay.body, true);
+    let metadata = runtime.host.report_metadata(
         &relay.pane_id,
-        "--source",
-        "namedrop-relay",
-        "--token",
-        &token,
-        "--ttl-ms",
-        "15000",
-    ]);
+        &crate::PaneMetadata::Relay {
+            text,
+            ttl_ms: 15000,
+        },
+    );
     json!({
         "mode": crate::DeliveryReplyMode::ReturnToSource.as_str(),
         "notification_shown": notification.is_ok(),
-        "notification_error": notification.err(),
-        "metadata_error": metadata.err(),
+        "notification_error": notification.err().map(String::from),
+        "metadata_error": metadata.err().map(String::from),
     })
 }
 

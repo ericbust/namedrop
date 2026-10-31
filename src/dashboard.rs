@@ -4,7 +4,7 @@ mod hub;
 mod server_files;
 pub mod snapshot;
 
-use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, StateNamespace};
+use crate::{Clock, Host, IdGenerator, LifecycleRuntime, StateNamespace};
 use serde_json::{Value, json};
 use server_files::{ServerFiles, ServerInfo, Token};
 use snapshot::SpaceKey;
@@ -22,19 +22,24 @@ use std::{
 const DEFAULT_IDLE: Duration = Duration::from_secs(10 * 60);
 
 pub fn open(
-    runtime: &LifecycleRuntime<'_, impl HerdrCommandExecutor, impl Clock, impl IdGenerator>,
+    runtime: &LifecycleRuntime<'_, impl Host, impl Clock, impl IdGenerator>,
     open_browser: bool,
 ) -> Result<Value, String> {
     let workspace_id = match runtime.workspace_id {
         Some(id) => id.to_owned(),
-        None => crate::discover_worktree(runtime.herdr, runtime.cwd)?.workspace_id,
+        None => {
+            runtime
+                .host
+                .space(crate::SpaceLocator::Checkout(runtime.cwd), None)?
+                .workspace_id
+        }
     };
     let key = SpaceKey::of(&StateNamespace::for_space(
         runtime.session_socket_id,
         &workspace_id,
     ));
     let files = ServerFiles::at(runtime.state_directory)?;
-    if let Some(label) = workspace_label(runtime.herdr, &workspace_id)
+    if let Some(label) = workspace_label(&runtime.host, &workspace_id)
         && let Err(error) = files.record_label(key.as_str(), &label)
     {
         eprintln!("Could not save the workspace label: {error}");
@@ -104,13 +109,13 @@ fn answers(info: &ServerInfo, token: &Token) -> bool {
     })
 }
 
-fn workspace_label(herdr: &impl HerdrCommandExecutor, workspace_id: &str) -> Option<String> {
-    let output = herdr.execute(&["workspace", "get", workspace_id]).ok()?;
-    let value: Value = serde_json::from_str(&output.stdout).ok()?;
-    value["result"]["workspace"]["label"]
-        .as_str()
-        .filter(|label| !label.trim().is_empty())
-        .map(str::to_owned)
+fn workspace_label(host: &impl Host, workspace_id: &str) -> Option<String> {
+    host.spaces()
+        .ok()?
+        .into_iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .map(|workspace| workspace.label)
+        .filter(|label| !label.trim().is_empty() && label != workspace_id)
 }
 
 fn launch_browser(url: &str) -> bool {

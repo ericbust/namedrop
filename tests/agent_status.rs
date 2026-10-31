@@ -36,7 +36,7 @@ fn with_runtime_options<T>(
     _action: impl FnOnce(
         &namedrop::LifecycleRuntime<
             '_,
-            namedrop::ProcessHerdr,
+            namedrop::TuiHost<&'_ namedrop::ProcessHerdr>,
             namedrop::SystemClock,
             namedrop::ProcessIds,
         >,
@@ -164,7 +164,7 @@ struct Fixture(PathBuf);
 fn live_origin_probe() {
     use namedrop::{
         LifecycleRuntime, ProcessHerdr, ProcessIds, SystemClock, collect_agent_status,
-        discover_worktree_for_workspace, summarize_agent_status,
+        summarize_agent_status,
     };
     use serde_json::json;
     use std::{env, sync::atomic::AtomicBool, time::Instant};
@@ -176,7 +176,13 @@ fn live_origin_probe() {
     let home = env::var_os("HOME").map(PathBuf::from);
     let cwd = env::current_dir().unwrap();
     let herdr = ProcessHerdr::default().with_socket(Some(socket.clone()));
-    let before = discover_worktree_for_workspace(&herdr, &workspace).unwrap();
+    let before = namedrop::Host::space(
+        &namedrop::TuiHost::new(&herdr),
+        namedrop::SpaceLocator::Workspace(&workspace),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap();
     let origin = before
         .panes
         .iter()
@@ -193,7 +199,7 @@ fn live_origin_probe() {
         workspace_id: Some(&workspace),
         current_pane_id: Some(&pane_id),
         session_socket_id: &socket,
-        herdr: &herdr,
+        host: namedrop::TuiHost::new(&herdr),
         clock: &clock,
         ids: &ids,
     };
@@ -242,7 +248,13 @@ fn live_origin_probe() {
         warm_ms = Some(warm_started.elapsed().as_millis());
         cache_reused = &warm == summary;
     }
-    let after = discover_worktree_for_workspace(&herdr, &workspace).unwrap();
+    let after = namedrop::Host::space(
+        &namedrop::TuiHost::new(&herdr),
+        namedrop::SpaceLocator::Workspace(&workspace),
+        None,
+    )
+    .map_err(String::from)
+    .unwrap();
     let unchanged = after.panes.iter().any(|p| {
         p.pane_id == pane_id
             && p.terminal_id == origin.terminal_id

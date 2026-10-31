@@ -712,12 +712,12 @@ impl IntegrationPackageInstallation {
 /// lifecycle event: it blocks challenge issuance for that runtime and leaves one
 /// durable Integration Registration Attention Item naming the failed target. A
 /// later successful refresh resolves that item.
-pub(crate) fn refresh_user_integration_packages<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn refresh_user_integration_packages<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     discovered: &DiscoveredWorktree,
 ) -> Result<IntegrationPackageInstallation, String>
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {

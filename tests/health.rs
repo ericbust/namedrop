@@ -139,7 +139,7 @@ impl Fixture {
             ids: Ids(AtomicU64::new(1)),
         }
     }
-    fn runtime(&self) -> LifecycleRuntime<'_, Host, Time, Ids> {
+    fn runtime(&self) -> LifecycleRuntime<'_, namedrop::TuiHost<&'_ Host>, Time, Ids> {
         LifecycleRuntime {
             state_directory: &self.root,
             home_directory: Some(&self.home),
@@ -148,7 +148,7 @@ impl Fixture {
             workspace_id: None,
             current_pane_id: Some("pane-1"),
             session_socket_id: "socket-a",
-            herdr: &self.host,
+            host: namedrop::TuiHost::new(&self.host),
             clock: &Time,
             ids: &self.ids,
         }
@@ -639,7 +639,7 @@ fn doctor_reports_unsupported_codex_without_preparing_its_home() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &host,
+        host: namedrop::TuiHost::new(&host),
         clock: &Time,
         ids: &f.ids,
     };
@@ -687,7 +687,7 @@ fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
         workspace_id: None,
         current_pane_id: Some("pane-1"),
         session_socket_id: "socket-a",
-        herdr: &host,
+        host: namedrop::TuiHost::new(&host),
         clock: &Time,
         ids: &f.ids,
     };
@@ -729,7 +729,7 @@ fn doctor_unavailable_preserves_the_underlying_cause() {
     }
     let f = Fixture::new();
     let runtime = LifecycleRuntime {
-        herdr: &Broken,
+        host: namedrop::TuiHost::new(&Broken),
         state_directory: &f.root,
         home_directory: Some(&f.home),
         agent_config: namedrop::AgentConfigDirectories::default(),
@@ -1164,7 +1164,7 @@ impl Fixture {
     fn codex_runtime<'a>(
         &'a self,
         host: &'a TwoCodexPanes<'a>,
-    ) -> LifecycleRuntime<'a, TwoCodexPanes<'a>, Time, Ids> {
+    ) -> LifecycleRuntime<'a, namedrop::TuiHost<&'a TwoCodexPanes<'a>>, Time, Ids> {
         LifecycleRuntime {
             state_directory: &self.root,
             home_directory: Some(&self.home),
@@ -1173,7 +1173,7 @@ impl Fixture {
             workspace_id: Some("workspace-1"),
             current_pane_id: Some("pane-2"),
             session_socket_id: "socket-a",
-            herdr: host,
+            host: namedrop::TuiHost::new(host),
             clock: &Time,
             ids: &self.ids,
         }

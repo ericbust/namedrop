@@ -31,7 +31,7 @@ fn with_runtime_options<T>(
     _action: impl FnOnce(
         &namedrop::LifecycleRuntime<
             '_,
-            namedrop::ProcessHerdr,
+            namedrop::TuiHost<&'_ namedrop::ProcessHerdr>,
             namedrop::SystemClock,
             namedrop::ProcessIds,
         >,
@@ -1356,7 +1356,7 @@ fn check(herdr: &FakeHerdr, session: Option<&str>, cancelled: &AtomicBool) -> Id
         workspace_id: Some("w44"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        herdr,
+        host: namedrop::TuiHost::new(herdr),
         clock: &FakeClock,
         ids: &FakeIds,
     };

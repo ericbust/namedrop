@@ -82,6 +82,10 @@ elif [ "$1 $2" = "plugin pane" ]; then
     case "$arg" in --workspace|--target-pane) echo 'overlay and popup plugin panes target the active pane' >&2; exit 1;; esac
   done
   printf '%s\n' "$@" > "$TEST_ARGS"
+  if [ "$3" = open ] && [ "$TEST_POPUP_INVALID_JSON" = 1 ]; then
+    printf '%s\n' 'not JSON'
+    exit 0
+  fi
   printf '%s\n' '{"result":{"pane_id":"popup"}}'
 else printf '%s\n' '{}'; fi
 "#).unwrap();
@@ -226,6 +230,92 @@ fn naming_shortcut_has_a_real_popup_entrypoint() {
         "\"ui\", \"run\"",
     ] {
         assert!(manifest.contains(expected), "missing {expected}");
+    }
+}
+
+#[test]
+fn popup_launch_reports_an_unreadable_host_result() {
+    let f = Fixture::new();
+    let output = f
+        .command()
+        .args([
+            "--human",
+            "--herdr-workspace",
+            "w1",
+            "--herdr-pane",
+            "p1",
+            "ui",
+            "launch",
+            "name",
+        ])
+        .env("TEST_POPUP_INVALID_JSON", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "{output:?}");
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Herdr returned an unreadable popup result: "),
+        "{error}"
+    );
+}
+
+#[test]
+fn every_popup_launch_preserves_the_full_ordered_argv() {
+    let f = Fixture::new();
+    for (mode, entrypoint, width, height) in [
+        ("name", "naming", "72", "20"),
+        ("manage", "management", "72", "24"),
+        ("doctor", "doctor", "72", "24"),
+        ("status", "agent-status", "84", "24"),
+        ("tour", "tour", "72", "24"),
+    ] {
+        let output = f
+            .command()
+            .args([
+                "--herdr-workspace",
+                "w1",
+                "--herdr-pane",
+                "p1",
+                "ui",
+                "launch",
+                mode,
+            ])
+            .env("TEST_AGENT", "1")
+            .env("TEST_AGENT_SESSION", "origin-session")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{mode}: {output:?}");
+        let args = fs::read_to_string(f.0.join("args")).unwrap();
+        let state = format!("HERDR_PLUGIN_STATE_DIR={}", f.0.join("state").display());
+        let expected = [
+            "plugin",
+            "pane",
+            "open",
+            "--plugin",
+            "namedrop",
+            "--entrypoint",
+            entrypoint,
+            "--placement",
+            "popup",
+            "--width",
+            width,
+            "--height",
+            height,
+            "--env",
+            "NAMEDROP_TARGET_WORKSPACE=w1",
+            "--env",
+            "NAMEDROP_TARGET_PANE=p1",
+            "--env",
+            "NAMEDROP_TARGET_TERMINAL=t1",
+            "--env",
+            "NAMEDROP_TARGET_SESSION=origin-session",
+            "--env",
+            &state,
+            "--env",
+            "HERDR_SOCKET_PATH=test-socket",
+            "--focus",
+        ];
+        assert_eq!(args.lines().collect::<Vec<_>>(), expected, "{mode}");
     }
 }
 

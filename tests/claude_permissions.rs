@@ -101,7 +101,7 @@ print(json.dumps({'result':result}))
         let report: Value = serde_json::from_slice(&output.stdout).unwrap();
         serde_json::from_value(report["data"].clone()).unwrap_or_else(|_| panic!("{output:?}"))
     }
-    fn runtime(&self) -> LifecycleRuntime<'_, Host, Time, Ids> {
+    fn runtime(&self) -> LifecycleRuntime<'_, namedrop::TuiHost<&'_ Host>, Time, Ids> {
         LifecycleRuntime {
             state_directory: &self.root,
             home_directory: Some(&self.home),
@@ -113,7 +113,7 @@ print(json.dumps({'result':result}))
             workspace_id: None,
             current_pane_id: Some("pane-1"),
             session_socket_id: "socket-a",
-            herdr: &Host,
+            host: namedrop::TuiHost::new(&Host),
             clock: &Time,
             ids: &self.ids,
         }

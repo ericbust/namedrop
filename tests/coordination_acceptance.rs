@@ -90,7 +90,10 @@ impl Fixture {
     fn ns(&self) -> StateNamespace {
         StateNamespace::for_space("synthetic-socket", "synthetic-workspace")
     }
-    fn runtime<'a>(&'a self, pane: &'a str) -> LifecycleRuntime<'a, Self, Self, Self> {
+    fn runtime<'a>(
+        &'a self,
+        pane: &'a str,
+    ) -> LifecycleRuntime<'a, namedrop::TuiHost<&'a Self>, Self, Self> {
         LifecycleRuntime {
             state_directory: &self.state,
             home_directory: Some(&self.home),
@@ -99,7 +102,7 @@ impl Fixture {
             workspace_id: Some("synthetic-workspace"),
             current_pane_id: Some(pane),
             session_socket_id: "synthetic-socket",
-            herdr: self,
+            host: namedrop::TuiHost::new(self),
             clock: self,
             ids: self,
         }

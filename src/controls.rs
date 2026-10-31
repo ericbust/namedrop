@@ -1,6 +1,5 @@
 use crate::{
     ActorKind, LifecycleRuntime, MutationAttribution, PaneAddressId, StateStore, ThreadId,
-    discover_worktree, discover_worktree_for_workspace,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -46,20 +45,17 @@ struct AcknowledgeDeliveryInput {
     confirmed: bool,
 }
 
-pub fn execute_control_operation<E, C, I>(
+pub fn execute_control_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution =
         MutationAttribution::new(ActorKind::Human, "local-human", runtime.clock.now_unix_ms());
@@ -210,10 +206,7 @@ where
                 .map_err(|error| error.to_string())?;
             let mut interrupted_pane_ids = Vec::new();
             let mut warnings = Vec::new();
-            let live_discovered = match runtime.workspace_id {
-                Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id),
-                None => discover_worktree(runtime.herdr, runtime.cwd),
-            };
+            let live_discovered = runtime.host.space(runtime.space_locator(), None);
             let live_discovered = match live_discovered {
                 Ok(live_discovered) => Some(live_discovered),
                 Err(error) => {
@@ -251,12 +244,7 @@ where
                     ));
                     continue;
                 }
-                match runtime
-                    .herdr
-                    // Herdr key-combo syntax joins a modifier to its key with
-                    // `+`; it answers `ctrl-c` with `invalid_key`.
-                    .execute(&["agent", "send-keys", &response.pane_id, "ctrl+c"])
-                {
+                match runtime.host.interrupt(&response.pane_id) {
                     Ok(_) => interrupted_pane_ids.push(response.pane_id.clone()),
                     Err(error) => warnings.push(format!(
                         "Could not interrupt {} after stopping the thread: {error}",

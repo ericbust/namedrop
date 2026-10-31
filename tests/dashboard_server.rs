@@ -488,8 +488,22 @@ fn fake_herdr(root: &Path) -> PathBuf {
     let herdr = root.join("herdr");
     fs::write(
         &herdr,
-        "#!/bin/sh\n[ \"$1 $2\" = \"workspace get\" ] || exit 1\n\
-         printf '{\"result\":{\"workspace\":{\"label\":\"label-%s\"}}}' \"$3\"\n",
+        r#"#!/bin/sh
+case "$1 $2" in
+  "workspace list")
+    printf '%s\n' '{"result":{"workspaces":[
+      {"workspace_id":"w0","number":0,"label":"label-w0"},
+      {"workspace_id":"w1","number":1,"label":"label-w1"},
+      {"workspace_id":"w2","number":2,"label":"label-w2"},
+      {"workspace_id":"w3","number":3,"label":"label-w3"},
+      {"workspace_id":"w4","number":4},
+      {"workspace_id":"w5","number":5,"label":"  "},
+      {"workspace_id":"w6","number":6,"label":"w6"}
+    ]}}'
+    ;;
+  *) exit 1 ;;
+esac
+"#,
     )
     .unwrap();
     fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
@@ -567,6 +581,22 @@ fn every_workspace_shares_one_server_with_its_own_page() {
         frame.contains(r#""label":{"text":"label-w1","truncated":false}"#),
         "the CLI records the Herdr label for the server: {frame}"
     );
+}
+
+#[test]
+fn workspaces_without_a_display_label_do_not_record_their_id() {
+    let directory = TestDirectory::new();
+    let state = state(&directory);
+    let _stop = StopOnDrop(state.clone());
+    fake_herdr(directory.path());
+
+    for workspace in ["w4", "w5", "w6", "w7"] {
+        open_dashboard(directory.path(), workspace);
+        assert!(
+            !state.join("dashboard/labels.json").exists(),
+            "workspace {workspace} recorded a missing, blank, id-only, or unlisted label"
+        );
+    }
 }
 
 #[test]

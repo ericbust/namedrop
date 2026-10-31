@@ -58,7 +58,7 @@ fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
         workspace_id: Some("w1"),
         current_pane_id: Some("p1"),
         session_socket_id: "socket",
-        herdr: &host,
+        host: namedrop::TuiHost::new(&host),
         clock: &Time,
         ids: &ids,
     };

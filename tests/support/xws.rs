@@ -288,7 +288,8 @@ pub struct Fixture {
     pub clock: TestClock,
 }
 
-pub type Runtime<'a> = LifecycleRuntime<'a, FakeHerdr, TestClock, SequenceIds>;
+pub type Runtime<'a> =
+    LifecycleRuntime<'a, namedrop::TuiHost<&'a FakeHerdr>, TestClock, SequenceIds>;
 
 impl Fixture {
     pub fn new() -> Self {
@@ -371,7 +372,7 @@ impl Fixture {
             workspace_id: Some(workspace),
             current_pane_id: Some(pane),
             session_socket_id: "socket-a",
-            herdr: &self.herdr,
+            host: namedrop::TuiHost::new(&self.herdr),
             clock: &self.clock,
             ids: &self.ids,
         }

@@ -1,10 +1,9 @@
 use crate::lifecycle::PaneLabel;
 use crate::{
-    ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate,
-    HerdrCommandExecutor, IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation,
-    LeaseDraft, LifecycleRuntime, MutationAttribution, PromptFailureKind, StateNamespace,
-    StateStore, StateTransaction, StoreError, collaboration_executable, discover_worktree,
-    discover_worktree_for_workspace, tool_environment,
+    ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate, Host,
+    IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation, LeaseDraft, LifecycleRuntime,
+    MutationAttribution, PromptFailureKind, StateNamespace, StateStore, StateTransaction,
+    StoreError, collaboration_executable, tool_environment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -104,9 +103,9 @@ pub fn spaces_to_wake(
     spaces
 }
 
-pub(crate) fn drain_receipt<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> Value
+pub(crate) fn drain_receipt<H, C, I>(runtime: &LifecycleRuntime<'_, H, C, I>) -> Value
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -242,12 +241,12 @@ fn observe_agent_attempt(
     }
 }
 
-pub(crate) fn publish_status_metadata<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn publish_status_metadata<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     discovered: &crate::DiscoveredWorktree,
 ) -> Result<(), String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
 {
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
@@ -263,8 +262,6 @@ where
         })
         .map_err(|error| error.to_string())?;
     let served = crate::codex_app_server::served_codex_panes(runtime, &discovered.panes);
-    let awaiting_token = format!("namedrop-awaiting={waiting}");
-    let attention_token = format!("namedrop-attention={attention}");
     for binding in bindings {
         if let Some(pane) = discovered
             .panes
@@ -285,27 +282,23 @@ where
                     )?;
                 }
             }
-            runtime.herdr.execute(&[
-                "pane",
-                "report-metadata",
+            runtime.host.report_metadata(
                 &binding.pane_id,
-                "--source",
-                "namedrop",
-                "--token",
-                &awaiting_token,
-                "--token",
-                &attention_token,
-            ])?;
+                &crate::PaneMetadata::Counters {
+                    awaiting: waiting,
+                    attention,
+                },
+            )?;
         }
     }
     Ok(())
 }
 
-pub fn drain_mailboxes<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn drain_mailboxes<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<DrainReport, String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -334,7 +327,7 @@ where
                 .transaction(|tx| tx.terminal_result(&namespace, &attempt.attempt_id))
                 .map_err(|e| e.to_string())?
                 .is_none()
-            && crate::terminal::shell_is_available(runtime.herdr, &attempt.pane_id)
+            && crate::terminal::shell_is_available(&runtime.host, &attempt.pane_id)
         {
             store
                 .transaction(|tx| {
@@ -372,7 +365,7 @@ where
         .transaction(|transaction| transaction.remote_seat_spaces(&namespace))
         .map_err(|error| error.to_string())?;
     let live =
-        crate::spaces::LiveSpaces::load(runtime.herdr, first_discovery.clone(), &remote_seats);
+        crate::spaces::LiveSpaces::load(&runtime.host, first_discovery.clone(), &remote_seats);
     store
         .transaction(|transaction| {
             transaction.complete_ready_result_sets(
@@ -407,7 +400,7 @@ where
         };
         if !live_candidate_matches(&first, &first_discovery)
             || (first.pane_type == crate::PaneType::Terminal
-                && !crate::terminal::shell_is_available(runtime.herdr, &first.pane_id))
+                && !crate::terminal::shell_is_available(&runtime.host, &first.pane_id))
         {
             if first.pane_type == crate::PaneType::Terminal {
                 report.terminal_waiting.push(address_id);
@@ -439,7 +432,7 @@ where
                         .iter()
                         .find(|p| p.pane_id == second.pane_id)
                         .map(|p| &p.terminal_id)
-                    || !crate::terminal::shell_is_available(runtime.herdr, &second.pane_id)))
+                    || !crate::terminal::shell_is_available(&runtime.host, &second.pane_id)))
         {
             if second.pane_type == crate::PaneType::Terminal {
                 report.terminal_waiting.push(address_id);
@@ -531,13 +524,9 @@ where
             continue;
         };
         let prompt_result = if second.pane_type == crate::PaneType::Terminal {
-            runtime
-                .herdr
-                .execute(&["pane", "run", &second.pane_id, &prompt])
+            runtime.host.run_in_pane(&second.pane_id, &prompt)
         } else {
-            runtime
-                .herdr
-                .execute(&["agent", "prompt", &second.pane_id, &prompt])
+            runtime.host.prompt(&second.pane_id, &prompt)
         };
         let attribution = MutationAttribution::new(
             ActorKind::Plugin,
@@ -589,10 +578,7 @@ where
                     .map_err(|error| error.to_string())?;
                 report.submitted.push(leased.attempt_id);
             }
-            Err(error)
-                if runtime.herdr.classify_prompt_failure(&error)
-                    == PromptFailureKind::TemporaryPreInvocation =>
-            {
+            Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {
                 store
                     .transaction(|transaction| {
                         transaction.return_delivery_attempt_to_queue(
@@ -604,10 +590,7 @@ where
                     .map_err(|error| error.to_string())?;
                 report.requeued.push(leased.attempt_id);
             }
-            Err(error)
-                if runtime.herdr.classify_prompt_failure(&error)
-                    == PromptFailureKind::DefinitiveNonRetryable =>
-            {
+            Err(error) if error.kind == PromptFailureKind::DefinitiveNonRetryable => {
                 store
                     .transaction(|transaction| {
                         transaction.transition_delivery_attempt(
@@ -654,16 +637,16 @@ where
     Ok(report)
 }
 
-fn discover<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn discover<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<crate::DiscoveredWorktree, String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
 {
-    match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id),
-        None => discover_worktree(runtime.herdr, runtime.cwd),
-    }
+    runtime
+        .host
+        .space(runtime.space_locator(), None)
+        .map_err(String::from)
 }
 
 fn live_candidate_matches(

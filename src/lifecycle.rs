@@ -1,10 +1,9 @@
 use crate::integration::{onboard_settled_integrations, pane_agent_runtime};
 use crate::{
-    ActorKind, AgentSessionId, AttentionItemRecord, Clock, HerdrCommandExecutor, IdGenerator,
-    MutationAttribution, PaneAddressDraft, PaneAddressId, PaneAddressRecord, PaneBindingId,
-    PaneRoleId, PaneRolePreset, StateNamespace, StateStore, StateTransaction, StoreError,
-    WorktreeId, WorktreeState, normalize_alias, publish_status_metadata, reconcile_delivery_state,
-    validate_alias,
+    ActorKind, AgentSessionId, AttentionItemRecord, Clock, Host, IdGenerator, MutationAttribution,
+    PaneAddressDraft, PaneAddressId, PaneAddressRecord, PaneBindingId, PaneRoleId, PaneRolePreset,
+    StateNamespace, StateStore, StateTransaction, StoreError, WorktreeId, WorktreeState,
+    normalize_alias, publish_status_metadata, reconcile_delivery_state, validate_alias,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -43,7 +42,7 @@ pub struct DiscoveredPane {
 }
 
 #[derive(Clone, Copy)]
-pub struct LifecycleRuntime<'a, E, C, I> {
+pub struct LifecycleRuntime<'a, H, C, I> {
     pub state_directory: &'a Path,
     /// The user directory holding the shared Agent Integration package targets
     /// every Worktree on this machine installs into. `None` when no user home
@@ -55,9 +54,18 @@ pub struct LifecycleRuntime<'a, E, C, I> {
     pub workspace_id: Option<&'a str>,
     pub current_pane_id: Option<&'a str>,
     pub session_socket_id: &'a str,
-    pub herdr: &'a E,
+    pub host: H,
     pub clock: &'a C,
     pub ids: &'a I,
+}
+
+impl<H, C, I> LifecycleRuntime<'_, H, C, I> {
+    pub fn space_locator(&self) -> crate::SpaceLocator<'_> {
+        match self.workspace_id {
+            Some(workspace) => crate::SpaceLocator::Workspace(workspace),
+            None => crate::SpaceLocator::Checkout(self.cwd),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -212,7 +220,7 @@ struct PaneEventInfo {
     agent_status: String,
     revision: u64,
     agent: Option<String>,
-    agent_session: Option<AgentSessionEntry>,
+    agent_session: Option<PaneEventSession>,
     cwd: Option<String>,
     display_agent: Option<String>,
     foreground_cwd: Option<String>,
@@ -227,20 +235,17 @@ struct PaneEventInfo {
     tokens: std::collections::BTreeMap<String, String>,
 }
 
-pub fn execute_lifecycle_operation<E, C, I>(
+pub fn execute_lifecycle_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    H: Host + Copy,
     C: Clock,
     I: IdGenerator,
 {
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let (actor_kind, actor_id) = if operation.starts_with("event.") || operation == "reconcile" {
         (ActorKind::Plugin, "herdr")
@@ -416,7 +421,7 @@ where
                     &pane.tab_id,
                     &address_id,
                     &format!("@{alias}"),
-                    runtime.herdr,
+                    &runtime.host,
                 )
             } else {
                 json!({"status": "unchanged", "reason": "tab_has_multiple_agents"})
@@ -501,7 +506,7 @@ where
                 false,
             )?;
             let shortcuts =
-                crate::shortcuts::activate_shortcuts(runtime.home_directory, runtime.herdr);
+                crate::shortcuts::activate_shortcuts(runtime.home_directory, &runtime.host);
             // After the shortcuts, so the tour's reopen shortcut already works
             // when the popup mentions it. It reports instead of failing.
             let tour = crate::tour::show_for_first_agent(runtime, &discovered, None);
@@ -788,8 +793,9 @@ where
             let event: PaneLifecycleEvent = parse_input(input)?;
             match event {
                 PaneLifecycleEvent::Created { pane } => {
-                    if let Ok(event_worktree) =
-                        discover_worktree_for_workspace(runtime.herdr, &pane.workspace_id)
+                    if let Ok(event_worktree) = runtime
+                        .host
+                        .space(crate::SpaceLocator::Workspace(&pane.workspace_id), None)
                     {
                         let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                         let event_runtime = LifecycleRuntime {
@@ -813,8 +819,9 @@ where
                     pane_id,
                     workspace_id,
                 } => {
-                    let event_worktree =
-                        discover_worktree_for_workspace(runtime.herdr, &workspace_id)?;
+                    let event_worktree = runtime
+                        .host
+                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &event_namespace)?;
                     let removed_address_id = store
@@ -838,7 +845,9 @@ where
                         workspace_id: Some(&workspace_id),
                         ..*runtime
                     };
-                    let refreshed = discover_worktree_for_workspace(runtime.herdr, &workspace_id)?;
+                    let refreshed = runtime
+                        .host
+                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &event_namespace,
@@ -869,8 +878,9 @@ where
                     tab_id,
                     workspace_id,
                 } => {
-                    let event_worktree =
-                        discover_worktree_for_workspace(runtime.herdr, &workspace_id)?;
+                    let event_worktree = runtime
+                        .host
+                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &event_namespace)?;
                     let removed_bindings = store
@@ -907,7 +917,9 @@ where
                         workspace_id: Some(&workspace_id),
                         ..*runtime
                     };
-                    let refreshed = discover_worktree_for_workspace(runtime.herdr, &workspace_id)?;
+                    let refreshed = runtime
+                        .host
+                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &event_namespace,
@@ -942,12 +954,14 @@ where
                         closed_tab_id,
                         closed_workspace_id,
                     );
-                    let source =
-                        discover_worktree_for_workspace(runtime.herdr, &previous_workspace_id)?;
+                    let source = runtime
+                        .host
+                        .space(crate::SpaceLocator::Workspace(&previous_workspace_id), None)?;
                     let source_namespace = source.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &source_namespace)?;
-                    let destination =
-                        discover_worktree_for_workspace(runtime.herdr, &pane.workspace_id)?;
+                    let destination = runtime
+                        .host
+                        .space(crate::SpaceLocator::Workspace(&pane.workspace_id), None)?;
                     store
                         .transaction(|transaction| {
                             apply_pane_move(
@@ -974,8 +988,9 @@ where
                         workspace_id: Some(&previous_workspace_id),
                         ..*runtime
                     };
-                    let refreshed =
-                        discover_worktree_for_workspace(runtime.herdr, &previous_workspace_id)?;
+                    let refreshed = runtime
+                        .host
+                        .space(crate::SpaceLocator::Workspace(&previous_workspace_id), None)?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &source_namespace,
@@ -1014,8 +1029,9 @@ where
                 event.title,
                 event.state_labels,
             );
-            let event_worktree =
-                discover_worktree_for_workspace(runtime.herdr, &event.workspace_id)?;
+            let event_worktree = runtime
+                .host
+                .space(crate::SpaceLocator::Workspace(&event.workspace_id), None)?;
             let event_namespace = event_worktree.namespace(runtime.session_socket_id);
             require_activated(&mut store, &event_namespace)?;
             if !event_worktree
@@ -1125,14 +1141,14 @@ impl PaneLabel {
     }
 }
 
-pub(crate) fn publish_pane_address_metadata<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub(crate) fn publish_pane_address_metadata<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     pane_id: &str,
     alias: &str,
     label: PaneLabel,
 ) -> Result<(), String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
 {
     let title = format!("@{alias}");
     let hint = label.hint(alias);
@@ -1140,25 +1156,16 @@ where
     let working = format!("@{alias} working");
     let blocked = format!("@{alias} needs attention");
     let unknown = hint.unwrap_or_else(|| format!("@{alias} status unknown"));
-    runtime.herdr.execute(&[
-        "pane",
-        "report-metadata",
+    runtime.host.report_metadata(
         pane_id,
-        "--source",
-        "namedrop-identity",
-        "--title",
-        &title,
-        "--state-label",
-        &format!("idle={ready}"),
-        "--state-label",
-        &format!("done={ready}"),
-        "--state-label",
-        &format!("working={working}"),
-        "--state-label",
-        &format!("blocked={blocked}"),
-        "--state-label",
-        &format!("unknown={unknown}"),
-    ])?;
+        &crate::PaneMetadata::Identity {
+            title,
+            ready,
+            working,
+            blocked,
+            unknown,
+        },
+    )?;
     Ok(())
 }
 
@@ -1168,16 +1175,16 @@ struct WorktreeReconciliation {
     installation: crate::IntegrationPackageInstallation,
 }
 
-fn reconcile_worktree<E, C, I>(
+fn reconcile_worktree<H, C, I>(
     store: &mut StateStore,
     namespace: &StateNamespace,
     discovered: &DiscoveredWorktree,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     attribution: &MutationAttribution,
     after_restart: bool,
 ) -> Result<WorktreeReconciliation, String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -1226,7 +1233,7 @@ fn apply_managed_tab_label(
     tab_id: &str,
     address_id: &PaneAddressId,
     desired_label: &str,
-    herdr: &impl HerdrCommandExecutor,
+    herdr: &impl Host,
 ) -> Value {
     let warning = || {
         json!({
@@ -1234,7 +1241,7 @@ fn apply_managed_tab_label(
             "message": "Pane named, but its tab label could not be updated.",
         })
     };
-    let Some(current_label) = current_tab_label(herdr, tab_id) else {
+    let Some(current_label) = herdr.tab_label(tab_id) else {
         return warning();
     };
     let intent = store.transaction(|transaction| {
@@ -1267,10 +1274,7 @@ fn apply_managed_tab_label(
         Ok(false) => json!({"status": "applied"}),
         Err(_) => warning(),
         Ok(true) => {
-            if herdr
-                .execute(&["tab", "rename", tab_id, desired_label])
-                .is_err()
-            {
+            if herdr.rename_tab(tab_id, desired_label).is_err() {
                 return warning();
             }
             let finalized = store.transaction(|transaction| {
@@ -1315,24 +1319,14 @@ fn tab_label_owner<'a>(
     candidates.next().is_none().then_some(owner)
 }
 
-fn current_tab_label(herdr: &impl HerdrCommandExecutor, tab_id: &str) -> Option<String> {
-    let output = herdr.execute(&["tab", "get", tab_id]).ok()?;
-    let value: Value = serde_json::from_str(&output.stdout).ok()?;
-    value
-        .pointer("/result/label")
-        .or_else(|| value.pointer("/result/tab/label"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-}
-
-fn reconcile_managed_tab_labels<E, C, I>(
+fn reconcile_managed_tab_labels<H, C, I>(
     store: &mut StateStore,
     namespace: &StateNamespace,
     discovered: &DiscoveredWorktree,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<(), String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -1382,7 +1376,7 @@ where
         } else {
             None
         };
-        let Some(current) = current_tab_label(runtime.herdr, &label.tab_id) else {
+        let Some(current) = runtime.host.tab_label(&label.tab_id) else {
             continue;
         };
         if let Some(pending) = label.pending_label.clone() {
@@ -1395,11 +1389,7 @@ where
                         .map_err(|error| error.to_string())?;
                     continue;
                 }
-                if runtime
-                    .herdr
-                    .execute(&["tab", "rename", &label.tab_id, &pending])
-                    .is_err()
-                {
+                if runtime.host.rename_tab(&label.tab_id, &pending).is_err() {
                     continue;
                 }
             }
@@ -1448,8 +1438,8 @@ where
             .transaction(|transaction| transaction.put_managed_tab_label(namespace, &label))
             .map_err(|error| error.to_string())?;
         if runtime
-            .herdr
-            .execute(&["tab", "rename", &label.tab_id, &replacement])
+            .host
+            .rename_tab(&label.tab_id, &replacement)
             .is_err()
         {
             continue;
@@ -1603,17 +1593,19 @@ enum AllWorkspaces {
     All,
 }
 
-fn every_workspace_addresses<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn every_workspace_addresses<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     here: &str,
     store: &mut StateStore,
 ) -> Result<Value, String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
-    let spaces: Vec<(crate::SpaceId, crate::WorkspaceLabel)> = workspace_labels(runtime.herdr)?
+    let spaces: Vec<(crate::SpaceId, crate::WorkspaceLabel)> = runtime
+        .host
+        .spaces()?
         .into_iter()
         .map(|workspace| {
             (
@@ -1638,7 +1630,9 @@ where
             Some(label),
             spaces.iter().map(|(other, label)| (other, Some(label))),
         );
-        let discovered = discover_worktree_for_workspace(runtime.herdr, space.as_str())?;
+        let discovered = runtime
+            .host
+            .space(crate::SpaceLocator::Workspace(space.as_str()), None)?;
         let groups = store
             .transaction(|transaction| transaction.list_mention_groups(&namespace))
             .map_err(|error| error.to_string())?;
@@ -1657,237 +1651,18 @@ where
     Ok(serde_json::json!({"here": here_label, "workspaces": workspaces}))
 }
 
-pub fn discover_worktree(
-    herdr: &impl HerdrCommandExecutor,
-    cwd: &Path,
-) -> Result<DiscoveredWorktree, String> {
-    let cwd = cwd
-        .to_str()
-        .ok_or_else(|| "Worktree path must be valid UTF-8".to_owned())?;
-    let worktree_output = herdr.execute(&["worktree", "list", "--cwd", cwd, "--json"])?;
-    let worktrees: WorktreeListEnvelope =
-        serde_json::from_str(&worktree_output.stdout).map_err(|error| error.to_string())?;
-    let WorktreeListResult { source, worktrees } = worktrees.result;
-    let worktree = worktrees
-        .into_iter()
-        .find(|worktree| Path::new(&worktree.path) == Path::new(cwd))
-        .ok_or_else(|| format!("Herdr did not resolve {cwd} as a Worktree"))?;
-    let workspace_id = worktree
-        .open_workspace_id
-        .clone()
-        .ok_or_else(|| format!("Worktree {} is not open in Herdr", worktree.path))?;
-    let repo_key = source
-        .as_ref()
-        .and_then(|source| source.repo_key.as_deref());
-    let (owners, unknown) = spaces_owning_checkout(herdr, &worktree, repo_key, &workspace_id)?;
-    if owners.len() > 1 || !unknown.is_empty() {
-        let open_in = match owners.as_slice() {
-            [owner] => format!("Herdr space {owner}"),
-            owners => format!("more than one Herdr space ({})", owners.join(", ")),
-        };
-        let suspects = if unknown.is_empty() {
-            String::new()
-        } else {
-            format!(
-                " and may be open in {}, whose checkout Herdr does not report",
-                unknown.join(", ")
-            )
-        };
-        return Err(format!(
-            "Checkout {} is open in {open_in}{suspects}, so Namedrop can't tell which one \
-             this command is for. Pass --herdr-workspace <space-id> (or --herdr-pane \
-             <pane-id>).",
-            worktree.path
-        ));
-    }
-    discover_panes(
-        herdr,
-        worktree.path,
-        workspace_id,
-        true,
-        worktree.label,
-        worktree.branch,
-    )
-}
-
-// `worktree list --cwd` names only the first opener. Returns the spaces proven
-// to own `checkout`, and, for a linked checkout, the spaces in the same
-// repository whose checkout Herdr does not report.
-fn spaces_owning_checkout(
-    herdr: &impl HerdrCommandExecutor,
-    checkout: &WorktreeEntry,
-    repo_key: Option<&str>,
-    opener: &str,
-) -> Result<(Vec<String>, Vec<String>), String> {
-    let output = herdr.execute(&["workspace", "list"])?;
-    let workspaces: WorkspaceListEnvelope =
-        serde_json::from_str(&output.stdout).map_err(|error| error.to_string())?;
-    let mut owners = vec![opener.to_owned()];
-    let mut unknown = Vec::new();
-    for workspace in workspaces.result.workspaces {
-        if workspace.workspace_id == opener {
-            continue;
-        }
-        // Herdr stamps `worktree` only through `worktree open` and
-        // `worktree create`, and then it names the space's own checkout.
-        if let Some(stamped) = workspace.worktree {
-            if Path::new(&stamped.checkout_path) == Path::new(&checkout.path) {
-                owners.push(workspace.workspace_id);
-            }
-            continue;
-        }
-        let listing = match worktree_list_for_workspace(herdr, &workspace.workspace_id) {
-            Ok(listing) => listing,
-            Err(error) if herdr_error_code(&error).as_deref() == Some("workspace_not_found") => {
-                None
-            }
-            Err(error) => return Err(error),
-        };
-        let Some(result) = listing else {
-            continue;
-        };
-        let other_repo = result
-            .source
-            .as_ref()
-            .and_then(|source| source.repo_key.as_deref())
-            .zip(repo_key)
-            .is_some_and(|(theirs, ours)| theirs != ours);
-        if other_repo {
-            continue;
-        }
-        match owned_worktree_index(&result, &workspace.workspace_id) {
-            Some(index)
-                if Path::new(&result.worktrees[index].path) == Path::new(&checkout.path) =>
-            {
-                owners.push(workspace.workspace_id);
-            }
-            Some(_) => {}
-            // A space on the repository root is always placed, as opener or
-            // through `source`, so only a checkout not known to be the root
-            // can hide an owner.
-            None if checkout.is_linked_worktree != Some(false) => {
-                unknown.push(workspace.workspace_id)
-            }
-            None => {}
-        }
-    }
-    owners.sort();
-    unknown.sort();
-    Ok((owners, unknown))
-}
-
-pub(crate) struct ListedWorkspace {
-    pub id: String,
-    pub label: String,
-    /// The repository a workspace's checkout belongs to, when Herdr stamped one.
-    pub repo: Option<String>,
-}
-
-pub(crate) fn workspace_labels(
-    herdr: &impl HerdrCommandExecutor,
-) -> Result<Vec<ListedWorkspace>, String> {
-    let output = herdr.execute(&["workspace", "list"])?;
-    let mut workspaces = serde_json::from_str::<WorkspaceListEnvelope>(&output.stdout)
-        .map_err(|error| error.to_string())?
-        .result
-        .workspaces;
-    workspaces.sort_by_key(|workspace| workspace.number);
-    Ok(workspaces
-        .into_iter()
-        .map(|workspace| {
-            let label = workspace
-                .label
-                .unwrap_or_else(|| workspace.workspace_id.clone());
-            ListedWorkspace {
-                id: workspace.workspace_id,
-                label,
-                repo: workspace.worktree.and_then(|worktree| worktree.repo_name),
-            }
-        })
-        .collect())
-}
-
-fn worktree_list_for_workspace(
-    herdr: &impl HerdrCommandExecutor,
-    workspace_id: &str,
-) -> Result<Option<WorktreeListResult>, String> {
-    let output = match herdr.execute(&["worktree", "list", "--workspace", workspace_id, "--json"]) {
-        Ok(output) => output,
-        Err(error) if herdr_error_code(&error).as_deref() == Some("not_git_worktree") => {
-            return Ok(None);
-        }
-        Err(error) => return Err(error),
-    };
-    let worktrees: WorktreeListEnvelope =
-        serde_json::from_str(&output.stdout).map_err(|error| error.to_string())?;
-    Ok(Some(worktrees.result))
-}
-
-fn owned_worktree_index(result: &WorktreeListResult, workspace_id: &str) -> Option<usize> {
-    result
-        .worktrees
-        .iter()
-        .position(|worktree| worktree.open_workspace_id.as_deref() == Some(workspace_id))
-        .or_else(|| {
-            // Herdr lists each checkout path once with its first opener as
-            // open_workspace_id, so a second workspace on the same path never
-            // matches by id. `source` names the requester only when it sits on
-            // the repo root, and then source_checkout_path is its checkout.
-            let source = result
-                .source
-                .as_ref()
-                .filter(|source| source.source_workspace_id.as_deref() == Some(workspace_id))?;
-            let checkout = source.source_checkout_path.as_deref()?;
-            result
-                .worktrees
-                .iter()
-                .position(|worktree| Path::new(&worktree.path) == Path::new(checkout))
-        })
-}
-
-pub fn discover_worktree_for_workspace(
-    herdr: &impl HerdrCommandExecutor,
-    workspace_id: &str,
-) -> Result<DiscoveredWorktree, String> {
-    let Some(mut result) = worktree_list_for_workspace(herdr, workspace_id)? else {
-        return discover_panes(
-            herdr,
-            format!("herdr-space:{workspace_id}"),
-            workspace_id.to_owned(),
-            false,
-            None,
-            None,
-        );
-    };
-    let index = owned_worktree_index(&result, workspace_id);
-    match index.map(|index| result.worktrees.swap_remove(index)) {
-        Some(worktree) => discover_panes(
-            herdr,
-            worktree.path,
-            workspace_id.to_owned(),
-            true,
-            worktree.label,
-            worktree.branch,
-        ),
-        None => Err(format!(
-            "Herdr returned a Worktree snapshot that does not contain space {workspace_id}"
-        )),
-    }
-}
-
 /// Asks Herdr which pane runs `agent_session_id` and returns its (space ID,
 /// pane ID). For agents whose command environment lost the Herdr pane
 /// variables. Only an exact, unique match counts, so it never guesses.
 pub fn locate_agent_session_pane(
-    herdr: &impl HerdrCommandExecutor,
+    host: &impl crate::Host,
     agent_session_id: &str,
 ) -> Option<(String, String)> {
-    let output = herdr.execute(&["pane", "list"]).ok()?;
-    let panes: PaneListEnvelope = serde_json::from_str(&output.stdout).ok()?;
-    let mut matches = panes.result.panes.into_iter().filter(|pane| {
-        pane.agent_session
+    let panes = host.panes(crate::PaneScope::All).ok()?;
+    let mut matches = panes.into_iter().filter(|pane| {
+        pane.agent_session_id
             .as_ref()
-            .is_some_and(|session| session.value == agent_session_id)
+            .is_some_and(|session| session.as_str() == agent_session_id)
     });
     let pane = matches.next()?;
     matches
@@ -1896,13 +1671,9 @@ pub fn locate_agent_session_pane(
         .then_some((pane.workspace_id, pane.pane_id))
 }
 
-pub fn pane_workspace(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Result<String, String> {
-    let output = herdr.execute(&["pane", "list"])?;
-    let panes: PaneListEnvelope =
-        serde_json::from_str(&output.stdout).map_err(|error| error.to_string())?;
+pub fn pane_workspace(host: &impl crate::Host, pane_id: &str) -> Result<String, String> {
+    let panes = host.panes(crate::PaneScope::All)?;
     panes
-        .result
-        .panes
         .into_iter()
         .find(|pane| pane.pane_id == pane_id)
         .map(|pane| pane.workspace_id)
@@ -1912,58 +1683,6 @@ pub fn pane_workspace(herdr: &impl HerdrCommandExecutor, pane_id: &str) -> Resul
                  --herdr-workspace <space-id>."
             )
         })
-}
-
-fn herdr_error_code(error: &str) -> Option<String> {
-    serde_json::from_str::<Value>(error).ok().and_then(|value| {
-        value
-            .pointer("/error/code")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    })
-}
-
-fn discover_panes(
-    herdr: &impl HerdrCommandExecutor,
-    worktree_path: String,
-    workspace_id: String,
-    worktree_attached: bool,
-    label: Option<String>,
-    branch: Option<String>,
-) -> Result<DiscoveredWorktree, String> {
-    let pane_output = herdr.execute(&["pane", "list", "--workspace", &workspace_id])?;
-    let panes: PaneListEnvelope =
-        serde_json::from_str(&pane_output.stdout).map_err(|error| error.to_string())?;
-    let panes = panes
-        .result
-        .panes
-        .into_iter()
-        .map(|pane| DiscoveredPane {
-            pane_id: pane.pane_id,
-            terminal_id: pane.terminal_id,
-            tab_id: pane.tab_id,
-            workspace_id: pane.workspace_id,
-            cwd: pane.cwd,
-            pane_label: pane.label.or(pane.title).or(pane.terminal_title_stripped),
-            agent_session_id: pane
-                .agent_session
-                .map(|session| AgentSessionId::new(session.value)),
-            agent: pane.agent.clone(),
-            occupant_label: pane.display_agent.or(pane.agent),
-            agent_status: pane.agent_status,
-            idle_state_label: pane
-                .state_labels
-                .and_then(|mut labels| labels.remove("idle")),
-        })
-        .collect();
-    Ok(DiscoveredWorktree {
-        worktree_id: WorktreeId::new(worktree_path),
-        workspace_id,
-        worktree_attached,
-        label,
-        branch,
-        panes,
-    })
 }
 
 /// The current space state used by the read-only health check.
@@ -2223,85 +1942,8 @@ fn reconcile_compacted_pane_bindings(
     Ok(())
 }
 
-#[derive(Deserialize)]
-struct WorktreeListEnvelope {
-    result: WorktreeListResult,
-}
-
-#[derive(Deserialize)]
-struct WorktreeListResult {
-    source: Option<WorktreeListSource>,
-    worktrees: Vec<WorktreeEntry>,
-}
-
-#[derive(Deserialize)]
-struct WorktreeListSource {
-    repo_key: Option<String>,
-    source_checkout_path: Option<String>,
-    source_workspace_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct WorktreeEntry {
-    path: String,
-    is_linked_worktree: Option<bool>,
-    open_workspace_id: Option<String>,
-    label: Option<String>,
-    branch: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceListEnvelope {
-    result: WorkspaceListResult,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceListResult {
-    workspaces: Vec<WorkspaceEntry>,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceEntry {
-    workspace_id: String,
-    label: Option<String>,
-    number: Option<u64>,
-    worktree: Option<WorkspaceWorktree>,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceWorktree {
-    checkout_path: String,
-    repo_name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct PaneListEnvelope {
-    result: PaneListResult,
-}
-
-#[derive(Deserialize)]
-struct PaneListResult {
-    panes: Vec<PaneEntry>,
-}
-
-#[derive(Deserialize)]
-struct PaneEntry {
-    pane_id: String,
-    terminal_id: String,
-    tab_id: String,
-    workspace_id: String,
-    cwd: Option<String>,
-    label: Option<String>,
-    title: Option<String>,
-    terminal_title_stripped: Option<String>,
-    agent: Option<String>,
-    display_agent: Option<String>,
-    agent_session: Option<AgentSessionEntry>,
-    agent_status: Option<String>,
-    state_labels: Option<std::collections::BTreeMap<String, String>>,
-}
-
 #[derive(Clone, Deserialize)]
-struct AgentSessionEntry {
-    value: String,
+struct PaneEventSession {
+    #[serde(rename = "value")]
+    _value: String,
 }

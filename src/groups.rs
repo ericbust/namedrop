@@ -1,4 +1,4 @@
-use crate::{LifecycleRuntime, StateStore, discover_worktree, discover_worktree_for_workspace};
+use crate::{LifecycleRuntime, StateStore};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -17,20 +17,17 @@ struct RemoveInput {
 
 /// Group mutations are user-requested management, like address management.
 /// Only the read-only list is part of the registered collaboration profile.
-pub fn execute_group_operation<E, C, I>(
+pub fn execute_group_operation<H, C, I>(
     operation: &str,
     input: Value,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<Value, String>
 where
-    E: crate::HerdrCommandExecutor,
+    H: crate::Host,
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    let discovered = match runtime.workspace_id {
-        Some(workspace) => discover_worktree_for_workspace(runtime.herdr, workspace)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let mut store = if operation == "group.list" {
         if !input.as_object().is_some_and(|o| o.is_empty()) {

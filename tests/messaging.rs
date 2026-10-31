@@ -162,7 +162,7 @@ fn explicit_send_resolves_and_atomically_fans_out_with_a_visible_receipt() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -208,7 +208,7 @@ fn a_held_mailbox_is_reported_on_new_sends_and_idempotent_replays() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -274,7 +274,7 @@ fn agent_authored_send_persists_explicit_delegation_provenance() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -315,7 +315,7 @@ fn agent_send_records_the_current_agent_session_as_author() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -356,7 +356,7 @@ fn idempotent_replay_uses_the_original_resolution_after_an_alias_rename() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -398,7 +398,7 @@ fn reply_routes_explicitly_and_reply_all_requires_every_previous_participant() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -482,7 +482,7 @@ fn unresolved_or_tombstoned_mentions_reject_without_partial_mailbox_writes() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -581,7 +581,7 @@ fn at_sign_prose_that_is_not_alias_shaped_sends_without_a_context_reference() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -628,7 +628,7 @@ fn request_ids_reject_conflicts_while_new_ids_create_new_messages() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };
@@ -676,7 +676,7 @@ fn request_fingerprint_matches_the_main_serialization_and_replays() {
         workspace_id: None,
         current_pane_id: Some("pane-author"),
         session_socket_id: "socket-a",
-        herdr: &FakeHerdr,
+        host: namedrop::TuiHost::new(&FakeHerdr),
         clock: &FixedClock,
         ids: &ids,
     };

@@ -2,9 +2,8 @@ use crate::codex_app_server::ServedPanes;
 use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
 use crate::{
-    AgentSessionId, AttentionSourceKind, Clock, HerdrCommandExecutor, IdGenerator,
-    LifecycleRuntime, PaneAddressLifecycle, PromptFailureKind, StateStore, discover_worktree,
-    discover_worktree_for_workspace,
+    AgentSessionId, AttentionSourceKind, Clock, Host, IdGenerator, LifecycleRuntime,
+    PaneAddressLifecycle, PromptFailureKind, StateStore,
 };
 use serde::{Deserialize, Serialize};
 
@@ -69,9 +68,9 @@ pub struct HealthReport {
 }
 
 /// Inspect Namedrop without reconciling, retrying, cancelling, or changing state.
-pub fn diagnose_collaboration<E, C, I>(runtime: &LifecycleRuntime<'_, E, C, I>) -> HealthReport
+pub fn diagnose_collaboration<H, C, I>(runtime: &LifecycleRuntime<'_, H, C, I>) -> HealthReport
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -223,7 +222,7 @@ where
         issues.push(paused);
     }
     if let Some(stale) = crate::installed_runtime::stale_release(runtime.state_directory, || {
-        registered_plugin_root(runtime.herdr)
+        runtime.host.plugin_root()
     }) {
         issues.push(stale_runtime_issue(&stale));
     }
@@ -364,7 +363,7 @@ where
             {
                 if pane.agent.is_none()
                     && pane.agent_session_id.is_none()
-                    && crate::terminal::shell_is_available(runtime.herdr, &pane.pane_id)
+                    && crate::terminal::shell_is_available(&runtime.host, &pane.pane_id)
                 {
                     available_terminals += 1;
                 } else {
@@ -558,12 +557,12 @@ where
 /// `Ok` means only that the host accepted the prompt: nothing is repaired and
 /// no delivery is recorded. `Err` states, in its first words, why nothing was
 /// sent.
-pub fn request_doctor_assistance<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+pub fn request_doctor_assistance<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     expected_session_id: &str,
 ) -> Result<(), String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
@@ -604,27 +603,23 @@ where
         return Err("The pane changed session; nothing was sent.".to_owned());
     }
     let prompt = doctor_assistance_prompt(&report, pane_id, &live);
-    match runtime
-        .herdr
-        .execute(&["agent", "prompt", pane_id, &prompt])
-    {
+    match runtime.host.prompt(pane_id, &prompt) {
         Ok(_) => Ok(()),
-        Err(error)
-            if runtime.herdr.classify_prompt_failure(&error)
-                == PromptFailureKind::TemporaryPreInvocation =>
-        {
+        Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }
         Err(error) => Err(format!("Unconfirmed, do not assume it arrived: {error}")),
     }
 }
 
-fn invoking_pane_is_served<E: HerdrCommandExecutor, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn invoking_pane_is_served<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     space_id: &str,
     pane_id: &str,
 ) -> bool {
-    discover_worktree_for_workspace(runtime.herdr, space_id)
+    runtime
+        .host
+        .space(crate::SpaceLocator::Workspace(space_id), None)
         .ok()
         .and_then(|discovered| {
             let pane = discovered
@@ -638,17 +633,19 @@ fn invoking_pane_is_served<E: HerdrCommandExecutor, C, I>(
 
 /// The Agent Session live in `pane_id` right now, or why Doctor must not
 /// prompt that pane at all.
-fn live_agent_session<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn live_agent_session<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     space_id: &str,
     pane_id: &str,
 ) -> Result<AgentSessionId, String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
-    let pane = discover_worktree_for_workspace(runtime.herdr, space_id)?
+    let pane = runtime
+        .host
+        .space(crate::SpaceLocator::Workspace(space_id), None)?
         .panes
         .into_iter()
         .find(|pane| pane.pane_id == pane_id)
@@ -689,18 +686,15 @@ struct HealthSnapshot {
     space_id: String,
 }
 
-fn load_health_snapshot<E, C, I>(
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+fn load_health_snapshot<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
 ) -> Result<HealthSnapshot, String>
 where
-    E: HerdrCommandExecutor,
+    H: Host,
     C: Clock,
     I: IdGenerator,
 {
-    let discovered = match runtime.workspace_id {
-        Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
-        None => discover_worktree(runtime.herdr, runtime.cwd)?,
-    };
+    let discovered = runtime.host.space(runtime.space_locator(), None)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let Some(mut store) =
         StateStore::open_read_only(runtime.state_directory).map_err(|error| error.to_string())?
@@ -816,24 +810,6 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
     }
 }
 
-fn registered_plugin_root<E: HerdrCommandExecutor>(herdr: &E) -> Option<std::path::PathBuf> {
-    let output = herdr
-        .execute_bounded(
-            &["plugin", "list", "--plugin", "namedrop", "--json"],
-            std::time::Duration::from_secs(2),
-            &std::sync::atomic::AtomicBool::new(false),
-            64 * 1024,
-        )
-        .ok()?;
-    let list: serde_json::Value = serde_json::from_str(&output.stdout).ok()?;
-    let root = list["result"]["plugins"]
-        .as_array()?
-        .iter()
-        .find(|plugin| plugin["plugin_id"] == "namedrop")?["plugin_root"]
-        .as_str()?;
-    Some(std::path::PathBuf::from(root)).filter(|root| root.is_absolute())
-}
-
 fn stale_runtime_issue(stale: &crate::installed_runtime::StaleRelease) -> HealthIssue {
     let mut outdated = issue(
         "ND-SETUP-004",
@@ -905,9 +881,9 @@ fn issue(
     }
 }
 
-fn add_operation<E, C, I>(
+fn add_operation<H, C, I>(
     issue: &mut HealthIssue,
-    runtime: &LifecycleRuntime<'_, E, C, I>,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
     space_id: &str,
     operation: &str,
     input: serde_json::Value,
