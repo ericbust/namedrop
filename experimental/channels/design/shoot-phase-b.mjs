@@ -19,7 +19,7 @@ const browser = await chromium.launch({
 const errors = [];
 const channel = (page, name) =>
   page
-    .getByRole("navigation", { name: "Channels", exact: true })
+    .getByRole("navigation", { name: "Channel list", exact: true })
     .getByRole("button")
     .filter({ has: page.locator(".row-name", { hasText: name }) })
     .first();

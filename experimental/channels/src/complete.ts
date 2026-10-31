@@ -262,11 +262,19 @@ function spaceAfter(text: string, at: number): number {
 function recipient(word: string): string {
   return /[,:]$/.test(word) ? word.slice(0, -1) : word;
 }
-function afterLabels(text: string): number {
+// The leading `#label` words, folded, and where the text after them starts.
+function leadingLabels(text: string): { labels: string[]; end: number } {
+  const labels: string[] = [];
   let at = spaceAfter(text, 0);
-  while (LABEL.test(recipient(wordAt(text, at))))
-    at = spaceAfter(text, at + wordAt(text, at).length);
-  return at;
+  for (
+    let word = wordAt(text, at);
+    LABEL.test(recipient(word));
+    word = wordAt(text, at)
+  ) {
+    labels.push(foldLabel(recipient(word).slice(1)));
+    at = spaceAfter(text, at + word.length);
+  }
+  return { labels, end: at };
 }
 // The server's workspace_label_before: an `@` after whitespace that follows a
 // `#label` word, `#all` aside, names someone in that workspace.
@@ -280,7 +288,7 @@ function afterLabelWord(text: string, at: number): boolean {
   return LABEL.test(word) && foldLabel(word.slice(1)) !== "all";
 }
 function serverMentions(text: string): Mentions {
-  let at = afterLabels(text);
+  let at = leadingLabels(text).end;
   const leading = new Set<string>();
   let word = wordAt(text, at);
   while (word.startsWith("@") && ALIAS.test(recipient(word).slice(1))) {
@@ -343,21 +351,24 @@ function closedNames(members: ReadonlyMap<AddressId, Member>): Set<string> {
 // may have capitals. The server refuses a capital before it looks the name up,
 // so that is the reason whether or not the page knows the name. A lowercase
 // name the page doesn't know may be a group, which the frame doesn't carry, so
-// the server decides that one. Without a `#label`, a name whose pane is closed
-// comes before any capital: lowercasing it would only meet a second refusal.
+// the server decides that one. When the name resolves here, with no `#label`
+// or only this channel's, a name whose pane is closed comes before any capital:
+// lowercasing it would only meet a second refusal. Last, `#all` can't share
+// the run with other labels.
 function refusedLeading(
   text: string,
   members: ReadonlyMap<AddressId, Member>,
+  here: string | null,
 ): string | null {
-  let at = afterLabels(text);
-  const labelled = at > spaceAfter(text, 0);
+  const { labels, end } = leadingLabels(text);
+  let at = end;
   let word = wordAt(text, at);
   const isName = (token: string) =>
     token.startsWith("@") && ALIAS.test(asciiLower(recipient(token).slice(1)));
   if (word.length > 1 && word.startsWith("@") && !isName(word)) {
     // Text that starts with a #label is never a leading mention to the server,
     // so it posts to the channel as it is.
-    if (labelled) return null;
+    if (labels.length > 0) return null;
     const name = PUNCTUATED.exec(word)?.[1];
     return name !== undefined && ALIAS.test(asciiLower(name))
       ? composerCopy.spaceAfter(`@${asciiLower(name)}`)
@@ -369,13 +380,16 @@ function refusedLeading(
     at = spaceAfter(text, at + word.length);
     word = wordAt(text, at);
   }
-  const closed = labelled ? new Set<string>() : closedNames(members);
+  const resolvesHere = labels.every((label) => label === here);
+  const closed = resolvesHere ? closedNames(members) : new Set<string>();
   const closedName = names.map(asciiLower).find((name) => closed.has(name));
   if (closedName !== undefined) return composerCopy.paneClosed(closedName);
   const capital = names.find((name) => name !== asciiLower(name));
-  return capital === undefined
-    ? null
-    : composerCopy.lowercase(asciiLower(capital));
+  if (capital !== undefined) return composerCopy.lowercase(asciiLower(capital));
+  const all = labels.filter((label) => label === "all").length;
+  return names.length > 0 && all > 0 && all < labels.length
+    ? composerCopy.allWithLabels
+    : null;
 }
 
 // The agents a channel post mentions, in the order the text first names them.
@@ -392,9 +406,19 @@ export function mentionedAgents(
   );
 }
 
+// The text Enter sends. The hint judges this same string.
+export function sentText(text: string): string {
+  return text.trim();
+}
+// The server reads text that is only `@` as a leading mention with no name.
+function loneAt(sent: string): boolean {
+  return sent.slice(spaceAfter(sent, 0)) === "@";
+}
+
 // The text Enter sends, or null when it must stay in the box.
 export function postSource(text: string, rule: SendRule): string | null {
-  const body = text.trim();
+  const body = sentText(text);
+  if (loneAt(body)) return null;
   const { leading, rest } = serverMentions(body);
   if (leading.length > 0) return rest.trim() === "" ? null : body;
   return body === "" || (rule.kind === "thread" && rule.to.length === 0)
@@ -402,14 +426,26 @@ export function postSource(text: string, rule: SendRule): string | null {
     : body;
 }
 
+// Why Enter kept the text in the box, for the line under it.
+export function keptHint(text: string): string {
+  const body = sentText(text);
+  if (loneAt(body)) return composerCopy.nameAfter;
+  const leading = leadingMentions(body);
+  return leading.length > 0
+    ? composerCopy.needsMessage(leading)
+    : composerCopy.needsRecipient;
+}
+
 // Where Enter sends the text, in the words of the hint under the box.
 export function composerHint(rule: SendRule, text: string): string {
+  const body = sentText(text);
+  if (loneAt(body)) return composerCopy.nameAfter;
   if (rule.kind === "thread") return composerCopy.hint;
-  const refused = refusedLeading(text, rule.agents);
+  const refused = refusedLeading(body, rule.agents, rule.label);
   if (refused !== null) return refused;
-  const leading = leadingMentions(text);
+  const leading = leadingMentions(body);
   if (leading.length > 0) return composerCopy.sendsOnlyTo(leading);
-  const mentioned = mentionedAgents(text, rule.agents);
+  const mentioned = mentionedAgents(body, rule.agents);
   return mentioned.length > 0
     ? composerCopy.checks(mentioned.map((member) => member.alias))
     : composerCopy.toRoom;

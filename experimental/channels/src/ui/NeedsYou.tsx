@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { responderOf } from "../attention.ts";
+import { responderOf, responseAbsence } from "../attention.ts";
 import { attentionCopy, relativeAge } from "../copy.ts";
-import type { Attention, ChannelSnapshot, SpaceKey } from "../model.ts";
+import type {
+  Attention,
+  ChannelSnapshot,
+  Directory,
+  SpaceKey,
+} from "../model.ts";
 import {
   AttentionActions,
   type ControlThread,
@@ -46,18 +51,21 @@ function Item({
   item,
   now,
   channel,
+  directory,
   onFocus,
   onControl,
 }: {
   item: Attention;
   now: number;
   channel: ChannelSnapshot;
+  directory: Directory;
   onFocus: FocusAttention;
   onControl: ControlThread;
 }) {
   const [open, setOpen] = useState(false);
   const responder = responderOf(item, channel.members);
-  const copy = attentionCopy(item, responder);
+  const absent = responseAbsence(item, directory);
+  const copy = attentionCopy(item, responder, absent);
   const opened = new Date(item.openedAt);
   return (
     <li className="attention-item">
@@ -75,6 +83,7 @@ function Item({
       <AttentionActions
         item={item}
         channel={channel}
+        absent={absent}
         onFocus={onFocus}
         onControl={onControl}
       >
@@ -97,10 +106,12 @@ function Item({
 }
 export function NeedsYou({
   channel,
+  directory,
   onFocus,
   onControl,
 }: {
   channel: ChannelSnapshot;
+  directory: Directory;
   onFocus: FocusAttention;
   onControl: ControlThread;
 }) {
@@ -122,6 +133,7 @@ export function NeedsYou({
                 item={item}
                 now={now}
                 channel={channel}
+                directory={directory}
                 onFocus={onFocus}
                 onControl={onControl}
               />

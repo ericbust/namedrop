@@ -421,7 +421,7 @@ async function open(
   });
   await page.goto(`http://127.0.0.1:${server.address().port}${path}`);
   const channels = page.getByRole("navigation", {
-    name: "Channels",
+    name: "Channel list",
     exact: true,
   });
   const row = (n) => channels.locator(`button[data-channel-key="${key(n)}"]`);
@@ -2527,7 +2527,9 @@ test("DESIGN-R2 B2: the reply count is never covered: the preview text takes the
     });
   };
   for (const [width, height, text] of [
-    [390, 844, "count only"],
+    // A 390 px phone at 140 percent zoom is about 280 CSS px wide.
+    [280, 640, "count only"],
+    [390, 844, true],
     [599, 844, true],
     [640, 800, true],
     [1440, 900, true],
@@ -3260,7 +3262,7 @@ test("design-b: the layout gives the timeline the room, wraps members in two lin
   );
 });
 
-test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column keeps the Needs-you banner and the composer inside its half", async (t) => {
+test("DESIGN-R2 C1, UI-R4 L1 and L3: stacked under a thread or the peek drawer on a narrow, tall window, the main column keeps the Needs-you banner, the timeline's three lines and the composer inside its half", async (t) => {
   const value = team(1, "alpha");
   const at = Date.now() - 60 * 60_000;
   value.frame.health = { level: "needs_you", items: 8 };
@@ -3347,8 +3349,8 @@ test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column k
   const squeezed = [];
   const stacked = async (state) => {
     for (const [width, height] of [
-      [390, 844],
-      [640, 600],
+      [768, 1024],
+      [860, 900],
     ]) {
       await ui.page.setViewportSize({ width, height });
       const at = `${state} at ${width}x${height}`;
@@ -3373,12 +3375,15 @@ test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column k
         `the banner is capped at 40% of the column with ${at}: ${JSON.stringify(shown)}`,
       );
       assert.ok(shown.bannerScrolls, `the banner scrolls inside with ${at}`);
+      assert.ok(
+        shown.timeline.height >= 112 - 0.5,
+        `the timeline keeps its three lines with ${at}: ${JSON.stringify(shown)}`,
+      );
       if (shown.banner.height < cap - 0.5) {
         squeezed.push(at);
-        assert.equal(
-          shown.timeline.height,
-          0,
-          `the timeline gives up all its room before the banner with ${at}: ${JSON.stringify(shown)}`,
+        assert.ok(
+          Math.abs(shown.timeline.height - 112) < 0.5,
+          `the banner gives way only once the timeline is at its floor with ${at}: ${JSON.stringify(shown)}`,
         );
       }
     }
@@ -3401,9 +3406,9 @@ test("DESIGN-R2 C1: stacked under a thread or the peek drawer, the main column k
   await drawer(ui).waitFor();
   await stacked("the peek drawer open");
   assert.deepEqual(
-    squeezed.filter((at) => at.endsWith("640x600")),
-    ["a thread open at 640x600", "the peek drawer open at 640x600"],
-    "the 300px column squeezes the banner",
+    squeezed.filter((at) => at.endsWith("860x900")),
+    ["a thread open at 860x900", "the peek drawer open at 860x900"],
+    "the 450px column squeezes the banner",
   );
 });
 
@@ -4344,7 +4349,7 @@ test("UI-3: the box re-fits a wrapped placeholder when the viewport narrows and 
   };
   const wide = await fit(1440);
   assert.equal(wide.height, 32, "one line when wide");
-  const narrow = await fit(480);
+  const narrow = await fit(360);
   assert.ok(
     Math.abs(narrow.scrollHeight - narrow.clientHeight) <= 1,
     `the narrow box fits its placeholder: ${JSON.stringify(narrow)}`,
@@ -6257,7 +6262,8 @@ test("DESIGN-R2 D3: a narrow action row wraps between whole labels, and only a l
       `${width}px keeps one row of whole labels`,
     );
   }
-  await ui.page.setViewportSize({ width: 390, height: 844 });
+  // A 390 px phone at 140 percent zoom is about 280 CSS px wide.
+  await ui.page.setViewportSize({ width: 280, height: 844 });
   const buttons = async () => (await read()).map((row) => row.buttons);
   const cut = labels.map((row) =>
     row.map((label) =>
@@ -6773,23 +6779,49 @@ test("DESIGN-R2 A5: a kept channel draft is named in the composer's status row, 
   assert.equal(await notice.count(), 0);
 });
 
-test("R3 U3: when the responsible agent is gone, the first press of Message @codex says so and leaves the draft alone", async (t) => {
-  const { value, context } = actionableAttention("message");
-  value.frame.participants[0].activity = "retired";
+// The agent leaves between the press and the conversation's arrival: the card
+// offered the press while the agent was live.
+function leavesAfterPress(kind, gone) {
+  const { value, context } = actionableAttention(kind);
+  const left = structuredClone(value);
+  if (gone === "closed") {
+    left.frame.participants[0].activity = "retired";
+    left.frame.participants[0].recently_closed = true;
+  } else
+    left.frame.participants = left.frame.participants.filter(
+      (participant) => participant.address_id !== "codex",
+    );
+  return { value, left, context };
+}
+
+test("R3 U3: when the responsible agent is gone by the time the conversation loads, the press of Message @codex says so and leaves the draft alone", async (t) => {
+  const { value, left, context } = leavesAfterPress("message", "closed");
+  const loaded = held();
   const ui = await open(
     t,
     (client) => replay(client, [value]),
     () => [],
-    { onContext: () => context },
+    {
+      onContext: async () => {
+        await loaded.gate;
+        return context;
+      },
+    },
   );
   await ui.live();
   const draft = ui.page.locator("main .composer").getByRole("combobox");
   await draft.fill("my own words");
-  await ui.page
-    .getByRole("region", { name: "Attention needed" })
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card
     .getByRole("button", { name: "Message @codex", exact: true })
     .click();
   await until(() => ui.contextRequests.length === 1, "the conversation");
+  ui.connections[0].send("space", left);
+  await readsAs(
+    card.locator(".attention-hint"),
+    "@codex's pane is closed, so it can't take a message.",
+  );
+  loaded.release();
   await readsAs(
     ui.page.locator("main .composer-status"),
     "@codex's pane is closed, so it can't take a message.",
@@ -6810,30 +6842,37 @@ test("R3 U3: when the responsible agent is gone, the first press of Message @cod
   );
 });
 
-for (const [subject, button, line] of [
-  ["codex", "Message @codex", "@codex isn't in this channel anymore."],
-  [null, "Message the agent", "That agent isn't in this channel anymore."],
+for (const [subject, line] of [
+  ["codex", "@codex isn't in this channel anymore."],
+  [null, "That agent isn't in this channel anymore."],
 ])
-  test(`R3 fix1 F4: when the responsible agent has left the frame, ${button} says ${line}`, async (t) => {
-    const { value, context } = actionableAttention("message");
-    value.frame.participants = value.frame.participants.filter(
-      (participant) => participant.address_id !== "codex",
-    );
-    value.frame.attention[0].subject_alias = subject;
+  test(`R3 fix1 F4: when the responsible agent has left the frame by the time the conversation loads, Message @codex says ${line}`, async (t) => {
+    const { value, left, context } = leavesAfterPress("message", "left");
+    for (const frame of [value, left])
+      frame.frame.attention[0].subject_alias = subject;
+    const loaded = held();
     const ui = await open(
       t,
       (client) => replay(client, [value]),
       () => [],
-      { onContext: () => context },
+      {
+        onContext: async () => {
+          await loaded.gate;
+          return context;
+        },
+      },
     );
     await ui.live();
     const draft = ui.page.locator("main .composer").getByRole("combobox");
     await draft.fill("my own words");
-    await ui.page
-      .getByRole("region", { name: "Attention needed" })
-      .getByRole("button", { name: button, exact: true })
+    const card = ui.page.getByRole("region", { name: "Attention needed" });
+    await card
+      .getByRole("button", { name: "Message @codex", exact: true })
       .click();
     await until(() => ui.contextRequests.length === 1, "the conversation");
+    ui.connections[0].send("space", left);
+    await readsAs(card.locator(".attention-hint"), line);
+    loaded.release();
     await readsAs(ui.page.locator("main .composer-status"), line);
     assert.equal(await draft.inputValue(), "my own words");
     assert.equal(ui.posts.attempts.length, 0);
@@ -6843,16 +6882,10 @@ for (const [gone, line] of [
   ["closed", "@codex's pane is closed, so it can't take a message."],
   ["left", "@codex isn't in this channel anymore."],
 ])
-  test(`R3 fix1 F4: in the thread pane, a reply whose agent ${gone === "closed" ? "has a closed pane" : "left the frame"} reads ${line} in the reply box's place`, async (t) => {
-    const { value, context } = actionableAttention("reply");
-    if (gone === "closed") {
-      value.frame.participants[0].activity = "retired";
-      value.frame.participants[0].recently_closed = true;
-    } else
-      value.frame.participants = value.frame.participants.filter(
-        (participant) => participant.address_id !== "codex",
-      );
-    value.frame.attention[0].subject_alias = "codex";
+  test(`R3 fix1 F4: in the thread pane, a reply whose agent ${gone === "closed" ? "closes its pane" : "leaves the frame"} after the press reads ${line} in the reply box's place`, async (t) => {
+    const { value, left, context } = leavesAfterPress("reply", gone);
+    for (const frame of [value, left])
+      frame.frame.attention[0].subject_alias = "codex";
     const ui = await open(
       t,
       (client) => replay(client, [value]),
@@ -6868,6 +6901,8 @@ for (const [gone, line] of [
       name: "Thread",
       exact: true,
     });
+    await pane.getByRole("combobox").waitFor();
+    ui.connections[0].send("space", left);
     await readsAs(pane.locator(".thread-answer"), line);
     assert.equal(await pane.getByRole("combobox").count(), 0);
     if (gone === "closed")
@@ -6879,6 +6914,94 @@ for (const [gone, line] of [
         1,
         "the chip names the same state",
       );
+  });
+
+// A Needs-you card whose agent can't take a message, and the frames that
+// bring the agent back.
+function absentAgent(gone, kind) {
+  const { value, context } = actionableAttention(kind);
+  const [item] = value.frame.attention;
+  item.subject_alias = gone === "unreachable" ? "lead" : "codex";
+  const beta = frame(2, "beta");
+  beta.frame.participants = [
+    { ...people()[0], address_id: "pane-9", alias: "@lead" },
+  ];
+  if (gone === "unreachable") {
+    item.response.address_id = "envoy:w2:pane-9";
+    const unlabelled = structuredClone(beta);
+    unlabelled.frame.space.addressable_label = null;
+    unlabelled.frame.space.not_addressable_reason = "missing_label";
+    return { context, absent: [value, unlabelled], back: [beta] };
+  }
+  const live = structuredClone(value);
+  if (gone === "closed") {
+    value.frame.participants[0].activity = "retired";
+    value.frame.participants[0].recently_closed = true;
+  } else
+    value.frame.participants = value.frame.participants.filter(
+      (participant) => participant.address_id !== "codex",
+    );
+  return { context, absent: [value], back: [live] };
+}
+const absentCases = [
+  {
+    gone: "closed",
+    kind: "reply",
+    button: "Reply to @codex",
+    line: "@codex's pane is closed, so it can't take a message.",
+  },
+  {
+    gone: "left",
+    kind: "message",
+    button: "Message @codex",
+    line: "@codex isn't in this channel anymore.",
+  },
+  {
+    gone: "unreachable",
+    kind: "message",
+    button: "Message @lead",
+    line: "@lead's workspace has no label Namedrop can mention, so it can't take a message from here.",
+  },
+];
+for (const { gone, kind, button, line } of absentCases)
+  test(`UI-R4 H6: a card whose agent ${gone === "closed" ? "has a closed pane" : gone === "left" ? "left the frame" : "is in a workspace with no label"} offers no ${button} and reads ${line} before any press, and ${button} comes back with the agent`, async (t) => {
+    const { context, absent, back } = absentAgent(gone, kind);
+    const ui = await open(
+      t,
+      (client) => replay(client, absent),
+      () => [],
+      { onContext: () => context },
+    );
+    await ui.live();
+    const card = ui.page.getByRole("region", { name: "Attention needed" });
+    await readsAs(card.locator(".attention-hint"), line);
+    assert.deepEqual(
+      await card.locator(".attention-actions button").allTextContents(),
+      ["Show message", "Details"],
+    );
+    const pane = ui.page.getByRole("complementary", {
+      name: "Thread",
+      exact: true,
+    });
+    if (kind === "message") {
+      await card.getByRole("button", { name: /^Show message/ }).click();
+      await readsAs(pane.locator(".thread-answer"), line);
+      assert.equal(
+        await pane.getByRole("button", { name: /^Message / }).count(),
+        0,
+      );
+    }
+    for (const value of back) ui.connections[0].send("space", value);
+    await card.getByRole("button", { name: button, exact: true }).waitFor();
+    assert.notEqual(await shownText(card.locator(".attention-hint")), line);
+    if (kind === "message")
+      await pane.getByRole("button", { name: /^Message / }).waitFor();
+    assert.equal(ui.posts.attempts.length, 0);
+    assert.equal(
+      await ui.page.locator("main textarea").inputValue(),
+      "",
+      "nothing was typed for the operator",
+    );
   });
 
 test("DESIGN-R2 D2: the kept-draft notice lasts until the box changes, then the hint names a capitalized leading name again", async (t) => {
@@ -8998,6 +9121,100 @@ test("R3 fix1 F1: a name right after a #label word is that workspace's, so the h
   );
 });
 
+test("UI-R4 H1: a pasted U+FEFF before a leading name reads as Enter sends it, only to that name, and Enter sends the trimmed text", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  await box.fill("﻿@codex hi");
+  assert.equal(await status.textContent(), "Enter sends only to @codex");
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@codex hi");
+});
+
+test("UI-R4 H2: a lone @ reads Type a name after @, Enter keeps it with no request, and with the list open Enter still picks a name", async (t) => {
+  const { ui } = await chatRoom(t, []);
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  const list = ui.page.getByRole("listbox", { name: "Members" });
+  await box.click();
+  await box.pressSequentially("@");
+  await list.waitFor();
+  assert.equal(await status.textContent(), "Type a name after @");
+  await box.press("Enter");
+  assert.equal(await box.inputValue(), "@claude ", "Enter picked a name");
+  await box.fill("@");
+  await list.waitFor();
+  await box.press("Escape");
+  assert.equal(await list.count(), 0);
+  assert.equal(await status.textContent(), "Type a name after @");
+  assert.equal(
+    await ui.page.getByRole("button", { name: "Send" }).isDisabled(),
+    true,
+  );
+  await box.press("Enter");
+  await readsAs(status, "Type a name after @");
+  assert.equal(await box.inputValue(), "@", "the @ stays in the box");
+  await box.fill("@ hi");
+  assert.equal(
+    await status.textContent(),
+    "Enter posts to the channel · Mention @name to bring someone in",
+  );
+  assert.equal(ui.posts.attempts.length, 0, "no request was made");
+});
+
+test("UI-R4 H3: #all with another label before a name says #all already means every workspace, and Enter still sends it for the server to refuse", async (t) => {
+  const refusal =
+    "#all already addresses every workspace, so it cannot be combined with workspace labels";
+  const { ui } = await chatRoom(t, [], {
+    onPost: () => ({ status: 400, error: refusal }),
+  });
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  await box.fill("#all #alpha @codex hi");
+  assert.equal(
+    await status.textContent(),
+    "#all already means every workspace · Drop the other labels",
+  );
+  await box.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the post");
+  assert.equal(
+    JSON.parse(ui.posts.attempts[0].raw).source,
+    "#all #alpha @codex hi",
+  );
+  await status.getByText(refusal).waitFor();
+  assert.equal(
+    await box.inputValue(),
+    "#all #alpha @codex hi",
+    "the text stays",
+  );
+});
+
+test("UI-R4 H4: this channel's own #label before a closed name reads that the pane is closed, and any other label or #all skips the check", async (t) => {
+  const value = team(1, "alpha");
+  value.frame.participants[0].activity = "retired";
+  value.frame.participants[0].recently_closed = true;
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const box = ui.page.getByRole("combobox", { name: "Message #alpha" });
+  const status = ui.page.locator("main .composer-status");
+  await box.click();
+  const hints = [
+    ["#alpha @codex hi", "@codex's pane is closed"],
+    ["#Alpha: @Codex hi", "@codex's pane is closed"],
+    ["#beta @codex hi", "Enter sends only to @codex"],
+    ["#all @codex hi", "Enter sends only to @codex"],
+  ];
+  const read = [];
+  for (const [text] of hints) {
+    await box.fill(text);
+    read.push([text, await status.textContent()]);
+  }
+  assert.deepEqual(read, hints);
+});
+
 test("CH-2: an agent conversation shows every message flat, with header recipients and receipts", async (t) => {
   const at = Date.now() - 600_000;
   const { ui } = await chatRoom(t, [
@@ -9050,4 +9267,1052 @@ test("CH-2: an agent conversation shows every message flat, with header recipien
     .getByRole("complementary", { name: "Thread", exact: true })
     .getByRole("combobox", { name: "Reply to @claude, @codex" })
     .waitFor();
+});
+
+function layoutChannel() {
+  const value = team(1, "alpha");
+  const at = Date.now() - 60 * 60_000;
+  value.frame.health = { level: "needs_you", items: 1 };
+  value.frame.attention = [
+    {
+      source_kind: "agent_status",
+      summary: {
+        text: "@codex is waiting on an approval or question about the release.",
+        truncated: false,
+      },
+      opened_at_ms: at,
+    },
+  ];
+  value.frame.messages = [
+    message("p1", "@codex please check the build cache", {
+      at_ms: at,
+      legs: [{ to: "codex", stage: { stage: "delivered" } }],
+    }),
+    message("r1", "the cache is fine", {
+      thread_id: "p1",
+      in_reply_to: "p1",
+      kind: "reply",
+      author: "codex",
+      at_ms: at + 60_000,
+    }),
+    ...Array.from({ length: 24 }, (_, n) =>
+      message(
+        `m${n}`,
+        `Status line ${n}: the build finished and the cache is warm. Next step is the release notes for section ${n}.`,
+        { author: n % 2 ? "claude" : "human", at_ms: at + (n + 2) * 60_000 },
+      ),
+    ),
+  ];
+  return value;
+}
+// matchMedia reports a resize in the next frame's rendering steps, so the page
+// settles a frame after the viewport changes.
+async function resize(page, width, height) {
+  await page.setViewportSize({ width, height });
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+}
+const shortSizes = [
+  [844, 300],
+  [640, 340],
+  [390, 360],
+  [1024, 372],
+  [320, 260],
+];
+const layoutSizes = [
+  [390, 844],
+  [390, 460],
+  [640, 800],
+  [640, 460],
+  [768, 1024],
+  [1024, 768],
+  [1440, 900],
+];
+// Every region a reader needs, as the reader sees it. A region is rendered unless
+// it sits in a display: none or visibility: hidden ancestor, and shown when it
+// is rendered with some area.
+function layoutFacts(page) {
+  return page.evaluate(() => {
+    const regions = {
+      reconnect: ".reconnect",
+      header: "main .channel-header",
+      members: "main .members",
+      banner: "main .attention",
+      timeline: "main .timeline",
+      jump: "main .jump-latest",
+      composer: "main .composer",
+      slotHeader: ".slot .thread-head, .slot .peek-head",
+      threadBody: ".slot .thread-body",
+      threadComposer: ".slot .composer",
+    };
+    const facts = {};
+    for (const [name, selector] of Object.entries(regions)) {
+      const element = document.querySelector(selector);
+      if (element === null) continue;
+      const { left, top, right, bottom, width, height } =
+        element.getBoundingClientRect();
+      const rendered = element.checkVisibility({ visibilityProperty: true });
+      const shown = rendered && width > 0 && height > 0;
+      facts[name] = { rendered, shown, left, top, right, bottom, height };
+    }
+    const main = document.querySelector("main").getBoundingClientRect();
+    const slot = document.querySelector(".slot")?.getBoundingClientRect();
+    return {
+      facts,
+      viewport: [innerWidth, innerHeight],
+      scroll: [
+        document.documentElement.scrollWidth,
+        document.documentElement.scrollHeight,
+      ],
+      columnLeft: Math.min(main.left, slot?.left ?? main.left),
+      mainShown: document
+        .querySelector("main")
+        .checkVisibility({ visibilityProperty: true }),
+      scrolling: [...document.querySelectorAll("main, .slot")]
+        .filter((column) => column.scrollHeight > column.clientHeight)
+        .map((column) => column.className),
+      dots: [...document.querySelectorAll(".connection-dot")].map((dot) =>
+        dot.checkVisibility({ visibilityProperty: true }),
+      ),
+    };
+  });
+}
+// A window under 420 px tall lowers the floors, and the composer may scroll
+// into view inside its column instead of being whole.
+function layoutProblems(shown, at, expect, { floor = 96, whole = true } = {}) {
+  const { facts } = shown;
+  const [width, height] = shown.viewport;
+  const problems = [];
+  const round = (n) => Math.round(n * 10) / 10;
+  if (shown.scroll[0] > width || shown.scroll[1] > height)
+    problems.push(`${at}: the page overflows to ${shown.scroll.join("x")}`);
+  if (whole && shown.scrolling.length > 0)
+    problems.push(`${at}: ${shown.scrolling.join(" and ")} scroll as a whole`);
+  if (shown.dots.length !== 1 || !shown.dots[0])
+    problems.push(`${at}: connection dots shown ${JSON.stringify(shown.dots)}`);
+  for (const name of expect)
+    if (!facts[name]?.shown) problems.push(`${at}: ${name} is not shown`);
+  const visible = Object.entries(facts).filter(([, fact]) => fact.shown);
+  for (const [i, [a, ra]] of visible.entries())
+    for (const [b, rb] of visible.slice(i + 1)) {
+      if ([a, b].includes("jump") && [a, b].includes("timeline")) continue;
+      const x = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left);
+      const y = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
+      if (x > 0.5 && y > 0.5)
+        problems.push(`${at}: ${a} and ${b} overlap by ${round(y)} px`);
+    }
+  for (const name of ["timeline", "threadBody"])
+    if (
+      facts[name] !== undefined &&
+      (facts[name].rendered || expect.has(name)) &&
+      facts[name].height < floor - 0.5
+    )
+      problems.push(`${at}: ${name} is ${round(facts[name].height)} px tall`);
+  if (facts.banner?.shown) {
+    const next = ["timeline", "composer"].find((name) => facts[name]?.shown);
+    const gap = facts[next].top - facts.banner.bottom;
+    if (gap < 11.5)
+      problems.push(`${at}: ${round(gap)} px between the banner and ${next}`);
+  }
+  for (const name of ["composer", "threadComposer"])
+    if (
+      whole &&
+      facts[name]?.shown &&
+      (facts[name].top < -0.5 || facts[name].bottom > height + 0.5)
+    )
+      problems.push(`${at}: ${name} leaves the window`);
+  if (width <= 600 && Math.abs(shown.columnLeft) >= 0.5)
+    problems.push(`${at}: the main column starts at x=${shown.columnLeft}`);
+  return problems;
+}
+
+test("UI-R4 L4: at every size, with a banner, a thread open or the drawer open, no region overlaps another, the page never overflows, and the timeline and thread keep their room", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const channelsButton = ui.page.getByRole("button", { name: /^Channels/ });
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const scrollUp = () =>
+    ui.page
+      .locator("main .timeline")
+      .evaluate((element) => element.scrollTo({ top: 0 }));
+  const problems = [];
+  for (const [width, height] of layoutSizes) {
+    await resize(ui.page, width, height);
+    const at = `${width}x${height}`;
+    await scrollUp();
+    await ui.page
+      .getByRole("button", { name: "Jump to latest messages" })
+      .waitFor({ timeout: 1000 })
+      .catch(() => {});
+    problems.push(
+      ...layoutProblems(
+        await layoutFacts(ui.page),
+        `${at} reading back`,
+        new Set([
+          "header",
+          "members",
+          "banner",
+          "timeline",
+          "jump",
+          "composer",
+        ]),
+      ),
+    );
+    const toggles = await channelsButton.count();
+    if (toggles !== (width <= 600 ? 1 : 0))
+      problems.push(`${at}: ${toggles} Channels buttons`);
+
+    await timeline.getByRole("button", { name: /^1 reply from/ }).click();
+    await threadPane(ui).waitFor();
+    await scrollUp();
+    const threaded = await layoutFacts(ui.page);
+    problems.push(
+      ...layoutProblems(
+        threaded,
+        `${at} with a thread open`,
+        new Set(["slotHeader", "threadBody", "threadComposer"]),
+      ),
+    );
+    const alone = width <= 600 || (width <= 860 && height < 900);
+    if (threaded.mainShown === alone)
+      problems.push(
+        `${at}: the thread should ${alone ? "take the channel's place" : "share the window"}`,
+      );
+    await threadPane(ui).getByRole("button", { name: "Close thread" }).click();
+    await threadPane(ui).waitFor({ state: "detached" });
+
+    if (width <= 600 && toggles === 1) {
+      await channelsButton.click();
+      await ui.page.getByRole("dialog", { name: "Channels" }).waitFor();
+      problems.push(
+        ...layoutProblems(
+          await layoutFacts(ui.page),
+          `${at} with the drawer open`,
+          new Set(),
+        ),
+      );
+      await ui.page.keyboard.press("Escape");
+      await ui.page
+        .getByRole("dialog", { name: "Channels" })
+        .waitFor({ state: "hidden" });
+    }
+  }
+  assert.deepEqual(problems, []);
+});
+
+test("UI-R4 L4: in a window under 420 px tall, with a banner, a thread open or the Reconnecting bar, nothing overlaps, the timeline keeps 48 px, and the composer is whole or scrolls into view in its column", async (t) => {
+  const ui = await open(t, (client, n) => {
+    if (n === 1) replay(client, [layoutChannel()]);
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const problems = [];
+  async function check(at, composer, expect) {
+    problems.push(
+      ...layoutProblems(await layoutFacts(ui.page), at, new Set(expect), {
+        floor: 48,
+        whole: false,
+      }),
+    );
+    const reach = await ui.page.locator(composer).evaluate((element) => {
+      const column = element.closest(".main, .slot");
+      const before = element.getBoundingClientRect();
+      element.scrollIntoView({ block: "nearest" });
+      const after = element.getBoundingClientRect();
+      const box = column.getBoundingClientRect();
+      const page = document.scrollingElement;
+      const reached = {
+        column: box.height,
+        wholeAtFirst: before.top >= -0.5 && before.bottom <= innerHeight + 0.5,
+        whole:
+          after.top >= Math.max(box.top, 0) - 0.5 &&
+          after.bottom <= Math.min(box.bottom, innerHeight) + 0.5,
+        pageScroll: [page.scrollTop, page.scrollHeight - innerHeight],
+      };
+      column.scrollTop = 0;
+      return reached;
+    });
+    if (!reach.whole || reach.pageScroll.some((n) => n > 0))
+      problems.push(
+        `${at}: ${composer} is out of reach ${JSON.stringify(reach)}`,
+      );
+    if (reach.column >= 299.5 && !reach.wholeAtFirst)
+      problems.push(
+        `${at}: ${composer} is not whole in a ${reach.column} px column`,
+      );
+  }
+  for (const reconnecting of [false, true]) {
+    if (reconnecting) {
+      ui.connections[0].destroy();
+      await ui.page
+        .getByRole("status")
+        .filter({ hasText: "Reconnecting…" })
+        .waitFor({ timeout: 3000 });
+    }
+    for (const [width, height] of shortSizes) {
+      const at = `${width}x${height}${reconnecting ? " reconnecting" : ""}`;
+      await resize(ui.page, width, height);
+      await check(`${at} with a banner`, "main .composer", [
+        ...(reconnecting ? ["reconnect"] : []),
+        "header",
+        "members",
+        "banner",
+        "timeline",
+        "composer",
+      ]);
+      // The Jump pill can cover most of a timeline this short, so the keyboard
+      // opens the thread.
+      await timeline
+        .getByRole("button", { name: /^1 reply from/ })
+        .press("Enter");
+      await threadPane(ui).waitFor();
+      await check(`${at} with a thread open`, ".slot .composer", [
+        "slotHeader",
+        "threadBody",
+        "threadComposer",
+      ]);
+      await threadPane(ui)
+        .getByRole("button", { name: "Close thread" })
+        .click();
+      await threadPane(ui).waitFor({ state: "detached" });
+    }
+  }
+  assert.deepEqual(problems, []);
+});
+test("UI-R4 L1: on a phone or a short narrow window, the thread and the screen take the channel's place, and closing them brings back the channel with its draft, scroll and focus", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const main = ui.page.getByRole("main");
+  const timeline = main.getByRole("region", { name: "Message history" });
+  const box = main.getByRole("combobox");
+  const focused = (locator) =>
+    locator.evaluate((element) => element === document.activeElement);
+  for (const [width, height] of [
+    [390, 844],
+    [640, 460],
+  ]) {
+    const at = `${width}x${height}`;
+    await ui.page.setViewportSize({ width, height });
+    await box.fill(`draft at ${at}`);
+    const reply = timeline.getByRole("button", { name: /^1 reply from/ });
+    const scroller = ui.page.locator("main .timeline");
+    const scrollTop = () => scroller.evaluate((element) => element.scrollTop);
+    for (const close of ["Escape", "Close thread"]) {
+      await reply.click();
+      await threadPane(ui).waitFor();
+      const scrolled = await scrollTop();
+      assert.equal(
+        await main.isVisible(),
+        false,
+        `the thread takes the channel's place at ${at}`,
+      );
+      assert.equal(
+        await threadPane(ui).getByText("in #alpha").count(),
+        1,
+        `the thread names its channel at ${at}`,
+      );
+      if (close === "Escape") await ui.page.keyboard.press("Escape");
+      else await threadPane(ui).getByRole("button", { name: close }).click();
+      await threadPane(ui).waitFor({ state: "detached" });
+      assert.equal(await main.isVisible(), true, `${close} returns at ${at}`);
+      assert.ok(
+        await focused(reply),
+        `${close} puts focus back on the reply button at ${at}`,
+      );
+      assert.equal(await box.inputValue(), `draft at ${at}`);
+      assert.equal(
+        await scrollTop(),
+        scrolled,
+        `${close} keeps the channel's scroll at ${at}`,
+      );
+    }
+    const chip = main
+      .getByRole("list", { name: "Members" })
+      .getByRole("button", { name: /@codex/ });
+    await chip.click();
+    await drawer(ui).waitFor();
+    assert.equal(await main.isVisible(), false, `the screen fills ${at}`);
+    await ui.page.keyboard.press("Escape");
+    await drawer(ui).waitFor({ state: "detached" });
+    assert.ok(
+      await focused(chip),
+      `Escape puts focus back on the member at ${at}`,
+    );
+  }
+});
+
+test("UI-R4 L2: on a phone the Channels button opens the sidebar as a modal drawer that Escape, the backdrop or a choice closes, and focus returns to the button", async (t) => {
+  const alpha = layoutChannel();
+  const beta = team(2, "beta");
+  let client;
+  const ui = await open(t, (connected) => {
+    client = connected;
+    replay(connected, [alpha, beta]);
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  const page = ui.page;
+  const toggle = page.getByRole("button", { name: /^Channels/ });
+  const drawer = page.getByRole("dialog", { name: "Channels" });
+  const heading = page.getByRole("main").getByRole("heading", { level: 1 });
+  const onToggle = () =>
+    toggle.evaluate((element) => element === document.activeElement);
+  const inDrawer = () =>
+    page.evaluate(
+      () => document.activeElement?.closest('[role="dialog"]') !== null,
+    );
+  assert.equal(
+    await toggle.getAttribute("aria-label"),
+    "Channels, 1 needs you",
+  );
+  assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(
+    await page
+      .getByRole("navigation", { name: "Channel list", exact: true })
+      .count(),
+    0,
+    "the sidebar is not on screen",
+  );
+  assert.equal(
+    await toggle.locator(".dot-alert").count(),
+    1,
+    "the button shows the Needs-you dot",
+  );
+
+  await toggle.click();
+  await drawer.waitFor();
+  assert.equal(
+    await drawer.evaluate((element) => element.getBoundingClientRect().left),
+    0,
+    "with reduced motion the drawer is in place at once",
+  );
+  assert.equal(await toggle.getAttribute("aria-expanded"), "true");
+  assert.ok(await inDrawer(), "focus moves into the drawer");
+  assert.equal(
+    await page.evaluate(() => document.querySelector("main").inert),
+    true,
+    "the channel behind the drawer is inert",
+  );
+  for (const key of ["Tab", "Shift+Tab"])
+    for (let n = 0; n < 6; n++) {
+      await page.keyboard.press(key);
+      assert.ok(await inDrawer(), `${key} ${n + 1} stays in the drawer`);
+    }
+  await page.keyboard.press("Escape");
+  await drawer.waitFor({ state: "hidden" });
+  assert.ok(await onToggle(), "Escape returns focus to the button");
+  assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+
+  await toggle.click();
+  await drawer.waitFor();
+  await page.mouse.click(380, 600);
+  await drawer.waitFor({ state: "hidden" });
+  assert.ok(await onToggle(), "the backdrop returns focus to the button");
+  assert.equal(
+    await heading.textContent(),
+    "alpha",
+    "the backdrop chooses nothing",
+  );
+
+  await toggle.click();
+  await drawer.getByRole("button", { name: "beta" }).click();
+  await drawer.waitFor({ state: "hidden" });
+  assert.equal(await heading.textContent(), "beta");
+  assert.ok(await onToggle(), "choosing a channel returns focus to the button");
+
+  await toggle.click();
+  await drawer.getByRole("link", { name: "All activity" }).click();
+  await drawer.waitFor({ state: "hidden" });
+  assert.equal(await heading.textContent(), "All activity");
+  assert.ok(await onToggle(), "All activity has the button too");
+
+  await toggle.click();
+  await drawer
+    .getByRole("button", { name: /^alpha/ })
+    .first()
+    .click();
+  await drawer.waitFor({ state: "hidden" });
+  const timeline = page.getByRole("region", { name: "Message history" });
+  await timeline.getByRole("button", { name: /^1 reply from/ }).click();
+  const paneToggle = threadPane(ui).getByRole("button", { name: /^Channels/ });
+  await paneToggle.waitFor();
+  assert.equal(await toggle.count(), 1, "one Channels button, in the thread");
+  await paneToggle.click();
+  await drawer.waitFor();
+  assert.equal(
+    await page.evaluate(() => document.querySelector(".slot").inert),
+    true,
+    "the thread behind the drawer is inert",
+  );
+  await page.keyboard.press("Escape");
+  await drawer.waitFor({ state: "hidden" });
+  assert.ok(
+    await paneToggle.evaluate((element) => element === document.activeElement),
+    "Escape returns focus to the button in the thread, which stays open",
+  );
+  await threadPane(ui).getByRole("button", { name: "Close thread" }).click();
+  await threadPane(ui).waitFor({ state: "detached" });
+
+  const calm = structuredClone(alpha);
+  calm.frame.health = { level: "calm" };
+  calm.frame.attention = [];
+  client.send("space", calm);
+  await page.getByRole("button", { name: "Channels", exact: true }).waitFor();
+  assert.equal(await toggle.locator(".dot-alert").count(), 0);
+
+  for (const [width, phone] of [
+    [600, true],
+    [601, false],
+  ]) {
+    await resize(page, width, 844);
+    assert.equal(
+      await toggle.count(),
+      phone ? 1 : 0,
+      `the Channels button at ${width} px`,
+    );
+    assert.equal(
+      await page
+        .getByRole("navigation", { name: "Channel list", exact: true })
+        .count(),
+      phone ? 0 : 1,
+      `the sidebar column at ${width} px`,
+    );
+    assert.deepEqual(
+      await page.evaluate(() =>
+        [...document.querySelectorAll(".connection-dot")].map((dot) =>
+          dot.checkVisibility({ visibilityProperty: true }),
+        ),
+      ),
+      [true],
+      `one connection dot shows at ${width} px`,
+    );
+  }
+});
+
+test("UI-R4 L3: in a short window with no pane, the Needs-you banner shrinks and scrolls inside before the timeline gives up its three lines", async (t) => {
+  const value = layoutChannel();
+  value.frame.health = { level: "needs_you", items: 8 };
+  value.frame.attention = Array.from({ length: 8 }, (_, n) => ({
+    source_kind: "agent_status",
+    summary: {
+      text: `@codex is waiting on an approval or question ${n + 1}.`,
+      truncated: false,
+    },
+    opened_at_ms: Date.now() - 60 * 60_000,
+  }));
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Show 5 more", exact: true })
+    .click();
+  for (const [width, height] of [
+    [390, 460],
+    [640, 460],
+    [1024, 600],
+  ]) {
+    await resize(ui.page, width, height);
+    const shown = await ui.page.evaluate(() => {
+      const box = (selector) =>
+        document.querySelector(selector).getBoundingClientRect();
+      const banner = document.querySelector("main .attention");
+      return {
+        banner: box("main .attention").height,
+        scrolls: banner.scrollHeight > banner.clientHeight,
+        gap: box("main .timeline").top - box("main .attention").bottom,
+        timeline: box("main .timeline").height,
+        composer: box("main .composer").bottom,
+        height: innerHeight,
+      };
+    });
+    const at = `${width}x${height}: ${JSON.stringify(shown)}`;
+    assert.ok(
+      shown.timeline >= 112 - 0.5,
+      `the timeline keeps 112 px at ${at}`,
+    );
+    assert.ok(shown.scrolls, `the banner scrolls inside at ${at}`);
+    assert.ok(shown.gap >= 12 - 0.5, `12 px under the banner at ${at}`);
+    assert.ok(
+      shown.composer <= shown.height + 0.5,
+      `the composer is whole at ${at}`,
+    );
+  }
+});
+test("UI-R4 L3: in a window under 560 px tall the member strip folds to one row with +N more, and a taller window gets its two rows back", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.live();
+  const strip = () =>
+    ui.page.evaluate(() => {
+      const items = [...document.querySelectorAll("main .members > li")];
+      return {
+        rows: new Set(items.map((item) => item.offsetTop)).size,
+        chips: items.map((item) => item.textContent),
+      };
+    });
+  await resize(ui.page, 390, 460);
+  const short = await strip();
+  assert.equal(short.rows, 1, `one row at 390x460: ${JSON.stringify(short)}`);
+  assert.match(short.chips.at(-1), /^\+\d+ more$/);
+  await resize(ui.page, 390, 844);
+  const tall = await strip();
+  assert.equal(tall.rows, 2, `two rows at 390x844: ${JSON.stringify(tall)}`);
+  assert.ok(
+    tall.chips.every((chip) => !/more$/.test(chip)),
+    `every member shows at 390x844: ${JSON.stringify(tall)}`,
+  );
+  await resize(ui.page, 390, 460);
+  await ui.page
+    .locator("main .members")
+    .getByRole("button", { name: /^\+\d+ more$/ })
+    .click();
+  assert.ok(
+    (await strip()).chips.every((chip) => !/more$/.test(chip)),
+    "+N more still shows every member",
+  );
+});
+test("UI-R4 L2: the drawer is a modal dialog named Channels, and the list inside it has a name of its own", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [layoutChannel(), team(2, "beta")]),
+  );
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  const dialog = ui.page.getByRole("dialog", { name: "Channels" });
+  await ui.page.getByRole("button", { name: /^Channels/ }).click();
+  await dialog.waitFor();
+  assert.equal(await dialog.getAttribute("aria-modal"), "true");
+  assert.deepEqual(
+    await dialog
+      .getByRole("navigation")
+      .evaluateAll((navs) => navs.map((nav) => nav.getAttribute("aria-label"))),
+    ["Needs you", "Channel list"],
+    "no landmark in the dialog repeats its name",
+  );
+  await ui.page.keyboard.press("Escape");
+  await dialog.waitFor({ state: "hidden" });
+  await resize(ui.page, 1024, 768);
+  const sidebar = ui.page.getByRole("navigation", { name: "Channel list" });
+  await sidebar.waitFor();
+  assert.equal(
+    await ui.page.locator('[aria-modal="true"]').count(),
+    0,
+    "the sidebar column is no modal",
+  );
+});
+test("UI-R4 L1: while a thread covers the channel, or sits beside it, one Reconnecting bar shows above it", async (t) => {
+  const ui = await open(t, (client, n) => {
+    if (n === 1) replay(client, [layoutChannel()]);
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from/ })
+    .click();
+  await threadPane(ui).waitFor();
+  ui.connections[0].destroy();
+  const bar = ui.page.getByRole("status").filter({ hasText: "Reconnecting…" });
+  for (const [width, height] of [
+    [390, 844],
+    [640, 460],
+    [1440, 900],
+  ]) {
+    const at = `${width}x${height}`;
+    await resize(ui.page, width, height);
+    await bar.waitFor({ timeout: 3000 });
+    assert.equal(await bar.count(), 1, `one Reconnecting status at ${at}`);
+    const shown = await bar.evaluate((element) => {
+      const { top, bottom } = element.getBoundingClientRect();
+      const pane = document.querySelector(".slot").getBoundingClientRect();
+      return { top, bottom, pane: pane.top };
+    });
+    assert.ok(
+      shown.top >= 0 && shown.bottom <= shown.pane + 0.5,
+      `the bar sits above the thread at ${at}: ${JSON.stringify(shown)}`,
+    );
+    assert.ok(await threadPane(ui).isVisible(), `the thread stays at ${at}`);
+  }
+});
+async function phoneDrawer(t) {
+  const ui = await open(t, (client) =>
+    replay(client, [layoutChannel(), team(2, "beta"), team(3, "gamma")]),
+  );
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  const page = ui.page;
+  return {
+    page,
+    toggle: page.getByRole("button", { name: /^Channels/ }),
+    dialog: page.getByRole("dialog", { name: "Channels" }),
+    heading: page.getByRole("main").getByRole("heading", { level: 1 }),
+    focused: () => page.evaluate(() => document.activeElement?.textContent),
+  };
+}
+test("UI-R4 L2: in the drawer the arrow keys, Home and End only move focus between rows, and Enter chooses", async (t) => {
+  const { page, toggle, dialog, heading, focused } = await phoneDrawer(t);
+  await toggle.click();
+  await dialog.waitFor();
+  const rows = await dialog
+    .getByRole("navigation", { name: "Channel list" })
+    .getByRole("button")
+    .allTextContents();
+  assert.equal(rows.length, 3);
+  let at = rows.indexOf("alpha");
+  assert.equal(await focused(), "alpha", "focus starts on the selected row");
+  for (const key of ["ArrowDown", "ArrowDown", "ArrowUp", "End", "Home"]) {
+    await page.keyboard.press(key);
+    at =
+      key === "Home"
+        ? 0
+        : key === "End"
+          ? rows.length - 1
+          : (at + (key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length;
+    assert.equal(
+      await focused(),
+      rows[at],
+      `${key} moves focus to ${rows[at]}`,
+    );
+    assert.ok(await dialog.isVisible(), `${key} keeps the drawer open`);
+    assert.equal(
+      await heading.textContent(),
+      "alpha",
+      `${key} chooses nothing`,
+    );
+  }
+  await page.keyboard.press("ArrowDown");
+  const chosen = await focused();
+  assert.notEqual(chosen, "alpha");
+  await page.keyboard.press("Enter");
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await heading.textContent(), chosen, "Enter chooses the row");
+});
+test("UI-R4 L2: a drawer open when the window grows past 600 px closes, and stays closed back on a phone", async (t) => {
+  const { page, toggle, dialog } = await phoneDrawer(t);
+  await toggle.click();
+  await dialog.waitFor();
+  await resize(page, 700, 844);
+  assert.equal(await dialog.count(), 0, "no dialog at 700 px");
+  assert.equal(await page.locator(".drawer-backdrop").count(), 0);
+  assert.equal(
+    await page.evaluate(() => document.querySelector("main").inert),
+    false,
+    "nothing is inert at 700 px",
+  );
+  await resize(page, 390, 844);
+  assert.equal(await toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(await dialog.count(), 0, "the drawer stays closed at 390 px");
+  await toggle.click();
+  await dialog.waitFor();
+});
+test("UI-R4 L2: after the drawer was open, growing past 600 px and shrinking back leaves focus on the Channels button, not on the page", async (t) => {
+  const { page, toggle, dialog, focused } = await phoneDrawer(t);
+  await toggle.click();
+  await dialog.waitFor();
+  await resize(page, 700, 844);
+  assert.equal(await focused(), "alpha", "focus stays on the row at 700 px");
+  await resize(page, 390, 844);
+  assert.ok(
+    await toggle.evaluate((element) => element === document.activeElement),
+    `focus is on ${await page.evaluate(() => document.activeElement?.tagName)}`,
+  );
+});
+// WCAG contrast between pixels of a screenshot, read on a blank page so the
+// app's CSP has no say over the data URL.
+async function pixelContrast(png, pairs) {
+  const reader = await browser.newPage();
+  try {
+    return await reader.evaluate(
+      async ([data, pairs]) => {
+        const image = new Image();
+        image.src = `data:image/png;base64,${data}`;
+        await image.decode();
+        const canvas = document.createElement("canvas");
+        canvas.width = image.width;
+        canvas.height = image.height;
+        const context = canvas.getContext("2d");
+        context.drawImage(image, 0, 0);
+        const luminance = ([x, y]) => {
+          const [r, g, b] = context.getImageData(x, y, 1, 1).data;
+          const channel = (v) =>
+            v / 255 <= 0.03928
+              ? v / 255 / 12.92
+              : ((v / 255 + 0.055) / 1.055) ** 2.4;
+          return (
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+          );
+        };
+        return pairs.map(([a, b]) => {
+          const [la, lb] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+          return Math.round(((la + 0.05) / (lb + 0.05)) * 100) / 100;
+        });
+      },
+      [png.toString("base64"), pairs],
+    );
+  } finally {
+    await reader.close();
+  }
+}
+test("UI-R4 L2: in dark mode the drawer's edge stands off the dimmed page by 1.5:1, and light mode keeps its separation", async (t) => {
+  const ui = await open(t, (client) => replay(client, [team(1, "alpha")]));
+  await resize(ui.page, 390, 844);
+  await ui.live();
+  const dialog = ui.page.getByRole("dialog", { name: "Channels" });
+  const found = {};
+  for (const colorScheme of ["dark", "light"]) {
+    await ui.page.emulateMedia({ colorScheme, reducedMotion: "reduce" });
+    await ui.page.getByRole("button", { name: /^Channels/ }).click();
+    await dialog.waitFor();
+    const right = await dialog.evaluate(
+      (element) => element.getBoundingClientRect().right,
+    );
+    const y = 600;
+    const png = await ui.page.screenshot({
+      clip: { x: right - 20, y, width: 120, height: 1 },
+    });
+    const [edge, nearPage, surface] = [19, 20, 10].map((x) => [x, 0]);
+    const farPage = [119, 0];
+    const [edgeNear, edgeFar, surfaceFar] = await pixelContrast(png, [
+      [edge, nearPage],
+      [edge, farPage],
+      [surface, farPage],
+    ]);
+    found[colorScheme] = { edge: Math.min(edgeNear, edgeFar), surfaceFar };
+    await ui.page.keyboard.press("Escape");
+    await dialog.waitFor({ state: "hidden" });
+  }
+  const at = JSON.stringify(found);
+  t.diagnostic(`contrast ${at}`);
+  assert.ok(found.dark.edge >= 1.5, `the dark edge reads ${at}`);
+  assert.ok(found.light.surfaceFar >= 1.9, `light mode keeps its scrim ${at}`);
+});
+test("UI-R4 L2: typing in the composer leaves the page's media queries subscribed once", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.live();
+  await ui.page.evaluate(() => {
+    window.mediaListeners = { added: 0, removed: 0 };
+    const { addEventListener, removeEventListener } = MediaQueryList.prototype;
+    MediaQueryList.prototype.addEventListener = function (...args) {
+      window.mediaListeners.added += 1;
+      return addEventListener.apply(this, args);
+    };
+    MediaQueryList.prototype.removeEventListener = function (...args) {
+      window.mediaListeners.removed += 1;
+      return removeEventListener.apply(this, args);
+    };
+  });
+  await ui.page
+    .getByRole("main")
+    .getByRole("combobox")
+    .pressSequentially("hello there");
+  assert.deepEqual(await ui.page.evaluate(() => window.mediaListeners), {
+    added: 0,
+    removed: 0,
+  });
+});
+
+test("UI-R4 review H Low 3: when the agent comes back after a press read it was gone, the absence line clears and the card offers Message @codex again", async (t) => {
+  const { value, left, context } = leavesAfterPress("message", "closed");
+  const loaded = held();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    {
+      onContext: async () => {
+        await loaded.gate;
+        return context;
+      },
+    },
+  );
+  await ui.live();
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  await until(() => ui.contextRequests.length === 1, "the conversation");
+  ui.connections[0].send("space", left);
+  loaded.release();
+  const status = ui.page.locator("main .composer-status");
+  await readsAs(status, "@codex's pane is closed, so it can't take a message.");
+  ui.connections[0].send("space", value);
+  await card
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .waitFor();
+  await eventually(
+    async () => !(await status.textContent()).includes("can't take a message"),
+    "the absence line clears",
+  );
+});
+
+test("UI-R4 review H Low 2: in a thread, a pasted U+FEFF before a leading name drops the To label, as Enter sends only to that name", async (t) => {
+  const now = Date.now();
+  const value = team(1, "alpha");
+  value.frame.messages = [
+    message("ask", "@codex check this", {
+      thread_id: "t1",
+      at_ms: now - 120_000,
+      legs: [{ to: "codex", stage: done() }],
+    }),
+    message("answer", "Checked", {
+      thread_id: "t1",
+      in_reply_to: "ask",
+      kind: "reply",
+      author: "codex",
+      at_ms: now - 60_000,
+    }),
+  ];
+  value.frame.threads = [
+    {
+      thread_id: "t1",
+      title: { text: "Check", truncated: false },
+      message_count: 2,
+    },
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from @codex/ })
+    .click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
+  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  await reply.fill("﻿@claude look too");
+  assert.equal(await pane.locator(".composer-to").count(), 0, "no To label");
+  await reply.press("Enter");
+  await until(() => ui.posts.attempts.length === 1, "the reply");
+  assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@claude look too");
+});
+
+test("UI-R4 fix1 1 and 3: a window that narrows until the open pane covers the channel hands focus from the composer to the pane, and the cover starts at 899 px tall, not 900", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const main = ui.page.getByRole("main");
+  const box = main.getByRole("combobox");
+  const active = () =>
+    ui.page.evaluate(() => {
+      const element = document.activeElement;
+      return element === document.body
+        ? "body"
+        : (element.getAttribute("aria-label") ?? element.className);
+    });
+  for (const [from, to] of [
+    [
+      [1440, 900],
+      [390, 844],
+    ],
+    [
+      [860, 1000],
+      [860, 899],
+    ],
+    [
+      [861, 899],
+      [700, 899],
+    ],
+  ]) {
+    const at = `${from.join("x")} to ${to.join("x")}`;
+    await resize(ui.page, ...from);
+    await ui.page
+      .getByRole("region", { name: "Message history" })
+      .getByRole("button", { name: /^1 reply from/ })
+      .click();
+    await threadPane(ui).waitFor();
+    assert.equal(await main.isVisible(), true, `both show at ${from}`);
+    await box.click();
+    await box.fill(`draft ${at}`);
+    await resize(ui.page, ...to);
+    assert.equal(await main.isVisible(), false, `the thread covers at ${to}`);
+    await eventually(
+      async () => (await active()) === "Close thread",
+      `focus moves to Close thread at ${at}, not ${await active()}`,
+    );
+    await ui.page.keyboard.press("Escape");
+    await threadPane(ui).waitFor({ state: "detached" });
+    assert.equal(await box.inputValue(), `draft ${at}`);
+  }
+  for (const [width, height, covers] of [
+    [860, 900, false],
+    [860, 899, true],
+    [601, 900, false],
+    [600, 900, true],
+  ]) {
+    await resize(ui.page, width, height);
+    await ui.page
+      .getByRole("region", { name: "Message history" })
+      .getByRole("button", { name: /^1 reply from/ })
+      .click();
+    await threadPane(ui).waitFor();
+    assert.equal(
+      await main.isVisible(),
+      !covers,
+      `${width}x${height} ${covers ? "covers" : "stacks"}`,
+    );
+    await ui.page.keyboard.press("Escape");
+    await threadPane(ui).waitFor({ state: "detached" });
+  }
+  await resize(ui.page, 1440, 900);
+  await main
+    .getByRole("list", { name: "Members" })
+    .getByRole("button", { name: /@codex/ })
+    .click();
+  await drawer(ui).waitFor();
+  await box.click();
+  await resize(ui.page, 390, 844);
+  await eventually(
+    async () =>
+      ui.page.evaluate(() =>
+        document.activeElement?.classList.contains("peek-text"),
+      ),
+    "focus moves to the screen's text when the peek covers the channel",
+  );
+});
+
+test("UI-R4 fix1 2: a kept draft's line says why once the agent's pane closes, instead of asking for a Message press that is gone", async (t) => {
+  const { value, left, context } = leavesAfterPress("message", "closed");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  const status = ui.page.locator("main .composer-status");
+  await readsAs(
+    status.locator(".composer-guard"),
+    "Your draft is still here. Send or clear it, then press Message @codex again.",
+  );
+  ui.connections[0].send("space", left);
+  await readsAs(
+    status.locator(".composer-guard"),
+    "@codex's pane is closed, so it can't take a message.",
+  );
+  assert.equal(
+    await ui.page
+      .getByRole("button", { name: "Message @codex", exact: true })
+      .count(),
+    0,
+  );
+  assert.equal(await draft.inputValue(), "my own words");
+  assert.equal(ui.posts.attempts.length, 0);
 });

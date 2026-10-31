@@ -81,6 +81,8 @@
   --shadow-pop:
     0 8px 24px -6px oklch(0.2 0.02 275 / 0.18),
     0 2px 6px -2px oklch(0.2 0.02 275 / 0.12);
+  --scrim: oklch(0.2 0.02 275 / 0.32);
+  --drawer-edge: var(--line);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -119,6 +121,8 @@
     --id-terminal: oklch(0.42 0.02 278);
     --shadow-pop:
       0 10px 28px -6px oklch(0 0 0 / 0.55), 0 2px 8px -2px oklch(0 0 0 / 0.4);
+    --scrim: oklch(0 0 0 / 0.5);
+    --drawer-edge: var(--line-strong);
   }
 }
 
@@ -157,6 +161,8 @@
   --id-terminal: oklch(0.42 0.02 278);
   --shadow-pop:
     0 10px 28px -6px oklch(0 0 0 / 0.55), 0 2px 8px -2px oklch(0 0 0 / 0.4);
+  --scrim: oklch(0 0 0 / 0.5);
+  --drawer-edge: var(--line-strong);
 }
 
 * {
@@ -270,9 +276,12 @@ a:hover {
   transform: none;
 }
 
+/* Row 1 holds the Reconnecting bar and is empty without it. The sidebar spans
+   every row, and the channel and any pane share the last one. */
 .app-shell {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100dvh;
   overflow: hidden;
 }
@@ -287,6 +296,7 @@ a:hover {
 }
 
 .sidebar {
+  grid-row: 1 / -1;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -450,16 +460,23 @@ a:hover {
   background: var(--working);
 }
 
+/* Below the floors of a short window, the column scrolls as a whole, so the
+   composer is never out of reach. */
 .main {
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden auto;
 }
 .main:focus-visible {
   outline-offset: -2px;
 }
+/* One bar spans the channel and any pane beside or over it, so it shows in
+   every layout. */
 .reconnect {
+  grid-column: 2 / -1;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -468,7 +485,6 @@ a:hover {
   background: var(--warning-bg);
   color: var(--warning-text);
   font-size: var(--text-sm);
-  flex: none;
 }
 .channel-header {
   display: flex;
@@ -698,12 +714,15 @@ button.member:not(.more):hover {
 .text-button.confirm-stop[aria-disabled="true"] {
   color: var(--text-muted);
 }
+/* A short window shrinks the banner, which scrolls inside, before the timeline
+   gives up its last three lines. */
 .attention {
-  margin: var(--space-3) var(--space-6) 0;
+  margin: var(--space-3) var(--space-6);
   border: 1px solid var(--attention-line);
   border-radius: var(--radius-lg);
   background: var(--attention-bg);
-  flex: none;
+  flex: 0 1 auto;
+  min-height: 56px;
   max-height: 40vh;
   overflow-y: auto;
   transform-origin: top;
@@ -790,15 +809,13 @@ button.member:not(.more):hover {
 .timeline {
   --pad-bottom: var(--space-6);
   flex: 1;
-  min-height: 0;
+  min-height: 112px;
   overflow-y: auto;
   overflow-anchor: none;
   padding: 0 var(--space-6);
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px);
   mask-image: linear-gradient(to bottom, transparent, #000 12px);
 }
-/* The space above and below the messages is content, not padding, so a
-   squeezed timeline can shrink to nothing. */
 .timeline::before,
 .timeline::after {
   content: "";
@@ -1336,10 +1353,12 @@ button.member:not(.more):hover {
 }
 
 .slot {
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden auto;
   border-left: 1px solid var(--line);
   background: var(--bg);
   animation: slot-in var(--duration) var(--ease-out);
@@ -1961,15 +1980,8 @@ code.inline {
   .app-shell.has-slot {
     grid-template-columns: 200px minmax(0, 1fr);
   }
-  .app-shell.has-slot {
-    grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
-  }
-  .app-shell.has-slot .sidebar {
-    grid-row: 1 / 3;
-  }
   .slot {
     border-left: 0;
-    border-top: 1px solid var(--line);
   }
   .channel-header,
   .members,
@@ -1982,28 +1994,138 @@ code.inline {
   .attention {
     margin-inline: var(--space-4);
   }
-  /* Stacked, the main column is half the window. Once the timeline is gone,
-     the banner shrinks so the composer stays whole. */
+}
+/* A narrow window tall enough for both stacks the thread or peek under the
+   channel, each in half the height. */
+@media (max-width: 860px) and (min-height: 900px) and (width > 600px) {
+  .app-shell.has-slot {
+    grid-template-rows: auto minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .slot {
+    grid-row: 3;
+    border-top: 1px solid var(--line);
+  }
   .app-shell.has-slot .attention {
-    flex-shrink: 1;
     max-height: 40%;
   }
 }
+/* Any other narrow window has no room for two: the thread or peek takes the
+   channel's place. The channel stays mounted under it, so its draft, scroll
+   and deliveries survive. */
+@media (max-width: 860px) and (height < 900px), (max-width: 600px) {
+  .app-shell.has-slot > .main,
+  .app-shell.has-slot > .slot {
+    grid-row: 2;
+    grid-column: -2 / -1;
+  }
+  .app-shell.has-slot > .main {
+    visibility: hidden;
+  }
+}
+.channels-toggle {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  margin-left: calc(-1 * var(--space-2));
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  flex: none;
+}
+.thread-head .channels-toggle,
+.peek-head .channels-toggle {
+  margin-left: calc(-1 * var(--space-3));
+}
+.channels-toggle:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.channels-toggle .dot,
+.channels-toggle .connection-dot {
+  position: absolute;
+  right: 1px;
+  border: 2px solid var(--bg);
+}
+.channels-toggle .dot {
+  top: 3px;
+  width: 12px;
+  height: 12px;
+}
+.channels-toggle .connection-dot {
+  bottom: 4px;
+  width: 10px;
+  height: 10px;
+}
+.channels-toggle:hover .dot,
+.channels-toggle:hover .connection-dot {
+  border-color: var(--bg-hover);
+}
+/* A phone has no room for a sidebar column: the sidebar becomes a drawer over
+   the channel. */
 @media (max-width: 600px) {
   .app-shell,
   .app-shell.has-slot {
-    grid-template-columns: 160px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .reconnect {
+    grid-column: 1;
   }
   .channel-header .health {
     display: none;
+  }
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 3;
+    width: min(280px, calc(100vw - var(--space-10)));
+    border-right-color: var(--drawer-edge);
+    box-shadow: var(--shadow-pop);
+    translate: -100% 0;
+    visibility: hidden;
+  }
+  .drawer-open .sidebar {
+    translate: none;
+    visibility: visible;
+    transition: translate var(--duration) var(--ease-out);
+  }
+  .drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 2;
+    background: var(--scrim);
+    animation: backdrop-in var(--duration) var(--ease-out);
+  }
+}
+/* A window this short lowers the floors, so the composer stays whole down to
+   300 px tall. */
+@media (max-height: 420px) {
+  .channel-header {
+    height: 48px;
+  }
+  .attention {
+    min-height: 40px;
+  }
+  .timeline {
+    min-height: 48px;
+  }
+}
+@keyframes backdrop-in {
+  from {
+    opacity: 0;
   }
 }
 @media (prefers-reduced-motion: reduce) {
   .presence[data-activity="working"],
   .arrive,
   .slot,
-  .attention {
+  .attention,
+  .drawer-backdrop {
     animation: none;
+  }
+  .sidebar,
+  .drawer-open .sidebar {
+    transition: none;
   }
   .located,
   .located:hover,

@@ -86,8 +86,9 @@ Use the 4px scale `--space-1` through `--space-10`. The density is comfortable,
 not airy.
 
 - Sidebar rows are 32px tall. Section gaps are 20px.
-- The channel header is 56px. The member strip under it is 36px per line, at
-  most two lines.
+- The channel header is 56px, or 48px in a window under 420px tall. The member
+  strip under it is 36px per line, at most two lines, or one line in a window
+  under 560px tall.
 - A message group has 16px above it. Messages inside a group sit about 6px
   apart, which keeps the hover padding.
 - The timeline scroller fades its top 12px with a `mask-image` gradient, so a
@@ -129,13 +130,90 @@ sidebar list, the Needs-you details, the timeline, the thread, the activity list
 and the screen text. Each of them is the containing block of what it scrolls, so
 hidden text inside it never stretches the page.
 
-Below 860px of window width, an open thread pane or peek drawer stacks under
-the main column, and each gets half the window's height. Nothing in the main
-column paints outside it. The Needs-you banner takes at most 40 percent of the
-main column. When the column is short, the timeline shrinks first, down to
-nothing, and then the banner, which scrolls inside itself. The composer always
-stays whole. Side by side, from 860px up, the banner's cap is 40 percent of the
-window's height.
+The grid's first row holds the Reconnecting bar and is empty without it. The
+bar spans every column right of the sidebar, so it sits over the channel and
+any pane beside it, stacked under it, or covering it. There is one bar and one
+`role="status"` at every size, and it is inert behind the phone drawer like the
+rest of the page. The sidebar spans every row. The main column and a pane
+share the last row, or take one row each when they stack.
+
+The window's size decides where an open pane (the thread pane or the peek
+drawer) goes:
+
+| Window                                                         | Pane                                                                                                                 |
+| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Over 860px wide                                                | Beside the main column.                                                                                              |
+| 601 to 860px wide and at least 900px tall, such as a tablet    | Stacked under the main column. Each gets half the window's height.                                                   |
+| 860px wide or less and under 900px tall, or 600px wide or less | In the main column's place. The channel stays mounted under it, hidden, so its draft, scroll and deliveries survive. |
+
+When the pane takes the channel's place, its header's "in #alpha" is the only
+context, and its close button or Escape is the way back. There is no back
+button. Focus returns where it does in the other layouts: to the thread button,
+or to the chip, name or row that opened the screen. When the window narrows
+until an open pane covers the channel, focus that was in the channel moves into
+the pane: to the thread's Close button, or to the screen's text. The breakpoints are media
+queries in `style.css`. JavaScript reads two facts, in `ui/measure.ts`: the
+600px phone width, because it decides where the connection dot is and whether
+the sidebar is a modal drawer, and the 560px short window, because the member
+strip counts its lines.
+
+In every layout the timeline keeps at least 112px, about three message lines.
+When the main column is short, the Needs-you banner gives way first: it
+shrinks, down to 56px, and scrolls inside itself. 12px (`--space-3`) always
+separate it from the timeline. Its cap is 40 percent of the window's height, or
+40 percent of the main column when stacked. The composer always stays whole.
+The Jump to latest pill lies inside the timeline, so with the timeline's floor
+it never covers the banner, the member strip or the composer. Nothing in the
+main column paints outside it.
+
+Those floors add up to 373px: the 56px header, the 39px one-line member strip,
+the banner's 56px and its two 12px gaps, the timeline's 112px and the 86px
+composer. A window under 420px tall, such as a phone in landscape, lowers them:
+the header is 48px, the banner's floor 40px and the timeline's 48px, 285px in
+all. The member strip keeps its one line and the gaps stay 12px. So the
+composer stays whole down to a 300px column, the Reconnecting bar included.
+Under that, as the last resort, the main column and a pane scroll as a whole
+(`overflow-y: auto`) instead of clipping, so the composer and the thread's
+composer can always be scrolled to. The page still never scrolls, and in any
+taller window neither column ever has to.
+
+### Phone drawer
+
+At 600px wide or less the sidebar column goes away and the main column takes
+the whole width.
+
+- A 32px **Channels** button starts the header that is on screen: the channel
+  header, the All activity header, the bar above an empty or loading view, or
+  the pane's header when a pane covers the channel. It shows a drawn menu icon,
+  three lines. Its accessible name is "Channels". When channels need you, a red
+  dot sits at its top right and the name reads "Channels, 1 needs you", or
+  "Channels, 2 need you". The connection dot sits at its bottom right, because
+  the sidebar's footer is off screen. Each dot has a 2px ring in the header's
+  background, like a presence badge. Exactly one connection dot exists at every
+  width.
+- The button opens the `Sidebar` itself as a drawer from the left,
+  `min(280px, 100vw - 40px)` wide, over a `--scrim` backdrop. Its right edge is
+  a 1px `--drawer-edge` line: `--line` in light mode and `--line-strong` in dark
+  mode. In dark mode the drawer's surface and the dimmed page are almost the
+  same color (1.03:1, measured from pixels), so the edge does the separating: it
+  reads 1.80:1 against the dimmed page, where `--line` read 1.37:1. Light mode
+  keeps `--line` (1.65:1), because the scrim already parts the surfaces there
+  (1.96:1) and `--line-strong` would drop the edge to 1.32:1. The drawer is a
+  modal dialog (`aria-modal="true"`) named "Channels". Its list of channels is
+  the "Channel list" navigation at every width, so no landmark in the drawer
+  repeats the dialog's name. Focus moves to the selected row, Tab and Shift+Tab
+  stay inside, and everything behind it is inert.
+- Escape, a press on the backdrop, or choosing a channel or All activity closes
+  it. Focus then returns to the Channels button. In the drawer, the arrow keys
+  only move focus between rows, and Enter chooses.
+- The drawer slides in over `--duration` and the backdrop fades in. With
+  reduced motion it appears in place. It closes at once, so the chosen channel
+  shows without waiting, and a window that narrows past 600px never shows the
+  sidebar sliding away over the page.
+- Over 600px nothing changes: no button, and the sidebar column stays. A
+  drawer open when the window grows past 600px closes. If focus was in the
+  sidebar column when the window narrows to a phone, it moves to the Channels
+  button.
 
 ### Landing and navigation
 
@@ -195,7 +273,7 @@ window's height.
 - Only the Channels row of the selected channel gets the selected background.
   Its Needs-you row stays unselected.
 - **Footer**, 40px: the connection dot and "Live", "Connecting…", or
-  "Reconnecting…".
+  "Reconnecting…". On a phone the dot moves to the Channels button.
 - Section labels are 12px 600 `--text-muted`, sentence case, with the count in
   tabular numerals. They are not headings. Each `nav` carries the section name
   as its `aria-label`, so the channel title is the page's first heading.
@@ -229,7 +307,9 @@ unknown, pane closed. The operator chip reads "You", shows no presence, and
 comes last. The chip's
 tooltip names the runtime in words: "Claude Code", "Codex", "OpenCode", "Pi",
 or "Terminal". An unknown runtime id is shown with its first letter capitalized. After two lines, end with a
-"+N more" chip that expands the strip. Remove the "Members" and "Status"
+"+N more" chip that expands the strip. In a window under 560px tall, end it
+after one line, so the timeline keeps the second line's room
+(`useShortWindow` in `ui/measure.ts`). Remove the "Members" and "Status"
 headings. Each member chip is a button that opens the peek drawer for that
 member. The operator chip is not a button.
 
@@ -392,8 +472,10 @@ full summary in 13px muted text. On a narrow window the row wraps between
 buttons, never inside a label, and a button never shrinks below its label. Only
 a label wider than the whole column ends in an ellipsis, with the full label as
 its tooltip. Show three items, then a "Show N more" button.
-The banner takes at most 40 percent of the main column's height and scrolls
-inside (see App shell for the stacked layout).
+The banner takes at most 40 percent of the window's height, shrinks before the
+timeline would drop under 112px (48px in a window under 420px tall), and
+scrolls inside. 12px separate it from the
+timeline. See App shell for each layout.
 Announce new items through a polite live region.
 
 | `source`                                | Title                                                                                                | Hint                                                            |
@@ -453,16 +535,24 @@ offer, and its button names the action and the person:
 | `pane`     | "See @worker's screen" | Opens the peek drawer for that agent.                                |
 | `local`    | none                   | Its setup step becomes the hint.                                     |
 
-When the agent a `reply` or `message` is for can't take a message, the first
-press says why in the place the answer would go: the channel composer's status
-row for `message`, and the thread pane's slot for `reply`. Its words match the
-member chip.
+When the agent a `reply` or `message` is for can't take a message, the card
+offers no press that can't work. It shows no **Reply to** or **Message**
+button, and its hint line reads why in place of its usual hint, which would ask
+for an action the operator can no longer take. **Show message** and
+**Details** stay. When the frame shows the agent live again, the button and
+the usual hint come back. Its words match the member chip.
 
-| The agent                                    | The line                                               |
-| -------------------------------------------- | ------------------------------------------------------ |
-| Its pane is closed, the chip's "Pane closed" | "@codex's pane is closed, so it can't take a message." |
-| No longer in the frame, the card names it    | "@codex isn't in this channel anymore."                |
-| No longer in the frame, no name known        | "That agent isn't in this channel anymore."            |
+| The agent                                         | The line                                                                                      |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Its pane is closed, the chip's "Pane closed"      | "@codex's pane is closed, so it can't take a message."                                        |
+| In a workspace with no label Namedrop can mention | "@codex's workspace has no label Namedrop can mention, so it can't take a message from here." |
+| No longer in the frame, the card names it         | "@codex isn't in this channel anymore."                                                       |
+| No longer in the frame, no name known             | "That agent isn't in this channel anymore."                                                   |
+
+An agent whose home workspace has no addressable label is alive, so it never
+reads as gone. If the agent goes after the press, the same line shows where
+the answer would go: the channel composer's status row for `message`, and the
+thread pane's slot for `reply`.
 
 The card's name for an agent that left the frame is the item's subject. A
 `coordination` or `automatic_reply_limit` item has none, so it reads "That
@@ -534,8 +624,8 @@ the parent message, a divider that reads "1 reply" with hairlines on both sides,
 and the replies. When the thread has no replies and the server knows of none, the
 divider reads "No replies yet". Replies use the message component without a
 reply preview. The pane slides in from 16px right with a fade over `--duration`.
-Below 860px of window width, the pane stacks under the timeline instead of
-beside it.
+On a narrow window the pane stacks under the timeline or takes the main
+column's place; see App shell.
 
 A Needs-you conversation that is answered somewhere else says where, in the
 composer's place: one 12px muted line, 20px from the sides and 12px from the
@@ -543,15 +633,17 @@ bottom. Only one place offers an action at a time. While the channel box shows
 its kept-draft notice, which names the card's button as the retry, the line has
 no button. Once the notice goes, the button comes back.
 
-| The item's answer                      | The line                                                                      |
-| -------------------------------------- | ----------------------------------------------------------------------------- |
-| A channel message, ready               | "Answer tracked work in the channel. Your message to @claude is ready there." |
-| A channel message, not prepared        | "Answer tracked work in the channel." then a **Message @claude** text button  |
-| A channel message, draft kept          | "Answer tracked work in the channel." alone                                   |
-| The agent's pane                       | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip   |
-| A reply to an agent whose pane closed  | "@codex's pane is closed, so it can't take a message."                        |
-| A reply to an agent no longer in frame | "@codex isn't in this channel anymore."                                       |
-| The same, with no name known           | "That agent isn't in this channel anymore."                                   |
+| The item's answer                      | The line                                                                                      |
+| -------------------------------------- | --------------------------------------------------------------------------------------------- |
+| A channel message, ready               | "Answer tracked work in the channel. Your message to @claude is ready there."                 |
+| A channel message, not prepared        | "Answer tracked work in the channel." then a **Message @claude** text button                  |
+| A channel message to an absent agent   | The agent's line from the Needs-you banner alone, with no button                              |
+| A channel message, draft kept          | "Answer tracked work in the channel." alone                                                   |
+| The agent's pane                       | "Answer it in @worker's pane in Herdr.", with the pane label as its tooltip                   |
+| A reply to an agent whose pane closed  | "@codex's pane is closed, so it can't take a message."                                        |
+| A reply to an agent no longer in frame | "@codex isn't in this channel anymore."                                                       |
+| A reply to an agent it can't mention   | "@codex's workspace has no label Namedrop can mention, so it can't take a message from here." |
+| The same, with no name known           | "That agent isn't in this channel anymore."                                                   |
 
 When a reply's thread already holds a draft, the composer stays and its status
 row reads, 12px muted: "Your existing draft was kept. Send or clear it before
@@ -607,20 +699,24 @@ main column, under the timeline, and at the bottom of the thread pane.
   open, Enter and Tab accept the highlighted suggestion instead.
 - **Hint**: while the box has focus, a 12px muted line under it says where Enter
   sends the text. In the thread pane it reads "Enter to send · Shift+Enter for
-  a new line". The channel composer's hints are in Channel chat below.
+  a new line", except for a lone `@` (see Channel chat). The channel
+  composer's hints are in Channel chat below.
 - **Kept draft**: when a Needs-you **Message @claude** finds the channel box
   already holding other text, the text stays and the status row under the box
   reads, in 12px `--text` like the recipient guard: "Your draft is still here.
   Send or clear it, then press Message @claude again.", with the pressed
   button's own label. There is no link in it; the card's button is the retry.
+  If the agent goes while the notice shows, the row reads why instead, as
+  below, since the button it names is gone.
   The notice stays until the next edit of the box, a send, or a clear; then the
   recipient guard and the hint return, so "@Codex hi" typed after it reads
   "Names are lowercase: @codex". The message that button prepared is not
-  another draft, so pressing it again never warns. When the agent can't take a
-  message, the first press says why in the same row, whether or not the box
-  holds a draft, and the box keeps its text: "@codex's pane is closed, so it
-  can't take a message." or "@codex isn't in this channel anymore." (see
-  Response under Needs-you banner). Availability is checked before the draft,
+  another draft, so pressing it again never warns. The card offers no press
+  for an agent that can't take a message. When the agent goes between the
+  press and the conversation's arrival, the press says why in the same row,
+  whether or not the box holds a draft, and the box keeps its text:
+  "@codex's pane is closed, so it can't take a message." or "@codex isn't in
+  this channel anymore." (see Response under Needs-you banner). Availability is checked before the draft,
   so the operator never clears a draft only to learn the agent is gone. That
   line also gives way at the next edit, so the hint and the guard explain the
   text that follows.
@@ -926,8 +1022,15 @@ uses the "Send to" form. Each offer is a text button in 12px 600
   and no reference lines.
 
 **Channel composer hint.** While the box has focus, the hint line says where
-Enter sends:
+Enter sends. It judges the text Enter sends, which is the box's text trimmed
+the way JavaScript trims it, so a pasted U+FEFF at either end can't change the
+hint, and U+0085 reads as whitespace, as the server reads it.
 
+- Text that is only `@`, in any composer: "Type a name after @". The server
+  reads it as a mention with no name and refuses it, so Enter keeps it in the
+  box with no request, and the line under the box keeps the same words after
+  Enter. While the member list is open, Enter still picks the highlighted
+  name. "#alpha @" and "@ hi" are plain posts.
 - Text that mentions no agent, or no text: "Enter posts to the channel ·
   Mention @name to bring someone in".
 - Text that mentions agents but does not start with them: "Enter posts to the
@@ -959,19 +1062,27 @@ Enter sends:
     channel post apply. Its @codex follows the `#label` word, so the post
     mentions no one: "Enter posts to the channel · Mention @name to bring
     someone in".
-  - With no `#label` before it, a name whose lowercase form belongs to a
-    member of this channel whose pane is closed (the chip's "Pane closed"):
-    "@codex's pane is closed", for "@codex hi" and "@Codex hi" alike. The
-    server refuses both, so this comes before the capitals rule: lowercasing
-    the name would only lead to a second refusal. A name a current member has
-    taken since is not closed. With a `#label` first, the name belongs to that
-    workspace, so the rules below apply.
+  - With no `#label` before it, or only this channel's own label in any case
+    ("#alpha @codex hi", "#Alpha: @codex hi" in #alpha), a name whose
+    lowercase form belongs to a member of this channel whose pane is closed
+    (the chip's "Pane closed"): "@codex's pane is closed", for "@codex hi" and
+    "@Codex hi" alike. The server resolves such a name here and refuses both,
+    so this comes before the capitals rule: lowercasing the name would only
+    lead to a second refusal. A name a current member has taken since is not
+    closed. With any other label, or `#all`, the name belongs to another
+    workspace or to every one, so the rules below apply.
   - A name with capitals: "Names are lowercase: @codex", the name with its
     ASCII letters lowercased. The server refuses the capital before it looks
     the name up, so this is the reason for a current member, a mention group
     the page can't see, and an unknown name alike: "@Backend hi" reads "Names
     are lowercase: @backend" and "@Nobody hi there" reads "Names are
     lowercase: @nobody".
+  - `#all` in the leading label run with any other workspace label, before a
+    valid name: "#all already means every workspace · Drop the other labels",
+    for "#all #alpha @codex hi" and "#alpha #ALL @codex hi". The server
+    checks capitals first, so "#all #alpha @Codex hi" reads "Names are
+    lowercase: @codex". With no valid name after the labels, as in
+    "#all #alpha hi", the text is a plain post.
   - A lowercase name the page doesn't know keeps "Enter sends only to
     @name". It may be a group, which the page can't see, so the server
     decides.
@@ -1133,8 +1244,8 @@ reads only when it opens and when the reader asks: never on a timer.
 - **Slot**: the thread pane's slot, `clamp(400px, 36vw, 480px)` wide, which is
   480px at 1440 and 400px at 1024. Opening the drawer closes the thread pane,
   and opening a thread closes the drawer. Picking another channel or All
-  activity closes it. Below 860px it stacks under the main column, like the
-  thread pane. Its accessible name is "Screen of @codex".
+  activity closes it. On a narrow window it stacks under the main column or
+  takes its place, like the thread pane. Its accessible name is "Screen of @codex".
 - **Header**, 60px, two lines. Line 1: a 20px avatar with its presence badge,
   the alias at 15px 600, and the presence word in 12px muted. Line 2, 12px
   muted: "in #alpha · Read at 10:42 PM". The stamp updates with every read and
@@ -1189,6 +1300,8 @@ Motion shows state and nothing else.
 - A presence dot changes color over 180ms. A working dot pulses slowly.
 - The thread pane and the peek drawer enter over 180ms.
 - The Needs-you banner expands and fades over 180ms when it appears.
+- The phone drawer slides in from the left over 180ms while its backdrop fades
+  in. It closes with no motion.
 - Under `prefers-reduced-motion: reduce`, remove the pulse and every movement,
   and keep only color changes.
 
@@ -1204,7 +1317,7 @@ Motion shows state and nothing else.
 | History error                 | "Couldn't load earlier messages." and a **Try again** button, in the same line.                                                    |
 | Conversation error            | "Couldn't load this conversation." and a **Try again** button, in the thread pane.                                                 |
 | Missing range                 | A hairline divider with "Some messages are missing here" and a **Load them** button.                                               |
-| Reconnecting                  | A 36px bar at the top of the main column in `--warning-bg` and `--warning-text`: "Reconnecting… Showing updates up to 10:42 PM."   |
+| Reconnecting                  | A 36px bar over the channel and any pane in `--warning-bg` and `--warning-text`: "Reconnecting… Showing updates up to 10:42 PM."   |
 | Server-shortened text         | A 12px muted line "Shortened by Namedrop."                                                                                         |
 | All activity, nothing active  | The pulse icon, title "Every agent is idle", body "Agents show up here while they work, wait on each other, or need you."          |
 
@@ -1221,7 +1334,8 @@ Namedrop." when the server never answered. The pane header keeps "in #alpha".
 - The sidebar keeps its arrow-key navigation. The timeline scroller stays
   focusable. Escape closes the thread pane and returns focus to the thread button.
   Escape closes the peek drawer and returns focus to the chip, name, or row that
-  opened it. When that control is gone, focus moves to the timeline, or to the
+  opened it. On a phone, Escape closes the channels drawer and returns focus to
+  the Channels button. When that control is gone, focus moves to the timeline, or to the
   activity list in All activity.
 - Every presence dot, receipt icon, and avatar has a text equivalent. Decorative
   icons are `aria-hidden`.

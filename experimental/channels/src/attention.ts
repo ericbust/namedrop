@@ -227,16 +227,34 @@ export function attentionReplyTo(
 // Why the agent a response is for can't take a message.
 export type Absence =
   | { kind: "closed"; alias: string }
+  | { kind: "unreachable"; alias: string }
   | { kind: "gone"; alias: string | null };
+// Null when the agent can take one: the same test as attentionReplyTo.
 export function absence(
   intent: Pick<ReplyIntent, "addressId" | "subject">,
   directory: Directory,
-): Absence {
+): Absence | null {
+  if (attentionReplyTo(intent, directory) !== null) return null;
   const who = participant(directory, intent.addressId);
   if (who.kind !== "member") return { kind: "gone", alias: intent.subject };
-  return who.member.activity === "retired"
-    ? { kind: "closed", alias: who.member.alias }
+  if (who.member.activity === "retired")
+    return { kind: "closed", alias: who.member.alias };
+  return who.home?.token === null
+    ? { kind: "unreachable", alias: who.member.alias }
     : { kind: "gone", alias: who.member.alias };
+}
+// Why a card's Reply or Message press can't reach its agent, or null.
+export function responseAbsence(
+  item: Attention,
+  directory: Directory,
+): Absence | null {
+  const response = item.response;
+  return response?.kind === "reply" || response?.kind === "message"
+    ? absence(
+        { addressId: response.addressId, subject: item.subjectAlias },
+        directory,
+      )
+    : null;
 }
 export function replyPrefill(
   draft: string,

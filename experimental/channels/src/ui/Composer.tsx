@@ -16,8 +16,10 @@ import {
   complete,
   composerHint,
   insertion,
+  keptHint,
   leadingMentions,
   postSource,
+  sentText,
 } from "../complete.ts";
 import {
   composerCopy,
@@ -165,7 +167,7 @@ export function Composer({
   const text = draft?.text ?? "";
   const failure = draft?.failure ?? null;
   const sending = inFlight(outbox, composer);
-  const leading = leadingMentions(text);
+  const leading = leadingMentions(sentText(text));
   const source = postSource(text, rule);
 
   const completion = useMemo(
@@ -369,12 +371,8 @@ export function Composer({
           <p>{composerCopy.sending}</p>
         ) : notice !== null ? (
           notice
-        ) : guarded && source === null && text.trim() !== "" ? (
-          <p className="composer-guard">
-            {leading.length > 0
-              ? composerCopy.needsMessage(leading)
-              : composerCopy.needsRecipient}
-          </p>
+        ) : guarded && source === null && sentText(text) !== "" ? (
+          <p className="composer-guard">{keptHint(text)}</p>
         ) : focused ? (
           <p>{composerHint(rule, text)}</p>
         ) : null}

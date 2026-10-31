@@ -28,7 +28,7 @@ try {
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(url);
   const channels = page.getByRole("navigation", {
-    name: "Channels",
+    name: "Channel list",
     exact: true,
   });
   await channels.getByRole("button").first().waitFor();

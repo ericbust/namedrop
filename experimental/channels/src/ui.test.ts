@@ -66,7 +66,11 @@ test("item 1: rendered display names never invent mentions and exact tokens stay
     const event = space(fixture);
     const state = reduce(initialState(), event);
     const header = renderToStaticMarkup(
-      createElement(ChannelHeader, { channel: event.channel, suffix: null }),
+      createElement(ChannelHeader, {
+        toggle: null,
+        channel: event.channel,
+        suffix: null,
+      }),
     );
     assert.equal(text(header.match(/<h1[^>]*>(.*?)<\/h1>/)?.[1] ?? ""), name);
     assert.ok(
@@ -77,6 +81,8 @@ test("item 1: rendered display names never invent mentions and exact tokens stay
       createElement(Sidebar, {
         state,
         busy: 0,
+        id: "sidebar",
+        drawer: null,
         onSelect() {},
         onActivity() {},
       }),
@@ -125,6 +131,8 @@ test("a channel whose post was refused while the reader was elsewhere shows the 
       createElement(Sidebar, {
         state,
         busy: 0,
+        id: "sidebar",
+        drawer: null,
         onSelect() {},
         onActivity() {},
       }),
@@ -172,16 +180,23 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
       createElement(Sidebar, {
         state,
         busy: 0,
+        id: "sidebar",
+        drawer: null,
         onSelect() {},
         onActivity() {},
       }),
     );
     const header = renderToStaticMarkup(
-      createElement(ChannelHeader, { channel: event.channel, suffix: null }),
+      createElement(ChannelHeader, {
+        toggle: null,
+        channel: event.channel,
+        suffix: null,
+      }),
     );
     const banner = renderToStaticMarkup(
       createElement(NeedsYou, {
         channel: event.channel,
+        directory: { members: event.channel.members, homes: new Map() },
         onFocus() {},
         onControl,
       }),
@@ -561,6 +576,7 @@ test("attention actions show historical evidence and safe responses for every so
         createElement(AttentionActions, {
           item,
           channel,
+          absent: null,
           onFocus() {},
           onControl,
         }),
@@ -593,7 +609,13 @@ test("attention actions show historical evidence and safe responses for every so
   const item = channel.attention[0];
   assert.ok(item);
   const local = renderToStaticMarkup(
-    createElement(AttentionActions, { item, channel, onFocus() {}, onControl }),
+    createElement(AttentionActions, {
+      item,
+      channel,
+      absent: null,
+      onFocus() {},
+      onControl,
+    }),
   );
   assert.deepEqual(buttons(local), []);
   assert.doesNotMatch(local, /Namedrop setup|Namedrop Doctor/);
@@ -639,7 +661,12 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
       createElement(
         PeekContext,
         { value: { scope: channel.key, open() {} } },
-        createElement(NeedsYou, { channel, onFocus() {}, onControl }),
+        createElement(NeedsYou, {
+          channel,
+          directory: { members: channel.members, homes: new Map() },
+          onFocus() {},
+          onControl,
+        }),
       ),
     );
     return [...markup.matchAll(/<li class="attention-item">(.*?)<\/li>/gs)].map(
@@ -718,6 +745,7 @@ test("Activity reuses the attention evidence and response controls", async () =>
   const state = reduce(initialState(), space(value));
   const markup = renderToStaticMarkup(
     createElement(ActivityView, {
+      toggle: null,
       list: activityOf(state.channels),
       homes: homesOf(state.channels.values(), undefined),
       channels: state.channels,
@@ -776,6 +804,8 @@ test("focused tracked evidence exposes the channel response path without a rejec
     onSend() {},
     onClose() {},
     paneId: "tracked-pane",
+    toggle: null,
+    inert: false,
   } satisfies Parameters<typeof ThreadPane>[0];
   const ordinary = renderToStaticMarkup(createElement(ThreadPane, props));
   assert.ok(ordinary.includes("textarea"));

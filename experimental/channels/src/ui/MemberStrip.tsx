@@ -3,6 +3,7 @@ import { presenceWord, runtimeName } from "../copy.ts";
 import type { Activity, ChannelSnapshot, Member } from "../model.ts";
 import { peekTarget } from "../peek.ts";
 import { Avatar } from "./Avatar.tsx";
+import { useShortWindow } from "./measure.ts";
 import { PeekControl, usePeek } from "./PeekContext.tsx";
 
 const order = {
@@ -92,13 +93,18 @@ export function MemberStrip({
   const list = useRef<HTMLUListElement>(null);
   const [width, setWidth] = useState(0);
   const [expanded, setExpanded] = useState(false);
+  const rows = useShortWindow() ? 1 : 2;
   const [measured, setMeasured] = useState<{
     members: Member[];
     width: number;
+    rows: number;
     count: number;
   } | null>(null);
   const limit =
-    !expanded && measured?.members === sorted && measured.width === width
+    !expanded &&
+    measured?.members === sorted &&
+    measured.width === width &&
+    measured.rows === rows
       ? measured.count
       : null;
   useEffect(() => {
@@ -118,13 +124,13 @@ export function MemberStrip({
     for (const [index, item] of [...element.children].entries()) {
       if (!(item instanceof HTMLElement)) continue;
       lines.add(item.offsetTop);
-      if (lines.size > 2) {
+      if (lines.size > rows) {
         count = Math.max(1, index - 1);
         break;
       }
     }
-    setMeasured({ members: sorted, width, count });
-  }, [expanded, limit, sorted, width]);
+    setMeasured({ members: sorted, width, rows, count });
+  }, [expanded, limit, rows, sorted, width]);
   if (sorted.length === 0)
     return (
       <div className="members">

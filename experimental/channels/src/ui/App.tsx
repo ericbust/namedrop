@@ -9,6 +9,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
+import { flushSync } from "react-dom";
 import { type ActivityList, activityOf } from "../activity.ts";
 import {
   absence,
@@ -73,11 +74,11 @@ import { Composer } from "./Composer.tsx";
 import { type DeliveryAccess, DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { MemberStrip } from "./MemberStrip.tsx";
-import { measure } from "./measure.ts";
+import { measure, usePhone } from "./measure.ts";
 import { NeedsYou } from "./NeedsYou.tsx";
 import { type PeekAccess, PeekContext } from "./PeekContext.tsx";
 import { PeekDrawer } from "./PeekDrawer.tsx";
-import { Sidebar } from "./Sidebar.tsx";
+import { ChannelsToggle, Sidebar } from "./Sidebar.tsx";
 import { ThreadPane, type ThreadResponse } from "./ThreadPane.tsx";
 import { type Located, Timeline } from "./Timeline.tsx";
 
@@ -513,6 +514,23 @@ export function App() {
     dispatch({ type: "jump", key });
   }, []);
   const connection = connectionStatus(state);
+  const phone = usePhone();
+  const [drawer, setDrawer] = useState(false);
+  const drawerOpen = phone && drawer;
+  const sidebarId = useId();
+  const toggleFocus = useRef(false);
+  useEffect(() => {
+    if (!phone) setDrawer(false);
+  }, [phone]);
+  const closeDrawer = useCallback(() => {
+    setDrawer(false);
+    toggleFocus.current = true;
+  }, []);
+  useLayoutEffect(() => {
+    if (drawerOpen || !toggleFocus.current) return;
+    toggleFocus.current = false;
+    document.querySelector<HTMLElement>(".channels-toggle")?.focus();
+  }, [drawerOpen]);
   const channel =
     state.selection.key === null
       ? undefined
@@ -541,9 +559,10 @@ export function App() {
     measure("namedrop:activity-derive", start);
     return activitySeen.current;
   }, [state.channels]);
+  const label = channel?.addressableLabel ?? null;
   const channelRule = useMemo<SendRule>(
-    () => ({ kind: "channel", agents: members }),
-    [members],
+    () => ({ kind: "channel", agents: members, label }),
+    [members, label],
   );
   const directory = useMemo<Directory>(
     () => ({ members, homes }),
@@ -647,6 +666,21 @@ export function App() {
   const peeking = state.slot.kind === "peek" ? state.slot.target : null;
   const who = peeking === null ? null : peekWho(state.channels, peeking);
   const pane = thread || focused ? "thread" : who ? "peek" : null;
+  // On a phone the Channels button starts whichever header shows: the pane
+  // covers the channel there.
+  const toggle = phone ? (
+    <ChannelsToggle
+      state={state}
+      open={drawerOpen}
+      controls={sidebarId}
+      onOpen={() => setDrawer(true)}
+    />
+  ) : null;
+  const mainToggle = pane === null ? toggle : null;
+  const paneToggle = pane === null ? null : toggle;
+  const bar = mainToggle && (
+    <header className="channel-header">{mainToggle}</header>
+  );
   const paneId = useId();
   const returnFocus = useRef<{
     button: HTMLButtonElement;
@@ -722,9 +756,13 @@ export function App() {
     },
     [openThread],
   );
+  // Where the pane covers the channel, the channel shows again only once React
+  // commits the close, and a hidden button can't take focus.
   const closeThread = useCallback(() => {
-    focusEvidence({ type: "close" });
-    dispatch({ type: "thread", threadId: null });
+    flushSync(() => {
+      focusEvidence({ type: "close" });
+      dispatch({ type: "thread", threadId: null });
+    });
     const saved = returnFocus.current;
     if (!saved) return;
     const button = saved.button.isConnected
@@ -752,7 +790,7 @@ export function App() {
     [],
   );
   const closePeek = useCallback(() => {
-    dispatch({ type: "peek", target: null });
+    flushSync(() => dispatch({ type: "peek", target: null }));
     const saved = opening.current;
     const control =
       saved === null
@@ -772,16 +810,17 @@ export function App() {
   const paneWasOpen = useRef(false);
   const view = viewOf(state.selection);
   const shownView = useRef(view);
+  const focusPaneControl = useCallback(() => {
+    document
+      .getElementById(paneId)
+      ?.querySelector<HTMLElement>(
+        pane === "thread" ? 'button[aria-label="Close thread"]' : ".peek-text",
+      )
+      ?.focus();
+  }, [pane, paneId]);
   useLayoutEffect(() => {
     if (pane !== null && focusPane.current) {
-      document
-        .getElementById(paneId)
-        ?.querySelector<HTMLElement>(
-          pane === "thread"
-            ? 'button[aria-label="Close thread"]'
-            : ".peek-text",
-        )
-        ?.focus();
+      focusPaneControl();
       focusPane.current = false;
     }
     const unmounted =
@@ -806,6 +845,8 @@ export function App() {
   const messaged =
     (channelResponse && members.get(channelResponse.addressId)?.alias) ??
     "the agent";
+  const messageAbsence =
+    channelResponse === null ? null : absence(channelResponse, directory);
   let threadResponse: ThreadResponse | null = null;
   if (focused?.kind === "ready") {
     const response = focused.request.response;
@@ -814,17 +855,20 @@ export function App() {
         threadResponse = { kind: "reply", intent: response };
         break;
       case "message":
-        threadResponse = {
-          kind: "message",
-          name: messaged,
-          draft:
-            response.preparation === "preserved"
-              ? "kept"
-              : response.preparation === "prepared" && channelDraft !== ""
-                ? "prepared"
-                : "none",
-          prepare: prepareResponse,
-        };
+        threadResponse =
+          messageAbsence !== null
+            ? { kind: "absent", absence: messageAbsence }
+            : {
+                kind: "message",
+                name: messaged,
+                draft:
+                  response.preparation === "preserved"
+                    ? "kept"
+                    : response.preparation === "prepared" && channelDraft !== ""
+                      ? "prepared"
+                      : "none",
+                prepare: prepareResponse,
+              };
         break;
       case "pane": {
         const member = members.get(response.addressId);
@@ -848,28 +892,66 @@ export function App() {
     <PeekContext value={peekAccess}>
       <DeliveryContext value={deliveryAccess}>
         <div
-          className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}`}
+          className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}${drawerOpen ? " drawer-open" : ""}`}
         >
-          <a className="skip-link" href="#main-content">
+          <a className="skip-link" href="#main-content" inert={drawerOpen}>
             Skip to messages
           </a>
           <Sidebar
             state={state}
             busy={activity.count}
-            onSelect={select}
-            onActivity={showActivity}
+            id={sidebarId}
+            drawer={phone ? { open: drawerOpen, onClose: closeDrawer } : null}
+            onSelect={(key) => {
+              select(key);
+              if (drawerOpen) closeDrawer();
+            }}
+            onActivity={() => {
+              showActivity();
+              if (drawerOpen) closeDrawer();
+            }}
           />
-          <main className="main" id="main-content" tabIndex={-1} ref={main}>
-            {connection === "reconnecting" && (
-              <div className="reconnect" role="status">
-                <Icon name="refresh" />
-                Reconnecting…
-                {updatedAt !== null &&
-                  ` Showing updates up to ${new Date(updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`}
-              </div>
-            )}
+          {drawerOpen && (
+            <div
+              className="drawer-backdrop"
+              aria-hidden="true"
+              onClick={closeDrawer}
+            />
+          )}
+          {connection === "reconnecting" && (
+            <div className="reconnect" role="status" inert={drawerOpen}>
+              <Icon name="refresh" />
+              Reconnecting…
+              {updatedAt !== null &&
+                ` Showing updates up to ${new Date(updatedAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.`}
+            </div>
+          )}
+          <main
+            className="main"
+            id="main-content"
+            tabIndex={-1}
+            ref={main}
+            inert={drawerOpen}
+            onBlurCapture={(event) => {
+              // A narrowing window lets the open pane cover the channel, and
+              // the focus it held falls to the page. The pane takes it.
+              if (
+                pane === null ||
+                event.relatedTarget !== null ||
+                event.currentTarget.checkVisibility({
+                  visibilityProperty: true,
+                })
+              )
+                return;
+              requestAnimationFrame(() => {
+                if (document.activeElement === document.body)
+                  focusPaneControl();
+              });
+            }}
+          >
             {state.selection.kind === "activity" && state.channels.size > 0 ? (
               <ActivityView
+                toggle={mainToggle}
                 list={activity}
                 homes={homes}
                 open={peeking === null ? null : peekKey(peeking)}
@@ -881,12 +963,14 @@ export function App() {
             ) : channel ? (
               <>
                 <ChannelHeader
+                  toggle={mainToggle}
                   channel={channel}
                   suffix={channelSuffix(channel, state.channels.values())}
                 />
                 <MemberStrip key={channel.key} members={channel.members} />
                 <NeedsYou
                   channel={channel}
+                  directory={directory}
                   onFocus={showAttention}
                   onControl={poster.control}
                 />
@@ -919,14 +1003,16 @@ export function App() {
                     label={composerPlaceholder(channel)}
                     rule={channelRule}
                     notice={
-                      channelResponse?.preparation === "preserved" ? (
+                      (channelResponse?.preparation === "unavailable" ||
+                        channelResponse?.preparation === "preserved") &&
+                      messageAbsence !== null ? (
+                        <p className="composer-guard" role="status">
+                          {absenceCopy(messageAbsence)}
+                        </p>
+                      ) : channelResponse?.preparation === "preserved" ? (
                         <p className="composer-guard" role="status">
                           Your draft is still here. Send or clear it, then press{" "}
                           {responseCopy.message(messaged)} again.
-                        </p>
-                      ) : channelResponse?.preparation === "unavailable" ? (
-                        <p className="composer-guard" role="status">
-                          {absenceCopy(absence(channelResponse, directory))}
                         </p>
                       ) : null
                     }
@@ -949,22 +1035,29 @@ export function App() {
                 )}
               </>
             ) : state.channels.size > 0 ? (
-              <div className="empty">
-                <h1>Choose a channel</h1>
-                <p>Select a channel to read its messages and live status.</p>
-              </div>
+              <>
+                {bar}
+                <div className="empty">
+                  <h1>Choose a channel</h1>
+                  <p>Select a channel to read its messages and live status.</p>
+                </div>
+              </>
             ) : connection === "live" ? (
-              <div className="empty">
-                <Icon name="inbox" />
-                <h1>No workspaces yet</h1>
-                <p>
-                  Open a workspace in Herdr and name an agent with{" "}
-                  <code className="inline">namedrop name</code>. It shows up
-                  here as a channel.
-                </p>
-              </div>
+              <>
+                {bar}
+                <div className="empty">
+                  <Icon name="inbox" />
+                  <h1>No workspaces yet</h1>
+                  <p>
+                    Open a workspace in Herdr and name an agent with{" "}
+                    <code className="inline">namedrop name</code>. It shows up
+                    here as a channel.
+                  </p>
+                </div>
+              </>
             ) : (
               <>
+                {bar}
                 <h1 className="sr-only">
                   {connection === "reconnecting"
                     ? "Waiting to reconnect"
@@ -1005,6 +1098,8 @@ export function App() {
                 onSend={send}
                 onClose={closeThread}
                 paneId={paneId}
+                toggle={paneToggle}
+                inert={drawerOpen}
                 response={threadResponse}
                 target={
                   focused?.kind === "ready" ? focused.request.target : null
@@ -1015,8 +1110,14 @@ export function App() {
               />
             )}
           {channel && focused && focused.kind !== "ready" && (
-            <aside className="slot thread" aria-label="Thread" id={paneId}>
+            <aside
+              className="slot thread"
+              aria-label="Thread"
+              id={paneId}
+              inert={drawerOpen}
+            >
               <header className="thread-head">
+                {paneToggle}
                 <h2 className="thread-title">Thread</h2>
                 <span className="thread-where">
                   in {channelMention(channel)}
@@ -1061,6 +1162,8 @@ export function App() {
               reader={reader}
               startedAt={opening.current?.startedAt ?? 0}
               paneId={paneId}
+              toggle={paneToggle}
+              inert={drawerOpen}
               onClose={closePeek}
             />
           )}

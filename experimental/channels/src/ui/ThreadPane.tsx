@@ -1,4 +1,5 @@
 import {
+  type ReactNode,
   useContext,
   useEffect,
   useLayoutEffect,
@@ -8,6 +9,7 @@ import {
   useState,
 } from "react";
 import {
+  type Absence,
   absence,
   attentionReplyTo,
   type ReplyIntent,
@@ -56,7 +58,8 @@ export type ThreadResponse =
       draft: "prepared" | "kept" | "none";
       prepare: () => void;
     }
-  | { kind: "pane"; name: string | null; pane: string | null };
+  | { kind: "pane"; name: string | null; pane: string | null }
+  | { kind: "absent"; absence: Absence };
 
 export function ThreadPane({
   channel,
@@ -71,6 +74,8 @@ export function ThreadPane({
   onSend,
   onClose,
   paneId,
+  toggle,
+  inert,
   response = null,
   target = null,
   earlierOmitted = false,
@@ -90,6 +95,8 @@ export function ThreadPane({
   ) => void;
   onClose: () => void;
   paneId: string;
+  toggle: ReactNode;
+  inert: boolean;
   response?: ThreadResponse | null;
   target?: { messageId: string } | null;
   earlierOmitted?: boolean;
@@ -124,6 +131,8 @@ export function ThreadPane({
       activeReply === null ? null : attentionReplyTo(activeReply, directory),
     [directory, activeReply],
   );
+  const replyAbsence =
+    activeReply === null ? null : absence(activeReply, directory);
   const rule = useMemo<Extract<SendRule, { kind: "thread" }>>(
     () => ({ kind: "thread", to: threadAgents(thread, directory) }),
     [thread, directory],
@@ -172,8 +181,15 @@ export function ThreadPane({
   const unloaded =
     thread.knownCount > thread.parents.length + thread.replies.length;
   return (
-    <aside className="slot thread" aria-label="Thread" id={paneId} ref={pane}>
+    <aside
+      className="slot thread"
+      aria-label="Thread"
+      id={paneId}
+      ref={pane}
+      inert={inert}
+    >
       <header className="thread-head">
+        {toggle}
         <h2 className="thread-title">Thread</h2>
         <span className="thread-where">
           in{" "}
@@ -248,9 +264,14 @@ export function ThreadPane({
           <PendingMessage key={entry.requestId} entry={entry} />
         ))}
       </div>
-      {activeReply !== null && to === null && (
+      {replyAbsence !== null && (
         <p className="thread-answer" role="status">
-          {absenceCopy(absence(activeReply, directory))}
+          {absenceCopy(replyAbsence)}
+        </p>
+      )}
+      {response?.kind === "absent" && (
+        <p className="thread-answer" role="status">
+          {absenceCopy(response.absence)}
         </p>
       )}
       {response?.kind === "pane" && (

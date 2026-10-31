@@ -34,6 +34,7 @@ export type IconName =
   | "done"
   | "hash"
   | "inbox"
+  | "menu"
   | "pause"
   | "plug"
   | "prompt"
@@ -175,6 +176,8 @@ export function absenceCopy(absence: Absence): string {
   switch (absence.kind) {
     case "closed":
       return `${absence.alias}'s pane is closed, so it can't take a message.`;
+    case "unreachable":
+      return `${absence.alias}'s workspace has no label Namedrop can mention, so it can't take a message from here.`;
     case "gone":
       return `${absence.alias ?? "That agent"} isn't in this channel anymore.`;
     default: {
@@ -252,13 +255,18 @@ export const threadControlCopy = {
 export function attentionKind(item: Attention): string {
   return attentionTable[item.source].title;
 }
+// With `absent`, the card's press can't reach the agent, so the hint says why.
 export function attentionCopy(
   item: Attention,
   responder: Member | null = null,
+  absent: Absence | null = null,
 ): AttentionCopy {
   const { text, truncated } = item.summary;
   const row = attentionTable[item.source];
-  const response = responseHint(item, responder);
+  const response =
+    absent === null
+      ? responseHint(item, responder)
+      : { hint: absenceCopy(absent), hintTitle: null };
   const hintTitle = response?.hintTitle ?? null;
   if (
     item.source === "agent_status" &&
@@ -425,6 +433,8 @@ export const composerCopy = {
   paneClosed: (alias: string) => `${alias}'s pane is closed`,
   notMember: (name: string) => `${name} isn't in this channel`,
   spaceAfter: (alias: string) => `Put a space after ${alias}`,
+  nameAfter: "Type a name after @",
+  allWithLabels: "#all already means every workspace · Drop the other labels",
   sending: "Sending…",
   send: "Send",
   everyWorkspace: "every workspace",
