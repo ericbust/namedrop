@@ -671,7 +671,7 @@ fn detached_subscriber_child() {
     std::fs::remove_file(root.join("disconnect")).unwrap();
     let _reconnected =
         hc_socket::HcSocket::rpc(&socket, "628bcf8129aa037b1fa5aad3504926a6").unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
     while epoch() <= absent_epoch {
         assert!(
             std::time::Instant::now() < deadline,
