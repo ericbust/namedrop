@@ -32,6 +32,7 @@ pub fn calls(root: &Path) -> Vec<serde_json::Value> {
 }
 
 pub fn assert_tour(root: &Path, count: usize) {
+    assert!(!root.join("path/unexpected-app.log").exists());
     let calls = calls(root);
     assert_eq!(calls.len(), count, "app popup calls: {calls:?}");
     for call in calls {

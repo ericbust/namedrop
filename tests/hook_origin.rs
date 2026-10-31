@@ -198,21 +198,21 @@ fn explicit_hook_selection_precedes_origin_state_and_host_io() {
                 Some("hc"),
             ),
             (
-                "tui rejects hc flags",
+                "explicit tui wins over hc flags",
                 vec!["--host", "tui", "--hc-terminal", "terminal"],
                 true,
                 false,
-                None,
+                Some("baked"),
             ),
             (
-                "hc rejects tui flags",
+                "explicit hc wins over tui flags",
                 vec!["--host", "hc", "--herdr-pane", "pane"],
                 false,
                 true,
-                None,
+                Some("hc"),
             ),
             (
-                "both flag groups reject explicit hc",
+                "explicit hc wins over both flag groups",
                 vec![
                     "--host",
                     "hc",
@@ -223,7 +223,7 @@ fn explicit_hook_selection_precedes_origin_state_and_host_io() {
                 ],
                 true,
                 false,
-                None,
+                Some("hc"),
             ),
             (
                 "both flag groups reject without host",

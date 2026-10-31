@@ -1,5 +1,7 @@
 #[path = "support/environment.rs"]
 mod environment;
+#[path = "support/hc_socket.rs"]
+mod hc_socket;
 
 use environment::CommandHome;
 use namedrop::{HcHost, HerdrCommandExecutor, HerdrCommandOutput, Host, Popup, ProcessHerdr};
@@ -21,7 +23,7 @@ fn hc_popup_retains_executor_snapshot() {
     if std::env::var_os(CHILD).is_none() {
         for (entrypoint, program) in [
             ("tour", "absolute"),
-            ("doctor", "default"),
+            ("doctor", "absolute"),
             ("agent-status", "path"),
             ("naming", "absolute"),
         ] {
@@ -38,10 +40,10 @@ fn hc_popup_retains_executor_snapshot() {
 }
 
 #[test]
-fn hc_popup_without_executor_snapshot_captures_at_invocation() {
+fn hc_popup_without_executor_support_is_unavailable() {
     if std::env::var_os(CHILD).is_none() {
         run_child(
-            "hc_popup_without_executor_snapshot_captures_at_invocation",
+            "hc_popup_without_executor_support_is_unavailable",
             "doctor",
             "absolute",
         );
@@ -51,7 +53,23 @@ fn hc_popup_without_executor_snapshot_captures_at_invocation() {
     let executor = NoSnapshot;
     let host = HcHost::new(&executor);
     change_environment(&home);
-    assert_popup(host, &home.parent().unwrap().join("B"), "B");
+    let popup = Popup {
+        entrypoint: "doctor",
+        width: "72",
+        height: "24",
+        env: &[],
+    };
+    for use_override in [true, false] {
+        if !use_override {
+            // This child runs one test without concurrent environment readers.
+            unsafe { std::env::remove_var("HERDR_APP_BIN_PATH") };
+        }
+        let error = host.open_popup(&popup).unwrap_err();
+        assert_eq!(
+            error.message,
+            "HC popups are unavailable with this executor"
+        );
+    }
 }
 
 struct NoSnapshot;
@@ -70,12 +88,14 @@ fn run_child(test: &str, entrypoint: &str, program: &str) {
     for label in ["A", "B"] {
         let bin = root.join(label).join("bin");
         fs::create_dir_all(&bin).unwrap();
-        let app = bin.join("herdr-app");
+        let app = bin.join("snapshot-app");
         fs::write(
             &app,
             format!(
                 r#"#!/usr/bin/python3
 import json, os, sys
+with open(os.path.join(os.path.dirname(__file__), 'app-calls'), 'a') as log:
+    log.write('called\n')
 keys = ["HOME", "XDG_STATE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "PATH", "HC_SOCKET", "HC_SESSION"]
 print(json.dumps({{"program": "{label}", "argv": sys.argv[1:], "env": {{k: v for k, v in os.environ.items() if k in keys or k.startswith("HERDR_") or k.startswith("HC_TERMINAL_")}}}}))
 "#
@@ -83,8 +103,24 @@ print(json.dumps({{"program": "{label}", "argv": sys.argv[1:], "env": {{k: v for
         )
         .unwrap();
         fs::set_permissions(&app, fs::Permissions::from_mode(0o755)).unwrap();
+        let tripwire = bin.join("herdr-app");
+        fs::write(
+            &tripwire,
+            r#"#!/usr/bin/python3
+import os, sys
+with open(os.path.join(os.path.dirname(__file__), 'unexpected-app'), 'w') as log:
+    log.write('called')
+sys.exit(97)
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&tripwire, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let home = root.join("A");
+    let _cores = [
+        hc_socket::HcSocket::bind(&home.join("core.sock")).unwrap(),
+        hc_socket::HcSocket::bind(&root.join("B/core.sock")).unwrap(),
+    ];
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", test, "--nocapture"])
@@ -100,22 +136,32 @@ print(json.dumps({{"program": "{label}", "argv": sys.argv[1:], "env": {{k: v for
         .env(CHILD, entrypoint);
     match program {
         "absolute" => {
-            command.env("HERDR_APP_BIN_PATH", home.join("bin/herdr-app"));
+            command.env("HERDR_APP_BIN_PATH", home.join("bin/snapshot-app"));
         }
         "path" => {
-            command.env("HERDR_APP_BIN_PATH", "herdr-app");
+            command.env("HERDR_APP_BIN_PATH", "snapshot-app");
         }
-        "default" => {}
         _ => unreachable!(),
     }
     let output = command.output().unwrap();
-    fs::remove_dir_all(root).unwrap();
     assert!(
         output.status.success(),
         "{entrypoint}/{program}\n{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    for label in ["A", "B"] {
+        let bin = root.join(label).join("bin");
+        assert!(!bin.join("unexpected-app").exists());
+        let calls = fs::read_to_string(bin.join("app-calls")).unwrap_or_default();
+        let expected = if test == "hc_popup_retains_executor_snapshot" && label == "A" {
+            "called\n"
+        } else {
+            ""
+        };
+        assert_eq!(calls, expected, "{test}/{label}");
+    }
+    fs::remove_dir_all(root).unwrap();
 }
 
 fn change_environment(home: &Path) {
@@ -126,7 +172,7 @@ fn change_environment(home: &Path) {
             std::env::set_var(key, root_path(&late, suffix));
         }
         std::env::set_var("HC_SESSION", "B");
-        std::env::set_var("HERDR_APP_BIN_PATH", late.join("bin/herdr-app"));
+        std::env::set_var("HERDR_APP_BIN_PATH", late.join("bin/snapshot-app"));
         std::env::remove_var("HERDR_CAPTURED_ONLY");
         std::env::set_var("HERDR_LATE_ONLY", "late");
         std::env::set_var("HC_TERMINAL_ID", "late-terminal");

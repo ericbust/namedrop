@@ -13,6 +13,7 @@ use std::{cell::RefCell, path::Path};
 
 struct Fixture {
     environment: namedrop::environment::EnvironmentSnapshot,
+    popup: Option<PopupFixture>,
     _shell: process::AgentProcess,
     terminals: RefCell<Vec<Value>>,
     calls: RefCell<Vec<Vec<String>>>,
@@ -37,6 +38,7 @@ impl Default for Fixture {
                     .join(format!("hc-host-fixture-{}", std::process::id()))
                     .into_os_string(),
             )]),
+            popup: PopupFixture::capture(),
             _shell: shell,
             terminals: RefCell::new(vec![terminal]),
             calls: RefCell::new(Vec::new()),
@@ -49,15 +51,58 @@ impl Default for Fixture {
         }
     }
 }
+struct PopupFixture {
+    executor: namedrop::ProcessHerdr,
+    socket: std::path::PathBuf,
+    _core: hc_socket::HcSocket,
+}
+
+impl PopupFixture {
+    fn capture() -> Option<Self> {
+        if std::env::var_os("NAMEDROP_BOOTSTRAP_CASE").is_none()
+            && std::env::var_os("NAMEDROP_HC_POPUP_TEST").is_none()
+        {
+            return None;
+        }
+        let app = std::env::var_os("HERDR_APP_BIN_PATH").expect("test app override missing");
+        static NEXT_SOCKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let socket = std::env::temp_dir().join(format!(
+            "nd-popup-{}-{}.sock",
+            std::process::id(),
+            NEXT_SOCKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let core = hc_socket::HcSocket::bind(&socket).unwrap();
+        let environment = namedrop::environment::EnvironmentSnapshot::from_variables([
+            ("HERDR_APP_BIN_PATH".into(), app),
+            ("PATH".into(), std::env::var_os("PATH").unwrap()),
+            ("HC_SOCKET".into(), socket.clone().into_os_string()),
+        ]);
+        Some(Self {
+            executor: namedrop::ProcessHerdr::from_snapshot(
+                namedrop::runtime::HostKind::Hc,
+                &environment,
+            ),
+            socket,
+            _core: core,
+        })
+    }
+}
+
+impl Drop for PopupFixture {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.socket).unwrap();
+    }
+}
+
 impl HerdrCommandExecutor for Fixture {
     fn open_hc_popup(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let environment = namedrop::environment::EnvironmentSnapshot::capture();
-        if environment.var_os("HERDR_APP_BIN_PATH").is_none() {
-            return Err("test app override missing".into());
-        }
-        namedrop::ProcessHerdr::from_snapshot(namedrop::runtime::HostKind::Hc, &environment)
+        self.popup
+            .as_ref()
+            .ok_or("test app override missing")?
+            .executor
             .open_hc_popup(args)
     }
+
     fn environment_snapshot(&self) -> Option<&namedrop::environment::EnvironmentSnapshot> {
         Some(&self.environment)
     }
@@ -1902,6 +1947,10 @@ fn hc_bootstrap_stale_activation_does_not_replace_the_current_fallback() {
         .env(CHILD, "1")
         .env("NAMEDROP_BOOTSTRAP_CASE", "stale-activation")
         .env("HERDR_APP_BIN_PATH", fake)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", app_popup::tripwire(&root).display()),
+        )
         .output()
         .unwrap();
     assert!(
@@ -1930,6 +1979,10 @@ fn check_hc_bootstrap(damage: Option<&str>) {
             .args(["--exact", thread.name().unwrap(), "--nocapture"])
             .env("NAMEDROP_BOOTSTRAP_CASE", case)
             .env("HERDR_APP_BIN_PATH", fake)
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", app_popup::tripwire(&root).display()),
+            )
             .output()
             .unwrap();
         app_popup::assert_one_test(&output);
@@ -2229,7 +2282,10 @@ fn hc_popup_uses_native_override_and_scrubs_environment() {
 #[test]
 #[ignore]
 fn hc_popup_child() {
-    let result = HcHost::new(&Fixture::default())
+    let environment = namedrop::environment::EnvironmentSnapshot::capture();
+    let executor =
+        namedrop::ProcessHerdr::from_snapshot(namedrop::runtime::HostKind::Hc, &environment);
+    let result = HcHost::new(&executor)
         .open_popup(&namedrop::Popup {
             entrypoint: "entry 'quoted'\n$(touch never) *",
             width: "80",
@@ -2723,6 +2779,10 @@ fn in_recorded_app_fixture(expected_tours: usize) -> bool {
         .args(["--exact", test, "--nocapture"])
         .env("NAMEDROP_HC_POPUP_TEST", test)
         .env("HERDR_APP_BIN_PATH", fake)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", app_popup::tripwire(&root).display()),
+        )
         .output()
         .unwrap();
     app_popup::assert_one_test(&output);

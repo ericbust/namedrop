@@ -102,6 +102,7 @@ esac
         .unwrap();
         fs::set_permissions(host, fs::Permissions::from_mode(0o700)).unwrap();
         app_popup::fake(&root);
+        app_popup::tripwire(&root);
         Self(root)
     }
     /// The test process is the parent of every binary it runs, so its pid is
@@ -119,7 +120,6 @@ esac
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         self.host(&mut command)
             .env_remove("HERDR_PLUGIN_STATE_DIR")
-            .env("PATH", "/usr/bin:/bin")
             .arg("--plugin-state")
             .arg(self.0.join("state"))
             .args(args);
@@ -161,7 +161,10 @@ esac
     fn host<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         command
             .isolated_home(self.0.join("home"))
-            .env("PATH", "/usr/bin:/bin")
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", self.0.join("path").display()),
+            )
             .env("HC_SOCKET", self.0.join("hc.sock"))
             .env("CLAUDE_CONFIG_DIR", self.0.join("home").join(".claude"))
             .env("CODEX_HOME", self.0.join("home").join(".codex"))
@@ -204,6 +207,7 @@ impl Drop for Fixture {
                 "fixture HC event stream {pid} did not stop"
             );
         }
+        assert!(!self.0.join("path/unexpected-app.log").exists());
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
@@ -935,7 +939,10 @@ else: raise AssertionError(args)
         let mut command = Command::new(program);
         command
             .isolated_home(f.0.join("home"))
-            .env("PATH", "/usr/bin:/bin")
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", f.0.join("path").display()),
+            )
             .env("CLAUDE_CONFIG_DIR", f.0.join("home/.claude"))
             .env("CODEX_HOME", f.0.join("home/.codex"))
             .args(args)
@@ -1137,6 +1144,10 @@ else: raise AssertionError(args)
     let mut wrapper = Command::new(Path::new(package).join("scripts/session-start"));
     wrapper
         .isolated_home(f.0.join("home"))
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", f.0.join("path").display()),
+        )
         .env("CLAUDE_CONFIG_DIR", f.0.join("home/.claude"))
         .env("CODEX_HOME", f.0.join("home/.codex"))
         .env("HERDR_APP_BIN_PATH", f.0.join("app-popup"))
@@ -1288,18 +1299,11 @@ esac
         "address",
         "list",
     ]);
-    assert_eq!(
-        override_host.status.code(),
-        Some(64),
-        "{}",
-        text(&override_host)
-    );
-    let error: serde_json::Value = serde_json::from_slice(&override_host.stdout).unwrap();
-    assert_eq!(error["error"]["code"], "invalid_request");
-    let message = error["error"]["message"].as_str().unwrap();
-    for expected in ["conflict", "--host", "--hc-space", "--herdr-workspace"] {
-        assert!(message.contains(expected), "{message}");
-    }
+    assert!(override_host.status.success(), "{}", text(&override_host));
+    let body: serde_json::Value = serde_json::from_slice(&override_host.stdout).unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["operation"], "address.list");
+    assert_eq!(body["data"], serde_json::json!([]));
 }
 
 #[test]
