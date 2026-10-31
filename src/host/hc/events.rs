@@ -248,7 +248,7 @@ impl Subscriber {
             self.next_wake_ms = None;
             let active: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
             for (pane, terminal) in &mut self.terminals {
-                if !active.contains(terminal.workspace()) {
+                if self.unavailable.contains_key(pane) || !active.contains(terminal.workspace()) {
                     continue;
                 }
                 match runtime.host.reconcile_session(
