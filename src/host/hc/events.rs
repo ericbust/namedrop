@@ -428,7 +428,7 @@ impl BinaryIdentity {
     }
 }
 
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Deserialize, serde::Serialize, PartialEq, Eq)]
 struct SubscriberRecord {
     pid: u32,
     process_start: String,
@@ -439,9 +439,17 @@ struct SubscriberRecord {
 
 impl SubscriberRecord {
     fn is_running(&self) -> bool {
-        process_start(self.pid).as_deref() == Ok(self.process_start.as_str())
-            && BinaryIdentity::read(&PathBuf::from(format!("/proc/{}/exe", self.pid))).as_ref()
-                == Ok(&self.binary)
+        process_start(self.pid).as_deref() == Some(self.process_start.as_str())
+            && running_binary(self.pid).as_ref() == Some(&self.binary)
+    }
+
+    fn should_stop(&self, directory: &Path, state: &Path) -> bool {
+        STOP.load(std::sync::atomic::Ordering::Relaxed)
+            || !self.is_current(state)
+            || std::fs::read(directory.join("stop-request.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Self>(&bytes).ok())
+                .is_some_and(|request| request == *self)
     }
 
     fn is_current(&self, state: &Path) -> bool {
@@ -452,13 +460,14 @@ impl SubscriberRecord {
     }
 }
 
-fn process_start(pid: u32) -> Result<String, String> {
-    let stat =
-        std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|error| error.to_string())?;
-    stat.rsplit_once(')')
-        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
-        .map(str::to_owned)
-        .ok_or_else(|| "Missing process start identity".to_owned())
+#[cfg(target_os = "linux")]
+fn running_binary(pid: u32) -> Option<BinaryIdentity> {
+    BinaryIdentity::read(&PathBuf::from(format!("/proc/{pid}/exe"))).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn running_binary(pid: u32) -> Option<BinaryIdentity> {
+    BinaryIdentity::read(&crate::terminal::process_executable(pid)?).ok()
 }
 
 fn subscriber_directory(state: &Path, socket: &str) -> PathBuf {
@@ -489,16 +498,24 @@ fn read_record(directory: &Path) -> Option<SubscriberRecord> {
     serde_json::from_slice(&std::fs::read(directory.join("subscriber.json")).ok()?).ok()
 }
 
-fn stop_verified(record: &SubscriberRecord) -> Result<(), String> {
+fn stop_verified(directory: &Path, record: &SubscriberRecord) -> Result<(), String> {
+    use std::io::Write;
+    let mut request = lock_file(directory, ".stop-request.json")?;
+    request.set_len(0).map_err(|error| error.to_string())?;
+    request
+        .write_all(&serde_json::to_vec(record).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    std::fs::rename(
+        directory.join(".stop-request.json"),
+        directory.join("stop-request.json"),
+    )
+    .map_err(|error| error.to_string())?;
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::FromRawFd;
         let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, record.pid, 0) };
         if fd < 0 {
-            if !record.is_running() {
-                return Ok(());
-            }
-            return Err(std::io::Error::last_os_error().to_string());
+            return Ok(());
         }
         let _fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as i32) };
         if record.is_running()
@@ -517,7 +534,7 @@ fn stop_verified(record: &SubscriberRecord) -> Result<(), String> {
         Ok(())
     }
     #[cfg(not(target_os = "linux"))]
-    Err("Verified subscriber replacement requires Linux process identities".to_owned())
+    Ok(())
 }
 
 fn wait_for_lifetime(directory: &Path) -> Result<std::fs::File, String> {
@@ -542,7 +559,7 @@ pub fn stop(state: &Path, socket: &str) -> Result<(), String> {
     let launch = lock_file(&directory, "launch.lock")?;
     launch.lock().map_err(|error| error.to_string())?;
     if let Some(record) = read_record(&directory) {
-        stop_verified(&record)?;
+        stop_verified(&directory, &record)?;
     }
     drop(wait_for_lifetime(&directory)?);
     Ok(())
@@ -586,7 +603,7 @@ pub fn start<E: HerdrCommandExecutor>(
         {
             return Ok(());
         }
-        stop_verified(&record)?;
+        stop_verified(&directory, &record)?;
     }
     drop(wait_for_lifetime(&directory)?);
     let mut command = crate::runtime::hc_command(executable);
@@ -656,7 +673,7 @@ pub fn run(state: &Path) -> Result<(), String> {
     let record = SubscriberRecord {
         launch_identity: BinaryIdentity::read(&launch_path)?,
         pid: std::process::id(),
-        process_start: process_start(std::process::id())?,
+        process_start: process_start(std::process::id()).ok_or("Missing process start identity")?,
         launch_path,
         binary: BinaryIdentity::read(&running)?,
     };
@@ -703,7 +720,7 @@ pub fn run(state: &Path) -> Result<(), String> {
         ids: &ids,
     };
     let mut subscriber = Subscriber::default();
-    while !STOP.load(std::sync::atomic::Ordering::Relaxed) && record.is_current(state) {
+    while !record.should_stop(&directory, state) {
         let mut child = transport
             .checked_command()?
             .args(["events", "--json"])
@@ -727,7 +744,7 @@ pub fn run(state: &Path) -> Result<(), String> {
         });
         'stream: loop {
             let line = receiver.recv_timeout(Duration::from_millis(250));
-            if STOP.load(std::sync::atomic::Ordering::Relaxed) || !record.is_current(state) {
+            if record.should_stop(&directory, state) {
                 break;
             }
             let guard = loop {
@@ -735,16 +752,14 @@ pub fn run(state: &Path) -> Result<(), String> {
                     Ok(guard) => break guard,
                     Err(error) => {
                         eprintln!("Namedrop hc runtime: {error}");
-                        if STOP.load(std::sync::atomic::Ordering::Relaxed)
-                            || !record.is_current(state)
-                        {
+                        if record.should_stop(&directory, state) {
                             break 'stream;
                         }
                         std::thread::sleep(Duration::from_millis(25));
                     }
                 }
             };
-            if STOP.load(std::sync::atomic::Ordering::Relaxed) || !record.is_current(state) {
+            if record.should_stop(&directory, state) {
                 break;
             }
             match line {
