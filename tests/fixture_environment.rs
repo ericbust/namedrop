@@ -29,7 +29,11 @@ fn isolated_home_overrides_every_ambient_xdg_directory() {
     assert!(output.status.success());
     let output = String::from_utf8(output.stdout).unwrap();
     for ((key, expected), actual) in directories.iter().zip(output.lines()) {
-        assert_eq!(actual, expected.to_str().unwrap(), "{key} leaked from the host");
+        assert_eq!(
+            actual,
+            expected.to_str().unwrap(),
+            "{key} leaked from the host"
+        );
     }
     assert_eq!(output.lines().count(), directories.len());
 }

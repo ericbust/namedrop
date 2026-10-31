@@ -1,6 +1,4 @@
-#[path = "environment.rs"]
-mod environment;
-use environment::CommandHome;
+use crate::environment::CommandHome;
 
 use std::{
     env, fs,

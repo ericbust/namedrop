@@ -1,3 +1,6 @@
+#[path = "support/environment.rs"]
+mod environment;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 #[path = "support/update_profile.rs"]
