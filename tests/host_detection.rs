@@ -8,6 +8,7 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
         env: Vec<&'static str>,
         expected: Option<&'static str>,
         ancestry: Option<(&'static str, &'static str)>,
+        expected_probes: usize,
     }
     let mut cases = Vec::new();
     let mut add = |name: &str, flags, env, expected| {
@@ -17,6 +18,7 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
             env,
             expected,
             ancestry: None,
+            expected_probes: 0,
         });
     };
     add("plain shell defaults to tui", vec![], vec![], Some("tui"));
@@ -97,11 +99,48 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
         Some("tui"),
     );
 
-    for (name, tui_pid, hc_pid, expected) in [
-        ("hc run from TUI selects nearer HC", "$far", "$$", "hc"),
-        ("nested TUI in app selects nearer TUI", "$$", "$far", "tui"),
-        ("stale TUI ancestor selects HC", "999999999", "$$", "hc"),
-        ("unrelated HC keeps ancestor TUI", "$$", "999999999", "tui"),
+    for (name, tui_pid, hc_pid, expected, expected_probes) in [
+        ("hc run from TUI selects nearer HC", "$far", "$$", "hc", 2),
+        (
+            "nested TUI in app selects nearer TUI",
+            "$$",
+            "$far",
+            "tui",
+            2,
+        ),
+        ("stale TUI ancestor selects HC", "999999999", "$$", "hc", 2),
+        (
+            "unrelated HC keeps ancestor TUI",
+            "$$",
+            "999999999",
+            "tui",
+            2,
+        ),
+        ("same ancestor tie selects TUI", "$$", "$$", "tui", 2),
+        (
+            "neither PID is ancestor selects HC",
+            "999999998",
+            "999999999",
+            "hc",
+            2,
+        ),
+        ("zero TUI PID falls back to TUI", "0", "$$", "tui", 1),
+        (
+            "overflow TUI PID falls back to TUI",
+            "4294967296",
+            "$$",
+            "tui",
+            1,
+        ),
+        ("zero HC PID falls back to TUI", "$$", "0", "tui", 2),
+        (
+            "overflow HC PID falls back to TUI",
+            "$$",
+            "4294967296",
+            "tui",
+            2,
+        ),
+        ("malformed HC PID falls back to TUI", "$$", "null", "tui", 2),
     ] {
         cases.push(Case {
             name: name.into(),
@@ -109,6 +148,7 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
             env: vec!["HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HC_TERMINAL_ID"],
             expected: Some(expected),
             ancestry: Some((tui_pid, hc_pid)),
+            expected_probes,
         });
     }
 
@@ -137,17 +177,19 @@ esac
     )
     .unwrap();
     fs::set_permissions(&identity, fs::Permissions::from_mode(0o700)).unwrap();
+    let binary = std::env::var_os("NAMEDROP_TEST_BASE_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_namedrop").into());
     let mut failures = Vec::new();
     for case in cases {
         let mut command = Command::new("/bin/sh");
         let script = if let Some((tui, hc)) = case.ancestry {
-            format!("export TUI_PID={tui} HC_PID={hc}; \"$@\"")
+            format!("export TUI_PID={tui} HC_PID={hc}; \"$@\"; status=$?; exit \"$status\"")
         } else {
             "exec \"$@\"".into()
         };
         let output = command
             .args(["-c", &script, "host-detection"])
-            .arg(env!("CARGO_BIN_EXE_namedrop"))
+            .arg(&binary)
             .env_clear()
             .env("HOME", root.join("home"))
             .env("PATH", "/usr/bin:/bin")
@@ -196,7 +238,7 @@ esac
             case.name, output.status
         );
         if !valid {
-            failures.push(case.name);
+            failures.push(case.name.clone());
         }
         let ambiguous = case.flags.is_empty()
             && case.env.contains(&"HC_TERMINAL_ID")
@@ -211,10 +253,12 @@ esac
         }
         if case.ancestry.is_some() {
             let probes = fs::read_to_string(root.join("identity-log")).unwrap_or_default();
-            assert!(
-                probes.lines().count() <= 2,
-                "repeated identity lookups: {probes}"
-            );
+            if probes.lines().count() != case.expected_probes {
+                failures.push(format!(
+                    "{} expected {} identity lookups, observed {probes:?}",
+                    case.name, case.expected_probes
+                ));
+            }
             let _ = fs::remove_file(root.join("identity-log"));
         }
         assert!(
@@ -238,3 +282,4 @@ esac
         "incorrect host detection rows: {failures:?}"
     );
 }
+
