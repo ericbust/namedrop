@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -227,7 +230,7 @@ fn activation_output(installed: bool) -> String {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        cleanup::remove_fixture(&self.0).unwrap();
     }
 }
 fn success(output: Output) -> String {

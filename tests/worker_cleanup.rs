@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 #[path = "support/xws.rs"]
 mod xws;
 

@@ -1,4 +1,7 @@
 //! Shared wiring and conflict-safe shortcut installation acceptance.
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use std::{
     fs,
     path::PathBuf,
@@ -282,7 +285,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
+        let _ = cleanup::remove_fixture(&self.0);
     }
 }
 

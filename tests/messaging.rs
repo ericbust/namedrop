@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 mod support;
 
 use namedrop::{

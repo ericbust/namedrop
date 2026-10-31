@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{AgentRuntime, install_integration_package, operation_catalog};
 use std::{
     fs,
@@ -33,7 +36,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        cleanup::remove_fixture(&self.0).unwrap();
     }
 }
 

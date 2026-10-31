@@ -3,6 +3,9 @@
 //! assets inside that boundary: no HTML-parsing DOM sinks, no dynamic code,
 //! no inline script or style, and nothing loaded from the network.
 
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 const INDEX_HTML: &str = include_str!("../src/dashboard/assets/index.html");
 const APP_JS: &str = include_str!("../src/dashboard/assets/app.js");
 const APP_CSS: &str = include_str!("../src/dashboard/assets/app.css");

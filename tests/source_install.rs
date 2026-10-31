@@ -2,6 +2,9 @@
 //! command Herdr runs before it registers the plugin, and the setup helper that
 //! links a local checkout or activates an already registered installation.
 //! Every fixture path contains a space so quoting is exercised throughout.
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use std::{
@@ -241,7 +244,7 @@ chmod 755 "$directory/$target/release/namedrop"
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.root).unwrap();
+        cleanup::remove_fixture(&self.root).unwrap();
     }
 }
 

@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use crate::cleanup;
+
 use namedrop::{
     ActorKind, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,
     MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
@@ -44,16 +46,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        for path in [
-            self.path.join("pane-effects-retries.log"),
-            self.path.join("state/pane-effects-retries.log"),
-        ] {
-            if let Ok(record) = fs::read(path) {
-                use std::io::Write;
-                let _ = std::io::stderr().lock().write_all(&record);
-            }
-        }
-        fs::remove_dir_all(&self.path).unwrap();
+        cleanup::remove_fixture(&self.path).unwrap();
     }
 }
 

@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{
     ActorKind, AgentSessionId, DeliveryAttemptId, DeliveryId, DeliveryState, LeaseDraft,
     MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft,
@@ -396,11 +399,7 @@ impl Drop for Worker {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if let Ok(record) = fs::read(self.state().join("pane-effects-retries.log")) {
-            use std::io::Write;
-            let _ = std::io::stderr().lock().write_all(&record);
-        }
-        fs::remove_dir_all(&self.root).unwrap();
+        cleanup::remove_fixture(&self.root).unwrap();
     }
 }
 

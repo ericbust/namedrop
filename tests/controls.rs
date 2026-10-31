@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{
     ActorKind, AgentSessionId, Clock, DeliveryId, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MessageDraft, MessageId, MessageRecipientDraft,
@@ -572,11 +575,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        if let Ok(record) = fs::read(self.path.join("pane-effects-retries.log")) {
-            use std::io::Write;
-            let _ = std::io::stderr().lock().write_all(&record);
-        }
-        fs::remove_dir_all(&self.path).unwrap();
+        cleanup::remove_fixture(&self.path).unwrap();
     }
 }
 

@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{
     AgentRuntime, StateNamespace, StateStore, diagnose_collaboration, execute_control_operation,
     execute_group_operation, execute_handoff_operation, execute_integration_operation,

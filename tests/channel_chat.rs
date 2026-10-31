@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 #[path = "support/channel_controls.rs"]
 mod channel_controls;
 #[path = "support/channel_deliver.rs"]

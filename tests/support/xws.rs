@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use crate::cleanup;
+
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
@@ -707,10 +709,6 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop_workers();
-        if let Ok(record) = fs::read(self.state.join("pane-effects-retries.log")) {
-            use std::io::Write;
-            let _ = std::io::stderr().lock().write_all(&record);
-        }
-        let _ = fs::remove_dir_all(&self.root);
+        let _ = cleanup::remove_fixture(&self.root);
     }
 }
