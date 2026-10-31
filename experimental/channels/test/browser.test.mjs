@@ -10690,3 +10690,44 @@ test("UI-R5 R5-3: under 420 px tall the Jump control is a 28 px round icon butto
       await threadPane(ui).waitFor();
     });
 });
+
+test("UI-R5 fix1 2: under 420 px tall the Earlier thread row along the timeline's bottom edge takes a click at its left end, clear of the Jump button", async (t) => {
+  const value = layoutChannel();
+  value.frame.messages = value.frame.messages.filter(
+    (message) => message.message_id !== "p1",
+  );
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 844, 300);
+  await ui.live();
+  const row = ui.page.locator("main .earlier-thread");
+  await row.waitFor();
+  const timeline = ui.page.locator("main .timeline");
+  await timeline.evaluate(
+    (scroller, row) => {
+      const bottom =
+        scroller.getBoundingClientRect().top +
+        scroller.clientTop +
+        scroller.clientHeight;
+      scroller.scrollTop += row.getBoundingClientRect().bottom - (bottom - 4);
+    },
+    await row.elementHandle(),
+  );
+  await ui.page
+    .getByRole("button", { name: "Jump to latest messages" })
+    .waitFor();
+  await nextFrame(ui.page);
+  const box = await row.boundingBox();
+  const at = { x: box.x + 6, y: box.y + box.height / 2 };
+  assert.equal(
+    await ui.page.evaluate(
+      ([x, y]) =>
+        document.elementFromPoint(x, y)?.closest("button")?.className ?? null,
+      [at.x, at.y],
+    ),
+    "text-button earlier-thread",
+    "the row's left end is the row, not the Jump button",
+  );
+  await ui.page.mouse.click(at.x, at.y);
+  await threadPane(ui).waitFor({ timeout: 2000 });
+});

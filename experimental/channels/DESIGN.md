@@ -692,8 +692,9 @@ The way back is always at the bottom.
   buttons. There it is a 28px round icon button with the same arrow, colors,
   border and shadow, and no visible text. It sits 12px (`--space-3`) from
   the timeline's bottom and left edges, over the avatar gutter, where nothing
-  takes a click. The right edge holds the reply counts, so a corner there
-  would take their clicks. The name and tooltip stay. A 390 by 460 window at 125 percent zoom
+  takes a click: rows that are buttons, such as "Earlier thread · parent not
+  loaded", are indented by the avatar column like the reply rows. The right
+  edge holds the reply counts, so a corner there would take their clicks. The name and tooltip stay. A 390 by 460 window at 125 percent zoom
   (312 by 368 CSS pixels) gets it too.
 - While browsing, the last row of the timeline is a hairline divider that reads
   "Newer messages aren't loaded", with a **Jump to latest** text button, so
@@ -746,7 +747,7 @@ main column, under the timeline, and at the bottom of the thread pane.
   text that follows.
 - The Jump to latest pill floats 16px above the composer, not above the
   timeline's bottom edge. In a window under 420px tall its icon button sits
-  12px above the composer, at the timeline's right edge.
+  12px above the composer, at the timeline's left edge, over the avatar gutter.
 
 ### Sending
 
