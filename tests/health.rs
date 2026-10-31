@@ -954,7 +954,7 @@ fn doctor_assistance_explains_unsafe_lock_permissions_without_internal_terms() {
     let error = request_doctor_assistance(&runtime, "session-old").unwrap_err();
     assert_eq!(
         error,
-        "Namedrop's lock for this pane has unsafe owner or permissions"
+        "Namedrop's pane lock for pane-1 is not private to you"
     );
     assert!(!error.contains("pane effects"), "{error}");
     assert!(f.host.prompts.borrow().is_empty());

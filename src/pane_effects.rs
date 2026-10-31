@@ -21,6 +21,31 @@ use std::{
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_MARKER: u64 = 8192;
 static NEXT_MARKER: AtomicU64 = AtomicU64::new(0);
+static DIRECTORY_OPEN_RETRIES: AtomicU64 = AtomicU64::new(0);
+static LOCK_OPEN_RETRIES: AtomicU64 = AtomicU64::new(0);
+
+enum OpenRetry {
+    Directory,
+    Lock,
+}
+
+impl OpenRetry {
+    fn record(self, pane: &str) {
+        let (counter, operation) = match self {
+            Self::Directory => (&DIRECTORY_OPEN_RETRIES, "directory"),
+            Self::Lock => (&LOCK_OPEN_RETRIES, "lock"),
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        if cfg!(any(test, debug_assertions)) {
+            let source = if cfg!(test) { "unit-test" } else { "runtime" };
+            let record = format!(
+                "pane-effects: retrying {operation} open after ENOENT for {} source={source}\n",
+                pane.escape_debug()
+            );
+            let _ = io::stderr().lock().write_all(record.as_bytes());
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -89,7 +114,7 @@ enum MarkerOwnership {
     Reject,
 }
 
-fn checked(file: File, directory: bool) -> io::Result<File> {
+fn checked(file: File, directory: bool, pane: &str) -> io::Result<File> {
     let metadata = file.metadata()?;
     if metadata.uid() != unsafe { libc::geteuid() }
         || metadata.mode() & 0o077 != 0
@@ -99,9 +124,9 @@ fn checked(file: File, directory: bool) -> io::Result<File> {
             !metadata.is_file() || metadata.nlink() != 1
         }
     {
-        return Err(io::Error::other(
-            "Namedrop's lock for this pane has unsafe owner or permissions",
-        ));
+        return Err(io::Error::other(format!(
+            "Namedrop's pane lock for {pane} is not private to you"
+        )));
     }
     Ok(file)
 }
@@ -121,8 +146,8 @@ fn raw_open_at(directory: &File, name: &CString, flags: i32) -> io::Result<File>
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-fn open_at(directory: &File, name: &CString, flags: i32) -> io::Result<File> {
-    checked(raw_open_at(directory, name, flags)?, false)
+fn open_at(directory: &File, name: &CString, flags: i32, pane: &str) -> io::Result<File> {
+    checked(raw_open_at(directory, name, flags)?, false, pane)
 }
 
 fn raw_open_directory(state: &File) -> io::Result<File> {
@@ -181,12 +206,20 @@ impl PaneEffects {
                 .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
                 .open(state)?,
             true,
+            pane,
         )?;
         let created = unsafe { libc::mkdirat(state.as_raw_fd(), c"pane-effects".as_ptr(), 0o700) };
         if created != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
             return Err(io::Error::last_os_error().into());
         }
-        let directory = checked(open_directory(&state)?, true)?;
+        let directory = match open_directory(&state) {
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                OpenRetry::Directory.record(pane);
+                open_directory(&state)?
+            }
+            result => result?,
+        };
+        let directory = checked(directory, true, pane)?;
         let key = Sha256::digest(serde_json::to_vec(&(socket, pane)).map_err(io::Error::from)?)
             .iter()
             .map(|byte| format!("{byte:02x}"))
@@ -195,11 +228,12 @@ impl PaneEffects {
         let flags = libc::O_RDWR | libc::O_CREAT;
         let lock = match open_lock(&directory, &lock_name, flags) {
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                OpenRetry::Lock.record(pane);
                 open_lock(&directory, &lock_name, flags)?
             }
             result => result?,
         };
-        let lock = checked(lock, false)?;
+        let lock = checked(lock, false, pane)?;
         acquire_flock(lock.as_raw_fd(), timeout)?;
         Ok(Self {
             _lock: lock,
@@ -221,6 +255,7 @@ impl PaneEffects {
                 &self.directory,
                 &temporary,
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+                &self.pane,
             )?;
             file.write_all(&serde_json::to_vec(owner)?)?;
             file.sync_all()?;
@@ -246,7 +281,7 @@ impl PaneEffects {
     }
 
     fn ownership(&self, expected: &InputOwner) -> MarkerOwnership {
-        let file = match open_at(&self.directory, &self.marker, libc::O_RDONLY) {
+        let file = match open_at(&self.directory, &self.marker, libc::O_RDONLY, &self.pane) {
             Ok(file) => file,
             Err(error) => {
                 return if error.kind() == io::ErrorKind::NotFound {
@@ -513,7 +548,10 @@ mod tests {
     #[test]
     fn transient_directory_open_enoent_recovers_with_exclusion() {
         let state = State::new();
-        fs::create_dir(state.0.join("pane-effects")).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(state.0.join("pane-effects"))
+            .unwrap();
         let mut calls = 0;
         let mut first_fd = None;
         let gate = PaneEffects::acquire_for_with_opens(
@@ -573,6 +611,41 @@ mod tests {
                 Err(AcquireError::Fault(error)) if error.raw_os_error() == Some(errno)
             ));
         }
+    }
+
+    #[test]
+    fn retried_directory_open_still_validates_privacy_before_lock_open() {
+        let state = State::new();
+        let directory = state.0.join("pane-effects");
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let mut directory_calls = 0;
+        let mut lock_calls = 0;
+        let result = PaneEffects::acquire_for_with_opens(
+            &state.0,
+            "socket",
+            "pane",
+            Duration::ZERO,
+            |state| {
+                directory_calls += 1;
+                if directory_calls == 1 {
+                    Err(io::Error::from_raw_os_error(libc::ENOENT))
+                } else {
+                    raw_open_directory(state)
+                }
+            },
+            |directory, name, flags| {
+                lock_calls += 1;
+                raw_open_at(directory, name, flags)
+            },
+        );
+        assert_eq!(directory_calls, 2);
+        assert_eq!(lock_calls, 0);
+        assert!(matches!(
+            result,
+            Err(AcquireError::Fault(error)) if error.to_string()
+                == "Namedrop's pane lock for pane is not private to you"
+        ));
     }
 
     #[test]
@@ -689,7 +762,7 @@ mod tests {
             assert_eq!(calls, if transient_enoent { 2 } else { 1 });
             assert!(matches!(
                 result,
-                Err(AcquireError::Fault(error)) if error.to_string().contains("unsafe")
+                Err(AcquireError::Fault(error)) if error.to_string().contains("not private to you")
             ));
             let lock = fs::read_dir(state.0.join("pane-effects"))
                 .unwrap()
@@ -726,7 +799,7 @@ mod tests {
         assert_eq!(calls, 0);
         assert!(matches!(
             result,
-            Err(AcquireError::Fault(error)) if error.to_string().contains("unsafe")
+            Err(AcquireError::Fault(error)) if error.to_string().contains("not private to you")
         ));
     }
 
@@ -746,7 +819,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             PaneEffects::acquire_for(&state.0, "socket", "pane", Duration::ZERO),
-            Err(AcquireError::Fault(error)) if error.to_string().contains("unsafe")
+            Err(AcquireError::Fault(error)) if error.to_string().contains("not private to you")
         ));
         assert!(matches!(
             AcquireError::from(io::Error::from_raw_os_error(libc::EWOULDBLOCK)),
