@@ -417,12 +417,7 @@ fn repeated_writable_initialization_skips_transition_history_after_index_creatio
     queries.clear();
     initialize_schema(&mut store.connection, &directory.0).unwrap();
     unsafe {
-        rusqlite::ffi::sqlite3_trace_v2(
-            store.connection.handle(),
-            0,
-            None,
-            std::ptr::null_mut(),
-        );
+        rusqlite::ffi::sqlite3_trace_v2(store.connection.handle(), 0, None, std::ptr::null_mut());
     }
     assert!(queries.is_empty(), "{queries:?}");
     assert_eq!(store.schema_version().unwrap(), 6);
