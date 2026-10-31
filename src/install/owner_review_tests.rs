@@ -1,6 +1,5 @@
-#[path = "../../tests/support/hc_socket.rs"]
-mod hc_socket;
 use super::*;
+use crate::runtime::hc_socket_fixture as hc_socket;
 struct NoCalls;
 impl crate::HerdrCommandExecutor for NoCalls {
     fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {

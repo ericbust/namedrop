@@ -693,7 +693,7 @@ pub(crate) fn stop_process_group(child: &mut Child) {
 
 #[cfg(test)]
 #[path = "../tests/support/hc_socket.rs"]
-mod hc_socket_fixture;
+pub(crate) mod hc_socket_fixture;
 
 #[cfg(test)]
 mod bounded_read_tests {

@@ -565,6 +565,8 @@ fn hc_binary_verifies_inherited_identity() {
         serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
     terminal["pid"] = serde_json::json!(4_000_000_000u32);
     terminal["labels"]["namedrop.session.pid"] = serde_json::json!(agent.pid().to_string());
+    terminal["labels"]["namedrop.session.start"] =
+        serde_json::json!(hc_process::start(agent.pid()));
     fs::write(&record, terminal.to_string()).unwrap();
     fs::write(&hc, format!(r#"#!/bin/sh
 case "$1" in
@@ -599,6 +601,10 @@ esac
         "{recovered}"
     );
     assert!(!recovered.contains("unexpected Herdr call"), "{recovered}");
+    let unrelated_shell = hc_process::AgentProcess::shell();
+    terminal["pid"] = serde_json::json!(unrelated_shell.pid());
+    fs::write(&record, terminal.to_string()).unwrap();
+    assert!(text(&run(None)).contains("HC_TERMINAL_ID is stale"));
     terminal["pid"] = serde_json::json!(std::process::id());
     fs::write(&record, terminal.to_string()).unwrap();
     assert!(!text(&run(None)).contains("HC_TERMINAL_ID is stale"));

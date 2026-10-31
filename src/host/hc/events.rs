@@ -213,13 +213,11 @@ impl Subscriber {
         for terminal in &terminals {
             if spaces.iter().any(|space| space == terminal.workspace())
                 && terminal.labels.contains_key("namedrop.session.pid")
-            {
-                if let Err(error) = runtime
+                && let Err(error) = runtime
                     .host
                     .invalidate_session(runtime.state_directory, &terminal.address)
-                {
-                    errors.push(error.to_string());
-                }
+            {
+                errors.push(error.to_string());
             }
         }
         for space in spaces {
