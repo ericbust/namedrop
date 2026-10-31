@@ -178,6 +178,23 @@ impl EnvironmentSnapshot {
         }
         command
     }
+    pub(crate) fn tui_command(&self, program: impl AsRef<OsStr>) -> Command {
+        use std::os::unix::ffi::OsStrExt;
+        let mut command = self.command(program);
+        for key in self
+            .0
+            .variables
+            .keys()
+            .cloned()
+            .chain(std::env::vars_os().map(|(key, _)| key))
+        {
+            if key.as_bytes().starts_with(b"HC_") {
+                command.env_remove(key);
+            }
+        }
+        command
+    }
+
     pub(crate) fn hc_command(&self, program: impl AsRef<OsStr>) -> Command {
         use std::os::unix::ffi::OsStrExt;
         let mut command = self.command(program);

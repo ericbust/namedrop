@@ -398,7 +398,7 @@ impl ProcessHerdr {
         match self.host {
             HostKind::Hc => self.environment.hc_command(&self.binary),
             HostKind::Tui => {
-                let mut command = self.environment.command(&self.binary);
+                let mut command = self.environment.tui_command(&self.binary);
                 if let Some(socket) = &self.socket {
                     command.env("HERDR_SOCKET_PATH", socket);
                 }
