@@ -182,6 +182,24 @@ esac
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        for state in ["hc-state", "foreign-hc"] {
+            let state = self.0.join(state);
+            if state.join("hc-subscribers").exists() {
+                namedrop::host::hc::events::stop(&state, "hc:hook-test").unwrap();
+            }
+        }
+        for pid in fs::read_to_string(self.0.join("events-pids"))
+            .unwrap_or_default()
+            .lines()
+        {
+            let args = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            assert!(
+                !args
+                    .split(|byte| *byte == 0)
+                    .any(|arg| arg == self.0.join("hc").as_os_str().as_encoded_bytes()),
+                "fixture HC event stream {pid} did not stop"
+            );
+        }
         fs::remove_dir_all(&self.0).unwrap();
     }
 }
@@ -666,9 +684,11 @@ elif args[0] == 'label':
         else: record['labels'].pop(key, None)
     record_path.write_text(json.dumps(record))
     print(json.dumps(record))
-elif args[0] == 'run':
-    print(json.dumps({'error':{'kind':'name_taken','message':'already running'}}), file=sys.stderr)
-    sys.exit(1)
+elif args[0] == 'events':
+    import signal
+    with (root / 'events-pids').open('a') as out:
+        out.write(str(os.getpid()) + '\n')
+    signal.pause()
 elif args[0] == 'send':
     assert 'HC_TERMINAL_ID' not in os.environ
     assert 'HC_TERMINAL_SOCKET' not in os.environ
@@ -752,13 +772,20 @@ else: raise AssertionError(args)
         1,
         "session writes are idempotent"
     );
-    assert_eq!(
-        calls
-            .lines()
-            .filter(|line| line.starts_with("[\"run\""))
-            .count(),
-        2
-    );
+    assert!(!calls.lines().any(|line| line.starts_with("[\"run\"")));
+    let subscriber_record = || {
+        let directory = fs::read_dir(hc_state.join("hc-subscribers"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(directory.join("subscriber.json")).unwrap(),
+        )
+        .unwrap()
+    };
+    let subscriber = subscriber_record();
     let named = command(&[
         "--host",
         "hc",
@@ -879,6 +906,12 @@ else: raise AssertionError(args)
         ]);
     let fallback = fallback.output().unwrap();
     assert!(fallback.status.success(), "{}", text(&fallback));
+    fs::create_dir_all(hc_state.join("runtime/current")).unwrap();
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_namedrop"),
+        hc_state.join("runtime/current/namedrop"),
+    )
+    .unwrap();
     let inherited_hook = |program: &Path, args: &[&str], payload: &str| {
         let mut command = Command::new(program);
         command
@@ -981,16 +1014,15 @@ else: raise AssertionError(args)
                     }
                 }
                 let calls = fs::read_to_string(f.0.join("hc-calls")).unwrap();
-                if event == "session-start" {
-                    assert_eq!(
-                        calls
-                            .lines()
-                            .filter(|line| line.starts_with("[\"run\""))
-                            .count(),
-                        1,
-                        "one current package must dispatch SessionStart: {calls}"
-                    );
-                }
+                assert!(
+                    !calls.lines().any(|line| line.starts_with("[\"run\"")),
+                    "hooks must not create a terminal for the subscriber: {calls}"
+                );
+                assert_eq!(
+                    subscriber_record(),
+                    subscriber,
+                    "hooks replaced the subscriber"
+                );
                 assert!(
                     calls.contains("[\"server\""),
                     "current {event} must run: {calls}"
@@ -1112,6 +1144,8 @@ else: raise AssertionError(args)
         !calls.lines().any(|line| line.starts_with("[\"label\"")),
         "stale inherited terminal wrote a label: {calls}"
     );
+    namedrop::host::hc::events::stop(&hc_state, "hc:hook-test").unwrap();
+    fs::remove_file(hc_state.join("runtime/current/namedrop")).unwrap();
     let selected_runtime = hc_state.join("runtime/namedrop");
     fs::create_dir_all(selected_runtime.parent().unwrap()).unwrap();
     fs::write(
