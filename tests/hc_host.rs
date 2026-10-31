@@ -2411,14 +2411,14 @@ fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
             if let Some(proof) = recovery.strip_prefix("cancel-held-") {
                 match proof {
                     "missing-pause" => {
-                        database.execute("DELETE FROM transition_facts WHERE entity_kind='prompt_recipient' AND transition_kind='paused'", []).unwrap();
+                        database.execute("DELETE FROM transition_facts WHERE entity_kind='mailbox_delivery' AND transition_kind='paused'", []).unwrap();
                     }
                     "wrong-recipient" => {
-                        database.execute("DELETE FROM transition_facts WHERE entity_kind='prompt_recipient' AND transition_kind='paused'", []).unwrap();
+                        database.execute("DELETE FROM transition_facts WHERE entity_kind='mailbox_delivery' AND transition_kind='paused'", []).unwrap();
                         database.execute("INSERT INTO transition_facts
                             (session_socket_id,worktree_id,worktree_order,entity_kind,entity_id,transition_kind,actor_kind,actor_id,occurred_at_ms)
-                            SELECT session_socket_id,worktree_id,worktree_order+1,entity_kind,'[\"t2\",\"fixture-session\"]','paused',actor_kind,actor_id,1000
-                            FROM transition_facts WHERE entity_kind='prompt_recipient' AND transition_kind='observed'", []).unwrap();
+                            SELECT session_socket_id,worktree_id,worktree_order+1,entity_kind,'other-delivery','paused',actor_kind,actor_id,1000
+                            FROM transition_facts WHERE entity_kind='mailbox_delivery' AND transition_kind='observed'", []).unwrap();
                     }
                     "active" => {
                         database
