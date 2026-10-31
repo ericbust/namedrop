@@ -2487,3 +2487,36 @@ fn due_mailbox_tick_does_not_retry_an_unavailable_dead_owner() {
         );
     });
 }
+
+#[test]
+fn carried_missed_snapshot_and_dirty_read_each_pane_once() {
+    check("carried-missed", |fixture, runtime| {
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber.handle_line(&session_event("snapshot", fixture), runtime).unwrap();
+        fixture.calls.borrow_mut().clear();
+        let snapshot = json!({"method":"missed","params":{"seq":10,"terminals":*fixture.terminals.borrow()}}).to_string();
+        let dirty = json!({"method":"event","params":{"seq":11,"type":"labels","terminal":"t1"}}).to_string();
+        subscriber.handle_lines([snapshot.as_str(), dirty.as_str()], runtime).unwrap();
+        let calls = fixture.calls.borrow();
+        assert_eq!(calls.iter().filter(|call| call[0] == "ls").count(), 0, "carried snapshot must not discover: {calls:?}");
+        assert_eq!(calls.iter().filter(|call| call[0] == "get").count(), 1, "one observation per pane: {calls:?}");
+    });
+}
+
+#[test]
+fn dirty_alias_and_dead_session_share_one_fresh_read() {
+    check("one-fresh-read", |fixture, runtime| {
+        let agent = process::AgentProcess::new();
+        queued_agent(fixture, runtime, agent.pid());
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber.handle_line(&session_event("snapshot", fixture), runtime).unwrap();
+        drop(agent);
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("new-alias");
+        fixture.calls.borrow_mut().clear();
+        subscriber.handle_line(&session_event("labels", fixture), runtime).unwrap();
+        let calls = fixture.calls.borrow();
+        assert_eq!(calls.iter().filter(|call| call[0] == "get").count(), 1, "cleanup and naming must reuse the observation: {calls:?}");
+        assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.session"], "");
+        assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.name"], "new-alias");
+    });
+}
