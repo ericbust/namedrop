@@ -686,22 +686,6 @@ impl<E: HerdrCommandExecutor> HcHost<'_, E> {
         self.clear_session(&mut terminal)
     }
 
-    pub(super) fn reconcile_session(
-        &self,
-        state: &Path,
-        session_socket_id: &str,
-        terminal: &mut Terminal,
-    ) -> Result<bool, HostError> {
-        if !Self::session_needs_reconciliation(terminal) {
-            return Ok(false);
-        }
-        let _lock = label_lock(state)?;
-        let mut current = self.terminal(&terminal.address, None)?;
-        self.reconcile_session_fresh(state, session_socket_id, &mut current, &_lock)?;
-        *terminal = current;
-        Ok(true)
-    }
-
     fn session_needs_reconciliation(terminal: &Terminal) -> bool {
         !(terminal.state == "live" && terminal.session().is_some())
             && [
