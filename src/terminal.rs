@@ -157,22 +157,53 @@ fn copy_output(mut reader: impl Read, mut writer: impl Write) -> Result<String, 
     Ok(text)
 }
 
+enum ForegroundIdentity {
+    Process(u32),
+    Group(u32),
+}
+
+impl ForegroundIdentity {
+    fn current(hc: bool) -> Option<Self> {
+        if hc {
+            // SAFETY: getpgid(0) reads the calling process's group without pointers.
+            u32::try_from(unsafe { libc::getpgid(0) })
+                .ok()
+                .filter(|group| *group > 0)
+                .map(Self::Group)
+        } else {
+            Some(Self::Process(std::process::id()))
+        }
+    }
+
+    fn matches(&self, info: &crate::host::ProcessInfo) -> bool {
+        match self {
+            Self::Group(group) => info.foreground_process_group_id == u64::from(*group),
+            Self::Process(pid) => info
+                .foreground_processes
+                .iter()
+                .any(|process| process.pid == *pid),
+        }
+    }
+}
+
 fn runner_in_foreground(
     host: &impl Host,
     pane: &str,
-    _hc: bool,
+    hc: bool,
     budget: std::time::Duration,
 ) -> bool {
+    let Some(identity) = ForegroundIdentity::current(hc) else {
+        return false;
+    };
     let deadline = std::time::Instant::now() + budget;
     loop {
-        if host.process_info(pane).is_some_and(|info| {
-            info.foreground_processes
-                .iter()
-                .any(|process| process.pid == std::process::id())
-        }) {
+        if host
+            .process_info(pane)
+            .is_some_and(|info| identity.matches(&info))
+        {
             return true;
         }
-        if std::time::Instant::now() >= deadline {
+        if !hc || std::time::Instant::now() >= deadline {
             return false;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -347,15 +378,16 @@ pub fn detect_pane_type<H: Host, C, I>(
     if pane.agent.is_some() || pane.agent_session_id.is_some() {
         return Ok(Some(PaneType::Agent));
     }
+    let identity = ForegroundIdentity::current(runtime.is_hc());
     Ok(runtime
         .host
         .process_info(&pane.pane_id)
         .is_some_and(|p| {
             p.shell_pid > 0
                 && (p.shell_pid == p.foreground_process_group_id
-                    || p.foreground_processes
-                        .iter()
-                        .any(|p| p.pid == std::process::id()))
+                    || identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.matches(&p)))
         })
         .then_some(PaneType::Terminal))
 }
