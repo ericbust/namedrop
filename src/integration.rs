@@ -1854,3 +1854,18 @@ impl DeliveryEnvelope {
 #[cfg(test)]
 #[path = "integration_tests.rs"]
 mod command_guidance_tests;
+
+#[cfg(test)]
+mod guidance_state_tests {
+    #[test]
+    fn tui_delivery_guidance_ignores_hc_state() {
+        let tool = serde_json::json!({
+            "executable":"/namedrop", "input_flag":"--input-json",
+            "environment":{"HERDR_PLUGIN_STATE_DIR":"/tui-state", "NAMEDROP_STATE_DIR":"/hc-state", "HERDR_PANE_ID":"p1"},
+            "operations":[{"token":"address.list", "argv":["address", "list"], "input":{}}]
+        });
+        let guidance = super::delivery_command_guidance(&tool).unwrap();
+        assert!(guidance.contains("--plugin-state '/tui-state'"), "{guidance}");
+        assert!(!guidance.contains("/hc-state"), "{guidance}");
+    }
+}
