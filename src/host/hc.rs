@@ -1,7 +1,7 @@
 pub mod events;
 
 use super::*;
-use crate::{AgentSessionId, HerdrCommandExecutor, WorktreeId};
+use crate::{AgentRuntime, AgentSessionId, HerdrCommandExecutor, WorktreeId};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
@@ -28,8 +28,6 @@ pub(super) struct Terminal {
     state: String,
     #[serde(default)]
     pub(super) labels: BTreeMap<String, String>,
-    #[serde(default)]
-    argv: Vec<String>,
     cwd: Option<String>,
     pid: Option<u32>,
     foreground: Option<Foreground>,
@@ -50,7 +48,6 @@ struct Foreground {
 #[derive(Deserialize)]
 struct Status {
     state: StatusWord,
-    app: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -64,6 +61,13 @@ enum StatusWord {
 }
 
 impl StatusWord {
+    fn prompt_condition(&self) -> Option<&'static str> {
+        match self {
+            Self::Idle | Self::Done => Some("idle"),
+            _ => None,
+        }
+    }
+
     fn as_str(&self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -101,6 +105,13 @@ pub(super) fn host_error(raw: String) -> HostError {
     }
 }
 
+fn pre_invocation(error: HostError) -> PromptFailure {
+    PromptFailure {
+        kind: PromptFailureKind::TemporaryPreInvocation,
+        message: error.message,
+    }
+}
+
 fn prompt_failure(raw: String) -> PromptFailure {
     let kind = serde_json::from_str::<ErrorEnvelope>(&raw)
         .ok()
@@ -130,6 +141,75 @@ fn prompt_failure(raw: String) -> PromptFailure {
     }
 }
 
+enum Occupancy<'a> {
+    Terminal,
+    Agent {
+        runtime: AgentRuntime,
+        session: Option<&'a str>,
+        state: AgentState<'a>,
+    },
+}
+
+enum AgentState<'a> {
+    Foreground(Option<&'a StatusWord>),
+    Background,
+}
+
+fn program_runtime(program: &str) -> Option<AgentRuntime> {
+    let name = Path::new(program).file_name()?.to_str()?;
+    AgentRuntime::parse(if name == "claude" {
+        "claude-code"
+    } else {
+        name
+    })
+    .ok()
+}
+
+fn process_runtime(pid: u32) -> Option<AgentRuntime> {
+    let arguments = crate::terminal::process_arguments(pid)?;
+    arguments
+        .first()
+        .and_then(|program| program_runtime(program))
+        .or_else(|| program_runtime(crate::terminal::process_executable(pid)?.to_str()?))
+}
+
+#[cfg(target_os = "linux")]
+fn process_start(pid: u32) -> Option<String> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    Some(
+        stat.rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(19)?
+            .to_owned(),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_start(_: u32) -> Option<String> {
+    None
+}
+
+fn local_terminal(pane: &str) -> Result<(), HostError> {
+    if pane.contains('/') {
+        return Err("Namedrop supports local hc terminals only"
+            .to_owned()
+            .into());
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct DiscoveryWarning {
+    pub terminal: String,
+    pub message: String,
+}
+
+pub(super) struct TerminalDiscovery {
+    pub(super) terminals: Vec<Terminal>,
+    pub(super) warnings: Vec<DiscoveryWarning>,
+}
+
 impl Terminal {
     fn workspace(&self) -> &str {
         self.labels
@@ -154,55 +234,87 @@ impl Terminal {
             .unwrap_or_else(|| self.workspace().to_owned())
     }
 
-    fn session(&self) -> Option<&str> {
-        if let Some(pid) = self.labels.get("namedrop.session.pid")
-            && self.pid.map(|pid| pid.to_string()).as_ref() != Some(pid)
+    fn session_owner(&self) -> Option<(u32, AgentRuntime)> {
+        let pid = self.labels.get("namedrop.session.pid")?.parse().ok()?;
+        let runtime = process_runtime(pid)?;
+        if let Some(start) = self.labels.get("namedrop.session.start")
+            && process_start(pid).as_ref() != Some(start)
         {
             return None;
         }
-        self.labels
-            .get("namedrop.session")
-            .map(String::as_str)
-            .filter(|session| !session.is_empty())
+        Some((pid, runtime))
+    }
+
+    fn occupancy(&self) -> Occupancy<'_> {
+        let foreground = self.foreground.as_ref().and_then(|foreground| {
+            let program = foreground
+                .argv
+                .first()
+                .map(String::as_str)
+                .unwrap_or(&foreground.name);
+            Some((
+                u32::try_from(foreground.pid).ok()?,
+                program_runtime(program)?,
+            ))
+        });
+        if let Some((pid, runtime)) = self.session_owner() {
+            let session = self
+                .labels
+                .get("namedrop.session")
+                .map(String::as_str)
+                .filter(|session| !session.is_empty());
+            return Occupancy::Agent {
+                runtime,
+                session,
+                state: if foreground == Some((pid, runtime)) {
+                    AgentState::Foreground(self.status.as_ref().map(|status| &status.state))
+                } else {
+                    AgentState::Background
+                },
+            };
+        }
+        if let Some((pid, runtime)) = foreground
+            && (!self.labels.contains_key("namedrop.session.pid")
+                || process_runtime(pid) == Some(runtime))
+        {
+            return Occupancy::Agent {
+                runtime,
+                session: None,
+                state: AgentState::Foreground(self.status.as_ref().map(|status| &status.state)),
+            };
+        }
+        Occupancy::Terminal
+    }
+
+    fn session(&self) -> Option<&str> {
+        match self.occupancy() {
+            Occupancy::Agent { session, .. } => session,
+            Occupancy::Terminal => None,
+        }
     }
 
     fn pane(&self) -> DiscoveredPane {
-        let app = self
-            .status
-            .as_ref()
-            .and_then(|status| status.app.as_deref())
-            .filter(|app| !app.is_empty());
-        let program = self
-            .foreground
-            .as_ref()
-            .and_then(|foreground| {
-                foreground
-                    .argv
-                    .first()
-                    .map(String::as_str)
-                    .or(Some(foreground.name.as_str()))
-            })
-            .or_else(|| self.argv.first().map(String::as_str));
-        let agent = app
-            .map(|app| match app {
-                "claude-code" => "claude".to_owned(),
-                _ => app.to_owned(),
-            })
-            .or_else(|| {
-                let name = Path::new(program?).file_name()?.to_str()?;
-                let name = if name == "claude" {
-                    "claude-code"
-                } else {
-                    name
-                };
-                crate::AgentRuntime::parse(name).ok().map(|agent| {
-                    match agent {
-                        crate::AgentRuntime::ClaudeCode => "claude",
-                        crate::AgentRuntime::Codex => "codex",
+        let (agent, session, status) = match self.occupancy() {
+            Occupancy::Terminal => (None, None, None),
+            Occupancy::Agent {
+                runtime,
+                session,
+                state,
+            } => (
+                Some(
+                    match runtime {
+                        AgentRuntime::ClaudeCode => "claude",
+                        AgentRuntime::Codex => "codex",
                     }
-                    .to_owned()
-                })
-            });
+                    .to_owned(),
+                ),
+                session,
+                match state {
+                    AgentState::Foreground(status) => status.map(StatusWord::as_str),
+                    AgentState::Background => Some("working"),
+                },
+            ),
+        };
         DiscoveredPane {
             pane_id: self.address.clone(),
             terminal_id: self.address.clone(),
@@ -213,13 +325,10 @@ impl Terminal {
                 .labels
                 .get("namedrop.name")
                 .map(|alias| format!("@{alias}")),
-            agent_session_id: self.session().map(AgentSessionId::new),
+            agent_session_id: session.map(AgentSessionId::new),
             occupant_label: agent.clone(),
             agent,
-            agent_status: self
-                .status
-                .as_ref()
-                .map(|status| status.state.as_str().to_owned()),
+            agent_status: status.map(str::to_owned),
             status_reported: Some(self.reported),
             idle_state_label: None,
         }
@@ -251,6 +360,7 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
     }
 
     pub(crate) fn shell_pid(&self, terminal: &str, budget: &dyn Budget) -> Option<u32> {
+        local_terminal(terminal).ok()?;
         let response: serde_json::Value = self
             .execute(&["get", terminal, "--json"], Some(budget))
             .ok()?;
@@ -283,6 +393,7 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
         pane: &str,
         budget: Option<&dyn Budget>,
     ) -> Result<Terminal, HostError> {
+        local_terminal(pane)?;
         self.execute(&["get", pane, "--json"], budget)
     }
 
@@ -290,25 +401,45 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
         &self,
         budget: Option<&dyn Budget>,
     ) -> Result<Vec<Terminal>, HostError> {
+        Ok(self.discover(budget)?.terminals)
+    }
+
+    pub(super) fn discover(
+        &self,
+        budget: Option<&dyn Budget>,
+    ) -> Result<TerminalDiscovery, HostError> {
         let list: TerminalList = self.execute(&["ls", "--json"], budget)?;
-        let mut terminals = Vec::new();
+        let mut discovery = TerminalDiscovery {
+            terminals: Vec::new(),
+            warnings: Vec::new(),
+        };
         for summary in list
             .terminals
             .into_iter()
-            .filter(|summary| summary.state == "live")
+            .filter(|summary| summary.state == "live" && !summary.address.contains('/'))
         {
             match self.terminal(&summary.address, budget) {
-                Ok(terminal) if terminal.state == "live" => terminals.push(terminal),
+                Ok(terminal) if terminal.state == "live" => discovery.terminals.push(terminal),
                 Ok(_) => (),
-                Err(error) if matches!(error.code.as_deref(), Some("not_found" | "finished")) => (),
-                Err(error) => return Err(error),
+                Err(error) => discovery.warnings.push(DiscoveryWarning {
+                    terminal: summary.address,
+                    message: error.message,
+                }),
             }
         }
-        Ok(terminals)
+        Ok(discovery)
+    }
+
+    pub fn discovery_warnings(&self) -> Result<Vec<DiscoveryWarning>, HostError> {
+        Ok(self.discover(None)?.warnings)
     }
 
     pub fn set_labels(&self, pane: &str, labels: &[(&str, &str)]) -> Result<(), HostError> {
         let terminal = self.terminal(pane, None)?;
+        self.update_labels(&terminal, labels)
+    }
+
+    fn update_labels(&self, terminal: &Terminal, labels: &[(&str, &str)]) -> Result<(), HostError> {
         let changed: Vec<String> = labels
             .iter()
             .filter(|(key, value)| terminal.labels.get(*key).map_or("", String::as_str) != *value)
@@ -317,7 +448,7 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
         if changed.is_empty() {
             return Ok(());
         }
-        let mut args = vec!["label", pane];
+        let mut args = vec!["label", &terminal.address];
         args.extend(changed.iter().map(String::as_str));
         args.push("--json");
         self.transport
@@ -334,15 +465,27 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
     ) -> Result<(), HostError> {
         let _lock = label_lock(state)?;
         let terminal = self.terminal(pane, None)?;
-        let pid = terminal
+        let terminal_pid = terminal
             .pid
             .filter(|pid| *pid > 0)
             .ok_or("hc terminal has no live program to own a session".to_owned())?;
-        self.set_labels(
-            pane,
+        let ancestors: Vec<_> = crate::terminal::ancestor_pids(std::process::id()).collect();
+        let boundary = ancestors
+            .iter()
+            .position(|pid| *pid == terminal_pid)
+            .ok_or("SessionStart is outside the hc terminal process tree".to_owned())?;
+        let pid = ancestors[..=boundary]
+            .iter()
+            .copied()
+            .find(|pid| process_runtime(*pid).is_some())
+            .ok_or("hc terminal has no recognized agent ancestor to own a session".to_owned())?;
+        let start = process_start(pid).unwrap_or_default();
+        self.update_labels(
+            &terminal,
             &[
                 ("namedrop.session", session),
                 ("namedrop.session.pid", &pid.to_string()),
+                ("namedrop.session.start", &start),
             ],
         )
     }
@@ -350,16 +493,20 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
     pub fn invalidate_session(&self, state: &Path, pane: &str) -> Result<(), HostError> {
         let _lock = label_lock(state)?;
         let terminal = self.terminal(pane, None)?;
-        let current_pid = terminal.pid.map(|pid| pid.to_string());
-        if current_pid
-            .as_ref()
-            .is_some_and(|pid| terminal.labels.get("namedrop.session.pid") == Some(pid))
-        {
+        if terminal.session().is_some() {
             return Ok(());
         }
-        self.set_labels(
-            pane,
-            &[("namedrop.session", ""), ("namedrop.session.pid", "")],
+        self.clear_session(&terminal)
+    }
+
+    fn clear_session(&self, terminal: &Terminal) -> Result<(), HostError> {
+        self.update_labels(
+            terminal,
+            &[
+                ("namedrop.session", ""),
+                ("namedrop.session.pid", ""),
+                ("namedrop.session.start", ""),
+            ],
         )
     }
 
@@ -393,10 +540,17 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         budget: Option<&dyn Budget>,
     ) -> Result<DiscoveredWorktree, HostError> {
         let terminals = self.terminals(budget)?;
+        let mut roots_by_cwd = BTreeMap::<PathBuf, Option<PathBuf>>::new();
+        let mut cached_root = |cwd: &Path| {
+            roots_by_cwd
+                .entry(cwd.to_owned())
+                .or_insert_with(|| git_root(cwd))
+                .clone()
+        };
         let workspace = match at {
             SpaceLocator::Workspace(id) => id.to_owned(),
             SpaceLocator::Checkout(cwd) => {
-                let root = git_root(cwd).ok_or_else(|| {
+                let root = cached_root(cwd).ok_or_else(|| {
                     "hc cannot resolve this checkout. Pass --hc-space <space-id>.".to_owned()
                 })?;
                 let spaces: BTreeSet<&str> = terminals
@@ -404,7 +558,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
                     .filter(|terminal| {
                         terminal
                             .cwd()
-                            .and_then(|cwd| git_root(Path::new(cwd)))
+                            .and_then(|cwd| cached_root(Path::new(cwd)))
                             .as_ref()
                             == Some(&root)
                     })
@@ -433,7 +587,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
             .collect();
         let roots: Option<Vec<PathBuf>> = terminals
             .iter()
-            .map(|terminal| terminal.cwd().and_then(|cwd| git_root(Path::new(cwd))))
+            .map(|terminal| terminal.cwd().and_then(|cwd| cached_root(Path::new(cwd))))
             .collect();
         let root = roots
             .as_ref()
@@ -509,9 +663,6 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
             vec!["read", pane, "--lines", &count, "--json"]
         };
         let result = self.execute::<ReadResult>(&args, budget)?;
-        if lines > terminal.rows {
-            return Ok(result.text);
-        }
         let skip = result
             .text
             .split_inclusive('\n')
@@ -521,17 +672,62 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
     }
 
     fn prompt(&self, pane: &str, text: &str) -> Result<(), PromptFailure> {
+        let terminal = self.terminal(pane, None).map_err(pre_invocation)?;
+        let occupancy = terminal.occupancy();
+        if !matches!(
+            occupancy,
+            Occupancy::Agent {
+                session: Some(_),
+                ..
+            }
+        ) {
+            self.clear_session(&terminal).map_err(pre_invocation)?;
+        }
+        let condition = match occupancy {
+            Occupancy::Agent {
+                session: Some(_),
+                state: AgentState::Foreground(Some(status)),
+                ..
+            } if terminal.state == "live" => status.prompt_condition(),
+            _ => None,
+        };
+        let Some(condition) = condition else {
+            return Err(pre_invocation(
+                "hc terminal has no settled foreground session owner"
+                    .to_owned()
+                    .into(),
+            ));
+        };
         self.transport
-            .execute(&["send", pane, text, "--json"])
+            .execute(&["send", pane, text, "--if", condition, "--json"])
             .map(|_| ())
             .map_err(prompt_failure)
     }
 
     fn run_in_pane(&self, pane: &str, command: &str) -> Result<(), PromptFailure> {
-        self.prompt(pane, command)
+        let terminal = self.terminal(pane, None).map_err(pre_invocation)?;
+        let shell_foreground = terminal
+            .foreground
+            .as_ref()
+            .and_then(|foreground| u32::try_from(foreground.pid).ok())
+            == terminal.pid;
+        if terminal.state != "live"
+            || !matches!(terminal.occupancy(), Occupancy::Terminal)
+            || !shell_foreground
+            || terminal.pid.is_none()
+        {
+            return Err(pre_invocation(
+                "hc terminal is not an available shell".to_owned().into(),
+            ));
+        }
+        self.transport
+            .execute(&["send", pane, command, "--json"])
+            .map(|_| ())
+            .map_err(prompt_failure)
     }
 
     fn interrupt(&self, pane: &str) -> Result<(), HostError> {
+        local_terminal(pane)?;
         self.transport
             .execute(&["interrupt", pane, "--timeout", "2", "--json"])
             .map(|_| ())
@@ -542,7 +738,10 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         match metadata {
             PaneMetadata::Identity { title, .. } => self.set_labels(
                 pane,
-                &[("namedrop.name", title.strip_prefix('@').unwrap_or(title))],
+                &[
+                    ("namedrop.name", title.strip_prefix('@').unwrap_or(title)),
+                    ("namedrop.name.error", ""),
+                ],
             ),
             PaneMetadata::Counters {
                 awaiting,
@@ -616,6 +815,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
     }
     fn caller_identity(&self, claim: &CallerClaim) -> Result<CallerIdentity, HostError> {
         if let Some(pane) = &claim.pane {
+            local_terminal(pane)?;
             let workspace = match &claim.workspace {
                 Some(workspace) => workspace.clone(),
                 None => self.terminal(pane, None)?.workspace().to_owned(),
@@ -693,11 +893,31 @@ pub(crate) mod testing {
         let mut record: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/fixtures/hc/get-labeled.stdout"))
                 .unwrap();
+        use std::os::unix::process::CommandExt;
+        let mut agent = Command::new("/bin/sleep")
+            .arg0("codex")
+            .arg("600")
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while process_runtime(agent.id()) != Some(AgentRuntime::Codex) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fake agent did not exec"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        record["labels"]["namedrop.session.pid"] = serde_json::json!(agent.id().to_string());
+        record["foreground"] =
+            serde_json::json!({"pid":agent.id(),"argv":["codex"],"name":"codex"});
         record["status"] = word
             .map(|state| serde_json::json!({"state":state,"app":"codex"}))
             .unwrap_or_default();
         record["reported"] = serde_json::json!(word.is_some());
-        serde_json::from_value::<Terminal>(record).unwrap().pane()
+        let pane = serde_json::from_value::<Terminal>(record).unwrap().pane();
+        agent.kill().unwrap();
+        agent.wait().unwrap();
+        pane
     }
 
     pub(crate) fn address(word: Option<&str>) -> crate::PaneAddressRecord {
@@ -749,7 +969,7 @@ pub(crate) mod testing {
         host.panes(PaneScope::All).unwrap();
         host.read("t1", 40, None).unwrap();
         host.read("t1", 1000, None).unwrap();
-        host.prompt("t1", "hello").unwrap();
+        assert!(host.prompt("t1", "hello").is_err());
         host.run_in_pane("t1", "command").unwrap();
         host.interrupt("t1").unwrap();
         host.set_labels("t1", &[("namedrop.session", "next-session")])
@@ -764,7 +984,9 @@ pub(crate) mod testing {
                 vec!["read", "t1", "--json"],
                 vec!["get", "t1", "--json"],
                 vec!["read", "t1", "--lines", "1000", "--json"],
-                vec!["send", "t1", "hello", "--json"],
+                vec!["get", "t1", "--json"],
+                vec!["label", "t1", "namedrop.session=", "--json"],
+                vec!["get", "t1", "--json"],
                 vec!["send", "t1", "command", "--json"],
                 vec!["interrupt", "t1", "--timeout", "2", "--json"],
                 vec!["get", "t1", "--json"],

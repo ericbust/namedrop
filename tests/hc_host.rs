@@ -1,5 +1,7 @@
 #[path = "support/app_popup.rs"]
 mod app_popup;
+#[path = "fixtures/hc/process.rs"]
+mod process;
 use namedrop::{
     CallerClaim, HcHost, HerdrCommandExecutor, HerdrCommandOutput, Host, PaneMetadata, PaneScope,
     PromptFailureKind, SpaceLocator,
@@ -88,6 +90,12 @@ impl HerdrCommandExecutor for Fixture {
     }
 }
 impl Fixture {
+    fn agent(&self, pid: u32) {
+        let mut terminals = self.terminals.borrow_mut();
+        terminals[0]["labels"]["namedrop.session.pid"] = json!(pid.to_string());
+        terminals[0]["foreground"] = json!({"pid":pid,"argv":["codex"],"name":"codex"});
+        terminals[0]["status"] = json!({"state":"idle","app":"codex"});
+    }
     fn take_calls(&self) -> Vec<Vec<String>> {
         std::mem::take(&mut *self.calls.borrow_mut())
     }
@@ -107,10 +115,7 @@ fn recorded_terminal_discovers_labels_namespace_and_processes() {
     assert_eq!(pane.status_reported, Some(false));
     assert_eq!(pane.agent_status, None);
     assert_eq!(pane.pane_label.as_deref(), Some("@fixture-name"));
-    assert_eq!(
-        pane.agent_session_id.as_ref().unwrap().as_str(),
-        "fixture-session"
-    );
+    assert!(pane.agent_session_id.is_none());
     let spaces = host.spaces().unwrap();
     assert_eq!(spaces[0].label, "Fixture Space");
     assert_eq!(
@@ -142,7 +147,7 @@ fn golden_argv_and_idempotent_metadata() {
     let host = HcHost::new(&fixture);
     host.read("t1", 40, None).unwrap();
     host.read("t1", 1000, None).unwrap();
-    host.prompt("t1", "hello").unwrap();
+    assert!(host.prompt("t1", "hello").is_err());
     host.run_in_pane("t1", "true").unwrap();
     host.interrupt("t1").unwrap();
     host.report_metadata(
@@ -161,6 +166,7 @@ fn golden_argv_and_idempotent_metadata() {
         },
     )
     .unwrap();
+    fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name.error"] = json!("stale failure");
     host.report_metadata(
         "t1",
         &PaneMetadata::Identity {
@@ -191,7 +197,9 @@ fn golden_argv_and_idempotent_metadata() {
             vec!["read", "t1", "--json"],
             vec!["get", "t1", "--json"],
             vec!["read", "t1", "--lines", "1000", "--json"],
-            vec!["send", "t1", "hello", "--json"],
+            vec!["get", "t1", "--json"],
+            vec!["label", "t1", "namedrop.session=", "--json"],
+            vec!["get", "t1", "--json"],
             vec!["send", "t1", "true", "--json"],
             vec!["interrupt", "t1", "--timeout", "2", "--json"],
             vec!["get", "t1", "--json"],
@@ -204,7 +212,13 @@ fn golden_argv_and_idempotent_metadata() {
             ],
             vec!["get", "t1", "--json"],
             vec!["get", "t1", "--json"],
-            vec!["label", "t1", "namedrop.name=alice", "--json"],
+            vec![
+                "label",
+                "t1",
+                "namedrop.name=alice",
+                "namedrop.name.error=",
+                "--json"
+            ],
         ]
     );
 }
@@ -212,6 +226,7 @@ fn golden_argv_and_idempotent_metadata() {
 #[test]
 fn status_words_and_program_fallback_keep_unknown_distinct() {
     let fixture = Fixture::default();
+    fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["claude"]);
     let host = HcHost::new(&fixture);
     for (word, expected) in [
         ("idle", "idle"),
@@ -277,8 +292,10 @@ fn errors_classify_by_kind_and_pretyping_hint() {
             ),
             ..Fixture::default()
         };
+        let agent = process::AgentProcess::new();
+        fixture.agent(agent.pid());
         let failure = HcHost::new(&fixture).prompt("t1", "hello").unwrap_err();
-        assert_eq!(failure.kind, expected, "{kind} {hint}");
+        assert_eq!(failure.kind, expected, "{kind} {hint}: {}", failure.message);
         assert!(failure.message.contains(hint));
     }
 }
@@ -295,6 +312,8 @@ fn identity_requires_ancestry_or_one_exact_live_session() {
     };
     fixture.terminals.borrow_mut()[0]["pid"] = json!(4_000_000_000u32);
     assert!(host.caller_identity(&claim).is_err());
+    let agent = process::AgentProcess::new();
+    fixture.agent(agent.pid());
     claim.agent_sessions.push("fixture-session".into());
     assert_eq!(
         host.caller_identity(&claim).unwrap().pane.as_deref(),
@@ -606,6 +625,9 @@ fn release_and_removal_clear_name_mirrors_after_store_mutation() {
 
 #[test]
 fn events_reconcile_names_preserve_lost_aliases_and_clear_sessions() {
+    if process::in_agent_tree("events_reconcile_names_preserve_lost_aliases_and_clear_sessions") {
+        return;
+    }
     let fixture = Fixture::default();
     let state = std::env::temp_dir().join(format!("namedrop-hc-events-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&state);
@@ -672,6 +694,7 @@ fn events_reconcile_names_preserve_lost_aliases_and_clear_sessions() {
         );
         assert_eq!(names()[0].alias, "bob");
     }
+    fixture.terminals.borrow_mut()[0]["pid"] = json!(std::os::unix::process::parent_id());
     runtime
         .host
         .publish_session(&state, "t1", "fresh-session")
@@ -684,10 +707,16 @@ fn events_reconcile_names_preserve_lost_aliases_and_clear_sessions() {
         );
         assert_eq!(names()[0].alias, "bob");
     }
-    fixture.terminals.borrow_mut()[0]["labels"]
-        .as_object_mut()
-        .unwrap()
-        .remove("namedrop.session");
+    for key in [
+        "namedrop.session",
+        "namedrop.session.pid",
+        "namedrop.session.start",
+    ] {
+        fixture.terminals.borrow_mut()[0]["labels"]
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+    }
     for kind in [
         "created",
         "status",
@@ -939,13 +968,18 @@ impl HerdrCommandExecutor for ConcurrentFixture {
 
 #[test]
 fn delayed_invalidations_and_interleaved_publication_preserve_the_new_session() {
+    if process::in_agent_tree(
+        "delayed_invalidations_and_interleaved_publication_preserve_the_new_session",
+    ) {
+        return;
+    }
     let fixture = ConcurrentFixture::new();
     let state =
         std::env::temp_dir().join(format!("namedrop-hc-session-race-{}", std::process::id()));
     let host = HcHost::new(&fixture);
-    fixture.record.lock().unwrap()["pid"] = json!(100);
+    fixture.record.lock().unwrap()["pid"] = json!(std::os::unix::process::parent_id());
     host.publish_session(&state, "t1", "old").unwrap();
-    fixture.record.lock().unwrap()["pid"] = json!(200);
+    fixture.record.lock().unwrap()["pid"] = json!(std::os::unix::process::parent_id());
     host.publish_session(&state, "t1", "new").unwrap();
     host.invalidate_session(&state, "t1").unwrap();
     assert_eq!(
@@ -954,14 +988,14 @@ fn delayed_invalidations_and_interleaved_publication_preserve_the_new_session() 
         "a delayed event must retain a session published for the current PID"
     );
 
-    fixture.record.lock().unwrap()["pid"] = Value::Null;
+    fixture.record.lock().unwrap()["labels"]["namedrop.session.pid"] = json!("4000000000");
     let (entered, resume) = fixture.pause_on_get(1);
     std::thread::scope(|scope| {
         let invalidation = scope.spawn(|| host.invalidate_session(&state, "t1"));
         entered
             .recv_timeout(std::time::Duration::from_secs(2))
             .unwrap();
-        fixture.record.lock().unwrap()["pid"] = json!(300);
+        fixture.record.lock().unwrap()["pid"] = json!(std::os::unix::process::parent_id());
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let state = &state;
         let publication = scope.spawn(move || {
@@ -985,7 +1019,7 @@ fn delayed_invalidations_and_interleaved_publication_preserve_the_new_session() 
     );
     assert_eq!(
         fixture.record.lock().unwrap()["labels"]["namedrop.session.pid"],
-        "300"
+        std::os::unix::process::parent_id().to_string()
     );
     std::fs::remove_dir_all(state).unwrap();
 }
@@ -1076,7 +1110,13 @@ fn session_generation_is_checked_by_discovery_and_caller_identity() {
         inherited_pane: Some("stale-terminal".into()),
         agent_sessions: vec!["fixture-session".into()],
     };
-    for (companion, valid) in [(None, true), (Some("123"), false), (Some("456"), true)] {
+    let agent = process::AgentProcess::new();
+    let owner = agent.pid().to_string();
+    for (companion, valid) in [
+        (None, false),
+        (Some("4000000000"), false),
+        (Some(owner.as_str()), true),
+    ] {
         let mut terminals = fixture.terminals.borrow_mut();
         terminals[0]["pid"] = json!(456);
         if let Some(pid) = companion {
@@ -1101,6 +1141,9 @@ fn session_generation_is_checked_by_discovery_and_caller_identity() {
 
 #[test]
 fn snapshots_and_missed_events_clear_stale_sessions_before_naming() {
+    if process::in_agent_tree("snapshots_and_missed_events_clear_stale_sessions_before_naming") {
+        return;
+    }
     let fixture = Fixture::default();
     let state = std::env::temp_dir().join(format!("namedrop-hc-resnapshot-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&state);
@@ -1129,6 +1172,8 @@ fn snapshots_and_missed_events_clear_stale_sessions_before_naming() {
         })
         .unwrap();
     fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["codex"]);
+    fixture.terminals.borrow_mut()[0]["foreground"]["pid"] =
+        json!(std::os::unix::process::parent_id());
     let mut subscriber = namedrop::host::hc::events::Subscriber::default();
     for snapshot in [true, false] {
         for (session, companion) in [
@@ -1138,7 +1183,7 @@ fn snapshots_and_missed_events_clear_stale_sessions_before_naming() {
         ] {
             {
                 let mut terminals = fixture.terminals.borrow_mut();
-                terminals[0]["pid"] = json!(456);
+                terminals[0]["pid"] = json!(std::os::unix::process::parent_id());
                 terminals[0]["labels"]["namedrop.session"] = json!(session);
                 terminals[0]["labels"]["namedrop.name"] =
                     json!(format!("name-{snapshot}-{session}"));
@@ -1165,7 +1210,7 @@ fn snapshots_and_missed_events_clear_stale_sessions_before_naming() {
                 runtime.host.publish_session(&state, "t1", session).unwrap();
             }
             subscriber.handle_line(&line, &runtime).unwrap();
-            let expected = if session == "stale" {
+            let expected = if session != "fresh" {
                 None
             } else {
                 Some(session)
@@ -1174,7 +1219,11 @@ fn snapshots_and_missed_events_clear_stale_sessions_before_naming() {
                 fixture.terminals.borrow()[0]["labels"]["namedrop.session"]
                     .as_str()
                     .filter(|s| !s.is_empty()),
-                expected,
+                if session == "legacy" {
+                    Some(session)
+                } else {
+                    expected
+                },
                 "snapshot={snapshot}, session={session}"
             );
             let addresses = namedrop::StateStore::open(&state)
@@ -1239,6 +1288,7 @@ fn removing_or_releasing_a_gone_terminal_succeeds_but_other_clear_errors_roll_ba
                     &runtime,
                 )
                 .unwrap();
+                fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("alice");
             }
             if kind == "gone" {
                 fixture.terminals.borrow_mut().clear();
@@ -1291,9 +1341,11 @@ fn check_dispatch_lease(event: &str, expires: bool) {
         MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution, StateStore, ThreadId,
     };
     let fixture = Fixture::default();
+    let agent = process::AgentProcess::new();
+    fixture.agent(agent.pid());
     {
         let mut terminals = fixture.terminals.borrow_mut();
-        terminals[0]["foreground"]["argv"] = json!(["claude"]);
+        terminals[0]["foreground"]["argv"] = json!(["codex"]);
         terminals[0]["status"] = json!({"state":"done", "app":"claude-code"});
         let mut other = terminals[0].clone();
         other["address"] = json!("t2");
@@ -1516,7 +1568,7 @@ fn screen_reads_return_only_the_requested_tail() {
 }
 
 #[test]
-fn foreground_programs_are_agents_only_when_recognized_or_reported() {
+fn foreground_programs_are_agents_only_when_recognized() {
     for (program, app, expected) in [
         ("vim", None, None),
         ("npm", None, None),
@@ -1602,7 +1654,7 @@ fn hc_naming_recognizes_its_process_group_without_pid_membership() {
     assert_ne!(group as u32, std::process::id());
     {
         let mut terminals = fixture.terminals.borrow_mut();
-        terminals[0]["address"] = json!("remote/t1");
+        terminals[0]["address"] = json!("t1");
         terminals[0]["labels"]
             .as_object_mut()
             .unwrap()
@@ -1619,7 +1671,7 @@ fn hc_naming_recognizes_its_process_group_without_pid_membership() {
         agent_config: namedrop::AgentConfigDirectories::default(),
         cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
         workspace_id: Some("fixture-space"),
-        current_pane_id: Some("remote/t1"),
+        current_pane_id: Some("t1"),
         session_socket_id: "hc:fixture",
         host: HcHost::new(&fixture),
         clock: &clock,
