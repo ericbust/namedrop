@@ -1456,3 +1456,30 @@ fn inactive_space_session_labels_are_not_reconciled() {
         });
     }
 }
+
+#[test]
+fn subscriber_snapshot_and_created_events_do_not_rescan_other_terminals() {
+    check("bounded-created-discovery", |fixture, runtime| {
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .handle_line(&json!({"terminals":*fixture.terminals.borrow()}).to_string(), runtime)
+            .unwrap();
+        assert!(
+            fixture.calls.borrow().iter().all(|call| call[0] != "ls" && call[0] != "get"),
+            "snapshot discarded its terminal records: {:?}", fixture.calls.borrow()
+        );
+        for index in 2..=11 {
+            let pane = format!("t{index}");
+            let mut terminal = fixture.terminals.borrow()[0].clone();
+            terminal["address"] = json!(pane);
+            terminal["labels"]["namedrop.name"] = json!("");
+            fixture.terminals.borrow_mut().push(terminal);
+            fixture.calls.borrow_mut().clear();
+            subscriber.handle_line(&json!({"method":"event","params":{"type":"created","terminal":pane}}).to_string(), runtime).unwrap();
+            let calls = fixture.calls.borrow();
+            assert!(calls.len() <= 3, "created {pane} made {} hc calls: {calls:?}", calls.len());
+            assert!(calls.iter().all(|call| call[0] != "ls" && (call[0] != "get" || call[1] == pane)), "created {pane} touched another terminal: {calls:?}");
+        }
+    });
+}
