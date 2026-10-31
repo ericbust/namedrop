@@ -2,6 +2,8 @@
 mod app_popup;
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
+#[path = "fixtures/hc/process.rs"]
+mod hc_process;
 #[path = "support/hc_socket.rs"]
 mod hc_socket;
 use namedrop::{HerdrCommandExecutor, HerdrCommandOutput};
@@ -536,6 +538,7 @@ fn a_session_start_inside_codex_s_shared_app_server_gets_its_notice_without_a_ru
 
 #[test]
 fn hc_binary_verifies_inherited_identity() {
+    let agent = hc_process::AgentProcess::new();
     let f = Fixture::new("hc");
     let _socket = hc_socket::HcSocket::bind(&f.0.join("hc.sock")).unwrap();
     let hc = f.0.join("hc");
@@ -543,6 +546,7 @@ fn hc_binary_verifies_inherited_identity() {
     let mut terminal: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
     terminal["pid"] = serde_json::json!(4_000_000_000u32);
+    terminal["labels"]["namedrop.session.pid"] = serde_json::json!(agent.pid().to_string());
     fs::write(&record, terminal.to_string()).unwrap();
     fs::write(&hc, format!(r#"#!/bin/sh
 case "$1" in
@@ -584,6 +588,11 @@ esac
 
 #[test]
 fn hc_hooks_write_sessions_only_in_active_spaces_and_preserve_core_routing() {
+    if hc_process::in_agent_tree(
+        "hc_hooks_write_sessions_only_in_active_spaces_and_preserve_core_routing",
+    ) {
+        return;
+    }
     let f = Fixture::new("hc-hooks");
     let _socket = hc_socket::HcSocket::bind(&f.0.join("hc.sock")).unwrap();
     f.activate();
@@ -605,7 +614,17 @@ fn hc_hooks_write_sessions_only_in_active_spaces_and_preserve_core_routing() {
     let record = f.0.join("record.json");
     let mut terminal: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
-    terminal["pid"] = serde_json::json!(std::process::id());
+    terminal["pid"] = serde_json::json!(
+        std::env::var("NAMEDROP_HC_TERMINAL_PID")
+            .unwrap()
+            .parse::<u32>()
+            .unwrap()
+    );
+    terminal["foreground"] = serde_json::json!({
+        "pid": std::os::unix::process::parent_id(),
+        "argv": ["codex"],
+        "name": "codex"
+    });
     terminal["labels"]
         .as_object_mut()
         .unwrap()
