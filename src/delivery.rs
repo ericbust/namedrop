@@ -623,10 +623,10 @@ where
             }) => {
                 store
                     .transaction(|transaction| {
-                        transaction.defer_delivery_attempt_until_settle(
+                        transaction.return_delivery_attempt_to_queue(
                             &namespace,
                             &leased.attempt_id,
-                            observed_status_ms,
+                            crate::DeliveryReturnReason::DeferredUntilSettle { observed_status_ms },
                             &attribution,
                         )
                     })
@@ -638,6 +638,7 @@ where
                         transaction.return_delivery_attempt_to_queue(
                             &namespace,
                             &leased.attempt_id,
+                            crate::DeliveryReturnReason::TemporaryPreInvocation,
                             &attribution,
                         )
                     })

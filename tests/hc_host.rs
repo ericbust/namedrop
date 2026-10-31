@@ -2216,7 +2216,9 @@ fn inactive_namespace_preserves_settle_for_reactivation() {
 fn ordinary_refusals_share_the_mailbox_return_transition() {
     let delivery = include_str!("../src/delivery.rs");
     assert_eq!(
-        delivery.matches(".return_delivery_attempt_to_queue(").count(),
+        delivery
+            .matches(".return_delivery_attempt_to_queue(")
+            .count(),
         2,
         "both no-input outcomes must use the existing mailbox return transition"
     );
@@ -2482,12 +2484,22 @@ fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
                         authored_source: "@bob other work".into(),
                         body: "other work".into(),
                         grammar_version: "mention/v1".into(),
-                        recipients: vec![MessageRecipientDraft {
-                            address_id: other_binding.address_id.clone(),
-                            alias_snapshot: "bob".into(),
-                            agent_session_snapshot: Some(AgentSessionId::new("other-session")),
-                            delivery_id: DeliveryId::new("other-delivery"),
-                        }],
+                        recipients: vec![
+                            MessageRecipientDraft {
+                                address_id: other_binding.address_id.clone(),
+                                alias_snapshot: "bob".into(),
+                                agent_session_snapshot: Some(AgentSessionId::new("other-session")),
+                                delivery_id: DeliveryId::new("other-delivery"),
+                            },
+                            MessageRecipientDraft {
+                                address_id: binding.address_id.clone(),
+                                alias_snapshot: "alice".into(),
+                                agent_session_snapshot: Some(AgentSessionId::new(
+                                    "fixture-session",
+                                )),
+                                delivery_id: DeliveryId::new("followup-delivery"),
+                            },
+                        ],
                         context_references: Vec::new(),
                     },
                     &attribution,
@@ -2521,6 +2533,14 @@ fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
                 .count(),
             1
         );
+        for operation in ["thread.pause", "thread.resume"] {
+            namedrop::execute_control_operation(
+                operation,
+                json!({"thread_id":"test-thread"}),
+                &runtime,
+            )
+            .unwrap();
+        }
         for event in ["labels", "status", "turn"] {
             let mut subscriber = namedrop::host::hc::events::Subscriber::default();
             for pane in ["t1", "t2"] {

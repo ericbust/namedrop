@@ -810,7 +810,12 @@ fn terminal_recovery_resolves_superseded_warnings_and_preserves_current_failure(
         StateStore::open(fixture.state())
             .unwrap()
             .transaction(|tx| {
-                tx.return_delivery_attempt_to_queue(&namespace, &rejected, &attribution)?;
+                tx.return_delivery_attempt_to_queue(
+                    &namespace,
+                    &rejected,
+                    namedrop::DeliveryReturnReason::TemporaryPreInvocation,
+                    &attribution,
+                )?;
                 assert!(
                     tx.lease_mailbox_head(
                         &namespace,

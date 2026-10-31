@@ -101,8 +101,8 @@ pub use spaces::{SpaceScope, WorkspaceLabel};
 mod output;
 pub use output::render_command_result_to_text;
 pub use store::{
-    StateStore, StateTransaction, StoreError, StoreErrorKind, WorktreePurgeResult,
-    WorktreePurgeSummary,
+    DeliveryReturnReason, StateStore, StateTransaction, StoreError, StoreErrorKind,
+    WorktreePurgeResult, WorktreePurgeSummary,
 };
 
 #[derive(Debug, PartialEq, Serialize)]
