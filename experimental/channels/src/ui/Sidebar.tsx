@@ -44,7 +44,8 @@ export function Sidebar({
   const close = drawer?.onClose;
   const phone = drawer !== null;
   // The column hides as the window narrows to a phone, and the focus it held
-  // falls to the page. The button that opens the drawer takes it instead.
+  // falls to the page. The button that opens the drawer takes it instead,
+  // whether the blur comes before the phone layout renders or after it.
   useLayoutEffect(() => {
     if (!phone || !hiddenWithFocus.current) return;
     hiddenWithFocus.current = false;
@@ -168,9 +169,15 @@ export function Sidebar({
       }}
       onBlurCapture={(event) => {
         focusedRow.current = null;
-        hiddenWithFocus.current =
+        const hidden =
           event.relatedTarget === null &&
           !event.currentTarget.checkVisibility({ visibilityProperty: true });
+        hiddenWithFocus.current = hidden && !phone;
+        if (hidden && phone)
+          requestAnimationFrame(() => {
+            if (document.activeElement === document.body)
+              document.querySelector<HTMLElement>(".channels-toggle")?.focus();
+          });
       }}
     >
       <header className="brand">
