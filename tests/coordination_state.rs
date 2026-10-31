@@ -333,7 +333,7 @@ fn coordination_migration_and_reopen() {
             )
         })
         .unwrap();
-    f.db().execute_batch("DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=3;").unwrap();
+    f.db().execute_batch("DROP INDEX transition_facts_by_entity; DROP VIEW delivery_seats; DROP TABLE bridged_threads; DROP TABLE bridged_messages; DROP TABLE space_envoys; DROP TABLE coordination_links; DROP TABLE coordination_assignments; DROP TABLE coordinations; ALTER TABLE pane_addresses DROP COLUMN remote_commands_terminal_id; ALTER TABLE pane_addresses DROP COLUMN persona; PRAGMA user_version=3;").unwrap();
     let before = f.snapshot();
     for table in [
         "pane_addresses",
@@ -369,7 +369,7 @@ fn coordination_migration_and_reopen() {
             .unwrap()
             .schema_version()
             .unwrap(),
-        6
+        7
     );
     let after = f.snapshot();
     // Migration is additive: every legacy row keeps its rows and its existing
