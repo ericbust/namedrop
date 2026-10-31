@@ -10573,3 +10573,108 @@ test("UI-R5 R5-2: where a pane covers the channel, a kept draft or an absent age
         assert.equal(ui.posts.attempts.length, 0);
       });
 });
+
+// Scrolls the timeline so the element's center sits at the timeline's
+// vertical middle.
+const centerIn = async (timeline, element) =>
+  element.evaluate(
+    (target, scroller) => {
+      const port = scroller.getBoundingClientRect();
+      const box = target.getBoundingClientRect();
+      scroller.scrollTop +=
+        box.top +
+        box.height / 2 -
+        (port.top + scroller.clientTop + scroller.clientHeight / 2);
+    },
+    await timeline.elementHandle(),
+  );
+const jumpFacts = async (timeline, jump, reply) =>
+  timeline.evaluate(
+    (scroller, [jump, reply]) => {
+      const shownText = (element) => {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        let text = "";
+        while (walker.nextNode())
+          if (walker.currentNode.parentElement.checkVisibility())
+            text += walker.currentNode.data;
+        return text.trim();
+      };
+      const port = scroller.getBoundingClientRect();
+      const right = port.left + scroller.clientLeft + scroller.clientWidth;
+      const bottom = port.top + scroller.clientTop + scroller.clientHeight;
+      const pill = jump.getBoundingClientRect();
+      const target = reply.getBoundingClientRect();
+      const x = target.left + target.width / 2;
+      const y = target.top + target.height / 2;
+      return {
+        name: jump.getAttribute("aria-label"),
+        title: jump.title,
+        text: shownText(jump),
+        size: [Math.round(pill.width), Math.round(pill.height)],
+        round:
+          Number.parseFloat(getComputedStyle(jump).borderTopLeftRadius) >=
+          pill.height / 2,
+        corner:
+          pill.right <= right &&
+          pill.bottom <= bottom &&
+          pill.left >= right - 48 &&
+          pill.top >= bottom - 48,
+        inset: [
+          Math.round(right - pill.right),
+          Math.round(bottom - pill.bottom),
+        ],
+        replyInView: y > port.top && y < bottom,
+        hit: document.elementFromPoint(x, y)?.closest("button") === reply,
+      };
+    },
+    [await jump.elementHandle(), await reply.elementHandle()],
+  );
+test("UI-R5 R5-3: under 420 px tall the Jump control is a 28 px round icon button in the timeline's bottom-right corner, so a click on a reply button in the timeline's middle reaches it; taller windows keep the pill", async (t) => {
+  for (const [width, height, short] of [
+    [844, 300, true],
+    [320, 260, true],
+    [312, 368, true],
+    [390, 844, false],
+  ])
+    await t.test(`${width}x${height}`, async (t) => {
+      const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+      await ui.page.emulateMedia({ reducedMotion: "reduce" });
+      await resize(ui.page, width, height);
+      await ui.live();
+      const timeline = ui.page.locator("main .timeline");
+      const reply = ui.page
+        .getByRole("region", { name: "Message history" })
+        .getByRole("button", { name: /^1 reply from/ });
+      const jump = ui.page.getByRole("button", {
+        name: "Jump to latest messages",
+      });
+      await centerIn(timeline, reply);
+      await jump.waitFor();
+      await nextFrame(ui.page);
+      const facts = await jumpFacts(timeline, jump, reply);
+      assert.deepEqual(facts, {
+        name: "Jump to latest messages",
+        title: "Jump to latest",
+        replyInView: true,
+        ...(short
+          ? {
+              text: "",
+              size: [28, 28],
+              round: true,
+              corner: true,
+              inset: [12, 12],
+              hit: true,
+            }
+          : {
+              text: "Jump to latest",
+              size: [facts.size[0], 32],
+              round: true,
+              corner: false,
+              inset: facts.inset,
+              hit: facts.hit,
+            }),
+      });
+      await reply.click({ timeout: 2000 });
+      await threadPane(ui).waitFor();
+    });
+});

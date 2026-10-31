@@ -808,11 +808,12 @@ button.member:not(.more):hover {
 
 .timeline {
   --pad-bottom: var(--space-6);
+  --pad-inline: var(--space-6);
   flex: 1;
   min-height: 112px;
   overflow-y: auto;
   overflow-anchor: none;
-  padding: 0 var(--space-6);
+  padding: 0 var(--pad-inline);
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px);
   mask-image: linear-gradient(to bottom, transparent, #000 12px);
 }
@@ -1985,11 +1986,13 @@ code.inline {
   }
   .channel-header,
   .members,
-  .timeline,
   .activity-list,
   .composer,
   .reconnect {
     padding-inline: var(--space-4);
+  }
+  .timeline {
+    --pad-inline: var(--space-4);
   }
   .attention {
     margin-inline: var(--space-4);
@@ -2108,6 +2111,22 @@ code.inline {
   }
   .timeline {
     min-height: 48px;
+  }
+  /* The centered pill would cover the middle of so short a timeline, so the
+     control shrinks to its icon in the bottom-right corner. */
+  .jump-dock {
+    justify-content: flex-end;
+  }
+  .jump-latest {
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    translate: calc(var(--pad-inline) - var(--space-3))
+      calc(var(--pad-bottom) - var(--space-3));
+  }
+  .jump-label {
+    display: none;
   }
 }
 @keyframes backdrop-in {
