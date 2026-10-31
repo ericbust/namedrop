@@ -1436,3 +1436,37 @@ fn write_result(result: &CommandResult, exit_code: u8, human: bool) -> ExitCode 
     }
     ExitCode::from(exit_code)
 }
+
+#[cfg(test)]
+mod selected_worker_host_tests {
+    #[test]
+    fn socket_id_spelling_does_not_select_the_worker_host() {
+        let options = super::RuntimeOptions {
+            host: Some(super::HostKind::Tui),
+            ..Default::default()
+        };
+        let selected = super::worker_options(
+            &options,
+            std::path::Path::new("/state"),
+            "hc:/fake/herdr.sock",
+            "space",
+        );
+        assert_eq!(selected.host, Some(super::HostKind::Tui));
+        assert_eq!(
+            selected.herdr_socket.as_deref(),
+            Some("hc:/fake/herdr.sock")
+        );
+        let options = super::RuntimeOptions {
+            host: Some(super::HostKind::Hc),
+            ..Default::default()
+        };
+        let selected = super::worker_options(
+            &options,
+            std::path::Path::new("/state"),
+            "opaque-core-id",
+            "space",
+        );
+        assert_eq!(selected.host, Some(super::HostKind::Hc));
+        assert_eq!(selected.hc_space.as_deref(), Some("space"));
+    }
+}

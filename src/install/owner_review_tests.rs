@@ -1327,3 +1327,30 @@ fn hc_install_uses_one_owned_root_snapshot_for_packages_and_permissions() {
     assert!(!home.join(".codex").exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn tui_socket_prefix_keeps_tui_tool_environment_and_registration() {
+    let env = crate::integration::tool_environment(
+        Path::new("/state"),
+        "hc:/fake/herdr.sock",
+        "workspace",
+        "pane",
+    );
+    assert_eq!(
+        env.get("HERDR_SOCKET_PATH").map(String::as_str),
+        Some("hc:/fake/herdr.sock")
+    );
+    assert!(!env.contains_key("NAMEDROP_HOST"));
+    let prompt = crate::integration::registration_prompt(
+        Path::new("/state"),
+        "hc:/fake/herdr.sock",
+        "workspace",
+        "pane",
+        Path::new("/bin/namedrop"),
+        AgentRuntime::ClaudeCode,
+        "nonce",
+    )
+    .unwrap();
+    assert!(prompt.contains("--herdr-socket"), "{prompt}");
+    assert!(!prompt.contains("--host hc"), "{prompt}");
+}

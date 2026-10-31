@@ -4608,3 +4608,26 @@ fn tui_hooks_use_baked_executable_and_state_despite_global_launcher() {
         }
     }
 }
+
+#[test]
+fn tui_socket_prefix_does_not_select_the_app_package_or_registration() {
+    let directory = TestDirectory::new();
+    let ids = SequenceIds(AtomicU64::new(1));
+    let mut runtime = runtime(&directory, &ids);
+    runtime.session_socket_id = "hc:/fake/herdr.sock";
+    let result =
+        execute_lifecycle_operation("activate", serde_json::json!({"confirmed":true}), &runtime)
+            .unwrap();
+    assert!(
+        directory.home().join(".claude/skills/namedrop").is_dir(),
+        "TUI activation chose the wrong package: {result}"
+    );
+    assert!(
+        !directory
+            .home()
+            .join(".claude/skills/namedrop-app")
+            .exists()
+    );
+    assert!(directory.home().join(".local/bin/namedrop").exists());
+    assert!(!directory.home().join(".local/bin/namedrop-app").exists());
+}
