@@ -352,8 +352,11 @@ export function ChannelsToggle({
   const button = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
     const element = button.current;
-    // The button moves between headers as a pane opens or closes on a phone,
-    // so the one that mounts starts clean.
+    // On a phone the button moves to another header as a pane opens or closes
+    // and as back or forward switches views. The one that mounts takes the
+    // focus the one that left held, then starts clean.
+    if (focusLost.current && document.activeElement === document.body)
+      element?.focus();
     focusLost.current = false;
     return () => {
       if (document.activeElement === element) focusLost.current = true;

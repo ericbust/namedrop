@@ -10731,3 +10731,164 @@ test("UI-R5 fix1 2: under 420 px tall the Earlier thread row along the timeline'
   await ui.page.mouse.click(at.x, at.y);
   await threadPane(ui).waitFor({ timeout: 2000 });
 });
+
+test("UI-R6 1: on a phone, a back or forward that moves the Channels button to another header keeps focus on it", async (t) => {
+  const { page, toggle, dialog } = await phoneDrawer(t);
+  await toggle.click();
+  await dialog.waitFor();
+  await dialog.getByRole("link", { name: /^All activity/ }).click();
+  await dialog.waitFor({ state: "detached" });
+  await focusMatches(page, ".channels-toggle", "All activity chosen");
+  const heading = page.getByRole("main").getByRole("heading", { level: 1 });
+  for (const [step, view] of [
+    ["back", "alpha"],
+    ["forward", "All activity"],
+  ]) {
+    await page.evaluate((step) => history[step](), step);
+    await readsAs(heading, view);
+    await nextFrame(page);
+    await focusMatches(page, ".channels-toggle", `${step} to ${view}`);
+  }
+});
+
+test("UI-R6 2: in a 390x460 window at 125 % zoom the Needs-you card shows its Details button whole, and a press on it opens the details", async (t) => {
+  const { value } = actionableAttention("message");
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const page = ui.page;
+  await resize(page, 312, 368);
+  const card = page.getByRole("region", { name: "Attention needed" });
+  const details = card.getByRole("button", { name: "Details" });
+  const box = await card.evaluate((element) => {
+    const { top } = element.getBoundingClientRect();
+    return {
+      top: top + element.clientTop,
+      bottom: top + element.clientTop + element.clientHeight,
+    };
+  });
+  const label = await details.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const { top, bottom } = range.getBoundingClientRect();
+    return { top, bottom };
+  });
+  assert.ok(
+    label.top >= box.top && label.bottom <= box.bottom,
+    `the Details label (${label.top}-${label.bottom}) lies inside the card (${box.top}-${box.bottom})`,
+  );
+  await details.click();
+  await card.getByRole("button", { name: "Hide details" }).waitFor();
+});
+
+test("UI-R6 3: widening a phone moves focus to the column only when the Channels button held it", async (t) => {
+  await t.test(
+    "a back or forward handoff leaves no claim behind",
+    async (t) => {
+      const { page, toggle, dialog } = await phoneDrawer(t);
+      await toggle.click();
+      await dialog.waitFor();
+      await dialog.getByRole("link", { name: /^All activity/ }).click();
+      await dialog.waitFor({ state: "detached" });
+      await page.evaluate(() => history.back());
+      await focusMatches(page, ".channels-toggle", "back");
+      await page.locator("main .composer textarea").click();
+      await page.evaluate(() => document.activeElement.blur());
+      await resize(page, 844, 390);
+      await nextFrame(page);
+      assert.equal(await activeName(page), "the page");
+    },
+  );
+  await t.test(
+    "a control focused after the button hid keeps focus",
+    async (t) => {
+      const { page } = await phoneDrawer(t);
+      const toggle = page.locator(".channels-toggle");
+      await toggle.focus();
+      await forceVisibility(toggle, "hidden");
+      await focusLandsOn(page, "the page", "the hidden button");
+      await forceVisibility(toggle, null);
+      const box = page.locator("main .composer textarea");
+      await box.click();
+      await resize(page, 844, 390);
+      await nextFrame(page);
+      assert.equal(
+        await box.evaluate((element) => element === document.activeElement),
+        true,
+        `focus stays in the composer, not on ${await activeName(page)}`,
+      );
+    },
+  );
+});
+
+test("UI-R6 3: at 860 px and narrower the timeline's messages start where the composer's box starts", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.live();
+  for (const [width, inset] of [
+    [390, 16],
+    [700, 16],
+    [860, 16],
+    [861, 24],
+    [1440, 24],
+  ]) {
+    await resize(ui.page, width, 844);
+    const facts = await ui.page.evaluate(() => {
+      const left = (selector) =>
+        document.querySelector(selector).getBoundingClientRect().left;
+      return {
+        timeline: left("main .timeline"),
+        message: left("main .timeline .msg .avatar"),
+        composer: left("main .composer-box"),
+      };
+    });
+    assert.equal(
+      facts.message - facts.timeline,
+      inset,
+      `${width}: messages sit ${inset} px in`,
+    );
+    assert.equal(
+      facts.message,
+      facts.composer,
+      `${width}: in line with the composer`,
+    );
+  }
+});
+
+test("UI-R6 3: where a pane covers the channel, the kept-draft line under the channel composer clears when the draft is edited or sent", async (t) => {
+  for (const step of ["edited", "sent"])
+    await t.test(step, async (t) => {
+      const { ui, box } = await pressMessage(t, [700, 899], {
+        draft: "my own words",
+      });
+      const guard = ui.page.locator("main .composer-guard");
+      await readsAs(
+        guard,
+        "Your draft is still here. Send or clear it, then press Message @codex again.",
+      );
+      await eventually(
+        async () => (await threadPane(ui).count()) === 0,
+        "the pane to close",
+      );
+      if (step === "edited") await box.pressSequentially(" more");
+      else {
+        await box.press("Enter");
+        // "Sending…" takes the line's place until the post settles.
+        await eventually(
+          async () =>
+            ui.posts.attempts.length === 1 &&
+            (await box.inputValue()) === "" &&
+            !(await ui.page
+              .locator("main .composer-status")
+              .textContent()
+              .then((text) => text.includes("Sending"))),
+          "the post to settle",
+        );
+        await nextFrame(ui.page);
+      }
+      assert.equal(
+        await guard.count(),
+        0,
+        `the line clears once the draft is ${step}`,
+      );
+    });
+});
