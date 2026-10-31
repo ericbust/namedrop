@@ -839,7 +839,6 @@ mod bounded_read_tests {
         if run_with_hc_socket("hc_send_survives_the_fixed_server_waits") {
             return;
         }
-        use crate::Host;
         let root = env::temp_dir().join(format!("namedrop-hc-send-timeout-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let binary = root.join("fake-hc");
@@ -853,7 +852,7 @@ mod bounded_read_tests {
             socket: None,
             child_executable: None,
         };
-        let result = crate::HcHost::new(executor).prompt("t1", "hello");
+        let result = executor.execute(&["send", "t1", "hello", "--json"]);
         fs::remove_dir_all(root).unwrap();
         assert!(result.is_ok(), "{result:?}");
     }
