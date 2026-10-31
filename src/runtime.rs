@@ -3,6 +3,7 @@ use std::{
     env, fs,
     io::{Read, Seek, SeekFrom},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
+    path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
     thread,
@@ -131,16 +132,17 @@ impl crate::Budget for IdentityBudget {
     }
 }
 
-pub fn hc_state_directory(
-    variable: impl Fn(&str) -> Option<String>,
-) -> Result<std::path::PathBuf, String> {
-    let root = variable("XDG_STATE_HOME")
+pub fn hc_state_root(variable: impl Fn(&str) -> Option<String>) -> Result<PathBuf, String> {
+    variable("XDG_STATE_HOME")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
         .or_else(|| {
             variable("HOME").map(|home| std::path::PathBuf::from(home).join(".local/state"))
         })
-        .ok_or_else(|| "Set XDG_STATE_HOME, HOME, or --plugin-state for hc.".to_owned())?;
+        .ok_or_else(|| "Set XDG_STATE_HOME, HOME, or --plugin-state for hc.".to_owned())
+}
+
+fn hc_session(variable: impl Fn(&str) -> Option<String>) -> Result<String, String> {
     let session = variable("HC_SESSION").unwrap_or_default();
     let session = session.trim();
     let session = if session.is_empty() {
@@ -156,7 +158,130 @@ pub fn hc_state_directory(
     {
         return Err("HC_SESSION is not a valid session name.".to_owned());
     }
-    Ok(root.join("namedrop/hc").join(session))
+    Ok(session.to_owned())
+}
+
+pub fn hc_state_directory(variable: impl Fn(&str) -> Option<String>) -> Result<PathBuf, String> {
+    Ok(hc_state_root(&variable)?
+        .join("namedrop/hc")
+        .join(hc_session(variable)?))
+}
+
+pub fn hc_socket_path(variable: impl Fn(&str) -> Option<String>) -> Result<PathBuf, String> {
+    let session = hc_session(&variable)?;
+    for key in ["HC_SOCKET", "HC_TERMINAL_SOCKET"] {
+        if let Some(socket) = variable(key).filter(|value| !value.is_empty()) {
+            return Ok(socket.into());
+        }
+    }
+    let config_root = variable("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| variable("HOME").map(|home| PathBuf::from(home).join(".config")));
+    if let Some(root) = config_root {
+        let path = root.join("herdr-core/config.toml");
+        match fs::read_to_string(&path) {
+            Ok(contents) => {
+                let config = contents
+                    .parse::<toml_edit::DocumentMut>()
+                    .map_err(|error| format!("Invalid hc config {}: {error}", path.display()))?;
+                if let Some(socket) = config.get("socket") {
+                    let socket = socket
+                        .as_str()
+                        .filter(|socket| !socket.is_empty())
+                        .ok_or_else(|| {
+                            format!(
+                                "Invalid hc config {}: socket must be a nonempty string",
+                                path.display()
+                            )
+                        })?;
+                    return Ok(socket.into());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("Cannot read hc config {}: {error}", path.display())),
+        }
+    }
+    let runtime = variable("XDG_RUNTIME_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            // SAFETY: getuid has no arguments or memory preconditions.
+            let root = PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }));
+            root.is_dir().then_some(root)
+        });
+    let directory = match runtime {
+        Some(root) => root.join("herdr-core"),
+        None => hc_state_root(variable)?.join("herdr-core").join(&session),
+    };
+    Ok(directory.join(format!("{session}.sock")))
+}
+
+fn check_hc_budget(deadline: Instant, cancelled: &AtomicBool) -> Result<(), String> {
+    if cancelled.load(Ordering::Relaxed) {
+        Err("Herdr read cancelled".into())
+    } else if Instant::now() >= deadline {
+        Err("Herdr command timed out during hc socket preflight".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn connect_hc_socket(path: &Path, deadline: Instant, cancelled: &AtomicBool) -> Result<(), String> {
+    use std::os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{ffi::OsStrExt, net::UnixStream},
+    };
+    check_hc_budget(deadline, cancelled)?;
+    // SAFETY: zero initializes the sockaddr padding and the pathname terminator.
+    let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= address.sun_path.len() {
+        return Err(format!("Invalid hc socket path: {}", path.display()));
+    }
+    address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    for (destination, source) in address.sun_path.iter_mut().zip(bytes) {
+        *destination = *source as libc::c_char;
+    }
+    let unavailable =
+        |error: std::io::Error| format!("hc core is unavailable at {}: {error}", path.display());
+    // SAFETY: socket creates a new descriptor and does not access caller memory.
+    let fd = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+    if fd < 0 {
+        return Err(unavailable(std::io::Error::last_os_error()));
+    }
+    // SAFETY: fd is a newly created stream socket, owned only by this stream.
+    let stream = unsafe { UnixStream::from_raw_fd(fd) };
+    // SAFETY: fd is live and F_SETFD takes an integer flag argument.
+    if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
+        return Err(unavailable(std::io::Error::last_os_error()));
+    }
+    stream.set_nonblocking(true).map_err(unavailable)?;
+    loop {
+        check_hc_budget(deadline, cancelled)?;
+        // SAFETY: address is initialized and its full size matches the supplied pointer.
+        let result = unsafe {
+            libc::connect(
+                stream.as_raw_fd(),
+                (&address as *const libc::sockaddr_un).cast(),
+                std::mem::size_of_val(&address) as libc::socklen_t,
+            )
+        };
+        if result == 0 {
+            return check_hc_budget(deadline, cancelled);
+        }
+        let error = std::io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EISCONN) => return check_hc_budget(deadline, cancelled),
+            Some(libc::EINPROGRESS | libc::EALREADY | libc::EINTR | libc::EAGAIN) => {
+                thread::sleep(
+                    Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+            _ => return Err(unavailable(error)),
+        }
+    }
 }
 
 static NEXT_HERDR_OUTPUT_FILE: AtomicU64 = AtomicU64::new(1);
@@ -213,6 +338,36 @@ impl ProcessHerdr {
                 command
             }
         }
+    }
+
+    /// Checks the selected existing core before constructing an hc command.
+    /// The core can still stop between this check and the child's connection.
+    pub fn checked_command(&self) -> Result<Command, String> {
+        self.checked_command_bounded(self.timeout, &AtomicBool::new(false))
+    }
+
+    pub fn checked_command_bounded(
+        &self,
+        timeout: Duration,
+        cancelled: &AtomicBool,
+    ) -> Result<Command, String> {
+        self.checked_command_until(Instant::now() + self.bounded_timeout(timeout), cancelled)
+    }
+
+    fn checked_command_until(
+        &self,
+        deadline: Instant,
+        cancelled: &AtomicBool,
+    ) -> Result<Command, String> {
+        if self.host == HostKind::Tui {
+            return Ok(self.command());
+        }
+        check_hc_budget(deadline, cancelled)?;
+        let socket = hc_socket_path(|key| env::var(key).ok())?;
+        connect_hc_socket(&socket, deadline, cancelled)?;
+        let mut command = self.command();
+        command.env("HC_SOCKET", socket);
+        Ok(command)
     }
 
     pub fn with_child_executable(mut self, executable: std::path::PathBuf) -> Self {
@@ -307,7 +462,12 @@ impl ProcessHerdr {
         if cancelled.load(Ordering::Relaxed) {
             return Err("Herdr read cancelled".to_owned());
         }
-        let mut command = self.command();
+        let timeout = self.bounded_timeout(timeout);
+        let hc_deadline = (self.host == HostKind::Hc).then(|| Instant::now() + timeout);
+        let mut command = match hc_deadline {
+            Some(deadline) => self.checked_command_until(deadline, cancelled)?,
+            None => self.command(),
+        };
         if self.host == HostKind::Hc && args.first() == Some(&"run") {
             let separator = args
                 .iter()
@@ -328,9 +488,11 @@ impl ProcessHerdr {
             command.args(args);
         }
         command.process_group(0);
-        let timeout = self.bounded_timeout(timeout);
         let stdout = self.output_file("stdout")?;
         let stderr = self.output_file("stderr")?;
+        if let Some(deadline) = hc_deadline {
+            check_hc_budget(deadline, cancelled)?;
+        }
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
@@ -341,7 +503,7 @@ impl ProcessHerdr {
             })?))
             .spawn()
             .map_err(|error| format!("failed to run {}: {error}", self.binary))?;
-        let deadline = Instant::now() + timeout;
+        let deadline = hc_deadline.unwrap_or_else(|| Instant::now() + timeout);
         let status = loop {
             let oversized = [&stdout, &stderr].iter().any(|file| {
                 file.metadata()
@@ -530,8 +692,42 @@ pub(crate) fn stop_process_group(child: &mut Child) {
 }
 
 #[cfg(test)]
+#[path = "../tests/support/hc_socket.rs"]
+mod hc_socket_fixture;
+
+#[cfg(test)]
 mod bounded_read_tests {
     use super::*;
+
+    fn run_with_hc_socket(test: &str) -> bool {
+        if env::var("NAMEDROP_TEST_HC_SOCKET").as_deref() == Ok(test) {
+            return false;
+        }
+        let root = env::temp_dir().join(format!("nd-runtime-{}-{test}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("hc.sock");
+        let listener = hc_socket_fixture::HcSocket::bind(&path).unwrap();
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!("runtime::bounded_read_tests::{test}"),
+                "--nocapture",
+            ])
+            .env("HC_SOCKET", &path)
+            .env("HC_SESSION", "default")
+            .env("NAMEDROP_TEST_HC_SOCKET", test)
+            .output()
+            .unwrap();
+        drop(listener);
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
 
     #[test]
     fn hc_commands_remove_terminal_identity_but_retain_core_routing() {
@@ -561,6 +757,9 @@ mod bounded_read_tests {
 
     #[test]
     fn hc_bounded_reads_use_the_remaining_budget() {
+        if run_with_hc_socket("hc_bounded_reads_use_the_remaining_budget") {
+            return;
+        }
         let executor = ProcessHerdr {
             binary: "/bin/sh".into(),
             host: HostKind::Hc,
@@ -637,6 +836,9 @@ mod bounded_read_tests {
 
     #[test]
     fn hc_send_survives_the_fixed_server_waits() {
+        if run_with_hc_socket("hc_send_survives_the_fixed_server_waits") {
+            return;
+        }
         use crate::Host;
         let root = env::temp_dir().join(format!("namedrop-hc-send-timeout-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();

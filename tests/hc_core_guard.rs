@@ -1,11 +1,17 @@
-use namedrop::{HerdrCommandExecutor, ProcessHerdr, runtime::HostKind};
+#[path = "support/hc_socket.rs"]
+mod hc_socket;
+
+use namedrop::{
+    HerdrCommandExecutor, ProcessHerdr,
+    runtime::{HostKind, hc_socket_path, hc_state_root},
+};
 use std::{
     env, fs,
     os::unix::{fs::PermissionsExt, net::UnixListener},
     path::PathBuf,
     process::Command,
     sync::atomic::{AtomicBool, AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -77,21 +83,51 @@ fn guard_child() {
         assert_eq!(HostKind::from_environment(None).unwrap(), HostKind::Tui);
         return;
     }
+    if expected == "checked" || expected == "checked-stopped" {
+        let command = ProcessHerdr::for_host(HostKind::Hc).checked_command();
+        if expected == "checked-stopped" {
+            assert!(command.is_err());
+        } else {
+            assert!(
+                command
+                    .unwrap()
+                    .arg("--version")
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        return;
+    }
     let timeout = if expected == "deadline" {
         Duration::ZERO
     } else {
         Duration::from_millis(100)
     };
-    let result = ProcessHerdr::for_host(HostKind::Hc).execute_bounded(
-        &["--version"],
-        timeout,
-        &AtomicBool::new(expected == "cancelled"),
-        1024,
+    let cancelled = AtomicBool::new(expected == "cancelled");
+    let start = Instant::now();
+    let result = std::thread::scope(|scope| {
+        if expected == "waiting-cancelled" {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(20));
+                cancelled.store(true, Ordering::Relaxed);
+            });
+        }
+        ProcessHerdr::for_host(HostKind::Hc).execute_bounded(
+            &["--version"],
+            timeout,
+            &cancelled,
+            1024,
+        )
+    });
+    assert!(
+        start.elapsed() < Duration::from_secs(1),
+        "preflight exceeded budget"
     );
     match expected.as_str() {
         "ok" => assert!(result.is_ok(), "{result:?}"),
-        "deadline" => assert!(result.unwrap_err().contains("timed out")),
-        "cancelled" => assert!(result.unwrap_err().contains("cancelled")),
+        "deadline" | "waiting-deadline" => assert!(result.unwrap_err().contains("timed out")),
+        "cancelled" | "waiting-cancelled" => assert!(result.unwrap_err().contains("cancelled")),
         _ => assert!(
             result.is_err(),
             "hc must not launch without a connectable selected socket: {result:?}"
@@ -103,6 +139,7 @@ fn guard_child() {
 fn stopped_core_never_launches_even_version() {
     let f = Fixture::new();
     f.run(&[], "stopped");
+    f.run(&[], "checked-stopped");
     f.no_calls();
 }
 
@@ -207,4 +244,95 @@ fn inherited_identity_detector_cannot_start_stopped_core() {
         "detect",
     );
     f.no_calls();
+}
+
+#[test]
+fn checked_commands_reuse_an_accepting_listener_and_scrub_identity() {
+    let f = Fixture::new();
+    let endpoint = f.0.join("endpoint");
+    let _listener = hc_socket::HcSocket::bind(&endpoint).unwrap();
+    for _ in 0..4 {
+        f.run(&[("HC_SOCKET", endpoint.to_str().unwrap())], "checked");
+    }
+    assert_eq!(
+        fs::read_to_string(f.0.join("calls"))
+            .unwrap()
+            .lines()
+            .count(),
+        4
+    );
+}
+
+#[test]
+fn missing_explicit_socket_does_not_fall_back_to_a_running_core() {
+    let f = Fixture::new();
+    let _listener = f.listener("run/herdr-core/default.sock");
+    f.run(
+        &[("HC_SOCKET", f.0.join("absent").to_str().unwrap())],
+        "stopped",
+    );
+    f.no_calls();
+}
+
+#[test]
+fn xdg_config_overrides_home_and_empty_socket_variables_are_ignored() {
+    let f = Fixture::new();
+    let _listener = f.listener("endpoint");
+    f.write(".config/herdr-core/config.toml", "socket = '/absent'");
+    f.write(
+        "config/herdr-core/config.toml",
+        &format!("socket = {:?}", f.0.join("endpoint")),
+    );
+    f.run(
+        &[
+            ("XDG_CONFIG_HOME", f.0.join("config").to_str().unwrap()),
+            ("HC_SOCKET", ""),
+            ("HC_TERMINAL_SOCKET", ""),
+        ],
+        "ok",
+    );
+}
+
+#[test]
+fn state_root_and_session_paths_follow_xdg_precedence() {
+    let variables = |key: &str| match key {
+        "XDG_STATE_HOME" => Some("/state".to_owned()),
+        "HOME" => Some("/home/fixture".to_owned()),
+        "HC_SESSION" => Some(" chosen ".to_owned()),
+        _ => None,
+    };
+    assert_eq!(hc_state_root(variables).unwrap(), PathBuf::from("/state"));
+    assert_eq!(
+        hc_state_root(|key| if key == "XDG_STATE_HOME" {
+            Some("".into())
+        } else {
+            variables(key)
+        })
+        .unwrap(),
+        PathBuf::from("/home/fixture/.local/state")
+    );
+    assert!(hc_state_root(|_| None).is_err());
+    // SAFETY: getuid has no arguments or memory preconditions.
+    let runtime = PathBuf::from(format!("/run/user/{}", unsafe { libc::getuid() }));
+    let expected = if runtime.is_dir() {
+        runtime.join("herdr-core/chosen.sock")
+    } else {
+        PathBuf::from("/state/herdr-core/chosen/chosen.sock")
+    };
+    assert_eq!(hc_socket_path(variables).unwrap(), expected);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn full_accept_queue_obeys_deadline_and_cancellation() {
+    use std::os::{fd::AsRawFd, unix::net::UnixStream};
+    for expected in ["waiting-deadline", "waiting-cancelled"] {
+        let f = Fixture::new();
+        let listener = f.listener("run/herdr-core/default.sock");
+        // SAFETY: the listener owns this descriptor; backlog zero permits one queued connection on Linux.
+        assert_eq!(unsafe { libc::listen(listener.as_raw_fd(), 0) }, 0);
+        let _queued = UnixStream::connect(f.0.join("run/herdr-core/default.sock")).unwrap();
+        f.run(&[], expected);
+        f.no_calls();
+    }
 }
