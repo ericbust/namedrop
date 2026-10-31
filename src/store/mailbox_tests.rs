@@ -708,3 +708,46 @@ fn v6_unused_refusal_remains_cancellable_after_upgrade() {
         })
         .unwrap();
 }
+
+#[test]
+fn v6_migration_does_not_reclassify_unproven_prompt_facts() {
+    for mutation in [
+        "UPDATE transition_facts SET entity_id='[\"pane\",\"wrong-session\"]' WHERE entity_kind='prompt_recipient'",
+        "UPDATE transition_facts SET entity_id='[\"wrong-pane\",\"session\"]' WHERE entity_kind='prompt_recipient'",
+        "UPDATE transition_facts SET entity_id='different-delivery' WHERE entity_kind='mailbox_delivery' AND transition_kind='queued'",
+        "UPDATE delivery_attempt_state SET active=1",
+    ] {
+        let directory = super::tests::TestDirectory::new();
+        let ns = StateNamespace::for_space("socket", "space");
+        let mut store = StateStore::open(&directory.0).unwrap();
+        let before = store
+            .transaction(|tx| {
+                setup(tx, &ns)?;
+                legacy_refusal(tx, &ns, "legacy", 100)?;
+                let trigger: String = tx.transaction.query_row(
+                    "SELECT sql FROM sqlite_schema WHERE name='immutable_transitions_update'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                tx.transaction
+                    .execute_batch("DROP TRIGGER immutable_transitions_update;")?;
+                tx.transaction.execute_batch(mutation)?;
+                tx.transaction.execute_batch(&trigger)?;
+                tx.transition_facts(&ns)
+            })
+            .unwrap();
+        store
+            .connection
+            .execute_batch("DROP INDEX transition_facts_by_entity; PRAGMA user_version=6;")
+            .unwrap();
+        drop(store);
+        assert_eq!(
+            StateStore::open(&directory.0)
+                .unwrap()
+                .transaction(|tx| tx.transition_facts(&ns))
+                .unwrap(),
+            before,
+            "{mutation}"
+        );
+    }
+}

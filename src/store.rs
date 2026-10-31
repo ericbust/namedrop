@@ -54,6 +54,7 @@ mod coordination;
 mod coordination_bridge;
 mod coordination_ownership;
 pub mod dashboard;
+mod mailbox_migration;
 mod missing_disposition;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
@@ -7434,6 +7435,13 @@ fn initialize_schema(
             transaction.execute_batch(gap.ddl)?;
         }
     }
+    let transaction = if version < 7 {
+        let mut migration = StateTransaction { transaction };
+        migration.migrate_mailbox_deferrals()?;
+        migration.transaction
+    } else {
+        transaction
+    };
     if version < SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
