@@ -1,0 +1,6 @@
+{
+  "global": {
+    "alt-n": "mod.open:namedrop-name",
+    "alt-shift-s": "mod.open:namedrop"
+  }
+}

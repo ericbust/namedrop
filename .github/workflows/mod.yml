@@ -1,0 +1,21 @@
+name: Mod tests
+
+on:
+  pull_request:
+    paths:
+      - "mods/**"
+      - ".github/workflows/mod.yml"
+  push:
+    paths:
+      - "mods/**"
+      - ".github/workflows/mod.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: node --test mods/*/*.test.js

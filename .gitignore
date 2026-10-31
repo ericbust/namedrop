@@ -6,3 +6,5 @@ __pycache__/
 /docs/demo/node_modules/
 /docs/presentation/node_modules
 /docs/presentation/.cache/
+mods/*/gpui-kit.d.ts
+mods/*/jsconfig.json
