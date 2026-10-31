@@ -731,6 +731,10 @@ pub fn run(state: &Path) -> Result<(), String> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from);
+    let state_root = std::env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|home| home.join(".local/state")));
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let clock = crate::SystemClock;
     let ids = crate::ProcessIds::default();
@@ -740,6 +744,7 @@ pub fn run(state: &Path) -> Result<(), String> {
         agent_config: crate::AgentConfigDirectories {
             claude: claude.as_deref(),
             codex: codex.as_deref(),
+            state_root: state_root.as_deref(),
         },
         cwd: &cwd,
         workspace_id: None,

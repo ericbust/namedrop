@@ -55,6 +55,7 @@ const CODEX_SNAPSHOT_FILES: [&str; 6] = [
 pub struct AgentConfigDirectories<'a> {
     pub claude: Option<&'a Path>,
     pub codex: Option<&'a Path>,
+    pub state_root: Option<&'a Path>,
 }
 impl AgentConfigDirectories<'_> {
     fn claude(self, home: &Path) -> PathBuf {
@@ -101,15 +102,15 @@ impl PackageContext {
             executable.to_owned()
         }
     }
-    fn permission_owner(&self, state: &Path) -> Result<PathBuf, String> {
+    fn permission_owner(&self, state: &Path, config: AgentConfigDirectories<'_>) -> PathBuf {
         if self.hc {
-            crate::runtime::hc_state_root(|key| match key {
-                "HOME" => self.home.to_str().map(str::to_owned),
-                key => std::env::var(key).ok(),
-            })
-            .map(|root| root.join("namedrop-app"))
+            config
+                .state_root
+                .map(Path::to_owned)
+                .unwrap_or_else(|| self.home.join(".local/state"))
+                .join("namedrop-app")
         } else {
-            Ok(state.to_owned())
+            state.to_owned()
         }
     }
     fn permission_rules(&self, executable: &Path, state: &Path) -> Result<Vec<String>, String> {
@@ -137,7 +138,7 @@ impl PackageContext {
     ) -> Result<(), String> {
         claude_permissions::inspect_with_rules(
             &config.claude(&self.home),
-            &self.permission_owner(state)?,
+            &self.permission_owner(state, config),
             self.permission_rules(executable, state)?,
         )
         .map_err(|error| format!("{error}; {}", claude_permissions::REPAIR_GUIDANCE))
@@ -489,7 +490,7 @@ fn install_integration_package_with_config(
     if runtime == AgentRuntime::ClaudeCode
         && let Err(error) = claude_permissions::refresh_with_rules(
             &config.claude(&context.home),
-            &context.permission_owner(state_directory)?,
+            &context.permission_owner(state_directory, config),
             context.permission_rules(executable, state_directory)?,
         )
     {

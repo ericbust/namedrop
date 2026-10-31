@@ -253,3 +253,7 @@ mod tests {
 #[cfg(test)]
 #[path = "../tests/support/bash_rules.rs"]
 mod bash_rules;
+
+#[cfg(test)]
+#[path = "../tests/support/environment.rs"]
+mod test_environment;

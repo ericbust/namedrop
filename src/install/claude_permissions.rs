@@ -486,6 +486,7 @@ pub(super) fn inspect_with_rules(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_environment::CommandHome;
     #[test]
     fn pending_journal_omits_settings_secrets() {
         let root = std::env::temp_dir().join(format!("nd21-journal-{}", std::process::id()));
@@ -580,7 +581,7 @@ mod tests {
             .args(["-c", "umask 077; exec \"$@\"", "mode-proof"])
             .arg(std::env::current_exe().unwrap())
             .args(["--exact", "install::claude_permissions::tests::atomic_settings_replacement_preserves_mode_under_a_restrictive_umask", "--nocapture"])
-            .env(CHILD,"1").env("HOME",&root).env("CLAUDE_CONFIG_DIR",root.join(".claude")).env("CODEX_HOME",root.join(".codex"))
+            .env(CHILD,"1").isolated_home(&root).env("CLAUDE_CONFIG_DIR",root.join(".claude")).env("CODEX_HOME",root.join(".codex"))
             .output().unwrap();
         fs::remove_dir_all(root).unwrap();
         assert!(result.status.success(), "{result:?}");

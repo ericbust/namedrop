@@ -1,5 +1,6 @@
 use super::*;
 use crate::runtime::hc_socket_fixture as hc_socket;
+use crate::test_environment::CommandHome;
 struct NoCalls;
 impl crate::HerdrCommandExecutor for NoCalls {
     fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
@@ -352,6 +353,7 @@ fn native_codex_accepts_tui_and_one_stable_hc_marketplace_across_states() {
     let config = AgentConfigDirectories {
         claude: Some(&claude),
         codex: Some(&codex),
+        ..AgentConfigDirectories::default()
     };
     let executable = PathBuf::from(crate::collaboration_executable().unwrap());
     let contexts = [("tui", false), ("hc-one", true), ("hc-two", true)].map(|(name, hc)| {
@@ -383,7 +385,7 @@ fn native_codex_accepts_tui_and_one_stable_hc_marketplace_across_states() {
         ] {
             let output = std::process::Command::new("codex")
                 .args(&args)
-                .env("HOME", &home)
+                .isolated_home(&home)
                 .env("CODEX_HOME", &codex)
                 .env_remove("CODEX_SESSION_ID")
                 .output()
@@ -435,7 +437,7 @@ fn native_codex_accepts_tui_and_one_stable_hc_marketplace_across_states() {
         for operation in collaboration_permission_operations() {
             let mut command = std::process::Command::new("codex");
             command
-                .env("HOME", &home)
+                .isolated_home(&home)
                 .env("CODEX_HOME", &codex)
                 .args(["execpolicy", "check", "--rules"])
                 .arg(
@@ -470,7 +472,7 @@ fn native_codex_accepts_tui_and_one_stable_hc_marketplace_across_states() {
         vec![],
     ] {
         let output = std::process::Command::new("codex")
-            .env("HOME", &home)
+            .isolated_home(&home)
             .env("CODEX_HOME", &codex)
             .args(["execpolicy", "check", "--rules"])
             .arg(codex.join("rules/namedrop-app.rules"))
@@ -558,7 +560,7 @@ fn hc_wrappers_derive_runtime_state_without_claiming_the_inherited_terminal() {
             ] {
                 let mut command = std::process::Command::new(package.join(script));
                 command
-                    .env("HOME", &home)
+                    .isolated_home(&home)
                     .env("HC_TERMINAL_ID", "inherited-t3")
                     .env("XDG_STATE_HOME", root.join("xdg"))
                     .env("HC_SESSION", "session")
@@ -1029,7 +1031,7 @@ esac
             let mut child = Command::new(package.join(script))
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
-                .env("HOME", &home)
+                .isolated_home(&home)
                 .env("HC_TERMINAL_ID", "outer-hc")
                 .env("HERDR_SOCKET_PATH", "inner-tui")
                 .env("HERDR_PANE_ID", "inner-tui")
@@ -1092,6 +1094,7 @@ fn hc_onboarding_inspects_packages_without_repairing_them() {
         agent_config: AgentConfigDirectories {
             claude: Some(&claude),
             codex: Some(&codex),
+            ..AgentConfigDirectories::default()
         },
         cwd: &root,
         workspace_id: Some("space"),
@@ -1228,9 +1231,13 @@ fn hc_permission_owner_is_scoped_to_the_explicit_home() {
     }
     let root = owner_review_root("permission-root");
     let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "install::owner_review_tests::hc_permission_owner_is_scoped_to_the_explicit_home", "--nocapture"])
+        .args([
+            "--exact",
+            "install::owner_review_tests::hc_permission_owner_is_scoped_to_the_explicit_home",
+            "--nocapture",
+        ])
         .env(CHILD, &root)
-        .env("HOME", root.join("process-home"))
+        .isolated_home(root.join("process-home"))
         .env("XDG_STATE_HOME", root.join("foreign-xdg-state"))
         .output()
         .unwrap();
@@ -1240,5 +1247,44 @@ fn hc_permission_owner_is_scoped_to_the_explicit_home() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hc_permission_owner_accepts_an_explicit_state_root_across_sessions() {
+    let root = owner_review_root("explicit-permission-root");
+    let home = root.join("home");
+    let claude = root.join("claude-config");
+    let state_root = root.join("configured-state");
+    let config = AgentConfigDirectories {
+        claude: Some(&claude),
+        state_root: Some(&state_root),
+        ..AgentConfigDirectories::default()
+    };
+    let context = PackageContext::new(&home, true);
+    let expected = state_root.join("namedrop-app");
+    for session in ["first-session", "second-session"] {
+        let state = root.join(session);
+        assert_eq!(context.permission_owner(&state, config), expected);
+        assert_eq!(
+            PackageContext::new(&home, false).permission_owner(&state, config),
+            state
+        );
+        install_integration_package_with_config(
+            &context,
+            AgentRuntime::ClaudeCode,
+            &root.join("executable"),
+            &state,
+            config,
+        )
+        .unwrap();
+        assert!(expected.join("claude-permissions.json").is_file());
+        assert!(!state.join("claude-permissions.json").exists());
+        context
+            .inspect_permissions(config, &root.join("executable"), &state)
+            .unwrap();
+    }
+    assert!(claude.join("settings.json").is_file());
+    assert!(!home.join(".local/state/namedrop-app").exists());
     fs::remove_dir_all(root).unwrap();
 }

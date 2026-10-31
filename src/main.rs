@@ -839,6 +839,14 @@ fn with_runtime_options<T>(
         .filter(|path| path.is_absolute());
     let claude_config = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
     let codex_config = env::var_os("CODEX_HOME").map(PathBuf::from);
+    let state_root = env::var_os("XDG_STATE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            home_directory
+                .as_ref()
+                .map(|home| home.join(".local/state"))
+        });
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
     let transport = ProcessHerdr::for_host(kind).with_socket(if kind == HostKind::Tui {
         options.herdr_socket.clone()
@@ -888,6 +896,7 @@ fn with_runtime_options<T>(
         agent_config: namedrop::AgentConfigDirectories {
             claude: claude_config.as_deref(),
             codex: codex_config.as_deref(),
+            state_root: state_root.as_deref(),
         },
         cwd: &cwd,
         workspace_id: workspace_id.as_deref(),
