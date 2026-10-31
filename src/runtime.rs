@@ -627,7 +627,7 @@ pub(crate) fn hc_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
     command
 }
 
-fn remove_tui_environment(command: &mut Command) {
+pub(crate) fn remove_tui_environment(command: &mut Command) {
     use std::os::unix::ffi::OsStrExt;
     for (key, _) in env::vars_os() {
         if key.as_bytes().starts_with(b"HERDR_") {

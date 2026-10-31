@@ -321,20 +321,25 @@ fn digest(input: &WorkerInput, model: &str) -> String {
 
 /// Resolves the worker binary, allowing tests to substitute a fake CLI the same
 /// way `HERDR_BIN_PATH` substitutes the Herdr binary.
-fn claude_binary() -> String {
-    env::var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_owned())
+fn claude_binary(environment: &crate::environment::EnvironmentSnapshot) -> String {
+    environment
+        .var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN")
+        .unwrap_or_else(|| "claude".to_owned())
 }
 
-fn codex_binary() -> String {
-    env::var("NAMEDROP_AGENT_STATUS_CODEX_BIN").unwrap_or_else(|_| "codex".to_owned())
+fn codex_binary(environment: &crate::environment::EnvironmentSnapshot) -> String {
+    environment
+        .var("NAMEDROP_AGENT_STATUS_CODEX_BIN")
+        .unwrap_or_else(|| "codex".to_owned())
 }
 
 /// The containment wrapper. Tests substitute a recorder to assert the exact
 /// profile and argv; only the real wrapper actually enforces anything.
 #[cfg(target_os = "macos")]
-fn sandbox_binary() -> String {
-    env::var("NAMEDROP_AGENT_STATUS_SANDBOX_BIN")
-        .unwrap_or_else(|_| "/usr/bin/sandbox-exec".to_owned())
+fn sandbox_binary(environment: &crate::environment::EnvironmentSnapshot) -> String {
+    environment
+        .var("NAMEDROP_AGENT_STATUS_SANDBOX_BIN")
+        .unwrap_or_else(|| "/usr/bin/sandbox-exec".to_owned())
 }
 
 /// A directory with no project configuration, so the worker cannot pick up
@@ -490,19 +495,18 @@ fn oversized(file: &fs::File) -> bool {
 
 /// Resolves a CLI on `PATH` to a real path, which the sandbox profile needs in
 /// order to permit exactly one executable.
-fn resolve_executable(name: &str) -> Result<PathBuf, String> {
+fn resolve_executable(name: &str, path: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
     let candidate = PathBuf::from(name);
     let found = if candidate.is_absolute() {
         candidate
     } else {
-        env::var_os("PATH")
-            .map(|path| {
-                env::split_paths(&path)
-                    .map(|directory| directory.join(name))
-                    .find(|entry| entry.is_file())
-            })
-            .unwrap_or_default()
-            .ok_or_else(|| format!("{name} is not installed"))?
+        path.map(|path| {
+            env::split_paths(&path)
+                .map(|directory| directory.join(name))
+                .find(|entry| entry.is_file())
+        })
+        .unwrap_or_default()
+        .ok_or_else(|| format!("{name} is not installed"))?
     };
     found
         .canonicalize()
@@ -563,7 +567,9 @@ fn codex_home(environment: &crate::environment::EnvironmentSnapshot) -> Result<P
 #[cfg(target_os = "linux")]
 pub(crate) fn codex_worker_support() -> Result<(), String> {
     crate::linux_sandbox::check_support()?;
-    crate::linux_sandbox::native_codex(&resolve_executable(&codex_binary())?).map(|_| ())
+    let binary = env::var("NAMEDROP_AGENT_STATUS_CODEX_BIN").unwrap_or_else(|_| "codex".to_owned());
+    crate::linux_sandbox::native_codex(&resolve_executable(&binary, env::var_os("PATH"))?)
+        .map(|_| ())
 }
 
 #[cfg(target_os = "macos")]
@@ -667,8 +673,8 @@ fn macos_codex_command(
     program: impl AsRef<std::ffi::OsStr>,
     environment: &crate::environment::EnvironmentSnapshot,
 ) -> Result<Command, String> {
-    let mut command = Command::new(program);
-    environment.apply_roots(&mut command);
+    let mut command = environment.command(program);
+    command.env("CODEX_HOME", codex_home(environment)?);
     Ok(command)
 }
 
@@ -677,7 +683,7 @@ fn codex_plan(
     payload: &str,
     environment: &crate::environment::EnvironmentSnapshot,
 ) -> Result<WorkerPlan, String> {
-    let binary = resolve_executable(&codex_binary())?;
+    let binary = resolve_executable(&codex_binary(environment), environment.var_os("PATH"))?;
 
     let directory = reserve_worker_directory()?;
     let schema_path = reserve_scratch(&directory, "schema.json")?;
@@ -686,7 +692,7 @@ fn codex_plan(
     let output_path = reserve_scratch(&directory, "message.txt")?;
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = macos_codex_command(sandbox_binary(), environment)?;
+        let mut command = macos_codex_command(sandbox_binary(environment), environment)?;
         command
             .args(["-p", &deny_exec_profile(&binary, &directory, environment)?])
             .arg(&binary);
@@ -736,7 +742,7 @@ fn claude_plan(
     environment: &crate::environment::EnvironmentSnapshot,
 ) -> Result<WorkerPlan, String> {
     let directory = reserve_worker_directory()?;
-    let mut command = environment.command(claude_binary());
+    let mut command = environment.command(claude_binary(environment));
     command
         .args(["--print", "--model", CLAUDE_MODEL])
         // Verified against the real outbound request: an empty tool list.

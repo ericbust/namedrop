@@ -300,7 +300,11 @@ fn main() -> ExitCode {
     if matches!(cli.operation(), "reconcile" | "event.pane-lifecycle")
         && let Some(state) = selected_state.as_deref()
     {
-        namedrop::update_check::start(state, SystemClock.now_unix_ms(), &cli.runtime.environment);
+        namedrop::update_check::start_with_environment(
+            state,
+            SystemClock.now_unix_ms(),
+            &cli.runtime.environment,
+        );
     }
     if let Some(attempt) = cli.terminal_attempt() {
         let result = with_runtime_options(&cli.runtime, |runtime| {

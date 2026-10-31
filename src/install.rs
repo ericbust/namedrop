@@ -1223,7 +1223,6 @@ fn hook_script_for_context(
     }
 }
 
-// Each generated hook starts a new process and resolves its inherited roots there.
 const HC_HOOK_PREAMBLE: &str = "[ -n \"${HC_TERMINAL_ID-}\" ] || exit 0\nnamedrop_state=\"${NAMEDROP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/namedrop/hc/${HC_SESSION:-default}}\"\n";
 
 fn hook_script(

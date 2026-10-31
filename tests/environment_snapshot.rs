@@ -245,7 +245,7 @@ fn hc_children_scrub_herdr_names_added_after_capture() {
             .isolated_home(&home)
             .env_remove("HERDR_PLUGIN_EVENT_JSON")
             .env_remove("HERDR_SESSION_ID")
-            .env("HERDR_CAPTURED_MARKER", "captured")
+            .env("HERDR_CONFIG_PATH", home.join("captured-config.toml"))
             .env("HC_SOCKET", home.join("fake.sock"))
             .env("HC_BIN_PATH", "/bin/sh")
             .env(MARKER, "1")
@@ -264,11 +264,11 @@ fn hc_children_scrub_herdr_names_added_after_capture() {
     unsafe {
         std::env::set_var("HERDR_PLUGIN_EVENT_JSON", "late-event");
         std::env::set_var("HERDR_SESSION_ID", "late-session");
-        std::env::remove_var("HERDR_CAPTURED_MARKER");
+        std::env::remove_var("HERDR_CONFIG_PATH");
     }
     let transport = namedrop::ProcessHerdr::from_snapshot(HostKind::Hc, &snapshot);
     let output = transport.command()
-        .args(["-c", "printf '%s\\n' \"${HERDR_PLUGIN_EVENT_JSON-unset}\" \"${HERDR_SESSION_ID-unset}\" \"${HERDR_CAPTURED_MARKER-unset}\""])
+        .args(["-c", "printf '%s\\n' \"${HERDR_PLUGIN_EVENT_JSON-unset}\" \"${HERDR_SESSION_ID-unset}\" \"${HERDR_CONFIG_PATH-unset}\""])
         .output().unwrap();
     assert!(output.status.success());
     assert_eq!(

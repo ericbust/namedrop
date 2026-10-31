@@ -186,6 +186,7 @@ impl EnvironmentSnapshot {
                 command.env_remove(key);
             }
         }
+        crate::runtime::remove_tui_environment(&mut command);
         command
             .env_remove("HC_TERMINAL_ID")
             .env_remove("HC_TERMINAL_SOCKET");
