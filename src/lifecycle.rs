@@ -554,7 +554,13 @@ where
             let shortcuts = if runtime.is_hc() {
                 json!({"status":"app_managed", "next_step":"Install the Namedrop mod in herdr-app to enable its commands and shortcuts."})
             } else {
-                crate::shortcuts::activate_shortcuts(runtime.home_directory, &runtime.host)
+                crate::shortcuts::activate_shortcuts(
+                    runtime
+                        .agent_config
+                        .shortcut_config(runtime.home_directory)
+                        .as_deref(),
+                    &runtime.host,
+                )
             };
             // After the shortcuts, so the tour's reopen shortcut already works
             // when the popup mentions it. It reports instead of failing.

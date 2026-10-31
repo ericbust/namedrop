@@ -2,7 +2,10 @@ mod agent_status;
 mod agent_status_model;
 pub mod cli;
 pub use agent_status::collect_agent_status;
-pub use agent_status_model::{suggest_agent_persona, summarize_agent_status};
+pub use agent_status_model::{
+    suggest_agent_persona, suggest_agent_persona_with_environment, summarize_agent_status,
+    summarize_agent_status_with_environment,
+};
 mod codex_app_server;
 mod context;
 mod controls;
@@ -10,6 +13,7 @@ mod coordination;
 pub mod dashboard;
 mod delivery;
 mod domain;
+pub mod environment;
 mod groups;
 mod handoff;
 mod health;
@@ -34,7 +38,7 @@ mod shortcuts;
 mod spaces;
 mod store;
 #[doc(hidden)]
-pub use shortcuts::install_shortcuts;
+pub use shortcuts::{install_shortcuts, install_shortcuts_at};
 mod terminal;
 pub mod tour;
 #[doc(hidden)]

@@ -552,10 +552,11 @@ const CODEX_HOME_READS: [&str; 5] = [
     "installation_id",
 ];
 
-fn codex_home() -> Result<PathBuf, String> {
-    env::var_os("CODEX_HOME")
+fn codex_home(environment: &crate::environment::EnvironmentSnapshot) -> Result<PathBuf, String> {
+    environment
+        .var_os("CODEX_HOME")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        .or_else(|| environment.home().map(|home| home.join(".codex")))
         .ok_or_else(|| "Codex is unavailable: its credential home cannot be located".to_owned())
 }
 
@@ -566,7 +567,11 @@ pub(crate) fn codex_worker_support() -> Result<(), String> {
 }
 
 #[cfg(target_os = "macos")]
-fn deny_exec_profile(allowed: &Path, directory: &WorkerDirectory) -> Result<String, String> {
+fn deny_exec_profile(
+    allowed: &Path,
+    directory: &WorkerDirectory,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<String, String> {
     let executable = sandbox_literal(allowed)?;
 
     let mut readable: Vec<String> = PLATFORM_READS
@@ -580,10 +585,10 @@ fn deny_exec_profile(allowed: &Path, directory: &WorkerDirectory) -> Result<Stri
     // This worker's private directory, which is also its working directory.
     readable.push(sandbox_literal(&directory.0)?.to_owned());
 
-    let home = env::var_os("HOME").map(PathBuf::from);
+    let home = environment.home();
     // Fail closed: without a credential home the worker cannot be contained
     // and authenticated at the same time, so it is not run at all.
-    let codex_home = codex_home()?;
+    let codex_home = codex_home(environment)?;
     for entry in CODEX_HOME_READS {
         readable.push(sandbox_literal(&codex_home.join(entry))?.to_owned());
     }
@@ -657,7 +662,11 @@ impl WorkerPlan {
     }
 }
 
-fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String> {
+fn codex_plan(
+    prompt: &WorkerPrompt,
+    payload: &str,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<WorkerPlan, String> {
     let binary = resolve_executable(&codex_binary())?;
 
     let directory = reserve_worker_directory()?;
@@ -669,12 +678,14 @@ fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String
     let mut command = {
         let mut command = Command::new(sandbox_binary());
         command
-            .args(["-p", &deny_exec_profile(&binary, &directory)?])
+            .args(["-p", &deny_exec_profile(&binary, &directory, environment)?])
             .arg(&binary);
         command
     };
     #[cfg(target_os = "linux")]
-    let mut command = crate::linux_sandbox::command(&binary, &directory.0, &codex_home()?)?;
+    let mut command =
+        crate::linux_sandbox::command(&binary, &directory.0, &codex_home(environment)?)?;
+    environment.apply_roots(&mut command);
     command
         .arg("exec")
         // No user config, no project rules, no persisted session.
@@ -709,9 +720,13 @@ fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String
     })
 }
 
-fn claude_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String> {
+fn claude_plan(
+    prompt: &WorkerPrompt,
+    payload: &str,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<WorkerPlan, String> {
     let directory = reserve_worker_directory()?;
-    let mut command = Command::new(claude_binary());
+    let mut command = environment.command(claude_binary());
     command
         .args(["--print", "--model", CLAUDE_MODEL])
         // Verified against the real outbound request: an empty tool list.
@@ -751,10 +766,11 @@ fn run_worker(
     prompt: &WorkerPrompt,
     payload: &str,
     cancelled: &AtomicBool,
+    environment: &crate::environment::EnvironmentSnapshot,
 ) -> Result<String, String> {
     let mut plan = match host {
-        "codex" => codex_plan(prompt, payload)?,
-        _ => claude_plan(prompt, payload)?,
+        "codex" => codex_plan(prompt, payload, environment)?,
+        _ => claude_plan(prompt, payload, environment)?,
     };
     let worker_directory = plan.directory.0.clone();
     let command = &mut plan.command;
@@ -965,6 +981,18 @@ fn validate_summary(response: &Value, input: &WorkerInput, model: &str) -> Resul
 /// an `Err` carrying a short reason: callers render the snapshot's facts
 /// without descriptions rather than showing invented prose.
 pub fn summarize_agent_status(snapshot: &Value, cancelled: &AtomicBool) -> Result<Value, String> {
+    summarize_agent_status_with_environment(
+        snapshot,
+        cancelled,
+        &crate::environment::EnvironmentSnapshot::capture(),
+    )
+}
+
+pub fn summarize_agent_status_with_environment(
+    snapshot: &Value,
+    cancelled: &AtomicBool,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<Value, String> {
     if cancelled.load(Ordering::Relaxed) {
         return Err("agent status summary cancelled".to_owned());
     }
@@ -1018,6 +1046,7 @@ pub fn summarize_agent_status(snapshot: &Value, cancelled: &AtomicBool) -> Resul
         },
         &input.payload,
         cancelled,
+        environment,
     )?;
     let response = extract_response(&raw, "origin_description")?;
     let summary = validate_summary(&response, &input, model)?;
@@ -1066,6 +1095,22 @@ pub fn suggest_agent_persona(
     host: &str,
     cancelled: &AtomicBool,
 ) -> Result<String, String> {
+    suggest_agent_persona_with_environment(
+        alias,
+        description,
+        host,
+        cancelled,
+        &crate::environment::EnvironmentSnapshot::capture(),
+    )
+}
+
+pub fn suggest_agent_persona_with_environment(
+    alias: &str,
+    description: &str,
+    host: &str,
+    cancelled: &AtomicBool,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<String, String> {
     if cancelled.load(Ordering::Relaxed) {
         return Err("persona suggestion cancelled".to_owned());
     }
@@ -1087,6 +1132,7 @@ pub fn suggest_agent_persona(
         },
         &payload,
         cancelled,
+        environment,
     )?;
     // A status answer carries no persona description, so it is rejected rather
     // than rendered as one; personas stay out of the summary cache too.

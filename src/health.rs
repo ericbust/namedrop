@@ -324,9 +324,10 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
     }) {
         issues.push(stale_runtime_issue(&stale));
     }
-    match crate::update_check::settings() {
+    let settings_path = runtime.agent_config.update_settings(runtime.home_directory);
+    match crate::update_check::settings(settings_path.as_deref()) {
         Err(error) => {
-            let path = crate::update_check::settings_path().ok();
+            let path = &settings_path;
             let mut setting = issue(
                 "ND-UPDATE-002",
                 HealthSeverity::Info,
@@ -339,7 +340,9 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
             issues.push(setting);
         }
         Ok(_) => {
-            if let Some(update) = crate::update_check::available(runtime.state_directory) {
+            if let Some(update) =
+                crate::update_check::available(runtime.state_directory, settings_path.as_deref())
+            {
                 let mut update_issue = issue(
                     "ND-UPDATE-001",
                     HealthSeverity::Info,

@@ -35,9 +35,14 @@ const DOCTOR_PAGE_LINES: usize = 16;
 /// still in flight. The interactive editor never waits: it polls.
 const SUGGESTION_WAIT: Duration = Duration::from_secs(20);
 
-pub(super) fn install_shortcuts(config: Option<&Path>) -> Result<serde_json::Value, String> {
-    let home = env::var_os("HOME").map(PathBuf::from);
-    namedrop::install_shortcuts(config, home.as_deref())
+pub(super) fn install_shortcuts(
+    config: Option<&Path>,
+    environment: &namedrop::environment::EnvironmentSnapshot,
+) -> Result<serde_json::Value, String> {
+    let captured = environment
+        .agent_config()
+        .shortcut_config(environment.home());
+    namedrop::install_shortcuts_at(config.or(captured.as_deref()))
 }
 
 /// Clears the once-only marker so the current tour opens again the next time
@@ -156,10 +161,10 @@ fn run_prompt(options: &RuntimeOptions, mode: UiMode) -> Result<(), String> {
             );
         }
         match mode {
-            UiMode::Name => name_prompt(&targeted, &terminal).map(drop),
-            UiMode::Manage => manage_prompt(&targeted, &terminal),
-            UiMode::Doctor => doctor_prompt(&targeted, &terminal, &session),
-            UiMode::Tour => tour_prompt(&targeted, &terminal),
+            UiMode::Name => name_prompt(&targeted, &terminal, &options.environment).map(drop),
+            UiMode::Manage => manage_prompt(&targeted, &terminal, options),
+            UiMode::Doctor => doctor_prompt(&targeted, &terminal, &session, &options.environment),
+            UiMode::Tour => tour_prompt(&targeted, &terminal, &options.environment),
             UiMode::Status => unreachable!("status UI is dispatched before interactive prompts"),
         }
     })
@@ -169,6 +174,7 @@ fn doctor_prompt(
     runtime: &ProcessRuntime<'_>,
     terminal: &str,
     session: &str,
+    environment: &namedrop::environment::EnvironmentSnapshot,
 ) -> Result<(), String> {
     let _input_mode = InputMode::enter()?;
     let mut notice = String::new();
@@ -236,7 +242,7 @@ fn doctor_prompt(
                 }
                 // Naming from the tour changes what Doctor reports.
                 MenuKey::Char(b't') if offer_tour => {
-                    inline_tour(runtime, terminal, &mut notice)?;
+                    inline_tour(runtime, terminal, &mut notice, environment)?;
                     continue 'refresh;
                 }
                 // Only this key sends. Paging, refresh and close stay read-only.
@@ -285,7 +291,11 @@ fn doctor_prompt(
 
 /// Names the invoking pane and returns the confirmation it printed, or
 /// `None` when the person cancelled.
-fn name_prompt(runtime: &ProcessRuntime<'_>, terminal: &str) -> Result<Option<String>, String> {
+fn name_prompt(
+    runtime: &ProcessRuntime<'_>,
+    terminal: &str,
+    environment: &namedrop::environment::EnvironmentSnapshot,
+) -> Result<Option<String>, String> {
     let default = namedrop::default_pane_type(runtime)?;
     say(Tone::Strong, "Name this pane\n");
     say(
@@ -340,7 +350,12 @@ fn name_prompt(runtime: &ProcessRuntime<'_>, terminal: &str) -> Result<Option<St
                 .map_err(|e| e.to_string())?,
             None => None,
         };
-        persona_editor(&alias, saved.as_deref(), &origin.agent.unwrap_or_default())?
+        persona_editor(
+            &alias,
+            saved.as_deref(),
+            &origin.agent.unwrap_or_default(),
+            environment,
+        )?
     } else {
         Persona::Keep
     };
@@ -404,7 +419,11 @@ const TOUR_OFFER: &str = "Press T for the tour.";
 
 /// The tour popup. Opening it counts as showing the current presentation, so
 /// a tour someone opened by hand never pops up again on its own.
-fn tour_prompt(runtime: &ProcessRuntime<'_>, terminal: &str) -> Result<(), String> {
+fn tour_prompt(
+    runtime: &ProcessRuntime<'_>,
+    terminal: &str,
+    environment: &namedrop::environment::EnvironmentSnapshot,
+) -> Result<(), String> {
     let _input_mode = InputMode::enter()?;
     // A marker that cannot be written only means the tour may open again, so
     // it is reported on the page instead of costing the tour itself.
@@ -412,7 +431,13 @@ fn tour_prompt(runtime: &ProcessRuntime<'_>, terminal: &str) -> Result<(), Strin
         .err()
         .map(|error| format!("The tour may open again: {}", error.escape_debug()));
     let presentation = tour::current()?;
-    tour_pages(runtime, terminal, &presentation, warning.as_deref())
+    tour_pages(
+        runtime,
+        terminal,
+        &presentation,
+        warning.as_deref(),
+        environment,
+    )
 }
 
 /// Pages the current tour from Manage or Doctor, which stay open after it; a
@@ -422,9 +447,10 @@ fn inline_tour(
     runtime: &ProcessRuntime<'_>,
     terminal: &str,
     notice: &mut String,
+    environment: &namedrop::environment::EnvironmentSnapshot,
 ) -> Result<(), String> {
     match tour::current() {
-        Ok(presentation) => tour_pages(runtime, terminal, &presentation, None),
+        Ok(presentation) => tour_pages(runtime, terminal, &presentation, None, environment),
         Err(error) => {
             *notice = format!("Could not open the tour: {}", error.escape_debug());
             Ok(())
@@ -441,6 +467,7 @@ fn tour_pages(
     terminal: &str,
     presentation: &Presentation,
     warning: Option<&str>,
+    environment: &namedrop::environment::EnvironmentSnapshot,
 ) -> Result<(), String> {
     let count = presentation.pages.len();
     let mut index = 0;
@@ -481,7 +508,7 @@ fn tour_pages(
             }
             MenuKey::Char(b'n') if offers_naming => {
                 clear_screen();
-                named = name_prompt(runtime, terminal)?;
+                named = name_prompt(runtime, terminal, environment)?;
             }
             _ => {}
         }
@@ -510,7 +537,12 @@ fn space_has_no_names(runtime: &ProcessRuntime<'_>) -> bool {
     }
 }
 
-fn manage_prompt(runtime: &ProcessRuntime<'_>, terminal: &str) -> Result<(), String> {
+fn manage_prompt(
+    runtime: &ProcessRuntime<'_>,
+    terminal: &str,
+    options: &RuntimeOptions,
+) -> Result<(), String> {
+    let environment = &options.environment;
     let _input_mode = InputMode::enter()?;
     let mut selected = 0usize;
     let mut notice = String::new();
@@ -600,7 +632,7 @@ fn manage_prompt(runtime: &ProcessRuntime<'_>, terminal: &str) -> Result<(), Str
             MenuKey::Char(b'n') => {
                 notice.clear();
                 clear_screen();
-                name_prompt(runtime, terminal)?;
+                name_prompt(runtime, terminal, environment)?;
                 continue;
             }
             MenuKey::Down => {
@@ -625,7 +657,7 @@ fn manage_prompt(runtime: &ProcessRuntime<'_>, terminal: &str) -> Result<(), Str
             }
             MenuKey::Char(b't') if offer_tour => {
                 notice.clear();
-                inline_tour(runtime, terminal, &mut notice)?;
+                inline_tour(runtime, terminal, &mut notice, environment)?;
                 continue;
             }
             MenuKey::Enter => {}
@@ -684,21 +716,27 @@ fn manage_prompt(runtime: &ProcessRuntime<'_>, terminal: &str) -> Result<(), Str
                     // here, so a rename alone never redefines the agent.
                     clear_screen();
                     let host = target_pane(runtime)?.agent.unwrap_or_default();
-                    follow_up = persona_editor(&alias, address.persona.as_deref(), &host)?
-                        .description()
-                        .map(|description| {
-                            serde_json::json!({
-                                "address_id": address.id,
-                                "description": description,
-                            })
-                        });
+                    follow_up =
+                        persona_editor(&alias, address.persona.as_deref(), &host, environment)?
+                            .description()
+                            .map(|description| {
+                                serde_json::json!({
+                                    "address_id": address.id,
+                                    "description": description,
+                                })
+                            });
                 }
                 ("address.rename", None)
             }
             b'p' if is_agent => {
                 clear_screen();
                 let host = target_pane(runtime)?.agent.unwrap_or_default();
-                let choice = persona_editor(&address.alias, address.persona.as_deref(), &host)?;
+                let choice = persona_editor(
+                    &address.alias,
+                    address.persona.as_deref(),
+                    &host,
+                    environment,
+                )?;
                 let Some(description) = choice.description() else {
                     notice = if choice == Persona::Cancel {
                         "Cancelled. The saved persona is unchanged.".into()
@@ -779,7 +817,7 @@ fn manage_prompt(runtime: &ProcessRuntime<'_>, terminal: &str) -> Result<(), Str
         notice = match result {
             Ok(data) => {
                 let warning = if needs_mailbox_watcher(&data) {
-                    wake_runtime_mailboxes(runtime).err()
+                    wake_runtime_mailboxes(runtime, options).err()
                 } else {
                     None
                 };
@@ -1017,7 +1055,12 @@ impl Editor {
 ///
 /// `saved` is the persona already stored; `host` is the invoking pane's own
 /// CLI, and an unsupported one simply reports that it has no suggestions.
-fn persona_editor(alias: &str, saved: Option<&str>, host: &str) -> Result<Persona, String> {
+fn persona_editor(
+    alias: &str,
+    saved: Option<&str>,
+    host: &str,
+    environment: &namedrop::environment::EnvironmentSnapshot,
+) -> Result<Persona, String> {
     let interactive = io::stdin().is_terminal();
     let _mode = InputMode::polling()?;
     let draft = saved.unwrap_or_default().as_bytes().to_vec();
@@ -1040,7 +1083,13 @@ fn persona_editor(alias: &str, saved: Option<&str>, host: &str) -> Result<Person
             let alias = alias.to_owned();
             let host = host.to_owned();
             scope.spawn(move || {
-                let suggestion = namedrop::suggest_agent_persona(&alias, &draft, &host, &cancelled);
+                let suggestion = namedrop::suggest_agent_persona_with_environment(
+                    &alias,
+                    &draft,
+                    &host,
+                    &cancelled,
+                    environment,
+                );
                 let _ = sender.send((generation, suggestion));
             });
         };

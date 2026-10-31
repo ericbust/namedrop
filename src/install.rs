@@ -56,8 +56,25 @@ pub struct AgentConfigDirectories<'a> {
     pub claude: Option<&'a Path>,
     pub codex: Option<&'a Path>,
     pub state_root: Option<&'a Path>,
+    pub config_root: Option<&'a Path>,
+    pub data_root: Option<&'a Path>,
+    pub runtime_root: Option<&'a Path>,
+    pub herdr_config: Option<&'a Path>,
 }
 impl AgentConfigDirectories<'_> {
+    pub fn update_settings(self, home: Option<&Path>) -> Option<PathBuf> {
+        self.config_root
+            .map(Path::to_owned)
+            .or_else(|| home.map(|home| home.join(".config")))
+            .map(|root| root.join("herdr/plugins/config/namedrop/settings.json"))
+    }
+    pub fn shortcut_config(self, home: Option<&Path>) -> Option<PathBuf> {
+        self.herdr_config
+            .map(Path::to_owned)
+            .or_else(|| self.config_root.map(|root| root.join("herdr/config.toml")))
+            .or_else(|| home.map(|home| home.join(".config/herdr/config.toml")))
+    }
+
     fn claude(self, home: &Path) -> PathBuf {
         self.claude
             .map(Path::to_owned)
@@ -1206,6 +1223,7 @@ fn hook_script_for_context(
     }
 }
 
+// Each generated hook starts a new process and resolves its inherited roots there.
 const HC_HOOK_PREAMBLE: &str = "[ -n \"${HC_TERMINAL_ID-}\" ] || exit 0\nnamedrop_state=\"${NAMEDROP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/namedrop/hc/${HC_SESSION:-default}}\"\n";
 
 fn hook_script(

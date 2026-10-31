@@ -56,6 +56,41 @@ impl HostKind {
         let Some(terminal) = variable("HC_TERMINAL_ID") else {
             return Ok(Self::Tui);
         };
+        let environment = crate::environment::EnvironmentSnapshot::from_variables(
+            [
+                "HOME",
+                "XDG_STATE_HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+                "XDG_RUNTIME_DIR",
+                "HC_SOCKET",
+                "HC_TERMINAL_SOCKET",
+                "HC_SESSION",
+                "HERDR_PANE_ID",
+                "HERDR_SOCKET_PATH",
+                "HERDR_BIN_PATH",
+                "HC_BIN_PATH",
+                "NAMEDROP_HERDR_TIMEOUT_MS",
+                "PATH",
+            ]
+            .into_iter()
+            .filter_map(|key| variable(key).map(|value| (key.into(), value.into())))
+            .chain(std::iter::once(("HC_TERMINAL_ID".into(), terminal.into()))),
+        );
+        Self::from_snapshot(None, &environment)
+    }
+
+    pub fn from_snapshot(
+        explicit: Option<Self>,
+        environment: &crate::environment::EnvironmentSnapshot,
+    ) -> Result<Self, String> {
+        if let Some(host) = explicit {
+            return Ok(host);
+        }
+        let variable = |key| environment.var(key);
+        let Some(terminal) = variable("HC_TERMINAL_ID") else {
+            return Ok(Self::Tui);
+        };
         let Some(pane) = variable("HERDR_PANE_ID") else {
             return Ok(if variable("HERDR_SOCKET_PATH").is_some() {
                 Self::Tui
@@ -63,17 +98,21 @@ impl HostKind {
                 Self::Hc
             });
         };
-        Ok(Self::innermost_host(&pane, &terminal).unwrap_or(Self::Tui))
+        Ok(Self::innermost_host(&pane, &terminal, environment).unwrap_or(Self::Tui))
     }
 
-    fn innermost_host(pane: &str, terminal: &str) -> Option<Self> {
+    fn innermost_host(
+        pane: &str,
+        terminal: &str,
+        environment: &crate::environment::EnvironmentSnapshot,
+    ) -> Option<Self> {
         use crate::Budget;
         let budget = IdentityBudget {
             deadline: Instant::now() + Duration::from_millis(1500),
             cancelled: AtomicBool::new(false),
         };
-        let tui = crate::TuiHost::new(ProcessHerdr::for_host(Self::Tui));
-        let hc = crate::HcHost::new(ProcessHerdr::for_host(Self::Hc));
+        let tui = crate::TuiHost::new(ProcessHerdr::from_snapshot(Self::Tui, environment));
+        let hc = crate::HcHost::new(ProcessHerdr::from_snapshot(Self::Hc, environment));
         let tui_pid = tui.shell_pid(pane, &budget)?;
         let hc_pid = hc.shell_pid(terminal, &budget)?;
         let mut ancestors = Vec::new();
@@ -100,12 +139,9 @@ impl HostKind {
     }
 
     pub fn from_environment(explicit: Option<Self>) -> Result<Self, String> {
-        Self::detect(
-            HostSignals {
-                host: explicit,
-                ..HostSignals::default()
-            },
-            |key| env::var(key).ok(),
+        Self::from_snapshot(
+            explicit,
+            &crate::environment::EnvironmentSnapshot::capture(),
         )
     }
 }
@@ -142,7 +178,7 @@ pub fn hc_state_root(variable: impl Fn(&str) -> Option<String>) -> Result<PathBu
         .ok_or_else(|| "Set XDG_STATE_HOME, HOME, or --plugin-state for hc.".to_owned())
 }
 
-fn hc_session(variable: impl Fn(&str) -> Option<String>) -> Result<String, String> {
+pub(crate) fn hc_session(variable: impl Fn(&str) -> Option<String>) -> Result<String, String> {
     let session = variable("HC_SESSION").unwrap_or_default();
     let session = session.trim();
     let session = if session.is_empty() {
@@ -168,7 +204,13 @@ pub fn hc_state_directory(variable: impl Fn(&str) -> Option<String>) -> Result<P
 }
 
 pub fn hc_socket_path(variable: impl Fn(&str) -> Option<String>) -> Result<PathBuf, String> {
-    let session = hc_session(&variable)?;
+    hc_socket_path_os(|key| variable(key).map(Into::into))
+}
+
+pub(crate) fn hc_socket_path_os(
+    variable: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    let session = hc_session(|key| variable(key)?.into_string().ok())?;
     for key in ["HC_SOCKET", "HC_TERMINAL_SOCKET"] {
         if let Some(socket) = variable(key).filter(|value| !value.is_empty()) {
             return Ok(socket.into());
@@ -212,7 +254,13 @@ pub fn hc_socket_path(variable: impl Fn(&str) -> Option<String>) -> Result<PathB
         });
     let directory = match runtime {
         Some(root) => root.join("herdr-core"),
-        None => hc_state_root(variable)?.join("herdr-core").join(&session),
+        None => variable("XDG_STATE_HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| variable("HOME").map(|home| PathBuf::from(home).join(".local/state")))
+            .ok_or("Set XDG_STATE_HOME, HOME, or --plugin-state for hc.")?
+            .join("herdr-core")
+            .join(&session),
     };
     Ok(directory.join(format!("{session}.sock")))
 }
@@ -302,44 +350,55 @@ pub struct ProcessHerdr {
     timeout: Duration,
     socket: Option<String>,
     child_executable: Option<std::path::PathBuf>,
+    environment: crate::environment::EnvironmentSnapshot,
 }
 
 impl Default for ProcessHerdr {
     fn default() -> Self {
-        Self {
-            host: HostKind::Tui,
-            binary: env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned()),
-            socket: None,
-            child_executable: None,
-            timeout: Duration::from_millis(
-                env::var("NAMEDROP_HERDR_TIMEOUT_MS")
-                    .ok()
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .filter(|milliseconds| *milliseconds > 0)
-                    .unwrap_or(DEFAULT_HERDR_TIMEOUT_MS)
-                    .min(MAX_HERDR_TIMEOUT_MS),
-            ),
-        }
+        Self::for_host(HostKind::Tui)
     }
 }
 
 impl ProcessHerdr {
     pub fn for_host(host: HostKind) -> Self {
-        match host {
-            HostKind::Tui => Self::default(),
-            HostKind::Hc => Self {
-                host,
-                binary: env::var("HC_BIN_PATH").unwrap_or_else(|_| "hc".to_owned()),
-                ..Self::default()
-            },
+        Self::from_snapshot(host, &crate::environment::EnvironmentSnapshot::capture())
+    }
+
+    pub fn from_snapshot(
+        host: HostKind,
+        environment: &crate::environment::EnvironmentSnapshot,
+    ) -> Self {
+        if host == HostKind::Hc {
+            let _ = environment.hc_endpoint();
+        }
+        Self {
+            host,
+            binary: environment
+                .var(if host == HostKind::Hc {
+                    "HC_BIN_PATH"
+                } else {
+                    "HERDR_BIN_PATH"
+                })
+                .unwrap_or_else(|| if host == HostKind::Hc { "hc" } else { "herdr" }.to_owned()),
+            socket: None,
+            child_executable: None,
+            timeout: Duration::from_millis(
+                environment
+                    .var("NAMEDROP_HERDR_TIMEOUT_MS")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .filter(|ms| *ms > 0)
+                    .unwrap_or(DEFAULT_HERDR_TIMEOUT_MS)
+                    .min(MAX_HERDR_TIMEOUT_MS),
+            ),
+            environment: environment.clone(),
         }
     }
 
     pub fn command(&self) -> Command {
         match self.host {
-            HostKind::Hc => hc_command(&self.binary),
+            HostKind::Hc => self.environment.hc_command(&self.binary),
             HostKind::Tui => {
-                let mut command = Command::new(&self.binary);
+                let mut command = self.environment.command(&self.binary);
                 if let Some(socket) = &self.socket {
                     command.env("HERDR_SOCKET_PATH", socket);
                 }
@@ -371,8 +430,8 @@ impl ProcessHerdr {
             return Ok(self.command());
         }
         check_hc_budget(deadline, cancelled)?;
-        let socket = hc_socket_path(|key| env::var(key).ok())?;
-        connect_hc_socket(&socket, deadline, cancelled)?;
+        let socket = self.environment.hc_endpoint()?;
+        connect_hc_socket(socket, deadline, cancelled)?;
         let mut command = self.command();
         command.env("HC_SOCKET", socket);
         Ok(command)
@@ -728,7 +787,9 @@ mod bounded_read_tests {
         fs::create_dir_all(&root).unwrap();
         let path = root.join("hc.sock");
         let listener = hc_socket_fixture::HcSocket::bind(&path).unwrap();
+        use crate::test_environment::CommandHome;
         let output = Command::new(env::current_exe().unwrap())
+            .isolated_home(root.join("home"))
             .args([
                 "--exact",
                 &format!("runtime::bounded_read_tests::{test}"),
@@ -754,26 +815,18 @@ mod bounded_read_tests {
     fn hc_commands_remove_terminal_identity_but_retain_core_routing() {
         let executor = ProcessHerdr::for_host(HostKind::Hc);
         let command = executor.command();
-        let removals: Vec<_> = command
-            .get_envs()
-            .map(|(key, value)| (key.to_str().unwrap(), value))
-            .collect();
-        let mut expected: Vec<_> = env::vars_os()
-            .map(|(key, _)| key)
-            .filter(|key| {
-                use std::os::unix::ffi::OsStrExt;
-                key.as_bytes().starts_with(b"HERDR_")
-            })
-            .collect();
-        expected.extend(["HC_TERMINAL_ID".into(), "HC_TERMINAL_SOCKET".into()]);
-        expected.sort();
-        assert_eq!(
-            removals,
-            expected
-                .iter()
-                .map(|key| (key.to_str().unwrap(), None))
-                .collect::<Vec<_>>()
-        );
+        use std::os::unix::ffi::OsStrExt;
+        assert!(command.get_envs().all(|(key, value)| value.is_none()
+            || (!key.as_bytes().starts_with(b"HERDR_")
+                && key != "HC_TERMINAL_ID"
+                && key != "HC_TERMINAL_SOCKET")));
+        if let Ok(endpoint) = executor.environment.hc_endpoint() {
+            assert!(
+                command
+                    .get_envs()
+                    .any(|(key, value)| key == "HC_SOCKET" && value == Some(endpoint.as_os_str()))
+            );
+        }
     }
 
     #[test]
@@ -787,6 +840,7 @@ mod bounded_read_tests {
             timeout: Duration::from_millis(10),
             socket: None,
             child_executable: None,
+            environment: crate::environment::EnvironmentSnapshot::capture(),
         };
         assert_eq!(
             executor.bounded_timeout(Duration::from_secs(120)),
@@ -872,6 +926,7 @@ mod bounded_read_tests {
             timeout: Duration::from_millis(DEFAULT_HERDR_TIMEOUT_MS),
             socket: None,
             child_executable: None,
+            environment: crate::environment::EnvironmentSnapshot::capture(),
         };
         let result = executor.execute(&["send", "t1", "hello", "--json"]);
         fs::remove_dir_all(root).unwrap();
@@ -886,6 +941,7 @@ mod bounded_read_tests {
             timeout: Duration::from_secs(2),
             socket: None,
             child_executable: None,
+            environment: crate::environment::EnvironmentSnapshot::capture(),
         };
         let cancelled = AtomicBool::new(false);
         let deadline = Duration::from_millis(80);

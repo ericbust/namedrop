@@ -41,6 +41,8 @@ pub struct Cli {
 #[derive(Clone, Debug, Default, Args)]
 pub struct RuntimeOptions {
     #[arg(skip)]
+    pub environment: crate::environment::EnvironmentSnapshot,
+    #[arg(skip)]
     pub ambient_host: std::cell::OnceCell<crate::runtime::HostKind>,
     #[arg(long, global = true, hide = true)]
     pub hc_hook: bool,
@@ -81,7 +83,7 @@ impl RuntimeOptions {
 
     pub fn ambient_host_kind(&self) -> crate::runtime::HostKind {
         *self.ambient_host.get_or_init(|| {
-            crate::runtime::HostKind::from_environment(None)
+            crate::runtime::HostKind::from_snapshot(None, &self.environment)
                 .unwrap_or(crate::runtime::HostKind::Tui)
         })
     }
@@ -91,17 +93,16 @@ impl RuntimeOptions {
         self.plugin_state
             .clone()
             .or_else(|| {
-                std::env::var_os(match host {
-                    crate::runtime::HostKind::Tui => "HERDR_PLUGIN_STATE_DIR",
-                    crate::runtime::HostKind::Hc => "NAMEDROP_STATE_DIR",
-                })
-                .map(PathBuf::from)
+                self.environment
+                    .var_os(match host {
+                        crate::runtime::HostKind::Tui => "HERDR_PLUGIN_STATE_DIR",
+                        crate::runtime::HostKind::Hc => "NAMEDROP_STATE_DIR",
+                    })
+                    .map(PathBuf::from)
             })
             .map(Ok)
             .unwrap_or_else(|| match host {
-                crate::runtime::HostKind::Hc => {
-                    crate::runtime::hc_state_directory(|key| std::env::var(key).ok())
-                }
+                crate::runtime::HostKind::Hc => self.environment.hc_state_directory(),
                 crate::runtime::HostKind::Tui => {
                     Err("HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())
                 }

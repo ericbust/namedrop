@@ -612,8 +612,22 @@ pub fn start<E: HerdrCommandExecutor>(
     executable: &Path,
     state: &Path,
 ) -> Result<(), HostError> {
+    start_with_environment(
+        host,
+        executable,
+        state,
+        &crate::environment::EnvironmentSnapshot::capture(),
+    )
+}
+
+pub fn start_with_environment<E: HerdrCommandExecutor>(
+    host: &HcHost<E>,
+    executable: &Path,
+    state: &Path,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<(), HostError> {
     let socket = host.core_identity()?;
-    let endpoint = crate::runtime::hc_socket_path(|key| std::env::var(key).ok())?;
+    let endpoint = environment.hc_endpoint()?;
     let directory = subscriber_directory(state, &socket);
     let launch = lock_file(&directory, "launch.lock")?;
     launch.lock().map_err(|error| error.to_string())?;
@@ -636,7 +650,7 @@ pub fn start<E: HerdrCommandExecutor>(
         stop_verified(&directory, &record)?;
     }
     drop(wait_for_lifetime(&directory)?);
-    let mut command = crate::runtime::hc_command(executable);
+    let mut command = environment.hc_command(executable);
     command
         .env("HC_SOCKET", endpoint)
         .env("NAMEDROP_SUBSCRIBER_LAUNCH_PATH", executable)
@@ -686,7 +700,14 @@ extern "C" fn request_stop(_: libc::c_int) {
 }
 
 pub fn run(state: &Path) -> Result<(), String> {
-    let transport = crate::ProcessHerdr::for_host(crate::runtime::HostKind::Hc);
+    run_with_environment(state, &crate::environment::EnvironmentSnapshot::capture())
+}
+
+pub fn run_with_environment(
+    state: &Path,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<(), String> {
+    let transport = crate::ProcessHerdr::from_snapshot(crate::runtime::HostKind::Hc, environment);
     let host = HcHost::new(&transport);
     let socket = host.core_identity()?;
     let directory = subscriber_directory(state, &socket);
@@ -697,7 +718,8 @@ pub fn run(state: &Path) -> Result<(), String> {
         Err(error) => return Err(error.to_string()),
     }
     let running = std::env::current_exe().map_err(|error| error.to_string())?;
-    let launch_path = std::env::var_os("NAMEDROP_SUBSCRIBER_LAUNCH_PATH")
+    let launch_path = environment
+        .var_os("NAMEDROP_SUBSCRIBER_LAUNCH_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| running.clone());
     let record = SubscriberRecord {
@@ -728,24 +750,13 @@ pub fn run(state: &Path) -> Result<(), String> {
             request_stop as *const () as libc::sighandler_t,
         );
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let claude = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-    let codex = std::env::var_os("CODEX_HOME").map(PathBuf::from);
-    let state_root = std::env::var_os("XDG_STATE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| home.as_ref().map(|home| home.join(".local/state")));
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let clock = crate::SystemClock;
     let ids = crate::ProcessIds::default();
     let runtime = LifecycleRuntime {
         state_directory: state,
-        home_directory: home.as_deref(),
-        agent_config: crate::AgentConfigDirectories {
-            claude: claude.as_deref(),
-            codex: codex.as_deref(),
-            state_root: state_root.as_deref(),
-        },
+        home_directory: environment.home(),
+        agent_config: environment.agent_config(),
         cwd: &cwd,
         workspace_id: None,
         current_pane_id: None,

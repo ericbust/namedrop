@@ -1288,3 +1288,42 @@ fn hc_permission_owner_accepts_an_explicit_state_root_across_sessions() {
     assert!(!home.join(".local/state/namedrop-app").exists());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn hc_install_uses_one_owned_root_snapshot_for_packages_and_permissions() {
+    let root = owner_review_root("owned-root-snapshot");
+    let home = root.join("home");
+    let state_root = root.join("xdg-state");
+    let claude = root.join("claude");
+    let codex = root.join("codex");
+    let snapshot = crate::environment::EnvironmentSnapshot::from_variables([
+        ("HOME".into(), home.as_os_str().to_owned()),
+        ("XDG_STATE_HOME".into(), state_root.as_os_str().to_owned()),
+        ("CLAUDE_CONFIG_DIR".into(), claude.as_os_str().to_owned()),
+        ("CODEX_HOME".into(), codex.as_os_str().to_owned()),
+    ]);
+    let state = snapshot.hc_state_directory().unwrap();
+    let context = PackageContext::new(snapshot.home().unwrap(), true);
+    let config = snapshot.agent_config();
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        install_integration_package_with_config(
+            &context,
+            runtime,
+            &root.join("executable"),
+            &state,
+            config,
+        )
+        .unwrap();
+        assert!(context.directory(runtime).join("SKILL.md").is_file());
+    }
+    assert!(claude.join("settings.json").is_file());
+    assert!(codex.join("rules/namedrop-app.rules").is_file());
+    assert!(
+        state_root
+            .join("namedrop-app/claude-permissions.json")
+            .is_file()
+    );
+    assert!(!home.join(".local/state").exists());
+    assert!(!home.join(".codex").exists());
+    fs::remove_dir_all(root).unwrap();
+}

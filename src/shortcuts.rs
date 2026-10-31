@@ -1,11 +1,6 @@
 //! Shared shortcut installation for activation and the explicit repair command.
 use crate::Host;
-use std::{
-    env, fs,
-    io::Write,
-    os::unix::fs::OpenOptionsExt,
-    path::{Path, PathBuf},
-};
+use std::{fs, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 /// (key, action, label, description). Every key is free in Herdr's default
@@ -58,21 +53,6 @@ fn contains_key(item: &Item, key: &str) -> bool {
     })
 }
 
-/// Herdr reads `$XDG_CONFIG_HOME/herdr/config.toml` when that is an absolute
-/// path, otherwise `~/.config/herdr/config.toml`. XDG_CONFIG_HOME belongs to
-/// this process's own user, so it only applies when `home` is that user's
-/// HOME; activating for another home (tests, isolated profiles) never touches
-/// this user's configuration.
-fn default_config(home: &Path) -> PathBuf {
-    let own_home = env::var_os("HOME").is_some_and(|value| Path::new(&value) == home);
-    env::var_os("XDG_CONFIG_HOME")
-        .filter(|_| own_home)
-        .map(PathBuf::from)
-        .filter(|directory| directory.is_absolute())
-        .unwrap_or_else(|| home.join(".config"))
-        .join("herdr/config.toml")
-}
-
 /// Add each Namedrop shortcut that is not yet bound. An existing binding for
 /// the action is kept, including a custom key; a key already used by anything
 /// else is left alone and reported. All additions land in one atomic write.
@@ -80,12 +60,18 @@ pub fn install_shortcuts(
     config: Option<&Path>,
     home: Option<&Path>,
 ) -> Result<serde_json::Value, String> {
-    let path = config
-        .map(Path::to_path_buf)
-        .or_else(|| env::var_os("HERDR_CONFIG_PATH").map(PathBuf::from))
-        .or_else(|| home.map(default_config))
-        .ok_or("Could not locate Herdr configuration; use --config PATH")?;
-    let metadata = match fs::symlink_metadata(&path) {
+    let environment = crate::environment::EnvironmentSnapshot::capture();
+    let captured = if environment.home() == home {
+        environment.agent_config().shortcut_config(home)
+    } else {
+        crate::AgentConfigDirectories::default().shortcut_config(home)
+    };
+    install_shortcuts_at(config.or(captured.as_deref()))
+}
+
+pub fn install_shortcuts_at(config: Option<&Path>) -> Result<serde_json::Value, String> {
+    let path = config.ok_or("Could not locate Herdr configuration; use --config PATH")?;
+    let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.is_file() => Some(metadata),
         Ok(_) => return Err("Herdr configuration must be a regular file".to_owned()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -93,7 +79,7 @@ pub fn install_shortcuts(
     };
     let existed = metadata.is_some();
     let original = if existed {
-        fs::read_to_string(&path).map_err(|e| e.to_string())?
+        fs::read_to_string(path).map_err(|e| e.to_string())?
     } else {
         String::new()
     };
@@ -178,7 +164,7 @@ pub fn install_shortcuts(
     write_private(&temporary, &document.to_string())?;
     let result = (|| {
         if let Some(metadata) = metadata {
-            if fs::read_to_string(&path).map_err(|e| e.to_string())? != original {
+            if fs::read_to_string(path).map_err(|e| e.to_string())? != original {
                 return Err(
                     "Herdr configuration changed while preparing the shortcuts; try again"
                         .to_owned(),
@@ -186,10 +172,10 @@ pub fn install_shortcuts(
             }
             write_private(&backup, &original)?;
             fs::set_permissions(&temporary, metadata.permissions()).map_err(|e| e.to_string())?;
-            fs::rename(&temporary, &path).map_err(|e| e.to_string())?;
+            fs::rename(&temporary, path).map_err(|e| e.to_string())?;
         } else {
             // Publish a new config only if no file appeared while preparing it.
-            fs::hard_link(&temporary, &path).map_err(|e| e.to_string())?;
+            fs::hard_link(&temporary, path).map_err(|e| e.to_string())?;
         }
         Ok(
             serde_json::json!({"status":status, "path":path, "backup":existed.then_some(&backup), "next_step":"herdr server reload-config", "bindings":bindings}),
@@ -199,8 +185,8 @@ pub fn install_shortcuts(
     result
 }
 
-pub(crate) fn activate_shortcuts(home: Option<&Path>, herdr: &impl Host) -> serde_json::Value {
-    match install_shortcuts(None, home) {
+pub(crate) fn activate_shortcuts(config: Option<&Path>, herdr: &impl Host) -> serde_json::Value {
+    match install_shortcuts_at(config) {
         Ok(mut report) => {
             match herdr.reload_config() {
                 Ok(_) => {
@@ -231,7 +217,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = env::temp_dir().join(format!(
+        let root = std::env::temp_dir().join(format!(
             "namedrop-tour-shortcuts-{}-{nonce}",
             std::process::id()
         ));
