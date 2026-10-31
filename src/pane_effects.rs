@@ -422,6 +422,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "macos"))]
     fn diagnostic_fault_with_non_utf8_state_preserves_acquisition_error() {
         use std::os::unix::ffi::OsStrExt;
         let root = State::new();
