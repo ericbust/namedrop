@@ -19,6 +19,7 @@ struct Fixture {
     read_text: Option<String>,
     clear_error: RefCell<Option<String>>,
     rename_error: RefCell<bool>,
+    name_write_failure: RefCell<Option<bool>>,
 }
 impl Default for Fixture {
     fn default() -> Self {
@@ -37,6 +38,7 @@ impl Default for Fixture {
             read_text: None,
             clear_error: RefCell::new(None),
             rename_error: RefCell::new(false),
+            name_write_failure: RefCell::new(None),
         }
     }
 }
@@ -85,6 +87,18 @@ impl HerdrCommandExecutor for Fixture {
             }
             ["--version"] => "herdr-core 0.1.14\n".to_owned(),
             ["label", id, labels @ ..] => {
+                let failure = if labels
+                    .iter()
+                    .any(|label| label.starts_with("namedrop.name="))
+                {
+                    self.name_write_failure.borrow_mut().take()
+                } else {
+                    None
+                };
+                if failure == Some(false) {
+                    return Err("transient name write failed before applying".into());
+                }
+
                 if *self.rename_error.borrow()
                     && (labels.contains(&"namedrop.name=bob")
                         || (*id == "t2" && labels.contains(&"namedrop.name=alice")))
@@ -104,6 +118,9 @@ impl HerdrCommandExecutor for Fixture {
                 for label in labels.iter().filter(|label| **label != "--json") {
                     let (key, value) = label.split_once('=').unwrap();
                     terminal["labels"][key] = json!(value);
+                }
+                if failure == Some(true) {
+                    return Err("transient name write failed after applying".into());
                 }
                 "{}".into()
             }
@@ -945,5 +962,102 @@ fn naming_without_a_tab_works_for_parked_and_headless_terminals() {
                 "parked"
             );
         });
+    }
+}
+
+#[test]
+fn move_label_failure_preserves_source_proof_until_fresh_subscriber_repairs_mirror() {
+    for applied in [false, true] {
+        for destination_alias in [None, Some("destination-name")] {
+            for first in ["labels", "snapshot", "missed"] {
+                for retry in ["labels", "snapshot", "missed"] {
+                    check(
+                        &format!(
+                            "move-failure-{applied}-{}-{first}-{retry}",
+                            destination_alias.unwrap_or("empty")
+                        ),
+                        |fixture, runtime| {
+                            fixture.terminals.borrow_mut()[0]["labels"]["herdr.space"] =
+                                json!("destination");
+                            let destination = namedrop::LifecycleRuntime {
+                                workspace_id: Some("destination"),
+                                ..*runtime
+                            };
+                            if let Some(alias) = destination_alias {
+                                namedrop::execute_lifecycle_operation(
+                                    "name",
+                                    json!({"alias":alias, "pane_type":"terminal"}),
+                                    &destination,
+                                )
+                                .unwrap();
+                            } else {
+                                namedrop::execute_lifecycle_operation(
+                                    "activate",
+                                    json!({"confirmed":true}),
+                                    &destination,
+                                )
+                                .unwrap();
+                            }
+                            fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] =
+                                json!("alice");
+                            let event = |kind| match kind {
+                                "snapshot" => {
+                                    json!({"terminals":*fixture.terminals.borrow()}).to_string()
+                                }
+                                "missed" => json!({"method":"missed","params":{}}).to_string(),
+                                _ => labels(),
+                            };
+                            *fixture.name_write_failure.borrow_mut() = Some(applied);
+                            let error = namedrop::host::hc::events::Subscriber::default()
+                                .handle_line(&event(first), runtime)
+                                .unwrap_err();
+                            assert!(error.contains("transient name write failed"), "{error}");
+                            let mut store =
+                                namedrop::StateStore::open(runtime.state_directory).unwrap();
+                            let source =
+                                namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+                            let target =
+                                namedrop::StateNamespace::for_space("hc:fixture", "destination");
+                            assert_eq!(
+                                store
+                                    .transaction(|tx| tx.active_pane_bindings(&source))
+                                    .unwrap()
+                                    .len(),
+                                1,
+                                "failed mirror write lost durable source binding: applied={applied}, first={first}, retry={retry}"
+                            );
+                            namedrop::host::hc::events::Subscriber::default()
+                                .handle_line(&event(retry), runtime)
+                                .unwrap();
+                            assert!(
+                                store
+                                    .transaction(|tx| tx.active_pane_bindings(&source))
+                                    .unwrap()
+                                    .is_empty()
+                            );
+                            let destination_addresses = store
+                                .transaction(|tx| tx.list_pane_addresses(&target))
+                                .unwrap();
+                            assert!(
+                                !destination_addresses
+                                    .iter()
+                                    .any(|address| address.alias == "alice")
+                            );
+                            assert_eq!(
+                                destination_addresses
+                                    .iter()
+                                    .find(|address| address.pane_id.as_deref() == Some("t1"))
+                                    .map(|address| address.alias.as_str()),
+                                destination_alias
+                            );
+                            assert_eq!(
+                                fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+                                destination_alias.unwrap_or("")
+                            );
+                        },
+                    );
+                }
+            }
+        }
     }
 }
