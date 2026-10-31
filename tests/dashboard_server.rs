@@ -515,8 +515,6 @@ fn open_dashboard(root: &Path, workspace: &str) -> serde_json::Value {
         .args(["--json", "--plugin-state"])
         .arg(root.join("state"))
         .args([
-            "--host",
-            "tui",
             "--herdr-socket",
             SOCKET,
             "--herdr-workspace",
