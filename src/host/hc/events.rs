@@ -1,10 +1,9 @@
 use super::*;
 use crate::{Clock, IdGenerator, LifecycleRuntime, StateStore};
 use serde_json::{Value, json};
-use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
 use std::process::Stdio;
-use std::sync::mpsc;
+mod rpc;
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -1229,10 +1228,19 @@ pub fn run_with_environment(
     state: &Path,
     environment: &crate::environment::EnvironmentSnapshot,
 ) -> Result<(), String> {
-    let transport = crate::ProcessHerdr::from_snapshot(crate::runtime::HostKind::Hc, environment)
-        .with_state_directory(state.to_owned());
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            request_stop as *const () as libc::sighandler_t,
+        );
+    }
+    let transport = rpc::SubscriberRpc::new(environment, state, &STOP)?;
     let host = HcHost::new(&transport);
-    let socket = host.core_identity()?;
+    let socket = match host.core_identity() {
+        Ok(socket) => socket,
+        Err(_) if STOP.load(std::sync::atomic::Ordering::Relaxed) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
     let directory = subscriber_directory(state, &socket);
     let lifetime = lock_file(&directory, "lifetime.lock")?;
     match lifetime.try_lock() {
@@ -1267,12 +1275,6 @@ pub fn run_with_environment(
         directory.join("subscriber.json"),
     )
     .map_err(|error| error.to_string())?;
-    unsafe {
-        libc::signal(
-            libc::SIGTERM,
-            request_stop as *const () as libc::sighandler_t,
-        );
-    }
     let cwd = std::env::current_dir().map_err(|error| error.to_string())?;
     let clock = crate::SystemClock;
     let ids = crate::ProcessIds::default();
@@ -1291,11 +1293,13 @@ pub fn run_with_environment(
     let mut subscriber = Subscriber::default();
     let mut reconnect: Option<(u8, std::time::Instant)> = None;
     while !record.should_stop(&directory, state) {
-        if let Some((attempts, started)) = &mut reconnect {
-            if *attempts == 3 || started.elapsed() >= Duration::from_secs(12) {
+        let now = std::time::Instant::now();
+        let deadline = if let Some((attempts, started)) = &mut reconnect {
+            if *attempts == 3 || started.elapsed() >= Duration::from_secs(15) {
                 break;
             }
-            for _ in 0..10 {
+            let scheduled = *started + Duration::from_secs(u64::from(*attempts) * 5);
+            while std::time::Instant::now() < scheduled {
                 if record.should_stop(&directory, state) {
                     return Ok(());
                 }
@@ -1303,50 +1307,31 @@ pub fn run_with_environment(
             }
             *attempts += 1;
             eprintln!("Namedrop hc reconnect attempt {attempts}/3");
-        }
-        let mut command = match transport.checked_command_bounded(Duration::from_millis(250), &STOP)
-        {
-            Ok(command) => command,
-            Err(_) if record.should_stop(&directory, state) => break,
-            Err(error)
-                if error.starts_with("hc core is unavailable at ")
-                    || error == "Herdr command timed out during hc socket preflight" =>
-            {
+            (*started + Duration::from_secs(15))
+                .min(std::time::Instant::now() + Duration::from_secs(2))
+        } else {
+            now + Duration::from_secs(2)
+        };
+        let (mut stream, snapshot) = match transport.subscribe(deadline) {
+            Ok(subscription) => subscription,
+            Err(error) => {
                 eprintln!("Namedrop hc reconnect: {error}");
                 reconnect.get_or_insert((0, std::time::Instant::now()));
                 continue;
             }
-            Err(error) => return Err(error),
         };
-        if record.should_stop(&directory, state) {
-            break;
-        }
-        let mut child = command
-            .args(["events", "--json"])
-            .process_group(0)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| format!("Could not subscribe to hc events: {error}"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or("hc events stdout is unavailable")?;
-        let (sender, receiver) = mpsc::sync_channel(1024);
-        let reader = std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                if sender.send(line).is_err() {
-                    break;
-                }
-            }
-        });
+        reconnect = None;
+        subscriber.pending = Pending::default();
+        let mut snapshot = Some(snapshot);
         'stream: loop {
-            let line = receiver.recv_timeout(Duration::from_millis(250));
-            if record.should_stop(&directory, state)
-                || reconnect
-                    .is_some_and(|(_, started)| started.elapsed() >= Duration::from_secs(12))
-            {
+            let line = match snapshot.take() {
+                Some(snapshot) => Ok(Some(snapshot)),
+                None => stream.next(
+                    std::time::Instant::now() + Duration::from_millis(250),
+                    &STOP,
+                ),
+            };
+            if record.should_stop(&directory, state) {
                 break;
             }
             let guard = loop {
@@ -1354,11 +1339,7 @@ pub fn run_with_environment(
                     Ok(guard) => break guard,
                     Err(error) => {
                         eprintln!("Namedrop hc runtime: {error}");
-                        if record.should_stop(&directory, state)
-                            || reconnect.is_some_and(|(_, started)| {
-                                started.elapsed() >= Duration::from_secs(12)
-                            })
-                        {
+                        if record.should_stop(&directory, state) {
                             break 'stream;
                         }
                         std::thread::sleep(Duration::from_millis(25));
@@ -1369,17 +1350,13 @@ pub fn run_with_environment(
                 break;
             }
             match line {
-                Ok(Ok(line)) => {
+                Ok(Some(line)) => {
                     let mut lines = vec![line];
-                    while let Ok(Ok(line)) = receiver.try_recv() {
-                        lines.push(line);
-                    }
-                    if reconnect.is_some()
-                        && lines
-                            .iter()
-                            .any(|line| Pending::default().push(line).is_ok())
-                    {
-                        reconnect = None;
+                    while lines.len() < 1024 {
+                        match stream.next(std::time::Instant::now(), &STOP) {
+                            Ok(Some(line)) => lines.push(line),
+                            _ => break,
+                        }
                     }
                     if let Err(error) =
                         subscriber.handle_lines(lines.iter().map(String::as_str), &runtime)
@@ -1387,17 +1364,14 @@ pub fn run_with_environment(
                         eprintln!("Namedrop hc event: {error}");
                     }
                 }
-                Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => (),
+                Err(_) => break,
+                Ok(None) => (),
             }
             if let Err(error) = subscriber.tick(&runtime) {
                 eprintln!("Namedrop hc delivery: {error}");
             }
             drop(guard);
         }
-        crate::runtime::stop_process_group(&mut child);
-        drop(receiver);
-        let _ = reader.join();
         reconnect.get_or_insert((0, std::time::Instant::now()));
     }
     Ok(())
