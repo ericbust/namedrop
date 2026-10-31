@@ -27,6 +27,41 @@ struct Server {
 
 impl Server {
     fn start(state: &Path, idle_ms: Option<u64>) -> Self {
+        Self::start_with(state, idle_ms, |_| {})
+    }
+
+    fn start_with(
+        state: &Path,
+        idle_ms: Option<u64>,
+        after_publish: impl FnOnce(&mut Child),
+    ) -> Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::create_dir_all(state.join("dashboard")).unwrap();
+        let credentials = ["token", "session"].map(|name| {
+            let path = state.join("dashboard").join(name);
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let mut bytes = [0; 32];
+                    fs::File::open("/dev/urandom")
+                        .unwrap()
+                        .read_exact(&mut bytes)
+                        .unwrap();
+                    let secret = namedrop::lower_hex(&bytes);
+                    file.write_all(secret.as_bytes()).unwrap();
+                    secret
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    fs::read_to_string(path).unwrap()
+                }
+                Err(error) => panic!("could not prepare dashboard {name}: {error}"),
+            }
+        });
+        let [token, session] = credentials;
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         command
             .arg("--plugin-state")
@@ -42,7 +77,7 @@ impl Server {
         if let Some(idle) = idle_ms {
             command.env("NAMEDROP_DASHBOARD_IDLE_MS", idle.to_string());
         }
-        let child = command.spawn().unwrap();
+        let mut child = command.spawn().unwrap();
         let info = eventually(Duration::from_secs(10), || {
             let info: serde_json::Value =
                 serde_json::from_slice(&fs::read(state.join("dashboard/server.json")).ok()?)
@@ -50,11 +85,12 @@ impl Server {
             (info["pid"] == child.id()).then_some(info)
         })
         .expect("server.json published by the started server");
+        after_publish(&mut child);
         Self {
             child,
             port: info["port"].as_u64().unwrap() as u16,
-            token: fs::read_to_string(state.join("dashboard/token")).unwrap(),
-            session: fs::read_to_string(state.join("dashboard/session")).unwrap(),
+            token,
+            session,
         }
     }
 
@@ -643,7 +679,12 @@ fn an_idle_exit_rotates_the_browser_session() {
     let state = state(&directory);
     let ns = seed(&state, "w1", &["a"]);
     let page = format!("/w/{}", SpaceKey::of(&ns).as_str());
-    let mut first = Server::start(&state, Some(300));
+    let mut first = Server::start_with(&state, Some(300), |child| {
+        assert!(
+            eventually(Duration::from_secs(3), || child.try_wait().unwrap()).is_some(),
+            "startup can be descheduled until after the server's idle exit"
+        );
+    });
     let stale_cookie = first.cookie();
     assert!(first.exits_within(Duration::from_secs(3)));
 

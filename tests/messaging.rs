@@ -337,6 +337,64 @@ fn a_held_mailbox_is_reported_on_new_sends_and_idempotent_replays() {
 }
 
 #[test]
+fn a_reply_limit_hint_names_the_blocking_thread_on_sends_and_replays() {
+    let directory = TestDirectory::new();
+    setup_addresses(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-author"),
+        session_socket_id: "socket-a",
+        herdr: &FakeHerdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    let first = execute_message_operation(
+        "send",
+        serde_json::json!({
+            "request_id":"paused-head", "source":"@reviewer Original task"
+        }),
+        &runtime,
+    )
+    .unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("namedrop.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE thread_controls SET paused=1, reply_allowance=0 WHERE thread_id=?1",
+            [first["thread_id"].as_str().unwrap()],
+        )
+        .unwrap();
+    let input =
+        serde_json::json!({"request_id":"behind-pause", "source":"@reviewer @planner New task"});
+    for response in [
+        execute_message_operation("send", input.clone(), &runtime).unwrap(),
+        execute_message_operation("send", input, &runtime).unwrap(),
+    ] {
+        assert_ne!(response["thread_id"], first["thread_id"]);
+        let statement = response["delivery_outlook"][0]["statement"]
+            .as_str()
+            .unwrap();
+        assert!(
+            statement.contains(&format!(
+                "Continue for thread {}",
+                first["thread_id"].as_str().unwrap()
+            )),
+            "{statement}"
+        );
+        assert!(
+            !response["delivery_outlook"][1]["statement"]
+                .as_str()
+                .unwrap()
+                .contains("Continue")
+        );
+    }
+}
+
+#[test]
 fn agent_authored_send_persists_explicit_delegation_provenance() {
     let directory = TestDirectory::new();
     setup_addresses(&directory);

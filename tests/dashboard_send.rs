@@ -1997,38 +1997,62 @@ else:
 
     #[test]
     fn unsafe_pane_effects_directory_fails_with_a_durable_diagnostic() {
-        let f = Fixture::new();
-        f.register_all();
-        let directory = f.state.join("pane-effects");
-        fs::create_dir_all(&directory).unwrap();
-        fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
-        let server = Server::start(&f, None);
-        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
-        let response = server.post(
-            &format!("/w/{}/messages", key.as_str()),
-            &json!({"request_id":"unsafe-effects", "source":"@planner inspect"}).to_string(),
-            &[],
-        );
-        assert_eq!(response.status, 200, "{}", response.body);
-        wait_until("permanent pane lock fault fails the delivery", || {
-            f.texts("SELECT state FROM mailbox_deliveries") == ["failed"]
-        });
-        let mut store = StateStore::open(&f.state).unwrap();
-        let rows = store
-            .dashboard_rows(&StateNamespace::for_space("socket-a", "w1"))
-            .unwrap();
-        assert!(
-            rows.attention.iter().any(|row| {
-                let summary = row.item.summary.to_lowercase();
-                summary.contains("@planner")
-                    && !summary.contains("address-w1-planner")
-                    && !summary.contains("gate")
-                    && summary.contains("send the message again")
-                    && (summary.contains("unsafe") || summary.contains("permission"))
-            }),
-            "permanent pane lock failure needs an actionable durable diagnostic"
-        );
-        assert!(prompts(&f).is_empty());
+        for agent_sender in [false, true] {
+            let f = Fixture::new();
+            f.register_all();
+            let directory = f.state.join("pane-effects");
+            fs::create_dir_all(&directory).unwrap();
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+            let server = Server::start(&f, None);
+            let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+            if agent_sender {
+                let receipt = cli(
+                    &f,
+                    &["send"],
+                    json!({
+                        "request_id":"unsafe-effects", "source":"@planner inspect", "author_kind":"agent_session"
+                    }),
+                );
+                assert!(receipt["message_id"].is_string(), "{receipt}");
+            } else {
+                let response = server.post(
+                    &format!("/w/{}/messages", key.as_str()),
+                    &json!({"request_id":"unsafe-effects", "source":"@planner inspect"})
+                        .to_string(),
+                    &[],
+                );
+                assert_eq!(response.status, 200, "{}", response.body);
+            }
+            wait_until("permanent pane lock fault fails the delivery", || {
+                f.texts("SELECT state FROM mailbox_deliveries") == ["failed"]
+            });
+            let mut store = StateStore::open(&f.state).unwrap();
+            let rows = store
+                .dashboard_rows(&StateNamespace::for_space("socket-a", "w1"))
+                .unwrap();
+            assert!(
+                rows.attention.iter().any(|row| {
+                    let summary = row.item.summary.to_lowercase();
+                    summary.contains("@planner")
+                        && !summary.contains("address-w1-planner")
+                        && !summary.contains("gate")
+                        && !summary.contains("pane effects")
+                        && !summary.contains("retrying delivery")
+                        && summary.contains(
+                            "namedrop's lock for this pane has unsafe owner or permissions",
+                        )
+                        && summary.contains(
+                            "send it again, or ask the agent that sent it to send it again",
+                        )
+                }),
+                "permanent pane lock failure needs an actionable durable diagnostic: {:?}",
+                rows.attention
+                    .iter()
+                    .map(|row| &row.item.summary)
+                    .collect::<Vec<_>>()
+            );
+            assert!(prompts(&f).is_empty());
+        }
     }
 
     #[test]

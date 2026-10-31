@@ -585,6 +585,11 @@ fn implicit_followups_reach_all_agent_authors_and_recipients_without_a_model() {
     .unwrap();
     for (index, source) in [
         "Continue please.",
+        "planner inspect",
+        "planner, inspect",
+        "planner: inspect",
+        "planner",
+        "planner,",
         "Thanks @planner, continue. Unknown @ghost stays text.",
     ]
     .iter()

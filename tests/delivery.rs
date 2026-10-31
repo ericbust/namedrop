@@ -501,6 +501,60 @@ fn a_contended_pane_defers_only_its_mailbox_until_the_next_drain() {
 }
 
 #[test]
+fn drain_receipts_expose_local_and_forwarded_reports_to_both_frontends() {
+    use namedrop::{DrainReport, PaneAddressId, drain_reports};
+    use serde_json::json;
+    let pending = DrainReport {
+        delivery_notice: "",
+        pane_lock_deferred: vec![PaneAddressId::new("address-1")],
+        ..DrainReport::default()
+    };
+    for receipt in [
+        json!(pending),
+        json!({"drain": pending}),
+        json!({"delivery": pending}),
+        json!({"delivery": {"drain": pending}}),
+    ] {
+        let reports = drain_reports(&receipt).collect::<Vec<_>>();
+        assert_eq!(reports, vec![(None, pending.clone())]);
+        assert!(reports[0].1.needs_mailbox_worker());
+    }
+    let settled = DrainReport {
+        delivery_notice: "",
+        ..DrainReport::default()
+    };
+    let receipt = json!({
+        "drain": DrainReport::default(),
+        "delivery": {"error": "unavailable"},
+        "drains": {"ws1": pending, "ws2": {"drain": pending}, "ws3": {"error": "unavailable"}}
+    });
+    let reports = drain_reports(&receipt).collect::<Vec<_>>();
+    assert_eq!(
+        reports,
+        vec![
+            (None, settled),
+            (Some("ws1"), pending.clone()),
+            (Some("ws2"), pending)
+        ]
+    );
+    assert_eq!(
+        reports
+            .iter()
+            .filter(|(_, report)| report.needs_mailbox_worker())
+            .map(|(workspace, _)| *workspace)
+            .collect::<Vec<_>>(),
+        vec![Some("ws1"), Some("ws2")]
+    );
+    for invalid in [
+        json!(null),
+        json!({}),
+        json!({"drain": {"error": "unavailable"}}),
+    ] {
+        assert_eq!(drain_reports(&invalid).count(), 0);
+    }
+}
+
+#[test]
 fn drain_report_preserves_legacy_json_and_round_trips_pane_lock_deferrals() {
     let legacy = serde_json::json!({
         "terminal_waiting": [], "terminal_running": [], "delivery_notice": "",

@@ -530,6 +530,48 @@ fn registration_pane_lock(directory: &TestDirectory) -> fs::File {
 }
 
 #[test]
+fn registration_explains_unsafe_lock_permissions_without_internal_terms() {
+    let directory = TestDirectory::new();
+    setup_registered_address(&directory);
+    let herdr = ProductionHerdr::default();
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-agent"),
+        session_socket_id: "socket-a",
+        herdr: &herdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    issue_registration_challenge(
+        &PaneAddressId::new("address-agent"),
+        AgentRuntime::Codex,
+        &runtime,
+    )
+    .unwrap();
+    let lock = registration_pane_lock(&directory);
+    lock.set_permissions(fs::Permissions::from_mode(0o666))
+        .unwrap();
+
+    let error = execute_lifecycle_operation(
+        "event.agent-status-changed",
+        status_event("codex"),
+        &runtime,
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "Namedrop's lock for this pane has unsafe owner or permissions"
+    );
+    assert!(!error.contains("pane effects"), "{error}");
+    assert!(herdr.prompts.lock().unwrap().is_empty());
+}
+
+#[test]
 fn registration_gate_timeout_keeps_the_same_challenge_retryable() {
     use std::os::fd::AsRawFd;
 

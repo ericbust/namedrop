@@ -441,6 +441,39 @@ fn doctor_uses_current_package_evidence_without_rewriting_stale_attention() {
 }
 
 #[test]
+fn doctor_names_failed_context_sharing_and_how_to_retry() {
+    let f = Fixture::new();
+    f.register();
+    StateStore::open(&f.root)
+        .unwrap()
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &StateNamespace::for_space("socket-a", "workspace-1"),
+                &AttentionItemDraft {
+                    id: AttentionItemId::new("failed-context"),
+                    source_kind: AttentionSourceKind::ContextGrant,
+                    source_id: "grant-1".into(),
+                    summary: "Context Grant activation failed: snapshot exceeds 65536 bytes".into(),
+                },
+                &MutationAttribution::new(ActorKind::Plugin, "test", 100),
+            )
+        })
+        .unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-CONTEXT-001")
+        .unwrap();
+    assert_eq!(issue.summary, "Shared context failed.");
+    assert!(issue.explanation.contains("65536 bytes"));
+    assert_eq!(
+        issue.repair.prompt,
+        "Ask the sender to fix the problem and share the context again?"
+    );
+}
+
+#[test]
 fn doctor_keeps_individual_attention_causes_and_operation_inputs() {
     let f = Fixture::new();
     f.register();
@@ -901,6 +934,30 @@ fn doctor_assistance_prompts_only_the_bound_live_session_and_never_claims_delive
     let failure = request_doctor_assistance(&runtime, "session-old").unwrap_err();
     assert!(failure.starts_with("Unconfirmed"), "{failure}");
     assert_eq!(f.host.prompts.borrow().len(), 2);
+}
+
+#[test]
+fn doctor_assistance_explains_unsafe_lock_permissions_without_internal_terms() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    f.register();
+    let runtime = LifecycleRuntime {
+        workspace_id: Some("workspace-1"),
+        ..f.runtime()
+    };
+    execute_control_operation("worktree.pause", json!({}), &runtime).unwrap();
+    let directory = f.root.join("pane-effects");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+
+    let error = request_doctor_assistance(&runtime, "session-old").unwrap_err();
+    assert_eq!(
+        error,
+        "Namedrop's lock for this pane has unsafe owner or permissions"
+    );
+    assert!(!error.contains("pane effects"), "{error}");
+    assert!(f.host.prompts.borrow().is_empty());
 }
 
 /// A Doctor popup can sit open while its pane starts a different Agent Session

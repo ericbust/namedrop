@@ -4,18 +4,26 @@ use std::sync::mpsc;
 #[test]
 fn leading_punctuation_posts_explicitly_without_router_calls() {
     let f = fixture();
+    f.rename("w1", "lead", "codex");
     let server = Server::start(&f, "not json", false);
     for (index, source) in [
         "@planner, inspect \\@lead,",
         "@planner: inspect \\@lead,",
         "#ws1, @planner: inspect \\@lead,",
+        "@codex, inspect \\@lead,",
+        "@codex: inspect \\@lead,",
     ]
     .iter()
     .enumerate()
     {
         let (status, receipt) = post(&server, &format!("punctuation-{index}"), source, None);
         assert_eq!(status, 200, "{source}: {receipt}");
-        assert_eq!(recipient_aliases(&receipt), ["planner"]);
+        let expected = if source.starts_with("@codex") {
+            "codex"
+        } else {
+            "planner"
+        };
+        assert_eq!(recipient_aliases(&receipt), [expected]);
         assert_eq!(receipt["context_references"], json!([]));
         assert!(receipt.get("channel").is_none());
     }
@@ -578,4 +586,133 @@ fn manually_delivered_router_followup_under_a_mention_root_keeps_agent_thread_mo
         })
         .expect("manual delivery envelope for lead");
     assert_eq!(envelope["control"]["reply_mode"], "agent_thread");
+}
+
+#[test]
+fn bare_member_names_remain_channel_posts_without_a_model() {
+    let f = fixture();
+    f.rename("w1", "lead", "codex");
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in [
+        "codex, hi",
+        "planner inspect",
+        "planner, inspect",
+        "planner: inspect",
+        "planner is still busy, so hold off",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(&server, &format!("bare-member-{index}"), source, None);
+        assert_eq!(status, 200, "{source}: {receipt}");
+        assert_eq!(
+            recipient_aliases(&receipt),
+            Vec::<String>::new(),
+            "{source}: {receipt}"
+        );
+        assert_eq!(receipt["channel"]["state"], "unrouted");
+        let stored: (String, String) = f
+            .db()
+            .query_row(
+                "SELECT authored_source, body FROM collaboration_messages WHERE message_id=?1",
+                [receipt["message_id"].as_str().unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(stored, (source.to_string(), source.to_string()));
+    }
+    assert!(calls(&f).is_empty());
+    assert_eq!(f.count("SELECT COUNT(*) FROM mailbox_deliveries"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 0);
+}
+
+#[test]
+fn bare_single_member_names_remain_channel_posts() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in ["planner", "planner,", "planner:"].iter().enumerate() {
+        let (status, receipt) = post(&server, &format!("bare-single-{index}"), source, None);
+        assert_eq!(status, 200, "{source}: {receipt}");
+        assert_eq!(recipient_aliases(&receipt), Vec::<String>::new());
+        assert_eq!(receipt["channel"]["state"], "unrouted");
+    }
+    assert!(calls(&f).is_empty());
+    assert_eq!(f.count("SELECT COUNT(*) FROM mailbox_deliveries"), 0);
+    assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 0);
+}
+
+#[test]
+fn bound_channel_report_from_the_delivered_template_does_not_bounce() {
+    for (answer_body, report_body) in [
+        ("6 times 7 is 42.", r"\@lead says 6 times 7 is 42."),
+        ("@planner 6 times 7 is 42.", r"\@lead says 6 times 7 is 42."),
+        (
+            "@planner, 6 times 7 is 42.",
+            r"\@lead says 6 times 7 is 42.",
+        ),
+        (
+            "@planner: 6 times 7 is 42.",
+            r"\\@lead says 6 times 7 is 42.",
+        ),
+    ] {
+        let f = fixture();
+        let root = plain_root(&f, "bound-template-root", "Please collaborate here.");
+        let question = agent_reply(
+            &f,
+            "bound-template-question",
+            &root,
+            "pane-1-planner",
+            "@operator Sure, asking now. @lead what is 6 times 7?",
+        )
+        .unwrap();
+        let reply_from_template = |pane: &str, body: &str| {
+            let envelope = f.herdr.last_envelope(pane);
+            let mut input = envelope["control"]["tool"]["operations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|operation| operation["token"] == "reply")
+                .unwrap()["input"]
+                .clone();
+            input["source"] = input["source"]
+                .as_str()
+                .unwrap()
+                .replace("<reply body>", body)
+                .into();
+            namedrop::execute_message_operation("reply", input, &f.runtime("w1", pane)).unwrap()
+        };
+        let answer = reply_from_template("pane-1-lead", answer_body);
+        assert_eq!(recipient_aliases(&question), ["operator", "lead"]);
+        assert_eq!(recipient_aliases(&answer), ["operator", "planner"]);
+        let report = reply_from_template("pane-1-planner", report_body);
+        assert_eq!(recipient_aliases(&report), ["operator"], "{report_body}");
+        assert_eq!(f.count("SELECT COUNT(*) FROM delivery_attempts"), 3);
+        assert_eq!(f.herdr.envelopes("pane-1-lead").len(), 1);
+    }
+}
+
+#[test]
+fn bare_nonmembers_and_malformed_member_names_remain_channel_text() {
+    let f = fixture();
+    f.add_terminal("w1", "shell", "pane-shell");
+    let server = Server::start(&f, "not json", false);
+    for (index, source) in [
+        "ghost, inspect",
+        "Planner, inspect",
+        "planner,, inspect",
+        "planner:: inspect",
+        "planner; inspect",
+        "shell, echo hi",
+        "operator, hello",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let (status, receipt) = post(&server, &format!("bare-literal-{index}"), source, None);
+        assert_eq!(status, 200, "{source}: {receipt}");
+        assert_eq!(recipient_aliases(&receipt), Vec::<String>::new());
+        assert_eq!(receipt["channel"]["state"], "unrouted");
+    }
+    assert!(calls(&f).is_empty());
+    assert!(f.herdr.runs("pane-shell").is_empty());
 }

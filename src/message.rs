@@ -267,7 +267,7 @@ fn stored_recipient_outlooks(
 ) -> Result<Vec<RecipientOutlook>, crate::StoreError> {
     let addresses = transaction.list_pane_addresses(namespace)?;
     let held = transaction.held_deliveries(namespace)?;
-    let reply_limit_blocked = transaction.reply_limit_blocked_mailbox_addresses(namespace)?;
+    let reply_limit_blocked = transaction.reply_limit_blocked_mailbox_threads(namespace)?;
     let mut outlooks = recipient_outlooks(aliases, &addresses);
     for outlook in &mut outlooks {
         if let Some(delivery) = addresses
@@ -283,12 +283,15 @@ fn stored_recipient_outlooks(
                 outlook.alias,
                 delivery.delivery_id.as_str(),
             );
-        } else if addresses.iter().any(|address| {
-            address.alias == outlook.alias && reply_limit_blocked.contains(&address.id)
-        }) {
+        } else if let Some((_, thread_id)) = addresses
+            .iter()
+            .find(|address| address.alias == outlook.alias)
+            .and_then(|address| reply_limit_blocked.iter().find(|(id, _)| id == &address.id))
+        {
             outlook.statement = format!(
-                "@{}: the Automatic Reply Limit holds this mailbox. This message stays queued until the person selects Continue for that thread.",
+                "@{}: the Automatic Reply Limit holds this mailbox. This message stays queued until the person selects Continue for thread {}.",
                 outlook.alias,
+                thread_id.as_str(),
             );
         }
     }
@@ -991,7 +994,6 @@ where
         preparation,
         tracking,
     } = input;
-    let grammar_version = preparation.grammar(in_reply_to.as_ref());
     if context.is_some() && author_kind != ActorKind::AgentSession {
         return Err(SendError::Input(
             "a context block requires an agent-authored message (author_kind agent_session)"
@@ -1057,6 +1059,7 @@ where
         )?;
         return Ok(presented);
     }
+    let grammar_version = preparation.grammar(in_reply_to.as_ref());
     let plain_channel = preparation == MessagePreparation::OperatorPlain;
     let routing = if plain_channel {
         crate::spaces::RoutePlan {

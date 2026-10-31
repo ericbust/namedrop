@@ -70,7 +70,7 @@ impl std::fmt::Display for AcquireError {
                 "pane effects: {}",
                 io::Error::from_raw_os_error(libc::EWOULDBLOCK)
             ),
-            Self::Fault(error) => write!(f, "pane effects: {error}"),
+            Self::Fault(error) => error.fmt(f),
         }
     }
 }
@@ -99,7 +99,9 @@ fn checked(file: File, directory: bool) -> io::Result<File> {
             !metadata.is_file() || metadata.nlink() != 1
         }
     {
-        return Err(io::Error::other("unsafe pane effects ownership file"));
+        return Err(io::Error::other(
+            "Namedrop's lock for this pane has unsafe owner or permissions",
+        ));
     }
     Ok(file)
 }
@@ -372,6 +374,10 @@ mod tests {
     #[test]
     fn unexpected_flock_errno_is_a_fault_even_at_the_deadline() {
         let error = acquire_flock(-1, Duration::ZERO).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            io::Error::from_raw_os_error(libc::EBADF).to_string()
+        );
         assert!(
             matches!(error, AcquireError::Fault(ref error) if error.raw_os_error() == Some(libc::EBADF)),
             "{error:?}"

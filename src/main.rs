@@ -370,14 +370,7 @@ fn drain_report(result: &serde_json::Value) -> Result<namedrop::DrainReport, Str
 }
 
 fn needs_mailbox_watcher(result: &serde_json::Value) -> bool {
-    let needs_worker =
-        |value| drain_report(value).is_ok_and(|report| report.needs_mailbox_worker());
-    needs_worker(result)
-        || result.get("delivery").is_some_and(needs_worker)
-        || result
-            .get("drains")
-            .and_then(serde_json::Value::as_object)
-            .is_some_and(|drains| drains.values().any(needs_worker))
+    namedrop::drain_reports(result).any(|(_, report)| report.needs_mailbox_worker())
 }
 
 #[cfg(test)]
@@ -484,7 +477,8 @@ fn schedule_mailbox_workers(
     let mut workers = Vec::new();
     for space in namedrop::spaces_to_wake(state_directory, socket_id, here) {
         let scheduled = (|| -> Result<(), String> {
-            let directory = reconciliation_directory(state_directory, socket_id, &space)?;
+            let directory = reconciliation_directory(state_directory, socket_id, &space);
+            create_reconciliation_directory(&directory)?;
             queue_agent_status_reconciliation(
                 &directory,
                 &serde_json::json!({"operation":"mailbox-wake"}),
@@ -881,7 +875,9 @@ fn run_agent_status_changed_hook() -> ExitCode {
             return ExitCode::from(65);
         }
     };
-    if let Err(error) = queue_agent_status_reconciliation(&directory, &input) {
+    if let Err(error) = create_reconciliation_directory(&directory)
+        .and_then(|()| queue_agent_status_reconciliation(&directory, &input))
+    {
         eprintln!("could not queue Namedrop reconciliation: {error}");
         return ExitCode::from(65);
     }
@@ -921,22 +917,24 @@ fn agent_status_reconciliation_directory() -> Result<PathBuf, String> {
         env::var("HERDR_SOCKET_PATH").map_err(|_| "HERDR_SOCKET_PATH is required".to_owned())?;
     let space_id =
         env::var("HERDR_WORKSPACE_ID").map_err(|_| "HERDR_WORKSPACE_ID is required".to_owned())?;
-    reconciliation_directory(&state_directory, &socket_id, &space_id)
+    Ok(reconciliation_directory(
+        &state_directory,
+        &socket_id,
+        &space_id,
+    ))
 }
 
-fn reconciliation_directory(
-    state_directory: &Path,
-    socket_id: &str,
-    space_id: &str,
-) -> Result<PathBuf, String> {
+fn reconciliation_directory(state_directory: &Path, socket_id: &str, space_id: &str) -> PathBuf {
     let scope = namedrop::lower_hex(&Sha256::digest(format!("{socket_id}\0{space_id}")));
-    let directory = state_directory
+    state_directory
         .join("agent-status-reconciliation")
-        .join(scope);
-    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
-        .map_err(|error| error.to_string())?;
-    Ok(directory)
+        .join(scope)
+}
+
+fn create_reconciliation_directory(directory: &Path) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    fs::set_permissions(directory, fs::Permissions::from_mode(0o700))
+        .map_err(|error| error.to_string())
 }
 
 fn queue_agent_status_reconciliation(
@@ -972,9 +970,8 @@ fn queue_agent_status_reconciliation(
     Ok(())
 }
 
-fn pending_agent_status_reconciliations(directory: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut markers = fs::read_dir(directory)
-        .map_err(|error| error.to_string())?
+fn pending_agent_status_reconciliations(directory: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut markers = fs::read_dir(directory)?
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| {
@@ -1105,13 +1102,86 @@ fn run_agent_status_worker() -> ExitCode {
 fn wait_for_marker_or_deadline(directory: &Path, due_ms: u64) {
     loop {
         let now = SystemClock.now_unix_ms();
-        if now >= due_ms
-            || pending_agent_status_reconciliations(directory)
-                .is_ok_and(|pending| !pending.is_empty())
-        {
+        if now >= due_ms {
             return;
         }
+        match pending_agent_status_reconciliations(directory) {
+            Ok(pending) if pending.is_empty() => {}
+            Ok(_) => return,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(_) => {}
+        }
         thread::sleep(Duration::from_millis((due_ms - now).min(100)));
+    }
+}
+
+#[cfg(test)]
+mod worker_shutdown_tests {
+    use super::*;
+
+    #[test]
+    fn an_unreadable_queue_keeps_waiting_until_the_grace_deadline() {
+        let directory =
+            env::temp_dir().join(format!("namedrop-unreadable-queue-{}", std::process::id()));
+        fs::write(&directory, b"not a directory").unwrap();
+        assert_eq!(
+            fs::read_dir(&directory).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        let due = SystemClock.now_unix_ms() + 250;
+        wait_for_marker_or_deadline(&directory, due);
+        let returned_at = SystemClock.now_unix_ms();
+        fs::remove_file(&directory).unwrap();
+        assert!(
+            returned_at >= due,
+            "a queue read error ended the wait before its grace deadline"
+        );
+    }
+
+    #[test]
+    fn a_recovered_queue_wakes_a_grace_wait_when_a_marker_arrives() {
+        let directory =
+            env::temp_dir().join(format!("namedrop-recovered-queue-{}", std::process::id()));
+        let restored = directory.with_extension("restored");
+        let replacement = directory.with_extension("replacement");
+        fs::write(&directory, b"not a directory").unwrap();
+        fs::create_dir(&restored).unwrap();
+        fs::write(restored.join("pending-test"), b"{}").unwrap();
+        std::os::unix::fs::symlink(&restored, &replacement).unwrap();
+        let queue = directory.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let waiter = thread::spawn(move || {
+            wait_for_marker_or_deadline(&queue, SystemClock.now_unix_ms() + 10_000);
+            done.send(()).unwrap();
+        });
+        let early = finished.recv_timeout(Duration::from_millis(250));
+        fs::rename(&replacement, &directory).unwrap();
+        let recovered = finished.recv_timeout(Duration::from_secs(1));
+        fs::remove_file(&directory).unwrap();
+        fs::remove_dir_all(&restored).unwrap();
+        waiter.join().unwrap();
+        assert_eq!(
+            early,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "a queue read error must preserve the grace wait"
+        );
+        recovered.expect("a recovered queue's pending marker must wake the worker");
+    }
+
+    #[test]
+    fn a_removed_queue_stops_a_grace_deadline_wait() {
+        let directory =
+            env::temp_dir().join(format!("namedrop-removed-queue-{}", std::process::id()));
+        fs::create_dir(&directory).unwrap();
+        fs::remove_dir(&directory).unwrap();
+        let (done, finished) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            wait_for_marker_or_deadline(&directory, u64::MAX);
+            done.send(()).unwrap();
+        });
+        finished
+            .recv_timeout(Duration::from_secs(1))
+            .expect("a removed queue must stop the worker before its grace deadline");
     }
 }
 
