@@ -521,8 +521,16 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         } else {
             vec!["read", pane, "--lines", &count, "--json"]
         };
-        self.execute::<ReadResult>(&args, budget)
-            .map(|result| result.text)
+        let result = self.execute::<ReadResult>(&args, budget)?;
+        if lines > terminal.rows {
+            return Ok(result.text);
+        }
+        let skip = result
+            .text
+            .split_inclusive('\n')
+            .count()
+            .saturating_sub(lines);
+        Ok(result.text.split_inclusive('\n').skip(skip).collect())
     }
 
     fn prompt(&self, pane: &str, text: &str) -> Result<(), PromptFailure> {
