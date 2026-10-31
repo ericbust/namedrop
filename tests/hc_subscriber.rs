@@ -1342,6 +1342,61 @@ fn stale_observation_refresh_preserves_replacement_session() {
 }
 
 #[test]
+fn stale_session_refresh_preserves_labels_after_move_to_inactive_space() {
+    for deactivated in [false, true] {
+        check(
+            &format!("session-move-inactive-{deactivated}"),
+            |fixture, runtime| {
+                let old = process::AgentProcess::new();
+                queued_agent(fixture, runtime, old.pid());
+                let destination = "inactive-destination";
+                let namespace = namedrop::StateNamespace::for_space("hc:fixture", destination);
+                if deactivated {
+                    let attribution = namedrop::MutationAttribution::new(
+                        namedrop::ActorKind::Human,
+                        "test",
+                        1000,
+                    );
+                    namedrop::StateStore::open(runtime.state_directory)
+                        .unwrap()
+                        .transaction(|tx| {
+                            tx.activate_worktree(&namespace, &attribution)?;
+                            tx.deactivate_worktree(&namespace, &attribution)
+                        })
+                        .unwrap();
+                }
+                let mut moved = fixture.terminals.borrow()[0].clone();
+                moved["labels"]["herdr.space"] = json!(destination);
+                let session_labels: Vec<_> = [
+                    "namedrop.session",
+                    "namedrop.session.pid",
+                    "namedrop.session.start",
+                ]
+                .into_iter()
+                .map(|key| (key, moved["labels"][key].clone()))
+                .collect();
+                drop(old);
+                *fixture.replacement_on_get.borrow_mut() = Some((2, moved));
+                namedrop::host::hc::events::Subscriber::default()
+                    .handle_line(&session_event("status", fixture), runtime)
+                    .unwrap();
+                for (key, expected) in session_labels {
+                    assert_eq!(
+                        fixture.terminals.borrow()[0]["labels"][key],
+                        expected,
+                        "cleanup changed {key} after moving into an inactive space"
+                    );
+                }
+                assert!(
+                    fixture.calls.borrow().iter().all(|call| call[0] != "send"
+                        && !call.iter().any(|arg| arg == "namedrop.session="))
+                );
+            },
+        );
+    }
+}
+
+#[test]
 fn dead_queued_tui_session_has_the_same_empty_mailbox_outcome() {
     #[derive(Clone, Copy)]
     struct DeadTui;
