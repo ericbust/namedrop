@@ -7,6 +7,7 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
         flags: Vec<&'static str>,
         env: Vec<&'static str>,
         expected: Option<&'static str>,
+        ancestry: Option<(&'static str, &'static str)>,
     }
     let mut cases = Vec::new();
     let mut add = |name: &str, flags, env, expected| {
@@ -15,6 +16,7 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
             flags,
             env,
             expected,
+            ancestry: None,
         });
     };
     add("plain shell defaults to tui", vec![], vec![], Some("tui"));
@@ -95,6 +97,21 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
         Some("tui"),
     );
 
+    for (name, tui_pid, hc_pid, expected) in [
+        ("hc run from TUI selects nearer HC", "$far", "$$", "hc"),
+        ("nested TUI in app selects nearer TUI", "$$", "$far", "tui"),
+        ("stale TUI ancestor selects HC", "999999999", "$$", "hc"),
+        ("unrelated HC keeps ancestor TUI", "$$", "999999999", "tui"),
+    ] {
+        cases.push(Case {
+            name: name.into(),
+            flags: vec![],
+            env: vec!["HERDR_SOCKET_PATH", "HERDR_PANE_ID", "HC_TERMINAL_ID"],
+            expected: Some(expected),
+            ancestry: Some((tui_pid, hc_pid)),
+        });
+    }
+
     let root = std::env::temp_dir().join(format!("namedrop-host-detection-{}", std::process::id()));
     fs::create_dir_all(root.join("state/runtime")).unwrap();
     fs::create_dir_all(root.join("home")).unwrap();
@@ -106,14 +123,52 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
     .unwrap();
     fs::set_permissions(&probe, fs::Permissions::from_mode(0o700)).unwrap();
     fs::copy(&probe, root.join("state/runtime/namedrop")).unwrap();
+    let identity = root.join("identity");
+    fs::write(
+        &identity,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$IDENTITY_LOG"
+case "$1" in
+  pane) printf '{"result":{"process_info":{"shell_pid":%s}}}\n' "$TUI_PID" ;;
+  get) printf '{"pid":%s}\n' "$HC_PID" ;;
+  *) exit 92 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&identity, fs::Permissions::from_mode(0o700)).unwrap();
     let mut failures = Vec::new();
     for case in cases {
-        let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        let mut command = Command::new("/bin/sh");
+        let script = if let Some((tui, hc)) = case.ancestry {
+            format!("export TUI_PID={tui} HC_PID={hc}; \"$@\"")
+        } else {
+            "exec \"$@\"".into()
+        };
+        let output = command
+            .args(["-c", &script, "host-detection"])
+            .arg(env!("CARGO_BIN_EXE_namedrop"))
             .env_clear()
             .env("HOME", root.join("home"))
             .env("PATH", "/usr/bin:/bin")
-            .env("HC_BIN_PATH", &probe)
-            .env("HERDR_BIN_PATH", &probe)
+            .env(
+                "HC_BIN_PATH",
+                if case.ancestry.is_some() {
+                    &identity
+                } else {
+                    &probe
+                },
+            )
+            .env(
+                "HERDR_BIN_PATH",
+                if case.ancestry.is_some() {
+                    &identity
+                } else {
+                    &probe
+                },
+            )
+            .env("far", std::process::id().to_string())
+            .env("IDENTITY_LOG", root.join("identity-log"))
             .envs(case.env.iter().map(|key| (key, "value")))
             .arg("--plugin-state")
             .arg(root.join("state"))
@@ -143,10 +198,25 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
         if !valid {
             failures.push(case.name);
         }
-        assert!(
-            !root.join("home/touched").exists(),
-            "host or runtime executed"
-        );
+        let ambiguous = case.flags.is_empty()
+            && case.env.contains(&"HC_TERMINAL_ID")
+            && case.env.contains(&"HERDR_PANE_ID");
+        if ambiguous {
+            let _ = fs::remove_file(root.join("home/touched"));
+        } else {
+            assert!(
+                !root.join("home/touched").exists(),
+                "host or runtime executed"
+            );
+        }
+        if case.ancestry.is_some() {
+            let probes = fs::read_to_string(root.join("identity-log")).unwrap_or_default();
+            assert!(
+                probes.lines().count() <= 2,
+                "repeated identity lookups: {probes}"
+            );
+            let _ = fs::remove_file(root.join("identity-log"));
+        }
         assert!(
             !root.join("state/runtime/commands.lock").exists(),
             "runtime gate accessed"

@@ -663,6 +663,36 @@ mod host_selection_tests {
     }
 
     #[test]
+    fn tui_only_detection_reads_one_environment_variable() {
+        let reads = std::cell::RefCell::new(Vec::new());
+        assert_eq!(
+            HostKind::detect(None, false, false, |key| {
+                reads.borrow_mut().push(key.to_owned());
+                (key == "HERDR_SOCKET_PATH").then(|| "socket".into())
+            })
+            .unwrap(),
+            HostKind::Tui
+        );
+        assert_eq!(*reads.borrow(), ["HC_TERMINAL_ID"]);
+    }
+
+    #[test]
+    fn explicit_host_and_transport_flags_do_not_read_environment() {
+        for (explicit, tui, hc, expected) in [
+            (Some(HostKind::Hc), true, true, Some(HostKind::Hc)),
+            (Some(HostKind::Tui), true, true, Some(HostKind::Tui)),
+            (None, true, false, Some(HostKind::Tui)),
+            (None, false, true, Some(HostKind::Hc)),
+            (None, true, true, None),
+        ] {
+            assert_eq!(
+                HostKind::detect(explicit, tui, hc, |_| panic!("unexpected environment read")).ok(),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn hc_state_uses_xdg_and_default_session() {
         let vars = |key: &str| match key {
             "XDG_STATE_HOME" => Some("/state".into()),

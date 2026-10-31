@@ -548,7 +548,11 @@ fn hc_wrappers_derive_runtime_state_without_claiming_the_inherited_terminal() {
         )
         .unwrap();
         for script in [HOOK_SCRIPT_FILE, SESSION_START_SCRIPT_FILE] {
-            for override_state in [None, Some("/override-state")] {
+            for (override_state, dual_environment) in [
+                (None, false),
+                (Some("/override-state"), false),
+                (None, true),
+            ] {
                 let mut command = std::process::Command::new(package.join(script));
                 command
                     .env("HOME", &home)
@@ -562,7 +566,17 @@ fn hc_wrappers_derive_runtime_state_without_claiming_the_inherited_terminal() {
                 } else {
                     command.env_remove("NAMEDROP_STATE_DIR");
                 }
+                if dual_environment {
+                    command
+                        .env("HERDR_PANE_ID", "outer-tui")
+                        .env("HERDR_SOCKET_PATH", "outer-socket");
+                }
+                let _ = fs::remove_file(&log);
                 assert!(command.output().unwrap().status.success());
+                assert!(
+                    log.exists(),
+                    "generated HC hook declined dual environment before Rust origin detection"
+                );
                 let argv = fs::read_to_string(&log).unwrap();
                 assert!(argv.contains("--hc-hook\nhook\n"), "{argv}");
                 assert!(!argv.contains("--hc-terminal"), "{argv}");
