@@ -15,6 +15,7 @@ struct Fixture {
     calls: RefCell<Vec<Vec<String>>>,
     send_error: RefCell<Option<String>>,
     read_text: Option<String>,
+    on_send: RefCell<Option<Box<dyn Fn()>>>,
     clear_error: RefCell<Option<String>>,
     rename_error: RefCell<bool>,
 }
@@ -31,6 +32,7 @@ impl Default for Fixture {
             calls: RefCell::new(Vec::new()),
             send_error: RefCell::new(None),
             read_text: None,
+            on_send: RefCell::new(None),
             clear_error: RefCell::new(None),
             rename_error: RefCell::new(false),
         }
@@ -56,6 +58,9 @@ impl HerdrCommandExecutor for Fixture {
                 .map(|text| json!({"text":text}).to_string())
                 .unwrap_or_else(|| include_str!("fixtures/hc/read.stdout").to_owned()),
             ["send", ..] => {
+                if let Some(callback) = self.on_send.borrow_mut().take() {
+                    callback();
+                }
                 if let Some(error) = self.send_error.borrow().as_ref() {
                     return Err(error.clone());
                 }
@@ -2172,11 +2177,32 @@ fn hc_popup_child() {
 
 #[test]
 fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
+    assert_refused_hc_delivery("blocked", "status");
+    assert_refused_hc_delivery("status_mismatch", "snapshot");
+}
+
+#[test]
+fn settle_before_refusal_recording_resumes_delivery() {
+    assert_refused_hc_delivery("blocked", "earlier-settle");
+}
+
+#[test]
+fn inactive_namespace_preserves_settle_for_reactivation() {
+    assert_refused_hc_delivery("blocked", "inactive-status");
+    assert_refused_hc_delivery("status_mismatch", "inactive-snapshot");
+}
+
+#[test]
+fn expired_deferred_delivery_can_be_cancelled_with_confirmation() {
+    assert_refused_hc_delivery("blocked", "cancel-held");
+}
+
+fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
     use namedrop::{
         ActorKind, AgentSessionId, Clock, DeliveryId, DeliveryState, MessageDraft, MessageId,
         MessageRecipientDraft, MutationAttribution, StateStore, ThreadId,
     };
-    for (refusal, recovery) in [("blocked", "status"), ("status_mismatch", "snapshot")] {
+    {
         let fixture = Fixture::default();
         let agent = process::AgentProcess::new();
         fixture.agent(agent.pid());
@@ -2187,7 +2213,7 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
         other["labels"]["namedrop.name"] = json!("");
         fixture.terminals.borrow_mut().push(other);
         let state = std::env::temp_dir().join(format!(
-            "namedrop-hc-deferred-{}-{refusal}",
+            "namedrop-hc-deferred-{}-{refusal}-{recovery}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&state);
@@ -2336,6 +2362,30 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
             1
         );
         *fixture.send_error.borrow_mut() = None;
+        if recovery == "cancel-held" {
+            clock.0.set(86_401_001);
+            assert_eq!(
+                namedrop::drain_mailboxes(&runtime).unwrap().expired,
+                [DeliveryId::new("test-delivery")]
+            );
+            assert!(
+                namedrop::execute_control_operation(
+                    "delivery.cancel-held",
+                    json!({"delivery_id":"test-delivery","confirmed":false}),
+                    &runtime
+                )
+                .is_err()
+            );
+            let cancelled = namedrop::execute_control_operation(
+                "delivery.cancel-held",
+                json!({"delivery_id":"test-delivery","confirmed":true}),
+                &runtime,
+            )
+            .unwrap();
+            assert_eq!(cancelled["state"], "cancelled");
+            std::fs::remove_dir_all(state).unwrap();
+            return;
+        }
         store
             .transaction(|tx| {
                 tx.append_message(
@@ -2427,8 +2477,17 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
             );
         }
         fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"done"});
-        fixture.terminals.borrow_mut()[0]["status_ms"] = json!(clock.0.get());
-        let recovered = if recovery == "snapshot" {
+        fixture.terminals.borrow_mut()[0]["status_ms"] = json!(if recovery == "earlier-settle" {
+            950
+        } else {
+            clock.0.get()
+        });
+        if recovery.starts_with("inactive-") {
+            store
+                .transaction(|tx| tx.deactivate_worktree(&namespace, &attribution))
+                .unwrap();
+        }
+        let recovered = if recovery.ends_with("snapshot") {
             json!({"terminals":*fixture.terminals.borrow()})
         } else {
             json!({"method":"event","params":{"type":"status","terminal":"t1"}})
@@ -2436,6 +2495,20 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
         namedrop::host::hc::events::Subscriber::default()
             .handle_line(&recovered.to_string(), &runtime)
             .unwrap();
+        if recovery.starts_with("inactive-") {
+            assert_eq!(
+                fixture
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| call[0] == "send" && call[1] == "t1")
+                    .count(),
+                1
+            );
+            store
+                .transaction(|tx| tx.activate_worktree(&namespace, &attribution))
+                .unwrap();
+        }
         namedrop::drain_mailboxes(&runtime).unwrap();
         let calls = fixture.calls.borrow();
         let sends: Vec<_> = calls
@@ -2450,6 +2523,15 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
 
 #[test]
 fn onboarding_and_doctor_refusals_wait_for_new_settle() {
+    assert_onboarding_and_doctor_refusals(false);
+}
+
+#[test]
+fn no_input_refusal_resets_speculatively_invoked_challenge() {
+    assert_onboarding_and_doctor_refusals(true);
+}
+
+fn assert_onboarding_and_doctor_refusals(mark_invoked: bool) {
     use namedrop::{Clock, StateNamespace, StateStore, TransitionKind};
     for (caller, refusal) in [
         ("onboarding", "blocked"),
@@ -2461,7 +2543,7 @@ fn onboarding_and_doctor_refusals_wait_for_new_settle() {
         fixture.agent(agent.pid());
         fixture.terminals.borrow_mut()[0]["status_ms"] = json!(900);
         let state = std::env::temp_dir().join(format!(
-            "namedrop-hc-{caller}-deferred-{}",
+            "namedrop-hc-{caller}-deferred-{}-{mark_invoked}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&state);
@@ -2519,6 +2601,18 @@ fn onboarding_and_doctor_refusals_wait_for_new_settle() {
         fixture.take_calls();
         *fixture.send_error.borrow_mut() =
             Some(json!({"error":{"kind":refusal,"message":"not sent"}}).to_string());
+        if mark_invoked && caller == "onboarding" {
+            let path = state.join("namedrop.sqlite3");
+            *fixture.on_send.borrow_mut() = Some(Box::new(move || {
+                let db = rusqlite::Connection::open(&path).unwrap();
+                db.execute("INSERT INTO transition_facts
+                    (session_socket_id,worktree_id,worktree_order,entity_kind,entity_id,transition_kind,actor_kind,actor_id,occurred_at_ms)
+                    SELECT session_socket_id,worktree_id,
+                        (SELECT MAX(worktree_order)+1 FROM transition_facts),entity_kind,entity_id,'invoked',actor_kind,actor_id,occurred_at_ms
+                    FROM transition_facts WHERE entity_kind='integration_registration'
+                    AND transition_kind='dispatching' ORDER BY worktree_order DESC LIMIT 1", []).unwrap();
+            }));
+        }
         invoke();
         assert_eq!(
             fixture
