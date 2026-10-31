@@ -276,3 +276,43 @@ fn hc_children_scrub_herdr_names_added_after_capture() {
         "unset\nunset\nunset\n"
     );
 }
+
+#[test]
+fn hc_children_drop_captured_and_late_lifetime_tokens() {
+    const CHILD: &str = "NAMEDROP_LIFETIME_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "hc_children_drop_captured_and_late_lifetime_tokens", "--nocapture"])
+            .env_clear()
+            .env(CHILD, "1")
+            .env("HC_SCOPE", "captured-scope")
+            .env("HC_RUNTIME", "captured-runtime")
+            .env("HC_TERMINAL_CUSTOM", "captured-terminal")
+            .env("HERDR_CUSTOM", "captured-tui")
+            .env("HC_SESSION", "kept-session")
+            .env("HC_SOCKET", "/private/core.sock")
+            .env("HC_BIN_PATH", "/usr/bin/python3")
+            .env("UNRELATED", "kept")
+            .output().unwrap();
+        assert!(output.status.success(), "{} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    let snapshot = namedrop::environment::EnvironmentSnapshot::capture();
+    // SAFETY: this child runs one test and has no concurrent environment readers.
+    unsafe {
+        std::env::set_var("HC_TERMINAL_LATE", "late-terminal");
+        std::env::set_var("HERDR_LATE", "late-tui");
+    }
+    let output = namedrop::ProcessHerdr::from_snapshot(HostKind::Hc, &snapshot).command()
+        .args(["-c", "import json,os,sys; print(json.dumps({'env':dict(os.environ),'argv':sys.argv[1:]}))", "events", "--json"])
+        .output().unwrap();
+    assert!(output.status.success());
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let env = result["env"].as_object().unwrap();
+    let leaked: Vec<_> = env.keys().filter(|key| key.starts_with("HERDR_") || key.starts_with("HC_TERMINAL_") || matches!(key.as_str(), "HC_SCOPE" | "HC_RUNTIME")).collect();
+    assert!(leaked.is_empty(), "child inherited lifetime tokens: {leaked:?}");
+    assert_eq!(env["HC_SESSION"], "kept-session");
+    assert_eq!(env["HC_SOCKET"], "/private/core.sock");
+    assert_eq!(env["UNRELATED"], "kept");
+    assert_eq!(result["argv"], serde_json::json!(["events", "--json"]));
+}
