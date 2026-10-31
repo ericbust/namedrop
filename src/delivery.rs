@@ -423,7 +423,13 @@ where
 
     for address_id in addresses {
         let first = store
-            .transaction(|transaction| transaction.dispatch_candidate(&namespace, &address_id))
+            .transaction(|transaction| {
+                transaction.dispatch_candidate_for_host(
+                    &namespace,
+                    &address_id,
+                    runtime.host.kind(),
+                )
+            })
             .map_err(|error| error.to_string())?;
         let Some(first) = first else {
             continue;
@@ -453,7 +459,13 @@ where
             continue;
         }
         let second = store
-            .transaction(|transaction| transaction.dispatch_candidate(&namespace, &address_id))
+            .transaction(|transaction| {
+                transaction.dispatch_candidate_for_host(
+                    &namespace,
+                    &address_id,
+                    runtime.host.kind(),
+                )
+            })
             .map_err(|error| error.to_string())?;
         let Some(second) = second else {
             continue;
@@ -501,7 +513,7 @@ where
                 )? {
                     return Ok(None);
                 }
-                let leased = transaction.lease_mailbox_head(
+                let leased = transaction.lease_mailbox_head_for_host(
                     &namespace,
                     &address_id,
                     &LeaseDraft {
@@ -513,6 +525,7 @@ where
                         acquired_at_ms: now,
                         expires_at_ms: now.saturating_add(LEASE_DURATION_MS),
                     },
+                    runtime.host.kind(),
                     &attribution,
                 )?;
                 leased
