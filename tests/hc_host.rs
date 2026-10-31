@@ -3002,7 +3002,11 @@ fn dead_owner_after_lease_records_failed_attention_and_requeues() {
 }
 
 #[test]
-fn full_refresh_with_labels_resumes_deferred_mail() {
+fn full_refresh_snapshot_with_labels_resumes_deferred_mail() {
     assert_refused_hc_delivery("blocked", "snapshot-labels");
+}
+
+#[test]
+fn full_refresh_missed_with_labels_resumes_deferred_mail() {
     assert_refused_hc_delivery("status_mismatch", "missed-labels");
 }
