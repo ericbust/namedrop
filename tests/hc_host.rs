@@ -21,8 +21,11 @@ struct Fixture {
     terminals: RefCell<Vec<Value>>,
     calls: RefCell<Vec<Vec<String>>>,
     send_error: RefCell<Option<String>>,
+    get_error: RefCell<Option<String>>,
+    session_clear_error: RefCell<Option<String>>,
     read_text: Option<String>,
     on_send: RefCell<Option<Box<dyn Fn()>>>,
+    on_send_fixture: RefCell<Option<Box<dyn Fn(&Fixture)>>>,
     retire_when_leased: RefCell<Option<std::path::PathBuf>>,
     clear_error: RefCell<Option<String>>,
     rename_error: RefCell<bool>,
@@ -46,8 +49,11 @@ impl Default for Fixture {
             terminals: RefCell::new(vec![terminal]),
             calls: RefCell::new(Vec::new()),
             send_error: RefCell::new(None),
+            get_error: RefCell::new(None),
+            session_clear_error: RefCell::new(None),
             read_text: None,
             on_send: RefCell::new(None),
+            on_send_fixture: RefCell::new(None),
             retire_when_leased: RefCell::new(None),
             clear_error: RefCell::new(None),
             rename_error: RefCell::new(false),
@@ -111,6 +117,9 @@ impl HerdrCommandExecutor for Fixture {
         let stdout = match args {
             ["ls", "--json"] => json!({"terminals": *self.terminals.borrow()}).to_string(),
             ["get", id, "--json"] => {
+                if let Some(error) = self.get_error.borrow().as_ref() {
+                    return Err(error.clone());
+                }
                 if let Some(state) = self.retire_when_leased.borrow().as_ref() {
                     let database =
                         rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
@@ -138,6 +147,9 @@ impl HerdrCommandExecutor for Fixture {
                 if let Some(callback) = self.on_send.borrow_mut().take() {
                     callback();
                 }
+                if let Some(callback) = self.on_send_fixture.borrow_mut().take() {
+                    callback(self);
+                }
                 if let Some(error) = self.send_error.borrow().as_ref() {
                     return Err(error.clone());
                 }
@@ -148,6 +160,11 @@ impl HerdrCommandExecutor for Fixture {
             }
             ["--version"] => "herdr-core 0.1.14\n".to_owned(),
             ["label", id, labels @ ..] => {
+                if labels.contains(&"namedrop.session=")
+                    && let Some(error) = self.session_clear_error.borrow().as_ref()
+                {
+                    return Err(error.clone());
+                }
                 let mut terminals = self.terminals.borrow_mut();
                 let terminal = terminals
                     .iter_mut()
@@ -2440,7 +2457,70 @@ fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
         if recovery == "dead-owner" {
             *fixture.retire_when_leased.borrow_mut() = Some(state.clone());
         }
+        if recovery == "dead-in-send" {
+            let owner = RefCell::new(Some(agent));
+            *fixture.on_send_fixture.borrow_mut() = Some(Box::new(move |_| {
+                drop(owner.borrow_mut().take());
+            }));
+        }
         let report = namedrop::drain_mailboxes(&runtime).unwrap();
+        if recovery == "dead-in-send" {
+            assert_eq!(report.requeued.len(), 1, "{report:?}");
+            let facts = store
+                .transaction(|tx| tx.transition_facts(&namespace))
+                .unwrap();
+            let attempt = facts
+                .iter()
+                .find(|fact| fact.entity_kind == namedrop::TransitionEntityKind::DeliveryAttempt)
+                .unwrap();
+            assert_eq!(
+                store
+                    .transaction(|tx| tx.delivery_attempt_state(
+                        &namespace,
+                        &namedrop::DeliveryAttemptId::new(&attempt.entity_id)
+                    ))
+                    .unwrap(),
+                DeliveryState::Failed
+            );
+            assert!(
+                facts
+                    .iter()
+                    .any(|fact| fact.transition_kind == namedrop::TransitionKind::Failed)
+            );
+            assert!(
+                !facts
+                    .iter()
+                    .any(|fact| fact.transition_kind == namedrop::TransitionKind::Paused)
+            );
+            assert!(
+                store
+                    .transaction(|tx| tx.unresolved_attention_items(&namespace))
+                    .unwrap()
+                    .len()
+                    > attention_before
+            );
+            let database = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+            assert_eq!(
+                database
+                    .query_row(
+                        "SELECT state FROM mailbox_deliveries WHERE delivery_id = 'test-delivery'",
+                        [],
+                        |row| row.get::<_, String>(0)
+                    )
+                    .unwrap(),
+                "queued"
+            );
+            assert_eq!(
+                database
+                    .query_row("SELECT COUNT(*) FROM leases", [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert_refusal_cleared_session(&fixture);
+            std::fs::remove_dir_all(state).unwrap();
+            return;
+        }
         if recovery == "dead-owner" {
             assert_eq!(report.requeued.len(), 1, "{report:?}");
             assert!(
@@ -3009,4 +3089,169 @@ fn full_refresh_snapshot_with_labels_resumes_deferred_mail() {
 #[test]
 fn full_refresh_missed_with_labels_resumes_deferred_mail() {
     assert_refused_hc_delivery("status_mismatch", "missed-labels");
+}
+
+fn assert_refusal_cleared_session(fixture: &Fixture) {
+    for key in [
+        "namedrop.session",
+        "namedrop.session.pid",
+        "namedrop.session.start",
+    ] {
+        assert_eq!(fixture.terminals.borrow()[0]["labels"][key], "", "{key}");
+    }
+    assert_eq!(
+        fixture
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| call[0] == "send")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn owner_dies_inside_refused_send_is_preinvocation() {
+    for refusal in ["blocked", "status_mismatch"] {
+        let fixture = Fixture::default();
+        let agent = process::AgentProcess::new();
+        fixture.agent(agent.pid());
+        let owner = RefCell::new(Some(agent));
+        *fixture.on_send_fixture.borrow_mut() = Some(Box::new(move |_| {
+            drop(owner.borrow_mut().take());
+        }));
+        *fixture.send_error.borrow_mut() =
+            Some(json!({"error":{"kind":refusal,"message":"not sent"}}).to_string());
+        let failure = HcHost::new(&fixture)
+            .prompt("t1", "must not type")
+            .unwrap_err();
+        assert_eq!(
+            failure.kind,
+            PromptFailureKind::TemporaryPreInvocation,
+            "{refusal}"
+        );
+        assert_refusal_cleared_session(&fixture);
+    }
+}
+
+#[test]
+fn owner_dies_inside_refused_send_records_failed_attention_and_requeues() {
+    for refusal in ["blocked", "status_mismatch"] {
+        assert_refused_hc_delivery(refusal, "dead-in-send");
+    }
+}
+
+#[test]
+fn replacement_during_refused_send_survives_without_deferring_old_owner() {
+    for refusal in ["blocked", "status_mismatch"] {
+        let fixture = Fixture::default();
+        let agent = process::AgentProcess::new();
+        let replacement = process::AgentProcess::new();
+        fixture.agent(agent.pid());
+        let replacement_pid = replacement.pid();
+        let owner = RefCell::new(Some(agent));
+        *fixture.on_send_fixture.borrow_mut() = Some(Box::new(move |fixture| {
+            drop(owner.borrow_mut().take());
+            fixture.agent(replacement_pid);
+            fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("replacement");
+        }));
+        *fixture.send_error.borrow_mut() =
+            Some(json!({"error":{"kind":refusal,"message":"not sent"}}).to_string());
+        let failure = HcHost::new(&fixture)
+            .prompt("t1", "must not type")
+            .unwrap_err();
+        assert_eq!(
+            failure.kind,
+            PromptFailureKind::TemporaryPreInvocation,
+            "{refusal}"
+        );
+        let terminals = fixture.terminals.borrow();
+        assert_eq!(terminals[0]["labels"]["namedrop.session"], "replacement");
+        assert_eq!(
+            terminals[0]["labels"]["namedrop.session.pid"],
+            replacement_pid.to_string()
+        );
+        assert_eq!(
+            terminals[0]["labels"]["namedrop.session.start"],
+            process::start(replacement_pid)
+        );
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "send")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn refused_send_owner_recheck_errors_are_preinvocation() {
+    for refusal in ["blocked", "status_mismatch"] {
+        for operation in ["get", "clear"] {
+            let fixture = Fixture::default();
+            let agent = process::AgentProcess::new();
+            fixture.agent(agent.pid());
+            let owner = RefCell::new(Some(agent));
+            *fixture.on_send_fixture.borrow_mut() = Some(Box::new(move |fixture| {
+                drop(owner.borrow_mut().take());
+                let error = if operation == "get" {
+                    &fixture.get_error
+                } else {
+                    &fixture.session_clear_error
+                };
+                *error.borrow_mut() = Some("owner recheck failed".into());
+            }));
+            *fixture.send_error.borrow_mut() =
+                Some(json!({"error":{"kind":refusal,"message":"not sent"}}).to_string());
+            let failure = HcHost::new(&fixture)
+                .prompt("t1", "must not type")
+                .unwrap_err();
+            assert_eq!(failure.kind, PromptFailureKind::TemporaryPreInvocation);
+            assert_eq!(failure.message, "owner recheck failed");
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+                "fixture-session"
+            );
+            assert_eq!(
+                fixture
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| call[0] == "send")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[test]
+fn live_owner_after_refused_send_keeps_original_watermark() {
+    for refusal in ["blocked", "status_mismatch"] {
+        let fixture = Fixture::default();
+        let agent = process::AgentProcess::new();
+        fixture.agent(agent.pid());
+        fixture.terminals.borrow_mut()[0]["status_ms"] = json!(900);
+        *fixture.on_send_fixture.borrow_mut() = Some(Box::new(|fixture| {
+            fixture.terminals.borrow_mut()[0]["status_ms"] = json!(950);
+        }));
+        *fixture.send_error.borrow_mut() =
+            Some(json!({"error":{"kind":refusal,"message":"not sent"}}).to_string());
+        let failure = HcHost::new(&fixture)
+            .prompt("t1", "must not type")
+            .unwrap_err();
+        assert_eq!(
+            failure.kind,
+            PromptFailureKind::DeferredUntilSettle {
+                observed_status_ms: Some(900)
+            }
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "fixture-session"
+        );
+    }
 }
