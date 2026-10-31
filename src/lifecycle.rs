@@ -279,7 +279,7 @@ where
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
 
     match operation {
-        "name" => {
+        "name" | "event.name" => {
             let input: NameInput = parse_input(input)?;
             let supplied_alias = required_nonempty(input.alias, "alias")?;
             let alias = supplied_alias
@@ -420,6 +420,9 @@ where
                     Ok(address_id)
                 })
                 .map_err(|error| error.to_string())?;
+            if runtime.is_hc() && operation == "name" {
+                crate::refresh_user_integration_packages(runtime, &discovered)?;
+            }
             let reconciliation = reconcile_worktree(
                 &mut store,
                 &namespace,
@@ -535,6 +538,9 @@ where
             store
                 .transaction(|transaction| transaction.activate_worktree(&namespace, &attribution))
                 .map_err(|error| error.to_string())?;
+            if runtime.is_hc() {
+                crate::refresh_user_integration_packages(runtime, &discovered)?;
+            }
             let reconciliation = reconcile_worktree(
                 &mut store,
                 &namespace,
@@ -667,6 +673,8 @@ where
                         .ok_or_else(|| {
                             StoreError::invalid_input("created Pane Address is not visible")
                         })?;
+                    publish_hc_name(runtime, Some(&pane_id), &draft.alias)
+                        .map_err(StoreError::invalid_input)?;
                     Ok(enrich_record(record, &discovered.panes))
                 })
                 .map_err(|error| error.to_string())?;
@@ -868,7 +876,13 @@ where
             let address_id = PaneAddressId::new(required_nonempty(input.address_id, "address_id")?);
             store
                 .transaction(|transaction| {
-                    transaction.retire_pane_address(&namespace, &address_id, &attribution)
+                    let pane = transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .and_then(|address| address.pane_id);
+                    transaction.retire_pane_address(&namespace, &address_id, &attribution)?;
+                    clear_hc_name(runtime, pane.as_deref()).map_err(StoreError::invalid_input)
                 })
                 .map_err(|error| error.to_string())?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);

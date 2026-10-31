@@ -962,6 +962,50 @@ where
         };
         (agent_runtime, outcome)
     });
+    record_package_readiness(runtime, discovered, context, outcomes.into_iter().collect())
+}
+
+pub(crate) fn inspect_user_integration_packages<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    discovered: &DiscoveredWorktree,
+) -> Result<IntegrationPackageInstallation, String>
+where
+    C: crate::Clock,
+{
+    let context = runtime
+        .home_directory
+        .map(|home| PackageContext::new(home, runtime.is_hc()));
+    let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode]
+        .map(|agent| {
+            let outcome = inspect_integration_package(
+                runtime.home_directory,
+                agent,
+                runtime.state_directory,
+                runtime.agent_config,
+                runtime.is_hc(),
+            )
+            .map(|()| {
+                context
+                    .as_ref()
+                    .expect("inspection requires HOME")
+                    .directory(agent)
+            });
+            (agent, outcome)
+        })
+        .into_iter()
+        .collect();
+    record_package_readiness(runtime, discovered, context, outcomes)
+}
+
+fn record_package_readiness<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    discovered: &DiscoveredWorktree,
+    context: Option<PackageContext>,
+    outcomes: Vec<(AgentRuntime, Result<PathBuf, String>)>,
+) -> Result<IntegrationPackageInstallation, String>
+where
+    C: crate::Clock,
+{
     let namespace = discovered.namespace(runtime.session_socket_id);
     let attribution = MutationAttribution::new(
         crate::ActorKind::Plugin,
@@ -1002,10 +1046,7 @@ where
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    Ok(IntegrationPackageInstallation {
-        context,
-        outcomes: outcomes.into_iter().collect(),
-    })
+    Ok(IntegrationPackageInstallation { context, outcomes })
 }
 
 /// The durable per-runtime readiness record a failed refresh opens and a
