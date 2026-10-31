@@ -662,6 +662,16 @@ impl WorkerPlan {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn macos_codex_command(
+    program: impl AsRef<std::ffi::OsStr>,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<Command, String> {
+    let mut command = Command::new(program);
+    environment.apply_roots(&mut command);
+    Ok(command)
+}
+
 fn codex_plan(
     prompt: &WorkerPrompt,
     payload: &str,
@@ -676,7 +686,7 @@ fn codex_plan(
     let output_path = reserve_scratch(&directory, "message.txt")?;
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = Command::new(sandbox_binary());
+        let mut command = macos_codex_command(sandbox_binary(), environment)?;
         command
             .args(["-p", &deny_exec_profile(&binary, &directory, environment)?])
             .arg(&binary);
@@ -1163,4 +1173,86 @@ fn store(key: String, summary: &Value) {
             stored_at: Instant::now(),
         },
     );
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::{environment::EnvironmentSnapshot, test_environment::CommandHome};
+
+    #[test]
+    fn macos_codex_command_keeps_captured_credential_home() {
+        const MARKER: &str = "NAMEDROP_MACOS_SNAPSHOT_TEST_CHILD";
+        if env::var_os(MARKER).is_none() {
+            let home =
+                env::temp_dir().join(format!("namedrop-macos-snapshot-{}", std::process::id()));
+            let output = Command::new(env::current_exe().unwrap())
+                .args(["--exact", "agent_status_model::snapshot_tests::macos_codex_command_keeps_captured_credential_home", "--nocapture"])
+                .isolated_home(&home)
+                .env(MARKER, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let home = PathBuf::from(env::var_os("HOME").unwrap());
+        let mut failures = Vec::new();
+        for captured in [
+            Some(home.join("credentials").into_os_string()),
+            None,
+            Some("".into()),
+        ] {
+            // This process runs only this test, with no concurrent environment readers.
+            unsafe {
+                match &captured {
+                    Some(value) => env::set_var("CODEX_HOME", value),
+                    None => env::remove_var("CODEX_HOME"),
+                }
+            }
+            let environment = EnvironmentSnapshot::capture();
+            unsafe {
+                env::set_var("CODEX_HOME", home.join("late"));
+            }
+            let expected = captured
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".codex"));
+            let output = macos_codex_command("/bin/sh", &environment)
+                .unwrap()
+                .args(["-c", "printf '%s' \"$CODEX_HOME\""])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let actual = String::from_utf8(output.stdout).unwrap();
+            if actual != expected.to_str().unwrap() {
+                failures.push(format!(
+                    "captured={captured:?}: got {actual:?}, expected {expected:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn claude_plan_uses_captured_binary_override() {
+        let environment = EnvironmentSnapshot::from_variables([(
+            "NAMEDROP_AGENT_STATUS_CLAUDE_BIN".into(),
+            "/snapshot/claude".into(),
+        )]);
+        let plan = claude_plan(
+            &WorkerPrompt {
+                instructions: "",
+                schema: "{}".into(),
+            },
+            "",
+            &environment,
+        )
+        .unwrap();
+        assert_eq!(plan.command.get_program(), "/snapshot/claude");
+    }
 }

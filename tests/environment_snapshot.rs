@@ -230,3 +230,49 @@ fn hc_update_and_shortcuts_share_resolved_config_roots() {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn hc_children_scrub_herdr_names_added_after_capture() {
+    const MARKER: &str = "NAMEDROP_HC_SNAPSHOT_TEST_CHILD";
+    if std::env::var_os(MARKER).is_none() {
+        let home = std::env::temp_dir().join(format!("namedrop-hc-scrub-{}", std::process::id()));
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "hc_children_scrub_herdr_names_added_after_capture",
+                "--nocapture",
+            ])
+            .isolated_home(&home)
+            .env_remove("HERDR_PLUGIN_EVENT_JSON")
+            .env_remove("HERDR_SESSION_ID")
+            .env("HERDR_CAPTURED_MARKER", "captured")
+            .env("HC_SOCKET", home.join("fake.sock"))
+            .env("HC_BIN_PATH", "/bin/sh")
+            .env(MARKER, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let snapshot = namedrop::environment::EnvironmentSnapshot::capture();
+    // This process runs only this test, with no concurrent environment readers.
+    unsafe {
+        std::env::set_var("HERDR_PLUGIN_EVENT_JSON", "late-event");
+        std::env::set_var("HERDR_SESSION_ID", "late-session");
+        std::env::remove_var("HERDR_CAPTURED_MARKER");
+    }
+    let transport = namedrop::ProcessHerdr::from_snapshot(HostKind::Hc, &snapshot);
+    let output = transport.command()
+        .args(["-c", "printf '%s\\n' \"${HERDR_PLUGIN_EVENT_JSON-unset}\" \"${HERDR_SESSION_ID-unset}\" \"${HERDR_CAPTURED_MARKER-unset}\""])
+        .output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "unset\nunset\nunset\n"
+    );
+}
