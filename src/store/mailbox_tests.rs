@@ -396,7 +396,7 @@ unsafe extern "C" fn record_transition_queries(
 }
 
 #[test]
-fn repeated_writable_initialization_skips_transition_history_after_index_creation() {
+fn writable_initialization_never_reads_transition_history() {
     let directory = super::tests::TestDirectory::new();
     let mut store = StateStore::open(&directory.0).unwrap();
     store
@@ -413,13 +413,17 @@ fn repeated_writable_initialization_skips_transition_history_after_index_creatio
         );
     }
     initialize_schema(&mut store.connection, &directory.0).unwrap();
-    assert_eq!(queries.len(), 1, "{queries:?}");
-    queries.clear();
+    let first_queries = std::mem::take(&mut queries);
     initialize_schema(&mut store.connection, &directory.0).unwrap();
     unsafe {
         rusqlite::ffi::sqlite3_trace_v2(store.connection.handle(), 0, None, std::ptr::null_mut());
     }
-    assert!(queries.is_empty(), "{queries:?}");
+    assert_eq!(
+        first_queries.len(),
+        0,
+        "initialization without index: {first_queries:?}"
+    );
+    assert_eq!(queries.len(), 0, "repeat initialization: {queries:?}");
     assert_eq!(store.schema_version().unwrap(), 6);
 }
 
