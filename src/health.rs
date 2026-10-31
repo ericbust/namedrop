@@ -561,11 +561,21 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
         }
     }
     if supported_agents == 0
-        && setup.unavailable_panes.is_empty()
         && !setup
             .addresses
             .iter()
             .any(|a| a.pane_type == crate::PaneType::Terminal)
+        && (setup.unavailable_panes.is_empty()
+            || (runtime.is_hc()
+                && runtime
+                    .host
+                    .panes(crate::PaneScope::All)
+                    .is_ok_and(|observed| {
+                        setup
+                            .unavailable_panes
+                            .iter()
+                            .all(|pane| observed.iter().any(|known| known.pane_id == *pane))
+                    })))
     {
         issues.push(issue(
             "ND-SETUP-003",
