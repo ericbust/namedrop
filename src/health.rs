@@ -117,9 +117,22 @@ pub fn append_hc_diagnostics<H: Host, C: Clock, I: IdGenerator, E: crate::HerdrC
             report.status = HealthStatus::NeedsAttention;
         }
     }
-    if let Err(error) =
+    let subscriber =
         crate::host::hc::events::status(runtime.state_directory, runtime.session_socket_id)
-    {
+            .or_else(|_| {
+                let environment = host
+                    .environment_snapshot()
+                    .ok_or("HC subscriber restart requires the captured environment")?;
+                let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+                crate::host::hc::events::start_with_environment(
+                    host,
+                    &executable,
+                    runtime.state_directory,
+                    environment,
+                )
+                .map_err(|error| error.to_string())
+            });
+    if let Err(error) = subscriber {
         let mut note = issue(
             "ND-HC-SUBSCRIBER-001",
             HealthSeverity::Broken,
@@ -128,14 +141,16 @@ pub fn append_hc_diagnostics<H: Host, C: Clock, I: IdGenerator, E: crate::HerdrC
             HealthRepairKind::ProductAction,
             "Activate Namedrop to restart event delivery.",
         );
-        add_operation(
-            &mut note,
-            runtime,
-            runtime.workspace_id.unwrap_or("headless"),
-            "activate",
-            serde_json::json!({"confirmed":true}),
-            None,
-        );
+        if let Ok(space) = runtime.host.space(runtime.space_locator(), None) {
+            add_operation(
+                &mut note,
+                runtime,
+                &space.workspace_id,
+                "activate",
+                serde_json::json!({"confirmed":true}),
+                None,
+            );
+        }
         report.issues.push(note);
         report.status = HealthStatus::NeedsAttention;
     }

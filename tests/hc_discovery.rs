@@ -226,10 +226,15 @@ fn terminal_ending_during_discovery_is_not_an_unavailable_pane() {
         r#"{"error":{"kind":"not_found","message":"ended"}}"#,
         r#"{"error":{"kind":"finished","message":"ended"}}"#,
     ] {
-        let fixture = Fixture { calls: RefCell::default(), error };
+        let fixture = Fixture {
+            calls: RefCell::default(),
+            error,
+        };
         let host = HcHost::new(&fixture);
         assert!(host.discovery_warnings().unwrap().is_empty());
-        let space = host.space(SpaceLocator::Workspace("fixture-space"), None).unwrap();
+        let space = host
+            .space(SpaceLocator::Workspace("fixture-space"), None)
+            .unwrap();
         assert_eq!(space.panes.len(), 1);
         assert!(space.unavailable_panes.is_empty());
     }

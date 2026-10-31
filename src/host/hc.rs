@@ -322,9 +322,13 @@ impl Terminal {
     }
 }
 
-// Naming operations take their lock first. Settlement projection drops this guard
-// before running lifecycle work that can acquire the naming lock.
-pub(crate) fn prompt_lock(state: &Path, core: &str, pane: &str) -> Result<std::fs::File, String> {
+pub(crate) struct PromptGuard {
+    _prompt: std::fs::File,
+    _labels: std::rc::Rc<std::fs::File>,
+}
+
+pub(crate) fn prompt_lock(state: &Path, core: &str, pane: &str) -> Result<PromptGuard, String> {
+    let labels = label_lock(state)?;
     use sha2::Digest;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     let directory = state.join("hc-prompts");
@@ -344,16 +348,29 @@ pub(crate) fn prompt_lock(state: &Path, core: &str, pane: &str) -> Result<std::f
         .open(directory.join(filename))
         .map_err(|error| error.to_string())?;
     file.lock().map_err(|error| error.to_string())?;
-    Ok(file)
+    Ok(PromptGuard {
+        _prompt: file,
+        _labels: labels,
+    })
 }
 
-pub(crate) fn label_lock(state: &Path) -> Result<std::fs::File, String> {
+thread_local! {
+    static LABEL_LOCKS: std::cell::RefCell<BTreeMap<PathBuf, std::rc::Weak<std::fs::File>>> = const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+pub(crate) fn label_lock(state: &Path) -> Result<std::rc::Rc<std::fs::File>, String> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(state)
         .map_err(|error| error.to_string())?;
+    let state = state.canonicalize().map_err(|error| error.to_string())?;
+    if let Some(file) =
+        LABEL_LOCKS.with(|locks| locks.borrow().get(&state).and_then(std::rc::Weak::upgrade))
+    {
+        return Ok(file);
+    }
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -363,6 +380,12 @@ pub(crate) fn label_lock(state: &Path) -> Result<std::fs::File, String> {
         .open(state.join("hc-labels.lock"))
         .map_err(|error| error.to_string())?;
     file.lock().map_err(|error| error.to_string())?;
+    let file = std::rc::Rc::new(file);
+    LABEL_LOCKS.with(|locks| {
+        let mut locks = locks.borrow_mut();
+        locks.retain(|_, file| file.strong_count() > 0);
+        locks.insert(state, std::rc::Rc::downgrade(&file));
+    });
     Ok(file)
 }
 
@@ -386,11 +409,13 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
 
     pub(crate) fn shell_pid(&self, terminal: &str, budget: &dyn Budget) -> Option<u32> {
         local_terminal(terminal).ok()?;
-        let response: serde_json::Value = self
-            .execute(&["get", terminal, "--json"], Some(budget))
-            .ok()?;
-        u32::try_from(response["pid"].as_u64()?)
-            .ok()
+        #[derive(Deserialize)]
+        struct Shell {
+            pid: Option<u32>,
+        }
+        self.execute::<Shell>(&["get", terminal, "--json"], Some(budget))
+            .ok()?
+            .pid
             .filter(|pid| *pid > 0)
     }
 
@@ -446,6 +471,7 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
             match self.terminal(&summary.address, budget) {
                 Ok(terminal) if terminal.state == "live" => discovery.terminals.push(terminal),
                 Ok(_) => (),
+                Err(error) if matches!(error.code.as_deref(), Some("not_found" | "finished")) => (),
                 Err(error) => discovery.warnings.push(DiscoveryWarning {
                     terminal: summary.address,
                     message: error.message,
@@ -734,7 +760,30 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
                 ..
             }
         ) {
-            self.clear_session(&terminal).map_err(pre_invocation)?;
+            let captured_state;
+            let state = match self.transport.state_directory() {
+                Some(state) => state,
+                None => {
+                    captured_state = self
+                        .transport
+                        .environment_snapshot()
+                        .ok_or_else(|| {
+                            pre_invocation(
+                                "hc session cleanup requires a captured state directory"
+                                    .to_owned()
+                                    .into(),
+                            )
+                        })?
+                        .hc_state_directory()
+                        .map_err(|error| pre_invocation(error.into()))?;
+                    &captured_state
+                }
+            };
+            self.invalidate_session(state, pane)
+                .map_err(pre_invocation)?;
+            return Err(pre_invocation(
+                "hc terminal has no live session owner".to_owned().into(),
+            ));
         }
         let status = match occupancy {
             Occupancy::Agent {
@@ -828,38 +877,19 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         Ok(())
     }
     fn open_popup(&self, popup: &Popup<'_>) -> Result<serde_json::Value, HostError> {
-        let captured;
-        let environment = match self.transport.environment_snapshot() {
-            Some(environment) => environment,
-            None => {
-                captured = crate::environment::EnvironmentSnapshot::capture();
-                &captured
-            }
-        };
-        let program = environment
-            .var_os("HERDR_APP_BIN_PATH")
-            .unwrap_or_else(|| "herdr-app".into());
-        let output = environment
-            .hc_command(program)
-            .args([
+        let output = self
+            .transport
+            .open_hc_popup(&[
                 "do",
                 "mod.open",
                 "--name",
                 &format!("namedrop-{}", popup.entrypoint),
             ])
-            .output()
-            .map_err(|error| {
-                format!("Open Namedrop from the Herdr app, or put herdr-app on PATH: {error}")
-            })?;
-        if !output.status.success() {
-            return Err(String::from_utf8_lossy(&output.stderr)
-                .trim()
-                .to_owned()
-                .into());
-        }
-        Ok(serde_json::from_slice(&output.stdout)
+            .map_err(host_error)?;
+        Ok(serde_json::from_str(&output.stdout)
             .unwrap_or_else(|_| serde_json::json!({"opened": true})))
     }
+
     fn reload_config(&self) -> Result<(), HostError> {
         Ok(())
     }
@@ -1004,9 +1034,42 @@ pub(crate) mod testing {
     }
 
     #[test]
+    fn label_then_prompt_locks_allow_nested_lifecycle_and_block_other_threads() {
+        let state = std::env::temp_dir().join(format!("hc-lock-order-{}", std::process::id()));
+        let labels = label_lock(&state).unwrap();
+        let nested = prompt_lock(&state.join("."), "core", "pane").unwrap();
+        let (entered, pending) = std::sync::mpsc::channel();
+        let other_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            let _guard = prompt_lock(&other_state, "core", "pane").unwrap();
+            entered.send(()).unwrap();
+        });
+        assert!(
+            pending
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        drop(nested);
+        assert!(
+            pending
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err()
+        );
+        drop(labels);
+        pending
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        worker.join().unwrap();
+        std::fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
     fn golden_argv() {
-        struct Executor(std::cell::RefCell<Vec<Vec<String>>>, u32);
+        struct Executor(std::cell::RefCell<Vec<Vec<String>>>, u32, PathBuf);
         impl HerdrCommandExecutor for Executor {
+            fn state_directory(&self) -> Option<&Path> {
+                Some(&self.2)
+            }
             fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
                 self.0
                     .borrow_mut()
@@ -1053,7 +1116,11 @@ pub(crate) mod testing {
         )
         .unwrap();
         assert_eq!(ready, "ready\n");
-        let executor = Executor(std::cell::RefCell::default(), shell.id());
+        let executor = Executor(
+            std::cell::RefCell::default(),
+            shell.id(),
+            std::env::temp_dir().join(format!("hc-golden-{}", std::process::id())),
+        );
         let host = HcHost::new(&executor);
         host.panes(PaneScope::All).unwrap();
         host.read("t1", 40, None).unwrap();
@@ -1075,6 +1142,7 @@ pub(crate) mod testing {
                 vec!["read", "t1", "--json"],
                 vec!["get", "t1", "--json"],
                 vec!["read", "t1", "--lines", "1000", "--json"],
+                vec!["get", "t1", "--json"],
                 vec!["get", "t1", "--json"],
                 vec!["label", "t1", "namedrop.session=", "--json"],
                 vec!["get", "t1", "--json"],

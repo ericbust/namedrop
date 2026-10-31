@@ -282,7 +282,71 @@ where
     let attribution = MutationAttribution::new(actor_kind, actor_id, runtime.clock.now_unix_ms());
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
 
-    match operation {
+    let compensation_panes = if runtime.is_hc()
+        && matches!(
+            operation,
+            "name"
+                | "event.name"
+                | "address.create"
+                | "address.bind"
+                | "address.unbind"
+                | "address.rename"
+                | "address.release-alias"
+                | "address.remove"
+                | "address.retire"
+        ) {
+        let mut panes = std::collections::BTreeSet::new();
+        match operation {
+            "name" | "event.name" => {
+                panes.extend(runtime.current_pane_id.map(str::to_owned));
+            }
+            "address.create" => {
+                panes.extend(
+                    input
+                        .get("pane_id")
+                        .and_then(Value::as_str)
+                        .or(runtime.current_pane_id)
+                        .map(str::to_owned),
+                );
+            }
+            _ => {
+                let addresses = store
+                    .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+                    .map_err(|error| error.to_string())?;
+                for address in addresses {
+                    if input.get("address_id").and_then(Value::as_str) == Some(address.id.as_str())
+                        || (operation == "address.release-alias"
+                            && input.get("alias").and_then(Value::as_str) == Some(&address.alias))
+                    {
+                        panes.extend(address.pane_id);
+                    }
+                }
+                if operation == "address.bind" {
+                    panes.extend(
+                        input
+                            .get("pane_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    );
+                }
+                if operation == "address.release-alias"
+                    && let Some(alias) = input.get("alias").and_then(Value::as_str)
+                {
+                    panes.extend(
+                        discovered
+                            .panes
+                            .iter()
+                            .filter(|pane| pane.pane_label.as_deref() == Some(&format!("@{alias}")))
+                            .map(|pane| pane.pane_id.clone()),
+                    );
+                }
+            }
+        }
+        panes
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let result = (|| match operation {
         "name" | "event.name" => {
             let input: NameInput = parse_input(input)?;
             let supplied_alias = required_nonempty(input.alias, "alias")?;
@@ -1230,7 +1294,37 @@ where
             }))
         }
         _ => Err(format!("{operation} is not a lifecycle operation")),
+    })();
+    if let Err(error) = result.as_ref()
+        && !compensation_panes.is_empty()
+    {
+        let committed = store
+            .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+            .map_err(|read| format!("{error}; could not read committed names: {read}"))?;
+        let mut failures = Vec::new();
+        for pane in &compensation_panes {
+            let alias = committed
+                .iter()
+                .find(|address| {
+                    !address.retired && address.pane_id.as_deref() == Some(pane.as_str())
+                })
+                .map(|address| address.alias.as_str());
+            let restored = match alias {
+                Some(alias) => publish_hc_name(runtime, Some(pane.as_str()), alias),
+                None => clear_hc_name(runtime, Some(pane.as_str())),
+            };
+            if let Err(restore) = restored {
+                failures.push(restore);
+            }
+        }
+        if !failures.is_empty() {
+            return Err(format!(
+                "{error}; restoring committed names failed: {}",
+                failures.join("; ")
+            ));
+        }
     }
+    result
 }
 
 /// What a named pane's idle label tells the human.

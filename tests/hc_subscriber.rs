@@ -351,12 +351,14 @@ fn detached_subscriber_child() {
     let Some(root) = std::env::var_os("SUBSCRIBER_TEST_ROOT").map(std::path::PathBuf::from) else {
         return;
     };
+    let environment = namedrop::environment::EnvironmentSnapshot::capture();
     let fixture = Fixture::default();
     let host = HcHost::new(&fixture);
     let state = root.join("state");
     let binary = root.join("namedrop");
     std::fs::create_dir_all(state.join("runtime")).unwrap();
-    namedrop::host::hc::events::start(&host, &binary, &state).unwrap();
+    namedrop::host::hc::events::start_with_environment(&host, &binary, &state, &environment)
+        .unwrap();
     let directory = std::fs::read_dir(state.join("hc-subscribers"))
         .unwrap()
         .next()
@@ -377,6 +379,15 @@ fn detached_subscriber_child() {
         }
     }
     let _cleanup = Cleanup(state.clone());
+    let child_environment = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
+    for token in [b"HC_SCOPE=".as_slice(), b"HC_RUNTIME=", b"HC_TERMINAL_"] {
+        assert!(
+            !child_environment
+                .split(|byte| *byte == 0)
+                .any(|entry| entry.starts_with(token))
+        );
+    }
+
     std::fs::create_dir_all(state.join("runtime")).unwrap();
     let gate = std::fs::OpenOptions::new()
         .create(true)
@@ -421,7 +432,8 @@ fn detached_subscriber_child() {
         );
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    namedrop::host::hc::events::start(&host, &binary, &state).unwrap();
+    namedrop::host::hc::events::start_with_environment(&host, &binary, &state, &environment)
+        .unwrap();
     assert_eq!(record()["pid"], first["pid"]);
     let starters: Vec<_> = (0..3)
         .map(|_| {
@@ -429,7 +441,13 @@ fn detached_subscriber_child() {
             let binary = binary.clone();
             std::thread::spawn(move || {
                 let fixture = Fixture::default();
-                namedrop::host::hc::events::start(&HcHost::new(&fixture), &binary, &state).unwrap();
+                namedrop::host::hc::events::start_with_environment(
+                    &HcHost::new(&fixture),
+                    &binary,
+                    &state,
+                    &namedrop::environment::EnvironmentSnapshot::capture(),
+                )
+                .unwrap();
             })
         })
         .collect();
@@ -450,9 +468,22 @@ fn detached_subscriber_child() {
     std::fs::copy(&binary, &replacement).unwrap();
     std::fs::rename(replacement, &binary).unwrap();
     let doctor = std::process::Command::new(&binary)
-        .args(["--host", "hc", "--plugin-state"]).arg(&state)
-        .args(["--hc-space", "fixture-space", "doctor"]).output().unwrap();
-    assert!(!String::from_utf8_lossy(&doctor.stdout).contains("ND-HC-SUBSCRIBER-001"), "{}", String::from_utf8_lossy(&doctor.stdout));
+        .env_remove("HC_TERMINAL_ID")
+        .args(["--host", "hc", "--plugin-state"])
+        .arg(&state)
+        .args(["--hc-space", "fixture-space", "doctor"])
+        .output()
+        .unwrap();
+    assert!(
+        !doctor.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&doctor.stdout).contains("ND-HC-SUBSCRIBER-001"),
+        "{}",
+        String::from_utf8_lossy(&doctor.stdout)
+    );
     let second = record();
     let second_pid = second["pid"].as_u64().unwrap() as i32;
     assert_ne!(
@@ -498,7 +529,8 @@ fn detached_subscriber_child() {
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700)).unwrap();
-    namedrop::host::hc::events::start(&host, &launcher, &state).unwrap();
+    namedrop::host::hc::events::start_with_environment(&host, &launcher, &state, &environment)
+        .unwrap();
     let cooperative = record();
     let mut stale_request = cooperative.clone();
     stale_request["process_start"] = json!("recycled-pid");
@@ -520,11 +552,13 @@ fn detached_subscriber_child() {
     namedrop::host::hc::events::status(&state, "hc:628bcf8129aa037b1fa5aad3504926a6").unwrap();
     std::fs::write(directory.join("stop-request.json"), cooperative.to_string()).unwrap();
     wait_exit(cooperative["pid"].as_u64().unwrap() as i32);
-    namedrop::host::hc::events::start(&host, &launcher, &state).unwrap();
+    namedrop::host::hc::events::start_with_environment(&host, &launcher, &state, &environment)
+        .unwrap();
     let stopped_pid = record()["pid"].as_u64().unwrap() as i32;
     namedrop::host::hc::events::stop(&state, "hc:628bcf8129aa037b1fa5aad3504926a6").unwrap();
     wait_exit(stopped_pid);
-    namedrop::host::hc::events::start(&host, &launcher, &state).unwrap();
+    namedrop::host::hc::events::start_with_environment(&host, &launcher, &state, &environment)
+        .unwrap();
     let selected_pid = record()["pid"].as_u64().unwrap() as i32;
     let successor = root.join("successor");
     std::fs::copy(&binary, &successor).unwrap();
@@ -532,7 +566,8 @@ fn detached_subscriber_child() {
     std::os::unix::fs::symlink(&successor, state.join("runtime/current/namedrop")).unwrap();
     wait_exit(selected_pid);
     let before_restart_epoch = epoch();
-    namedrop::host::hc::events::start(&host, &launcher, &state).unwrap();
+    namedrop::host::hc::events::start_with_environment(&host, &launcher, &state, &environment)
+        .unwrap();
     let final_pid = record()["pid"].as_u64().unwrap() as i32;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while epoch() <= before_restart_epoch {
@@ -542,7 +577,7 @@ fn detached_subscriber_child() {
         );
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    let socket = std::path::PathBuf::from(std::env::var_os("HC_TERMINAL_SOCKET").unwrap());
+    let socket = std::path::PathBuf::from(std::env::var_os("HC_SOCKET").unwrap());
     std::fs::remove_file(&socket).unwrap();
     std::fs::write(root.join("disconnect"), "").unwrap();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
@@ -791,17 +826,40 @@ fn snapshot_repairs_a_missing_name_mirror() {
 #[test]
 fn failed_store_commit_restores_the_applied_name() {
     check("commit-failure", |fixture, runtime| {
-        let connection = rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
+        let connection =
+            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
         connection.execute_batch("CREATE TABLE failure_parent (id INTEGER PRIMARY KEY);
             CREATE TABLE failure_child (id INTEGER REFERENCES failure_parent(id) DEFERRABLE INITIALLY DEFERRED);
             CREATE TRIGGER fail_rename_commit AFTER INSERT ON alias_claims WHEN NEW.alias='bob'
             BEGIN INSERT INTO failure_child VALUES(1); END;").unwrap();
-        let error = namedrop::execute_lifecycle_operation("name", json!({"alias":"bob", "pane_type":"terminal"}), runtime).unwrap_err();
+        let error = namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"bob", "pane_type":"terminal"}),
+            runtime,
+        )
+        .unwrap_err();
         assert!(error.contains("FOREIGN KEY"), "{error}");
-        assert!(fixture.calls.borrow().iter().any(|call| call.iter().any(|arg| arg == "namedrop.name=bob")));
-        assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.name"], "alice");
-        namedrop::host::hc::events::Subscriber::default().handle_line(&labels(), runtime).unwrap();
-        let alias: String = connection.query_row("SELECT alias FROM alias_claims WHERE claim_state='active'", [], |row| row.get(0)).unwrap();
+        assert!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call.iter().any(|arg| arg == "namedrop.name=bob"))
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+            "alice"
+        );
+        namedrop::host::hc::events::Subscriber::default()
+            .handle_line(&labels(), runtime)
+            .unwrap();
+        let alias: String = connection
+            .query_row(
+                "SELECT alias FROM alias_claims WHERE claim_state='active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(alias, "alice");
     });
 }
@@ -810,11 +868,82 @@ fn failed_store_commit_restores_the_applied_name() {
 fn doctor_repair_uses_the_discovered_checkout_space() {
     check("doctor-space", |fixture, runtime| {
         fixture.terminals.borrow_mut()[0]["foreground"]["cwd"] = json!(env!("CARGO_MANIFEST_DIR"));
-        let runtime = namedrop::LifecycleRuntime { workspace_id: None, current_pane_id: None, ..*runtime };
+        let runtime = namedrop::LifecycleRuntime {
+            workspace_id: None,
+            current_pane_id: None,
+            ..*runtime
+        };
         let mut report = namedrop::diagnose_collaboration(&runtime);
         namedrop::append_hc_diagnostics(&mut report, &runtime, &runtime.host);
-        let repair = &report.issues.iter().find(|issue| issue.code == "ND-HC-SUBSCRIBER-001").unwrap().repair;
+        let repair = &report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "ND-HC-SUBSCRIBER-001")
+            .unwrap()
+            .repair;
         let command = repair.command.as_ref().unwrap();
-        assert!(command.windows(2).any(|part| part == ["--hc-space", "fixture-space"]), "{command:?}");
+        assert!(
+            command
+                .windows(2)
+                .any(|part| part == ["--hc-space", "fixture-space"]),
+            "{command:?}"
+        );
     });
+}
+
+#[test]
+fn moved_terminal_mirrors_its_existing_destination_alias() {
+    check("move-existing", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["labels"]["herdr.space"] = json!("destination");
+        let destination = namedrop::LifecycleRuntime {
+            workspace_id: Some("destination"),
+            ..*runtime
+        };
+        namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"destination-name", "pane_type":"terminal"}),
+            &destination,
+        )
+        .unwrap();
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("alice");
+        namedrop::host::hc::events::Subscriber::default()
+            .handle_line(&labels(), runtime)
+            .unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+            "destination-name"
+        );
+    });
+}
+
+#[test]
+fn naming_without_a_tab_works_for_parked_and_headless_terminals() {
+    for space in ["fixture-space", "headless"] {
+        check(&format!("no-tab-{space}"), |fixture, runtime| {
+            fixture.terminals.borrow_mut()[0]["labels"]
+                .as_object_mut()
+                .unwrap()
+                .remove("herdr.tab");
+            if space == "headless" {
+                fixture.terminals.borrow_mut()[0]["labels"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("herdr.space");
+            }
+            let runtime = namedrop::LifecycleRuntime {
+                workspace_id: Some(space),
+                ..*runtime
+            };
+            namedrop::execute_lifecycle_operation(
+                "name",
+                json!({"alias":"parked", "pane_type":"terminal"}),
+                &runtime,
+            )
+            .unwrap();
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+                "parked"
+            );
+        });
+    }
 }

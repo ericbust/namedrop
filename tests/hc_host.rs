@@ -1,5 +1,7 @@
 #[path = "support/app_popup.rs"]
 mod app_popup;
+#[path = "support/hc_socket.rs"]
+mod hc_socket;
 #[path = "fixtures/hc/process.rs"]
 mod process;
 use namedrop::{
@@ -10,12 +12,14 @@ use serde_json::{Value, json};
 use std::{cell::RefCell, path::Path};
 
 struct Fixture {
+    environment: namedrop::environment::EnvironmentSnapshot,
     _shell: process::AgentProcess,
     terminals: RefCell<Vec<Value>>,
     calls: RefCell<Vec<Vec<String>>>,
     send_error: RefCell<Option<String>>,
     read_text: Option<String>,
     on_send: RefCell<Option<Box<dyn Fn()>>>,
+    retire_when_leased: RefCell<Option<std::path::PathBuf>>,
     clear_error: RefCell<Option<String>>,
     rename_error: RefCell<bool>,
 }
@@ -27,31 +31,61 @@ impl Default for Fixture {
         terminal["pid"] = json!(shell.pid());
         terminal["foreground"]["pid"] = json!(shell.pid());
         Self {
+            environment: namedrop::environment::EnvironmentSnapshot::from_variables([(
+                "XDG_STATE_HOME".into(),
+                std::env::temp_dir()
+                    .join(format!("hc-host-fixture-{}", std::process::id()))
+                    .into_os_string(),
+            )]),
             _shell: shell,
             terminals: RefCell::new(vec![terminal]),
             calls: RefCell::new(Vec::new()),
             send_error: RefCell::new(None),
             read_text: None,
             on_send: RefCell::new(None),
+            retire_when_leased: RefCell::new(None),
             clear_error: RefCell::new(None),
             rename_error: RefCell::new(false),
         }
     }
 }
 impl HerdrCommandExecutor for Fixture {
+    fn open_hc_popup(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        let environment = namedrop::environment::EnvironmentSnapshot::capture();
+        if environment.var_os("HERDR_APP_BIN_PATH").is_none() {
+            return Err("test app override missing".into());
+        }
+        namedrop::ProcessHerdr::from_snapshot(namedrop::runtime::HostKind::Hc, &environment)
+            .open_hc_popup(args)
+    }
+    fn environment_snapshot(&self) -> Option<&namedrop::environment::EnvironmentSnapshot> {
+        Some(&self.environment)
+    }
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         self.calls
             .borrow_mut()
             .push(args.iter().map(|arg| (*arg).to_owned()).collect());
         let stdout = match args {
             ["ls", "--json"] => json!({"terminals": *self.terminals.borrow()}).to_string(),
-            ["get", id, "--json"] => self
-                .terminals
-                .borrow()
-                .iter()
-                .find(|terminal| terminal["address"] == *id)
-                .ok_or_else(|| include_str!("fixtures/hc/not-found.stderr").to_owned())?
-                .to_string(),
+            ["get", id, "--json"] => {
+                if let Some(state) = self.retire_when_leased.borrow().as_ref() {
+                    let database =
+                        rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+                    let leased: bool = database
+                        .query_row("SELECT EXISTS(SELECT 1 FROM leases)", [], |row| row.get(0))
+                        .unwrap();
+                    if leased {
+                        self.terminals.borrow_mut()[0]["labels"]["namedrop.session.pid"] =
+                            json!("4000000000");
+                    }
+                }
+                self.terminals
+                    .borrow()
+                    .iter()
+                    .find(|terminal| terminal["address"] == *id)
+                    .ok_or_else(|| include_str!("fixtures/hc/not-found.stderr").to_owned())?
+                    .to_string()
+            }
             ["read", ..] => self
                 .read_text
                 .as_ref()
@@ -208,6 +242,7 @@ fn golden_argv_and_idempotent_metadata() {
             vec!["read", "t1", "--json"],
             vec!["get", "t1", "--json"],
             vec!["read", "t1", "--lines", "1000", "--json"],
+            vec!["get", "t1", "--json"],
             vec!["get", "t1", "--json"],
             vec!["label", "t1", "namedrop.session=", "--json"],
             vec!["get", "t1", "--json"],
@@ -807,10 +842,11 @@ fn subscriber_start_propagates_core_preflight_failure_before_launch() {
         }
     }
     let root = std::env::temp_dir().join(format!("hc-preflight-no-launch-{}", std::process::id()));
-    let error = namedrop::host::hc::events::start(
+    let error = namedrop::host::hc::events::start_with_environment(
         &HcHost::new(StartTransport),
         &root.join("missing-binary"),
         &root,
+        &namedrop::environment::EnvironmentSnapshot::from_variables([]),
     )
     .unwrap_err();
     assert!(error.message.contains("fixture core unavailable"));
@@ -917,7 +953,10 @@ impl ConcurrentFixture {
             .remove("namedrop.session");
         Self {
             environment: namedrop::environment::EnvironmentSnapshot::from_variables([(
-                "XDG_STATE_HOME".into(), std::env::temp_dir().join(format!("hc-prompt-race-{}", std::process::id())).into_os_string()
+                "XDG_STATE_HOME".into(),
+                std::env::temp_dir()
+                    .join(format!("hc-prompt-race-{}", std::process::id()))
+                    .into_os_string(),
             )]),
             record: std::sync::Mutex::new(record),
             get_count: std::sync::atomic::AtomicUsize::new(0),
@@ -939,7 +978,9 @@ impl ConcurrentFixture {
     }
 }
 impl HerdrCommandExecutor for ConcurrentFixture {
-    fn environment_snapshot(&self) -> Option<&namedrop::environment::EnvironmentSnapshot> { Some(&self.environment) }
+    fn environment_snapshot(&self) -> Option<&namedrop::environment::EnvironmentSnapshot> {
+        Some(&self.environment)
+    }
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let stdout = match args {
             ["ls", "--json"] => json!({"terminals":[*self.record.lock().unwrap()]}).to_string(),
@@ -2141,6 +2182,8 @@ fn hc_popup_uses_native_override_and_scrubs_environment() {
     ));
     std::fs::rename(fake, &native_path).unwrap();
     let path = app_popup::tripwire(&root);
+    let socket = root.join("core.sock");
+    let _core = hc_socket::HcSocket::bind(&socket).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "hc_popup_child", "--nocapture"])
         .env_clear()
@@ -2156,7 +2199,7 @@ fn hc_popup_uses_native_override_and_scrubs_environment() {
         .env("HC_TERMINAL_ID", "inherited-terminal")
         .env("HC_TERMINAL_SOCKET", "inherited-terminal-socket")
         .env("HC_SESSION", "kept-session")
-        .env("HC_SOCKET", "kept-socket")
+        .env("HC_SOCKET", &socket)
         .env("UNRELATED", "kept-value")
         .output()
         .unwrap();
@@ -2177,7 +2220,7 @@ fn hc_popup_uses_native_override_and_scrubs_environment() {
     assert!(!env.contains_key("HC_TERMINAL_ID"));
     assert!(!env.contains_key("HC_TERMINAL_SOCKET"));
     assert_eq!(env["HC_SESSION"], "kept-session");
-    assert_eq!(env["HC_SOCKET"], "kept-socket");
+    assert_eq!(env["HC_SOCKET"], socket.to_str().unwrap());
     assert_eq!(env["UNRELATED"], "kept-value");
     assert!(!root.join("path/unexpected-app.log").exists());
     std::fs::remove_dir_all(root).unwrap();
@@ -2344,7 +2387,34 @@ fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
         fixture.take_calls();
         *fixture.send_error.borrow_mut() =
             Some(json!({"error":{"kind":refusal,"message":"not sent"}}).to_string());
+        if recovery == "dead-owner" {
+            *fixture.retire_when_leased.borrow_mut() = Some(state.clone());
+        }
         let report = namedrop::drain_mailboxes(&runtime).unwrap();
+        if recovery == "dead-owner" {
+            assert_eq!(report.requeued.len(), 1, "{report:?}");
+            assert!(
+                store
+                    .transaction(|tx| tx.transition_facts(&namespace))
+                    .unwrap()
+                    .iter()
+                    .any(|fact| fact.transition_kind == namedrop::TransitionKind::Failed)
+            );
+            assert!(
+                store
+                    .transaction(|tx| tx.unresolved_attention_items(&namespace))
+                    .unwrap()
+                    .len()
+                    > attention_before
+            );
+            assert!(!fixture.calls.borrow().iter().any(|call| call[0] == "send"));
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+                ""
+            );
+            std::fs::remove_dir_all(state).unwrap();
+            return;
+        }
         assert!(
             report.requeued.is_empty(),
             "settle deferral must not schedule retry: {report:?}"
@@ -2825,15 +2895,22 @@ fn dead_session_owner_is_a_preinvocation_failure() {
     let fixture = Fixture::default();
     fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session.pid"] = json!("4000000000");
     fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session.start"] = json!("gone");
-    let result = HcHost::new(&fixture).prompt("t1", "must not type").unwrap_err();
+    let result = HcHost::new(&fixture)
+        .prompt("t1", "must not type")
+        .unwrap_err();
     assert_eq!(result.kind, PromptFailureKind::TemporaryPreInvocation);
-    assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.session"], "");
+    assert_eq!(
+        fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+        ""
+    );
     assert!(!fixture.calls.borrow().iter().any(|call| call[0] == "send"));
 }
 
 #[test]
 fn stale_prompt_does_not_erase_a_replacement_session() {
-    if process::in_agent_tree("stale_prompt_does_not_erase_a_replacement_session") { return; }
+    if process::in_agent_tree("stale_prompt_does_not_erase_a_replacement_session") {
+        return;
+    }
     let fixture = ConcurrentFixture::new();
     let state = fixture.environment.hc_state_directory().unwrap();
     let host = HcHost::new(&fixture);
@@ -2843,11 +2920,21 @@ fn stale_prompt_does_not_erase_a_replacement_session() {
     let (entered, resume) = fixture.pause_on_get(1);
     std::thread::scope(|scope| {
         let sending = scope.spawn(|| host.prompt("t1", "must not type"));
-        entered.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        entered
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
         host.publish_session(&state, "t1", "replacement").unwrap();
         resume.send(()).unwrap();
         assert!(sending.join().unwrap().is_err());
     });
-    assert_eq!(fixture.record.lock().unwrap()["labels"]["namedrop.session"], "replacement");
+    assert_eq!(
+        fixture.record.lock().unwrap()["labels"]["namedrop.session"],
+        "replacement"
+    );
     std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn dead_owner_after_lease_records_failed_attention_and_requeues() {
+    assert_refused_hc_delivery("blocked", "dead-owner");
 }

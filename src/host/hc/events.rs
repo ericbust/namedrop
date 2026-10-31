@@ -204,6 +204,7 @@ impl Subscriber {
         &mut self,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
+        let _lock = label_lock(runtime.state_directory)?;
         let spaces: Vec<_> = StateStore::open(runtime.state_directory)
             .map_err(|error| error.to_string())?
             .dashboard_spaces()
@@ -216,6 +217,32 @@ impl Subscriber {
         }
         let discovery = runtime.host.discover(None)?;
         let terminals = discovery.terminals;
+        if discovery.warnings.is_empty() {
+            let mut store =
+                StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
+            let attribution = crate::MutationAttribution::new(
+                crate::ActorKind::Plugin,
+                "namedrop-hc-reconcile",
+                runtime.clock.now_unix_ms(),
+            );
+            for row in &spaces {
+                let live = terminals
+                    .iter()
+                    .filter(|terminal| terminal.workspace() == row.namespace.space_id.as_str())
+                    .filter_map(|terminal| {
+                        terminal
+                            .session()
+                            .map(|session| (terminal.address.clone(), AgentSessionId::new(session)))
+                    })
+                    .collect::<Vec<_>>();
+                store
+                    .transaction(|transaction| {
+                        transaction.reconcile_prompt_recipients(&row.namespace, &live, &attribution)
+                    })
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+
         let mut errors: Vec<String> = discovery
             .warnings
             .into_iter()
@@ -248,6 +275,13 @@ impl Subscriber {
                 errors.push(error.to_string());
             }
         }
+        let mut failed_moves = BTreeSet::new();
+        for terminal in &terminals {
+            if let Err(error) = self.reconcile_move(terminal, runtime) {
+                failed_moves.insert(terminal.address.as_str());
+                errors.push(error);
+            }
+        }
         for row in spaces {
             let space = row.namespace.space_id.as_str();
             if !row.state.activated || row.state.deactivated {
@@ -262,8 +296,7 @@ impl Subscriber {
                 .iter()
                 .filter(|terminal| terminal.workspace() == space)
             {
-                if let Err(error) = self.reconcile_move(terminal, runtime) {
-                    errors.push(error);
+                if failed_moves.contains(terminal.address.as_str()) {
                     continue;
                 }
                 if let Err(error) = self.reconcile_name(&terminal.address, &scoped) {
@@ -286,6 +319,7 @@ impl Subscriber {
         terminal: &Terminal,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
+        let _lock = label_lock(runtime.state_directory)?;
         let pane = &terminal.address;
         let destination = terminal.workspace();
         let mut previous: BTreeSet<String> = self.spaces.get(pane).cloned().into_iter().collect();
@@ -302,7 +336,9 @@ impl Subscriber {
                 previous.insert(space);
             }
         }
+        let mut moved = false;
         for source in previous.into_iter().filter(|source| source != destination) {
+            moved = true;
             let scoped = LifecycleRuntime {
                 workspace_id: Some(&source),
                 ..*runtime
@@ -316,6 +352,14 @@ impl Subscriber {
                         "focused":false, "agent_status":terminal.status.as_ref().map(|status| status.state.as_str()).unwrap_or("unknown"), "revision":0}
                 }), &scoped)?;
             }
+        }
+        if moved {
+            let namespace =
+                crate::StateNamespace::for_space(runtime.session_socket_id, destination);
+            let alias = committed_alias(runtime.state_directory, &namespace, pane)?;
+            runtime
+                .host
+                .set_labels(pane, &[("namedrop.name", alias.as_deref().unwrap_or(""))])?;
         }
         self.spaces.insert(pane.clone(), destination.to_owned());
         Ok(())
@@ -333,12 +377,17 @@ impl Subscriber {
             .labels
             .get("namedrop.name")
             .map_or("", String::as_str);
-        if requested.is_empty() {
-            return Ok(());
-        }
         let namespace =
             crate::StateNamespace::for_space(runtime.session_socket_id, terminal.workspace());
         let stored = committed_alias(runtime.state_directory, &namespace, pane)?;
+        if requested.is_empty() {
+            if let Some(alias) = stored {
+                runtime
+                    .host
+                    .set_labels(pane, &[("namedrop.name", &alias)])?;
+            }
+            return Ok(());
+        }
         if stored.as_deref() == Some(requested) {
             return Ok(());
         }
@@ -607,19 +656,6 @@ pub fn status(state: &Path, socket: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn start<E: HerdrCommandExecutor>(
-    host: &HcHost<E>,
-    executable: &Path,
-    state: &Path,
-) -> Result<(), HostError> {
-    start_with_environment(
-        host,
-        executable,
-        state,
-        &crate::environment::EnvironmentSnapshot::capture(),
-    )
-}
-
 pub fn start_with_environment<E: HerdrCommandExecutor>(
     host: &HcHost<E>,
     executable: &Path,
@@ -699,15 +735,12 @@ extern "C" fn request_stop(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-pub fn run(state: &Path) -> Result<(), String> {
-    run_with_environment(state, &crate::environment::EnvironmentSnapshot::capture())
-}
-
 pub fn run_with_environment(
     state: &Path,
     environment: &crate::environment::EnvironmentSnapshot,
 ) -> Result<(), String> {
-    let transport = crate::ProcessHerdr::from_snapshot(crate::runtime::HostKind::Hc, environment);
+    let transport = crate::ProcessHerdr::from_snapshot(crate::runtime::HostKind::Hc, environment)
+        .with_state_directory(state.to_owned());
     let host = HcHost::new(&transport);
     let socket = host.core_identity()?;
     let directory = subscriber_directory(state, &socket);
@@ -883,6 +916,13 @@ fn resume_settled_recipient<E: HerdrCommandExecutor, C: Clock, I>(
                 return Ok(());
             }
             transaction.resume_prompt_after_settle(
+                &namespace,
+                &terminal.address,
+                &AgentSessionId::new(session),
+                status_ms,
+                &attribution,
+            )?;
+            transaction.resume_mailbox_after_settle(
                 &namespace,
                 &terminal.address,
                 &AgentSessionId::new(session),

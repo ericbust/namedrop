@@ -23,8 +23,15 @@ fn projection_waits_on_prompt_lock(state: &Path) -> bool {
         return false;
     };
     let locks = std::fs::read_to_string("/proc/locks").unwrap();
-    files.filter_map(Result::ok).any(|file| {
-        let inode = file.metadata().unwrap().ino();
+    let inodes = files
+        .filter_map(Result::ok)
+        .map(|file| file.metadata().unwrap().ino())
+        .chain(
+            std::fs::metadata(state.join("hc-labels.lock"))
+                .ok()
+                .map(|file| file.ino()),
+        );
+    inodes.into_iter().any(|inode| {
         locks.lines().any(|line| {
             line.contains(" -> ")
                 && line
@@ -213,7 +220,14 @@ fn assert_projection_waits(caller: &str, trigger: &str) {
     let gate = facts
         .iter()
         .rev()
-        .find(|fact| fact.entity_kind == namedrop::TransitionEntityKind::PromptRecipient)
+        .find(|fact| {
+            fact.entity_kind
+                == if caller == "delivery" {
+                    namedrop::TransitionEntityKind::MailboxDelivery
+                } else {
+                    namedrop::TransitionEntityKind::PromptRecipient
+                }
+        })
         .unwrap();
     assert_eq!(
         gate.transition_kind,
