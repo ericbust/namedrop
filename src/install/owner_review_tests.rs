@@ -1354,3 +1354,38 @@ fn tui_socket_prefix_keeps_tui_tool_environment_and_registration() {
     assert!(prompt.contains("--herdr-socket"), "{prompt}");
     assert!(!prompt.contains("--host hc"), "{prompt}");
 }
+
+#[test]
+fn every_claude_permission_inspection_error_includes_repair_guidance() {
+    let root = owner_review_root("permission-repair-guidance");
+    let state = root.join("st*ate");
+    for hc in [false, true] {
+        let home = root.join(if hc { "hc*home" } else { "tui-home" });
+        let error = PackageContext::new(&home, hc)
+            .inspect_permissions(
+                AgentConfigDirectories::default(),
+                Path::new("/bin/namedrop"),
+                &state,
+            )
+            .unwrap_err();
+        assert!(
+            error.contains(claude_permissions::REPAIR_GUIDANCE),
+            "hc={hc}: {error}"
+        );
+        let home = root.join(if hc { "hc-home" } else { "tui-home" });
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        fs::write(home.join(".claude/settings.json"), "invalid json").unwrap();
+        let error = PackageContext::new(&home, hc)
+            .inspect_permissions(
+                AgentConfigDirectories::default(),
+                Path::new("/bin/namedrop"),
+                &root.join("state"),
+            )
+            .unwrap_err();
+        assert!(
+            error.contains(claude_permissions::REPAIR_GUIDANCE),
+            "hc={hc}: {error}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
