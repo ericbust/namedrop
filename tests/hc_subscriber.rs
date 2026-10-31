@@ -2437,6 +2437,22 @@ fn due_mailbox_tick_does_not_retry_an_unavailable_dead_owner() {
         drop(dead_owner);
         *fixture.get_failure.borrow_mut() = Some("t1".into());
         subscriber.handle_line(&labels(), &runtime).unwrap();
+        let connection =
+            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
+        let attempt: String = connection
+            .query_row(
+                "SELECT attempt_id FROM delivery_attempts WHERE delivery_id='live-delivery'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .transaction(|tx| tx
+                    .delivery_attempt_state(&namespace, &DeliveryAttemptId::new(attempt.clone())))
+                .unwrap(),
+            DeliveryState::Acknowledged
+        );
         fixture.calls.borrow_mut().clear();
         let due = LifecycleRuntime {
             clock: &RetryClock(40_000),
@@ -2455,15 +2471,6 @@ fn due_mailbox_tick_does_not_retry_an_unavailable_dead_owner() {
             fixture.calls.borrow()
         );
         result.unwrap();
-        let connection =
-            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
-        let attempt: String = connection
-            .query_row(
-                "SELECT attempt_id FROM delivery_attempts WHERE delivery_id='live-delivery'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
         let state = store
             .transaction(|tx| {
                 tx.delivery_attempt_state(&namespace, &DeliveryAttemptId::new(attempt))
@@ -2471,7 +2478,7 @@ fn due_mailbox_tick_does_not_retry_an_unavailable_dead_owner() {
             .unwrap();
         assert_eq!(
             state,
-            DeliveryState::Held,
+            DeliveryState::Settled,
             "independent delivery grace must still run"
         );
         assert_eq!(
