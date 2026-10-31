@@ -2221,3 +2221,122 @@ fn unavailable_terminal_clears_session_with_still_running_owner() {
         }
     }
 }
+
+#[test]
+fn remote_events_do_not_schedule_heartbeat_retries() {
+    check("remote-heartbeats", |fixture, runtime| {
+        let mut remote = fixture.terminals.borrow()[0].clone();
+        remote["address"] = json!("remote/t9");
+        remote["labels"]["namedrop.name"] = json!("");
+        fixture.terminals.borrow_mut().push(remote);
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(
+                &json!({"terminals":*fixture.terminals.borrow()}).to_string(),
+                runtime,
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .all(|call| !call.iter().any(|arg| arg == "remote/t9"))
+        );
+        fixture.calls.borrow_mut().clear();
+        for kind in ["created", "status", "removed"] {
+            subscriber
+                .handle_line(
+                    &json!({"method":"event","params":{"type":kind,"terminal":"remote/t9"}})
+                        .to_string(),
+                    runtime,
+                )
+                .unwrap();
+        }
+        for _ in 0..10 {
+            subscriber
+                .handle_line(r#"{"method":"heartbeat","params":{}}"#, runtime)
+                .unwrap();
+        }
+        assert!(
+            fixture.calls.borrow().is_empty(),
+            "remote events scheduled hc work: {:?}",
+            fixture.calls.borrow()
+        );
+    });
+}
+
+#[test]
+fn failed_get_is_idle_on_heartbeats_and_preserves_only_unknown_recipients() {
+    check("unavailable-heartbeats", |fixture, runtime| {
+        let mut other = fixture.terminals.borrow()[0].clone();
+        other["address"] = json!("t2");
+        other["labels"]["namedrop.name"] = json!("bob");
+        fixture.terminals.borrow_mut().push(other);
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(
+                &json!({"terminals":*fixture.terminals.borrow()}).to_string(),
+                runtime,
+            )
+            .unwrap();
+        let connection =
+            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
+        for pane in ["t1", "t2", "never-readable"] {
+            connection.execute("INSERT INTO transition_facts SELECT 'hc:fixture', 'fixture-space', MAX(worktree_order)+1, 'prompt_recipient', ?1, 'paused', 'plugin', 'fixture', 1 FROM transition_facts WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space'", [json!([pane,"dead-session"]).to_string()]).unwrap();
+        }
+        connection.execute("UPDATE order_counters SET next_order = (SELECT MAX(worktree_order)+1 FROM transition_facts WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space') WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space' AND stream_kind='worktree_transition' AND stream_id=''", []).unwrap();
+        *fixture.get_failure.borrow_mut() = Some("t1".into());
+        subscriber
+            .handle_lines(
+                [
+                    labels().as_str(),
+                    r#"{"method":"event","params":{"type":"labels","terminal":"never-readable"}}"#,
+                ],
+                runtime,
+            )
+            .unwrap();
+        fixture.calls.borrow_mut().clear();
+        for _ in 0..10 {
+            subscriber
+                .handle_line(r#"{"method":"heartbeat","params":{}}"#, runtime)
+                .unwrap();
+        }
+        assert!(
+            fixture.calls.borrow().is_empty(),
+            "failed get was retried: {:?}",
+            fixture.calls.borrow()
+        );
+        fixture.terminals.borrow_mut()[1]["labels"]["namedrop.name"] = json!("carol");
+        subscriber
+            .handle_line(
+                r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#,
+                runtime,
+            )
+            .unwrap();
+        assert!(fixture.calls.borrow().iter().all(|call| {
+            call.get(1)
+                .is_none_or(|pane| pane != "t1" && pane != "never-readable")
+        }));
+        let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+        let addresses = namedrop::StateStore::open(runtime.state_directory)
+            .unwrap()
+            .transaction(|tx| tx.list_pane_addresses(&namespace))
+            .unwrap();
+        assert!(addresses.iter().any(|address| address.alias == "carol"));
+        assert!(addresses.iter().any(|address| address.alias == "alice"));
+        for (pane, expected) in [
+            ("t1", "paused"),
+            ("t2", "resumed"),
+            ("never-readable", "paused"),
+        ] {
+            let state: String = connection.query_row("SELECT transition_kind FROM transition_facts WHERE entity_kind='prompt_recipient' AND entity_id=?1 ORDER BY worktree_order DESC LIMIT 1", [json!([pane,"dead-session"]).to_string()], |row| row.get(0)).unwrap();
+            assert_eq!(state, expected, "recipient {pane}");
+        }
+        let mut report = namedrop::diagnose_collaboration(runtime);
+        namedrop::append_hc_diagnostics(&mut report, runtime, &runtime.host);
+        assert!(report.issues.iter().any(
+            |issue| issue.code == "ND-HC-DISCOVERY-001" && issue.diagnostic["terminal"] == "t1"
+        ));
+    });
+}
