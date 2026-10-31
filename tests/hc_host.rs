@@ -1318,11 +1318,7 @@ fn snapshots_and_missed_events_clear_stale_sessions_before_naming() {
                 fixture.terminals.borrow()[0]["labels"]["namedrop.session"]
                     .as_str()
                     .filter(|s| !s.is_empty()),
-                if session == "legacy" {
-                    Some(session)
-                } else {
-                    expected
-                },
+                expected,
                 "snapshot={snapshot}, session={session}"
             );
             let addresses = namedrop::StateStore::open(&state)

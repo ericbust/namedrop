@@ -20,6 +20,7 @@ struct Fixture {
     clear_error: RefCell<Option<String>>,
     rename_error: RefCell<bool>,
     name_write_failure: RefCell<Option<bool>>,
+    session_clear_failure: RefCell<bool>,
 }
 impl Default for Fixture {
     fn default() -> Self {
@@ -39,6 +40,7 @@ impl Default for Fixture {
             clear_error: RefCell::new(None),
             rename_error: RefCell::new(false),
             name_write_failure: RefCell::new(None),
+            session_clear_failure: RefCell::new(false),
         }
     }
 }
@@ -87,6 +89,9 @@ impl HerdrCommandExecutor for Fixture {
             }
             ["--version"] => "herdr-core 0.1.14\n".to_owned(),
             ["label", id, labels @ ..] => {
+                if labels.contains(&"namedrop.session=") && *self.session_clear_failure.borrow() {
+                    return Err("session cleanup failed".into());
+                }
                 let failure = if labels
                     .iter()
                     .any(|label| label.starts_with("namedrop.name="))
@@ -1095,5 +1100,196 @@ fn move_label_failure_preserves_source_proof_until_fresh_subscriber_repairs_mirr
                 }
             }
         }
+    }
+}
+
+fn session_event(kind: &str, fixture: &Fixture) -> String {
+    match kind {
+        "snapshot" => json!({"terminals": *fixture.terminals.borrow()}).to_string(),
+        "missed" => json!({"method":"missed","params":{}}).to_string(),
+        _ => json!({"method":"event","params":{"type":kind,"terminal":"t1"}}).to_string(),
+    }
+}
+
+fn queued_agent(
+    fixture: &Fixture,
+    runtime: &namedrop::LifecycleRuntime<
+        '_,
+        HcHost<&Fixture>,
+        namedrop::SystemClock,
+        namedrop::ProcessIds,
+    >,
+    pid: u32,
+) {
+    use namedrop::*;
+    {
+        let mut terminals = fixture.terminals.borrow_mut();
+        let terminal = &mut terminals[0];
+        terminal["labels"]["namedrop.session"] = json!("original-session");
+        terminal["labels"]["namedrop.session.pid"] = json!(pid.to_string());
+        terminal["labels"]["namedrop.session.start"] = json!(process::start(pid));
+        terminal["foreground"] = json!({"pid":pid,"name":"codex","argv":["codex"]});
+        terminal["status"] = json!({"state":"working"});
+    }
+    execute_lifecycle_operation(
+        "name",
+        json!({"alias":"alice","pane_type":"agent"}),
+        runtime,
+    )
+    .unwrap();
+    let namespace = StateNamespace::for_space("hc:fixture", "fixture-space");
+    let attribution = MutationAttribution::new(ActorKind::Human, "test", 1000);
+    StateStore::open(runtime.state_directory)
+        .unwrap()
+        .transaction(|tx| {
+            let binding = tx.active_pane_bindings(&namespace)?.remove(0);
+            let thread = ThreadId::new("death-thread");
+            tx.create_thread(&namespace, &thread, "test", &attribution)?;
+            tx.append_message(
+                &namespace,
+                &MessageDraft {
+                    thread_id: thread,
+                    message_id: MessageId::new("death-message"),
+                    in_reply_to: None,
+                    author_address_id: binding.address_id.clone(),
+                    author_kind: ActorKind::Human,
+                    author_alias_snapshot: "alice".into(),
+                    author_agent_session_snapshot: None,
+                    request_id: "death-request".into(),
+                    authored_source: "@alice test".into(),
+                    body: "test".into(),
+                    grammar_version: "mention/v1".into(),
+                    recipients: vec![MessageRecipientDraft {
+                        address_id: binding.address_id,
+                        alias_snapshot: "alice".into(),
+                        agent_session_snapshot: Some(AgentSessionId::new("original-session")),
+                        delivery_id: DeliveryId::new("death-delivery"),
+                    }],
+                    context_references: vec![],
+                },
+                &attribution,
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    fixture.calls.borrow_mut().clear();
+}
+
+#[test]
+fn dead_queued_session_clears_labels_and_keeps_base_empty_mailbox_behavior() {
+    for kind in ["status", "turn", "labels", "snapshot", "missed"] {
+        check(&format!("dead-queued-{kind}"), |fixture, runtime| {
+            let agent = process::AgentProcess::new();
+            queued_agent(fixture, runtime, agent.pid());
+            drop(agent);
+            namedrop::host::hc::events::Subscriber::default()
+                .handle_line(&session_event(kind, fixture), runtime)
+                .unwrap();
+            for key in [
+                "namedrop.session",
+                "namedrop.session.pid",
+                "namedrop.session.start",
+            ] {
+                assert_eq!(
+                    fixture.terminals.borrow()[0]["labels"][key],
+                    "",
+                    "stale {key} after {kind}"
+                );
+            }
+            let db = rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3"))
+                .unwrap();
+            assert_eq!(
+                db.query_row(
+                    "SELECT state FROM mailbox_deliveries WHERE delivery_id='death-delivery'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+                "queued"
+            );
+            assert_eq!(
+                db.query_row("SELECT COUNT(*) FROM delivery_attempts", [], |row| row
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+            let addresses = namedrop::StateStore::open(runtime.state_directory)
+                .unwrap()
+                .transaction(|tx| tx.list_pane_addresses(&namespace))
+                .unwrap();
+            let address = addresses
+                .iter()
+                .find(|address| address.alias == "alice")
+                .unwrap();
+            assert_eq!(address.lifecycle, namedrop::PaneAddressLifecycle::Empty);
+            let outlook = namedrop::recipient_outlooks(&["alice".into()], &addresses);
+            assert!(
+                outlook[0]
+                    .statement
+                    .contains("this message queues normally with nobody there to receive it")
+            );
+            let calls = fixture.calls.borrow();
+            assert!(calls.iter().all(|call| call[0] != "send"));
+            let clears: Vec<_> = calls
+                .iter()
+                .filter(|call| call.iter().any(|arg| arg == "namedrop.session="))
+                .collect();
+            assert_eq!(clears.len(), 1);
+            assert!(clears[0].contains(&"namedrop.session.pid=".to_owned()));
+            assert!(clears[0].contains(&"namedrop.session.start=".to_owned()));
+        });
+    }
+}
+
+#[test]
+fn stale_session_cleanup_failure_stops_reconciliation_and_sends() {
+    for kind in ["status", "turn", "labels", "snapshot", "missed"] {
+        check(&format!("cleanup-failure-{kind}"), |fixture, runtime| {
+            let agent = process::AgentProcess::new();
+            queued_agent(fixture, runtime, agent.pid());
+            drop(agent);
+            *fixture.session_clear_failure.borrow_mut() = true;
+            let error = namedrop::host::hc::events::Subscriber::default()
+                .handle_line(&session_event(kind, fixture), runtime)
+                .unwrap_err();
+            assert!(error.contains("session cleanup failed"), "{error}");
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+                "original-session"
+            );
+            let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+            let addresses = namedrop::StateStore::open(runtime.state_directory)
+                .unwrap()
+                .transaction(|tx| tx.list_pane_addresses(&namespace))
+                .unwrap();
+            assert_eq!(
+                addresses[0].agent_session_id.as_ref().map(|id| id.as_str()),
+                Some("original-session")
+            );
+            assert!(fixture.calls.borrow().iter().all(|call| call[0] != "send"));
+        });
+    }
+}
+
+#[test]
+fn reconciliation_validates_pid_start_and_preserves_fresh_session() {
+    for valid_start in [true, false] {
+        check(&format!("pid-start-{valid_start}"), |fixture, runtime| {
+            let agent = process::AgentProcess::new();
+            queued_agent(fixture, runtime, agent.pid());
+            if !valid_start {
+                fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session.start"] =
+                    json!("recycled-pid");
+            }
+            namedrop::host::hc::events::Subscriber::default()
+                .handle_line(&session_event("status", fixture), runtime)
+                .unwrap();
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+                if valid_start { "original-session" } else { "" }
+            );
+            assert!(fixture.calls.borrow().iter().all(|call| call[0] != "send"));
+        });
     }
 }
