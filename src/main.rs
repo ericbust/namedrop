@@ -992,7 +992,14 @@ fn pending_agent_status_reconciliations_with_retry(
     loop {
         match scan(directory) {
             Ok(pending) => return Ok(pending),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(error),
+            Err(error)
+                if !matches!(
+                    error.raw_os_error(),
+                    Some(libc::EMFILE | libc::ENFILE | libc::EINTR | libc::EAGAIN | libc::ENOMEM)
+                ) =>
+            {
+                return Err(error);
+            }
             Err(_) => wait_for_reconciliation_retry(failures, false),
         }
     }
@@ -1036,11 +1043,11 @@ fn run_agent_status_worker_queue(
         let Some(marker) = pending.first() else {
             if let Some(due) = deadline_ms {
                 if SystemClock.now_unix_ms() < due {
-                    wait_for_marker_or_deadline(&directory, due);
+                    wait_for_marker_or_deadline(directory, due);
                     continue;
                 }
                 if queue_agent_status_reconciliation(
-                    &directory,
+                    directory,
                     &serde_json::json!({"operation":"mailbox-wake"}),
                 )
                 .is_ok()
@@ -1055,7 +1062,10 @@ fn run_agent_status_worker_queue(
             // A producer can queue after our empty scan, then lose try_lock
             // while we still own it. Recheck only after releasing ownership:
             // either we reclaim the queued work or its new worker owns it.
-            if scan(directory).is_ok_and(|pending| !pending.is_empty()) && lock.try_lock().is_ok() {
+            if pending_agent_status_reconciliations_with_retry(directory, &mut failures, &mut scan)
+                .is_ok_and(|pending| !pending.is_empty())
+                && lock.try_lock().is_ok()
+            {
                 continue;
             }
             return ExitCode::SUCCESS;
