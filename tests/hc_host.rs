@@ -1547,7 +1547,15 @@ fn hc_process_info_reports_the_group_leader_without_enumerating_members() {
     let fixture = Fixture::default();
     let group = unsafe { libc::getpgid(0) };
     fixture.terminals.borrow_mut()[0]["foreground"]["pid"] = json!(group);
-    let info = HcHost::new(&fixture).process_info("t1").unwrap();
+    let mut member = std::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let info = HcHost::new(&fixture).process_info("t1");
+    drop(member.stdin.take());
+    let status = member.wait().unwrap();
+    assert!(status.success());
+    let info = info.unwrap();
     assert_eq!(info.foreground_process_group_id, group as u64);
     assert_eq!(
         info.foreground_processes
@@ -1560,6 +1568,21 @@ fn hc_process_info_reports_the_group_leader_without_enumerating_members() {
 
 #[test]
 fn hc_naming_recognizes_its_process_group_without_pid_membership() {
+    const TEST_NAME: &str = "hc_naming_recognizes_its_process_group_without_pid_membership";
+    if std::env::var("NAMEDROP_NAMING_TEST_CHILD").as_deref() != Ok(TEST_NAME) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env("NAMEDROP_NAMING_TEST_CHILD", TEST_NAME)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
     let fixture = Fixture::default();
     let group = unsafe { libc::getpgid(0) };
     assert_ne!(group as u32, std::process::id());

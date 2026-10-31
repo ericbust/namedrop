@@ -464,6 +464,24 @@ mod foreground_transition_tests {
         ));
         assert_eq!(samples.0.get(), 2);
     }
+    fn run_in_group_member(test_name: &str) -> bool {
+        if std::env::var("NAMEDROP_FOREGROUND_TEST_CHILD").as_deref() == Ok(test_name) {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env("NAMEDROP_FOREGROUND_TEST_CHILD", test_name)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
     struct HcSamples(Cell<usize>);
     impl crate::HerdrCommandExecutor for HcSamples {
         fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
@@ -485,6 +503,11 @@ mod foreground_transition_tests {
 
     #[test]
     fn hc_runner_retries_lagging_group_sample_without_member_enumeration() {
+        if run_in_group_member(
+            "terminal::foreground_transition_tests::hc_runner_retries_lagging_group_sample_without_member_enumeration",
+        ) {
+            return;
+        }
         let samples = HcSamples(Cell::new(0));
         assert!(runner_in_foreground(
             &crate::HcHost::new(&samples),
@@ -497,6 +520,11 @@ mod foreground_transition_tests {
 
     #[test]
     fn hc_runner_rejects_another_group_at_deadline() {
+        if run_in_group_member(
+            "terminal::foreground_transition_tests::hc_runner_rejects_another_group_at_deadline",
+        ) {
+            return;
+        }
         let samples = HcSamples(Cell::new(0));
         assert!(!runner_in_foreground(
             &crate::HcHost::new(&samples),
