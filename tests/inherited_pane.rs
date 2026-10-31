@@ -755,7 +755,8 @@ fn explicit_transport_flags_select_the_host_without_environment() {
 #[test]
 fn tui_ignores_hc_state_for_execution_and_command_guard() {
     let fixture = Fixture::new("tui-hc-state");
-    let state = fixture.0.join("tui-state");
+    fixture.activate();
+    let state = fixture.0.join("state");
     let hc_state = fixture.0.join("hc-state");
     fs::create_dir_all(hc_state.join("runtime")).unwrap();
     fs::write(hc_state.join("runtime/namedrop"), "#!/bin/sh\nexit 91\n").unwrap();
