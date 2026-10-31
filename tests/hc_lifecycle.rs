@@ -53,6 +53,71 @@ fn root(case: &str) -> PathBuf {
 }
 
 #[test]
+fn address_list_finishes_while_another_thread_holds_the_label_lock() {
+    let root = root("roster-label-lock");
+    let state = root.join("state");
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    let namespace = StateNamespace::for_space("hc:lifecycle", "fixture-space");
+    let mut store = StateStore::open(&state).unwrap();
+    store
+        .transaction(|tx| {
+            let attribution = MutationAttribution::new(ActorKind::Human, "test", 1);
+            tx.activate_worktree(&namespace, &attribution)?;
+            tx.create_pane_address(
+                &namespace,
+                &namedrop::PaneAddressDraft {
+                    id: PaneAddressId::new("planner"),
+                    role_id: namedrop::PaneRoleId::new("planner-role"),
+                    role_name: "Planner".into(),
+                    role_description: "Plan work".into(),
+                    alias: "planner".into(),
+                },
+                &attribution,
+            )
+        })
+        .unwrap();
+    let labels = fs::File::create(state.join("hc-labels.lock")).unwrap();
+    labels.lock().unwrap();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let worker_root = root.clone();
+    let worker = std::thread::spawn(move || {
+        let fixture = Fixture::new();
+        let ids = ProcessIds::default();
+        let runtime = LifecycleRuntime {
+            state_directory: &state,
+            home_directory: Some(&home),
+            agent_config: AgentConfigDirectories::default(),
+            cwd: &worker_root,
+            workspace_id: Some("fixture-space"),
+            current_pane_id: Some("t1"),
+            session_socket_id: "hc:lifecycle",
+            host: HcHost::new(&fixture),
+            clock: &SystemClock,
+            ids: &ids,
+        };
+        ready_tx.send(()).unwrap();
+        let listed = [json!({}), json!({"workspaces":"all"})]
+            .into_iter()
+            .map(|input| execute_lifecycle_operation("address.list", input, &runtime))
+            .collect::<Result<Vec<_>, _>>();
+        done_tx.send(listed).unwrap();
+    });
+    ready_rx.recv().unwrap();
+    let listed = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+    drop(labels);
+    worker.join().unwrap();
+    fs::remove_dir_all(root).unwrap();
+    let listed = listed
+        .expect("address.list must finish without waiting for the HC label lock")
+        .unwrap();
+    assert_eq!(listed[0].as_array().unwrap().len(), 1);
+    assert_eq!(listed[0][0]["alias"], "planner");
+    assert_eq!(listed[1]["workspaces"][0]["addresses"], listed[0]);
+}
+
+#[test]
 fn create_and_retire_update_the_bound_pane_label() {
     address_labels(false);
 }
