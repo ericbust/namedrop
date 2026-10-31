@@ -218,6 +218,26 @@ impl IdGenerator for Ids {
 }
 
 #[test]
+fn activation_ignores_python_shims_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    let python = f.root.join("python3");
+    fs::write(&python, "#!/bin/sh\necho unexpected-python-shim >&2\nexit 97\n").unwrap();
+    fs::set_permissions(&python, fs::Permissions::from_mode(0o700)).unwrap();
+    let output = f
+        .command_for("workspace-1")
+        .env("PATH", format!("{}:/usr/bin:/bin", f.root.display()))
+        .args(["activate", "--input-json", r#"{"confirmed":true}"#])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["status"], "ok", "{report}");
+    assert_eq!(f.read()["permissions"]["allow"], json!(f.expected()));
+}
+
+#[test]
 fn activation_preserves_settings_and_adds_managed_command_permissions() {
     let f = Fixture::new();
     fs::write(f.settings(), r#"{"model":"user-model","permissions":{"deny":["Bash(rm *)"],"allow":["Read","Bash(echo *)",42]},"env":{"USER_KEY":"value"}}"#).unwrap();
