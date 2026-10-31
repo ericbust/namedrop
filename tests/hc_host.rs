@@ -2205,6 +2205,13 @@ fn expired_deferred_delivery_can_be_cancelled_with_confirmation() {
     assert_refused_hc_delivery("blocked", "cancel-held");
 }
 
+#[test]
+fn cancelled_attempt_requires_exact_unused_deferral_provenance() {
+    for proof in ["missing-pause", "wrong-recipient", "active", "submitted"] {
+        assert_refused_hc_delivery("blocked", &format!("cancel-held-{proof}"));
+    }
+}
+
 fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
     use namedrop::{
         ActorKind, AgentSessionId, Clock, DeliveryId, DeliveryState, MessageDraft, MessageId,
@@ -2370,12 +2377,51 @@ fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
             1
         );
         *fixture.send_error.borrow_mut() = None;
-        if recovery == "cancel-held" {
+        if recovery.starts_with("cancel-held") {
             clock.0.set(86_401_001);
             assert_eq!(
                 namedrop::drain_mailboxes(&runtime).unwrap().expired,
                 [DeliveryId::new("test-delivery")]
             );
+            if let Some(proof) = recovery.strip_prefix("cancel-held-") {
+                match proof {
+                    "missing-pause" => {
+                        database.execute("DELETE FROM transition_facts WHERE entity_kind='prompt_recipient' AND transition_kind='paused'", []).unwrap();
+                    }
+                    "wrong-recipient" => {
+                        database.execute("DELETE FROM transition_facts WHERE entity_kind='prompt_recipient' AND transition_kind='paused'", []).unwrap();
+                        database.execute("INSERT INTO transition_facts
+                            (session_socket_id,worktree_id,worktree_order,entity_kind,entity_id,transition_kind,actor_kind,actor_id,occurred_at_ms)
+                            SELECT session_socket_id,worktree_id,worktree_order+1,entity_kind,'[\"t2\",\"fixture-session\"]','paused',actor_kind,actor_id,1000
+                            FROM transition_facts WHERE entity_kind='prompt_recipient' AND transition_kind='observed'", []).unwrap();
+                    }
+                    "active" => {
+                        database
+                            .execute("UPDATE delivery_attempt_state SET active=1", [])
+                            .unwrap();
+                    }
+                    "submitted" => {
+                        database.execute("INSERT INTO transition_facts
+                            (session_socket_id,worktree_id,worktree_order,entity_kind,entity_id,transition_kind,actor_kind,actor_id,occurred_at_ms)
+                            SELECT session_socket_id,worktree_id,(SELECT MAX(worktree_order)+1 FROM transition_facts),entity_kind,entity_id,'submitted',actor_kind,actor_id,occurred_at_ms
+                            FROM transition_facts WHERE entity_kind='delivery_attempt' AND transition_kind='cancelled'", []).unwrap();
+                        database.execute("UPDATE order_counters SET next_order=next_order+1 WHERE stream_kind='worktree_transition'", []).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                assert!(
+                    store
+                        .transaction(|tx| tx.cancel_held_delivery(
+                            &namespace,
+                            &DeliveryId::new("test-delivery"),
+                            &attribution
+                        ))
+                        .is_err(),
+                    "accepted invalid cancellation proof: {proof}"
+                );
+                std::fs::remove_dir_all(state).unwrap();
+                return;
+            }
             assert!(
                 namedrop::execute_control_operation(
                     "delivery.cancel-held",

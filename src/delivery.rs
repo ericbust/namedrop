@@ -439,6 +439,15 @@ where
         }
 
         runtime.clock.wait_ms(first.settled_delay_ms);
+        let _prompt_guard = if runtime.is_hc() && first.pane_type == crate::PaneType::Agent {
+            Some(crate::host::hc::prompt_lock(
+                runtime.state_directory,
+                runtime.session_socket_id,
+                &first.pane_id,
+            )?)
+        } else {
+            None
+        };
         let second_discovery = discover(runtime)?;
         if second_discovery.workspace_id != namespace.space_id.as_str() {
             continue;

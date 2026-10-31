@@ -719,6 +719,15 @@ where
     // Immediately before dispatch: the pane must still hold the exact Agent
     // Session the popup was opened for, so a replacement session can never
     // receive the session-bound diagnostics of the one it replaced.
+    let _prompt_guard = if runtime.is_hc() {
+        Some(crate::host::hc::prompt_lock(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            pane_id,
+        )?)
+    } else {
+        None
+    };
     let live = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());

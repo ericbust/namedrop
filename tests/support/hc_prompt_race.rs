@@ -212,8 +212,8 @@ fn assert_projection_waits(caller: &str, trigger: &str) {
         .unwrap();
     let gate = facts
         .iter()
-        .filter(|fact| fact.entity_kind == namedrop::TransitionEntityKind::PromptRecipient)
-        .last()
+        .rev()
+        .find(|fact| fact.entity_kind == namedrop::TransitionEntityKind::PromptRecipient)
         .unwrap();
     assert_eq!(
         gate.transition_kind,

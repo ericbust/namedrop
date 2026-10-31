@@ -322,6 +322,31 @@ impl Terminal {
     }
 }
 
+// Naming operations take their lock first. Settlement projection drops this guard
+// before running lifecycle work that can acquire the naming lock.
+pub(crate) fn prompt_lock(state: &Path, core: &str, pane: &str) -> Result<std::fs::File, String> {
+    use sha2::Digest;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    let directory = state.join("hc-prompts");
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
+        .map_err(|error| error.to_string())?;
+    let key = serde_json::to_vec(&(core, pane)).expect("string pair serializes");
+    let filename = format!("{}.lock", crate::lower_hex(&sha2::Sha256::digest(key)));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .open(directory.join(filename))
+        .map_err(|error| error.to_string())?;
+    file.lock().map_err(|error| error.to_string())?;
+    Ok(file)
+}
+
 pub(crate) fn label_lock(state: &Path) -> Result<std::fs::File, String> {
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     std::fs::DirBuilder::new()

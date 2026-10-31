@@ -90,9 +90,6 @@ impl Subscriber {
                     Err(_) if matches!(event.kind, Kind::Removed) => None,
                     Err(error) => return Err(error.to_string()),
                 };
-                if let Some(terminal) = &terminal {
-                    self.reconcile_move(terminal, runtime)?;
-                }
                 let space = terminal
                     .as_ref()
                     .map(|terminal| terminal.workspace().to_owned())
@@ -100,7 +97,6 @@ impl Subscriber {
                 let Some(space) = space else {
                     return self.reconcile_all(runtime);
                 };
-                self.spaces.insert(pane.clone(), space.clone());
                 let scoped = LifecycleRuntime {
                     workspace_id: Some(&space),
                     current_pane_id: None,
@@ -111,6 +107,10 @@ impl Subscriber {
                 {
                     resume_settled_recipient(terminal, &scoped)?;
                 }
+                if let Some(terminal) = &terminal {
+                    self.reconcile_move(terminal, runtime)?;
+                }
+                self.spaces.insert(pane.clone(), space.clone());
                 if !active(&scoped)? {
                     return Ok(());
                 }
@@ -222,6 +222,20 @@ impl Subscriber {
             .map(|warning| format!("{}: {}", warning.terminal, warning.message))
             .collect();
         for terminal in &terminals {
+            if spaces
+                .iter()
+                .any(|row| row.namespace.space_id.as_str() == terminal.workspace())
+            {
+                let scoped = LifecycleRuntime {
+                    workspace_id: Some(terminal.workspace()),
+                    ..*runtime
+                };
+                if let Err(error) = resume_settled_recipient(terminal, &scoped) {
+                    errors.push(error);
+                }
+            }
+        }
+        for terminal in &terminals {
             if spaces.iter().any(|row| {
                 row.namespace.space_id.as_str() == terminal.workspace()
                     && row.state.activated
@@ -236,7 +250,9 @@ impl Subscriber {
         }
         for row in spaces {
             let space = row.namespace.space_id.as_str();
-            let is_active = row.state.activated && !row.state.deactivated;
+            if !row.state.activated || row.state.deactivated {
+                continue;
+            }
             let scoped = LifecycleRuntime {
                 workspace_id: Some(space),
                 current_pane_id: None,
@@ -246,13 +262,6 @@ impl Subscriber {
                 .iter()
                 .filter(|terminal| terminal.workspace() == space)
             {
-                if let Err(error) = resume_settled_recipient(terminal, &scoped) {
-                    errors.push(error);
-                    continue;
-                }
-                if !is_active {
-                    continue;
-                }
                 if let Err(error) = self.reconcile_move(terminal, runtime) {
                     errors.push(error);
                     continue;
@@ -261,7 +270,7 @@ impl Subscriber {
                     errors.push(error);
                 }
             }
-            if is_active && let Err(error) = self.operation("event.reconcile", json!({}), &scoped) {
+            if let Err(error) = self.operation("event.reconcile", json!({}), &scoped) {
                 errors.push(error);
             }
         }
@@ -846,6 +855,11 @@ fn resume_settled_recipient<E: HerdrCommandExecutor, C: Clock, I>(
         "namedrop-hc-settle",
         runtime.clock.now_unix_ms(),
     );
+    let _prompt_guard = prompt_lock(
+        runtime.state_directory,
+        runtime.session_socket_id,
+        &terminal.address,
+    )?;
     StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
         .transaction(|transaction| {

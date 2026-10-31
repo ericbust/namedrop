@@ -7871,6 +7871,74 @@ mod tests {
     }
 
     #[test]
+    fn no_input_challenge_deferral_preserves_terminal_outcomes_and_tui_invoked_guard() {
+        let directory = TestDirectory::new();
+        let namespace = StateNamespace::for_space("hc:one", "space");
+        let session = crate::AgentSessionId::new("session");
+        let at = MutationAttribution::new(ActorKind::Plugin, "test", 120);
+        StateStore::open(&directory.0)
+            .unwrap()
+            .transaction(|tx| {
+                tx.activate_worktree(&namespace, &at)?;
+                for current in [
+                    TransitionKind::Dispatching,
+                    TransitionKind::Invoked,
+                    TransitionKind::Registered,
+                    TransitionKind::Failed,
+                    TransitionKind::Expired,
+                ] {
+                    let registration = current.as_str();
+                    tx.append_transition(
+                        &namespace,
+                        TransitionEntityKind::IntegrationRegistration,
+                        registration,
+                        current,
+                        &at,
+                    )?;
+                    tx.defer_integration_challenge_prompt(
+                        &namespace,
+                        registration,
+                        "t1",
+                        &session,
+                        Some(100),
+                        &at,
+                    )?;
+                    let expected = if matches!(
+                        current,
+                        TransitionKind::Dispatching | TransitionKind::Invoked
+                    ) {
+                        TransitionKind::Challenged
+                    } else {
+                        current
+                    };
+                    assert_eq!(
+                        tx.integration_challenge_transition(&namespace, registration)?,
+                        expected
+                    );
+                }
+                tx.append_transition(
+                    &namespace,
+                    TransitionEntityKind::IntegrationRegistration,
+                    "tui",
+                    TransitionKind::Invoked,
+                    &at,
+                )?;
+                tx.finish_integration_challenge_prompt(
+                    &namespace,
+                    "tui",
+                    TransitionKind::Challenged,
+                    &at,
+                )?;
+                assert_eq!(
+                    tx.integration_challenge_transition(&namespace, "tui")?,
+                    TransitionKind::Invoked
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn status_reads_interrupt_long_queries_and_reject_writes() {
         use std::{sync::atomic::AtomicBool, time::Instant};
         let directory = TestDirectory::new();

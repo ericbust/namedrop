@@ -460,6 +460,15 @@ where
     let Some(agent_session_id) = pane.agent_session_id.as_ref() else {
         return Ok(());
     };
+    let _prompt_guard = if runtime.is_hc() {
+        Some(crate::host::hc::prompt_lock(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            &pane.pane_id,
+        )?)
+    } else {
+        None
+    };
     let discovered = integration_discovery(runtime)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     if runtime.is_hc()
