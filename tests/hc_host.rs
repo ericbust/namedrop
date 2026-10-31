@@ -1,3 +1,5 @@
+#[path = "support/app_popup.rs"]
+mod app_popup;
 use namedrop::{
     CallerClaim, HcHost, HerdrCommandExecutor, HerdrCommandOutput, Host, PaneMetadata, PaneScope,
     PromptFailureKind, SpaceLocator,
@@ -1768,6 +1770,7 @@ fn hc_bootstrap_stale_activation_does_not_replace_the_current_fallback() {
         root.join("current"),
     )
     .unwrap();
+    let fake = app_popup::fake(&root);
     let output = std::process::Command::new(old.join("namedrop"))
         .args([
             "--exact",
@@ -1775,6 +1778,8 @@ fn hc_bootstrap_stale_activation_does_not_replace_the_current_fallback() {
             "--nocapture",
         ])
         .env(CHILD, "1")
+        .env("NAMEDROP_BOOTSTRAP_CASE", "stale-activation")
+        .env("HERDR_APP_BIN_PATH", fake)
         .output()
         .unwrap();
     assert!(
@@ -1783,6 +1788,8 @@ fn hc_bootstrap_stale_activation_does_not_replace_the_current_fallback() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    app_popup::assert_one_test(&output);
+    app_popup::assert_tour(&root, 1);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1791,6 +1798,26 @@ fn check_hc_bootstrap(damage: Option<&str>) {
         fs,
         os::unix::fs::{PermissionsExt, symlink},
     };
+    let case = damage.unwrap_or("fresh-name");
+    if std::env::var("NAMEDROP_BOOTSTRAP_CASE").as_deref() != Ok(case) {
+        let root =
+            std::env::temp_dir().join(format!("namedrop-popup-{case}-{}", std::process::id()));
+        let fake = app_popup::fake(&root);
+        let thread = std::thread::current();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", thread.name().unwrap(), "--nocapture"])
+            .env("NAMEDROP_BOOTSTRAP_CASE", case)
+            .env("HERDR_APP_BIN_PATH", fake)
+            .output()
+            .unwrap();
+        app_popup::assert_one_test(&output);
+        app_popup::assert_tour(
+            &root,
+            usize::from(damage.is_some() && damage != Some("unowned-first-name")),
+        );
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
     let fixture = Fixture::default();
     fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["claude"]);
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1993,4 +2020,87 @@ fn check_hc_bootstrap(damage: Option<&str>) {
         assert!(!home.join(".profile").exists());
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hc_bootstrap_popups_use_only_the_test_app() {
+    app_popup::guard(
+        &[
+            "hc_bootstrap_doctor_detects_corrupt_command",
+            "hc_bootstrap_doctor_detects_deleted_command",
+            "hc_bootstrap_doctor_detects_missing_fallback",
+            "hc_bootstrap_doctor_detects_nonexecutable_command",
+            "hc_bootstrap_doctor_detects_symlink_command",
+            "hc_bootstrap_doctor_detects_symlink_parent",
+            "hc_bootstrap_doctor_detects_unowned_command",
+            "hc_bootstrap_stale_activation_does_not_replace_the_current_fallback",
+        ],
+        "bootstrap",
+    );
+}
+
+#[test]
+fn hc_popup_uses_native_override_and_scrubs_environment() {
+    use std::os::unix::ffi::OsStringExt;
+    let root = std::env::temp_dir().join(format!("namedrop-popup-native-{}", std::process::id()));
+    let fake = app_popup::fake(&root);
+    let native_path = root.join(std::ffi::OsString::from_vec(
+        b"app with spaces-\xff".to_vec(),
+    ));
+    std::fs::rename(fake, &native_path).unwrap();
+    let path = app_popup::tripwire(&root);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "hc_popup_child", "--nocapture"])
+        .env_clear()
+        .env("PATH", path)
+        .env("HERDR_APP_BIN_PATH", native_path)
+        .env("HERDR_SOCKET_PATH", "inherited-socket")
+        .env("HERDR_PANE_ID", "inherited-pane")
+        .env("HERDR_UNKNOWN", "line one\nline two")
+        .env(
+            std::ffi::OsString::from_vec(b"HERDR_nonutf8_\xff".to_vec()),
+            "bytes",
+        )
+        .env("HC_TERMINAL_ID", "inherited-terminal")
+        .env("HC_TERMINAL_SOCKET", "inherited-terminal-socket")
+        .env("HC_SESSION", "kept-session")
+        .env("HC_SOCKET", "kept-socket")
+        .env("UNRELATED", "kept-value")
+        .output()
+        .unwrap();
+    app_popup::assert_one_test(&output);
+    let calls = app_popup::calls(&root);
+    assert_eq!(calls.len(), 1, "{calls:?}");
+    assert_eq!(
+        calls[0]["argv"],
+        json!([
+            "do",
+            "mod.open",
+            "--name",
+            "namedrop-entry 'quoted'\n$(touch never) *"
+        ])
+    );
+    let env = calls[0]["env"].as_object().unwrap();
+    assert!(env.keys().all(|key| !key.starts_with("HERDR_")), "{env:?}");
+    assert!(!env.contains_key("HC_TERMINAL_ID"));
+    assert!(!env.contains_key("HC_TERMINAL_SOCKET"));
+    assert_eq!(env["HC_SESSION"], "kept-session");
+    assert_eq!(env["HC_SOCKET"], "kept-socket");
+    assert_eq!(env["UNRELATED"], "kept-value");
+    assert!(!root.join("path/unexpected-app.log").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore]
+fn hc_popup_child() {
+    let result = HcHost::new(&Fixture::default())
+        .open_popup(&namedrop::Popup {
+            entrypoint: "entry 'quoted'\n$(touch never) *",
+            width: "80",
+            height: "20",
+            env: &[],
+        })
+        .unwrap();
+    assert_eq!(result, json!({"opened": true}));
 }

@@ -1,3 +1,5 @@
+#[path = "support/app_popup.rs"]
+mod app_popup;
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use namedrop::{HerdrCommandExecutor, HerdrCommandOutput};
@@ -91,6 +93,7 @@ esac
         )
         .unwrap();
         fs::set_permissions(host, fs::Permissions::from_mode(0o700)).unwrap();
+        app_popup::fake(&root);
         Self(root)
     }
     /// The test process is the parent of every binary it runs, so its pid is
@@ -159,6 +162,7 @@ esac
             .env_remove("CLAUDE_CODE_SESSION_ID")
             .env_remove("HERDR_CONFIG_PATH")
             .env("SHELL", "/bin/zsh")
+            .env("HERDR_APP_BIN_PATH", self.0.join("app-popup"))
             .env("HERDR_BIN_PATH", self.0.join("herdr"))
             .env("HERDR_SOCKET_PATH", "isolated-socket")
             .env("HERDR_WORKSPACE_ID", "w1")
@@ -852,6 +856,7 @@ else: raise AssertionError(args)
             .env("CLAUDE_CONFIG_DIR", f.0.join("home/.claude"))
             .env("CODEX_HOME", f.0.join("home/.codex"))
             .args(args)
+            .env("HERDR_APP_BIN_PATH", f.0.join("app-popup"))
             .env("HC_BIN_PATH", &hc)
             .env("HC_TERMINAL_ID", "t1")
             .env("HC_SESSION", "hook-core")
@@ -963,6 +968,7 @@ else: raise AssertionError(args)
             }
         }
         let output = Command::new(active_package.join("scripts/session-start"))
+            .env("HERDR_APP_BIN_PATH", f.0.join("app-popup"))
             .env("HERDR_SOCKET_PATH", "tui")
             .env_remove("HC_TERMINAL_ID")
             .output()
@@ -1051,6 +1057,7 @@ else: raise AssertionError(args)
         .env("HOME", f.0.join("home"))
         .env("CLAUDE_CONFIG_DIR", f.0.join("home/.claude"))
         .env("CODEX_HOME", f.0.join("home/.codex"))
+        .env("HERDR_APP_BIN_PATH", f.0.join("app-popup"))
         .env("HC_BIN_PATH", &hc)
         .env("HC_TERMINAL_ID", "t1")
         .env("HC_SESSION", "hook-core")
@@ -1093,6 +1100,7 @@ else: raise AssertionError(args)
         String::from_utf8(output.stdout).unwrap(),
         "selected-runtime\ndoctor\n--host\nhc\n"
     );
+    app_popup::assert_tour(&f.0, 1);
 }
 
 #[test]
@@ -1237,4 +1245,12 @@ fn integration_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (Vec
     let mut entries = std::collections::BTreeMap::new();
     walk(root, root, &mut entries);
     entries
+}
+
+#[test]
+fn hc_hook_popups_use_only_the_test_app() {
+    app_popup::guard(
+        &["hc_hooks_write_sessions_only_in_active_spaces_and_preserve_core_routing"],
+        "hooks",
+    );
 }

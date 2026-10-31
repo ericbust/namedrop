@@ -18,7 +18,8 @@ with open(os.environ['CLIENT_LOG'], 'w') as log:
     json.dump({'argv': sys.argv[1:], 'env': dict(os.environ)}, log)
 args = sys.argv[1:]
 os.environ.update(HERDR_SOCKET_PATH='daemon-socket', HERDR_PANE_ID='daemon-pane',
-                  HERDR_UNKNOWN_DAEMON='daemon\nvalue $(touch never) *')
+                  HERDR_UNKNOWN_DAEMON='daemon\nvalue $(touch never) *',
+                  HC_TERMINAL_ID='daemon-terminal', HC_TERMINAL_SOCKET='daemon-terminal-socket')
 os.environb.update({b'HERDR_bad-name': b'bad', b'HERDR_nonutf8_\xff': b'bytes', b'HERDR_NEWLINE\n': b'newline'})
 result = subprocess.run(args[args.index('--') + 1:], capture_output=True)
 sys.stdout.buffer.write(result.stdout)
@@ -128,6 +129,8 @@ fn hc_process_boundary_child() {
     assert_eq!(target["argv"], serde_json::json!(arguments));
     assert_eq!(environment["HC_SESSION"], "kept-session");
     assert_eq!(environment["HC_SOCKET"], "kept-socket");
+    assert_eq!(environment["HC_TERMINAL_ID"], "daemon-terminal");
+    assert_eq!(environment["HC_TERMINAL_SOCKET"], "daemon-terminal-socket");
 }
 
 #[test]
