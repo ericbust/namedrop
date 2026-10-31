@@ -1180,8 +1180,10 @@ def step_terminal(r):
                        lambda value: any(run.completed for run in value[0]) and
                        value[1] == Backlog(0, 0, 0), TIMEOUTS.terminal)
     r.save("terminal.json", [run._asdict() for run in runs])
-    r.wait_agent("claude", ("idle", "done"), TIMEOUTS.idle)
-    return judge_terminal(runs, r.transcript("claude"))
+    claude = r.settle(lambda: r.transcript("claude"),
+                      lambda transcript: has_word("hello", last_answer(transcript)) and
+                      has_word("0", last_answer(transcript)), TIMEOUTS.idle, watch=())
+    return judge_terminal(runs, claude)
 
 
 def step_settled(r):
