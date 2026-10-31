@@ -108,14 +108,20 @@ pub(crate) fn record(state: &Path, event: Value) {
 
 /// Print on every fixture drop: libtest retains this even if a later assertion fails.
 pub fn dump(root: &Path) {
+    let dump_started_ns = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     let result = (|| -> io::Result<()> {
         let directory = directory(root)?;
         let mut entries = fs::read_dir(root.join(DIRECTORY))?.collect::<Result<Vec<_>, _>>()?;
         entries.sort_by_key(|entry| entry.file_name());
         println!(
-            "diagnostic-evidence root={} records={}",
+            "diagnostic-evidence root={} records={} dump_pid={} dump_started_ns={}",
             root.display(),
-            entries.len()
+            entries.len(),
+            std::process::id(),
+            dump_started_ns
         );
         for entry in entries {
             let result = (|| -> io::Result<Value> {

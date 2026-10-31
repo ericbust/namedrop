@@ -130,23 +130,40 @@ impl PaneEffects {
         pane: &str,
         timeout: Duration,
     ) -> Result<Self, AcquireError> {
+        let mut operation = "create_state_directory";
+        let mut parent_fd_metadata = serde_json::Value::Null;
+        let mut mkdirat_errno = None;
+        let describe = |file: &File| match file.metadata() {
+            Ok(meta) => {
+                serde_json::json!({"inode": meta.ino(), "links": meta.nlink(), "uid": meta.uid(), "mode": meta.mode()})
+            }
+            Err(error) => serde_json::json!({"error": format!("{error:?}")}),
+        };
         let result = (|| {
             std::fs::DirBuilder::new()
                 .recursive(true)
                 .mode(0o700)
                 .create(state)?;
-            let state = checked(
-                OpenOptions::new()
-                    .read(true)
-                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-                    .open(state)?,
-                true,
-            )?;
+            operation = "open_state_directory";
+            let state_file = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .open(state)?;
+            operation = "check_state_directory_metadata";
+            let state = checked(state_file, true)?;
+            operation = "mkdirat_pane_effects";
             let created =
                 unsafe { libc::mkdirat(state.as_raw_fd(), c"pane-effects".as_ptr(), 0o700) };
-            if created != 0 && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
-                return Err(io::Error::last_os_error().into());
+            if created != 0 {
+                let error = io::Error::last_os_error();
+                mkdirat_errno = error.raw_os_error();
+                if error.kind() != io::ErrorKind::AlreadyExists {
+                    let error = io::Error::last_os_error();
+                    parent_fd_metadata = describe(&state);
+                    return Err(error.into());
+                }
             }
+            operation = "openat_pane_effects_directory";
             let fd = unsafe {
                 libc::openat(
                     state.as_raw_fd(),
@@ -155,16 +172,51 @@ impl PaneEffects {
                 )
             };
             if fd < 0 {
-                return Err(io::Error::last_os_error().into());
+                let error = io::Error::last_os_error();
+                parent_fd_metadata = describe(&state);
+                return Err(error.into());
             }
-            let directory = checked(unsafe { File::from_raw_fd(fd) }, true)?;
+            operation = "check_pane_effects_directory_metadata";
+            let directory = checked(unsafe { File::from_raw_fd(fd) }, true).inspect_err(|_| {
+                parent_fd_metadata = describe(&state);
+            })?;
+            operation = "encode_pane_key";
             let key = Sha256::digest(serde_json::to_vec(&(socket, pane)).map_err(io::Error::from)?)
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>();
             let lock_name = CString::new(format!("{key}.lock")).map_err(io::Error::from)?;
-            let lock = open_at(&directory, &lock_name, libc::O_RDWR | libc::O_CREAT)?;
-            acquire_flock(lock.as_raw_fd(), timeout)?;
+            operation = "openat_lock_file";
+            let fd = unsafe {
+                libc::openat(
+                    directory.as_raw_fd(),
+                    lock_name.as_ptr(),
+                    libc::O_RDWR
+                        | libc::O_CREAT
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC
+                        | libc::O_NONBLOCK,
+                    0o600,
+                )
+            };
+            if fd < 0 {
+                let error = io::Error::last_os_error();
+                parent_fd_metadata = describe(&directory);
+                return Err(error.into());
+            }
+            operation = "check_lock_file_metadata";
+            let lock = checked(unsafe { File::from_raw_fd(fd) }, false).inspect_err(|_| {
+                parent_fd_metadata = describe(&directory);
+            })?;
+            operation = "flock_lock_file";
+            acquire_flock(lock.as_raw_fd(), timeout).inspect_err(|error| {
+                if matches!(error, AcquireError::Fault(_)) {
+                    parent_fd_metadata = serde_json::json!({
+                        "directory": describe(&directory), "lock": describe(&lock),
+                    });
+                }
+            })?;
+            operation = "encode_marker_name";
             Ok(Self {
                 _lock: lock,
                 directory,
@@ -173,12 +225,22 @@ impl PaneEffects {
             })
         })();
         if let Err(AcquireError::Fault(error)) = &result {
+            let path_metadata = |path: &Path| match std::fs::symlink_metadata(path) {
+                Ok(meta) => {
+                    serde_json::json!({"inode": meta.ino(), "links": meta.nlink(), "uid": meta.uid(), "mode": meta.mode()})
+                }
+                Err(error) => serde_json::json!({"error": format!("{error:?}")}),
+            };
             crate::diagnostic_evidence::record(
                 state,
                 serde_json::json!({
                     "kind": "Fault", "classification": "Fault", "error_kind": format!("{:?}", error.kind()),
                     "raw_errno": error.raw_os_error(), "error": format!("{error:?}"),
                     "socket": socket, "pane": pane,
+                    "operation": operation, "parent_fd_metadata": parent_fd_metadata,
+                    "mkdirat_errno": mkdirat_errno,
+                    "state_path_metadata": path_metadata(state),
+                    "effects_path_metadata": path_metadata(&state.join("pane-effects")),
                 }),
             );
         }

@@ -655,6 +655,15 @@ impl Fixture {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        println!(
+            "diagnostic-fixture-drop root={} pid={} drop_started_ns={}",
+            self.root.display(),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
         namedrop::diagnostic_evidence::dump(&self.root);
         let _ = fs::remove_dir_all(&self.root);
     }
