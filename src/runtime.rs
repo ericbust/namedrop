@@ -801,8 +801,8 @@ mod host_selection_tests {
     #[test]
     fn explicit_host_and_transport_flags_do_not_read_environment() {
         for (explicit, tui, hc, expected) in [
-            (Some(HostKind::Hc), true, true, Some(HostKind::Hc)),
-            (Some(HostKind::Tui), true, true, Some(HostKind::Tui)),
+            (Some(HostKind::Hc), true, true, None),
+            (Some(HostKind::Tui), true, true, None),
             (None, true, false, Some(HostKind::Tui)),
             (None, false, true, Some(HostKind::Hc)),
             (None, true, true, None),

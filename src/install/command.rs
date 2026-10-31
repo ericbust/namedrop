@@ -176,54 +176,17 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn launcher_queries_original_arguments_before_adding_tui_state() {
+    fn tui_launcher_matches_base_bytes_with_quoted_paths() {
         let root =
-            std::env::temp_dir().join(format!("namedrop-launcher-query-{}", std::process::id()));
+            std::env::temp_dir().join(format!("namedrop-launcher-bytes-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
-        let executable = root.join("executable");
-        fs::write(
-            &executable,
-            r#"#!/bin/sh
-if [ "$1" = --print-host ]; then
-  shift
-  printf '%s\n' "$@" > "$HOME/query"
-  if [ "$NAMEDROP_TEST_HOST" = conflict ]; then exit 64; fi
-  printf '%s\n' "$NAMEDROP_TEST_HOST"
-  exit
-fi
-printf '%s\n' "$@"
-"#,
-        )
-        .unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
-        let state = root.join("state");
-        install_shell_command(&root, &executable, &state, false).unwrap();
-        for selected in ["tui", "hc", "conflict"] {
-            let output = Command::new(root.join(".local/bin/namedrop"))
-                .args(["--hc-space", "space", "doctor"])
-                .env("HOME", &root)
-                .env("NAMEDROP_TEST_HOST", selected)
-                .output()
-                .unwrap();
-            assert_eq!(
-                fs::read_to_string(root.join("query")).unwrap(),
-                "--hc-space\nspace\ndoctor\n"
-            );
-            if selected == "conflict" {
-                assert_eq!(output.status.code(), Some(64));
-                assert!(output.stdout.is_empty());
-            } else {
-                let prefix = if selected == "tui" {
-                    format!("--plugin-state\n{}\n", state.display())
-                } else {
-                    String::new()
-                };
-                assert_eq!(
-                    String::from_utf8(output.stdout).unwrap(),
-                    format!("{prefix}--hc-space\nspace\ndoctor\n")
-                );
-            }
-        }
+        let executable = Path::new("/opt/name'drop\n/bin");
+        let state = Path::new("/state/it's here\n");
+        install_shell_command(&root, executable, state, false).unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join(".local/bin/namedrop")).unwrap(),
+            "#!/bin/sh\n# Managed by Namedrop: shell command.\nexec '/opt/name'\"'\"'drop\n/bin' --plugin-state '/state/it'\"'\"'s here\n' \"$@\"\n"
+        );
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

@@ -80,7 +80,7 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
                         &format!("override {explicit:?}"),
                         explicit,
                         vec!["HERDR_PANE_ID", "HC_TERMINAL_ID"],
-                        Some(host),
+                        None,
                     );
                 }
             }
@@ -98,6 +98,46 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
         vec!["HC_TERMINAL_ID"],
         Some("tui"),
     );
+
+    for (name, flags, expected) in [
+        (
+            "plugin state selects tui",
+            vec!["--plugin-state", "/explicit-state"],
+            Some("tui"),
+        ),
+        (
+            "plugin state conflicts with hc transport",
+            vec![
+                "--plugin-state",
+                "/explicit-state",
+                "--hc-terminal",
+                "terminal",
+            ],
+            None,
+        ),
+        (
+            "explicit hc accepts plugin state",
+            vec!["--host", "hc", "--plugin-state", "/explicit-state"],
+            Some("hc"),
+        ),
+        (
+            "explicit tui rejects hc transport",
+            vec!["--host", "tui", "--hc-space", "space"],
+            None,
+        ),
+        (
+            "explicit hc rejects tui transport",
+            vec!["--host", "hc", "--herdr-pane", "pane"],
+            None,
+        ),
+    ] {
+        add(
+            name,
+            flags,
+            vec!["HC_TERMINAL_ID", "HERDR_PANE_ID"],
+            expected,
+        );
+    }
 
     for (name, tui_pid, hc_pid, expected, expected_probes) in [
         ("hc run from TUI selects nearer HC", "$far", "$$", "hc", 2),
@@ -212,8 +252,8 @@ esac
             .env("far", std::process::id().to_string())
             .env("IDENTITY_LOG", root.join("identity-log"))
             .envs(case.env.iter().map(|key| (key, "value")))
-            .arg("--plugin-state")
-            .arg(root.join("state"))
+            .env("HERDR_PLUGIN_STATE_DIR", root.join("state"))
+            .env("NAMEDROP_STATE_DIR", root.join("state"))
             .args(&case.flags)
             .args(["doctor", "--print-host", "--input-json-file"])
             .arg(root.join("missing-input"))
@@ -324,6 +364,8 @@ else:
             .env("IDENTITY_LOG", &log)
             .env("IDENTITY_MODE", mode)
             .env("EXPECTED_HOST", expected)
+            .env("HERDR_PLUGIN_STATE_DIR", "/unused-state")
+            .env("NAMEDROP_STATE_DIR", "/unused-state")
             .output()
             .unwrap();
         assert!(
@@ -350,7 +392,6 @@ else:
 fn cached_host_child() {
     use namedrop::{cli::RuntimeOptions, runtime::HostKind};
     let options = RuntimeOptions {
-        plugin_state: Some("/unused-state".into()),
         ..RuntimeOptions::default()
     };
     let expected = if std::env::var("EXPECTED_HOST").unwrap() == "hc" {

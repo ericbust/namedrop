@@ -46,12 +46,6 @@ fn cross_host_hooks_decline_before_locked_state_runtime_or_socket_access() {
                 .env("HERDR_BIN_PATH", &tripwire)
                 .env("NAMEDROP_STATE_DIR", &state)
                 .env("HERDR_PLUGIN_STATE_DIR", &state)
-                .args([
-                    "--host",
-                    if hc_origin { "hc" } else { "tui" },
-                    "--plugin-state",
-                ])
-                .arg(&state)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -92,6 +86,156 @@ fn cross_host_hooks_decline_before_locked_state_runtime_or_socket_access() {
         "cross-host hook opened state"
     );
     drop(lock);
+    fs::remove_dir_all(root).unwrap();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn explicit_hook_selection_precedes_origin_state_and_host_io() {
+    let root = std::env::temp_dir().join(format!("namedrop-hook-selection-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let marker = root.join("runtime-contacted");
+    let host_marker = root.join("host-contacted");
+    let host = root.join("host");
+    fs::write(
+        &host,
+        format!(
+            "#!/bin/sh\nprintf host > '{}'\nexit 97\n",
+            host_marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
+    for name in ["baked", "hc", "plugin"] {
+        let state = root.join(name);
+        fs::create_dir_all(state.join("runtime")).unwrap();
+        let launcher = state.join("runtime/namedrop");
+        fs::write(
+            &launcher,
+            format!(
+                "#!/bin/sh\nprintf %s {name} > '{}'\nexit 98\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let mut failures = Vec::new();
+    for event in ["session-start", "user-prompt-submit", "mailbox-wake"] {
+        for (name, flags, hc_origin, hc_ambient, expected) in [
+            (
+                "tui overrides hc ambient",
+                vec!["--host", "tui"],
+                false,
+                true,
+                Some("baked"),
+            ),
+            (
+                "hc overrides tui ambient",
+                vec!["--host", "hc"],
+                true,
+                false,
+                Some("hc"),
+            ),
+            (
+                "hc origin follows explicit tui state",
+                vec!["--host", "tui"],
+                true,
+                false,
+                Some("baked"),
+            ),
+            (
+                "tui origin follows explicit hc state",
+                vec!["--host", "hc"],
+                false,
+                true,
+                Some("hc"),
+            ),
+            (
+                "tui rejects hc flags",
+                vec!["--host", "tui", "--hc-terminal", "terminal"],
+                true,
+                false,
+                None,
+            ),
+            (
+                "hc rejects tui flags",
+                vec!["--host", "hc", "--herdr-pane", "pane"],
+                false,
+                true,
+                None,
+            ),
+            (
+                "both flag groups reject explicit hc",
+                vec![
+                    "--host",
+                    "hc",
+                    "--herdr-pane",
+                    "pane",
+                    "--hc-space",
+                    "space",
+                ],
+                true,
+                false,
+                None,
+            ),
+            (
+                "both flag groups reject without host",
+                vec!["--herdr-pane", "pane", "--hc-space", "space"],
+                false,
+                true,
+                None,
+            ),
+        ] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+            command
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", root.join("home"))
+                .env("NAMEDROP_STATE_DIR", root.join("hc"))
+                .env("HERDR_PLUGIN_STATE_DIR", root.join("unused-tui"))
+                .env("HERDR_BIN_PATH", &host)
+                .env("HC_BIN_PATH", &host)
+                .args(&flags)
+                .arg("--json")
+                .stdin(Stdio::null());
+            if hc_origin {
+                command.arg("--hc-hook");
+            }
+            if hc_ambient {
+                command.env("HC_TERMINAL_ID", "terminal");
+            } else {
+                command.env("HERDR_SOCKET_PATH", "socket");
+            }
+            let output = command
+                .args(["hook", event, "--state-directory"])
+                .arg(root.join("baked"))
+                .output()
+                .unwrap();
+            let valid = if let Some(state) = expected {
+                output.status.code() == Some(98)
+                    && fs::read_to_string(&marker).ok().as_deref() == Some(state)
+            } else {
+                let body: serde_json::Value =
+                    serde_json::from_slice(&output.stdout).unwrap_or_default();
+                output.status.code() == Some(64)
+                    && body.to_string().contains("invalid_request")
+                    && body.to_string().contains("conflict")
+                    && !marker.exists()
+            };
+            if !valid {
+                failures.push(format!(
+                    "{event}: {name}: {:?} stdout={} stderr={} marker={:?}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                    fs::read_to_string(&marker).ok()
+                ));
+            }
+            assert!(!host_marker.exists(), "{event}: {name} accessed host");
+            let _ = fs::remove_file(&marker);
+        }
+    }
     fs::remove_dir_all(root).unwrap();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
