@@ -333,7 +333,7 @@ const DEFAULT_HERDR_TIMEOUT_MS: u64 = 10_000;
 const MAX_HERDR_TIMEOUT_MS: u64 = 60_000;
 
 pub struct ProcessHerdr {
-    binary: String,
+    binary: std::ffi::OsString,
     host: HostKind,
     timeout: Duration,
     socket: Option<String>,
@@ -353,12 +353,12 @@ impl ProcessHerdr {
         Self {
             host,
             binary: environment
-                .var(if host == HostKind::Hc {
+                .var_os(if host == HostKind::Hc {
                     "HC_BIN_PATH"
                 } else {
                     "HERDR_BIN_PATH"
                 })
-                .unwrap_or_else(|| if host == HostKind::Hc { "hc" } else { "herdr" }.to_owned()),
+                .unwrap_or_else(|| if host == HostKind::Hc { "hc" } else { "herdr" }.into()),
             socket: None,
             state_directory: None,
             child_executable: None,
@@ -554,7 +554,7 @@ impl ProcessHerdr {
                 format!("failed to capture Herdr command stderr: {error}")
             })?))
             .spawn()
-            .map_err(|error| format!("failed to run {}: {error}", self.binary))?;
+            .map_err(|error| format!("failed to run {}: {error}", self.binary.to_string_lossy()))?;
         let deadline = hc_deadline.unwrap_or_else(|| Instant::now() + timeout);
         let status = loop {
             let oversized = [&stdout, &stderr].iter().any(|file| {
@@ -571,10 +571,12 @@ impl ProcessHerdr {
                 }
                 .to_owned());
             }
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("failed to wait for {}: {error}", self.binary))?
-            {
+            if let Some(status) = child.try_wait().map_err(|error| {
+                format!(
+                    "failed to wait for {}: {error}",
+                    self.binary.to_string_lossy()
+                )
+            })? {
                 break status;
             }
             if Instant::now() >= deadline {
@@ -634,8 +636,8 @@ impl HerdrCommandExecutor for ProcessHerdr {
         let app = Self {
             binary: self
                 .environment
-                .var("HERDR_APP_BIN_PATH")
-                .unwrap_or_else(|| "herdr-app".to_owned()),
+                .var_os("HERDR_APP_BIN_PATH")
+                .unwrap_or_else(|| "herdr-app".into()),
             host: HostKind::Hc,
             timeout: self.timeout,
             socket: None,
@@ -928,7 +930,7 @@ mod bounded_read_tests {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
         let executor = ProcessHerdr {
-            binary: binary.to_string_lossy().into_owned(),
+            binary: binary.into_os_string(),
             host: HostKind::Hc,
             timeout: Duration::from_millis(DEFAULT_HERDR_TIMEOUT_MS),
             socket: None,
@@ -944,7 +946,7 @@ mod bounded_read_tests {
     #[test]
     fn bounded_reads_enforce_output_deadline_and_cancellation() {
         let executor = ProcessHerdr {
-            binary: "/bin/sh".to_owned(),
+            binary: "/bin/sh".into(),
             host: HostKind::Tui,
             timeout: Duration::from_secs(2),
             socket: None,

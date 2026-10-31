@@ -13,9 +13,15 @@ fn popup_executor_uses_captured_program_scrubbed_environment_and_bounded_childre
     fs::create_dir_all(&root).unwrap();
     let socket = root.join("core.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    let program = root.join(std::ffi::OsString::from_vec(b"app with spaces-\xff".to_vec()));
+    let program = root.join(std::ffi::OsString::from_vec(
+        b"app with spaces-\xff".to_vec(),
+    ));
     let fallback = root.join("herdr-app");
-    fs::write(&fallback, "#!/bin/sh\necho unexpected-PATH-fallback >&2\nexit 91\n").unwrap();
+    fs::write(
+        &fallback,
+        "#!/bin/sh\necho unexpected-PATH-fallback >&2\nexit 91\n",
+    )
+    .unwrap();
     fs::set_permissions(&fallback, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(&program, "#!/usr/bin/python3\nimport json,os,sys,time\nif sys.argv[1] == 'slow': time.sleep(10)\nelif sys.argv[1] == 'fail': print('app refused',file=sys.stderr);sys.exit(7)\nelse: print(json.dumps({'argv':sys.argv[1:],'env':dict(os.environ)}))\n").unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
