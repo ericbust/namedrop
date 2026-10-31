@@ -2709,13 +2709,21 @@ fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
                 .transaction(|tx| tx.deactivate_worktree(&namespace, &attribution))
                 .unwrap();
         }
-        let recovered = if recovery.ends_with("snapshot") {
+        let recovered = if recovery == "snapshot-labels" || recovery.ends_with("snapshot") {
             json!({"terminals":*fixture.terminals.borrow()})
+        } else if recovery == "missed-labels" {
+            json!({"method":"missed","params":{}})
         } else {
             json!({"method":"event","params":{"type":"status","terminal":"t1"}})
         };
+        let mut lines = vec![recovered.to_string()];
+        if recovery.ends_with("-labels") {
+            lines.push(
+                json!({"method":"event","params":{"type":"labels","terminal":"t1"}}).to_string(),
+            );
+        }
         namedrop::host::hc::events::Subscriber::default()
-            .handle_line(&recovered.to_string(), &runtime)
+            .handle_lines(lines.iter().map(String::as_str), &runtime)
             .unwrap();
         if recovery.starts_with("inactive-") {
             assert_eq!(
@@ -2991,4 +2999,10 @@ fn stale_prompt_does_not_erase_a_replacement_session() {
 #[test]
 fn dead_owner_after_lease_records_failed_attention_and_requeues() {
     assert_refused_hc_delivery("blocked", "dead-owner");
+}
+
+#[test]
+fn full_refresh_with_labels_resumes_deferred_mail() {
+    assert_refused_hc_delivery("blocked", "snapshot-labels");
+    assert_refused_hc_delivery("status_mismatch", "missed-labels");
 }
