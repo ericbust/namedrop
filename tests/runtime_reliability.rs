@@ -1315,6 +1315,11 @@ fn worker_at_capped_eventless_retry(
     let script = fs::read_to_string(fixture.root.join("herdr")).unwrap();
     fixture.set_herdr(&format!(
         r#"if [ "$1 $2" = 'agent prompt' ]; then
+             if [ "$3" = 'pane-grace' ]; then
+               printf 'x' >> "$NAMEDROP_TEST_FIXTURE/other-prompts"
+               printf '%s\n' '{{}}'
+               exit 0
+             fi
              printf 'x' >> "$NAMEDROP_TEST_FIXTURE/prompts"
              count=$(wc -c < "$NAMEDROP_TEST_FIXTURE/prompts")
              if [ "$count" -eq 8 ]; then
@@ -1335,7 +1340,7 @@ fn worker_at_capped_eventless_retry(
              exit 1
            fi
            if [ "$1 $2" = 'pane list' ]; then
-             printf '%s\n' '{{"result":{{"panes":[{{"pane_id":"pane-recipient","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"workspace-1","agent":"claude","agent_session":{{"value":"session-1"}},"agent_status":"idle"}},{{"pane_id":"pane-grace","terminal_id":"terminal-2","tab_id":"tab-2","workspace_id":"workspace-1","agent_session":{{"value":"session-grace"}},"agent_status":"idle"}}]}}}}'
+             printf '%s\n' '{{"result":{{"panes":[{{"pane_id":"pane-recipient","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"workspace-1","agent":"claude","agent_session":{{"value":"session-1"}},"agent_status":"idle"}},{{"pane_id":"pane-grace","terminal_id":"terminal-2","tab_id":"tab-2","workspace_id":"workspace-1","agent":"claude","agent_session":{{"value":"session-grace"}},"agent_status":"idle"}}]}}}}'
              exit 0
            fi
            {script}"#
@@ -1520,5 +1525,98 @@ fn eventless_backoff_serves_other_recipients_grace_at_the_retry_cap() {
         "independent grace settled {} ms after its deadline without another marker, prompts={:?}",
         settled - due,
         fixture.prompt_counts()
+    );
+}
+
+#[test]
+fn eventless_rejections_keep_pane_lock_deferrals_on_the_short_retry() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let fixture = Fixture::new();
+    let namespace = fixture.namespace();
+    let mut pane_lock = None;
+    let (_worker, mixed_marker) = worker_at_capped_eventless_retry(&fixture, || {
+        let attribution = MutationAttribution::new(ActorKind::Plugin, "fixture", now_ms());
+        StateStore::open(fixture.state())
+            .unwrap()
+            .transaction(|tx| {
+                tx.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new("binding-other"),
+                    &PaneAddressId::new("author"),
+                    "pane-grace",
+                    &attribution,
+                )?;
+                tx.observe_agent_session(
+                    &namespace,
+                    "other-observation",
+                    &PaneAddressId::new("author"),
+                    &AgentSessionId::new("session-grace"),
+                    "idle",
+                    &attribution,
+                )?;
+                tx.append_message(
+                    &namespace,
+                    &MessageDraft {
+                        thread_id: ThreadId::new("thread-1"),
+                        message_id: MessageId::new("other-message"),
+                        in_reply_to: None,
+                        author_address_id: PaneAddressId::new("recipient"),
+                        author_kind: ActorKind::Human,
+                        author_alias_snapshot: "recipient".to_owned(),
+                        author_agent_session_snapshot: None,
+                        request_id: "other-request".to_owned(),
+                        authored_source: "@author review".to_owned(),
+                        body: "review".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: PaneAddressId::new("author"),
+                            alias_snapshot: "author".to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new("session-grace")),
+                            delivery_id: DeliveryId::new("other-delivery"),
+                        }],
+                        context_references: vec![],
+                    },
+                    &attribution,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let key = namedrop::lower_hex(&Sha256::digest(
+            serde_json::to_vec(&("test-socket", "pane-grace")).unwrap(),
+        ));
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(
+                fixture
+                    .state()
+                    .join("pane-effects")
+                    .join(format!("{key}.lock")),
+            )
+            .unwrap();
+        lock.try_lock().unwrap();
+        pane_lock = Some(lock);
+    });
+    fs::write(fixture.root.join("release-capped-retry"), "ready").unwrap();
+    wait_for_runtime("mixed drain did not finish its marker", 30, || {
+        !mixed_marker.exists()
+    });
+    assert!(!fixture.root.join("other-prompts").exists());
+    drop(pane_lock);
+    let released = Instant::now();
+    wait_for_runtime(
+        "rejection backoff delayed a released pane lock beyond 5 s",
+        8,
+        || fixture.root.join("other-prompts").exists(),
+    );
+    assert_eq!(fs::read(fixture.root.join("other-prompts")).unwrap(), b"x");
+    eprintln!(
+        "deferred recipient prompted {:?} after pane lock release",
+        released.elapsed()
     );
 }
