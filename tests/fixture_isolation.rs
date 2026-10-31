@@ -200,9 +200,6 @@ fn routing_guard_rejects_missing_runtime_without_connecting() {
 fn routing_guard_rejects_missing_socket_override_without_connecting() {
     let home = Path::new("/private/fixture-home");
     let mut command = Command::new("/bin/true");
-    command
-        .env("HOME", home)
-        .env("XDG_CONFIG_HOME", home.join(".config"))
-        .env("XDG_RUNTIME_DIR", home.join(".runtime"));
+    command.isolated_env(home).env_remove("HC_SOCKET");
     environment::assert_private_hc_routing(&command, home);
 }
