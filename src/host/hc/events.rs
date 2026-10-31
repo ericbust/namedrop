@@ -80,15 +80,31 @@ impl Subscriber {
                     return Ok(());
                 }
                 let pane = event.terminal.ok_or("hc terminal event has no terminal")?;
+                let _lock = label_lock(runtime.state_directory)?;
                 if matches!(event.kind, Kind::Lost | Kind::Restarted) {
                     runtime
                         .host
                         .invalidate_session(runtime.state_directory, &pane)?;
                 }
-                let terminal = match runtime.host.terminal(&pane, None) {
+                let mut terminal = match runtime.host.terminal(&pane, None) {
                     Ok(terminal) => Some(terminal),
                     Err(_) if matches!(event.kind, Kind::Removed) => None,
                     Err(error) => return Err(error.to_string()),
+                };
+                let session_refreshed = if let Some(terminal) = &mut terminal {
+                    let observed = LifecycleRuntime {
+                        workspace_id: Some(terminal.workspace()),
+                        ..*runtime
+                    };
+                    if active(&observed)? {
+                        runtime
+                            .host
+                            .reconcile_session(runtime.state_directory, terminal)?
+                    } else {
+                        false
+                    }
+                } else {
+                    false
                 };
                 let space = terminal
                     .as_ref()
@@ -130,7 +146,13 @@ impl Subscriber {
                         Ok(())
                     }
                     Kind::Status | Kind::Turn => self.operation("event.agent-status-changed", json!({"type":"pane_agent_status_changed", "pane_id":pane, "workspace_id":space}), &scoped),
-                    Kind::Labels => self.reconcile_name(&pane, &scoped),
+                    Kind::Labels => {
+                        self.reconcile_name(&pane, &scoped)?;
+                        if session_refreshed {
+                            self.operation("event.reconcile", json!({}), &scoped)?;
+                        }
+                        Ok(())
+                    },
                     Kind::Ignored => Ok(()),
                 }
             }
@@ -216,7 +238,18 @@ impl Subscriber {
             return Ok(());
         }
         let discovery = runtime.host.discover(None)?;
-        let terminals = discovery.terminals;
+        let mut terminals = discovery.terminals;
+        for terminal in &mut terminals {
+            if spaces.iter().any(|row| {
+                row.namespace.space_id.as_str() == terminal.workspace()
+                    && row.state.activated
+                    && !row.state.deactivated
+            }) {
+                runtime
+                    .host
+                    .reconcile_session(runtime.state_directory, terminal)?;
+            }
+        }
         if discovery.warnings.is_empty() {
             let mut store =
                 StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
@@ -260,19 +293,6 @@ impl Subscriber {
                 if let Err(error) = resume_settled_recipient(terminal, &scoped) {
                     errors.push(error);
                 }
-            }
-        }
-        for terminal in &terminals {
-            if spaces.iter().any(|row| {
-                row.namespace.space_id.as_str() == terminal.workspace()
-                    && row.state.activated
-                    && !row.state.deactivated
-            }) && terminal.labels.contains_key("namedrop.session.pid")
-                && let Err(error) = runtime
-                    .host
-                    .invalidate_session(runtime.state_directory, &terminal.address)
-            {
-                errors.push(error.to_string());
             }
         }
         let mut failed_moves = BTreeSet::new();

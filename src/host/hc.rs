@@ -551,6 +551,44 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
         self.clear_session(&terminal)
     }
 
+    pub(super) fn reconcile_session(
+        &self,
+        state: &Path,
+        terminal: &mut Terminal,
+    ) -> Result<bool, HostError> {
+        if (terminal.state == "live" && terminal.session().is_some())
+            || ![
+                "namedrop.session",
+                "namedrop.session.pid",
+                "namedrop.session.start",
+            ]
+            .iter()
+            .any(|key| {
+                terminal
+                    .labels
+                    .get(*key)
+                    .is_some_and(|value| !value.is_empty())
+            })
+        {
+            return Ok(false);
+        }
+        let _lock = label_lock(state)?;
+        // Cached observations can predate a replacement SessionStart publication.
+        let mut current = self.terminal(&terminal.address, None)?;
+        if current.state != "live" || current.session().is_none() {
+            self.clear_session(&current)?;
+            for key in [
+                "namedrop.session",
+                "namedrop.session.pid",
+                "namedrop.session.start",
+            ] {
+                current.labels.remove(key);
+            }
+        }
+        *terminal = current;
+        Ok(true)
+    }
+
     fn clear_session(&self, terminal: &Terminal) -> Result<(), HostError> {
         self.update_labels(
             terminal,

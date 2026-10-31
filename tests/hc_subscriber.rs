@@ -21,6 +21,7 @@ struct Fixture {
     rename_error: RefCell<bool>,
     name_write_failure: RefCell<Option<bool>>,
     session_clear_failure: RefCell<bool>,
+    replacement_on_get: RefCell<Option<(usize, Value)>>,
 }
 impl Default for Fixture {
     fn default() -> Self {
@@ -41,6 +42,7 @@ impl Default for Fixture {
             rename_error: RefCell::new(false),
             name_write_failure: RefCell::new(None),
             session_clear_failure: RefCell::new(false),
+            replacement_on_get: RefCell::new(None),
         }
     }
 }
@@ -49,6 +51,16 @@ impl HerdrCommandExecutor for Fixture {
         self.calls
             .borrow_mut()
             .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+        if matches!(args, ["get", "t1", "--json"]) {
+            let mut replacement = self.replacement_on_get.borrow_mut();
+            if let Some((remaining, terminal)) = replacement.as_mut() {
+                *remaining -= 1;
+                if *remaining == 0 {
+                    self.terminals.borrow_mut()[0] = terminal.clone();
+                    *replacement = None;
+                }
+            }
+        }
         let stdout = match args {
             ["ls", "--json"]
                 if self.fail_ls_at.borrow().is_some_and(|limit| {
@@ -1138,7 +1150,8 @@ fn queued_agent(
     )
     .unwrap();
     let namespace = StateNamespace::for_space("hc:fixture", "fixture-space");
-    let attribution = MutationAttribution::new(ActorKind::Human, "test", 1000);
+    let attribution =
+        MutationAttribution::new(ActorKind::Human, "test", runtime.clock.now_unix_ms());
     StateStore::open(runtime.state_directory)
         .unwrap()
         .transaction(|tx| {
@@ -1222,7 +1235,11 @@ fn dead_queued_session_clears_labels_and_keeps_base_empty_mailbox_behavior() {
                 .iter()
                 .find(|address| address.alias == "alice")
                 .unwrap();
-            assert_eq!(address.lifecycle, namedrop::PaneAddressLifecycle::Empty);
+            assert_eq!(
+                address.lifecycle,
+                namedrop::PaneAddressLifecycle::Empty,
+                "{kind}"
+            );
             let outlook = namedrop::recipient_outlooks(&["alice".into()], &addresses);
             assert!(
                 outlook[0]
@@ -1290,6 +1307,152 @@ fn reconciliation_validates_pid_start_and_preserves_fresh_session() {
                 if valid_start { "original-session" } else { "" }
             );
             assert!(fixture.calls.borrow().iter().all(|call| call[0] != "send"));
+        });
+    }
+}
+
+#[test]
+fn stale_observation_refresh_preserves_replacement_session() {
+    check("replacement-refresh", |fixture, runtime| {
+        let old = process::AgentProcess::new();
+        queued_agent(fixture, runtime, old.pid());
+        let fresh = process::AgentProcess::new();
+        let mut replacement = fixture.terminals.borrow()[0].clone();
+        replacement["labels"]["namedrop.session"] = json!("replacement-session");
+        replacement["labels"]["namedrop.session.pid"] = json!(fresh.pid().to_string());
+        replacement["labels"]["namedrop.session.start"] = json!(process::start(fresh.pid()));
+        replacement["foreground"]["pid"] = json!(fresh.pid());
+        drop(old);
+        *fixture.replacement_on_get.borrow_mut() = Some((2, replacement));
+        namedrop::host::hc::events::Subscriber::default()
+            .handle_line(&session_event("status", fixture), runtime)
+            .unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "replacement-session"
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session.pid"],
+            fresh.pid().to_string()
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session.start"],
+            process::start(fresh.pid())
+        );
+        assert!(fixture.calls.borrow().iter().all(|call| call[0] != "send"
+            && !call.iter().any(|arg| arg == "namedrop.session=")));
+    });
+}
+
+#[test]
+fn dead_queued_tui_session_has_the_same_empty_mailbox_outcome() {
+    #[derive(Clone, Copy)]
+    struct DeadTui;
+    impl HerdrCommandExecutor for DeadTui {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            let stdout = match args {
+                ["worktree", "list", "--workspace", "fixture-space", "--json"] => {
+                    json!({"result":{"worktrees":[{"path":env!("CARGO_MANIFEST_DIR"),"open_workspace_id":"fixture-space"}]}}).to_string()
+                }
+                ["pane", "list", "--workspace", "fixture-space"] => {
+                    json!({"result":{"panes":[{"pane_id":"t1","terminal_id":"t1","tab_id":"tab-1","workspace_id":"fixture-space"}]}}).to_string()
+                }
+                ["pane", "report-metadata", ..] => "{}".into(),
+                other => panic!("unexpected TUI command after agent exit {other:?}"),
+            };
+            Ok(HerdrCommandOutput { stdout })
+        }
+    }
+    check("tui-dead-queued", |fixture, runtime| {
+        let agent = process::AgentProcess::new();
+        queued_agent(fixture, runtime, agent.pid());
+        drop(agent);
+        let tui = namedrop::LifecycleRuntime {
+            host: namedrop::TuiHost::new(DeadTui),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            clock: runtime.clock,
+            ids: runtime.ids,
+        };
+        namedrop::execute_lifecycle_operation(
+            "event.agent-status-changed",
+            json!({"type":"pane_agent_status_changed","pane_id":"t1","workspace_id":"fixture-space"}),
+            &tui,
+        ).unwrap();
+        let db =
+            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT state FROM mailbox_deliveries WHERE delivery_id='death-delivery'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+            "queued"
+        );
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM delivery_attempts", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+        let addresses = namedrop::StateStore::open(runtime.state_directory)
+            .unwrap()
+            .transaction(|tx| tx.list_pane_addresses(&namespace))
+            .unwrap();
+        assert_eq!(
+            addresses[0].lifecycle,
+            namedrop::PaneAddressLifecycle::Empty
+        );
+        assert!(
+            namedrop::recipient_outlooks(&["alice".into()], &addresses)[0]
+                .statement
+                .contains("this message queues normally with nobody there to receive it")
+        );
+    });
+}
+
+#[test]
+fn inactive_space_session_labels_are_not_reconciled() {
+    for kind in ["status", "turn", "labels", "snapshot", "missed"] {
+        check(&format!("inactive-session-{kind}"), |fixture, runtime| {
+            let agent = process::AgentProcess::new();
+            queued_agent(fixture, runtime, agent.pid());
+            drop(agent);
+            let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+            namedrop::StateStore::open(runtime.state_directory)
+                .unwrap()
+                .transaction(|tx| {
+                    tx.deactivate_worktree(
+                        &namespace,
+                        &namedrop::MutationAttribution::new(
+                            namedrop::ActorKind::Human,
+                            "test",
+                            1000,
+                        ),
+                    )
+                })
+                .unwrap();
+            namedrop::host::hc::events::Subscriber::default()
+                .handle_line(&session_event(kind, fixture), runtime)
+                .unwrap();
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+                "original-session"
+            );
+            assert!(
+                fixture
+                    .calls
+                    .borrow()
+                    .iter()
+                    .all(|call| !matches!(call[0].as_str(), "label" | "send"))
+            );
         });
     }
 }
