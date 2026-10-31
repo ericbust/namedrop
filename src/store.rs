@@ -3237,9 +3237,6 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         delivery_id: &crate::DeliveryId,
     ) -> Result<(), StoreError> {
-        // A Failed state alone cannot prove the host was never invoked. The
-        // immutable Failed -> Queued fact pair is written only by the explicit
-        // pre-invocation requeue path; require it for every historical attempt.
         let unsent = self.transaction.query_row(
             "SELECT EXISTS (
                  SELECT 1 FROM mailbox_deliveries d
@@ -3248,27 +3245,47 @@ impl StateTransaction<'_> {
                    AND NOT EXISTS (
                        SELECT 1 FROM delivery_attempts a
                        LEFT JOIN delivery_attempt_state s USING (session_socket_id, worktree_id, attempt_id, address_id)
+                       LEFT JOIN pane_bindings b USING (session_socket_id, worktree_id, binding_id, address_id)
                        WHERE a.session_socket_id = d.session_socket_id
                          AND a.worktree_id = d.worktree_id AND a.delivery_id = d.delivery_id
-                         AND (s.state IS NOT 'failed' OR NOT EXISTS (
-                             SELECT 1 FROM transition_facts failed
-                             JOIN transition_facts queued ON queued.session_socket_id = failed.session_socket_id
-                               AND queued.worktree_id = failed.worktree_id
-                               AND queued.worktree_order = failed.worktree_order + 1
-                             WHERE failed.session_socket_id = a.session_socket_id
-                               AND failed.worktree_id = a.worktree_id
-                               AND failed.entity_kind = 'delivery_attempt' AND failed.entity_id = a.attempt_id
-                               AND failed.transition_kind = 'failed'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM transition_facts unused
+                             JOIN transition_facts queued ON queued.session_socket_id = unused.session_socket_id
+                               AND queued.worktree_id = unused.worktree_id
+                               AND queued.worktree_order = unused.worktree_order + 1
+                             WHERE unused.session_socket_id = a.session_socket_id
+                               AND unused.worktree_id = a.worktree_id
+                               AND unused.entity_kind = 'delivery_attempt' AND unused.entity_id = a.attempt_id
                                AND queued.entity_kind = 'mailbox_delivery' AND queued.entity_id = d.delivery_id
                                AND queued.transition_kind = 'queued'
-                         ))
+                               AND ((s.state = 'failed' AND unused.transition_kind = 'failed') OR (
+                                   s.state = 'cancelled' AND s.active = 0 AND unused.transition_kind = 'cancelled'
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM transition_facts sent
+                                       WHERE sent.session_socket_id = a.session_socket_id AND sent.worktree_id = a.worktree_id
+                                         AND sent.entity_kind = 'delivery_attempt' AND sent.entity_id = a.attempt_id
+                                         AND sent.transition_kind IN ('submitted','invoked','acknowledged','settled','held','failed')
+                                   )
+                                   AND EXISTS (
+                                       SELECT 1 FROM transition_facts paused
+                                       LEFT JOIN transition_facts observed ON observed.session_socket_id = paused.session_socket_id
+                                         AND observed.worktree_id = paused.worktree_id
+                                         AND observed.worktree_order = paused.worktree_order - 1
+                                         AND observed.entity_kind = paused.entity_kind AND observed.entity_id = paused.entity_id
+                                         AND observed.transition_kind = 'observed'
+                                       WHERE paused.session_socket_id = a.session_socket_id AND paused.worktree_id = a.worktree_id
+                                         AND paused.entity_kind = 'prompt_recipient'
+                                         AND paused.entity_id = json_array(b.pane_id, a.agent_session_id)
+                                         AND paused.transition_kind = 'paused'
+                                         AND (paused.worktree_order = queued.worktree_order + 1
+                                           OR (paused.worktree_order = queued.worktree_order + 2
+                                             AND observed.worktree_order = queued.worktree_order + 1))
+                                   )
+                               ))
+                         )
                    )
              )",
-            params![
-                namespace.session_socket_id,
-                namespace.space_id.as_str(),
-                delivery_id.as_str()
-            ],
+            params![namespace.session_socket_id, namespace.space_id.as_str(), delivery_id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
         if !unsent {
@@ -6959,6 +6976,7 @@ fn parse_transition_kind(value: String) -> rusqlite::Result<TransitionKind> {
         "bound" => Ok(TransitionKind::Bound),
         "unbound" => Ok(TransitionKind::Unbound),
         "occupied" => Ok(TransitionKind::Occupied),
+        "observed" => Ok(TransitionKind::Observed),
         "empty" => Ok(TransitionKind::Empty),
         "renamed" => Ok(TransitionKind::Renamed),
         "released" => Ok(TransitionKind::Released),
@@ -7794,7 +7812,7 @@ mod tests {
             .transaction(|tx| {
                 tx.activate_worktree(&namespace, &at(1))?;
                 tx.activate_worktree(&other_namespace, &at(1))?;
-                tx.defer_prompt_until_settle(&namespace, "t1", &session, &at(100))
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, Some(100), &at(120))
             })
             .unwrap();
         drop(store);
@@ -7812,8 +7830,41 @@ mod tests {
                 assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
                 tx.resume_prompt_after_settle(&namespace, "t1", &session, 101, &at(200))?;
                 assert!(!tx.prompt_is_deferred(&namespace, "t1", &session)?);
-                tx.defer_prompt_until_settle(&namespace, "t1", &session, &at(150))?;
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, Some(150), &at(150))?;
                 assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn prompt_deferral_uses_only_adjacent_observation_and_unknown_lower_bound() {
+        let directory = TestDirectory::new();
+        let namespace = StateNamespace::for_space("hc:one", "space");
+        let session = crate::AgentSessionId::new("session");
+        let at = |time| MutationAttribution::new(ActorKind::Plugin, "test", time);
+        StateStore::open(&directory.0)
+            .unwrap()
+            .transaction(|tx| {
+                tx.activate_worktree(&namespace, &at(1))?;
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, Some(100), &at(120))?;
+                let recipient = serde_json::to_string(&("t1", "session")).unwrap();
+                tx.append_transition(
+                    &namespace,
+                    TransitionEntityKind::PromptRecipient,
+                    &recipient,
+                    TransitionKind::Observed,
+                    &at(90),
+                )?;
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 95, &at(130))?;
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 110, &at(130))?;
+                assert!(!tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, None, &at(140))?;
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 0, &at(150))?;
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 1, &at(150))?;
+                assert!(!tx.prompt_is_deferred(&namespace, "t1", &session)?);
                 Ok(())
             })
             .unwrap();

@@ -110,17 +110,22 @@ fn pre_invocation(error: HostError) -> PromptFailure {
     }
 }
 
-fn prompt_failure(raw: String, wait_for_settle: bool) -> PromptFailure {
+enum PromptTarget {
+    Agent(Option<u64>),
+    Shell,
+}
+
+fn prompt_failure(raw: String, target: PromptTarget) -> PromptFailure {
     let kind = serde_json::from_str::<ErrorEnvelope>(&raw)
         .ok()
-        .map(|envelope| match envelope.error.kind.as_str() {
-            "blocked" | "status_mismatch" if wait_for_settle => {
-                PromptFailureKind::DeferredUntilSettle
+        .map(|envelope| match (envelope.error.kind.as_str(), target) {
+            ("blocked" | "status_mismatch", PromptTarget::Agent(observed_status_ms)) => {
+                PromptFailureKind::DeferredUntilSettle { observed_status_ms }
             }
-            "not_found" | "finished" | "blocked" | "status_mismatch" => {
+            ("not_found" | "finished" | "blocked" | "status_mismatch", _) => {
                 PromptFailureKind::TemporaryPreInvocation
             }
-            "unavailable"
+            ("unavailable", _)
                 if envelope.error.hint.contains("nothing was typed")
                     || (envelope
                         .error
@@ -130,7 +135,7 @@ fn prompt_failure(raw: String, wait_for_settle: bool) -> PromptFailure {
             {
                 PromptFailureKind::TemporaryPreInvocation
             }
-            "usage" | "invalid_params" | "config" | "machine_unknown" => {
+            ("usage" | "invalid_params" | "config" | "machine_unknown", _) => {
                 PromptFailureKind::DefinitiveNonRetryable
             }
             _ => PromptFailureKind::AmbiguousInvocation,
@@ -707,7 +712,9 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
             } if terminal.state == "live" => status,
             _ => {
                 return Err(PromptFailure {
-                    kind: PromptFailureKind::DeferredUntilSettle,
+                    kind: PromptFailureKind::DeferredUntilSettle {
+                        observed_status_ms: terminal.status_ms,
+                    },
                     message: "hc terminal has no settled foreground session owner".to_owned(),
                 });
             }
@@ -720,7 +727,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         self.transport
             .execute(&args)
             .map(|_| ())
-            .map_err(|raw| prompt_failure(raw, true))
+            .map_err(|raw| prompt_failure(raw, PromptTarget::Agent(terminal.status_ms)))
     }
 
     fn run_in_pane(&self, pane: &str, command: &str) -> Result<(), PromptFailure> {
@@ -742,7 +749,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         self.transport
             .execute(&["send", pane, command, "--json"])
             .map(|_| ())
-            .map_err(|raw| prompt_failure(raw, false))
+            .map_err(|raw| prompt_failure(raw, PromptTarget::Shell))
     }
 
     fn interrupt(&self, pane: &str) -> Result<(), HostError> {

@@ -735,7 +735,10 @@ where
     let prompt = doctor_assistance_prompt(&report, pane_id, &live);
     match runtime.host.prompt(pane_id, &prompt) {
         Ok(_) => Ok(()),
-        Err(error) if error.kind == PromptFailureKind::DeferredUntilSettle => {
+        Err(crate::PromptFailure {
+            kind: PromptFailureKind::DeferredUntilSettle { observed_status_ms },
+            message,
+        }) => {
             let attribution = crate::MutationAttribution::new(
                 crate::ActorKind::Plugin,
                 "namedrop-doctor",
@@ -744,11 +747,17 @@ where
             StateStore::open(runtime.state_directory)
                 .map_err(|error| error.to_string())?
                 .transaction(|transaction| {
-                    transaction.defer_prompt_until_settle(&namespace, pane_id, &live, &attribution)
+                    transaction.defer_prompt_until_settle(
+                        &namespace,
+                        pane_id,
+                        &live,
+                        observed_status_ms,
+                        &attribution,
+                    )
                 })
                 .map_err(|error| error.to_string())?;
             Err(format!(
-                "Not sent; waiting for the agent's next settled status: {error}"
+                "Not sent; waiting for the agent's next settled status: {message}"
             ))
         }
         Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {

@@ -623,7 +623,10 @@ where
             TransitionKind::Submitted,
             &attribution,
         ),
-        Err(error) if error.kind == PromptFailureKind::DeferredUntilSettle => {
+        Err(crate::PromptFailure {
+            kind: PromptFailureKind::DeferredUntilSettle { observed_status_ms },
+            ..
+        }) => {
             let attribution = MutationAttribution::new(
                 crate::ActorKind::Plugin,
                 "namedrop-onboarding",
@@ -632,16 +635,12 @@ where
             StateStore::open(runtime.state_directory)
                 .map_err(|error| error.to_string())?
                 .transaction(|transaction| {
-                    transaction.finish_integration_challenge_prompt(
+                    transaction.defer_integration_challenge_prompt(
                         &namespace,
                         &challenge.registration_id,
-                        TransitionKind::Challenged,
-                        &attribution,
-                    )?;
-                    transaction.defer_prompt_until_settle(
-                        &namespace,
                         &pane.pane_id,
                         agent_session_id,
+                        observed_status_ms,
                         &attribution,
                     )
                 })

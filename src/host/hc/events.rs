@@ -106,13 +106,13 @@ impl Subscriber {
                     current_pane_id: None,
                     ..*runtime
                 };
-                if !active(&scoped)? {
-                    return Ok(());
-                }
                 if matches!(event.kind, Kind::Status | Kind::Turn)
                     && let Some(terminal) = &terminal
                 {
                     resume_settled_recipient(terminal, &scoped)?;
+                }
+                if !active(&scoped)? {
+                    return Ok(());
                 }
                 match event.kind {
                     Kind::Created | Kind::Restarted => {
@@ -204,7 +204,13 @@ impl Subscriber {
         &mut self,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
-        let spaces = active_spaces(runtime)?;
+        let spaces: Vec<_> = StateStore::open(runtime.state_directory)
+            .map_err(|error| error.to_string())?
+            .dashboard_spaces()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter(|row| row.namespace.session_socket_id == runtime.session_socket_id)
+            .collect();
         if spaces.is_empty() {
             return Ok(());
         }
@@ -216,8 +222,11 @@ impl Subscriber {
             .map(|warning| format!("{}: {}", warning.terminal, warning.message))
             .collect();
         for terminal in &terminals {
-            if spaces.iter().any(|space| space == terminal.workspace())
-                && terminal.labels.contains_key("namedrop.session.pid")
+            if spaces.iter().any(|row| {
+                row.namespace.space_id.as_str() == terminal.workspace()
+                    && row.state.activated
+                    && !row.state.deactivated
+            }) && terminal.labels.contains_key("namedrop.session.pid")
                 && let Err(error) = runtime
                     .host
                     .invalidate_session(runtime.state_directory, &terminal.address)
@@ -225,9 +234,11 @@ impl Subscriber {
                 errors.push(error.to_string());
             }
         }
-        for space in spaces {
+        for row in spaces {
+            let space = row.namespace.space_id.as_str();
+            let is_active = row.state.activated && !row.state.deactivated;
             let scoped = LifecycleRuntime {
-                workspace_id: Some(&space),
+                workspace_id: Some(space),
                 current_pane_id: None,
                 ..*runtime
             };
@@ -235,11 +246,14 @@ impl Subscriber {
                 .iter()
                 .filter(|terminal| terminal.workspace() == space)
             {
-                if let Err(error) = self.reconcile_move(terminal, runtime) {
+                if let Err(error) = resume_settled_recipient(terminal, &scoped) {
                     errors.push(error);
                     continue;
                 }
-                if let Err(error) = resume_settled_recipient(terminal, &scoped) {
+                if !is_active {
+                    continue;
+                }
+                if let Err(error) = self.reconcile_move(terminal, runtime) {
                     errors.push(error);
                     continue;
                 }
@@ -247,7 +261,7 @@ impl Subscriber {
                     errors.push(error);
                 }
             }
-            if let Err(error) = self.operation("event.reconcile", json!({}), &scoped) {
+            if is_active && let Err(error) = self.operation("event.reconcile", json!({}), &scoped) {
                 errors.push(error);
             }
         }
@@ -835,6 +849,9 @@ fn resume_settled_recipient<E: HerdrCommandExecutor, C: Clock, I>(
     StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
         .transaction(|transaction| {
+            if transaction.worktree_state(&namespace)?.is_none() {
+                return Ok(());
+            }
             transaction.resume_prompt_after_settle(
                 &namespace,
                 &terminal.address,

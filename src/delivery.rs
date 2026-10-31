@@ -608,12 +608,16 @@ where
                     .map_err(|error| error.to_string())?;
                 report.submitted.push(leased.attempt_id);
             }
-            Err(error) if error.kind == PromptFailureKind::DeferredUntilSettle => {
+            Err(crate::PromptFailure {
+                kind: PromptFailureKind::DeferredUntilSettle { observed_status_ms },
+                ..
+            }) => {
                 store
                     .transaction(|transaction| {
                         transaction.defer_delivery_attempt_until_settle(
                             &namespace,
                             &leased.attempt_id,
+                            observed_status_ms,
                             &attribution,
                         )
                     })

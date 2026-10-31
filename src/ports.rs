@@ -15,7 +15,7 @@ pub enum PromptFailureKind {
     /// delivery to the queue cannot duplicate an invocation.
     TemporaryPreInvocation,
     /// No input was sent; only a newer settled observation permits another attempt.
-    DeferredUntilSettle,
+    DeferredUntilSettle { observed_status_ms: Option<u64> },
     /// The host rejected the call itself — an identical retry cannot succeed.
     DefinitiveNonRetryable,
     /// It cannot be established that the input never arrived. The conservative

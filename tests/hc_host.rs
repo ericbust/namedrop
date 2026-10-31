@@ -271,11 +271,19 @@ fn errors_classify_by_kind_and_pretyping_hint() {
     for (kind, hint, expected) in [
         ("not_found", "", PromptFailureKind::TemporaryPreInvocation),
         ("finished", "", PromptFailureKind::TemporaryPreInvocation),
-        ("blocked", "", PromptFailureKind::DeferredUntilSettle),
+        (
+            "blocked",
+            "",
+            PromptFailureKind::DeferredUntilSettle {
+                observed_status_ms: None,
+            },
+        ),
         (
             "status_mismatch",
             "",
-            PromptFailureKind::DeferredUntilSettle,
+            PromptFailureKind::DeferredUntilSettle {
+                observed_status_ms: None,
+            },
         ),
         (
             "unavailable",
@@ -2505,8 +2513,7 @@ fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
                     .count(),
                 1
             );
-            store
-                .transaction(|tx| tx.activate_worktree(&namespace, &attribution))
+            namedrop::execute_lifecycle_operation("activate", json!({"confirmed":true}), &runtime)
                 .unwrap();
         }
         namedrop::drain_mailboxes(&runtime).unwrap();
@@ -2662,7 +2669,7 @@ fn assert_onboarding_and_doctor_refusals(mark_invoked: bool) {
         );
         clock.0.set(2_000);
         fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"done"});
-        fixture.terminals.borrow_mut()[0]["status_ms"] = json!(2_000);
+        fixture.terminals.borrow_mut()[0]["status_ms"] = json!(950);
         subscriber
             .handle_line(
                 &json!({"method":"event","params":{"type":"status","terminal":"t1"}}).to_string(),

@@ -15,10 +15,19 @@ impl StateTransaction<'_> {
         let latest = self
             .transaction
             .query_row(
-                "SELECT transition_kind, occurred_at_ms FROM transition_facts
-             WHERE session_socket_id = ?1 AND worktree_id = ?2
-               AND entity_kind = 'prompt_recipient' AND entity_id = ?3
-             ORDER BY worktree_order DESC LIMIT 1",
+                "SELECT gate.transition_kind, COALESCE(observed.occurred_at_ms, 0)
+             FROM transition_facts gate
+             LEFT JOIN transition_facts observed
+               ON observed.session_socket_id = gate.session_socket_id
+               AND observed.worktree_id = gate.worktree_id
+               AND observed.worktree_order = gate.worktree_order - 1
+               AND observed.entity_kind = gate.entity_kind
+               AND observed.entity_id = gate.entity_id
+               AND observed.transition_kind = 'observed'
+             WHERE gate.session_socket_id = ?1 AND gate.worktree_id = ?2
+               AND gate.entity_kind = 'prompt_recipient' AND gate.entity_id = ?3
+               AND gate.transition_kind IN ('paused', 'resumed')
+             ORDER BY gate.worktree_order DESC LIMIT 1",
                 params![
                     namespace.session_socket_id,
                     namespace.space_id.as_str(),
@@ -63,8 +72,22 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         pane: &str,
         session: &AgentSessionId,
+        observed_status_ms: Option<u64>,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        // Missing HC timestamps have an unknown lower bound, not the later refusal clock.
+        let observed = MutationAttribution::new(
+            attribution.actor_kind,
+            &attribution.actor_id,
+            observed_status_ms.unwrap_or(0),
+        );
+        self.append_transition(
+            namespace,
+            TransitionEntityKind::PromptRecipient,
+            &recipient_key(pane, session),
+            TransitionKind::Observed,
+            &observed,
+        )?;
         self.append_transition(
             namespace,
             TransitionEntityKind::PromptRecipient,
@@ -101,6 +124,7 @@ impl StateTransaction<'_> {
         &mut self,
         namespace: &StateNamespace,
         attempt: &DeliveryAttemptId,
+        observed_status_ms: Option<u64>,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
         let (delivery, pane, session, state) = self.transaction.query_row(
@@ -164,12 +188,31 @@ impl StateTransaction<'_> {
             TransitionKind::Queued,
             attribution,
         )?;
-        self.append_transition(
-            namespace,
-            TransitionEntityKind::PromptRecipient,
-            &recipient_key(&pane, &session),
-            TransitionKind::Paused,
-            attribution,
-        )
+        self.defer_prompt_until_settle(namespace, &pane, &session, observed_status_ms, attribution)
+    }
+
+    pub(crate) fn defer_integration_challenge_prompt(
+        &mut self,
+        namespace: &StateNamespace,
+        registration_id: &str,
+        pane: &str,
+        session: &AgentSessionId,
+        observed_status_ms: Option<u64>,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let current = self.integration_challenge_transition(namespace, registration_id)?;
+        if matches!(
+            current,
+            TransitionKind::Dispatching | TransitionKind::Invoked
+        ) {
+            self.append_transition(
+                namespace,
+                TransitionEntityKind::IntegrationRegistration,
+                registration_id,
+                TransitionKind::Challenged,
+                attribution,
+            )?;
+        }
+        self.defer_prompt_until_settle(namespace, pane, session, observed_status_ms, attribution)
     }
 }
