@@ -2263,6 +2263,29 @@ fn address_list_reads_every_workspace_when_asked() {
 
 #[test]
 fn every_unsent_delivery_cancel_goes_through_the_one_reflecting_helper() {
+    fn mailbox_cancel_count(text: &str) -> usize {
+        let compact: String = text.split_whitespace().collect();
+        compact
+            .matches("UPDATEmailbox_deliveriesSETstate='cancelled'")
+            .count()
+    }
+
+    assert_eq!(
+        mailbox_cancel_count("UPDATE delivery_attempt_state SET state = 'cancelled', active = 0"),
+        0,
+        "an unused dispatch reservation can be cancelled while its mailbox stays queued"
+    );
+    assert_eq!(
+        mailbox_cancel_count("UPDATE mailbox_deliveries SET state = 'cancelled'"),
+        1,
+        "a raw mailbox cancellation must still be detected"
+    );
+    assert_eq!(
+        mailbox_cancel_count("UPDATE mailbox_deliveries AS d SET state = 'cancelled'"),
+        1,
+        "an aliased raw mailbox cancellation must still be detected"
+    );
+
     fn sources(directory: &std::path::Path, found: &mut Vec<(String, String)>) {
         for entry in fs::read_dir(directory).unwrap() {
             let path = entry.unwrap().path();
@@ -2284,8 +2307,7 @@ fn every_unsent_delivery_cancel_goes_through_the_one_reflecting_helper() {
     let raw_cancels: Vec<String> = files
         .iter()
         .flat_map(|(path, text)| {
-            let compact: String = text.split_whitespace().collect();
-            let count = compact.matches("SETstate='cancelled'").count();
+            let count = mailbox_cancel_count(text);
             std::iter::repeat_n(path.clone(), count)
         })
         .collect();
