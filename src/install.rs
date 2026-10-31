@@ -153,11 +153,14 @@ impl PackageContext {
         executable: &Path,
         state: &Path,
     ) -> Result<(), String> {
-        claude_permissions::inspect_with_rules(
-            &config.claude(&self.home),
-            &self.permission_owner(state, config),
-            self.permission_rules(executable, state)?,
-        )
+        self.permission_rules(executable, state)
+            .and_then(|rules| {
+                claude_permissions::inspect_with_rules(
+                    &config.claude(&self.home),
+                    &self.permission_owner(state, config),
+                    rules,
+                )
+            })
         .map_err(|error| format!("{error}; {}", claude_permissions::REPAIR_GUIDANCE))
     }
 }
@@ -508,7 +511,9 @@ fn install_integration_package_with_config(
         && let Err(error) = claude_permissions::refresh_with_rules(
             &config.claude(&context.home),
             &context.permission_owner(state_directory, config),
-            context.permission_rules(executable, state_directory)?,
+            context
+                .permission_rules(executable, state_directory)
+                .map_err(|error| format!("{error}; {}", claude_permissions::REPAIR_GUIDANCE))?,
         )
     {
         eprintln!(
