@@ -378,6 +378,8 @@ where
                             runtime.ids,
                             &attribution,
                         )?;
+                        publish_hc_name(runtime, Some(pane_id), &alias)
+                            .map_err(StoreError::invalid_input)?;
                         return Ok(binding.address_id);
                     }
 
@@ -413,6 +415,8 @@ where
                         runtime.ids,
                         &attribution,
                     )?;
+                    publish_hc_name(runtime, Some(pane_id), &alias)
+                        .map_err(StoreError::invalid_input)?;
                     Ok(address_id)
                 })
                 .map_err(|error| error.to_string())?;
@@ -426,12 +430,14 @@ where
             )?;
             let served =
                 crate::codex_app_server::served_codex_panes(runtime, std::slice::from_ref(pane));
-            publish_pane_address_metadata(
-                runtime,
-                pane_id,
-                &alias,
-                PaneLabel::for_pane(pane, served.as_ref()),
-            )?;
+            if !runtime.is_hc() {
+                publish_pane_address_metadata(
+                    runtime,
+                    pane_id,
+                    &alias,
+                    PaneLabel::for_pane(pane, served.as_ref()),
+                )?;
+            }
             let addresses = store
                 .transaction(|transaction| transaction.list_pane_addresses(&namespace))
                 .map_err(|error| error.to_string())?;
@@ -686,6 +692,11 @@ where
                 &address_id,
                 &discovered.panes,
                 |transaction| {
+                    let previous = transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .ok_or_else(|| StoreError::invalid_input("Pane Address is not active"))?;
                     transaction.rebind_pane(
                         &namespace,
                         &binding_id,
@@ -700,17 +711,24 @@ where
                         pane,
                         runtime.ids,
                         &attribution,
-                    )
+                    )?;
+                    let old_pane = previous.pane_id.as_deref().filter(|old| *old != pane_id);
+                    clear_hc_name(runtime, old_pane).map_err(StoreError::invalid_input)?;
+                    if let Err(error) = publish_hc_name(runtime, Some(&pane_id), &previous.alias) {
+                        if let Err(restore_error) =
+                            publish_hc_name(runtime, old_pane, &previous.alias)
+                        {
+                            return Err(StoreError::invalid_input(format!(
+                                "{error}; restoring the previous pane name also failed: {restore_error}"
+                            )));
+                        }
+                        return Err(StoreError::invalid_input(error));
+                    }
+                    Ok(())
                 },
             )?;
             onboard_settled_integrations(runtime, &discovered)?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
-            if runtime.is_hc()
-                && let (Some(pane), Some(alias)) =
-                    (record["pane_id"].as_str(), record["alias"].as_str())
-            {
-                publish_pane_address_metadata(runtime, pane, alias, PaneLabel::Ready)?;
-            }
             Ok(record)
         }
         "address.unbind" => {
@@ -722,7 +740,15 @@ where
                 &namespace,
                 &address_id,
                 &discovered.panes,
-                |transaction| transaction.unbind_pane(&namespace, &address_id, &attribution),
+                |transaction| {
+                    let pane = transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .and_then(|address| address.pane_id);
+                    transaction.unbind_pane(&namespace, &address_id, &attribution)?;
+                    clear_hc_name(runtime, pane.as_deref()).map_err(StoreError::invalid_input)
+                },
             )?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
             Ok(record)
@@ -738,16 +764,17 @@ where
                 &address_id,
                 &discovered.panes,
                 |transaction| {
-                    transaction.replace_alias(&namespace, &address_id, &alias, &attribution)
+                    transaction.replace_alias(&namespace, &address_id, &alias, &attribution)?;
+                    let pane = transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .and_then(|address| address.pane_id);
+                    publish_hc_name(runtime, pane.as_deref(), &alias)
+                        .map_err(StoreError::invalid_input)
                 },
             )?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
-            if runtime.is_hc()
-                && let (Some(pane), Some(alias)) =
-                    (record["pane_id"].as_str(), record["alias"].as_str())
-            {
-                publish_pane_address_metadata(runtime, pane, alias, PaneLabel::Ready)?;
-            }
             Ok(record)
         }
         "address.persona" => {
@@ -1317,8 +1344,11 @@ fn apply_managed_tab_label(
             "message": "Pane named, but its tab label could not be updated.",
         })
     };
-    let Some(current_label) = herdr.tab_label(tab_id) else {
+    if !herdr.supports_tab_labels() {
         return json!({"status": "unchanged"});
+    }
+    let Some(current_label) = herdr.tab_label(tab_id) else {
+        return warning();
     };
     let intent = store.transaction(|transaction| {
         let existing = transaction
@@ -1406,11 +1436,7 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    if discovered
-        .panes
-        .iter()
-        .all(|pane| runtime.host.tab_label(&pane.tab_id).is_none())
-    {
+    if !runtime.host.supports_tab_labels() {
         return Ok(());
     }
     let managed = store
@@ -2029,6 +2055,19 @@ fn reconcile_compacted_pane_bindings(
 struct PaneEventSession {
     #[serde(rename = "value")]
     _value: String,
+}
+
+fn publish_hc_name<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    pane: Option<&str>,
+    alias: &str,
+) -> Result<(), String> {
+    if runtime.is_hc()
+        && let Some(pane) = pane
+    {
+        publish_pane_address_metadata(runtime, pane, alias, PaneLabel::Ready)?;
+    }
+    Ok(())
 }
 
 fn clear_hc_name<H: Host, C, I>(

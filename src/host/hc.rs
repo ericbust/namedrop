@@ -552,6 +552,9 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
     fn notify(&self, _: &str, _: &str, _: bool) -> Result<(), HostError> {
         Ok(())
     }
+    fn supports_tab_labels(&self) -> bool {
+        false
+    }
     fn tab_label(&self, _: &str) -> Option<String> {
         None
     }

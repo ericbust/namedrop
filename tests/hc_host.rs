@@ -409,6 +409,14 @@ fn check_name_mutation_failure(operation: &str, failure: bool, target_failure: b
         "address.unbind" => json!({"address_id":address_id}),
         _ => unreachable!(),
     };
+    let labels_event = || {
+        for pane in ["t1", "t2"] {
+            let event = json!({"jsonrpc":"2.0","method":"event","params":{"type":"labels","terminal":pane,"data":{}}}).to_string();
+            namedrop::host::hc::events::Subscriber::default()
+                .handle_line(&event, &runtime)
+                .unwrap();
+        }
+    };
     let result = namedrop::execute_lifecycle_operation(operation, input.clone(), &runtime);
     if failure {
         assert!(
@@ -422,6 +430,10 @@ fn check_name_mutation_failure(operation: &str, failure: bool, target_failure: b
             "alice"
         );
         assert_eq!(fixture.terminals.borrow()[1]["labels"]["namedrop.name"], "");
+        labels_event();
+        assert_eq!(names().len(), 1);
+        assert_eq!(names()[0].alias, "alice");
+        assert_eq!(names()[0].pane_id.as_deref(), Some("t1"));
         *fixture.rename_error.borrow_mut() = false;
         *fixture.clear_error.borrow_mut() = None;
         namedrop::execute_lifecycle_operation(operation, input, &runtime).unwrap();
@@ -433,34 +445,29 @@ fn check_name_mutation_failure(operation: &str, failure: bool, target_failure: b
         if rename { "bob" } else { "" }
     );
     assert_eq!(names()[0].alias, if rename { "bob" } else { "alice" });
-    if rename {
-        let event = json!({"jsonrpc":"2.0","method":"event","params":{"type":"labels","terminal":"t1","data":{}}}).to_string();
-        namedrop::host::hc::events::Subscriber::default()
-            .handle_line(&event, &runtime)
-            .unwrap();
-        assert_eq!(
-            names()[0].alias,
-            "bob",
-            "queued label events must preserve the rename"
-        );
-    } else {
-        assert_eq!(
-            names()[0].pane_id.as_deref(),
-            if operation == "address.bind" {
-                Some("t2")
-            } else {
-                None
-            }
-        );
-        assert_eq!(
-            fixture.terminals.borrow()[1]["labels"]["namedrop.name"],
-            if operation == "address.bind" {
-                "alice"
-            } else {
-                ""
-            }
-        );
-    }
+    labels_event();
+    assert_eq!(
+        names().len(),
+        1,
+        "queued label events must not resurrect an old binding"
+    );
+    assert_eq!(names()[0].alias, if rename { "bob" } else { "alice" });
+    assert_eq!(
+        names()[0].pane_id.as_deref(),
+        match operation {
+            "address.bind" => Some("t2"),
+            "address.unbind" => None,
+            _ => Some("t1"),
+        }
+    );
+    assert_eq!(
+        fixture.terminals.borrow()[1]["labels"]["namedrop.name"],
+        if operation == "address.bind" {
+            "alice"
+        } else {
+            ""
+        }
+    );
     std::fs::remove_dir_all(state).unwrap();
 }
 

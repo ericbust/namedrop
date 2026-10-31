@@ -144,6 +144,9 @@ pub trait Host {
     fn interrupt(&self, pane: &str) -> Result<(), HostError>;
     fn report_metadata(&self, pane: &str, metadata: &PaneMetadata) -> Result<(), HostError>;
     fn notify(&self, title: &str, body: &str, sound: bool) -> Result<(), HostError>;
+    fn supports_tab_labels(&self) -> bool {
+        true
+    }
     fn tab_label(&self, tab: &str) -> Option<String>;
     fn rename_tab(&self, tab: &str, label: &str) -> Result<(), HostError>;
     fn open_popup(&self, popup: &Popup<'_>) -> Result<serde_json::Value, HostError>;

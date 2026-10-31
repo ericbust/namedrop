@@ -86,6 +86,12 @@ impl<E: HerdrCommandExecutor> Host for RuntimeHost<E> {
             Self::Hc(host) => host.notify(title, body, sound),
         }
     }
+    fn supports_tab_labels(&self) -> bool {
+        match self {
+            Self::Tui(host) => host.supports_tab_labels(),
+            Self::Hc(host) => host.supports_tab_labels(),
+        }
+    }
     fn tab_label(&self, tab: &str) -> Option<String> {
         match self {
             Self::Tui(host) => host.tab_label(tab),
