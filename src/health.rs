@@ -502,7 +502,10 @@ where
             continue;
         }
         let mut attention = health_issue_for_attention(item.source_kind);
-        attention.explanation = crate::context::redact_disclosure_text(&item.summary);
+        let explanation = crate::context::redact_disclosure_text(&item.summary);
+        if explanation != attention.summary {
+            attention.explanation = explanation;
+        }
         attention.diagnostic = serde_json::json!({"attention_id":item.id,"source_kind":item.source_kind,"source_id":item.source_id});
         match item.source_kind {
             AttentionSourceKind::AutomaticReplyLimit => add_operation(
@@ -810,9 +813,9 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
             "ND-CONTEXT-001",
             HealthSeverity::Notice,
             "Shared context failed.",
-            "Ask the sender to fix the problem and share the context again.",
+            "The recipient could not use the shared context.",
             HealthRepairKind::HumanDecision,
-            "Ask the sender to fix the problem and share the context again?",
+            "Ask the sender to fix the problem and share the context again.",
         ),
         AttentionSourceKind::Coordination => issue(
             "ND-COORDINATION-001",

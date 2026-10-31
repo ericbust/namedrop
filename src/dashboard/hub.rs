@@ -995,14 +995,10 @@ impl Hub<'_> {
         use crate::spaces::{SpaceDirectory, SpaceEntry, names_in_scope, workspace_token};
         use snapshot::NotAddressableReason as Reason;
         let target = self.live_spaces.get(key).ok_or(Reason::Unavailable)?;
-        let raw_label = target.label.as_deref().ok_or(Reason::MissingLabel)?;
-        let label = crate::WorkspaceLabel::from_herdr(raw_label);
-        if label.as_str().is_empty() {
-            return Err(Reason::EmptyLabel);
-        }
-        if label.as_str() == "all" {
-            return Err(Reason::ReservedAll);
-        }
+        let label = target
+            .label
+            .as_deref()
+            .map(crate::WorkspaceLabel::from_herdr);
         if !self.spaces.get(key).is_some_and(|space| space.activated) {
             return Err(match state {
                 snapshot::SpaceState::Deactivated => Reason::NotActive,
@@ -1031,21 +1027,20 @@ impl Hub<'_> {
             .collect();
         let token = workspace_token(
             &target.namespace.space_id,
-            Some(&label),
+            label.as_ref(),
             entries
                 .iter()
                 .map(|entry| (&entry.space, entry.label.as_ref())),
         );
         let collision_reason = if entries.iter().any(|entry| {
-            entry.space != target.namespace.space_id && entry.label.as_ref() == Some(&label)
+            entry.space != target.namespace.space_id
+                && label.is_some()
+                && entry.label.as_ref() == label.as_ref()
         }) {
             Reason::SharedLabel
         } else {
             Reason::IdCollision
         };
-        if token != label {
-            return Err(collision_reason);
-        }
         let mut others = entries;
         let index = others
             .iter()
@@ -1053,7 +1048,7 @@ impl Hub<'_> {
             .ok_or(Reason::Unavailable)?;
         let here = others.swap_remove(index);
         let directory = SpaceDirectory::new(here, others);
-        names_in_scope(&crate::SpaceScope::Named(vec![label.clone()]), &directory).map_err(
+        names_in_scope(&crate::SpaceScope::Named(vec![token.clone()]), &directory).map_err(
             |refusal| match refusal {
                 crate::spaces::RouteRefusal::DuplicateLabel { .. } => collision_reason,
                 crate::spaces::RouteRefusal::NotActivated { .. } => match state {
@@ -1063,7 +1058,7 @@ impl Hub<'_> {
                 _ => Reason::Unavailable,
             },
         )?;
-        Ok(label.as_str().to_owned())
+        Ok(token.as_str().to_owned())
     }
 
     fn namespace(&mut self, key: &SpaceKey) -> Option<StateNamespace> {
