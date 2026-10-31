@@ -455,6 +455,46 @@ def check_judges():
     return "judges: doctor must agree with the daemon oracle; backlog, idle panes and the terminal run are exact"
 
 
+def check_terminal_answer_wait():
+    ran = live.TerminalRun("echo hello", 0, "hello\n", True)
+    interim = live.Transcript("claude", "c", "p", (), (
+        live.Turn(live.TERMINAL_PROMPT, (), ("The command is running.",)),
+        live.Turn("terminal result", (), ("The result arrived. I'll report it.",))), frozenset())
+    final = interim._replace(turns=interim.turns[:-1] + (
+        interim.turns[-1]._replace(answers=interim.turns[-1].answers +
+                                   ("stdout: hello; exit code 0.",)),))
+
+    class Runner:
+        def __init__(self):
+            self.reads = 0
+
+        def prompt(self, *args):
+            pass
+
+        def settle(self, read, done, seconds, watch=live.AGENTS):
+            for _ in range(3):
+                value = read()
+                if done(value):
+                    return value
+            return value
+
+        def transcript(self, alias):
+            self.reads += 1
+            return interim if self.reads == 1 else final
+
+        def save(self, *args):
+            pass
+
+        store = type("Store", (), {"terminal_runs": lambda self, since: (ran,),
+                                    "backlog": lambda self: live.Backlog(0, 0, 0)})()
+
+    runner = Runner()
+    checks = live.step_terminal(runner)
+    assert all(check.ok for check in checks), checks
+    assert runner.reads >= 2, "checker judged Claude's interim answer"
+    return "terminal answer: waits for Claude's final reply after the terminal settles"
+
+
 def check_plan_and_gates():
     old, current = live.features("1.1.0"), live.features("1.2.0-rc.1")
     assert live.choose_mode(None, old).name == "no-daemon"
@@ -538,6 +578,7 @@ def run(kit):
                   ("transcripts", check_transcripts),
                   ("exchange", lambda: check_exchange(base)),
                   ("judges", check_judges),
+                  ("terminal answer", check_terminal_answer_wait),
                   ("plan and gates", check_plan_and_gates),
                   ("report", check_report),
                   ("seeds", check_seeds),
