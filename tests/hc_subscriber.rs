@@ -606,3 +606,61 @@ fn postcommit_failure_preserves_the_committed_alias() {
         );
     });
 }
+
+#[test]
+fn stopped_core_error_survives_doctor_composition() {
+    let root = std::env::temp_dir().join(format!("namedrop-stopped-doctor-{}", std::process::id()));
+    std::fs::create_dir_all(root.join("home")).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .args(["--host", "hc", "--plugin-state"])
+        .arg(root.join("state"))
+        .args(["--hc-space", "fixture-space", "doctor"])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", root.join("home"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_STATE_HOME", root.join("xdg"))
+        .env("XDG_RUNTIME_DIR", &root)
+        .env("CODEX_HOME", root.join("codex"))
+        .env("CLAUDE_CONFIG_DIR", root.join("claude"))
+        .env("HC_SOCKET", root.join("missing.sock"))
+        .env("HC_BIN_PATH", root.join("hc-must-not-run"))
+        .output()
+        .unwrap();
+    let response = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success());
+    assert!(
+        response.contains("hc core is unavailable"),
+        "lost core preflight error: {response}"
+    );
+    assert!(response.contains("missing.sock"));
+    assert!(!root.join("missing.sock").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unreadable_agent_is_unknown_in_doctor_not_disconnected() {
+    check("unknown-doctor", |fixture, runtime| {
+        namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"alice","pane_type":"agent"}),
+            runtime,
+        )
+        .unwrap();
+        *fixture.get_failure.borrow_mut() = Some("t1".into());
+        let report = namedrop::diagnose_collaboration(runtime);
+        assert!(
+            report
+                .issues
+                .iter()
+                .all(|issue| !matches!(issue.code.as_str(), "ND-SESSION-001" | "ND-SETUP-003")),
+            "unknown inspection became a missing-agent diagnosis: {:?}",
+            report.issues
+        );
+        assert_eq!(report.available_agents, 0);
+    });
+}
