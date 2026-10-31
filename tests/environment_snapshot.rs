@@ -178,3 +178,55 @@ fn hc_config_is_read_only_when_hc_is_selected_and_then_frozen() {
         && value == Some(std::ffi::OsStr::new("/captured/config.sock"))));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn hc_update_and_shortcuts_share_resolved_config_roots() {
+    use namedrop::{ProcessHerdr, environment::EnvironmentSnapshot};
+    for (label, config_value) in [("empty", ""), ("relative", "relative-config")] {
+        let root = std::env::temp_dir().join(format!(
+            "namedrop-resolved-config-{}-{label}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let config = home.join(".config");
+        let endpoint = root.join("selected.sock");
+        let hc_config = config.join("herdr-core/config.toml");
+        fs::create_dir_all(hc_config.parent().unwrap()).unwrap();
+        fs::write(
+            &hc_config,
+            format!("socket = {:?}\n", endpoint.to_str().unwrap()),
+        )
+        .unwrap();
+        let snapshot = EnvironmentSnapshot::from_variables([
+            ("HOME".into(), home.as_os_str().to_owned()),
+            ("XDG_CONFIG_HOME".into(), config_value.into()),
+            (
+                "XDG_RUNTIME_DIR".into(),
+                root.join("runtime").into_os_string(),
+            ),
+        ]);
+        let paths = snapshot.agent_config();
+        assert_eq!(paths.config_root, Some(config.as_path()));
+        assert_eq!(
+            paths.shortcut_config(snapshot.home()).unwrap(),
+            config.join("herdr/config.toml")
+        );
+        assert_eq!(
+            paths.update_settings(snapshot.home()).unwrap(),
+            config.join("herdr/plugins/config/namedrop/settings.json")
+        );
+        let transport = ProcessHerdr::from_snapshot(HostKind::Hc, &snapshot);
+        assert_eq!(
+            snapshot.hc_endpoint().unwrap(),
+            endpoint,
+            "{label} XDG_CONFIG_HOME"
+        );
+        assert!(
+            transport
+                .command()
+                .get_envs()
+                .any(|(key, value)| key == "HC_SOCKET" && value == Some(endpoint.as_os_str()))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
