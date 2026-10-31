@@ -334,13 +334,13 @@ mod tests {
     fn spawn_waits_until_requested_arguments_are_visible() {
         let mut reads = 0;
         let process = Process::spawn_with_arguments(
-            Command::new("/bin/sh").args(["-c", "sleep 30; :", "sh", "--no-daemon"]),
+            Command::new("sleep").arg0("--no-daemon").arg("30"),
             |pid| {
                 reads += 1;
                 match reads {
                     1 => None,
                     2 => Some(Vec::new()),
-                    3 => Some(vec!["sh".to_owned()]),
+                    3 => Some(vec!["--no-daemon".to_owned()]),
                     _ => crate::terminal::process_arguments(pid),
                 }
             },
@@ -349,11 +349,9 @@ mod tests {
             reads >= 4,
             "spawn accepted incomplete arguments after {reads} reads"
         );
-        assert!(
-            crate::terminal::process_arguments(process.pid())
-                .unwrap()
-                .iter()
-                .any(|argument| argument == "--no-daemon")
+        assert_eq!(
+            crate::terminal::process_arguments(process.pid()).unwrap(),
+            ["--no-daemon", "30"]
         );
     }
 
@@ -627,14 +625,8 @@ mod tests {
         let root = Root::new();
         let server = Process::server(&root.codex_home());
         root.write("app-server-daemon/daemon.pid", &pid_record(server.pid()));
-        let in_process = Process::spawn(Command::new("/bin/sh").args([
-            "-c",
-            "sleep 30; :",
-            "sh",
-            "--no-daemon",
-        ]));
-        let plain =
-            Process::spawn(Command::new("/bin/sh").args(["-c", "sleep 30; :", "sh", "resume"]));
+        let in_process = Process::spawn(Command::new("sleep").arg0("--no-daemon").arg("30"));
+        let plain = Process::spawn(Command::new("sleep").arg0("codex").arg("30"));
         for process in [&in_process, &plain] {
             assert_eq!(
                 crate::terminal::process_executable(process.pid())

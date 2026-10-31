@@ -502,7 +502,15 @@ where
             continue;
         }
         let mut attention = health_issue_for_attention(item.source_kind);
-        let explanation = crate::context::redact_disclosure_text(&item.summary);
+        let cause = if item.source_kind == AttentionSourceKind::ContextGrant {
+            item.summary
+                .strip_prefix("Shared context failed:")
+                .map(str::trim_start)
+                .unwrap_or(&item.summary)
+        } else {
+            &item.summary
+        };
+        let explanation = crate::context::redact_disclosure_text(cause);
         if explanation != attention.summary {
             attention.explanation = explanation;
         }
