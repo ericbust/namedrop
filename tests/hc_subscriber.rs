@@ -1641,3 +1641,70 @@ fn subscriber_coalesces_queued_events_and_missed_notifications() {
         );
     });
 }
+
+#[test]
+fn queued_snapshot_does_not_resurrect_released_alias() {
+    check("snapshot-after-release", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+        let snapshot = json!({"terminals":*fixture.terminals.borrow()}).to_string();
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber.handle_line(&snapshot, runtime).unwrap();
+        let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+        let addresses = || {
+            namedrop::StateStore::open(runtime.state_directory)
+                .unwrap()
+                .transaction(|tx| tx.list_pane_addresses(&namespace))
+                .unwrap()
+        };
+        namedrop::execute_lifecycle_operation(
+            "address.retire",
+            json!({"address_id":addresses()[0].id}),
+            runtime,
+        )
+        .unwrap();
+        namedrop::execute_lifecycle_operation(
+            "address.release-alias",
+            json!({"alias":"alice"}),
+            runtime,
+        )
+        .unwrap();
+        fixture.calls.borrow_mut().clear();
+        subscriber.handle_line(&snapshot, runtime).unwrap();
+        assert!(
+            addresses().iter().all(|address| address.retired),
+            "stale snapshot resurrected a released alias"
+        );
+        assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.name"], "");
+    });
+}
+
+#[test]
+fn queued_snapshot_does_not_revert_committed_rename() {
+    check("snapshot-after-rename", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+        let snapshot = json!({"terminals":*fixture.terminals.borrow()}).to_string();
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber.handle_line(&snapshot, runtime).unwrap();
+        namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"bob", "pane_type":"terminal"}),
+            runtime,
+        )
+        .unwrap();
+        fixture.calls.borrow_mut().clear();
+        subscriber.handle_line(&snapshot, runtime).unwrap();
+        let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+        let addresses = namedrop::StateStore::open(runtime.state_directory)
+            .unwrap()
+            .transaction(|tx| tx.list_pane_addresses(&namespace))
+            .unwrap();
+        assert_eq!(
+            addresses[0].alias, "bob",
+            "stale snapshot reverted a committed rename"
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+            "bob"
+        );
+    });
+}
