@@ -277,3 +277,22 @@ fn hc_wrappers_derive_runtime_state_without_claiming_the_inherited_terminal() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn tui_cache_inspection_ignores_unowned_nested_skill_files() {
+    let root = std::env::temp_dir().join(format!("namedrop-snapshot-owner-{}", std::process::id()));
+    let installed = root.join("installed");
+    let cached = root.join("cached");
+    for directory in [&installed, &cached] {
+        for relative in CODEX_SNAPSHOT_FILES {
+            let path = directory.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "same owned content").unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    fs::create_dir_all(installed.join("skills/namedrop")).unwrap();
+    fs::write(installed.join(HC_CODEX_SKILL_FILE), "unowned TUI file").unwrap();
+    assert!(codex_snapshot_matches(&installed, &cached));
+    fs::remove_dir_all(root).unwrap();
+}
