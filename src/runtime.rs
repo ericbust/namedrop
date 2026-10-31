@@ -618,15 +618,6 @@ impl ProcessHerdr {
     }
 }
 
-pub(crate) fn hc_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
-    let mut command = Command::new(program);
-    command
-        .env_remove("HC_TERMINAL_ID")
-        .env_remove("HC_TERMINAL_SOCKET");
-    remove_tui_environment(&mut command);
-    command
-}
-
 pub(crate) fn remove_tui_environment(command: &mut Command) {
     use std::os::unix::ffi::OsStrExt;
     for (key, _) in env::vars_os() {
@@ -650,6 +641,10 @@ pub fn exec_hc_child(arguments: &[std::ffi::OsString]) -> std::io::Error {
 }
 
 impl HerdrCommandExecutor for ProcessHerdr {
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        Some(&self.environment)
+    }
+
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let output = self.output(args)?;
         if !output.status.success() {

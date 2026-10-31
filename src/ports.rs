@@ -27,6 +27,10 @@ pub enum PromptFailureKind {
 pub trait HerdrCommandExecutor {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String>;
 
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        None
+    }
+
     /// A bounded read for latency-sensitive UI. Process-backed executors must
     /// enforce the deadline and cancellation while their child is running.
     fn execute_bounded(
@@ -54,6 +58,10 @@ pub trait HerdrCommandExecutor {
 impl<T: HerdrCommandExecutor + ?Sized> HerdrCommandExecutor for &T {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         (**self).execute(args)
+    }
+
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        (**self).environment_snapshot()
     }
 
     fn execute_bounded(

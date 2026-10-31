@@ -821,8 +821,19 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         Ok(())
     }
     fn open_popup(&self, popup: &Popup<'_>) -> Result<serde_json::Value, HostError> {
-        let program = std::env::var_os("HERDR_APP_BIN_PATH").unwrap_or_else(|| "herdr-app".into());
-        let output = crate::runtime::hc_command(program)
+        let captured;
+        let environment = match self.transport.environment_snapshot() {
+            Some(environment) => environment,
+            None => {
+                captured = crate::environment::EnvironmentSnapshot::capture();
+                &captured
+            }
+        };
+        let program = environment
+            .var_os("HERDR_APP_BIN_PATH")
+            .unwrap_or_else(|| "herdr-app".into());
+        let output = environment
+            .hc_command(program)
             .args([
                 "do",
                 "mod.open",
