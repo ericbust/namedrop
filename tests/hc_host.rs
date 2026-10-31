@@ -2205,6 +2205,9 @@ fn settle_before_refusal_recording_resumes_delivery() {
 
 #[test]
 fn inactive_namespace_preserves_settle_for_reactivation() {
+    if in_recorded_app_fixture(2) {
+        return;
+    }
     assert_refused_hc_delivery("blocked", "inactive-status");
     assert_refused_hc_delivery("status_mismatch", "inactive-snapshot");
 }
@@ -2585,12 +2588,41 @@ fn assert_refused_hc_delivery(refusal: &str, recovery: &str) {
 
 #[test]
 fn onboarding_and_doctor_refusals_wait_for_new_settle() {
+    if in_recorded_app_fixture(1) {
+        return;
+    }
     assert_onboarding_and_doctor_refusals(false);
 }
 
 #[test]
 fn no_input_refusal_resets_speculatively_invoked_challenge() {
+    if in_recorded_app_fixture(1) {
+        return;
+    }
     assert_onboarding_and_doctor_refusals(true);
+}
+
+fn in_recorded_app_fixture(expected_tours: usize) -> bool {
+    let thread = std::thread::current();
+    let test = thread.name().unwrap();
+    if std::env::var("NAMEDROP_HC_POPUP_TEST").as_deref() == Ok(test) {
+        return false;
+    }
+    let root = std::env::temp_dir().join(format!(
+        "namedrop-refusal-popup-{}-{test}",
+        std::process::id()
+    ));
+    let fake = app_popup::fake(&root);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env("NAMEDROP_HC_POPUP_TEST", test)
+        .env("HERDR_APP_BIN_PATH", fake)
+        .output()
+        .unwrap();
+    app_popup::assert_one_test(&output);
+    app_popup::assert_tour(&root, expected_tours);
+    std::fs::remove_dir_all(root).unwrap();
+    true
 }
 
 fn assert_onboarding_and_doctor_refusals(mark_invoked: bool) {
