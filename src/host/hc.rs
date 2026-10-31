@@ -653,6 +653,17 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
                 }
             }
         };
+        let unavailable_panes = discovery
+            .warnings
+            .into_iter()
+            .map(|warning| warning.terminal)
+            .chain(
+                terminals
+                    .iter()
+                    .filter(|terminal| terminal.workspace() != workspace)
+                    .map(|terminal| terminal.address.clone()),
+            )
+            .collect();
         let terminals: Vec<_> = terminals
             .iter()
             .filter(|terminal| terminal.workspace() == workspace)
@@ -666,11 +677,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
             .filter(|roots| !roots.is_empty() && roots.iter().all(|root| root == &roots[0]))
             .map(|roots| &roots[0]);
         Ok(DiscoveredWorktree {
-            unavailable_panes: discovery
-                .warnings
-                .into_iter()
-                .map(|warning| warning.terminal)
-                .collect(),
+            unavailable_panes,
             worktree_id: WorktreeId::new(
                 root.map(|root| root.to_string_lossy().into_owned())
                     .unwrap_or_else(|| format!("hc-space:{workspace}")),

@@ -336,9 +336,16 @@ impl Subscriber {
                 previous.insert(space);
             }
         }
-        let mut moved = false;
-        for source in previous.into_iter().filter(|source| source != destination) {
-            moved = true;
+        previous.retain(|source| source != destination);
+        if !previous.is_empty() {
+            let namespace =
+                crate::StateNamespace::for_space(runtime.session_socket_id, destination);
+            let alias = committed_alias(runtime.state_directory, &namespace, pane)?;
+            runtime
+                .host
+                .set_labels(pane, &[("namedrop.name", alias.as_deref().unwrap_or(""))])?;
+        }
+        for source in previous {
             let scoped = LifecycleRuntime {
                 workspace_id: Some(&source),
                 ..*runtime
@@ -352,14 +359,6 @@ impl Subscriber {
                         "focused":false, "agent_status":terminal.status.as_ref().map(|status| status.state.as_str()).unwrap_or("unknown"), "revision":0}
                 }), &scoped)?;
             }
-        }
-        if moved {
-            let namespace =
-                crate::StateNamespace::for_space(runtime.session_socket_id, destination);
-            let alias = committed_alias(runtime.state_directory, &namespace, pane)?;
-            runtime
-                .host
-                .set_labels(pane, &[("namedrop.name", alias.as_deref().unwrap_or(""))])?;
         }
         self.spaces.insert(pane.clone(), destination.to_owned());
         Ok(())

@@ -1016,6 +1016,24 @@ fn move_label_failure_preserves_source_proof_until_fresh_subscriber_repairs_mirr
                                 .handle_line(&event(first), runtime)
                                 .unwrap_err();
                             assert!(error.contains("transient name write failed"), "{error}");
+                            if first != "labels" {
+                                let names = namedrop::StateStore::open(runtime.state_directory)
+                                    .unwrap()
+                                    .transaction(|transaction| {
+                                        transaction.list_pane_addresses(
+                                            &namedrop::StateNamespace::for_space(
+                                                "hc:fixture",
+                                                "fixture-space",
+                                            ),
+                                        )
+                                    })
+                                    .unwrap();
+                                assert!(
+                                    names.iter().any(|address| address.alias == "healthy"
+                                        && address.pane_id.as_deref() == Some("t2")),
+                                    "failed move prevented healthy source naming"
+                                );
+                            }
                             namedrop::execute_lifecycle_operation(
                                 "name",
                                 json!({"alias":"healthy", "pane_type":"terminal"}),
@@ -1025,6 +1043,8 @@ fn move_label_failure_preserves_source_proof_until_fresh_subscriber_repairs_mirr
                                 },
                             )
                             .unwrap();
+                            namedrop::execute_lifecycle_operation("reconcile", json!({}), runtime)
+                                .unwrap();
                             let mut store =
                                 namedrop::StateStore::open(runtime.state_directory).unwrap();
                             let source =

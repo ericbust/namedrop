@@ -17,7 +17,8 @@ pub struct DiscoveredWorktree {
     pub label: Option<String>,
     pub branch: Option<String>,
     pub panes: Vec<DiscoveredPane>,
-    /// Listed panes whose current observations could not be read.
+    /// Pane IDs whose absence from this space does not authorize clearing their bindings.
+    /// Includes unreadable terminals and terminals observed live in another space.
     pub unavailable_panes: Vec<String>,
 }
 
