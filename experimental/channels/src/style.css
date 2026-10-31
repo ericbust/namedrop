@@ -2112,7 +2112,7 @@ code.inline {
      actions whole in a 390x460 window at 125 % zoom. A longer card scrolls. */
   .attention {
     min-height: 40px;
-    margin-block: var(--space-2);
+    margin-top: var(--space-2);
   }
   .attention-item {
     row-gap: 0;

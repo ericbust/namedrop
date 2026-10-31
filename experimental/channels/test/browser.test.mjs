@@ -10879,7 +10879,7 @@ test("UI-R6 3: where a pane covers the channel, the kept-draft line under the ch
             (await box.inputValue()) === "" &&
             !(await ui.page
               .locator("main .composer-status")
-              .innerText()
+              .textContent()
               .then((text) => text.includes("Sending"))),
           "the post to settle",
         );
