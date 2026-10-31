@@ -328,7 +328,23 @@ fn exception_pause_never_gates_mailbox_and_dead_exception_sessions_are_reconcile
 }
 
 #[test]
-fn schema_six_upgrade_adds_entity_index_without_changing_facts() {
+fn writable_open_keeps_schema_six_compatible_with_installed_readers() {
+    let directory = super::tests::TestDirectory::new();
+    let store = StateStore::open(&directory.0).unwrap();
+    assert_eq!(store.schema_version().unwrap(), 6);
+    drop(store);
+    assert_eq!(
+        StateStore::open_read_only(&directory.0)
+            .unwrap()
+            .unwrap()
+            .schema_version()
+            .unwrap(),
+        6
+    );
+}
+
+#[test]
+fn writable_reopen_restores_entity_index_without_changing_version_or_facts() {
     let directory = super::tests::TestDirectory::new();
     let ns = StateNamespace::for_space("socket", "space");
     let mut store = StateStore::open(&directory.0).unwrap();
@@ -338,13 +354,14 @@ fn schema_six_upgrade_adds_entity_index_without_changing_facts() {
             tx.transition_facts(&ns)
         })
         .unwrap();
+    let version = store.schema_version().unwrap();
     store
         .connection
-        .execute_batch("DROP INDEX transition_facts_by_entity; PRAGMA user_version=6;")
+        .execute_batch("DROP INDEX transition_facts_by_entity;")
         .unwrap();
     drop(store);
     let mut store = StateStore::open(&directory.0).unwrap();
-    assert_eq!(store.schema_version().unwrap(), 7);
+    assert_eq!(store.schema_version().unwrap(), version);
     assert_eq!(
         store.transaction(|tx| tx.transition_facts(&ns)).unwrap(),
         before
