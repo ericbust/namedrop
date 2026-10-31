@@ -1429,7 +1429,19 @@ fn cached_session_after_other_pane_event(cleanup_failure: bool) {
                             .unwrap(),
                         0
                     );
-                    assert!(fixture.calls.borrow().iter().all(|call| call[0] != "send"));
+                    let calls = fixture.calls.borrow();
+                    assert!(
+                        calls
+                            .iter()
+                            .all(|call| call[0] != "send" && call[0] != "ls")
+                    );
+                    if !cleanup_failure {
+                        assert_eq!(
+                            calls.len(),
+                            3,
+                            "only t2 refresh and t1 cleanup are needed: {calls:?}"
+                        );
+                    }
                 },
             );
         }

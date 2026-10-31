@@ -461,6 +461,29 @@ impl Subscriber {
             }
             dirty.insert(pane.clone(), change.clone());
         }
+        if !full {
+            for (pane, terminal) in &mut self.terminals {
+                if pending.dirty.contains_key(pane) || !active_spaces.contains(terminal.workspace())
+                {
+                    continue;
+                }
+                match runtime.host.reconcile_session(
+                    runtime.state_directory,
+                    runtime.session_socket_id,
+                    terminal,
+                ) {
+                    Ok(true) => {
+                        self.unavailable.remove(pane);
+                        dirty.entry(pane.clone()).or_default();
+                    }
+                    Ok(false) => (),
+                    Err(error) => {
+                        self.unavailable.insert(pane.clone(), error.to_string());
+                        errors.push(error.to_string());
+                    }
+                }
+            }
+        }
         for (pane, change) in &dirty {
             if self.unavailable.contains_key(pane) {
                 continue;
