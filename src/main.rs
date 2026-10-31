@@ -984,6 +984,13 @@ fn pending_agent_status_reconciliations(directory: &Path) -> io::Result<Vec<Path
     Ok(markers)
 }
 
+fn pending_agent_status_reconciliations_with_retry(
+    directory: &Path,
+    _failures: &mut usize,
+) -> io::Result<Vec<PathBuf>> {
+    pending_agent_status_reconciliations(directory)
+}
+
 fn run_agent_status_worker() -> ExitCode {
     let directory = match agent_status_reconciliation_directory() {
         Ok(directory) => directory,
@@ -1006,7 +1013,9 @@ fn run_agent_status_worker() -> ExitCode {
     let mut failures = 0_usize;
     let mut deadline_ms: Option<u64> = None;
     loop {
-        let Ok(pending) = pending_agent_status_reconciliations(&directory) else {
+        let Ok(pending) =
+            pending_agent_status_reconciliations_with_retry(&directory, &mut failures)
+        else {
             return ExitCode::SUCCESS;
         };
         let Some(marker) = pending.first() else {
@@ -1023,7 +1032,7 @@ fn run_agent_status_worker() -> ExitCode {
                 {
                     deadline_ms = None;
                 } else {
-                    wait_for_reconciliation_retry(&mut failures);
+                    wait_for_reconciliation_retry(&mut failures, false);
                 }
                 continue;
             }
@@ -1042,7 +1051,7 @@ fn run_agent_status_worker() -> ExitCode {
         let bytes = match fs::read(marker) {
             Ok(bytes) => bytes,
             Err(_) => {
-                wait_for_reconciliation_retry(&mut failures);
+                wait_for_reconciliation_retry(&mut failures, false);
                 continue;
             }
         };
@@ -1075,7 +1084,7 @@ fn run_agent_status_worker() -> ExitCode {
                     {
                         failures = 0;
                     }
-                    wait_for_reconciliation_retry(&mut failures);
+                    wait_for_reconciliation_retry(&mut failures, report.retry_without_event);
                 }
                 Ok(report) => {
                     let _ = fs::remove_file(marker);
@@ -1094,7 +1103,7 @@ fn run_agent_status_worker() -> ExitCode {
                 let _ = fs::remove_file(marker);
                 failures = 0;
             }
-            Err(_) => wait_for_reconciliation_retry(&mut failures),
+            Err(_) => wait_for_reconciliation_retry(&mut failures, false),
         }
     }
 }
@@ -1118,6 +1127,75 @@ fn wait_for_marker_or_deadline(directory: &Path, due_ms: u64) {
 #[cfg(test)]
 mod worker_shutdown_tests {
     use super::*;
+
+    #[test]
+    fn persistent_eventless_rejections_limit_drains_and_keep_retrying() {
+        let mut elapsed = Duration::ZERO;
+        let mut drains = 0;
+        while elapsed < Duration::from_secs(600) {
+            let delay = reconciliation_retry_delay(drains, true);
+            assert!(delay <= Duration::from_secs(60));
+            assert!(!delay.is_zero());
+            elapsed += delay;
+            drains += 1;
+        }
+        assert!(
+            drains <= 20,
+            "persistent rejection caused {drains} drains in ten minutes"
+        );
+        assert_eq!(
+            reconciliation_retry_delay(usize::MAX, false),
+            Duration::from_secs(5)
+        );
+    }
+
+    #[test]
+    fn an_outer_queue_scan_retries_until_pending_work_can_be_read() {
+        let directory =
+            env::temp_dir().join(format!("namedrop-outer-queue-{}", std::process::id()));
+        let restored = directory.with_extension("restored");
+        let replacement = directory.with_extension("replacement");
+        fs::write(&directory, b"not a directory").unwrap();
+        fs::create_dir(&restored).unwrap();
+        fs::write(restored.join("pending-test"), b"{}").unwrap();
+        std::os::unix::fs::symlink(&restored, &replacement).unwrap();
+        let queue = directory.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let reader = thread::spawn(move || {
+            done.send(pending_agent_status_reconciliations_with_retry(
+                &queue, &mut 0,
+            ))
+            .unwrap();
+        });
+        let early = finished.recv_timeout(Duration::from_millis(50));
+        fs::rename(&replacement, &directory).unwrap();
+        let recovered = finished.recv_timeout(Duration::from_secs(2));
+        reader.join().unwrap();
+        fs::remove_file(&directory).unwrap();
+        fs::remove_dir_all(&restored).unwrap();
+        assert!(
+            matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
+            "outer scan abandoned a recoverable queue: {early:?}"
+        );
+        assert_eq!(
+            recovered.unwrap().unwrap(),
+            vec![directory.join("pending-test")]
+        );
+    }
+
+    #[test]
+    fn an_outer_queue_scan_stops_when_the_state_directory_is_gone() {
+        let directory = env::temp_dir().join(format!(
+            "namedrop-outer-removed-queue-{}",
+            std::process::id()
+        ));
+        assert_eq!(
+            pending_agent_status_reconciliations_with_retry(&directory, &mut 0)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::NotFound
+        );
+    }
 
     #[test]
     fn an_unreadable_queue_keeps_waiting_until_the_grace_deadline() {
@@ -1185,11 +1263,15 @@ mod worker_shutdown_tests {
     }
 }
 
-fn wait_for_reconciliation_retry(failures: &mut usize) {
+fn reconciliation_retry_delay(failures: usize, _retry_without_event: bool) -> Duration {
     let delays = [100, 250, 500, 1_000, 5_000];
-    let delay = delays[(*failures).min(delays.len() - 1)];
+    Duration::from_millis(delays[failures.min(delays.len() - 1)])
+}
+
+fn wait_for_reconciliation_retry(failures: &mut usize, retry_without_event: bool) {
+    let delay = reconciliation_retry_delay(*failures, retry_without_event);
     *failures = failures.saturating_add(1);
-    thread::sleep(Duration::from_millis(delay));
+    thread::sleep(delay);
 }
 
 fn retryable_agent_status_reconciliation(error: &str) -> bool {
