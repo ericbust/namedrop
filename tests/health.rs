@@ -506,6 +506,51 @@ fn doctor_shows_a_generic_context_failure_once_with_a_manual_next_step() {
 }
 
 #[test]
+fn doctor_shows_the_production_context_failure_cause_once_and_redacts_secrets() {
+    let f = Fixture::new();
+    f.register();
+    let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
+    StateStore::open(&f.root)
+        .unwrap()
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &StateNamespace::for_space("socket-a", "workspace-1"),
+                &AttentionItemDraft {
+                    id: AttentionItemId::new("production-context-failure"),
+                    source_kind: AttentionSourceKind::ContextGrant,
+                    source_id: "grant-production".into(),
+                    summary: format!(
+                        "Shared context failed: snapshot exceeds 65536 bytes for {secret}"
+                    ),
+                },
+                &MutationAttribution::new(ActorKind::Plugin, "test", 100),
+            )
+        })
+        .unwrap();
+    let report = diagnose_collaboration(&f.runtime());
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-CONTEXT-001")
+        .unwrap();
+    assert_eq!(issue.summary, "Shared context failed.");
+    assert_eq!(
+        issue.explanation,
+        "snapshot exceeds 65536 bytes for [REDACTED TOKEN]"
+    );
+    assert_eq!(
+        issue.repair.prompt,
+        "Ask the sender to fix the problem and share the context again."
+    );
+    assert!(issue.repair.operation.is_none());
+    let text = render_health_report_to_text(&report);
+    assert_eq!(text.matches("Shared context failed").count(), 1, "{text}");
+    assert!(!text.contains(secret), "{text}");
+    assert!(text.contains(&issue.explanation), "{text}");
+    assert!(text.contains(&issue.repair.prompt), "{text}");
+}
+
+#[test]
 fn doctor_keeps_individual_attention_causes_and_operation_inputs() {
     let f = Fixture::new();
     f.register();

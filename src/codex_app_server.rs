@@ -356,6 +356,20 @@ mod tests {
                 .any(|argument| argument == "--no-daemon")
         );
     }
+
+    #[test]
+    fn spawn_reaps_the_child_when_the_argument_probe_panics() {
+        let mut pid = None;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Process::spawn_with_arguments(Command::new("sleep").arg("30"), |child_pid| {
+                pid = Some(child_pid);
+                panic!("argument probe failed");
+            });
+        }));
+        assert!(result.is_err());
+        assert!(crate::terminal::process_arguments(pid.unwrap()).is_none());
+    }
+
     impl Drop for Process {
         fn drop(&mut self) {
             let group = libc::pid_t::try_from(self.0.id()).unwrap();
@@ -621,6 +635,15 @@ mod tests {
         ]));
         let plain =
             Process::spawn(Command::new("/bin/sh").args(["-c", "sleep 30; :", "sh", "resume"]));
+        for process in [&in_process, &plain] {
+            assert_eq!(
+                crate::terminal::process_executable(process.pid())
+                    .unwrap()
+                    .file_name(),
+                Some(std::ffi::OsStr::new("sleep")),
+                "pane fixtures must run directly without a shell launcher"
+            );
+        }
         let herdr = Herdr {
             foreground: BTreeMap::from([
                 ("w1:p1".to_owned(), vec![in_process.pid()]),
