@@ -10316,3 +10316,91 @@ test("UI-R4 fix1 2: a kept draft's line says why once the agent's pane closes, i
   assert.equal(await draft.inputValue(), "my own words");
   assert.equal(ui.posts.attempts.length, 0);
 });
+
+const activeName = (page) =>
+  page.evaluate(() => {
+    const element = document.activeElement;
+    if (element === null || element === document.body) return "the page";
+    return (
+      element.getAttribute("aria-label") ??
+      element.textContent?.trim() ??
+      element.tagName
+    );
+  });
+async function focusLandsOn(page, name, what) {
+  const deadline = Date.now() + 5000;
+  let seen = await activeName(page);
+  while (seen !== name) {
+    if (Date.now() > deadline)
+      assert.fail(`${what}: focus is on ${seen}, not ${name}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    seen = await activeName(page);
+  }
+}
+async function nextFrame(page) {
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+}
+// Sets an element's visibility from the page, so a test decides whether the
+// browser drops its focus before the layout renders or after.
+const forceVisibility = (locator, value) =>
+  locator.evaluate((element, value) => {
+    if (value === null) element.style.removeProperty("visibility");
+    else element.style.setProperty("visibility", value, "important");
+  }, value);
+
+test("UI-R5 R5-4: when the sidebar column hides with a row focused, focus moves to the Channels button whether the blur comes before the phone layout renders or after it", async (t) => {
+  for (const order of ["blur first", "render first"]) {
+    const ui = await open(t, (client) =>
+      replay(client, [layoutChannel(), team(2, "beta"), team(3, "gamma")]),
+    );
+    await ui.page.emulateMedia({ reducedMotion: "reduce" });
+    await ui.live();
+    const page = ui.page;
+    await resize(page, 700, 844);
+    const sidebar = page.locator(".sidebar");
+    const toggle = page.getByRole("button", { name: /^Channels/ });
+    await sidebar.getByRole("button", { name: /^beta/ }).first().focus();
+    if (order === "blur first") {
+      await forceVisibility(sidebar, "hidden");
+      await focusLandsOn(page, "the page", "the hidden column drops focus");
+      assert.equal(await toggle.count(), 0, "the blur came before the phone");
+      await forceVisibility(sidebar, null);
+      await resize(page, 390, 844);
+    } else {
+      await forceVisibility(sidebar, "visible");
+      await resize(page, 390, 844);
+      assert.equal(await toggle.count(), 1, "the phone layout rendered");
+      assert.equal(await activeName(page), "beta", "the row kept focus");
+      await forceVisibility(sidebar, null);
+    }
+    await focusLandsOn(page, "Channels, 1 needs you", order);
+  }
+});
+
+test("UI-R5 R5-4: with a thread open beside the channel, focus that leaves the channel composer for nowhere stays off the pane", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const page = ui.page;
+  await resize(page, 1440, 900);
+  await page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from/ })
+    .click();
+  await threadPane(ui).waitFor();
+  const box = page.getByRole("main").getByRole("combobox");
+  await box.click();
+  await page.evaluate(() => document.activeElement.blur());
+  await nextFrame(page);
+  assert.equal(await page.getByRole("main").isVisible(), true);
+  assert.equal(
+    await activeName(page),
+    "the page",
+    "a blur inside a visible channel leaves focus where the reader put it",
+  );
+});
