@@ -177,7 +177,13 @@ impl PaneEffects {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let lock_name = CString::new(format!("{key}.lock")).map_err(io::Error::from)?;
-        let lock = open_lock(&directory, &lock_name, libc::O_RDWR | libc::O_CREAT)?;
+        let flags = libc::O_RDWR | libc::O_CREAT;
+        let lock = match open_lock(&directory, &lock_name, flags) {
+            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+                open_lock(&directory, &lock_name, flags)?
+            }
+            result => result?,
+        };
         let lock = checked(lock, false)?;
         acquire_flock(lock.as_raw_fd(), timeout)?;
         Ok(Self {
@@ -531,6 +537,97 @@ mod tests {
         let reacquired = gate._lock.metadata().unwrap();
         assert_eq!(reacquired.dev(), metadata.dev());
         assert_eq!(reacquired.ino(), metadata.ino());
+    }
+
+    #[test]
+    fn raw_lock_open_faults_have_bounded_attempts() {
+        for (errno, expected_calls) in [(libc::ENOENT, 2), (libc::EACCES, 1), (libc::ELOOP, 1)] {
+            let state = State::new();
+            let mut calls = 0;
+            let result = PaneEffects::acquire_for_with_lock_open(
+                &state.0,
+                "socket",
+                "pane",
+                Duration::ZERO,
+                |_, _, _| {
+                    calls += 1;
+                    Err(io::Error::from_raw_os_error(errno))
+                },
+            );
+            assert_eq!(calls, expected_calls);
+            assert!(matches!(
+                result,
+                Err(AcquireError::Fault(error)) if error.raw_os_error() == Some(errno)
+            ));
+        }
+    }
+
+    #[test]
+    fn unsafe_lock_is_refused_without_retrying_validation() {
+        for transient_enoent in [false, true] {
+            let state = State::new();
+            let gate = PaneEffects::acquire(&state.0, "socket", "pane").unwrap();
+            gate._lock
+                .set_permissions(fs::Permissions::from_mode(0o666))
+                .unwrap();
+            drop(gate);
+            let mut calls = 0;
+            let result = PaneEffects::acquire_for_with_lock_open(
+                &state.0,
+                "socket",
+                "pane",
+                Duration::ZERO,
+                |directory, name, flags| {
+                    calls += 1;
+                    if transient_enoent && calls == 1 {
+                        Err(io::Error::from_raw_os_error(libc::ENOENT))
+                    } else {
+                        raw_open_at(directory, name, flags)
+                    }
+                },
+            );
+            assert_eq!(calls, if transient_enoent { 2 } else { 1 });
+            assert!(matches!(
+                result,
+                Err(AcquireError::Fault(error)) if error.to_string().contains("unsafe")
+            ));
+            let lock = fs::read_dir(state.0.join("pane-effects"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            fs::set_permissions(lock, fs::Permissions::from_mode(0o600)).unwrap();
+            let _gate = PaneEffects::acquire(&state.0, "socket", "pane").unwrap();
+            assert!(matches!(
+                PaneEffects::acquire_for(&state.0, "socket", "pane", Duration::ZERO),
+                Err(AcquireError::Contended)
+            ));
+        }
+    }
+
+    #[test]
+    fn unsafe_parent_is_refused_before_lock_open() {
+        let state = State::new();
+        let directory = state.0.join("pane-effects");
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o777)).unwrap();
+        let mut calls = 0;
+        let result = PaneEffects::acquire_for_with_lock_open(
+            &state.0,
+            "socket",
+            "pane",
+            Duration::ZERO,
+            |directory, name, flags| {
+                calls += 1;
+                raw_open_at(directory, name, flags)
+            },
+        );
+        assert_eq!(calls, 0);
+        assert!(matches!(
+            result,
+            Err(AcquireError::Fault(error)) if error.to_string().contains("unsafe")
+        ));
     }
 
     #[test]
