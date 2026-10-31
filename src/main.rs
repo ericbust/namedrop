@@ -1119,6 +1119,55 @@ mod worker_shutdown_tests {
     use super::*;
 
     #[test]
+    fn an_unreadable_queue_keeps_waiting_until_the_grace_deadline() {
+        let directory =
+            env::temp_dir().join(format!("namedrop-unreadable-queue-{}", std::process::id()));
+        fs::write(&directory, b"not a directory").unwrap();
+        assert_eq!(
+            fs::read_dir(&directory).unwrap_err().kind(),
+            io::ErrorKind::NotADirectory
+        );
+        let due = SystemClock.now_unix_ms() + 250;
+        wait_for_marker_or_deadline(&directory, due);
+        let returned_at = SystemClock.now_unix_ms();
+        fs::remove_file(&directory).unwrap();
+        assert!(
+            returned_at >= due,
+            "a queue read error ended the wait before its grace deadline"
+        );
+    }
+
+    #[test]
+    fn a_recovered_queue_wakes_a_grace_wait_when_a_marker_arrives() {
+        let directory =
+            env::temp_dir().join(format!("namedrop-recovered-queue-{}", std::process::id()));
+        let restored = directory.with_extension("restored");
+        let replacement = directory.with_extension("replacement");
+        fs::write(&directory, b"not a directory").unwrap();
+        fs::create_dir(&restored).unwrap();
+        fs::write(restored.join("pending-test"), b"{}").unwrap();
+        std::os::unix::fs::symlink(&restored, &replacement).unwrap();
+        let queue = directory.clone();
+        let (done, finished) = std::sync::mpsc::channel();
+        let waiter = thread::spawn(move || {
+            wait_for_marker_or_deadline(&queue, SystemClock.now_unix_ms() + 10_000);
+            done.send(()).unwrap();
+        });
+        let early = finished.recv_timeout(Duration::from_millis(250));
+        fs::rename(&replacement, &directory).unwrap();
+        let recovered = finished.recv_timeout(Duration::from_secs(1));
+        fs::remove_file(&directory).unwrap();
+        fs::remove_dir_all(&restored).unwrap();
+        waiter.join().unwrap();
+        assert_eq!(
+            early,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout),
+            "a queue read error must preserve the grace wait"
+        );
+        recovered.expect("a recovered queue's pending marker must wake the worker");
+    }
+
+    #[test]
     fn a_removed_queue_stops_a_grace_deadline_wait() {
         let directory =
             env::temp_dir().join(format!("namedrop-removed-queue-{}", std::process::id()));
