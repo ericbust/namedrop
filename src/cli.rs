@@ -38,7 +38,6 @@ pub struct Cli {
 }
 
 /// Explicit transport context for permission-matchable direct invocations.
-/// Omitted values retain the existing Herdr environment behavior.
 #[derive(Clone, Debug, Default, Args)]
 pub struct RuntimeOptions {
     #[arg(skip)]

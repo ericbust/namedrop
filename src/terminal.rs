@@ -216,7 +216,6 @@ pub(crate) fn shell_is_available(herdr: &impl Host, pane_id: &str) -> bool {
         .is_some_and(|p| p.shell_pid > 0 && p.shell_pid == p.foreground_process_group_id)
 }
 
-/// The ancestors of `pid`, nearest first, at most 1024 of them.
 pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
     std::iter::successors(parent_pid(pid).filter(|pid| *pid != 0), |pid| {
         parent_pid(*pid).filter(|pid| *pid != 0)
