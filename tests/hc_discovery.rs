@@ -239,3 +239,67 @@ fn terminal_ending_during_discovery_is_not_an_unavailable_pane() {
         assert!(space.unavailable_panes.is_empty());
     }
 }
+
+#[test]
+fn foreign_live_terminals_do_not_hide_the_no_agent_diagnosis() {
+    #[derive(Clone, Copy)]
+    struct TwoSpaces(bool);
+    impl HerdrCommandExecutor for TwoSpaces {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            if args == ["ls", "--json"] {
+                return Ok(HerdrCommandOutput { stdout: json!({"terminals":[{"address":"t1","state":"live"},{"address":"t2","state":"live"}]}).to_string() });
+            }
+            if args == ["get", "t2", "--json"] && self.0 {
+                return Err("terminal observation failed".into());
+            }
+            assert!(matches!(args, ["get", "t1" | "t2", "--json"]), "{args:?}");
+            let mut terminal: Value =
+                serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
+            terminal["address"] = json!(args[1]);
+            terminal["foreground"] = Value::Null;
+            terminal["status"] = Value::Null;
+            if args[1] == "t2" {
+                terminal["labels"]["herdr.space"] = json!("other-space");
+            }
+            Ok(HerdrCommandOutput {
+                stdout: terminal.to_string(),
+            })
+        }
+    }
+    let root = std::env::temp_dir().join(format!(
+        "namedrop-hc-doctor-retention-{}",
+        std::process::id()
+    ));
+    for broken in [false, true] {
+        let state = root.join(if broken { "unknown" } else { "foreign" });
+        let namespace = namedrop::StateNamespace::for_space("hc:doctor", "fixture-space");
+        namedrop::StateStore::open(&state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.activate_worktree(
+                    &namespace,
+                    &namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "test", 1),
+                )
+            })
+            .unwrap();
+        let runtime = namedrop::LifecycleRuntime {
+            state_directory: &state,
+            home_directory: None,
+            agent_config: Default::default(),
+            cwd: Path::new("/fixture/repo"),
+            workspace_id: Some("fixture-space"),
+            current_pane_id: None,
+            session_socket_id: "hc:doctor",
+            host: HcHost::new(TwoSpaces(broken)),
+            clock: &namedrop::SystemClock,
+            ids: &namedrop::ProcessIds::default(),
+        };
+        let report = namedrop::diagnose_collaboration(&runtime);
+        assert_eq!(
+            report.issues.iter().any(|issue| issue.code == "ND-SETUP-003"),
+            !broken,
+            "broken={broken}: {report:?}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
