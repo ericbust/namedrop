@@ -1187,7 +1187,15 @@ fn queued_agent(
 
 #[test]
 fn dead_queued_session_clears_labels_and_keeps_base_empty_mailbox_behavior() {
-    for kind in ["status", "turn", "labels", "snapshot", "missed"] {
+    for kind in [
+        "status",
+        "turn",
+        "labels",
+        "snapshot",
+        "missed",
+        "lost",
+        "restarted",
+    ] {
         check(&format!("dead-queued-{kind}"), |fixture, runtime| {
             let agent = process::AgentProcess::new();
             queued_agent(fixture, runtime, agent.pid());
@@ -1258,7 +1266,15 @@ fn dead_queued_session_clears_labels_and_keeps_base_empty_mailbox_behavior() {
 
 #[test]
 fn stale_session_cleanup_failure_stops_reconciliation_and_sends() {
-    for kind in ["status", "turn", "labels", "snapshot", "missed"] {
+    for kind in [
+        "status",
+        "turn",
+        "labels",
+        "snapshot",
+        "missed",
+        "lost",
+        "restarted",
+    ] {
         check(&format!("cleanup-failure-{kind}"), |fixture, runtime| {
             let agent = process::AgentProcess::new();
             queued_agent(fixture, runtime, agent.pid());
@@ -1343,56 +1359,69 @@ fn stale_observation_refresh_preserves_replacement_session() {
 
 #[test]
 fn stale_session_refresh_preserves_labels_after_move_to_inactive_space() {
-    for deactivated in [false, true] {
-        check(
-            &format!("session-move-inactive-{deactivated}"),
-            |fixture, runtime| {
-                let old = process::AgentProcess::new();
-                queued_agent(fixture, runtime, old.pid());
-                let destination = "inactive-destination";
-                let namespace = namedrop::StateNamespace::for_space("hc:fixture", destination);
-                if deactivated {
-                    let attribution = namedrop::MutationAttribution::new(
-                        namedrop::ActorKind::Human,
-                        "test",
-                        1000,
-                    );
-                    namedrop::StateStore::open(runtime.state_directory)
-                        .unwrap()
-                        .transaction(|tx| {
-                            tx.activate_worktree(&namespace, &attribution)?;
-                            tx.deactivate_worktree(&namespace, &attribution)
-                        })
+    for kind in [
+        "status",
+        "turn",
+        "labels",
+        "snapshot",
+        "missed",
+        "lost",
+        "restarted",
+    ] {
+        for deactivated in [false, true] {
+            check(
+                &format!("session-move-inactive-{deactivated}-{kind}"),
+                |fixture, runtime| {
+                    let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                    subscriber
+                        .handle_line(&session_event("snapshot", fixture), runtime)
                         .unwrap();
-                }
-                let mut moved = fixture.terminals.borrow()[0].clone();
-                moved["labels"]["herdr.space"] = json!(destination);
-                let session_labels: Vec<_> = [
-                    "namedrop.session",
-                    "namedrop.session.pid",
-                    "namedrop.session.start",
-                ]
-                .into_iter()
-                .map(|key| (key, moved["labels"][key].clone()))
-                .collect();
-                drop(old);
-                *fixture.replacement_on_get.borrow_mut() = Some((2, moved));
-                namedrop::host::hc::events::Subscriber::default()
-                    .handle_line(&session_event("status", fixture), runtime)
-                    .unwrap();
-                for (key, expected) in session_labels {
-                    assert_eq!(
-                        fixture.terminals.borrow()[0]["labels"][key],
-                        expected,
-                        "cleanup changed {key} after moving into an inactive space"
-                    );
-                }
-                assert!(
-                    fixture.calls.borrow().iter().all(|call| call[0] != "send"
-                        && !call.iter().any(|arg| arg == "namedrop.session="))
-                );
-            },
-        );
+                    let old = process::AgentProcess::new();
+                    queued_agent(fixture, runtime, old.pid());
+                    let destination = "inactive-destination";
+                    let namespace = namedrop::StateNamespace::for_space("hc:fixture", destination);
+                    if deactivated {
+                        let attribution = namedrop::MutationAttribution::new(
+                            namedrop::ActorKind::Human,
+                            "test",
+                            1000,
+                        );
+                        namedrop::StateStore::open(runtime.state_directory)
+                            .unwrap()
+                            .transaction(|tx| {
+                                tx.activate_worktree(&namespace, &attribution)?;
+                                tx.deactivate_worktree(&namespace, &attribution)
+                            })
+                            .unwrap();
+                    }
+                    let mut moved = fixture.terminals.borrow()[0].clone();
+                    moved["labels"]["herdr.space"] = json!(destination);
+                    let session_labels: Vec<_> = [
+                        "namedrop.session",
+                        "namedrop.session.pid",
+                        "namedrop.session.start",
+                    ]
+                    .into_iter()
+                    .map(|key| (key, moved["labels"][key].clone()))
+                    .collect();
+                    drop(old);
+                    *fixture.replacement_on_get.borrow_mut() =
+                        Some((if kind == "snapshot" { 1 } else { 2 }, moved));
+                    subscriber
+                        .handle_line(&session_event(kind, fixture), runtime)
+                        .unwrap();
+                    for (key, expected) in session_labels {
+                        assert_eq!(
+                            fixture.terminals.borrow()[0]["labels"][key],
+                            expected,
+                            "cleanup changed {key} after moving into an inactive space"
+                        );
+                    }
+                    assert!(fixture.calls.borrow().iter().all(|call| call[0] != "send"
+                        && !call.iter().any(|arg| arg == "namedrop.session=")));
+                },
+            );
+        }
     }
 }
 
@@ -1472,11 +1501,20 @@ fn dead_queued_tui_session_has_the_same_empty_mailbox_outcome() {
 
 #[test]
 fn inactive_space_session_labels_are_not_reconciled() {
-    for kind in ["status", "turn", "labels", "snapshot", "missed"] {
+    for kind in [
+        "status",
+        "turn",
+        "labels",
+        "snapshot",
+        "missed",
+        "lost",
+        "restarted",
+    ] {
         check(&format!("inactive-session-{kind}"), |fixture, runtime| {
             let agent = process::AgentProcess::new();
             queued_agent(fixture, runtime, agent.pid());
             drop(agent);
+            fixture.terminals.borrow_mut()[0]["state"] = json!("lost");
             let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
             namedrop::StateStore::open(runtime.state_directory)
                 .unwrap()
@@ -1754,4 +1792,234 @@ fn coalesced_session_loss_and_removal_close_the_pane_without_retrying() {
             );
         });
     }
+}
+
+#[derive(Clone, Copy)]
+struct RetryClock(u64);
+impl namedrop::Clock for RetryClock {
+    fn now_unix_ms(&self) -> u64 {
+        self.0
+    }
+}
+
+#[test]
+fn removed_binding_survives_failed_close_until_tick_retry() {
+    for initialized in [false, true] {
+        check(
+            &format!("removed-retry-{initialized}"),
+            |fixture, runtime| {
+                fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+                let clock = RetryClock(10_000);
+                let runtime = namedrop::LifecycleRuntime {
+                    clock: &clock,
+                    state_directory: runtime.state_directory,
+                    home_directory: runtime.home_directory,
+                    agent_config: runtime.agent_config,
+                    cwd: runtime.cwd,
+                    workspace_id: runtime.workspace_id,
+                    current_pane_id: runtime.current_pane_id,
+                    session_socket_id: runtime.session_socket_id,
+                    host: runtime.host,
+                    ids: runtime.ids,
+                };
+                let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                if initialized {
+                    subscriber
+                        .handle_line(&session_event("snapshot", fixture), &runtime)
+                        .unwrap();
+                } else {
+                    subscriber
+                        .handle_line(r#"{"terminals":[]}"#, &runtime)
+                        .unwrap();
+                    namedrop::execute_lifecycle_operation(
+                        "name",
+                        json!({"alias":"alice", "pane_type":"terminal"}),
+                        &runtime,
+                    )
+                    .unwrap();
+                }
+                let connection =
+                    rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3"))
+                        .unwrap();
+                connection.execute_batch("CREATE TRIGGER fail_unbind BEFORE UPDATE OF active ON pane_bindings WHEN NEW.active=0 BEGIN SELECT RAISE(ABORT, 'injected unbind failure'); END;").unwrap();
+                fixture.terminals.borrow_mut().clear();
+                let events = ["lost", "removed"].map(|kind| session_event(kind, fixture));
+                let result = subscriber.handle_lines(events.iter().map(String::as_str), &runtime);
+                assert!(
+                    result.is_err(),
+                    "removal must attempt closing the committed binding: {result:?}"
+                );
+                connection
+                    .execute_batch("DROP TRIGGER fail_unbind")
+                    .unwrap();
+                let retry = namedrop::LifecycleRuntime {
+                    clock: &RetryClock(10_500),
+                    ..runtime
+                };
+                subscriber.tick(&retry).unwrap();
+                let active: i64 = connection
+                    .query_row(
+                        "SELECT count(*) FROM pane_bindings WHERE active=1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(active, 0, "retry lost the removed pane's binding");
+            },
+        );
+    }
+}
+
+#[test]
+fn pending_event_survives_transient_store_read_failure() {
+    check("pending-store-failure", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+        let runtime = namedrop::LifecycleRuntime {
+            clock: &RetryClock(10_000),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            host: runtime.host,
+            ids: runtime.ids,
+        };
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        let connection =
+            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
+        connection
+            .execute_batch("ALTER TABLE worktrees RENAME TO unavailable_worktrees")
+            .unwrap();
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("bob");
+        assert!(subscriber.handle_line(&labels(), &runtime).is_err());
+        fixture.calls.borrow_mut().clear();
+        subscriber.tick(&runtime).unwrap();
+        assert!(
+            fixture.calls.borrow().is_empty(),
+            "retry must wait for its deadline"
+        );
+        let retry = namedrop::LifecycleRuntime {
+            clock: &RetryClock(10_500),
+            ..runtime
+        };
+        assert!(
+            subscriber.tick(&retry).is_err(),
+            "store outage must remain scheduled"
+        );
+        connection
+            .execute_batch("ALTER TABLE unavailable_worktrees RENAME TO worktrees")
+            .unwrap();
+        let retry = namedrop::LifecycleRuntime {
+            clock: &RetryClock(11_000),
+            ..runtime
+        };
+        subscriber.tick(&retry).unwrap();
+        let alias: String = connection
+            .query_row(
+                "SELECT alias FROM alias_claims WHERE claim_state='active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(alias, "bob", "failed batch lost its pending label event");
+    });
+}
+
+#[test]
+fn queued_snapshot_preserves_newer_bound_terminal() {
+    for unavailable in [false, true] {
+        check(
+            &format!("snapshot-new-binding-{unavailable}"),
+            |fixture, runtime| {
+                fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+                let snapshot = session_event("snapshot", fixture);
+                let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                subscriber.handle_line(&snapshot, runtime).unwrap();
+                let mut second = fixture.terminals.borrow()[0].clone();
+                second["address"] = json!("t2");
+                second["labels"]["namedrop.name"] = json!("");
+                fixture.terminals.borrow_mut().push(second);
+                let second_runtime = namedrop::LifecycleRuntime {
+                    current_pane_id: Some("t2"),
+                    ..*runtime
+                };
+                namedrop::execute_lifecycle_operation(
+                    "name",
+                    json!({"alias":"bob", "pane_type":"terminal"}),
+                    &second_runtime,
+                )
+                .unwrap();
+                if unavailable {
+                    *fixture.get_failure.borrow_mut() = Some("t2".into());
+                }
+                let result = subscriber.handle_line(&snapshot, runtime);
+                assert_eq!(
+                    result.is_err(),
+                    unavailable,
+                    "fresh terminal inspection: {result:?}"
+                );
+                let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+                let bindings = namedrop::StateStore::open(runtime.state_directory)
+                    .unwrap()
+                    .transaction(|tx| tx.active_pane_bindings(&namespace))
+                    .unwrap();
+                assert!(
+                    bindings.iter().any(|binding| binding.pane_id == "t2"),
+                    "old snapshot removed a newer binding"
+                );
+                *fixture.get_failure.borrow_mut() = None;
+                subscriber
+                    .handle_line(
+                        r#"{"method":"event","params":{"type":"created","terminal":"t2"}}"#,
+                        runtime,
+                    )
+                    .unwrap();
+                assert_eq!(
+                    fixture.terminals.borrow()[1]["labels"]["namedrop.name"],
+                    "bob"
+                );
+            },
+        );
+    }
+}
+
+#[test]
+fn queued_snapshot_does_not_reverse_committed_move() {
+    check("snapshot-committed-move", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+        let snapshot = session_event("snapshot", fixture);
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber.handle_line(&snapshot, runtime).unwrap();
+        fixture.terminals.borrow_mut()[0]["labels"]["herdr.space"] = json!("destination");
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("");
+        let destination = namedrop::LifecycleRuntime {
+            workspace_id: Some("destination"),
+            ..*runtime
+        };
+        namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"bob", "pane_type":"terminal"}),
+            &destination,
+        )
+        .unwrap();
+        subscriber.handle_line(&snapshot, runtime).unwrap();
+        let namespace = namedrop::StateNamespace::for_space("hc:fixture", "destination");
+        let bindings = namedrop::StateStore::open(runtime.state_directory)
+            .unwrap()
+            .transaction(|tx| tx.active_pane_bindings(&namespace))
+            .unwrap();
+        assert!(
+            bindings.iter().any(|binding| binding.pane_id == "t1"),
+            "old snapshot reversed a committed move"
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+            "bob"
+        );
+    });
 }
