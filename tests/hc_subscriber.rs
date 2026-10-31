@@ -206,7 +206,7 @@ fn missed_reconciles_healthy_terminal_after_failed_get() {
     });
 }
 #[test]
-fn restarted_subscriber_moves_durable_binding() {
+fn restarted_subscriber_clears_moved_alias_without_implicit_destination_claim() {
     for trigger in ["labels", "snapshot", "missed"] {
         check(&format!("move-{trigger}"), |fixture, runtime| {
             fixture.terminals.borrow_mut()[0]["labels"]["herdr.space"] = json!("destination");
@@ -241,6 +241,7 @@ fn restarted_subscriber_moves_durable_binding() {
                 old.iter().all(|a| a.pane_id.is_none()),
                 "old binding survived move: {old:?}"
             );
+            assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.name"], "");
             let new = store
                 .transaction(|tx| {
                     tx.list_pane_addresses(&namedrop::StateNamespace::for_space(
@@ -253,7 +254,7 @@ fn restarted_subscriber_moves_durable_binding() {
                 new.iter()
                     .filter(|a| a.pane_id.as_deref() == Some("t1"))
                     .count(),
-                1
+                0
             );
         });
     }
@@ -764,5 +765,15 @@ fn unreadable_agent_is_unknown_in_doctor_not_disconnected() {
             report.issues
         );
         assert_eq!(report.available_agents, 0);
+    });
+}
+
+#[test]
+fn snapshot_repairs_a_missing_name_mirror() {
+    check("mirror", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("");
+        namedrop::host::hc::events::Subscriber::default()
+            .handle_line(r#"{"method":"missed","params":{}}"#, runtime).unwrap();
+        assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.name"], "alice");
     });
 }

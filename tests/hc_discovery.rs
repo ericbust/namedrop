@@ -219,3 +219,18 @@ fn checkout_resolves_each_distinct_cwd_once_per_call() {
         assert_eq!(paths, ["/checkout", "/missing"]);
     }
 }
+
+#[test]
+fn terminal_ending_during_discovery_is_not_an_unavailable_pane() {
+    for error in [
+        r#"{"error":{"kind":"not_found","message":"ended"}}"#,
+        r#"{"error":{"kind":"finished","message":"ended"}}"#,
+    ] {
+        let fixture = Fixture { calls: RefCell::default(), error };
+        let host = HcHost::new(&fixture);
+        assert!(host.discovery_warnings().unwrap().is_empty());
+        let space = host.space(SpaceLocator::Workspace("fixture-space"), None).unwrap();
+        assert_eq!(space.panes.len(), 1);
+        assert!(space.unavailable_panes.is_empty());
+    }
+}

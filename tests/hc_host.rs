@@ -71,6 +71,15 @@ impl HerdrCommandExecutor for Fixture {
             }
             ["--version"] => "herdr-core 0.1.14\n".to_owned(),
             ["label", id, labels @ ..] => {
+                let mut terminals = self.terminals.borrow_mut();
+                let terminal = terminals
+                    .iter_mut()
+                    .find(|terminal| terminal["address"] == *id)
+                    .unwrap();
+                for label in labels.iter().filter(|label| **label != "--json") {
+                    let (key, value) = label.split_once('=').unwrap();
+                    terminal["labels"][key] = json!(value);
+                }
                 if *self.rename_error.borrow()
                     && (labels.contains(&"namedrop.name=bob")
                         || (*id == "t2" && labels.contains(&"namedrop.name=alice")))
@@ -81,15 +90,6 @@ impl HerdrCommandExecutor for Fixture {
                     && let Some(error) = self.clear_error.borrow().as_ref()
                 {
                     return Err(error.clone());
-                }
-                let mut terminals = self.terminals.borrow_mut();
-                let terminal = terminals
-                    .iter_mut()
-                    .find(|terminal| terminal["address"] == *id)
-                    .unwrap();
-                for label in labels.iter().filter(|label| **label != "--json") {
-                    let (key, value) = label.split_once('=').unwrap();
-                    terminal["labels"][key] = json!(value);
                 }
                 "{}".into()
             }
@@ -901,6 +901,7 @@ fn doctor_reports_only_observed_unreported_codex_and_uses_hc_repairs() {
 }
 
 struct ConcurrentFixture {
+    environment: namedrop::environment::EnvironmentSnapshot,
     record: std::sync::Mutex<Value>,
     get_count: std::sync::atomic::AtomicUsize,
     pause_get: std::sync::atomic::AtomicUsize,
@@ -915,6 +916,9 @@ impl ConcurrentFixture {
             .unwrap()
             .remove("namedrop.session");
         Self {
+            environment: namedrop::environment::EnvironmentSnapshot::from_variables([(
+                "XDG_STATE_HOME".into(), std::env::temp_dir().join(format!("hc-prompt-race-{}", std::process::id())).into_os_string()
+            )]),
             record: std::sync::Mutex::new(record),
             get_count: std::sync::atomic::AtomicUsize::new(0),
             pause_get: std::sync::atomic::AtomicUsize::new(usize::MAX),
@@ -935,6 +939,7 @@ impl ConcurrentFixture {
     }
 }
 impl HerdrCommandExecutor for ConcurrentFixture {
+    fn environment_snapshot(&self) -> Option<&namedrop::environment::EnvironmentSnapshot> { Some(&self.environment) }
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         let stdout = match args {
             ["ls", "--json"] => json!({"terminals":[*self.record.lock().unwrap()]}).to_string(),
@@ -2814,3 +2819,35 @@ fn assert_onboarding_and_doctor_refusals(mark_invoked: bool) {
 #[cfg(target_os = "linux")]
 #[path = "support/hc_prompt_race.rs"]
 mod prompt_race;
+
+#[test]
+fn dead_session_owner_is_a_preinvocation_failure() {
+    let fixture = Fixture::default();
+    fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session.pid"] = json!("4000000000");
+    fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session.start"] = json!("gone");
+    let result = HcHost::new(&fixture).prompt("t1", "must not type").unwrap_err();
+    assert_eq!(result.kind, PromptFailureKind::TemporaryPreInvocation);
+    assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.session"], "");
+    assert!(!fixture.calls.borrow().iter().any(|call| call[0] == "send"));
+}
+
+#[test]
+fn stale_prompt_does_not_erase_a_replacement_session() {
+    if process::in_agent_tree("stale_prompt_does_not_erase_a_replacement_session") { return; }
+    let fixture = ConcurrentFixture::new();
+    let state = fixture.environment.hc_state_directory().unwrap();
+    let host = HcHost::new(&fixture);
+    fixture.record.lock().unwrap()["pid"] = json!(std::os::unix::process::parent_id());
+    host.publish_session(&state, "t1", "old").unwrap();
+    fixture.record.lock().unwrap()["labels"]["namedrop.session.pid"] = json!("4000000000");
+    let (entered, resume) = fixture.pause_on_get(1);
+    std::thread::scope(|scope| {
+        let sending = scope.spawn(|| host.prompt("t1", "must not type"));
+        entered.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        host.publish_session(&state, "t1", "replacement").unwrap();
+        resume.send(()).unwrap();
+        assert!(sending.join().unwrap().is_err());
+    });
+    assert_eq!(fixture.record.lock().unwrap()["labels"]["namedrop.session"], "replacement");
+    std::fs::remove_dir_all(state).unwrap();
+}
