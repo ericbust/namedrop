@@ -1192,74 +1192,53 @@ fn hc_onboarding_inspects_packages_without_repairing_them() {
 }
 
 #[test]
-fn hc_permission_owner_uses_the_state_root_and_explicit_home() {
+fn hc_permission_owner_is_scoped_to_the_explicit_home() {
     const CHILD: &str = "NAMEDROP_PERMISSION_OWNER_CHILD";
-    if std::env::var_os(CHILD).is_some() {
-        let root = PathBuf::from(std::env::var_os(CHILD).unwrap());
-        let home = root.join("explicit-home");
-        let context = PackageContext::new(&home, true);
-        let expected = std::env::var_os("XDG_STATE_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/state"))
-            .join("namedrop-app");
-        assert_eq!(
-            context.permission_owner(Path::new("/state/one")).unwrap(),
-            expected
-        );
-        assert_eq!(
-            context.permission_owner(Path::new("/state/two")).unwrap(),
-            expected
-        );
-        assert_eq!(
-            PackageContext::new(&home, false)
-                .permission_owner(Path::new("/tui-state"))
-                .unwrap(),
-            Path::new("/tui-state")
-        );
-        let claude = root.join("foreign-claude-config");
-        let config = AgentConfigDirectories {
-            claude: Some(&claude),
-            codex: None,
-        };
-        for session in ["session-one", "session-two"] {
-            install_integration_package_with_config(
-                &context,
-                AgentRuntime::ClaudeCode,
-                &root.join("executable"),
-                &root.join(session),
-                config,
-            )
-            .unwrap();
-            assert!(expected.join("claude-permissions.json").is_file());
-            assert!(!root.join(session).join("claude-permissions.json").exists());
-            context
-                .inspect_permissions(config, &root.join("executable"), &root.join(session))
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = PathBuf::from(root);
+        for name in ["first-home", "second-home"] {
+            let home = root.join(name);
+            let context = PackageContext::new(&home, true);
+            let expected = home.join(".local/state/namedrop-app");
+            let config = AgentConfigDirectories::default();
+            for session in ["session-one", "session-two"] {
+                let state = root.join(session);
+                install_integration_package_with_config(
+                    &context,
+                    AgentRuntime::ClaudeCode,
+                    &root.join("executable"),
+                    &state,
+                    config,
+                )
                 .unwrap();
+                assert!(
+                    expected.join("claude-permissions.json").is_file(),
+                    "missing permission journal for explicit home {}",
+                    home.display()
+                );
+                assert!(!state.join("claude-permissions.json").exists());
+                context
+                    .inspect_permissions(config, &root.join("executable"), &state)
+                    .unwrap();
+            }
+            assert!(home.join(".claude/settings.json").is_file());
         }
-        assert!(claude.join("settings.json").is_file());
-        if std::env::var_os("XDG_STATE_HOME").is_some() {
-            assert!(!home.join(".local/state/namedrop-app").exists());
-        }
+        assert!(!root.join("foreign-xdg-state/namedrop-app").exists());
         return;
     }
     let root = owner_review_root("permission-root");
-    for with_xdg in [false, true] {
-        let case = root.join(if with_xdg { "xdg" } else { "fallback" });
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
-        child.args(["--exact", "install::owner_review_tests::hc_permission_owner_uses_the_state_root_and_explicit_home", "--nocapture"])
-            .env(CHILD, &case)
-            .env("HOME", "/unrelated-process-home")
-            .env_remove("XDG_STATE_HOME");
-        if with_xdg {
-            child.env("XDG_STATE_HOME", case.join("foreign-xdg-state"));
-        }
-        let output = child.output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "install::owner_review_tests::hc_permission_owner_is_scoped_to_the_explicit_home", "--nocapture"])
+        .env(CHILD, &root)
+        .env("HOME", root.join("process-home"))
+        .env("XDG_STATE_HOME", root.join("foreign-xdg-state"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     fs::remove_dir_all(root).unwrap();
 }
