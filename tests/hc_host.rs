@@ -1,3 +1,6 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
 #[path = "support/app_popup.rs"]
 mod app_popup;
 #[path = "support/hc_socket.rs"]
@@ -65,12 +68,7 @@ impl PopupFixture {
             return None;
         }
         let app = std::env::var_os("HERDR_APP_BIN_PATH").expect("test app override missing");
-        static NEXT_SOCKET: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let socket = std::env::temp_dir().join(format!(
-            "nd-popup-{}-{}.sock",
-            std::process::id(),
-            NEXT_SOCKET.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
+        let socket = hc_socket::fixture::short_socket_root().join("core.sock");
         let core = hc_socket::HcSocket::bind(&socket).unwrap();
         let environment = namedrop::environment::EnvironmentSnapshot::from_variables([
             ("HERDR_APP_BIN_PATH".into(), app),
@@ -90,7 +88,7 @@ impl PopupFixture {
 
 impl Drop for PopupFixture {
     fn drop(&mut self) {
-        std::fs::remove_file(&self.socket).unwrap();
+        std::fs::remove_dir_all(self.socket.parent().unwrap()).unwrap();
     }
 }
 
@@ -2224,7 +2222,7 @@ fn hc_bootstrap_popups_use_only_the_test_app() {
 #[test]
 fn hc_popup_uses_native_override_and_scrubs_environment() {
     use std::os::unix::ffi::OsStringExt;
-    let root = std::env::temp_dir().join(format!("namedrop-popup-native-{}", std::process::id()));
+    let root = hc_socket::fixture::short_socket_root();
     let fake = app_popup::fake(&root);
     let native_path = root.join(std::ffi::OsString::from_vec(
         b"app with spaces-\xff".to_vec(),
@@ -2235,7 +2233,7 @@ fn hc_popup_uses_native_override_and_scrubs_environment() {
     let _core = hc_socket::HcSocket::bind(&socket).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "hc_popup_child", "--nocapture"])
-        .env_clear()
+        .isolated_env(root.join("home"))
         .env("PATH", path)
         .env("HERDR_APP_BIN_PATH", native_path)
         .env("HERDR_SOCKET_PATH", "inherited-socket")

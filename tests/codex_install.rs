@@ -1,3 +1,6 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
 use namedrop::{AgentRuntime, install_integration_package, operation_catalog};
 use std::{
     fs,
@@ -330,7 +333,9 @@ fn global_state_binding_rejects_duplicates_across_command_levels_for_both_hosts(
     for host in ["tui", "hc"] {
         for arguments in &cases {
             let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
-                .env_clear()
+                .isolated_env(
+                    std::env::temp_dir().join(format!("nd-codex-home-{}", std::process::id())),
+                )
                 .args(["--host", host, "--json"])
                 .args(arguments)
                 .output()
@@ -361,7 +366,7 @@ fn global_state_binding_rejects_duplicates_across_command_levels_for_both_hosts(
             ],
         ] {
             let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
-                .env_clear()
+                .isolated_env(root.join("home"))
                 .args(["--host", host, "--json"])
                 .args(&arguments)
                 .output()

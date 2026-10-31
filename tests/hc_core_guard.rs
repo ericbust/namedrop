@@ -15,21 +15,14 @@ use std::{
     os::unix::{fs::PermissionsExt, net::UnixListener},
     path::PathBuf,
     process::Command,
-    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-
-static NEXT: AtomicU64 = AtomicU64::new(0);
 
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
-        let root = env::temp_dir().join(format!(
-            "nd-hc-guard-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&root).unwrap();
+        let root = hc_socket::fixture::short_socket_root();
         let fixture = Self(root);
         fixture.write("hc", "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$*\" \"$HC_SOCKET\" \"${HC_TERMINAL_SOCKET-unset}\" \"${HC_TERMINAL_ID-unset}\" >> \"$LOG\"\nprintf '{}'");
         fs::set_permissions(fixture.0.join("hc"), fs::Permissions::from_mode(0o700)).unwrap();
@@ -43,9 +36,8 @@ impl Fixture {
     fn run(&self, extra: &[(&str, &str)], expected: &str) {
         let output = Command::new(env::current_exe().unwrap())
             .args(["--exact", "guard_child", "--nocapture"])
-            .env_clear()
+            .isolated_env(&self.0)
             .env("PATH", "/usr/bin:/bin")
-            .isolated_home(&self.0)
             .env("XDG_RUNTIME_DIR", self.0.join("run"))
             .env("HC_BIN_PATH", self.0.join("hc"))
             .env("LOG", self.0.join("calls"))
@@ -70,6 +62,7 @@ impl Fixture {
     fn listener(&self, path: &str) -> UnixListener {
         let path = self.0.join(path);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
+        hc_socket::fixture::assert_socket_path(&path);
         UnixListener::bind(path).unwrap()
     }
 }
@@ -185,9 +178,8 @@ fn doctor_explains_overlong_socket_paths_without_launching_hc() {
                 .args(["--host", "hc", "--plugin-state"])
                 .arg(f.0.join("state"))
                 .args(["doctor", "--json"])
-                .env_clear()
+                .isolated_env(&f.0)
                 .env("PATH", "/usr/bin:/bin")
-                .isolated_home(&f.0)
                 .env("XDG_RUNTIME_DIR", f.0.join("run"))
                 .env("HC_BIN_PATH", f.0.join("hc"))
                 .env("LOG", f.0.join("calls"));

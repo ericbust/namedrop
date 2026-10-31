@@ -116,9 +116,8 @@ fn linux_preflight_requires_landlock_and_named_prerequisites() {
                 env!("CARGO_MANIFEST_DIR"),
                 "/scripts/check-linux-prerequisites.sh"
             ))
-            .env_clear()
+            .isolated_env(&root)
             .env("PATH", &bin)
-            .isolated_home(&root)
             .env("CLAUDE_CONFIG_DIR", root.join(".claude"))
             .env("CODEX_HOME", root.join(".codex"))
             .env("FAKE_LANDLOCK", landlock)

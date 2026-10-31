@@ -24,7 +24,7 @@ fn run_script_matches_base_and_uses_state_runtime_without_bin() {
     let output = Command::new("/bin/sh")
         .arg(root.join("scripts/run.sh"))
         .arg("--version")
-        .env_clear()
+        .isolated_env(root.join("home"))
         .env("PATH", "/usr/bin:/bin")
         .env("HERDR_PANE_ID", "pane")
         .env("HERDR_PLUGIN_STATE_DIR", root.join("state"))
@@ -54,9 +54,8 @@ esac
 "#).unwrap();
     fs::set_permissions(&host, fs::Permissions::from_mode(0o700)).unwrap();
     let activated = Command::new(env!("CARGO_BIN_EXE_namedrop"))
-        .env_clear()
+        .isolated_env(root.join("home"))
         .env("PATH", "/usr/bin:/bin")
-        .isolated_home(root.join("home"))
         .env("HERDR_BIN_PATH", &host)
         .env("SHELL", "/bin/bash")
         .arg("--plugin-state")
@@ -79,7 +78,7 @@ esac
         String::from_utf8_lossy(&activated.stderr)
     );
     let output = Command::new(root.join("home/.local/bin/namedrop"))
-        .env_clear()
+        .isolated_env(root.join("home"))
         .env("PATH", "/usr/bin:/bin")
         .args(["--json", "send", "--bogus"])
         .output()

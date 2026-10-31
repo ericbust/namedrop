@@ -1,5 +1,7 @@
 #[path = "support/environment.rs"]
 mod environment;
+#[path = "support/socket_fixture.rs"]
+mod socket_fixture;
 use environment::CommandHome;
 use namedrop::{cli::RuntimeOptions, runtime::HostKind};
 use std::{fs, process::Command};
@@ -7,8 +9,7 @@ use std::{fs, process::Command};
 #[test]
 fn runtime_roots_stay_at_the_construction_environment() {
     if std::env::var_os("NAMEDROP_SNAPSHOT_CHILD").is_none() {
-        let root = std::env::temp_dir().join(format!("namedrop-snapshot-{}", std::process::id()));
-        fs::create_dir_all(&root).unwrap();
+        let root = socket_fixture::short_socket_root();
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
@@ -39,6 +40,7 @@ fn runtime_roots_stay_at_the_construction_environment() {
     let original = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
     let endpoint = original.join(".runtime/herdr-core/default.sock");
     fs::create_dir_all(endpoint.parent().unwrap()).unwrap();
+    socket_fixture::assert_socket_path(&endpoint);
     let _listener = std::os::unix::net::UnixListener::bind(&endpoint).unwrap();
     let options = RuntimeOptions {
         host: Some(HostKind::Hc),
@@ -281,24 +283,26 @@ fn hc_children_scrub_herdr_names_added_after_capture() {
 fn hc_children_drop_captured_and_late_lifetime_tokens() {
     const CHILD: &str = "NAMEDROP_LIFETIME_CHILD";
     if std::env::var_os(CHILD).is_none() {
+        let root = socket_fixture::short_socket_root();
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "hc_children_drop_captured_and_late_lifetime_tokens",
                 "--nocapture",
             ])
-            .env_clear()
+            .isolated_env(&root)
             .env(CHILD, "1")
             .env("HC_SCOPE", "captured-scope")
             .env("HC_RUNTIME", "captured-runtime")
             .env("HC_TERMINAL_CUSTOM", "captured-terminal")
             .env("HERDR_CUSTOM", "captured-tui")
             .env("HC_SESSION", "kept-session")
-            .env("HC_SOCKET", "/private/core.sock")
+            .env("HC_SOCKET", root.join("core.sock"))
             .env("HC_BIN_PATH", "/usr/bin/python3")
             .env("UNRELATED", "kept")
             .output()
             .unwrap();
+        fs::remove_dir_all(root).unwrap();
         assert!(
             output.status.success(),
             "{} {}",
@@ -339,7 +343,13 @@ fn hc_children_drop_captured_and_late_lifetime_tokens() {
         "child inherited lifetime tokens: {leaked:?}"
     );
     assert_eq!(env["HC_SESSION"], "kept-session");
-    assert_eq!(env["HC_SOCKET"], "/private/core.sock");
+    assert_eq!(
+        env["HC_SOCKET"],
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap())
+            .join("core.sock")
+            .to_str()
+            .unwrap()
+    );
     assert_eq!(env["UNRELATED"], "kept");
     assert_eq!(result["argv"], serde_json::json!(["events", "--json"]));
 }
@@ -348,23 +358,25 @@ fn hc_children_drop_captured_and_late_lifetime_tokens() {
 fn tui_children_drop_all_captured_and_late_hc_keys() {
     const CHILD: &str = "NAMEDROP_TUI_SCRUB_CHILD";
     if std::env::var_os(CHILD).is_none() {
+        let root = socket_fixture::short_socket_root();
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "tui_children_drop_all_captured_and_late_hc_keys",
                 "--nocapture",
             ])
-            .env_clear()
+            .isolated_env(&root)
             .env(CHILD, "1")
             .env("HERDR_BIN_PATH", "/usr/bin/python3")
             .env("HERDR_SOCKET_PATH", "/tui.sock")
-            .env("HC_SOCKET", "/hc.sock")
+            .env("HC_SOCKET", root.join("core.sock"))
             .env("HC_SESSION", "captured")
             .env("HC_TERMINAL_ID", "terminal")
             .env("HC_SCOPE", "scope")
             .env("HC_CUSTOM", "custom")
             .output()
             .unwrap();
+        fs::remove_dir_all(root).unwrap();
         assert!(
             output.status.success(),
             "{} {}",
@@ -376,7 +388,7 @@ fn tui_children_drop_all_captured_and_late_hc_keys() {
     let snapshot = namedrop::environment::EnvironmentSnapshot::capture();
     assert_eq!(
         snapshot.hc_endpoint().unwrap(),
-        std::path::Path::new("/hc.sock")
+        std::path::PathBuf::from(std::env::var_os("HOME").unwrap()).join("core.sock")
     );
     // SAFETY: this child runs one test and has no concurrent environment readers.
     unsafe {
@@ -403,7 +415,10 @@ fn tui_children_drop_all_captured_and_late_hc_keys() {
         .output()
         .unwrap();
     let neutral: serde_json::Value = serde_json::from_slice(&neutral.stdout).unwrap();
-    assert_eq!(neutral["HC_SOCKET"], "/hc.sock");
+    assert_eq!(
+        neutral["HC_SOCKET"],
+        snapshot.hc_endpoint().unwrap().to_str().unwrap()
+    );
 }
 
 #[test]

@@ -693,13 +693,11 @@ mod session_event_tests {
         assert!(args.windows(2).any(|pair| pair == ["--host", "hc"]));
         assert!(!args.iter().any(|arg| arg.starts_with("--herdr-")));
     }
-
     #[test]
     fn hook_runtime_state_keeps_cached_hc_selection() {
-        use std::os::unix::fs::PermissionsExt;
-        let root =
-            std::env::temp_dir().join(format!("namedrop-hook-runtime-host-{}", std::process::id()));
-        std::fs::create_dir_all(&root).unwrap();
+        use {crate::test_environment::CommandHome, std::os::unix::fs::PermissionsExt};
+        let root = crate::hc_socket_fixture::fixture::short_socket_root();
+        let socket = crate::hc_socket_fixture::HcSocket::bind(&root.join("hc.sock")).unwrap();
         let host = root.join("host");
         std::fs::write(&host, "#!/bin/sh\n[ \"$*\" = 'server status --json' ] || exit 97\nprintf '%s\\n' '{\"core\":{\"id\":\"selection-test\"}}'\n").unwrap();
         std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -709,11 +707,13 @@ mod session_event_tests {
                 "--exact",
                 "session_event_tests::cached_hc_hook_runtime_child",
             ])
-            .env_clear()
+            .isolated_env(&root)
+            .env("HC_SOCKET", root.join("hc.sock"))
             .env("HC_BIN_PATH", &host)
             .env("HERDR_BIN_PATH", &host)
             .output()
             .unwrap();
+        drop(socket);
         std::fs::remove_dir_all(root).unwrap();
         assert!(
             output.status.success(),
@@ -1502,3 +1502,11 @@ mod status_worker_lifetime_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/environment.rs"]
+mod test_environment;
+
+#[cfg(test)]
+#[path = "../tests/support/hc_socket.rs"]
+mod hc_socket_fixture;

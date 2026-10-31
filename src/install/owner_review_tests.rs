@@ -973,8 +973,7 @@ fn generated_hc_hooks_decline_tui_context_before_locked_state() {
     };
     let binary =
         PathBuf::from(std::env::var_os("NAMEDROP_TEST_BINARY").expect("set NAMEDROP_TEST_BINARY"));
-    let root = std::env::temp_dir().join(format!("namedrop-generated-hook-{}", std::process::id()));
-    fs::create_dir_all(&root).unwrap();
+    let root = hc_socket::fixture::short_socket_root();
     let socket = root.join("hc.sock");
     let _socket = hc_socket::HcSocket::bind(&socket).unwrap();
     let home = root.join("home");
@@ -1030,9 +1029,8 @@ esac
         for script in [HOOK_SCRIPT_FILE, SESSION_START_SCRIPT_FILE] {
             use std::os::unix::process::CommandExt;
             let mut child = Command::new(package.join(script))
-                .env_clear()
+                .isolated_env(&home)
                 .env("PATH", "/usr/bin:/bin")
-                .isolated_home(&home)
                 .env("HC_TERMINAL_ID", "outer-hc")
                 .env("HERDR_SOCKET_PATH", "inner-tui")
                 .env("HERDR_PANE_ID", "inner-tui")

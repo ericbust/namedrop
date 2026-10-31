@@ -1,3 +1,6 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
 #[path = "support/hc_socket.rs"]
 mod hc_socket;
 use namedrop::environment::EnvironmentSnapshot;
@@ -10,8 +13,7 @@ use std::{
 
 #[test]
 fn hc_client_and_daemon_child_drop_tui_environment_and_preserve_arguments() {
-    let root = std::env::temp_dir().join(format!("namedrop-hc-boundary-{}", std::process::id()));
-    fs::create_dir_all(&root).unwrap();
+    let root = hc_socket::fixture::short_socket_root();
     let socket = root.join("hc.sock");
     let _socket = hc_socket::HcSocket::bind(&socket).unwrap();
     let fake = root.join("hc");
@@ -41,7 +43,7 @@ sys.exit(result.returncode)
             "hc_process_boundary_child",
             "--nocapture",
         ])
-        .env_clear()
+        .isolated_env(root.join("home"))
         .env("PATH", "/usr/bin:/bin")
         .env("HC_BIN_PATH", &fake)
         .env("CLIENT_LOG", root.join("client.json"))

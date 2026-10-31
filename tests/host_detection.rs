@@ -198,7 +198,7 @@ fn snapshot_host_detection_table_returns_before_state_or_dispatch() {
         });
     }
 
-    let root = std::env::temp_dir().join(format!("namedrop-host-detection-{}", std::process::id()));
+    let root = hc_socket::fixture::short_socket_root();
     fs::create_dir_all(root.join("state/runtime")).unwrap();
     fs::create_dir_all(root.join("home")).unwrap();
     let socket = root.join("hc.sock");
@@ -237,8 +237,7 @@ esac
         let output = command
             .args(["-c", &script, "host-detection"])
             .arg(&binary)
-            .env_clear()
-            .isolated_home(root.join("home"))
+            .isolated_env(root.join("home"))
             .env("PATH", "/usr/bin:/bin")
             .env(
                 "HC_BIN_PATH",
@@ -327,8 +326,7 @@ esac
 
 #[test]
 fn ambiguous_host_identity_is_cached_and_bounded_across_both_native_lookups() {
-    let root = std::env::temp_dir().join(format!("namedrop-host-budget-{}", std::process::id()));
-    fs::create_dir_all(&root).unwrap();
+    let root = hc_socket::fixture::short_socket_root();
     let socket = root.join("hc.sock");
     let _socket = hc_socket::HcSocket::bind(&socket).unwrap();
     let probe = root.join("identity");
@@ -359,7 +357,7 @@ else:
         let start = std::time::Instant::now();
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--exact", "cached_host_child", "--nocapture"])
-            .env_clear()
+            .isolated_env(root.join("home"))
             .env("PATH", "/usr/bin:/bin")
             .env("HERDR_PANE_ID", "tui")
             .env("HC_TERMINAL_ID", "hc")
@@ -442,7 +440,7 @@ fn describe_validates_conflicts_before_runtime_dispatch_and_keeps_explicit_state
         vec![],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
-            .env_clear()
+            .isolated_env(root.join("home"))
             .env("HC_TERMINAL_ID", "terminal")
             .env("HERDR_PANE_ID", "pane")
             .env("HC_BIN_PATH", &tripwire)

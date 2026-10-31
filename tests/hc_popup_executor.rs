@@ -1,3 +1,5 @@
+#[path = "support/socket_fixture.rs"]
+mod socket_fixture;
 use namedrop::{
     HerdrCommandExecutor, ProcessHerdr, environment::EnvironmentSnapshot, runtime::HostKind,
 };
@@ -9,9 +11,9 @@ use std::{
 
 #[test]
 fn popup_executor_uses_captured_program_scrubbed_environment_and_bounded_children() {
-    let root = std::env::temp_dir().join(format!("namedrop-popup-executor-{}", std::process::id()));
-    fs::create_dir_all(&root).unwrap();
+    let root = socket_fixture::short_socket_root();
     let socket = root.join("core.sock");
+    socket_fixture::assert_socket_path(&socket);
     let listener = UnixListener::bind(&socket).unwrap();
     let program = root.join(std::ffi::OsString::from_vec(
         b"app with spaces-\xff".to_vec(),

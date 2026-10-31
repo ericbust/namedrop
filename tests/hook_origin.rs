@@ -43,8 +43,7 @@ fn cross_host_hooks_decline_before_locked_state_runtime_or_socket_access() {
         for event in ["session-start", "user-prompt-submit", "mailbox-wake"] {
             let mut command = Command::new(&binary);
             command
-                .env_clear()
-                .isolated_home(root.join("home"))
+                .isolated_env(root.join("home"))
                 .env("PATH", "/usr/bin:/bin")
                 .env("HC_BIN_PATH", &tripwire)
                 .env("HERDR_BIN_PATH", &tripwire)
@@ -235,9 +234,8 @@ fn explicit_hook_selection_precedes_origin_state_and_host_io() {
         ] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
             command
-                .env_clear()
+                .isolated_env(root.join("home"))
                 .env("PATH", "/usr/bin:/bin")
-                .isolated_home(root.join("home"))
                 .env("NAMEDROP_STATE_DIR", root.join("hc"))
                 .env("HERDR_PLUGIN_STATE_DIR", root.join("unused-tui"))
                 .env("HERDR_BIN_PATH", &host)

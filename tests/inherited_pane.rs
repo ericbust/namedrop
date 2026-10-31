@@ -74,11 +74,8 @@ fn an_inherited_pane_herdr_cannot_describe_is_refused_with_herdr_s_own_reason() 
 /// `pane process-info` reports the shell pid written to `shell-pid`.
 struct Fixture(PathBuf);
 impl Fixture {
-    fn new(label: &str) -> Self {
-        let root = std::env::temp_dir().join(format!(
-            "namedrop-inherited-pane-{}-{label}",
-            std::process::id()
-        ));
+    fn new(_label: &str) -> Self {
+        let root = hc_socket::fixture::short_socket_root();
         fs::create_dir_all(root.join("home")).unwrap();
         let host = root.join("herdr");
         fs::write(

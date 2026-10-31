@@ -1,8 +1,11 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
 use std::process::Command;
 
 fn run(arguments: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_namedrop"))
-        .env_clear()
+        .isolated_env(std::env::temp_dir().join(format!("nd-cli-home-{}", std::process::id())))
         .args(arguments)
         .output()
         .unwrap()

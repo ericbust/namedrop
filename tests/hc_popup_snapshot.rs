@@ -81,10 +81,7 @@ impl HerdrCommandExecutor for NoSnapshot {
 }
 
 fn run_child(test: &str, entrypoint: &str, program: &str) {
-    let root = std::env::temp_dir().join(format!(
-        "namedrop-popup-snapshot-{}-{test}-{entrypoint}",
-        std::process::id()
-    ));
+    let root = hc_socket::fixture::short_socket_root();
     for label in ["A", "B"] {
         let bin = root.join(label).join("bin");
         fs::create_dir_all(&bin).unwrap();
@@ -124,8 +121,7 @@ sys.exit(97)
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
         .args(["--exact", test, "--nocapture"])
-        .env_clear()
-        .isolated_home(&home)
+        .isolated_env(&home)
         .env("PATH", home.join("bin"))
         .env("HC_SOCKET", home.join("core.sock"))
         .env("HC_SESSION", "A")

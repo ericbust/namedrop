@@ -1,3 +1,6 @@
+#[path = "socket_fixture.rs"]
+pub mod fixture;
+
 use std::{
     io,
     os::unix::net::UnixListener,
@@ -17,6 +20,7 @@ pub struct HcSocket {
 
 impl HcSocket {
     pub fn bind(path: &Path) -> io::Result<Self> {
+        fixture::assert_socket_path(path);
         let listener = UnixListener::bind(path)?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));

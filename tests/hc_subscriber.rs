@@ -330,8 +330,7 @@ mod hc_socket;
 #[test]
 fn detached_subscriber_process_lifecycle() {
     use std::os::unix::fs::PermissionsExt;
-    let root = std::env::temp_dir().join(format!("namedrop-detached-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
+    let root = hc_socket::fixture::short_socket_root();
     std::fs::create_dir_all(root.join("home")).unwrap();
     let socket = root.join("core.sock");
     let _socket = hc_socket::HcSocket::bind(&socket).unwrap();
@@ -365,9 +364,8 @@ else:
     std::fs::copy(env!("CARGO_BIN_EXE_namedrop"), &binary).unwrap();
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "detached_subscriber_child", "--nocapture"])
-        .env_clear()
+        .isolated_env(root.join("home"))
         .env("PATH", "/usr/bin:/bin")
-        .isolated_home(root.join("home"))
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("xdg"))
         .env("XDG_RUNTIME_DIR", &root)
@@ -808,9 +806,8 @@ fn stopped_core_error_survives_doctor_composition() {
             .args(["--host", "hc", "--plugin-state"])
             .arg(root.join("state"))
             .args(["--hc-space", "fixture-space", "doctor"])
-            .env_clear()
+            .isolated_env(root.join("home"))
             .env("PATH", "/usr/bin:/bin")
-            .isolated_home(root.join("home"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_STATE_HOME", root.join("xdg"))
             .env("XDG_RUNTIME_DIR", &root)

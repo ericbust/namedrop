@@ -1030,7 +1030,7 @@ fn run_script_forwards_tui_pane_and_arguments_without_host_prepass() {
                     .arg(checkout.join("scripts/run.sh"))
                     .args(&flags)
                     .arg("reconcile")
-                    .env_clear()
+                    .isolated_env(fixture.root.join("home"))
                     .env("PATH", &fixture.tools);
                 let mut expected = Vec::new();
                 if tui_env {
@@ -1068,7 +1068,7 @@ fn run_script_forwards_tui_pane_and_arguments_without_host_prepass() {
             .arg(checkout.join("scripts/run.sh"))
             .args(flags)
             .args(["--json", "doctor"])
-            .env_clear()
+            .isolated_env(fixture.root.join("home"))
             .env("PATH", &fixture.tools)
             .output()
             .unwrap();
