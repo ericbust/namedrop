@@ -1462,3 +1462,40 @@ mod selected_worker_host_tests {
         assert_eq!(selected.hc_space.as_deref(), Some("space"));
     }
 }
+
+#[cfg(test)]
+mod status_worker_lifetime_tests {
+    #[test]
+    fn hc_reconciliation_worker_has_no_terminal_lifetime_identity() {
+        let options = super::RuntimeOptions {
+            host: Some(super::HostKind::Hc),
+            environment: namedrop::environment::EnvironmentSnapshot::from_variables([
+                ("HC_SCOPE".into(), "terminal-scope".into()),
+                ("HC_RUNTIME".into(), "terminal-runtime".into()),
+                ("HC_TERMINAL_CUSTOM".into(), "terminal-custom".into()),
+                ("HERDR_CUSTOM".into(), "tui-custom".into()),
+                ("HC_SOCKET".into(), "/private/core.sock".into()),
+                ("HC_SESSION".into(), "private-session".into()),
+            ]),
+            ..Default::default()
+        };
+        let command = super::status_worker_command(&options).unwrap();
+        let values: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        for key in [
+            "HC_SCOPE",
+            "HC_RUNTIME",
+            "HC_TERMINAL_CUSTOM",
+            "HERDR_CUSTOM",
+        ] {
+            assert_eq!(values.get(std::ffi::OsStr::new(key)), Some(&None), "{key}");
+        }
+        assert_eq!(
+            values.get(std::ffi::OsStr::new("HC_SESSION")),
+            Some(&Some(std::ffi::OsStr::new("private-session")))
+        );
+        assert_eq!(
+            values.get(std::ffi::OsStr::new("HC_SOCKET")),
+            Some(&Some(std::ffi::OsStr::new("/private/core.sock")))
+        );
+    }
+}
