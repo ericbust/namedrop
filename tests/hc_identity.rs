@@ -132,7 +132,7 @@ fn live_owner_with_other_foreground_defers_but_retains_session() {
 }
 
 #[test]
-fn ready_agent_uses_one_fresh_read_and_one_conditional_send() {
+fn ready_agent_uses_one_fresh_read_and_status_specific_send() {
     let agent = process::AgentProcess::new();
     for status in ["idle", "done"] {
         let fixture = Fixture::new(agent.pid(), "codex");
@@ -142,26 +142,27 @@ fn ready_agent_uses_one_fresh_read_and_one_conditional_send() {
         assert_eq!(pane.agent_status.as_deref(), Some(status));
         fixture.calls.borrow_mut().clear();
         let result = host.prompt("t1", "hello");
-        if status == "done" {
-            assert_eq!(
-                result.unwrap_err().kind,
-                PromptFailureKind::TemporaryPreInvocation
-            );
-        } else {
-            result.unwrap();
-        }
+        result.unwrap();
         assert_eq!(fixture.calls("get").len(), 1);
-        assert_eq!(
-            fixture.calls("send"),
-            vec![vec!["send", "t1", "hello", "--if", "idle", "--json"]]
-        );
+        let expected = if status == "idle" {
+            vec!["send", "t1", "hello", "--if", "idle", "--json"]
+        } else {
+            vec!["send", "t1", "hello", "--json"]
+        };
+        assert_eq!(fixture.calls("send"), vec![expected]);
     }
 }
 
 #[test]
 fn nonsettled_or_unbound_agent_never_receives_prompt() {
     let agent = process::AgentProcess::new();
-    for status in [Some("working"), Some("blocked"), Some("error"), None] {
+    for status in [
+        Some("working"),
+        Some("blocked"),
+        Some("error"),
+        Some("future-status"),
+        None,
+    ] {
         let fixture = Fixture::new(agent.pid(), "codex");
         fixture.terminal.borrow_mut()["status"] = status
             .map(|state| json!({"state":state,"app":"codex"}))
@@ -416,4 +417,16 @@ fn non_shell_root_does_not_create_delivery_attempts() {
     assert!(fixture.calls("send")[0][2].contains("terminal-execute"));
     drop(db);
     std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn unknown_status_remains_discoverable_without_becoming_settled() {
+    let agent = process::AgentProcess::new();
+    let fixture = Fixture::new(agent.pid(), "codex");
+    fixture.terminal.borrow_mut()["status"]["state"] = json!("future-status");
+    let panes = HcHost::new(&fixture).panes(PaneScope::All).unwrap();
+    assert_eq!(panes.len(), 1);
+    assert_eq!(panes[0].agent_status.as_deref(), Some("unknown"));
+    assert!(HcHost::new(&fixture).prompt("t1", "hello").is_err());
+    assert!(fixture.calls("send").is_empty());
 }
