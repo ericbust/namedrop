@@ -8,7 +8,7 @@ use namedrop::{Clock, HcHost, HerdrCommandExecutor, HerdrCommandOutput, Lifecycl
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
-    io::BufRead,
+    io::{BufRead, Write},
     os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, Stdio},
@@ -18,11 +18,24 @@ use std::{
 struct Agent(Child);
 impl Agent {
     fn new(home: &Path) -> Self {
-        let mut child = Command::new("/usr/bin/python3").arg0("codex")
-            .args(["-c", "import signal,time\ndef end(*args):\n time.sleep(0.15)\n raise SystemExit(0)\nsignal.signal(signal.SIGINT,end)\nprint('ready',flush=True)\nwhile True: time.sleep(1)"])
-            .isolated_env(home).stdout(Stdio::piped()).spawn().unwrap();
+        let mut child = Command::new("/bin/bash")
+            .arg0("codex")
+            .args([
+                "--noprofile",
+                "--norc",
+                "-c",
+                r#"trap 'printf "interrupted\n"; IFS= read -r release; [[ "$release" = release ]] || exit 1; exit 0' INT
+printf 'ready\n'
+while IFS= read -r line; do :; done
+"#,
+            ])
+            .isolated_env(home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
         let mut ready = String::new();
-        std::io::BufReader::new(child.stdout.take().unwrap())
+        std::io::BufReader::new(child.stdout.as_mut().unwrap())
             .read_line(&mut ready)
             .unwrap();
         assert_eq!(ready, "ready\n");
@@ -154,6 +167,11 @@ fn delayed_sigint_exit_clears_without_another_event() {
                     json!({"pid":0,"name":"bash","argv":["bash"]});
             }
             assert_eq!(unsafe { libc::kill(agent.pid() as i32, libc::SIGINT) }, 0);
+            let mut interrupted = String::new();
+            std::io::BufReader::new(agent.0.stdout.as_mut().unwrap())
+                .read_line(&mut interrupted)
+                .unwrap();
+            assert_eq!(interrupted, "interrupted\n");
             subscriber
                 .handle_line(
                     &event(if kind == "status-null" {
@@ -172,6 +190,13 @@ fn delayed_sigint_exit_clears_without_another_event() {
                 agent.0.try_wait().unwrap().is_none(),
                 "owner must still be winding down at the event"
             );
+            agent
+                .0
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(b"release\n")
+                .unwrap();
             assert!(agent.0.wait().unwrap().success());
             fixture.calls.borrow_mut().clear();
             let started = Instant::now();
