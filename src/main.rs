@@ -155,7 +155,8 @@ fn main() -> ExitCode {
     let hook_state = cli
         .user_prompt_submit_hook_state_directory()
         .or_else(|| cli.mailbox_wake_hook_state_directory())
-        .or_else(|| cli.session_start_hook_state_directory());
+        .or_else(|| cli.session_start_hook_state_directory())
+        .or_else(|| cli.session_end_hook_state_directory());
     let selected_state = if let Some(hook_state) = hook_state {
         let host = explicit_host.unwrap_or_else(|| cli.runtime.ambient_host_kind());
         if explicit_host.is_none() && cli.runtime.hc_hook != (host == HostKind::Hc) {
@@ -261,6 +262,13 @@ fn main() -> ExitCode {
             selected_state.as_deref().unwrap_or(state_directory),
             &cli.runtime,
             |input, runtime: &ProcessRuntime<'_>| execute_user_prompt_submit_hook(input, runtime),
+        );
+    }
+    if let Some(state_directory) = cli.session_end_hook_state_directory() {
+        return run_context_hook(
+            selected_state.as_deref().unwrap_or(state_directory),
+            &cli.runtime,
+            |_, _| None,
         );
     }
     if let Some(state_directory) = cli.session_start_hook_state_directory() {
@@ -934,6 +942,16 @@ fn run_context_hook(
                     }
                     let event: serde_json::Value =
                         serde_json::from_str(&input).map_err(|error| error.to_string())?;
+                    if event["hook_event_name"] == "SessionEnd" {
+                        if let Some(session) = event["session_id"]
+                            .as_str()
+                            .filter(|session| !session.is_empty())
+                            && let Some(pane) = runtime.current_pane_id
+                        {
+                            host.end_session(runtime.state_directory, pane, session)?;
+                        }
+                        return Ok(None);
+                    }
                     if event["hook_event_name"] == "SessionStart"
                         && let Some(session) = event["session_id"]
                             .as_str()

@@ -51,6 +51,7 @@ enum Kind {
     Finished,
     Removed,
     Status,
+    Foreground,
     Turn,
     Labels,
     #[serde(other)]
@@ -60,6 +61,7 @@ enum Kind {
 #[derive(Clone, Default)]
 struct DirtyTerminal {
     seq: Option<u64>,
+    watch: bool,
     resume: bool,
     unavailable: bool,
     removed: bool,
@@ -122,6 +124,7 @@ impl Pending {
                     }
                     let dirty = self.dirty.entry(pane).or_default();
                     dirty.seq = dirty.seq.max(event.seq);
+                    dirty.watch |= matches!(event.kind, Kind::Foreground | Kind::Status);
                     dirty.resume |= matches!(event.kind, Kind::Status | Kind::Turn);
                     dirty.unavailable |=
                         matches!(event.kind, Kind::Lost | Kind::Finished | Kind::Removed);
@@ -153,6 +156,18 @@ impl Pending {
     }
 }
 
+#[derive(PartialEq, Eq)]
+struct SessionGeneration {
+    session: String,
+    pid: String,
+    start: String,
+}
+
+struct OwnerWatch {
+    generation: SessionGeneration,
+    due_ms: u64,
+}
+
 #[derive(Default)]
 pub struct Subscriber {
     spaces: BTreeMap<String, String>,
@@ -161,6 +176,7 @@ pub struct Subscriber {
     pending: Pending,
     initialized: bool,
     next_wake_ms: Option<u64>,
+    owner_watches: BTreeMap<String, OwnerWatch>,
 }
 
 impl Subscriber {
@@ -293,34 +309,23 @@ impl Subscriber {
         &mut self,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
+        let now = runtime.clock.now_unix_ms();
+        let mut owner_due = false;
+        for (pane, watch) in &mut self.owner_watches {
+            if watch.due_ms <= now {
+                owner_due = true;
+                self.pending.dirty.entry(pane.clone()).or_default();
+                watch.due_ms = now.saturating_add(500);
+            }
+        }
+        if owner_due || self.next_wake_ms.is_some_and(|due| due <= now) {
+            self.reconcile_pending(runtime)?;
+        }
         if self
             .next_wake_ms
             .is_some_and(|due| due <= runtime.clock.now_unix_ms())
         {
             self.next_wake_ms = None;
-            let active: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
-            for (pane, terminal) in &mut self.terminals {
-                if self.unavailable.contains_key(pane) || !active.contains(terminal.workspace()) {
-                    continue;
-                }
-                match runtime.host.reconcile_session(
-                    runtime.state_directory,
-                    runtime.session_socket_id,
-                    terminal,
-                ) {
-                    Ok(true) => {
-                        self.pending.dirty.entry(pane.clone()).or_default();
-                    }
-                    Ok(false) => (),
-                    Err(error) => {
-                        self.unavailable.insert(pane.clone(), error.to_string());
-                        self.pending.dirty.entry(pane.clone()).or_default();
-                    }
-                }
-            }
-            if !self.pending.is_empty() {
-                self.reconcile_pending(runtime)?;
-            }
             let mut errors = Vec::new();
             for space in active_spaces(runtime)? {
                 let scoped = LifecycleRuntime {
@@ -363,12 +368,73 @@ impl Subscriber {
         if !self.initialized && pending.snapshot.is_none() {
             pending.full = true;
         }
-        let result = self.reconcile_batch(&mut pending, runtime);
+        let result = self
+            .reconcile_batch(&mut pending, runtime)
+            .and_then(|()| self.schedule_owner_watches(&pending, runtime));
         if result.is_err() {
             self.pending = pending;
             self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
         }
         result
+    }
+
+    fn schedule_owner_watches<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
+        &mut self,
+        pending: &Pending,
+        runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
+    ) -> Result<(), String> {
+        let active: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
+        let mut panes: BTreeSet<_> = BTreeSet::new();
+        panes.extend(
+            pending
+                .dirty
+                .iter()
+                .filter(|(pane, change)| change.watch || self.owner_watches.contains_key(*pane))
+                .map(|(pane, _)| pane.clone()),
+        );
+        if pending.full || pending.snapshot.is_some() {
+            panes.extend(self.terminals.keys().cloned());
+            panes.extend(self.owner_watches.keys().cloned());
+        }
+        for pane in panes {
+            let generation = self
+                .terminals
+                .get(&pane)
+                .filter(|terminal| {
+                    terminal.state == "live"
+                        && active.contains(terminal.workspace())
+                        && matches!(
+                            terminal.occupancy(),
+                            Occupancy::Agent {
+                                session: Some(_),
+                                state: AgentState::Background | AgentState::Foreground(None),
+                                ..
+                            }
+                        )
+                })
+                .map(|terminal| SessionGeneration {
+                    session: terminal.labels["namedrop.session"].clone(),
+                    pid: terminal.labels["namedrop.session.pid"].clone(),
+                    start: terminal.labels["namedrop.session.start"].clone(),
+                });
+            match generation {
+                Some(generation)
+                    if self
+                        .owner_watches
+                        .get(&pane)
+                        .is_none_or(|watch| watch.generation == generation) =>
+                {
+                    self.owner_watches.entry(pane).or_insert(OwnerWatch {
+                        generation,
+                        due_ms: runtime.clock.now_unix_ms().saturating_add(500),
+                    });
+                }
+                _ => {
+                    self.owner_watches.remove(&pane);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn reconcile_batch<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(

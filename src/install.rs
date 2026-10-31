@@ -29,6 +29,7 @@ const CLAUDE_MANIFEST_FILE: &str = ".claude-plugin/plugin.json";
 const HOOKS_FILE: &str = "hooks/hooks.json";
 const HOOK_SCRIPT_FILE: &str = "scripts/user-prompt-submit";
 const SESSION_START_SCRIPT_FILE: &str = "scripts/session-start";
+const SESSION_END_SCRIPT_FILE: &str = "scripts/session-end";
 const MARKETPLACE_FILE: &str = ".agents/plugins/marketplace.json";
 const CODEX_RULES_MARKER: &str = "# Managed by Namedrop: collaboration command permissions.\n";
 const INSTALLED_COMMAND_MARKER: &str = "<!-- namedrop-installed-command -->";
@@ -577,7 +578,10 @@ fn prepare_integration_package(
     let hook = hook_script_for_context(context, runtime, executable, state_directory, false)?;
     let session_start =
         hook_script_for_context(context, runtime, executable, state_directory, true)?;
-    let cache_inputs = [
+    let session_end = context.hc.then(|| format!(
+        "#!/bin/sh\n{HC_HOOK_PREAMBLE}\"$HOME/.local/bin/namedrop-app\" --hc-hook hook session-end --state-directory \"$namedrop_state\" >/dev/null 2>&1\nexit 0\n"
+    ));
+    let mut cache_inputs = vec![
         runtime.as_str(),
         &instructions,
         package.tool_descriptor,
@@ -585,8 +589,11 @@ fn prepare_integration_package(
         &hook,
         &session_start,
     ];
+    if let Some(script) = &session_end {
+        cache_inputs.push(script);
+    }
     let codex_version = codex_cache_version(&cache_inputs);
-    let files = vec![
+    let mut files = vec![
         (OWNERSHIP_MARKER_FILE, ownership_marker(), None),
         (INSTRUCTIONS_FILE, instructions, None),
         (DESCRIPTOR_FILE, package.tool_descriptor.to_owned(), None),
@@ -609,6 +616,9 @@ fn prepare_integration_package(
             None,
         ),
     ];
+    if let Some(script) = session_end {
+        files.push((SESSION_END_SCRIPT_FILE, script, Some(0o700)));
+    }
     let directories = PACKAGE_DIRECTORIES.to_vec();
     verify_owned_plugin_targets(&directory, &files, &directories)?;
     let codex_policy = if runtime == AgentRuntime::Codex {
@@ -1162,27 +1172,32 @@ fn hooks_manifest(package_directory: &Path, hc: bool) -> Result<String, String> 
             shell_single_quote(fallback)
         ))
     };
-    Ok(format!(
-        "{}\n",
-        json!({
-            "hooks": {
-                "SessionStart": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": launch(SESSION_START_SCRIPT_FILE)?,
-                        "timeout": timeout
-                    }]
-                }],
-                "UserPromptSubmit": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": launch(HOOK_SCRIPT_FILE)?,
-                        "timeout": timeout
-                    }]
+    let mut manifest = json!({
+        "hooks": {
+            "SessionStart": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": launch(SESSION_START_SCRIPT_FILE)?,
+                    "timeout": timeout
                 }]
-            }
-        })
-    ))
+            }],
+            "UserPromptSubmit": [{
+                "hooks": [{
+                    "type": "command",
+                    "command": launch(HOOK_SCRIPT_FILE)?,
+                    "timeout": timeout
+                }]
+            }]
+        }
+    });
+    if hc {
+        manifest["hooks"]["SessionEnd"] = json!([{ "hooks": [{
+            "type": "command",
+            "command": launch(SESSION_END_SCRIPT_FILE)?,
+            "timeout": timeout
+        }] }]);
+    }
+    Ok(format!("{manifest}\n"))
 }
 
 fn marketplace_manifest(marketplace: &str) -> String {
@@ -1655,6 +1670,67 @@ mod owner_review_tests;
 #[cfg(test)]
 mod session_end_tests {
     use super::*;
+    #[test]
+    fn installed_hc_session_end_forwards_input_and_declines_missing_identity() {
+        use crate::test_environment::CommandHome;
+        use std::process::{Command, Stdio};
+        let root = std::env::temp_dir().join(format!(
+            "namedrop-session-end-install-{}",
+            std::process::id()
+        ));
+        let home = root.join("home");
+        let state = root.join("state");
+        fs::create_dir_all(home.join(".local/bin")).unwrap();
+        let launcher = home.join(".local/bin/namedrop-app");
+        fs::write(
+            &launcher,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$HOME/argv\"\ncat > \"$HOME/input\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+        for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+            let directory = install_integration_package_with_config(
+                &PackageContext::new(&home, true),
+                runtime,
+                &launcher,
+                &state,
+                AgentConfigDirectories::default(),
+            )
+            .unwrap();
+            let script = directory.join(SESSION_END_SCRIPT_FILE);
+            assert!(script.is_file());
+            let input = br#"{"hook_event_name":"SessionEnd","session_id":"old"}"#;
+            let mut child = Command::new(&script)
+                .isolated_env(&home)
+                .env("PATH", "/usr/bin:/bin")
+                .env("HC_TERMINAL_ID", "t1")
+                .env("NAMEDROP_STATE_DIR", &state)
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(input).unwrap();
+            assert!(child.wait().unwrap().success());
+            assert_eq!(fs::read(home.join("input")).unwrap(), input);
+            assert_eq!(
+                fs::read_to_string(home.join("argv")).unwrap(),
+                format!(
+                    "--hc-hook\nhook\nsession-end\n--state-directory\n{}\n",
+                    state.display()
+                )
+            );
+            fs::remove_file(home.join("argv")).unwrap();
+            assert!(
+                Command::new(&script)
+                    .isolated_env(&home)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(!home.join("argv").exists());
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn hc_manifest_installs_session_end() {
         let manifest: Value =

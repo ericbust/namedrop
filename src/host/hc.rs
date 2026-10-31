@@ -668,6 +668,15 @@ impl<E: HerdrCommandExecutor> HcHost<'_, E> {
             .map_err(Into::into)
     }
 
+    pub fn end_session(&self, state: &Path, pane: &str, session: &str) -> Result<(), HostError> {
+        let _lock = label_lock(state)?;
+        let mut terminal = self.terminal(pane, None)?;
+        if terminal.labels.get("namedrop.session").map(String::as_str) == Some(session) {
+            self.clear_session(&mut terminal)?;
+        }
+        Ok(())
+    }
+
     pub fn invalidate_session(&self, state: &Path, pane: &str) -> Result<(), HostError> {
         let _lock = label_lock(state)?;
         let mut terminal = self.terminal(pane, None)?;

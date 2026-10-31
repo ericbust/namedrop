@@ -206,6 +206,15 @@ impl Cli {
         }
     }
 
+    pub fn session_end_hook_state_directory(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::SessionEnd(args),
+            } => Some(&args.state_directory),
+            _ => None,
+        }
+    }
+
     pub fn is_agent_status_changed_hook(&self) -> bool {
         matches!(
             self.command,
@@ -705,6 +714,7 @@ enum HookCommand {
     AgentStatusWorker,
     MailboxWake(HookArgs),
     SessionStart(HookArgs),
+    SessionEnd(HookArgs),
     UserPromptSubmit(HookArgs),
 }
 
@@ -714,6 +724,7 @@ impl HookCommand {
             Self::AgentStatusChanged => "hook.agent-status-changed",
             Self::AgentStatusWorker => "hook.agent-status-worker",
             Self::MailboxWake(_) => "hook.mailbox-wake",
+            Self::SessionEnd(_) => "hook.session-end",
             Self::SessionStart(_) => "hook.session-start",
             Self::UserPromptSubmit(_) => "hook.user-prompt-submit",
         }

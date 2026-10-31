@@ -105,6 +105,7 @@ fn check(
         serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout")).unwrap();
     t["pid"] = json!(agent.pid());
     t["foreground"] = json!({"pid":agent.pid(),"name":"codex","argv":["codex"]});
+    t["status"] = json!({"state":"working"});
     t["labels"]["namedrop.session"] = json!("original");
     t["labels"]["namedrop.session.pid"] = json!(agent.pid().to_string());
     t["labels"]["namedrop.session.start"] = json!(process::start(agent.pid()));
@@ -128,7 +129,7 @@ fn check(
     };
     namedrop::execute_lifecycle_operation(
         "name",
-        json!({"alias":"alice","pane_type":"agent"}),
+        json!({"alias":"alice","pane_type":"terminal"}),
         &runtime,
     )
     .unwrap();
@@ -137,7 +138,7 @@ fn check(
 }
 #[test]
 fn delayed_sigint_exit_clears_without_another_event() {
-    for kind in ["foreground", "status"] {
+    for kind in ["foreground", "status", "status-null"] {
         check(kind, |fixture, runtime, agent| {
             let mut subscriber = namedrop::host::hc::events::Subscriber::default();
             subscriber
@@ -146,10 +147,23 @@ fn delayed_sigint_exit_clears_without_another_event() {
                     runtime,
                 )
                 .unwrap();
-            fixture.terminals.borrow_mut()[0]["foreground"] =
-                json!({"pid":0,"name":"bash","argv":["bash"]});
+            if kind == "status-null" {
+                fixture.terminals.borrow_mut()[0]["status"] = Value::Null;
+            } else {
+                fixture.terminals.borrow_mut()[0]["foreground"] =
+                    json!({"pid":0,"name":"bash","argv":["bash"]});
+            }
             assert_eq!(unsafe { libc::kill(agent.pid() as i32, libc::SIGINT) }, 0);
-            subscriber.handle_line(&event(kind), runtime).unwrap();
+            subscriber
+                .handle_line(
+                    &event(if kind == "status-null" {
+                        "status"
+                    } else {
+                        kind
+                    }),
+                    runtime,
+                )
+                .unwrap();
             assert_eq!(
                 fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
                 "original"
@@ -174,6 +188,19 @@ fn delayed_sigint_exit_clears_without_another_event() {
                 "",
                 "session remained after due checks without another event"
             );
+            let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+            let addresses = namedrop::StateStore::open(runtime.state_directory)
+                .unwrap()
+                .transaction(|tx| tx.list_pane_addresses(&namespace))
+                .unwrap();
+            assert!(
+                addresses
+                    .iter()
+                    .find(|address| address.alias == "alice")
+                    .unwrap()
+                    .agent_session_id
+                    .is_none()
+            );
             assert!(started.elapsed() < Duration::from_secs(2));
             let calls = fixture.calls.borrow();
             assert!(
@@ -188,4 +215,180 @@ fn delayed_sigint_exit_clears_without_another_event() {
             );
         });
     }
+}
+
+#[test]
+fn background_watch_repeats_then_disarms_on_foreground_return() {
+    check("return", |fixture, runtime, _| {
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(
+                &json!({"terminals": *fixture.terminals.borrow()}).to_string(),
+                runtime,
+            )
+            .unwrap();
+        let foreground = fixture.terminals.borrow()[0]["foreground"].clone();
+        fixture.terminals.borrow_mut()[0]["foreground"] =
+            json!({"pid":0,"name":"bash","argv":["bash"]});
+        subscriber
+            .handle_line(&event("foreground"), runtime)
+            .unwrap();
+        fixture.calls.borrow_mut().clear();
+        for now in [10_500, 11_000, 11_500, 12_000, 12_500] {
+            subscriber
+                .tick(&LifecycleRuntime {
+                    clock: &TestClock(now),
+                    ..*runtime
+                })
+                .unwrap();
+        }
+        let gets = fixture
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c[0] == "get")
+            .count();
+        assert_eq!(gets, 5, "each due check must fetch only its target once");
+        assert!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .all(|c| c[0] != "ls" && !(c[0] == "get" && c[1] != "t1")),
+            "{:?}",
+            fixture.calls.borrow()
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "original"
+        );
+        fixture.terminals.borrow_mut()[0]["foreground"] = foreground;
+        subscriber
+            .handle_line(
+                &event("foreground"),
+                &LifecycleRuntime {
+                    clock: &TestClock(12_500),
+                    ..*runtime
+                },
+            )
+            .unwrap();
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .tick(&LifecycleRuntime {
+                clock: &TestClock(13_000),
+                ..*runtime
+            })
+            .unwrap();
+        assert!(
+            fixture.calls.borrow().is_empty(),
+            "foreground return left a watch armed"
+        );
+    });
+}
+
+#[test]
+fn due_watch_preserves_and_disarms_for_replacement_generation() {
+    check("replacement", |fixture, runtime, _| {
+        fixture.terminals.borrow_mut()[0]["foreground"] =
+            json!({"pid":0,"name":"bash","argv":["bash"]});
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(
+                &json!({"terminals": *fixture.terminals.borrow()}).to_string(),
+                runtime,
+            )
+            .unwrap();
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("replacement");
+        subscriber
+            .tick(&LifecycleRuntime {
+                clock: &TestClock(10_500),
+                ..*runtime
+            })
+            .unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "replacement"
+        );
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .tick(&LifecycleRuntime {
+                clock: &TestClock(11_000),
+                ..*runtime
+            })
+            .unwrap();
+        assert!(
+            fixture.calls.borrow().is_empty(),
+            "old generation watch survived replacement"
+        );
+    });
+}
+
+#[test]
+fn matching_session_end_clears_live_owner_and_stale_end_preserves_replacement() {
+    check("end", |fixture, runtime, agent| {
+        runtime
+            .host
+            .end_session(runtime.state_directory, "t1", "stale")
+            .unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "original"
+        );
+        runtime
+            .host
+            .end_session(runtime.state_directory, "t1", "original")
+            .unwrap();
+        assert!(agent.0.try_wait().unwrap().is_none());
+        for key in [
+            "namedrop.session",
+            "namedrop.session.pid",
+            "namedrop.session.start",
+        ] {
+            assert_eq!(fixture.terminals.borrow()[0]["labels"][key], "");
+        }
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("replacement");
+        runtime
+            .host
+            .end_session(runtime.state_directory, "t1", "original")
+            .unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "replacement"
+        );
+    });
+}
+
+#[test]
+fn unactivated_workspace_has_no_owner_watch() {
+    check("inactive", |fixture, runtime, _| {
+        let fresh = runtime.state_directory.join("unactivated");
+        let runtime = LifecycleRuntime {
+            state_directory: &fresh,
+            ..*runtime
+        };
+        fixture.terminals.borrow_mut()[0]["foreground"] =
+            json!({"pid":0,"name":"bash","argv":["bash"]});
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(
+                &json!({"terminals": *fixture.terminals.borrow()}).to_string(),
+                &runtime,
+            )
+            .unwrap();
+        subscriber
+            .handle_line(&event("foreground"), &runtime)
+            .unwrap();
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .tick(&LifecycleRuntime {
+                clock: &TestClock(10_500),
+                ..runtime
+            })
+            .unwrap();
+        assert!(fixture.calls.borrow().is_empty());
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "original"
+        );
+    });
 }
