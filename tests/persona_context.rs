@@ -1,6 +1,9 @@
 //! What the installed hook actually hands a native session at a prompt or task
 //! boundary: the current workspace persona roster, without changing how explicit
 //! Mentions route or how a Delivery Envelope authenticates.
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use namedrop::{
@@ -67,7 +70,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.root).unwrap();
+        cleanup::remove_fixture(&self.root).unwrap();
     }
 }
 

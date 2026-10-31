@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{AgentRuntime, install_integration_package};
 #[path = "support/update_profile.rs"]
 mod update_profile;
