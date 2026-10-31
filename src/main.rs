@@ -987,9 +987,10 @@ fn pending_agent_status_reconciliations(directory: &Path) -> io::Result<Vec<Path
 fn pending_agent_status_reconciliations_with_retry(
     directory: &Path,
     failures: &mut usize,
+    scan: &mut impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
 ) -> io::Result<Vec<PathBuf>> {
     loop {
-        match pending_agent_status_reconciliations(directory) {
+        match scan(directory) {
             Ok(pending) => return Ok(pending),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Err(error),
             Err(_) => wait_for_reconciliation_retry(failures, false),
@@ -1016,11 +1017,19 @@ fn run_agent_status_worker() -> ExitCode {
     if lock.try_lock().is_err() {
         return ExitCode::SUCCESS;
     }
+    run_agent_status_worker_queue(&directory, lock, pending_agent_status_reconciliations)
+}
+
+fn run_agent_status_worker_queue(
+    directory: &Path,
+    lock: fs::File,
+    mut scan: impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
+) -> ExitCode {
     let mut failures = 0_usize;
     let mut deadline_ms: Option<u64> = None;
     loop {
         let Ok(pending) =
-            pending_agent_status_reconciliations_with_retry(&directory, &mut failures)
+            pending_agent_status_reconciliations_with_retry(directory, &mut failures, &mut scan)
         else {
             return ExitCode::SUCCESS;
         };
@@ -1046,10 +1055,7 @@ fn run_agent_status_worker() -> ExitCode {
             // A producer can queue after our empty scan, then lose try_lock
             // while we still own it. Recheck only after releasing ownership:
             // either we reclaim the queued work or its new worker owns it.
-            if pending_agent_status_reconciliations(&directory)
-                .is_ok_and(|pending| !pending.is_empty())
-                && lock.try_lock().is_ok()
-            {
+            if scan(directory).is_ok_and(|pending| !pending.is_empty()) && lock.try_lock().is_ok() {
                 continue;
             }
             return ExitCode::SUCCESS;
@@ -1168,51 +1174,178 @@ mod worker_shutdown_tests {
     }
 
     #[test]
-    fn an_outer_queue_scan_retries_until_pending_work_can_be_read() {
-        let directory =
-            env::temp_dir().join(format!("namedrop-outer-queue-{}", std::process::id()));
-        let restored = directory.with_extension("restored");
-        let replacement = directory.with_extension("replacement");
-        fs::write(&directory, b"not a directory").unwrap();
-        fs::create_dir(&restored).unwrap();
-        fs::write(restored.join("pending-test"), b"{}").unwrap();
-        std::os::unix::fs::symlink(&restored, &replacement).unwrap();
-        let queue = directory.clone();
-        let (done, finished) = std::sync::mpsc::channel();
-        let reader = thread::spawn(move || {
-            done.send(pending_agent_status_reconciliations_with_retry(
-                &queue, &mut 0,
-            ))
-            .unwrap();
-        });
-        let early = finished.recv_timeout(Duration::from_millis(50));
-        fs::rename(&replacement, &directory).unwrap();
-        let recovered = finished.recv_timeout(Duration::from_secs(2));
-        reader.join().unwrap();
-        fs::remove_file(&directory).unwrap();
-        fs::remove_dir_all(&restored).unwrap();
-        assert!(
-            matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout)),
-            "outer scan abandoned a recoverable queue: {early:?}"
+    fn an_outer_queue_scan_retries_transient_errors_until_pending_work_can_be_read() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EINTR,
+            libc::EAGAIN,
+            libc::ENOMEM,
+        ] {
+            let queue = QueueFixture::new(&format!("outer-transient-{errno}"));
+            let marker = queue.0.join("pending-test");
+            fs::write(&marker, b"invalid marker").unwrap();
+            let mut scans = 0;
+            let started = std::time::Instant::now();
+            let recovered = pending_agent_status_reconciliations_with_retry(
+                &queue.0,
+                &mut 0,
+                &mut |directory| {
+                    scans += 1;
+                    if scans == 1 {
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        pending_agent_status_reconciliations(directory)
+                    }
+                },
+            );
+            assert_eq!(recovered.unwrap(), vec![marker], "errno={errno}");
+            assert!(started.elapsed() >= Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn an_outer_queue_scan_stops_on_permanent_errors_without_retrying() {
+        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+            let mut scans = 0;
+            let result = pending_agent_status_reconciliations_with_retry(
+                Path::new("unused"),
+                &mut 0,
+                &mut |_| {
+                    scans += 1;
+                    if scans == 1 {
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+            );
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(errno));
+            assert_eq!(scans, 1, "permanent errno={errno} was retried");
+        }
+    }
+
+    struct QueueFixture(PathBuf);
+
+    impl QueueFixture {
+        fn new(name: &str) -> Self {
+            let directory =
+                env::temp_dir().join(format!("namedrop-queue-{name}-{}", std::process::id()));
+            fs::create_dir(&directory).unwrap();
+            Self(directory)
+        }
+
+        fn lock(&self) -> fs::File {
+            let lock = fs::File::create(self.0.join("worker.lock")).unwrap();
+            lock.try_lock().unwrap();
+            lock
+        }
+    }
+
+    impl Drop for QueueFixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_unlock_recheck_retries_transient_errors_and_reclaims_queued_work() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EINTR,
+            libc::EAGAIN,
+            libc::ENOMEM,
+        ] {
+            let queue = QueueFixture::new(&format!("unlock-transient-{errno}"));
+            let marker = queue.0.join("pending-handoff");
+            let lock = queue.lock();
+            let observer = fs::File::open(queue.0.join("worker.lock")).unwrap();
+            let mut scans = 0;
+            assert_eq!(
+                run_agent_status_worker_queue(&queue.0, lock, |directory| {
+                    scans += 1;
+                    if scans == 2 {
+                        observer
+                            .try_lock()
+                            .expect("handoff scan must release worker ownership");
+                        observer.unlock().unwrap();
+                        fs::write(&marker, b"invalid marker").unwrap();
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        pending_agent_status_reconciliations(directory)
+                    }
+                }),
+                ExitCode::SUCCESS
+            );
+            assert!(
+                !marker.exists(),
+                "errno={errno} stranded the handoff marker"
+            );
+            observer
+                .try_lock()
+                .expect("worker must release its lock when done");
+        }
+    }
+
+    #[test]
+    fn a_retried_unlock_recheck_preserves_a_successors_lock_ownership() {
+        let queue = QueueFixture::new("unlock-successor");
+        let marker = queue.0.join("pending-handoff");
+        let lock = queue.lock();
+        let successor = fs::File::open(queue.0.join("worker.lock")).unwrap();
+        let mut scans = 0;
+        assert_eq!(
+            run_agent_status_worker_queue(&queue.0, lock, |directory| {
+                scans += 1;
+                if scans == 2 {
+                    successor
+                        .try_lock()
+                        .expect("successor must acquire released worker lock");
+                    fs::write(&marker, b"invalid marker").unwrap();
+                    Err(io::Error::from_raw_os_error(libc::EMFILE))
+                } else {
+                    pending_agent_status_reconciliations(directory)
+                }
+            }),
+            ExitCode::SUCCESS
         );
         assert_eq!(
-            recovered.unwrap().unwrap(),
-            vec![directory.join("pending-test")]
+            scans, 3,
+            "handoff scan must recover before checking ownership"
+        );
+        assert!(
+            marker.exists(),
+            "original worker consumed its successor's marker"
+        );
+        assert!(
+            fs::File::open(queue.0.join("worker.lock"))
+                .unwrap()
+                .try_lock()
+                .is_err()
         );
     }
 
     #[test]
-    fn an_outer_queue_scan_stops_when_the_state_directory_is_gone() {
-        let directory = env::temp_dir().join(format!(
-            "namedrop-outer-removed-queue-{}",
-            std::process::id()
-        ));
-        assert_eq!(
-            pending_agent_status_reconciliations_with_retry(&directory, &mut 0)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::NotFound
-        );
+    fn an_unlock_recheck_stops_on_permanent_errors_without_retrying() {
+        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+            let queue = QueueFixture::new(&format!("unlock-permanent-{errno}"));
+            let lock = queue.lock();
+            let mut scans = 0;
+            assert_eq!(
+                run_agent_status_worker_queue(&queue.0, lock, |_| {
+                    scans += 1;
+                    if scans == 1 {
+                        Ok(Vec::new())
+                    } else {
+                        Err(io::Error::from_raw_os_error(errno))
+                    }
+                }),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(scans, 2, "permanent errno={errno} was retried after unlock");
+            queue.lock();
+        }
     }
 
     #[test]
