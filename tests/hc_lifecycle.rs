@@ -159,3 +159,133 @@ fn address_labels(reject: bool) {
         .unwrap();
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn hc_background_lifecycle_preserves_packages_until_a_user_refreshes_them() {
+    use std::{collections::BTreeMap, os::unix::fs::PermissionsExt, path::Path};
+
+    fn snapshot(root: &Path) -> BTreeMap<PathBuf, (u32, Vec<u8>)> {
+        fn visit(root: &Path, path: &Path, result: &mut BTreeMap<PathBuf, (u32, Vec<u8>)>) {
+            let metadata = fs::metadata(path).unwrap();
+            result.insert(
+                path.strip_prefix(root).unwrap().to_owned(),
+                (
+                    metadata.permissions().mode(),
+                    if metadata.is_file() {
+                        fs::read(path).unwrap()
+                    } else {
+                        vec![]
+                    },
+                ),
+            );
+            if metadata.is_dir() {
+                for entry in fs::read_dir(path).unwrap() {
+                    visit(root, &entry.unwrap().path(), result);
+                }
+            }
+        }
+        let mut result = BTreeMap::new();
+        visit(root, root, &mut result);
+        result
+    }
+
+    let root = root("background-packages");
+    let home = root.join("foreign-home");
+    let claude = root.join("foreign-claude-config");
+    let codex = root.join("foreign-codex-config");
+    let state = root.join("state");
+    let fixture = Fixture::new();
+    let clock = SystemClock;
+    let ids = ProcessIds::default();
+    let runtime = LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&home),
+        agent_config: AgentConfigDirectories {
+            claude: Some(&claude),
+            codex: Some(&codex),
+        },
+        cwd: &root,
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:lifecycle",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    let activation =
+        execute_lifecycle_operation("activate", json!({"confirmed":true}), &runtime).unwrap();
+    for agent in ["codex", "claude-code"] {
+        assert_eq!(
+            activation["integration_packages"][agent]["installed"], true,
+            "{activation}"
+        );
+    }
+    let roots = [&home, &claude, &codex];
+    let installed = roots.map(|path| snapshot(path));
+    let command = home.join(".local/bin/namedrop-app");
+    fs::write(
+        &command,
+        "#!/bin/sh\n# Managed by Namedrop: shell command.\ncorrupt bootstrap\n",
+    )
+    .unwrap();
+    fs::set_permissions(&command, fs::Permissions::from_mode(0o400)).unwrap();
+    let damaged = roots.map(|path| snapshot(path));
+    for (operation, input) in [
+        (
+            "event.name",
+            json!({"alias":"background", "pane_type":"terminal"}),
+        ),
+        ("event.reconcile", json!({})),
+        ("reconcile", json!({})),
+    ] {
+        execute_lifecycle_operation(operation, input, &runtime).unwrap();
+        assert_eq!(
+            roots.map(|path| snapshot(path)),
+            damaged,
+            "{operation} changed packages"
+        );
+    }
+    let namespace = StateNamespace::for_space("hc:lifecycle", "fixture-space");
+    let mut store = StateStore::open(&state).unwrap();
+    let addresses = store
+        .transaction(|tx| tx.list_pane_addresses(&namespace))
+        .unwrap();
+    assert_eq!(addresses[0].alias, "background");
+    let attention = store
+        .transaction(|tx| tx.unresolved_attention_items(&namespace))
+        .unwrap();
+    assert_eq!(
+        attention
+            .iter()
+            .filter(|item| item.source_id.starts_with("integration-package"))
+            .count(),
+        2
+    );
+    execute_lifecycle_operation(
+        "address.remove",
+        json!({"address_id": addresses[0].id}),
+        &runtime,
+    )
+    .unwrap();
+    execute_lifecycle_operation(
+        "address.create",
+        json!({"role_name":"Planner", "role_description":"Plan work", "alias":"planner"}),
+        &runtime,
+    )
+    .unwrap();
+    assert!(
+        roots.map(|path| snapshot(path)) == damaged,
+        "address.create changed packages"
+    );
+    execute_lifecycle_operation(
+        "name",
+        json!({"alias":"user", "pane_type":"terminal"}),
+        &runtime,
+    )
+    .unwrap();
+    assert!(
+        roots.map(|path| snapshot(path)) == installed,
+        "user name must repair owned package bytes and modes"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
