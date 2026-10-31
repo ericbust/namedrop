@@ -54,6 +54,47 @@ pub struct RuntimeOptions {
     pub herdr_pane: Option<String>,
 }
 
+impl RuntimeOptions {
+    pub fn host_kind(&self) -> Result<crate::runtime::HostKind, String> {
+        use crate::runtime::HostKind;
+        let explicit = self.host.or_else(|| {
+            if self.herdr_socket.is_some()
+                || self.herdr_workspace.is_some()
+                || self.herdr_pane.is_some()
+            {
+                Some(HostKind::Tui)
+            } else if self.hc_terminal.is_some() || self.hc_space.is_some() {
+                Some(HostKind::Hc)
+            } else {
+                None
+            }
+        });
+        HostKind::from_environment(explicit)
+    }
+
+    pub fn state_directory(&self) -> Result<PathBuf, String> {
+        let host = self.host_kind()?;
+        self.plugin_state
+            .clone()
+            .or_else(|| {
+                std::env::var_os(match host {
+                    crate::runtime::HostKind::Tui => "HERDR_PLUGIN_STATE_DIR",
+                    crate::runtime::HostKind::Hc => "NAMEDROP_STATE_DIR",
+                })
+                .map(PathBuf::from)
+            })
+            .map(Ok)
+            .unwrap_or_else(|| match host {
+                crate::runtime::HostKind::Hc => {
+                    crate::runtime::hc_state_directory(|key| std::env::var(key).ok())
+                }
+                crate::runtime::HostKind::Tui => {
+                    Err("HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())
+                }
+            })
+    }
+}
+
 impl Cli {
     pub fn human_output(&self, terminal: bool) -> bool {
         self.human || (!self.json && terminal && !self.machine_operation())

@@ -126,12 +126,7 @@ fn main() -> ExitCode {
             cli.session_start_hook_state_directory()
                 .map(Path::to_path_buf)
         })
-        .or_else(|| match HostKind::from_environment(cli.runtime.host) {
-            Ok(HostKind::Hc) => env::var_os("NAMEDROP_STATE_DIR")
-                .map(PathBuf::from)
-                .or_else(|| hc_state_directory(|key| env::var(key).ok()).ok()),
-            _ => env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from),
-        });
+        .or_else(|| cli.runtime.state_directory().ok());
     // A dashboard successor started mid-update waits a bounded time rather
     // than parking forever behind a stuck migration.
     let gate_wait = cli.is_dashboard_server().then_some(Duration::from_secs(60));
@@ -163,7 +158,7 @@ fn main() -> ExitCode {
     }
     if cli.operation() == "events" {
         drop(command_guard.take());
-        let result = HostKind::from_environment(cli.runtime.host).and_then(|kind| {
+        let result = cli.runtime.host_kind().and_then(|kind| {
             if kind != HostKind::Hc {
                 return Err("events requires --host hc".to_owned());
             }
@@ -695,21 +690,8 @@ fn with_runtime_options<T>(
     options: &RuntimeOptions,
     action: impl FnOnce(&ProcessRuntime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let kind = HostKind::from_environment(options.host)?;
-    let state_directory = options
-        .plugin_state
-        .clone()
-        .or_else(|| env::var_os("NAMEDROP_STATE_DIR").map(PathBuf::from))
-        .or_else(|| {
-            (kind == HostKind::Tui)
-                .then(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
-                .flatten()
-        })
-        .map(Ok)
-        .unwrap_or_else(|| match kind {
-            HostKind::Hc => hc_state_directory(|key| env::var(key).ok()),
-            HostKind::Tui => Err("HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned()),
-        })?;
+    let kind = options.host_kind()?;
+    let state_directory = options.state_directory()?;
     let home_directory = env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute());
@@ -787,7 +769,7 @@ fn run_context_hook(
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    let hc = HostKind::from_environment(options.host) == Ok(HostKind::Hc);
+    let hc = options.host_kind() == Ok(HostKind::Hc);
     let mut hc_active = false;
     let state_directory = options.plugin_state.as_deref().unwrap_or(state_directory);
     let mut output = (!hc)
@@ -867,7 +849,7 @@ fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
 fn run_mailbox_wake_hook(state_directory: &Path, options: &RuntimeOptions) -> ExitCode {
     let state_directory = options.plugin_state.as_deref().unwrap_or(state_directory);
     let wake = || -> Result<(), String> {
-        let kind = HostKind::from_environment(options.host)?;
+        let kind = options.host_kind()?;
         let transport = ProcessHerdr::for_host(kind).with_socket(options.herdr_socket.clone());
         let host = RuntimeHost::new(kind, &transport);
         let socket_id = if kind == HostKind::Hc {
@@ -1019,7 +1001,7 @@ fn status_worker_command(options: &RuntimeOptions) -> Result<Command, String> {
 }
 
 fn agent_status_reconciliation_directory(options: &RuntimeOptions) -> Result<PathBuf, String> {
-    if HostKind::from_environment(options.host)? == HostKind::Hc {
+    if options.host_kind()? == HostKind::Hc {
         return with_runtime_options(options, |runtime| {
             reconciliation_directory(
                 runtime.state_directory,
