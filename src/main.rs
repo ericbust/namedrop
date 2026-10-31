@@ -688,7 +688,10 @@ mod session_event_tests {
     #[test]
     fn hc_status_worker_carries_explicit_host_with_state() {
         let options = super::worker_options(
-            &super::RuntimeOptions::default(),
+            &super::RuntimeOptions {
+                host: Some(super::HostKind::Hc),
+                ..Default::default()
+            },
             std::path::Path::new("/state"),
             "hc:session",
             "space",
@@ -1121,7 +1124,10 @@ fn worker_options(
     namespace: &str,
     space: &str,
 ) -> RuntimeOptions {
-    let hc = namespace.starts_with("hc:");
+    let hc = options
+        .host_kind()
+        .expect("worker host was selected before queuing")
+        == HostKind::Hc;
     RuntimeOptions {
         plugin_state: Some(state.to_path_buf()),
         host: Some(if hc { HostKind::Hc } else { HostKind::Tui }),

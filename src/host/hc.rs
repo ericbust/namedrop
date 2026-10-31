@@ -560,6 +560,13 @@ fn git_root(cwd: &Path) -> Option<PathBuf> {
 }
 
 impl<E: HerdrCommandExecutor> Host for HcHost<E> {
+    fn kind(&self) -> crate::runtime::HostKind {
+        crate::runtime::HostKind::Hc
+    }
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        self.transport.environment_snapshot()
+    }
+
     fn space(
         &self,
         at: SpaceLocator<'_>,

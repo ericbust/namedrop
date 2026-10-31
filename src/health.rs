@@ -1051,7 +1051,7 @@ fn issue(
     }
 }
 
-fn add_operation<H, C, I>(
+fn add_operation<H: crate::Host, C, I>(
     issue: &mut HealthIssue,
     runtime: &LifecycleRuntime<'_, H, C, I>,
     space_id: &str,

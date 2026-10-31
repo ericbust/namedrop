@@ -125,6 +125,12 @@ pub struct Process {
 }
 
 pub trait Host {
+    fn kind(&self) -> crate::runtime::HostKind {
+        crate::runtime::HostKind::Tui
+    }
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        None
+    }
     fn space(
         &self,
         at: SpaceLocator<'_>,

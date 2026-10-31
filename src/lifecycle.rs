@@ -62,11 +62,13 @@ pub struct LifecycleRuntime<'a, H, C, I> {
     pub ids: &'a I,
 }
 
-impl<H, C, I> LifecycleRuntime<'_, H, C, I> {
+impl<H: Host, C, I> LifecycleRuntime<'_, H, C, I> {
     pub fn is_hc(&self) -> bool {
-        self.session_socket_id.starts_with("hc:")
+        self.host.kind() == crate::runtime::HostKind::Hc
     }
+}
 
+impl<H, C, I> LifecycleRuntime<'_, H, C, I> {
     pub fn space_locator(&self) -> crate::SpaceLocator<'_> {
         match self.workspace_id {
             Some(workspace) => crate::SpaceLocator::Workspace(workspace),

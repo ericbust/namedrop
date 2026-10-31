@@ -485,6 +485,7 @@ where
         let tool = IntegrationToolInvocation::new(
             crate::integration::tool_executable(runtime.home_directory, runtime.is_hc())?,
             tool_environment(
+                &runtime.host,
                 runtime.state_directory,
                 runtime.session_socket_id,
                 &second_discovery.workspace_id,

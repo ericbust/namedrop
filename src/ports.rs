@@ -31,6 +31,14 @@ pub trait HerdrCommandExecutor {
         None
     }
 
+    fn state_directory(&self) -> Option<&std::path::Path> {
+        None
+    }
+
+    fn open_hc_popup(&self, _args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        Err("HC popups are unavailable with this executor".to_owned())
+    }
+
     /// A bounded read for latency-sensitive UI. Process-backed executors must
     /// enforce the deadline and cancellation while their child is running.
     fn execute_bounded(
@@ -62,6 +70,14 @@ impl<T: HerdrCommandExecutor + ?Sized> HerdrCommandExecutor for &T {
 
     fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
         (**self).environment_snapshot()
+    }
+
+    fn state_directory(&self) -> Option<&std::path::Path> {
+        (**self).state_directory()
+    }
+
+    fn open_hc_popup(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        (**self).open_hc_popup(args)
     }
 
     fn execute_bounded(

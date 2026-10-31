@@ -219,12 +219,13 @@ pub fn describe_operations(token: Option<&str>) -> Result<Value, String> {
 /// registered session addresses the Worktree, socket, and pane the plugin
 /// resolved rather than whatever its own shell holds.
 pub(crate) fn tool_environment(
+    host: &impl crate::Host,
     state_directory: &Path,
     session_socket_id: &str,
     workspace_id: &str,
     pane_id: &str,
 ) -> BTreeMap<String, String> {
-    if session_socket_id.starts_with("hc:") {
+    if host.kind() == crate::runtime::HostKind::Hc {
         let mut environment = BTreeMap::from([
             ("NAMEDROP_HOST".to_owned(), "hc".to_owned()),
             (
@@ -616,6 +617,7 @@ where
 
     let executable = tool_executable(runtime.home_directory, runtime.is_hc())?;
     let prompt = registration_prompt(
+        runtime.host.kind(),
         runtime.state_directory,
         runtime.session_socket_id,
         &current.workspace_id,
@@ -863,7 +865,9 @@ fn concurrent_native_registration_completes_one_profile() {
 
 /// An agent-authored registration challenge used when automatic registration
 /// cannot complete without one visible model turn.
-pub fn registration_prompt(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn registration_prompt(
+    host: crate::runtime::HostKind,
     state_directory: &Path,
     session_socket_id: &str,
     workspace_id: &str,
@@ -873,6 +877,7 @@ pub fn registration_prompt(
     nonce: &str,
 ) -> Result<String, String> {
     let command = registration_command(
+        host,
         state_directory,
         session_socket_id,
         workspace_id,
@@ -900,7 +905,9 @@ pub fn registration_prompt(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn registration_command(
+    host: crate::runtime::HostKind,
     state_directory: &Path,
     session_socket_id: &str,
     workspace_id: &str,
@@ -929,7 +936,7 @@ pub(crate) fn registration_command(
         "nonce": nonce,
         "capabilities": complete_capability_profile(),
     });
-    let location = if session_socket_id.starts_with("hc:") {
+    let location = if host == crate::runtime::HostKind::Hc {
         format!(
             "--host hc --hc-space {} --hc-terminal {}",
             shell_single_quote(workspace_id),
@@ -943,12 +950,12 @@ pub(crate) fn registration_command(
             shell_single_quote(pane_id)
         )
     };
-    let prefix = if session_socket_id.starts_with("hc:") {
+    let prefix = if host == crate::runtime::HostKind::Hc {
         "register --plugin-state"
     } else {
         "--plugin-state"
     };
-    let suffix = if session_socket_id.starts_with("hc:") {
+    let suffix = if host == crate::runtime::HostKind::Hc {
         ""
     } else {
         " register"
@@ -1104,6 +1111,7 @@ where
     response["tool"] = serde_json::to_value(IntegrationToolInvocation::new(
         executable,
         tool_environment(
+            &runtime.host,
             runtime.state_directory,
             runtime.session_socket_id,
             &discovered.workspace_id,
@@ -1280,6 +1288,7 @@ where
     let tool = IntegrationToolInvocation::new(
         tool_executable(runtime.home_directory, runtime.is_hc())?,
         tool_environment(
+            &runtime.host,
             runtime.state_directory,
             runtime.session_socket_id,
             &discovered.workspace_id,

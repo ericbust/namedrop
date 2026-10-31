@@ -467,6 +467,10 @@ struct AgentSessionEntry {
     value: String,
 }
 impl<E: HerdrCommandExecutor> Host for TuiHost<E> {
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        self.transport.environment_snapshot()
+    }
+
     fn space(
         &self,
         at: SpaceLocator<'_>,

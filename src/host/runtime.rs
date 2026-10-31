@@ -17,6 +17,18 @@ impl<E: HerdrCommandExecutor> RuntimeHost<E> {
 }
 
 impl<E: HerdrCommandExecutor> Host for RuntimeHost<E> {
+    fn kind(&self) -> HostKind {
+        match self {
+            Self::Tui(_) => HostKind::Tui,
+            Self::Hc(_) => HostKind::Hc,
+        }
+    }
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        match self {
+            Self::Tui(host) => host.environment_snapshot(),
+            Self::Hc(host) => host.environment_snapshot(),
+        }
+    }
     fn space(
         &self,
         at: SpaceLocator<'_>,

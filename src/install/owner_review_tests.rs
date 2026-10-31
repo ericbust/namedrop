@@ -773,7 +773,7 @@ fn hc_command_forms_match_only_operation_scoped_permissions() {
     );
     let tool = json!({
         "executable": executable,
-        "environment": crate::integration::tool_environment(&state, "hc:session", "space", "terminal"),
+        "environment": crate::integration::tool_environment(&crate::HcHost::new(&NoCalls), &state, "hc:session", "space", "terminal"),
         "input_flag": "--input-json",
         "operations": operations.map(|op| json!({"token":op.token, "argv":op.argv, "input":{}})).collect::<Vec<_>>()
     });
@@ -790,6 +790,7 @@ fn hc_command_forms_match_only_operation_scoped_permissions() {
         assert!(command.contains("--host 'hc'"), "{command}");
     }
     let registration = crate::integration::registration_command(
+        crate::runtime::HostKind::Hc,
         &state,
         "hc:session",
         "space",
@@ -1331,6 +1332,7 @@ fn hc_install_uses_one_owned_root_snapshot_for_packages_and_permissions() {
 #[test]
 fn tui_socket_prefix_keeps_tui_tool_environment_and_registration() {
     let env = crate::integration::tool_environment(
+        &crate::TuiHost::new(&NoCalls),
         Path::new("/state"),
         "hc:/fake/herdr.sock",
         "workspace",
@@ -1342,6 +1344,7 @@ fn tui_socket_prefix_keeps_tui_tool_environment_and_registration() {
     );
     assert!(!env.contains_key("NAMEDROP_HOST"));
     let prompt = crate::integration::registration_prompt(
+        crate::runtime::HostKind::Tui,
         Path::new("/state"),
         "hc:/fake/herdr.sock",
         "workspace",

@@ -161,7 +161,7 @@ impl PackageContext {
                     rules,
                 )
             })
-        .map_err(|error| format!("{error}; {}", claude_permissions::REPAIR_GUIDANCE))
+            .map_err(|error| format!("{error}; {}", claude_permissions::REPAIR_GUIDANCE))
     }
 }
 
@@ -992,7 +992,7 @@ where
     record_package_readiness(runtime, discovered, context, outcomes.into_iter().collect())
 }
 
-pub(crate) fn inspect_user_integration_packages<H, C, I>(
+pub(crate) fn inspect_user_integration_packages<H: crate::Host, C, I>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
     discovered: &DiscoveredWorktree,
 ) -> Result<IntegrationPackageInstallation, String>

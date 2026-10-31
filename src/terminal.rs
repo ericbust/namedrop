@@ -11,7 +11,7 @@ use std::{
     thread,
 };
 
-pub(crate) fn runner_command<H, C, I>(
+pub(crate) fn runner_command<H: Host, C, I>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
     workspace: &str,
     pane: &str,
