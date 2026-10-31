@@ -502,7 +502,18 @@ where
             continue;
         }
         let mut attention = health_issue_for_attention(item.source_kind);
-        attention.explanation = crate::context::redact_disclosure_text(&item.summary);
+        let cause = if item.source_kind == AttentionSourceKind::ContextGrant {
+            item.summary
+                .strip_prefix("Shared context failed:")
+                .map(str::trim_start)
+                .unwrap_or(&item.summary)
+        } else {
+            &item.summary
+        };
+        let explanation = crate::context::redact_disclosure_text(cause);
+        if explanation != attention.summary {
+            attention.explanation = explanation;
+        }
         attention.diagnostic = serde_json::json!({"attention_id":item.id,"source_kind":item.source_kind,"source_id":item.source_id});
         match item.source_kind {
             AttentionSourceKind::AutomaticReplyLimit => add_operation(
@@ -596,6 +607,20 @@ where
     {
         return Err("No issues remain; nothing was sent.".to_owned());
     }
+    let alias = StateStore::open_read_only(runtime.state_directory)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|tx| {
+                    tx.routing_author_for_pane(
+                        &crate::StateNamespace::for_space(runtime.session_socket_id, space_id),
+                        pane_id,
+                    )
+                })
+                .ok()
+        })
+        .map(|address| address.alias);
     // Immediately before dispatch: the pane must still hold the exact Agent
     // Session the popup was opened for, so a replacement session can never
     // receive the session-bound diagnostics of the one it replaced.
@@ -604,7 +629,7 @@ where
         runtime.session_socket_id,
         pane_id,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.with_alias(alias.as_deref()).to_string())?;
     let live = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
@@ -810,9 +835,9 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
             "ND-CONTEXT-001",
             HealthSeverity::Notice,
             "Shared context failed.",
-            "Ask the sender to fix the problem and share the context again.",
+            "The recipient could not use the shared context.",
             HealthRepairKind::HumanDecision,
-            "Ask the sender to fix the problem and share the context again?",
+            "Ask the sender to fix the problem and share the context again.",
         ),
         AttentionSourceKind::Coordination => issue(
             "ND-COORDINATION-001",

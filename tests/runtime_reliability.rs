@@ -336,8 +336,10 @@ impl Fixture {
         let scope = namedrop::lower_hex(&Sha256::digest("test-socket\0workspace-1"));
         let directory = self.state().join("agent-status-reconciliation").join(scope);
         fs::create_dir_all(&directory).unwrap();
+        let queued = directory.join(format!("queued-{name}"));
         let marker = directory.join(format!("pending-{name}"));
-        fs::write(&marker, format!(r#"{{"type":"pane_agent_status_changed","pane_id":"{pane_id}","workspace_id":"workspace-1","agent_status":"idle"}}"#)).unwrap();
+        fs::write(&queued, format!(r#"{{"type":"pane_agent_status_changed","pane_id":"{pane_id}","workspace_id":"workspace-1","agent_status":"idle"}}"#)).unwrap();
+        fs::rename(queued, &marker).unwrap();
         marker
     }
 
@@ -394,6 +396,10 @@ impl Drop for Worker {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if let Ok(record) = fs::read(self.state().join("pane-effects-retries.log")) {
+            use std::io::Write;
+            let _ = std::io::stderr().lock().write_all(&record);
+        }
         fs::remove_dir_all(&self.root).unwrap();
     }
 }
@@ -1196,7 +1202,7 @@ fn status_worker_serves_a_marker_written_during_a_grace_wait_without_delay() {
     assert_eq!(fixture.attempt_state(&attempt), DeliveryState::Settled);
 }
 
-fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
+fn temporary_prompt_rejection_retries_without_another_event(code: &str, rejections: usize) {
     let fixture = Fixture::new();
     fixture.initialize();
     fixture.connect_recipient();
@@ -1205,8 +1211,7 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
     fixture.set_herdr(&format!(
         r#"if [ "$1 $2" = 'agent prompt' ]; then
              printf 'x' >> "$NAMEDROP_TEST_FIXTURE/prompts"
-             if [ ! -f "$NAMEDROP_TEST_FIXTURE/rejected-once" ]; then
-             touch "$NAMEDROP_TEST_FIXTURE/rejected-once"
+             if [ "$(wc -c < "$NAMEDROP_TEST_FIXTURE/prompts")" -le {rejections} ]; then
              printf '%s\n' '{{"error":{{"code":"{code}"}}}}' >&2
              exit 1
              fi
@@ -1220,7 +1225,7 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
         Some(1),
         "{code}: {rejected}"
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(if rejections > 1 { 30 } else { 5 });
     while fixture.prompt_counts().1 == 0 {
         assert!(
             Instant::now() < deadline,
@@ -1229,7 +1234,7 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(fixture.prompt_counts(), (2, 1), "{code}");
+    assert_eq!(fixture.prompt_counts(), (rejections + 1, 1), "{code}");
     let deadline = Instant::now() + Duration::from_secs(5);
     let inbox = loop {
         let inbox = fixture.inbox();
@@ -1269,20 +1274,390 @@ fn temporary_prompt_rejection_retries_without_another_event(code: &str) {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(fixture.prompt_counts(), (2, 1), "{code}");
+    assert_eq!(fixture.prompt_counts(), (rejections + 1, 1), "{code}");
 }
 
 #[test]
 fn server_busy_retries_without_another_event() {
-    temporary_prompt_rejection_retries_without_another_event("server_busy");
+    temporary_prompt_rejection_retries_without_another_event("server_busy", 1);
 }
 
 #[test]
 fn conflict_retries_without_another_event() {
-    temporary_prompt_rejection_retries_without_another_event("conflict");
+    temporary_prompt_rejection_retries_without_another_event("conflict", 1);
 }
 
 #[test]
 fn agent_not_ready_retries_without_another_event() {
-    temporary_prompt_rejection_retries_without_another_event("agent_not_ready");
+    temporary_prompt_rejection_retries_without_another_event("agent_not_ready", 1);
+}
+
+#[test]
+fn repeated_eventless_rejections_deliver_when_the_recipient_becomes_ready() {
+    temporary_prompt_rejection_retries_without_another_event("server_busy", 7);
+}
+
+fn wait_for_runtime(description: &str, timeout_secs: u64, mut observed: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    while !observed() {
+        assert!(Instant::now() < deadline, "{description}");
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn worker_at_capped_eventless_retry(
+    fixture: &Fixture,
+    before_retry: impl FnOnce(),
+) -> (Worker, PathBuf) {
+    fixture.initialize();
+    fixture.connect_recipient();
+    fixture.queue_message();
+    let script = fs::read_to_string(fixture.root.join("herdr")).unwrap();
+    fixture.set_herdr(&format!(
+        r#"if [ "$1 $2" = 'agent prompt' ]; then
+             if [ "$3" = 'pane-grace' ]; then
+               printf 'x' >> "$NAMEDROP_TEST_FIXTURE/other-prompts"
+               printf '%s\n' '{{}}'
+               exit 0
+             fi
+             printf 'x' >> "$NAMEDROP_TEST_FIXTURE/prompts"
+             count=$(wc -c < "$NAMEDROP_TEST_FIXTURE/prompts")
+             if [ "$count" -eq 8 ]; then
+               touch "$NAMEDROP_TEST_FIXTURE/setup-entered"
+               while [ ! -f "$NAMEDROP_TEST_FIXTURE/release-setup" ]; do sleep 0.01; done
+               sleep 0.2
+             fi
+             if [ "$count" -eq 9 ]; then
+               touch "$NAMEDROP_TEST_FIXTURE/capped-retry-entered"
+               while [ ! -f "$NAMEDROP_TEST_FIXTURE/release-capped-retry" ]; do sleep 0.01; done
+             fi
+             if [ "$count" -eq 10 ] && [ -f "$NAMEDROP_TEST_FIXTURE/slow-handler-enabled" ]; then
+               touch "$NAMEDROP_TEST_FIXTURE/slow-prompt-entered"
+               sleep 1.25
+               touch "$NAMEDROP_TEST_FIXTURE/slow-prompt-completed"
+             fi
+             printf '%s\n' '{{"error":{{"code":"server_busy"}}}}' >&2
+             exit 1
+           fi
+           if [ "$1 $2" = 'pane list' ]; then
+             printf '%s\n' '{{"result":{{"panes":[{{"pane_id":"pane-recipient","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"workspace-1","agent":"claude","agent_session":{{"value":"session-1"}},"agent_status":"idle"}},{{"pane_id":"pane-grace","terminal_id":"terminal-2","tab_id":"tab-2","workspace_id":"workspace-1","agent":"claude","agent_session":{{"value":"session-grace"}},"agent_status":"idle"}}]}}}}'
+             exit 0
+           fi
+           {script}"#
+    ));
+    let markers: Vec<_> = (0..8)
+        .map(|number| fixture.queue_status(&format!("setup-{number}")))
+        .collect();
+    let worker = fixture.worker();
+    wait_for_runtime("worker did not reach the queued-event barrier", 30, || {
+        fixture.root.join("setup-entered").exists()
+    });
+    before_retry();
+    fs::write(fixture.root.join("release-setup"), "ready").unwrap();
+    wait_for_runtime("worker did not reach the capped retry barrier", 30, || {
+        fixture.root.join("capped-retry-entered").exists()
+    });
+    assert_eq!(fixture.prompt_counts(), (9, 0));
+    assert!(markers.iter().all(|marker| !marker.exists()));
+    let pending: Vec<_> = fs::read_dir(markers[0].parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("pending-")
+        })
+        .collect();
+    assert_eq!(pending.len(), 1);
+    let input: serde_json::Value = serde_json::from_slice(&fs::read(&pending[0]).unwrap()).unwrap();
+    assert_eq!(input, serde_json::json!({"operation": "mailbox-wake"}));
+    (worker, pending.into_iter().next().unwrap())
+}
+
+#[test]
+fn eventless_backoff_serves_new_markers_at_the_retry_cap() {
+    let fixture = Fixture::new();
+    let (_worker, capped_marker) = worker_at_capped_eventless_retry(&fixture, || {});
+    fs::write(fixture.root.join("release-capped-retry"), "ready").unwrap();
+    wait_for_runtime("capped retry did not finish its marker", 30, || {
+        !capped_marker.exists()
+    });
+    assert_eq!(fixture.prompt_counts(), (9, 0));
+
+    fs::write(fixture.root.join("slow-handler-enabled"), "ready").unwrap();
+    let started = Instant::now();
+    let fresh = fixture.queue_status("fresh-during-capped-wait");
+    wait_for_runtime(
+        "fresh marker was blocked by the 60 s eventless backoff",
+        10,
+        || !fresh.exists(),
+    );
+    assert!(fixture.root.join("slow-prompt-entered").exists());
+    assert!(fixture.root.join("slow-prompt-completed").exists());
+    assert_eq!(fixture.prompt_counts(), (10, 0));
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    eprintln!(
+        "fresh marker consumed after slow handler at {:?}, prompts={:?}",
+        started.elapsed(),
+        fixture.prompt_counts()
+    );
+}
+
+#[test]
+fn eventless_backoff_serves_other_recipients_grace_at_the_retry_cap() {
+    let fixture = Fixture::new();
+    let namespace = fixture.namespace();
+    let attempt = DeliveryAttemptId::new("grace-attempt");
+    let (_worker, capped_marker) = worker_at_capped_eventless_retry(&fixture, || {
+        let created = now_ms() - 25_000;
+        let attribution = MutationAttribution::new(ActorKind::Plugin, "fixture", created);
+        StateStore::open(fixture.state())
+            .unwrap()
+            .transaction(|tx| {
+                tx.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new("binding-grace"),
+                    &PaneAddressId::new("author"),
+                    "pane-grace",
+                    &attribution,
+                )?;
+                tx.observe_agent_session(
+                    &namespace,
+                    "grace-observation",
+                    &PaneAddressId::new("author"),
+                    &AgentSessionId::new("session-grace"),
+                    "idle",
+                    &attribution,
+                )?;
+                tx.append_message(
+                    &namespace,
+                    &MessageDraft {
+                        thread_id: ThreadId::new("thread-1"),
+                        message_id: MessageId::new("grace-message"),
+                        in_reply_to: None,
+                        author_address_id: PaneAddressId::new("recipient"),
+                        author_kind: ActorKind::Human,
+                        author_alias_snapshot: "recipient".to_owned(),
+                        author_agent_session_snapshot: None,
+                        request_id: "grace-request".to_owned(),
+                        authored_source: "@author review".to_owned(),
+                        body: "review".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: PaneAddressId::new("author"),
+                            alias_snapshot: "author".to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new("session-grace")),
+                            delivery_id: DeliveryId::new("grace-delivery"),
+                        }],
+                        context_references: vec![],
+                    },
+                    &attribution,
+                )?;
+                assert!(
+                    tx.lease_mailbox_head(
+                        &namespace,
+                        &PaneAddressId::new("author"),
+                        &LeaseDraft {
+                            attempt_id: attempt.clone(),
+                            binding_id: PaneBindingId::new("binding-grace"),
+                            agent_session_id: AgentSessionId::new("session-grace"),
+                            retry_of_attempt_id: None,
+                            owner: "fixture".to_owned(),
+                            acquired_at_ms: created,
+                            expires_at_ms: created + 30_000,
+                        },
+                        &attribution,
+                    )?
+                    .is_some()
+                );
+                tx.transition_delivery_attempt(
+                    &namespace,
+                    &attempt,
+                    DeliveryState::Submitted,
+                    &attribution,
+                )?;
+                tx.acknowledge_delivery_attempt(
+                    &namespace,
+                    &attempt,
+                    "grace-receipt",
+                    &AgentSessionId::new("session-grace"),
+                    &attribution,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    });
+    assert_eq!(fixture.attempt_state(&attempt), DeliveryState::Acknowledged);
+    fs::write(fixture.root.join("release-capped-retry"), "ready").unwrap();
+    wait_for_runtime("capped retry did not finish its marker", 30, || {
+        !capped_marker.exists()
+    });
+    wait_for_runtime(
+        "60 s eventless backoff delayed another recipient's grace",
+        10,
+        || fixture.attempt_state(&attempt) == DeliveryState::Settled,
+    );
+    let facts = StateStore::open_read_only(fixture.state())
+        .unwrap()
+        .unwrap()
+        .transaction(|tx| tx.transition_facts(&namespace))
+        .unwrap();
+    let transition_time = |kind| {
+        facts
+            .iter()
+            .find(|fact| {
+                fact.entity_kind == namedrop::TransitionEntityKind::DeliveryAttempt
+                    && fact.entity_id == attempt.as_str()
+                    && fact.transition_kind == kind
+            })
+            .unwrap()
+            .occurred_at_ms
+    };
+    let due = transition_time(namedrop::TransitionKind::Acknowledged) + 30_000;
+    let settled = transition_time(namedrop::TransitionKind::Settled);
+    assert!(settled >= due, "grace settled before its deadline");
+    assert!(
+        settled < due + 10_000,
+        "grace settlement exceeded its watchdog"
+    );
+    eprintln!(
+        "independent grace settled {} ms after its deadline without another marker, prompts={:?}",
+        settled - due,
+        fixture.prompt_counts()
+    );
+}
+
+#[test]
+fn eventless_rejections_keep_pane_lock_deferrals_on_the_short_retry() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let fixture = Fixture::new();
+    let namespace = fixture.namespace();
+    let mut pane_lock = None;
+    let (_worker, mixed_marker) = worker_at_capped_eventless_retry(&fixture, || {
+        let attribution = MutationAttribution::new(ActorKind::Plugin, "fixture", now_ms());
+        StateStore::open(fixture.state())
+            .unwrap()
+            .transaction(|tx| {
+                tx.bind_pane(
+                    &namespace,
+                    &PaneBindingId::new("binding-other"),
+                    &PaneAddressId::new("author"),
+                    "pane-grace",
+                    &attribution,
+                )?;
+                tx.observe_agent_session(
+                    &namespace,
+                    "other-observation",
+                    &PaneAddressId::new("author"),
+                    &AgentSessionId::new("session-grace"),
+                    "idle",
+                    &attribution,
+                )?;
+                tx.append_message(
+                    &namespace,
+                    &MessageDraft {
+                        thread_id: ThreadId::new("thread-1"),
+                        message_id: MessageId::new("other-message"),
+                        in_reply_to: None,
+                        author_address_id: PaneAddressId::new("recipient"),
+                        author_kind: ActorKind::Human,
+                        author_alias_snapshot: "recipient".to_owned(),
+                        author_agent_session_snapshot: None,
+                        request_id: "other-request".to_owned(),
+                        authored_source: "@author review".to_owned(),
+                        body: "review".to_owned(),
+                        grammar_version: "mention/v1".to_owned(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: PaneAddressId::new("author"),
+                            alias_snapshot: "author".to_owned(),
+                            agent_session_snapshot: Some(AgentSessionId::new("session-grace")),
+                            delivery_id: DeliveryId::new("other-delivery"),
+                        }],
+                        context_references: vec![],
+                    },
+                    &attribution,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let key = namedrop::lower_hex(&Sha256::digest(
+            serde_json::to_vec(&("test-socket", "pane-grace")).unwrap(),
+        ));
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(
+                fixture
+                    .state()
+                    .join("pane-effects")
+                    .join(format!("{key}.lock")),
+            )
+            .unwrap();
+        lock.try_lock().unwrap();
+        pane_lock = Some(lock);
+        let challenge = StateStore::open(fixture.state())
+            .unwrap()
+            .transaction(|tx| {
+                tx.issue_integration_challenge(
+                    &namespace,
+                    "registration-other",
+                    &PaneAddressId::new("author"),
+                    namedrop::AgentRuntime::ClaudeCode,
+                    "nonce-other",
+                    &attribution,
+                )
+            })
+            .unwrap();
+        let registered = fixture
+            .command()
+            .env("HERDR_PANE_ID", "pane-grace")
+            .args(["register", "--input-json"])
+            .arg(
+                serde_json::json!({
+                    "runtime": "claude-code",
+                    "protocol_version": "collab/v1",
+                    "nonce": challenge.nonce,
+                    "capabilities": namedrop::complete_capability_profile(),
+                })
+                .to_string(),
+            )
+            .output()
+            .unwrap();
+        assert!(registered.status.success(), "{registered:?}");
+        let scope = namedrop::lower_hex(&Sha256::digest("test-socket\0workspace-1"));
+        let directory = fixture
+            .state()
+            .join("agent-status-reconciliation")
+            .join(scope);
+        for entry in fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name.starts_with("pending-") && !name.starts_with("pending-setup-") {
+                fs::remove_file(path).unwrap();
+            }
+        }
+    });
+    fs::write(fixture.root.join("release-capped-retry"), "ready").unwrap();
+    wait_for_runtime("mixed drain did not finish its marker", 30, || {
+        !mixed_marker.exists()
+    });
+    assert!(!fixture.root.join("other-prompts").exists());
+    drop(pane_lock);
+    let released = Instant::now();
+    wait_for_runtime(
+        "rejection backoff delayed a released pane lock beyond 5 s",
+        8,
+        || fixture.root.join("other-prompts").exists(),
+    );
+    assert_eq!(fs::read(fixture.root.join("other-prompts")).unwrap(), b"x");
+    eprintln!(
+        "deferred recipient prompted {:?} after pane lock release",
+        released.elapsed()
+    );
 }

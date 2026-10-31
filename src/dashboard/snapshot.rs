@@ -429,9 +429,6 @@ pub struct SpaceHeader {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotAddressableReason {
-    MissingLabel,
-    EmptyLabel,
-    ReservedAll,
     SharedLabel,
     IdCollision,
     NotActivated,

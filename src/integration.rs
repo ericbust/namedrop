@@ -466,20 +466,20 @@ where
     if installation.failed(agent_runtime) {
         return Ok(());
     }
-    let automatic = StateStore::open(runtime.state_directory)
+    let address = StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
         .transaction(|transaction| {
             Ok(transaction
                 .list_pane_addresses(&namespace)?
                 .into_iter()
-                .find(|address| address.id == *address_id)
-                .is_some_and(|address| {
-                    address
-                        .role_description
-                        .starts_with("Native collaborator addressed as @")
-                }))
+                .find(|address| address.id == *address_id))
         })
         .map_err(|error| error.to_string())?;
+    let automatic = address.as_ref().is_some_and(|address| {
+        address
+            .role_description
+            .starts_with("Native collaborator addressed as @")
+    });
     if automatic {
         return automatically_register_integration(
             address_id,
@@ -553,7 +553,11 @@ where
         runtime.session_socket_id,
         &pane.pane_id,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        error
+            .with_alias(address.as_ref().map(|address| address.alias.as_str()))
+            .to_string()
+    })?;
     let current = integration_discovery(runtime)?;
     let still_settled = current.panes.iter().any(|current| {
         current.pane_id == pane.pane_id

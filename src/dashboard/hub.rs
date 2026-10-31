@@ -995,14 +995,10 @@ impl Hub<'_> {
         use crate::spaces::{SpaceDirectory, SpaceEntry, names_in_scope, workspace_token};
         use snapshot::NotAddressableReason as Reason;
         let target = self.live_spaces.get(key).ok_or(Reason::Unavailable)?;
-        let raw_label = target.label.as_deref().ok_or(Reason::MissingLabel)?;
-        let label = crate::WorkspaceLabel::from_herdr(raw_label);
-        if label.as_str().is_empty() {
-            return Err(Reason::EmptyLabel);
-        }
-        if label.as_str() == "all" {
-            return Err(Reason::ReservedAll);
-        }
+        let label = target
+            .label
+            .as_deref()
+            .map(crate::WorkspaceLabel::from_herdr);
         if !self.spaces.get(key).is_some_and(|space| space.activated) {
             return Err(match state {
                 snapshot::SpaceState::Deactivated => Reason::NotActive,
@@ -1031,21 +1027,20 @@ impl Hub<'_> {
             .collect();
         let token = workspace_token(
             &target.namespace.space_id,
-            Some(&label),
+            label.as_ref(),
             entries
                 .iter()
                 .map(|entry| (&entry.space, entry.label.as_ref())),
         );
         let collision_reason = if entries.iter().any(|entry| {
-            entry.space != target.namespace.space_id && entry.label.as_ref() == Some(&label)
+            entry.space != target.namespace.space_id
+                && label.is_some()
+                && entry.label.as_ref() == label.as_ref()
         }) {
             Reason::SharedLabel
         } else {
             Reason::IdCollision
         };
-        if token != label {
-            return Err(collision_reason);
-        }
         let mut others = entries;
         let index = others
             .iter()
@@ -1053,7 +1048,7 @@ impl Hub<'_> {
             .ok_or(Reason::Unavailable)?;
         let here = others.swap_remove(index);
         let directory = SpaceDirectory::new(here, others);
-        names_in_scope(&crate::SpaceScope::Named(vec![label.clone()]), &directory).map_err(
+        names_in_scope(&crate::SpaceScope::Named(vec![token.clone()]), &directory).map_err(
             |refusal| match refusal {
                 crate::spaces::RouteRefusal::DuplicateLabel { .. } => collision_reason,
                 crate::spaces::RouteRefusal::NotActivated { .. } => match state {
@@ -1063,7 +1058,7 @@ impl Hub<'_> {
                 _ => Reason::Unavailable,
             },
         )?;
-        Ok(label.as_str().to_owned())
+        Ok(token.as_str().to_owned())
     }
 
     fn namespace(&mut self, key: &SpaceKey) -> Option<StateNamespace> {
@@ -1174,6 +1169,40 @@ mod tests {
             schema_busy_since: None,
             last_error: None,
         }
+    }
+
+    #[test]
+    fn fallback_workspace_tokens_are_addressable_in_frames() {
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-hub-fallback-tokens-{}",
+            std::process::id()
+        ));
+        let files = ServerFiles::at(&state).unwrap();
+        let mut hub = test_hub(&files);
+        for label in [None, Some(""), Some("all")] {
+            let namespace = StateNamespace::for_space("socket-a", "w1");
+            let key = SpaceKey::of(&namespace);
+            hub.live_spaces.insert(
+                key.clone(),
+                LiveSpace {
+                    namespace: namespace.clone(),
+                    label: label.map(str::to_owned),
+                },
+            );
+            hub.spaces.insert(
+                key.clone(),
+                KnownSpace {
+                    namespace,
+                    activated: true,
+                },
+            );
+            assert_eq!(
+                hub.addressability(&key, snapshot::SpaceState::Active),
+                Ok("w1".to_owned()),
+                "the send grammar accepts #w1 for label {label:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&state);
     }
 
     fn freeze_discovery(hub: &mut Hub<'_>) {
@@ -1713,7 +1742,7 @@ mod tests {
             panic!("the recovered discovery must update legacy addressability");
         };
         let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
-        assert_eq!(frame["space"]["not_addressable_reason"], "missing_label");
+        assert_eq!(frame["space"]["addressable_label"], "w1");
         hub.refresh(None);
         assert!(
             legacy.try_recv().is_err(),

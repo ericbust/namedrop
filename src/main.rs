@@ -972,16 +972,36 @@ fn queue_agent_status_reconciliation(
 
 fn pending_agent_status_reconciliations(directory: &Path) -> io::Result<Vec<PathBuf>> {
     let mut markers = fs::read_dir(directory)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("pending-"))
-        })
-        .collect::<Vec<_>>();
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<io::Result<Vec<_>>>()?;
+    markers.retain(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("pending-"))
+    });
     markers.sort();
     Ok(markers)
+}
+
+fn pending_agent_status_reconciliations_with_retry(
+    directory: &Path,
+    failures: &mut usize,
+    scan: &mut impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
+) -> io::Result<Vec<PathBuf>> {
+    loop {
+        match scan(directory) {
+            Ok(pending) => return Ok(pending),
+            Err(error) if !retryable_queue_scan(&error) => return Err(error),
+            Err(_) => wait_for_reconciliation_retry(failures, false),
+        }
+    }
+}
+
+fn retryable_queue_scan(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EMFILE | libc::ENFILE | libc::EINTR | libc::EAGAIN | libc::ENOMEM)
+    )
 }
 
 fn run_agent_status_worker() -> ExitCode {
@@ -1003,27 +1023,37 @@ fn run_agent_status_worker() -> ExitCode {
     if lock.try_lock().is_err() {
         return ExitCode::SUCCESS;
     }
+    run_agent_status_worker_queue(&directory, lock, pending_agent_status_reconciliations)
+}
+
+fn run_agent_status_worker_queue(
+    directory: &Path,
+    lock: fs::File,
+    mut scan: impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
+) -> ExitCode {
     let mut failures = 0_usize;
     let mut deadline_ms: Option<u64> = None;
     loop {
-        let Ok(pending) = pending_agent_status_reconciliations(&directory) else {
+        let Ok(pending) =
+            pending_agent_status_reconciliations_with_retry(directory, &mut failures, &mut scan)
+        else {
             return ExitCode::SUCCESS;
         };
         let Some(marker) = pending.first() else {
             if let Some(due) = deadline_ms {
                 if SystemClock.now_unix_ms() < due {
-                    wait_for_marker_or_deadline(&directory, due);
+                    wait_for_marker_or_deadline(directory, due, &mut scan);
                     continue;
                 }
                 if queue_agent_status_reconciliation(
-                    &directory,
+                    directory,
                     &serde_json::json!({"operation":"mailbox-wake"}),
                 )
                 .is_ok()
                 {
                     deadline_ms = None;
                 } else {
-                    wait_for_reconciliation_retry(&mut failures);
+                    wait_for_reconciliation_retry(&mut failures, false);
                 }
                 continue;
             }
@@ -1031,7 +1061,7 @@ fn run_agent_status_worker() -> ExitCode {
             // A producer can queue after our empty scan, then lose try_lock
             // while we still own it. Recheck only after releasing ownership:
             // either we reclaim the queued work or its new worker owns it.
-            if pending_agent_status_reconciliations(&directory)
+            if pending_agent_status_reconciliations_with_retry(directory, &mut failures, &mut scan)
                 .is_ok_and(|pending| !pending.is_empty())
                 && lock.try_lock().is_ok()
             {
@@ -1042,7 +1072,7 @@ fn run_agent_status_worker() -> ExitCode {
         let bytes = match fs::read(marker) {
             Ok(bytes) => bytes,
             Err(_) => {
-                wait_for_reconciliation_retry(&mut failures);
+                wait_for_reconciliation_retry(&mut failures, false);
                 continue;
             }
         };
@@ -1066,8 +1096,9 @@ fn run_agent_status_worker() -> ExitCode {
         };
         match result {
             Ok(result) => match drain_report(&result) {
-                Ok(report) if report.awaits_retry() => {
-                    if !report.submitted.is_empty()
+                Ok(report) => {
+                    if !report.awaits_retry()
+                        || !report.submitted.is_empty()
                         || !report.settled.is_empty()
                         || !report.failed.is_empty()
                         || !report.held.is_empty()
@@ -1075,15 +1106,24 @@ fn run_agent_status_worker() -> ExitCode {
                     {
                         failures = 0;
                     }
-                    wait_for_reconciliation_retry(&mut failures);
-                }
-                Ok(report) => {
-                    let _ = fs::remove_file(marker);
-                    failures = 0;
+                    let retry_due_ms = report.awaits_retry().then(|| {
+                        let rejection_only = report.retry_without_event
+                            && report.pane_lock_deferred.is_empty()
+                            && !report.awaits_terminal();
+                        let delay = reconciliation_retry_delay(failures, rejection_only);
+                        failures = failures.saturating_add(1);
+                        SystemClock
+                            .now_unix_ms()
+                            .saturating_add(delay.as_millis() as u64)
+                    });
                     deadline_ms = deadline_ms
                         .into_iter()
+                        .chain(retry_due_ms)
                         .chain(report.next_grace_due_ms())
                         .min();
+                    if fs::remove_file(marker).is_err() {
+                        wait_for_reconciliation_retry(&mut failures, false);
+                    }
                 }
                 Err(_) => {
                     let _ = fs::remove_file(marker);
@@ -1094,21 +1134,25 @@ fn run_agent_status_worker() -> ExitCode {
                 let _ = fs::remove_file(marker);
                 failures = 0;
             }
-            Err(_) => wait_for_reconciliation_retry(&mut failures),
+            Err(_) => wait_for_reconciliation_retry(&mut failures, false),
         }
     }
 }
 
-fn wait_for_marker_or_deadline(directory: &Path, due_ms: u64) {
+fn wait_for_marker_or_deadline(
+    directory: &Path,
+    due_ms: u64,
+    scan: &mut impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
+) {
     loop {
         let now = SystemClock.now_unix_ms();
         if now >= due_ms {
             return;
         }
-        match pending_agent_status_reconciliations(directory) {
+        match scan(directory) {
             Ok(pending) if pending.is_empty() => {}
             Ok(_) => return,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return,
+            Err(error) if !retryable_queue_scan(&error) => return,
             Err(_) => {}
         }
         thread::sleep(Duration::from_millis((due_ms - now).min(100)));
@@ -1120,50 +1164,305 @@ mod worker_shutdown_tests {
     use super::*;
 
     #[test]
-    fn an_unreadable_queue_keeps_waiting_until_the_grace_deadline() {
-        let directory =
-            env::temp_dir().join(format!("namedrop-unreadable-queue-{}", std::process::id()));
-        fs::write(&directory, b"not a directory").unwrap();
-        assert_eq!(
-            fs::read_dir(&directory).unwrap_err().kind(),
-            io::ErrorKind::NotADirectory
-        );
-        let due = SystemClock.now_unix_ms() + 250;
-        wait_for_marker_or_deadline(&directory, due);
-        let returned_at = SystemClock.now_unix_ms();
-        fs::remove_file(&directory).unwrap();
+    fn persistent_eventless_rejections_limit_drains_and_keep_retrying() {
+        let mut elapsed = Duration::ZERO;
+        let mut drains = 0;
+        while elapsed < Duration::from_secs(600) {
+            let delay = reconciliation_retry_delay(drains, true);
+            assert!(delay <= Duration::from_secs(60));
+            assert!(!delay.is_zero());
+            elapsed += delay;
+            drains += 1;
+        }
         assert!(
-            returned_at >= due,
-            "a queue read error ended the wait before its grace deadline"
+            drains <= 20,
+            "persistent rejection caused {drains} drains in ten minutes"
+        );
+        assert_eq!(
+            reconciliation_retry_delay(usize::MAX, true),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            reconciliation_retry_delay(usize::MAX, false),
+            Duration::from_secs(5)
         );
     }
 
     #[test]
+    fn an_outer_queue_scan_retries_transient_errors_until_pending_work_can_be_read() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EINTR,
+            libc::EAGAIN,
+            libc::ENOMEM,
+        ] {
+            let queue = QueueFixture::new(&format!("outer-transient-{errno}"));
+            let marker = queue.0.join("pending-test");
+            fs::write(&marker, b"invalid marker").unwrap();
+            let mut scans = 0;
+            let started = std::time::Instant::now();
+            let recovered = pending_agent_status_reconciliations_with_retry(
+                &queue.0,
+                &mut 0,
+                &mut |directory| {
+                    scans += 1;
+                    if scans == 1 {
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        pending_agent_status_reconciliations(directory)
+                    }
+                },
+            );
+            assert_eq!(recovered.unwrap(), vec![marker], "errno={errno}");
+            assert!(started.elapsed() >= Duration::from_millis(100));
+        }
+    }
+
+    #[test]
+    fn an_outer_queue_scan_stops_on_permanent_errors_without_retrying() {
+        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+            let mut scans = 0;
+            let result = pending_agent_status_reconciliations_with_retry(
+                Path::new("unused"),
+                &mut 0,
+                &mut |_| {
+                    scans += 1;
+                    if scans == 1 {
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        Ok(Vec::new())
+                    }
+                },
+            );
+            assert_eq!(result.unwrap_err().raw_os_error(), Some(errno));
+            assert_eq!(scans, 1, "permanent errno={errno} was retried");
+        }
+    }
+
+    struct QueueFixture(PathBuf);
+
+    impl QueueFixture {
+        fn new(name: &str) -> Self {
+            let directory =
+                env::temp_dir().join(format!("namedrop-queue-{name}-{}", std::process::id()));
+            fs::create_dir(&directory).unwrap();
+            Self(directory)
+        }
+
+        fn lock(&self) -> fs::File {
+            let lock = fs::File::create(self.0.join("worker.lock")).unwrap();
+            lock.try_lock().unwrap();
+            lock
+        }
+    }
+
+    impl Drop for QueueFixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_permanent_outer_scan_stops_the_worker_and_releases_ownership() {
+        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+            let queue = QueueFixture::new(&format!("worker-permanent-{errno}"));
+            let lock = queue.lock();
+            let mut scans = 0;
+            assert_eq!(
+                run_agent_status_worker_queue(&queue.0, lock, |_| {
+                    scans += 1;
+                    if scans == 1 {
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        Ok(Vec::new())
+                    }
+                }),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(scans, 1, "permanent errno={errno} kept the worker scanning");
+            queue.lock();
+        }
+    }
+
+    #[test]
+    fn an_unlock_recheck_retries_transient_errors_and_reclaims_queued_work() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EINTR,
+            libc::EAGAIN,
+            libc::ENOMEM,
+        ] {
+            let queue = QueueFixture::new(&format!("unlock-transient-{errno}"));
+            let marker = queue.0.join("pending-handoff");
+            let lock = queue.lock();
+            let observer = fs::File::open(queue.0.join("worker.lock")).unwrap();
+            let mut scans = 0;
+            assert_eq!(
+                run_agent_status_worker_queue(&queue.0, lock, |directory| {
+                    scans += 1;
+                    if scans == 2 {
+                        observer
+                            .try_lock()
+                            .expect("handoff scan must release worker ownership");
+                        observer.unlock().unwrap();
+                        fs::write(&marker, b"invalid marker").unwrap();
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        pending_agent_status_reconciliations(directory)
+                    }
+                }),
+                ExitCode::SUCCESS
+            );
+            assert!(
+                !marker.exists(),
+                "errno={errno} stranded the handoff marker"
+            );
+            observer
+                .try_lock()
+                .expect("worker must release its lock when done");
+        }
+    }
+
+    #[test]
+    fn a_retried_unlock_recheck_preserves_a_successors_lock_ownership() {
+        let queue = QueueFixture::new("unlock-successor");
+        let marker = queue.0.join("pending-handoff");
+        let lock = queue.lock();
+        let successor = fs::File::open(queue.0.join("worker.lock")).unwrap();
+        let mut scans = 0;
+        assert_eq!(
+            run_agent_status_worker_queue(&queue.0, lock, |directory| {
+                scans += 1;
+                if scans == 2 {
+                    successor
+                        .try_lock()
+                        .expect("successor must acquire released worker lock");
+                    fs::write(&marker, b"invalid marker").unwrap();
+                    Err(io::Error::from_raw_os_error(libc::EMFILE))
+                } else {
+                    pending_agent_status_reconciliations(directory)
+                }
+            }),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            scans, 3,
+            "handoff scan must recover before checking ownership"
+        );
+        assert!(
+            marker.exists(),
+            "original worker consumed its successor's marker"
+        );
+        assert!(
+            fs::File::open(queue.0.join("worker.lock"))
+                .unwrap()
+                .try_lock()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn an_unlock_recheck_stops_on_permanent_errors_without_retrying() {
+        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+            let queue = QueueFixture::new(&format!("unlock-permanent-{errno}"));
+            let lock = queue.lock();
+            let mut scans = 0;
+            assert_eq!(
+                run_agent_status_worker_queue(&queue.0, lock, |_| {
+                    scans += 1;
+                    if scans == 1 {
+                        Ok(Vec::new())
+                    } else {
+                        Err(io::Error::from_raw_os_error(errno))
+                    }
+                }),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(scans, 2, "permanent errno={errno} was retried after unlock");
+            queue.lock();
+        }
+    }
+
+    #[test]
+    fn a_transient_queue_error_preserves_the_grace_deadline() {
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::EINTR,
+            libc::EAGAIN,
+            libc::ENOMEM,
+        ] {
+            let due = SystemClock.now_unix_ms() + 250;
+            wait_for_marker_or_deadline(Path::new("unused"), due, &mut |_| {
+                Err(io::Error::from_raw_os_error(errno))
+            });
+            assert!(
+                SystemClock.now_unix_ms() >= due,
+                "errno={errno} ended the grace wait early"
+            );
+        }
+    }
+
+    #[test]
+    fn a_permanent_queue_error_stops_a_grace_wait_without_retrying() {
+        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+            let mut scans = 0;
+            wait_for_marker_or_deadline(
+                Path::new("unused"),
+                SystemClock.now_unix_ms() + 10_000,
+                &mut |_| {
+                    scans += 1;
+                    if scans == 1 {
+                        Err(io::Error::from_raw_os_error(errno))
+                    } else {
+                        Ok(vec![PathBuf::from("pending-test")])
+                    }
+                },
+            );
+            assert_eq!(
+                scans, 1,
+                "permanent errno={errno} kept the deadline wait alive"
+            );
+        }
+    }
+
+    #[test]
     fn a_recovered_queue_wakes_a_grace_wait_when_a_marker_arrives() {
-        let directory =
-            env::temp_dir().join(format!("namedrop-recovered-queue-{}", std::process::id()));
-        let restored = directory.with_extension("restored");
-        let replacement = directory.with_extension("replacement");
-        fs::write(&directory, b"not a directory").unwrap();
-        fs::create_dir(&restored).unwrap();
-        fs::write(restored.join("pending-test"), b"{}").unwrap();
-        std::os::unix::fs::symlink(&restored, &replacement).unwrap();
-        let queue = directory.clone();
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let queue = QueueFixture::new("grace-recovered");
+        let directory = queue.0.clone();
+        let available = Arc::new(AtomicBool::new(false));
+        let reader_available = available.clone();
         let (done, finished) = std::sync::mpsc::channel();
         let waiter = thread::spawn(move || {
-            wait_for_marker_or_deadline(&queue, SystemClock.now_unix_ms() + 10_000);
+            wait_for_marker_or_deadline(
+                &directory,
+                SystemClock.now_unix_ms() + 10_000,
+                &mut |directory| {
+                    if reader_available.load(Ordering::Acquire) {
+                        pending_agent_status_reconciliations(directory)
+                    } else {
+                        Err(io::Error::from_raw_os_error(libc::EMFILE))
+                    }
+                },
+            );
             done.send(()).unwrap();
         });
         let early = finished.recv_timeout(Duration::from_millis(250));
-        fs::rename(&replacement, &directory).unwrap();
+        fs::write(queue.0.join("pending-test"), b"{}").unwrap();
+        available.store(true, Ordering::Release);
         let recovered = finished.recv_timeout(Duration::from_secs(1));
-        fs::remove_file(&directory).unwrap();
-        fs::remove_dir_all(&restored).unwrap();
         waiter.join().unwrap();
         assert_eq!(
             early,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout),
-            "a queue read error must preserve the grace wait"
+            "a transient queue read error must preserve the grace wait"
         );
         recovered.expect("a recovered queue's pending marker must wake the worker");
     }
@@ -1176,7 +1475,11 @@ mod worker_shutdown_tests {
         fs::remove_dir(&directory).unwrap();
         let (done, finished) = std::sync::mpsc::channel();
         thread::spawn(move || {
-            wait_for_marker_or_deadline(&directory, u64::MAX);
+            wait_for_marker_or_deadline(
+                &directory,
+                u64::MAX,
+                &mut pending_agent_status_reconciliations,
+            );
             done.send(()).unwrap();
         });
         finished
@@ -1185,11 +1488,19 @@ mod worker_shutdown_tests {
     }
 }
 
-fn wait_for_reconciliation_retry(failures: &mut usize) {
-    let delays = [100, 250, 500, 1_000, 5_000];
-    let delay = delays[(*failures).min(delays.len() - 1)];
+fn reconciliation_retry_delay(failures: usize, retry_without_event: bool) -> Duration {
+    let delays: &[u64] = if retry_without_event {
+        &[100, 250, 500, 1_000, 5_000, 10_000, 30_000, 60_000]
+    } else {
+        &[100, 250, 500, 1_000, 5_000]
+    };
+    Duration::from_millis(delays[failures.min(delays.len() - 1)])
+}
+
+fn wait_for_reconciliation_retry(failures: &mut usize, retry_without_event: bool) {
+    let delay = reconciliation_retry_delay(*failures, retry_without_event);
     *failures = failures.saturating_add(1);
-    thread::sleep(Duration::from_millis(delay));
+    thread::sleep(delay);
 }
 
 fn retryable_agent_status_reconciliation(error: &str) -> bool {

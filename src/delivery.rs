@@ -454,7 +454,9 @@ where
             runtime.state_directory,
             runtime.session_socket_id,
             &first.pane_id,
-        ) {
+        )
+        .map_err(|error| error.with_alias(Some(&first.alias)))
+        {
             Ok(effects) => Ok(effects),
             Err(crate::pane_effects::AcquireError::Fault(error)) => Err(error),
             Err(crate::pane_effects::AcquireError::Contended) => {
