@@ -213,7 +213,12 @@ the whole width.
 - Over 600px nothing changes: no button, and the sidebar column stays. A
   drawer open when the window grows past 600px closes. If focus was in the
   sidebar column when the window narrows to a phone, it moves to the Channels
-  button.
+  button. If focus was on the Channels button when the window grows past
+  600px, or a phone turns to landscape (844 by 390), it moves to the current
+  channel's row in the sidebar column, or to the All activity row in All
+  activity, as it stays on the row when the drawer was open. Both handoffs
+  hold whether the browser drops the focus before the new layout renders or
+  as it renders.
 
 ### Landing and navigation
 
@@ -645,6 +650,17 @@ no button. Once the notice goes, the button comes back.
 | A reply to an agent it can't mention   | "@codex's workspace has no label Namedrop can mention, so it can't take a message from here." |
 | The same, with no name known           | "That agent isn't in this channel anymore."                                                   |
 
+Where the pane covers the channel, the channel's composer is under it. A
+**Message @claude** press, on the card or on the line, then closes the pane, so
+the press lands as it does beside the channel: the prepared message is in the
+channel box, which has focus, with the caret at the end of the first line. A
+kept draft or an absent agent closes the pane too, so its line under the
+channel box shows, and the box takes focus with the caret where it was. The
+page checks whether the channel box is on screen at the moment of the press; it
+keeps no copy of the breakpoints. Beside or above the channel, the pane stays
+open and the line above reads as the table says. The thread's located message
+is tinted again the next time the thread opens.
+
 When a reply's thread already holds a draft, the composer stays and its status
 row reads, 12px muted: "Your existing draft was kept. Send or clear it before
 preparing this reply." The line stays until the box changes or its text is
@@ -669,8 +685,15 @@ The way back is always at the bottom.
   centered. It holds a drawn arrow-down icon and "Jump to latest" at 13px 500 in
   `--accent-text`, on `--bg` with a 1px `--line-strong` border, a full radius,
   `--shadow-pop`, and a 32px height. Its accessible name is "Jump to latest
-  messages". Activating it returns to the newest window and scrolls to the
-  bottom.
+  messages", and its tooltip reads "Jump to latest". Activating it returns to
+  the newest window and scrolls to the bottom.
+- In a window under 420px tall the centered pill would cover the middle of
+  the short timeline and take clicks meant for messages and their reply
+  buttons. There it is a 28px round icon button with the same arrow, colors,
+  border and shadow, and no visible text. It sits 12px (`--space-3`) from
+  the timeline's bottom and right edges, clear of the left-aligned reply
+  buttons. The name and tooltip stay. A 390 by 460 window at 125 percent zoom
+  (312 by 368 CSS pixels) gets it too.
 - While browsing, the last row of the timeline is a hairline divider that reads
   "Newer messages aren't loaded", with a **Jump to latest** text button, so
   keyboard and screen reader users meet the gap at the end of the list.
@@ -721,7 +744,8 @@ main column, under the timeline, and at the bottom of the thread pane.
   line also gives way at the next edit, so the hint and the guard explain the
   text that follows.
 - The Jump to latest pill floats 16px above the composer, not above the
-  timeline's bottom edge.
+  timeline's bottom edge. In a window under 420px tall its icon button sits
+  12px above the composer, at the timeline's right edge.
 
 ### Sending
 
@@ -1339,8 +1363,10 @@ Namedrop." when the server never answered. The pane header keeps "in #alpha".
   activity list in All activity.
 - Every presence dot, receipt icon, and avatar has a text equivalent. Decorative
   icons are `aria-hidden`.
-- Hit targets are at least 32 by 32px. Names in a message header are the one
-  exception: they are inline text buttons, like links in a sentence. The route
+- Hit targets are at least 32 by 32px. Two exceptions: names in a message
+  header are inline text buttons, like links in a sentence, and the Jump to
+  latest button in a window under 420px tall is 28px, so it covers less of the
+  timeline. The route
   line's buttons keep the 32px target through padding, and their focus ring
   hugs the 12px text, so it never covers the line above.
 - The layout holds at 200 percent zoom and at 1024 by 700 without horizontal
