@@ -40,7 +40,7 @@ impl Fixture {
         fs::create_dir_all(home.join(".claude")).unwrap();
         let claude = home.join(".claude");
         let herdr = root.join("herdr");
-        fs::write(&herdr, r#"#!/usr/bin/env python3
+        fs::write(&herdr, r#"#!/usr/bin/python3
 import json, os, sys
 args=sys.argv[1:]
 w=os.environ['TEST_WORKSPACE']
