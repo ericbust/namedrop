@@ -295,6 +295,12 @@ mod tests {
     struct Process(Child);
     impl Process {
         fn spawn(command: &mut Command) -> Self {
+            Self::spawn_with_arguments(command, crate::terminal::process_arguments)
+        }
+        fn spawn_with_arguments(
+            command: &mut Command,
+            mut arguments: impl FnMut(u32) -> Option<Vec<String>>,
+        ) -> Self {
             let child = command
                 .process_group(0)
                 .stdin(Stdio::null())
@@ -304,9 +310,7 @@ mod tests {
                 .unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             let ours = crate::terminal::process_arguments(std::process::id());
-            while crate::terminal::process_arguments(child.id())
-                .is_none_or(|argv| Some(argv) == ours)
-            {
+            while arguments(child.id()).is_none_or(|argv| Some(argv) == ours) {
                 assert!(Instant::now() < deadline, "argv never appeared");
                 std::thread::sleep(Duration::from_millis(2));
             }
@@ -320,6 +324,33 @@ mod tests {
         fn pid(&self) -> u32 {
             self.0.id()
         }
+    }
+
+    #[test]
+    fn spawn_waits_until_requested_arguments_are_visible() {
+        let mut reads = 0;
+        let process = Process::spawn_with_arguments(
+            Command::new("/bin/sh").args(["-c", "sleep 30; :", "sh", "--no-daemon"]),
+            |pid| {
+                reads += 1;
+                match reads {
+                    1 => None,
+                    2 => Some(Vec::new()),
+                    3 => Some(vec!["sh".to_owned()]),
+                    _ => crate::terminal::process_arguments(pid),
+                }
+            },
+        );
+        assert!(
+            reads >= 4,
+            "spawn accepted incomplete arguments after {reads} reads"
+        );
+        assert!(
+            crate::terminal::process_arguments(process.pid())
+                .unwrap()
+                .iter()
+                .any(|argument| argument == "--no-daemon")
+        );
     }
     impl Drop for Process {
         fn drop(&mut self) {
