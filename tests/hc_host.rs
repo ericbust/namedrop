@@ -2112,6 +2112,15 @@ fn hc_bootstrap_popups_use_only_the_test_app() {
             "hc_bootstrap_doctor_detects_symlink_parent",
             "hc_bootstrap_doctor_detects_unowned_command",
             "hc_bootstrap_stale_activation_does_not_replace_the_current_fallback",
+            "refused_hc_delivery_waits_for_new_target_settle_without_failure",
+            "settle_before_refusal_recording_resumes_delivery",
+            "inactive_namespace_preserves_settle_for_reactivation",
+            "expired_deferred_delivery_can_be_cancelled_with_confirmation",
+            "cancelled_attempt_requires_exact_unused_deferral_provenance",
+            "onboarding_and_doctor_refusals_wait_for_new_settle",
+            "no_input_refusal_resets_speculatively_invoked_challenge",
+            #[cfg(target_os = "linux")]
+            "prompt_race::settle_projection_waits_for_each_prompt_callers_no_input_commit",
         ],
         "bootstrap",
     );
@@ -2739,5 +2748,6 @@ fn assert_onboarding_and_doctor_refusals(mark_invoked: bool) {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[path = "support/hc_prompt_race.rs"]
 mod prompt_race;
