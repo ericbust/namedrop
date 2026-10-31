@@ -2349,3 +2349,128 @@ fn unavailable_neighbor_does_not_block_healthy_mail() {
         );
     });
 }
+
+#[test]
+fn due_mailbox_tick_does_not_retry_an_unavailable_dead_owner() {
+    use namedrop::*;
+    check("unavailable-due-tick", |fixture, runtime| {
+        let dead_owner = process::AgentProcess::new();
+        queued_agent(fixture, runtime, dead_owner.pid());
+        let live_owner = process::AgentProcess::new();
+        let mut other = fixture.terminals.borrow()[0].clone();
+        other["address"] = json!("t2");
+        other["labels"]["namedrop.name"] = json!("bob");
+        other["labels"]["namedrop.session"] = json!("live-session");
+        other["labels"]["namedrop.session.pid"] = json!(live_owner.pid().to_string());
+        other["labels"]["namedrop.session.start"] = json!(process::start(live_owner.pid()));
+        other["foreground"]["pid"] = json!(live_owner.pid());
+        other["status"] = json!({"state":"done"});
+        fixture.terminals.borrow_mut().push(other);
+        let runtime = LifecycleRuntime {
+            clock: &RetryClock(10_000),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            host: runtime.host,
+            ids: runtime.ids,
+        };
+        let mut subscriber = host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        let namespace = StateNamespace::for_space("hc:fixture", "fixture-space");
+        let attribution = MutationAttribution::new(ActorKind::Human, "test", 10_000);
+        let mut store = StateStore::open(runtime.state_directory).unwrap();
+        store
+            .transaction(|tx| {
+                let binding = tx
+                    .active_pane_bindings(&namespace)?
+                    .into_iter()
+                    .find(|binding| binding.pane_id == "t2")
+                    .unwrap();
+                tx.append_message(
+                    &namespace,
+                    &MessageDraft {
+                        thread_id: ThreadId::new("death-thread"),
+                        message_id: MessageId::new("live-message"),
+                        in_reply_to: None,
+                        author_address_id: binding.address_id.clone(),
+                        author_kind: ActorKind::Human,
+                        author_alias_snapshot: "bob".into(),
+                        author_agent_session_snapshot: None,
+                        request_id: "live-request".into(),
+                        authored_source: "@bob test".into(),
+                        body: "test".into(),
+                        grammar_version: "mention/v1".into(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: binding.address_id,
+                            alias_snapshot: "bob".into(),
+                            agent_session_snapshot: Some(AgentSessionId::new("live-session")),
+                            delivery_id: DeliveryId::new("live-delivery"),
+                        }],
+                        context_references: vec![],
+                    },
+                    &attribution,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        subscriber
+            .handle_line(
+                r#"{"method":"event","params":{"type":"status","terminal":"t2"}}"#,
+                &runtime,
+            )
+            .unwrap();
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "send" && call[1] == "t2")
+                .count(),
+            1
+        );
+        drop(dead_owner);
+        *fixture.get_failure.borrow_mut() = Some("t1".into());
+        subscriber.handle_line(&labels(), &runtime).unwrap();
+        fixture.calls.borrow_mut().clear();
+        let due = LifecycleRuntime {
+            clock: &RetryClock(40_000),
+            ..runtime
+        };
+        let result = subscriber.tick(&due);
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "get" && call[1] == "t1")
+                .count(),
+            0,
+            "due tick retried unavailable pane: {:?}",
+            fixture.calls.borrow()
+        );
+        result.unwrap();
+        let connection =
+            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
+        let state: String = connection
+            .query_row(
+                "SELECT state FROM delivery_attempts WHERE pane_id='t2'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            state, "settled",
+            "independent delivery grace must still run"
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "original-session"
+        );
+    });
+}
