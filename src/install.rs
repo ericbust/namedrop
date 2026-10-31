@@ -1651,3 +1651,22 @@ mod permission_tests {
 
 #[cfg(test)]
 mod owner_review_tests;
+
+#[cfg(test)]
+mod session_end_tests {
+    use super::*;
+    #[test]
+    fn hc_manifest_installs_session_end() {
+        let manifest: Value =
+            serde_json::from_str(&hooks_manifest(Path::new("/private/package"), true).unwrap())
+                .unwrap();
+        assert!(
+            manifest["hooks"]["SessionEnd"].is_array(),
+            "hc manifest must install SessionEnd"
+        );
+        let tui: Value =
+            serde_json::from_str(&hooks_manifest(Path::new("/private/package"), false).unwrap())
+                .unwrap();
+        assert!(tui["hooks"]["SessionEnd"].is_null());
+    }
+}
