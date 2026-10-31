@@ -144,10 +144,6 @@ fn main() -> ExitCode {
     }
     let explicit_host = match cli.runtime.explicit_host_kind() {
         Ok(host) => host,
-        Err(error) if cli.print_host() => {
-            eprintln!("{error}");
-            return ExitCode::from(64);
-        }
         Err(error) => {
             return write_result(
                 &CommandResult::invalid_request(error),
@@ -156,24 +152,6 @@ fn main() -> ExitCode {
             );
         }
     };
-    if cli.print_host() {
-        return match cli.runtime.host_kind() {
-            Ok(host) => {
-                println!(
-                    "{}",
-                    match host {
-                        HostKind::Tui => "tui",
-                        HostKind::Hc => "hc",
-                    }
-                );
-                ExitCode::SUCCESS
-            }
-            Err(error) => {
-                eprintln!("{error}");
-                ExitCode::from(64)
-            }
-        };
-    }
     let hook_state = cli
         .user_prompt_submit_hook_state_directory()
         .or_else(|| cli.mailbox_wake_hook_state_directory())
@@ -235,17 +213,24 @@ fn main() -> ExitCode {
         }
     }
     if cli.operation() == "events" {
+        if cli.runtime.host_kind() != Ok(HostKind::Hc) {
+            return write_result(
+                &CommandResult::invalid_request("events requires --host hc"),
+                64,
+                cli.human_output(io::stdout().is_terminal()),
+            );
+        }
         drop(command_guard.take());
-        let result = cli.runtime.host_kind().and_then(|kind| {
-            if kind != HostKind::Hc {
-                return Err("events requires --host hc".to_owned());
-            }
+        let result = cli.runtime.host_kind().and_then(|_| {
             let state = cli.runtime.state_directory()?;
             namedrop::host::hc::events::run_with_environment(&state, &cli.runtime.environment)
         });
         if let Err(error) = result {
-            eprintln!("{error}");
-            return ExitCode::from(65);
+            return write_result(
+                &CommandResult::rejected("events", "operation_failed", error),
+                65,
+                cli.human_output(io::stdout().is_terminal()),
+            );
         }
         return ExitCode::SUCCESS;
     }

@@ -5,9 +5,6 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Parser)]
 #[command(name = "namedrop", version, about)]
 pub struct Cli {
-    #[arg(long, global = true, hide = true)]
-    print_host: bool,
-
     /// Print the complete JSON response, including when running in a terminal.
     #[arg(long, global = true, conflicts_with = "human")]
     pub json: bool,
@@ -111,10 +108,6 @@ impl RuntimeOptions {
 }
 
 impl Cli {
-    pub fn print_host(&self) -> bool {
-        self.print_host
-    }
-
     pub fn human_output(&self, terminal: bool) -> bool {
         self.human || (!self.json && terminal && !self.machine_operation())
     }
@@ -362,6 +355,7 @@ enum Command {
     /// Recover after a plugin restart; ambiguous in-flight delivery attempts are held.
     Reconcile,
     /// Subscribe to hc lifecycle and status events.
+    #[command(hide = true)]
     Events,
     /// Handle one Herdr lifecycle event.
     Event {
