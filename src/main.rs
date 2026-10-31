@@ -910,7 +910,6 @@ fn run_context_hook(
         return ExitCode::SUCCESS;
     }
     let hc = options.host_kind() == Ok(HostKind::Hc);
-    let mut hc_active = false;
     let mut output = (!hc)
         .then(|| namedrop::execute_codex_app_server_hook(&input))
         .flatten()
@@ -930,7 +929,6 @@ fn run_context_hook(
                     if !active {
                         return Ok(None);
                     }
-                    hc_active = true;
                     if let Some(notice) = namedrop::execute_codex_app_server_hook(&input) {
                         return Ok(Some(notice));
                     }
@@ -956,7 +954,7 @@ fn run_context_hook(
             .ok()
             .flatten()
         });
-    if (!hc || hc_active)
+    if !hc
         && serde_json::from_str::<serde_json::Value>(&input)
             .is_ok_and(|input| input["hook_event_name"] == "SessionStart")
     {
