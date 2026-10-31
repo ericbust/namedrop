@@ -1417,3 +1417,38 @@ fn app_session_start_never_forwards_the_tui_update_command() {
         assert!(tui_script.contains(crate::update_check::UPDATE_COMMAND));
     }
 }
+
+#[test]
+fn tool_routing_uses_the_hosts_captured_core_endpoint() {
+    struct Captured(crate::environment::EnvironmentSnapshot);
+    impl crate::HerdrCommandExecutor for Captured {
+        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
+            panic!("unexpected host command {args:?}");
+        }
+        fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+            Some(&self.0)
+        }
+    }
+    let snapshot = crate::environment::EnvironmentSnapshot::from_variables([
+        ("HC_SESSION".into(), "captured-route-session".into()),
+        ("HC_SOCKET".into(), "/captured-route/socket".into()),
+    ]);
+    let transport = Captured(snapshot);
+    let host = crate::HcHost::new(&transport);
+    let environment = crate::integration::tool_environment(
+        &host,
+        Path::new("/state"),
+        "opaque-core",
+        "space",
+        "terminal",
+    );
+    assert_eq!(
+        environment.get("HC_SESSION").map(String::as_str),
+        Some("captured-route-session")
+    );
+    assert_eq!(
+        environment.get("HC_SOCKET").map(String::as_str),
+        Some("/captured-route/socket")
+    );
+    assert!(!environment.keys().any(|key| key.starts_with("HERDR_")));
+}
