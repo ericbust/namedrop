@@ -622,3 +622,51 @@ test("channel preparation is idempotent while requested or already prepared", ()
     }
   }
 });
+
+test("a response handed to the channel keeps its request for the line under the channel composer, still ends at an edit or a send, and only a ready pane can hand it over", () => {
+  const response: MessageIntent = {
+    kind: "message",
+    addressId: member.id,
+    subject: null,
+    reference: { kind: "coordination", id: "coordination-1" },
+    preparation: "preserved",
+  };
+  const loading = evidenceReduce(
+    { kind: "closed", version: 0 },
+    { type: "open", request: { ...request, response } },
+  );
+  assert.equal(evidenceReduce(loading, { type: "to-channel" }), loading);
+  const ready = evidenceReduce(loading, {
+    type: "loaded",
+    version: loading.version,
+    context,
+  });
+  assert.ok(ready.kind === "ready");
+  const handed = evidenceReduce(ready, { type: "to-channel" });
+  assert.deepEqual(handed, {
+    kind: "in-channel",
+    version: ready.version,
+    request: ready.request,
+  });
+  assert.equal(evidenceReduce(handed, { type: "to-channel" }), handed);
+  assert.equal(
+    evidenceReduce(handed, { type: "prepare-message", draftEmpty: true }),
+    handed,
+    "no pane is left to press Message in",
+  );
+  for (const event of [
+    { type: "draft-edited", key: channel.key },
+    { type: "sent", key: channel.key, messageId: null },
+  ] as const)
+    assert.deepEqual(evidenceReduce(handed, event), {
+      ...handed,
+      request: {
+        ...handed.request,
+        response: { ...response, preparation: "idle" },
+      },
+    });
+  assert.deepEqual(evidenceReduce(handed, { type: "close" }), {
+    kind: "closed",
+    version: handed.version + 1,
+  });
+});

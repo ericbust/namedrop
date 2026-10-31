@@ -1,4 +1,10 @@
-import { type KeyboardEvent, useEffect, useLayoutEffect, useRef } from "react";
+import {
+  type KeyboardEvent,
+  type RefObject,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+} from "react";
 import { activityCopy, attentionCopy, composerCopy } from "../copy.ts";
 import type { Channel, SpaceKey, State } from "../model.ts";
 import { channelSuffix, connectionStatus, sortedChannels } from "../store.ts";
@@ -15,6 +21,14 @@ function needsYouOf(channels: Channel[]): Channel[] {
   return channels.filter((channel) => channel.health.level === "needs_you");
 }
 const TABBABLE = "a[href], button:not([disabled])";
+const CURRENT_ROW =
+  '.channels-navigation [aria-current="page"], .activity-entry[aria-current="page"]';
+function focusCurrentRow(sidebar: HTMLElement | null) {
+  (
+    sidebar?.querySelector<HTMLElement>(CURRENT_ROW) ??
+    sidebar?.querySelector<HTMLElement>(TABBABLE)
+  )?.focus();
+}
 
 // On a phone the sidebar is a drawer, and the connection dot moves to the
 // button that opens it.
@@ -24,6 +38,7 @@ type Props = {
   busy: number;
   id: string;
   drawer: Drawer | null;
+  toggleFocusLost: RefObject<boolean>;
   onSelect: (key: SpaceKey) => void;
   onActivity: () => void;
 };
@@ -32,6 +47,7 @@ export function Sidebar({
   busy,
   id,
   drawer,
+  toggleFocusLost,
   onSelect,
   onActivity,
 }: Props) {
@@ -43,23 +59,20 @@ export function Sidebar({
   const modal = drawer?.open === true;
   const close = drawer?.onClose;
   const phone = drawer !== null;
-  // The column hides as the window narrows to a phone, and the focus it held
-  // falls to the page. The button that opens the drawer takes it instead,
-  // whether the blur comes before the phone layout renders or after it.
+  // The column hides as the window narrows to a phone, and the Channels button
+  // goes away as it widens. The focus either one held falls to the page, so the
+  // one that now shows takes it, whether the blur comes before the new layout
+  // renders or after it.
   useLayoutEffect(() => {
-    if (!phone || !hiddenWithFocus.current) return;
-    hiddenWithFocus.current = false;
-    if (document.activeElement === document.body)
-      document.querySelector<HTMLElement>(".channels-toggle")?.focus();
-  }, [phone]);
+    const lost = phone ? hiddenWithFocus : toggleFocusLost;
+    if (!lost.current) return;
+    lost.current = false;
+    if (document.activeElement !== document.body) return;
+    if (phone) document.querySelector<HTMLElement>(".channels-toggle")?.focus();
+    else focusCurrentRow(sidebar.current);
+  }, [phone, toggleFocusLost]);
   useLayoutEffect(() => {
-    if (!modal) return;
-    const element = sidebar.current;
-    (
-      element?.querySelector<HTMLElement>(
-        '.channels-navigation [aria-current="page"], .activity-entry[aria-current="page"]',
-      ) ?? element?.querySelector<HTMLElement>(TABBABLE)
-    )?.focus();
+    if (modal) focusCurrentRow(sidebar.current);
   }, [modal]);
   useEffect(() => {
     if (!modal || close === undefined) return;
@@ -320,20 +333,35 @@ export function Sidebar({
   );
 }
 
+// `focusLost` is set while focus that was on the button has gone nowhere:
+// the button hid with it, or unmounted with it as the phone layout ended.
 export function ChannelsToggle({
   state,
   open,
   controls,
+  focusLost,
   onOpen,
 }: {
   state: State;
   open: boolean;
   controls: string;
+  focusLost: RefObject<boolean>;
   onOpen: () => void;
 }) {
   const needsYou = needsYouOf(sortedChannels(state)).length;
+  const button = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    const element = button.current;
+    // The button moves between headers as a pane opens or closes on a phone,
+    // so the one that mounts starts clean.
+    focusLost.current = false;
+    return () => {
+      if (document.activeElement === element) focusLost.current = true;
+    };
+  }, [focusLost]);
   return (
     <button
+      ref={button}
       type="button"
       className="channels-toggle"
       aria-label={
@@ -345,6 +373,13 @@ export function ChannelsToggle({
       aria-expanded={open}
       aria-controls={controls}
       onClick={onOpen}
+      onBlur={(event) => {
+        if (
+          event.relatedTarget === null &&
+          !event.currentTarget.checkVisibility({ visibilityProperty: true })
+        )
+          focusLost.current = true;
+      }}
     >
       <Icon name="menu" />
       {needsYou > 0 && <span className="dot dot-alert" />}

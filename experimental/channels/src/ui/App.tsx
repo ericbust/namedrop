@@ -519,6 +519,7 @@ export function App() {
   const drawerOpen = phone && drawer;
   const sidebarId = useId();
   const toggleFocus = useRef(false);
+  const toggleFocusLost = useRef(false);
   useEffect(() => {
     if (!phone) setDrawer(false);
   }, [phone]);
@@ -606,7 +607,9 @@ export function App() {
   const terminalRuns = channel?.terminalRuns;
   const runs = useMemo(() => runsByMessage(terminalRuns ?? []), [terminalRuns]);
   const focused =
-    evidence.kind !== "closed" && evidence.request.key === channel?.key
+    evidence.kind !== "closed" &&
+    evidence.kind !== "in-channel" &&
+    evidence.request.key === channel?.key
       ? evidence
       : null;
   const thread = useMemo(
@@ -618,11 +621,18 @@ export function App() {
           : undefined,
     [focused, channel, state.slot, groups],
   );
-  const channelResponse =
-    focused?.kind === "ready" && focused.request.response?.kind === "message"
-      ? focused.request.response
+  const evidenceResponse =
+    (evidence.kind === "ready" || evidence.kind === "in-channel") &&
+    evidence.request.key === channel?.key
+      ? evidence.request.response
       : null;
-  const preparedCaret = useRef<{ text: string; at: number } | null>(null);
+  const channelResponse =
+    evidenceResponse?.kind === "message" ? evidenceResponse : null;
+  // The channel composer takes focus once it shows the text, with the caret
+  // where a prepared message puts it, or where it was.
+  const composerFocus = useRef<{ text: string; at: number | null } | null>(
+    null,
+  );
   useLayoutEffect(() => {
     if (
       focused?.kind !== "ready" ||
@@ -642,10 +652,23 @@ export function App() {
       version: focused.version,
       result: result.kind,
     });
+    // Where the pane covers the channel, the message and the line about it
+    // are out of sight under it, so the pane closes.
+    const covered =
+      main.current
+        ?.querySelector("textarea")
+        ?.checkVisibility({ visibilityProperty: true }) === false;
     if (result.kind === "prepared") {
-      preparedCaret.current = { text: result.text, at: result.caret };
+      composerFocus.current = { text: result.text, at: result.caret };
       edit(composerId, result.text);
-      main.current?.querySelector("textarea")?.focus();
+    } else if (covered)
+      composerFocus.current = {
+        text: state.drafts.get(draftKey(composerId))?.text ?? "",
+        at: null,
+      };
+    if (covered) {
+      focusEvidence({ type: "to-channel" });
+      dispatch({ type: "thread", threadId: null });
     }
   }, [
     focused,
@@ -658,10 +681,16 @@ export function App() {
   ]);
   useLayoutEffect(() => {
     const box = main.current?.querySelector("textarea");
-    const want = preparedCaret.current;
-    if (want === null || box?.value !== want.text) return;
-    preparedCaret.current = null;
-    box.setSelectionRange(want.at, want.at);
+    const want = composerFocus.current;
+    if (
+      want === null ||
+      box?.value !== want.text ||
+      !box.checkVisibility({ visibilityProperty: true })
+    )
+      return;
+    composerFocus.current = null;
+    box.focus();
+    if (want.at !== null) box.setSelectionRange(want.at, want.at);
   });
   const peeking = state.slot.kind === "peek" ? state.slot.target : null;
   const who = peeking === null ? null : peekWho(state.channels, peeking);
@@ -673,6 +702,7 @@ export function App() {
       state={state}
       open={drawerOpen}
       controls={sidebarId}
+      focusLost={toggleFocusLost}
       onOpen={() => setDrawer(true)}
     />
   ) : null;
@@ -902,6 +932,7 @@ export function App() {
             busy={activity.count}
             id={sidebarId}
             drawer={phone ? { open: drawerOpen, onClose: closeDrawer } : null}
+            toggleFocusLost={toggleFocusLost}
             onSelect={(key) => {
               select(key);
               if (drawerOpen) closeDrawer();

@@ -10316,3 +10316,418 @@ test("UI-R4 fix1 2: a kept draft's line says why once the agent's pane closes, i
   assert.equal(await draft.inputValue(), "my own words");
   assert.equal(ui.posts.attempts.length, 0);
 });
+
+const activeName = (page) =>
+  page.evaluate(() => {
+    const element = document.activeElement;
+    if (element === null || element === document.body) return "the page";
+    return (
+      element.getAttribute("aria-label") ??
+      element.textContent?.trim() ??
+      element.tagName
+    );
+  });
+async function focusLandsOn(page, name, what) {
+  const deadline = Date.now() + 5000;
+  let seen = await activeName(page);
+  while (seen !== name) {
+    if (Date.now() > deadline)
+      assert.fail(`${what}: focus is on ${seen}, not ${name}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    seen = await activeName(page);
+  }
+}
+async function nextFrame(page) {
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(resolve)),
+      ),
+  );
+}
+// Sets an element's visibility from the page, so a test decides whether the
+// browser drops its focus before the layout renders or after.
+const forceVisibility = (locator, value) =>
+  locator.evaluate((element, value) => {
+    if (value === null) element.style.removeProperty("visibility");
+    else element.style.setProperty("visibility", value, "important");
+  }, value);
+
+test("UI-R5 R5-4: when the sidebar column hides with a row focused, focus moves to the Channels button whether the blur comes before the phone layout renders or after it", async (t) => {
+  for (const order of ["blur first", "render first"]) {
+    const ui = await open(t, (client) =>
+      replay(client, [layoutChannel(), team(2, "beta"), team(3, "gamma")]),
+    );
+    await ui.page.emulateMedia({ reducedMotion: "reduce" });
+    await ui.live();
+    const page = ui.page;
+    await resize(page, 700, 844);
+    const sidebar = page.locator(".sidebar");
+    const toggle = page.getByRole("button", { name: /^Channels/ });
+    await sidebar.getByRole("button", { name: /^beta/ }).first().focus();
+    if (order === "blur first") {
+      await forceVisibility(sidebar, "hidden");
+      await focusLandsOn(page, "the page", "the hidden column drops focus");
+      assert.equal(await toggle.count(), 0, "the blur came before the phone");
+      await forceVisibility(sidebar, null);
+      await resize(page, 390, 844);
+    } else {
+      await forceVisibility(sidebar, "visible");
+      await resize(page, 390, 844);
+      assert.equal(await toggle.count(), 1, "the phone layout rendered");
+      assert.equal(await activeName(page), "beta", "the row kept focus");
+      await forceVisibility(sidebar, null);
+    }
+    await focusLandsOn(page, "Channels, 1 needs you", order);
+  }
+});
+
+test("UI-R5 R5-4: with a thread open beside the channel, focus that leaves the channel composer for nowhere stays off the pane", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const page = ui.page;
+  await resize(page, 1440, 900);
+  await page
+    .getByRole("region", { name: "Message history" })
+    .getByRole("button", { name: /^1 reply from/ })
+    .click();
+  await threadPane(ui).waitFor();
+  const box = page.getByRole("main").getByRole("combobox");
+  await box.click();
+  await page.evaluate(() => document.activeElement.blur());
+  await nextFrame(page);
+  assert.equal(await page.getByRole("main").isVisible(), true);
+  assert.equal(
+    await activeName(page),
+    "the page",
+    "a blur inside a visible channel leaves focus where the reader put it",
+  );
+});
+
+async function focusMatches(page, selector, what) {
+  const deadline = Date.now() + 5000;
+  const matches = () =>
+    page.evaluate(
+      (selector) => document.activeElement?.matches(selector) === true,
+      selector,
+    );
+  while (!(await matches())) {
+    if (Date.now() > deadline)
+      assert.fail(`${what}: focus is on ${await activeName(page)}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+test("UI-R5 R5-1: when the phone layout ends with focus on the Channels button, focus moves to the current row in the sidebar column, whether the button loses focus before the wider layout renders or with it", async (t) => {
+  const currentRow =
+    '.sidebar .channels-navigation button[aria-current="page"]';
+  const activityRow = '.sidebar .activity-entry[aria-current="page"]';
+  const cases = [
+    { view: "channel", to: [844, 390], row: currentRow },
+    { view: "All activity", to: [1440, 900], row: activityRow },
+    { view: "thread covering the channel", to: [844, 390], row: currentRow },
+  ];
+  for (const order of ["blur first", "render first"])
+    for (const { view, to, row } of cases) {
+      const what = `${order}, ${view}, 390x844 to ${to.join("x")}`;
+      await t.test(what, async (t) => {
+        const { page, toggle, dialog } = await phoneDrawer(t);
+        if (view === "thread covering the channel") {
+          await page
+            .getByRole("region", { name: "Message history" })
+            .getByRole("button", { name: /^1 reply from/ })
+            .click();
+          await page.getByRole("complementary", { name: "Thread" }).waitFor();
+        }
+        await toggle.click();
+        await dialog.waitFor();
+        if (view === "All activity")
+          await dialog.getByRole("link", { name: /^All activity/ }).click();
+        else await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "detached" });
+        await focusMatches(
+          page,
+          ".channels-toggle",
+          `${what}: the drawer closed`,
+        );
+        const button = page.locator(".channels-toggle");
+        if (order === "blur first") {
+          await forceVisibility(button, "hidden");
+          await focusLandsOn(page, "the page", `${what}: the hidden button`);
+          await forceVisibility(button, null);
+        }
+        await resize(page, ...to);
+        assert.equal(await button.count(), 0, `${what}: no Channels button`);
+        await focusMatches(page, row, what);
+      });
+    }
+});
+
+async function pressMessage(t, size, { draft = "", gone = false } = {}) {
+  const { value, left, context } = leavesAfterPress("message", "closed");
+  const loaded = held();
+  if (!gone) loaded.release();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    {
+      onContext: async () => {
+        await loaded.gate;
+        return context;
+      },
+    },
+  );
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, ...size);
+  await ui.live();
+  const box = ui.page.locator("main .composer textarea");
+  if (draft !== "") await box.fill(draft);
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  if (gone) {
+    await until(() => ui.contextRequests.length === 1, "the conversation");
+    ui.connections[0].send("space", left);
+    await readsAs(
+      ui.page.locator(".attention-hint"),
+      "@codex's pane is closed, so it can't take a message.",
+    );
+    loaded.release();
+  }
+  return { ui, box };
+}
+const composerFocus = (box) =>
+  box.evaluate((element) => ({
+    focused: element === document.activeElement,
+    caret: [element.selectionStart, element.selectionEnd],
+  }));
+test("UI-R5 R5-2: where a pane covers the channel, Message @codex closes the pane and leaves focus in the channel composer with the prepared message, the caret at the end of its first line; beside or above the channel the pane stays open", async (t) => {
+  const first = "@codex About your coordination report: ";
+  for (const [width, height, covers] of [
+    [700, 899, true],
+    [390, 844, true],
+    [700, 1000, false],
+    [1440, 900, false],
+  ])
+    await t.test(`${width}x${height}`, async (t) => {
+      const { ui, box } = await pressMessage(t, [width, height]);
+      await eventually(
+        async () => (await box.inputValue()) === `${first}\nRef: decision-1`,
+        "the prepared message",
+      );
+      await eventually(
+        async () =>
+          isDeepStrictEqual(await composerFocus(box), {
+            focused: true,
+            caret: [first.length, first.length],
+          }),
+        `focus and caret in the channel composer, not ${JSON.stringify(await composerFocus(box))} on ${await activeName(ui.page)}`,
+      );
+      assert.equal(await ui.page.getByRole("main").isVisible(), true);
+      if (covers) assert.equal(await threadPane(ui).count(), 0, "pane closed");
+      else
+        await readsAs(
+          threadPane(ui).locator(".thread-answer"),
+          "Answer tracked work in the channel. Your message to @codex is ready there.",
+        );
+      await ui.page.keyboard.type("ship option B");
+      assert.equal(
+        await box.inputValue(),
+        `${first}ship option B\nRef: decision-1`,
+      );
+    });
+});
+test("UI-R5 R5-2: where a pane covers the channel, a kept draft or an absent agent closes the pane too, so the line under the channel composer shows, with focus in that composer", async (t) => {
+  for (const [state, line, options] of [
+    [
+      "kept draft",
+      "Your draft is still here. Send or clear it, then press Message @codex again.",
+      { draft: "my own words" },
+    ],
+    [
+      "absent agent",
+      "@codex's pane is closed, so it can't take a message.",
+      { draft: "my own words", gone: true },
+    ],
+  ])
+    for (const size of [
+      [700, 899],
+      [390, 844],
+    ])
+      await t.test(`${state} at ${size.join("x")}`, async (t) => {
+        const { ui, box } = await pressMessage(t, size, options);
+        const guard = ui.page.locator("main .composer-guard");
+        await readsAs(guard, line);
+        await eventually(
+          async () => (await threadPane(ui).count()) === 0,
+          "the pane to close",
+        );
+        assert.equal(await guard.isVisible(), true, "the line shows");
+        await eventually(
+          async () => (await composerFocus(box)).focused,
+          `focus in the channel composer, not on ${await activeName(ui.page)}`,
+        );
+        assert.equal(await box.inputValue(), "my own words");
+        assert.equal(ui.posts.attempts.length, 0);
+      });
+});
+
+// Scrolls the timeline so the element's center sits at the timeline's
+// vertical middle.
+const centerIn = async (timeline, element) =>
+  element.evaluate(
+    (target, scroller) => {
+      const port = scroller.getBoundingClientRect();
+      const box = target.getBoundingClientRect();
+      scroller.scrollTop +=
+        box.top +
+        box.height / 2 -
+        (port.top + scroller.clientTop + scroller.clientHeight / 2);
+    },
+    await timeline.elementHandle(),
+  );
+const jumpFacts = async (timeline, jump, reply) =>
+  timeline.evaluate(
+    (scroller, [jump, reply]) => {
+      const shownText = (element) => {
+        const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+        let text = "";
+        while (walker.nextNode())
+          if (walker.currentNode.parentElement.checkVisibility())
+            text += walker.currentNode.data;
+        return text.trim();
+      };
+      const port = scroller.getBoundingClientRect();
+      const left = port.left + scroller.clientLeft;
+      const bottom = port.top + scroller.clientTop + scroller.clientHeight;
+      const pill = jump.getBoundingClientRect();
+      const target = reply.getBoundingClientRect();
+      const x = target.left + target.width / 2;
+      const y = target.top + target.height / 2;
+      // The reply row scrolled down to the timeline's bottom edge, where a
+      // corner control could cover its right-aligned count.
+      const top = scroller.scrollTop;
+      scroller.scrollTop += target.bottom - (bottom - 4);
+      const low = reply.getBoundingClientRect();
+      const edges = [low.left + 2, low.right - 2].map(
+        (at) =>
+          document
+            .elementFromPoint(at, low.top + low.height / 2)
+            ?.closest("button") === reply,
+      );
+      scroller.scrollTop = top;
+      return {
+        name: jump.getAttribute("aria-label"),
+        title: jump.title,
+        text: shownText(jump),
+        size: [Math.round(pill.width), Math.round(pill.height)],
+        round:
+          Number.parseFloat(getComputedStyle(jump).borderTopLeftRadius) >=
+          pill.height / 2,
+        corner:
+          pill.left >= left &&
+          pill.bottom <= bottom &&
+          pill.right <= left + 48 &&
+          pill.top >= bottom - 48,
+        inset: [Math.round(pill.left - left), Math.round(bottom - pill.bottom)],
+        replyInView: y > port.top && y < bottom,
+        hit: document.elementFromPoint(x, y)?.closest("button") === reply,
+        lowHit: edges.every(Boolean),
+      };
+    },
+    [await jump.elementHandle(), await reply.elementHandle()],
+  );
+test("UI-R5 R5-3: under 420 px tall the Jump control is a 28 px round icon button in the timeline's bottom-left corner, so a reply button in the timeline's middle or along its bottom edge takes the click; taller windows keep the pill", async (t) => {
+  for (const [width, height, short] of [
+    [844, 300, true],
+    [320, 260, true],
+    [312, 368, true],
+    [390, 844, false],
+  ])
+    await t.test(`${width}x${height}`, async (t) => {
+      const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+      await ui.page.emulateMedia({ reducedMotion: "reduce" });
+      await resize(ui.page, width, height);
+      await ui.live();
+      const timeline = ui.page.locator("main .timeline");
+      const reply = ui.page
+        .getByRole("region", { name: "Message history" })
+        .getByRole("button", { name: /^1 reply from/ });
+      const jump = ui.page.getByRole("button", {
+        name: "Jump to latest messages",
+      });
+      await centerIn(timeline, reply);
+      await jump.waitFor();
+      await nextFrame(ui.page);
+      const facts = await jumpFacts(timeline, jump, reply);
+      assert.deepEqual(facts, {
+        name: "Jump to latest messages",
+        title: "Jump to latest",
+        replyInView: true,
+        ...(short
+          ? {
+              text: "",
+              size: [28, 28],
+              round: true,
+              corner: true,
+              inset: [12, 12],
+              hit: true,
+              lowHit: true,
+            }
+          : {
+              text: "Jump to latest",
+              size: [facts.size[0], 32],
+              round: true,
+              corner: false,
+              inset: facts.inset,
+              hit: facts.hit,
+              lowHit: facts.lowHit,
+            }),
+      });
+      await reply.click({ timeout: 2000 });
+      await threadPane(ui).waitFor();
+    });
+});
+
+test("UI-R5 fix1 2: under 420 px tall the Earlier thread row along the timeline's bottom edge takes a click at its left end, clear of the Jump button", async (t) => {
+  const value = layoutChannel();
+  value.frame.messages = value.frame.messages.filter(
+    (message) => message.message_id !== "p1",
+  );
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, 844, 300);
+  await ui.live();
+  const row = ui.page.locator("main .earlier-thread");
+  await row.waitFor();
+  const timeline = ui.page.locator("main .timeline");
+  await timeline.evaluate(
+    (scroller, row) => {
+      const bottom =
+        scroller.getBoundingClientRect().top +
+        scroller.clientTop +
+        scroller.clientHeight;
+      scroller.scrollTop += row.getBoundingClientRect().bottom - (bottom - 4);
+    },
+    await row.elementHandle(),
+  );
+  await ui.page
+    .getByRole("button", { name: "Jump to latest messages" })
+    .waitFor();
+  await nextFrame(ui.page);
+  const box = await row.boundingBox();
+  const at = { x: box.x + 6, y: box.y + box.height / 2 };
+  assert.equal(
+    await ui.page.evaluate(
+      ([x, y]) =>
+        document.elementFromPoint(x, y)?.closest("button")?.className ?? null,
+      [at.x, at.y],
+    ),
+    "text-button earlier-thread",
+    "the row's left end is the row, not the Jump button",
+  );
+  await ui.page.mouse.click(at.x, at.y);
+  await threadPane(ui).waitFor({ timeout: 2000 });
+});

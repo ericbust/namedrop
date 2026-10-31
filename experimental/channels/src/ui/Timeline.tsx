@@ -358,10 +358,11 @@ export function Timeline({
             type="button"
             className="jump-latest"
             aria-label="Jump to latest messages"
+            title="Jump to latest"
             onClick={jumpToLatest}
           >
             <Icon name="arrowDown" />
-            Jump to latest
+            <span className="jump-label">Jump to latest</span>
           </button>
         </div>
       )}

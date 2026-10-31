@@ -808,11 +808,12 @@ button.member:not(.more):hover {
 
 .timeline {
   --pad-bottom: var(--space-6);
+  --pad-inline: var(--space-6);
   flex: 1;
   min-height: 112px;
   overflow-y: auto;
   overflow-anchor: none;
-  padding: 0 var(--space-6);
+  padding: 0 var(--pad-inline);
   -webkit-mask-image: linear-gradient(to bottom, transparent, #000 12px);
   mask-image: linear-gradient(to bottom, transparent, #000 12px);
 }
@@ -1259,8 +1260,10 @@ button.member:not(.more):hover {
     background-color: var(--bg-selected);
   }
 }
+/* Indented by the avatar column, like the reply rows, so it lines up with the
+   message text and stays clear of the short-window Jump button. */
 .earlier-thread {
-  margin-top: var(--space-3);
+  margin: var(--space-3) 0 0 calc(var(--avatar) + var(--space-3));
   font-size: var(--text-xs);
 }
 
@@ -1985,11 +1988,13 @@ code.inline {
   }
   .channel-header,
   .members,
-  .timeline,
   .activity-list,
   .composer,
   .reconnect {
     padding-inline: var(--space-4);
+  }
+  .timeline {
+    --pad-inline: var(--space-4);
   }
   .attention {
     margin-inline: var(--space-4);
@@ -2108,6 +2113,23 @@ code.inline {
   }
   .timeline {
     min-height: 48px;
+  }
+  /* The centered pill would cover the middle of so short a timeline, so the
+     control shrinks to its icon in the bottom-left corner, over the avatar
+     gutter, where nothing takes a click; the right edge holds reply counts. */
+  .jump-dock {
+    justify-content: flex-start;
+  }
+  .jump-latest {
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    translate: calc(var(--space-3) - var(--pad-inline))
+      calc(var(--pad-bottom) - var(--space-3));
+  }
+  .jump-label {
+    display: none;
   }
 }
 @keyframes backdrop-in {
