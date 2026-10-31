@@ -235,9 +235,12 @@ pub(crate) fn tool_environment(
             ("HC_TERMINAL_ID".to_owned(), pane_id.to_owned()),
             ("NAMEDROP_HC_SPACE".to_owned(), workspace_id.to_owned()),
         ]);
-        for key in ["HC_SESSION", "HC_SOCKET"] {
-            if let Ok(value) = std::env::var(key) {
-                environment.insert(key.to_owned(), value);
+        if let Some(captured) = host.environment_snapshot() {
+            if let Some(session) = captured.var("HC_SESSION") {
+                environment.insert("HC_SESSION".to_owned(), session);
+            }
+            if let Ok(endpoint) = captured.hc_endpoint() {
+                environment.insert("HC_SOCKET".to_owned(), endpoint.to_string_lossy().into_owned());
             }
         }
         return environment;
