@@ -1389,3 +1389,28 @@ fn every_claude_permission_inspection_error_includes_repair_guidance() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn app_session_start_never_forwards_the_tui_update_command() {
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let script = session_start_script(
+            runtime,
+            Path::new("/bin/namedrop"),
+            Path::new("/state"),
+            Some("namedrop-app"),
+        )
+        .unwrap();
+        assert!(
+            !script.contains(crate::update_check::UPDATE_COMMAND),
+            "{script}"
+        );
+        let tui_script = session_start_script(
+            runtime,
+            Path::new("/bin/namedrop"),
+            Path::new("/state"),
+            None,
+        )
+        .unwrap();
+        assert!(tui_script.contains(crate::update_check::UPDATE_COMMAND));
+    }
+}
