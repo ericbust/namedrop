@@ -310,17 +310,22 @@ fn exception_pause_never_gates_mailbox_and_dead_exception_sessions_are_reconcile
                 )?
                 .is_some()
             );
-            tx.reconcile_prompt_recipients(&ns, &[("pane".into(), session.clone())], &at(140))?;
+            tx.reconcile_prompt_recipients(
+                &ns,
+                &[("pane".into(), session.clone())],
+                &Default::default(),
+                &at(140),
+            )?;
             assert!(tx.prompt_is_deferred(&ns, "pane", &session)?);
             assert!(!tx.prompt_is_deferred(
                 &ns,
                 "dead-pane",
                 &AgentSessionId::new("dead-session")
             )?);
-            tx.reconcile_prompt_recipients(&ns, &[], &at(150))?;
+            tx.reconcile_prompt_recipients(&ns, &[], &Default::default(), &at(150))?;
             assert!(!tx.prompt_is_deferred(&ns, "pane", &session)?);
             let before = tx.transition_facts(&ns)?.len();
-            tx.reconcile_prompt_recipients(&ns, &[], &at(160))?;
+            tx.reconcile_prompt_recipients(&ns, &[], &Default::default(), &at(160))?;
             assert_eq!(before, tx.transition_facts(&ns)?.len());
             Ok(())
         })

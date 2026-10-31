@@ -4472,6 +4472,7 @@ impl StateTransaction<'_> {
         &mut self,
         namespace: &StateNamespace,
         live_recipients: &[(String, crate::AgentSessionId)],
+        unavailable_panes: &std::collections::BTreeSet<String>,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
         let paused = {
@@ -4495,7 +4496,9 @@ impl StateTransaction<'_> {
             .map(|(pane, session)| prompt_recipient_key(pane, session))
             .collect();
         for recipient in paused {
-            if !live.contains(&recipient) {
+            let (pane, _): (String, String) = serde_json::from_str(&recipient)
+                .map_err(|error| StoreError::invalid_input(error.to_string()))?;
+            if !unavailable_panes.contains(&pane) && !live.contains(&recipient) {
                 self.append_transition(
                     namespace,
                     TransitionEntityKind::PromptRecipient,

@@ -82,6 +82,9 @@ impl Pending {
                     serde_json::from_value(params).map_err(|error| error.to_string())?;
                 if !matches!(event.kind, Kind::Ignored) {
                     let pane = event.terminal.ok_or("hc terminal event has no terminal")?;
+                    if pane.contains('/') {
+                        return Ok(());
+                    }
                     let dirty = self.dirty.entry(pane).or_default();
                     dirty.resume |= matches!(event.kind, Kind::Status | Kind::Turn);
                     dirty.unavailable |=
@@ -307,7 +310,7 @@ impl Subscriber {
         if !self.initialized && pending.snapshot.is_none() {
             pending.full = true;
         }
-        let result = self.reconcile_batch(pending.clone(), runtime);
+        let result = self.reconcile_batch(&mut pending, runtime);
         if result.is_err() {
             self.pending = pending;
             self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
@@ -317,7 +320,7 @@ impl Subscriber {
 
     fn reconcile_batch<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
         &mut self,
-        mut pending: Pending,
+        pending: &mut Pending,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
         let _lock = label_lock(runtime.state_directory)?;
@@ -351,7 +354,7 @@ impl Subscriber {
                     .map_err(|error| error.to_string())?
             } else {
                 TerminalDiscovery {
-                    terminals: pending.snapshot.take().unwrap(),
+                    terminals: pending.snapshot.clone().unwrap(),
                     warnings: vec![],
                 }
             };
@@ -363,6 +366,7 @@ impl Subscriber {
             let mut terminals: BTreeMap<_, _> = discovery
                 .terminals
                 .into_iter()
+                .filter(|terminal| !terminal.address.contains('/'))
                 .map(|terminal| (terminal.address.clone(), terminal))
                 .collect();
             for pane in self.unavailable.keys() {
@@ -397,7 +401,9 @@ impl Subscriber {
                 }
             }
             for (pane, terminal) in &mut terminals {
-                if !active_spaces.contains(terminal.workspace()) {
+                if self.unavailable.contains_key(pane)
+                    || !active_spaces.contains(terminal.workspace())
+                {
                     continue;
                 }
                 if let Err(error) = runtime.host.reconcile_session(
@@ -455,7 +461,6 @@ impl Subscriber {
                 }
                 Err(error) => {
                     self.unavailable.insert(pane.clone(), error.to_string());
-                    errors.push(error.to_string());
                     continue;
                 }
             }
@@ -463,7 +468,9 @@ impl Subscriber {
         }
         if !full {
             for (pane, terminal) in &mut self.terminals {
-                if pending.dirty.contains_key(pane) || !active_spaces.contains(terminal.workspace())
+                if pending.dirty.contains_key(pane)
+                    || self.unavailable.contains_key(pane)
+                    || !active_spaces.contains(terminal.workspace())
                 {
                     continue;
                 }
@@ -478,6 +485,7 @@ impl Subscriber {
                     }
                     Ok(false) => (),
                     Err(error) => {
+                        pending.dirty.entry(pane.clone()).or_default();
                         self.unavailable.insert(pane.clone(), error.to_string());
                         errors.push(error.to_string());
                     }
@@ -548,29 +556,33 @@ impl Subscriber {
             "namedrop-hc-reconcile",
             runtime.clock.now_unix_ms(),
         );
+        let unavailable_panes = self.unavailable.keys().cloned().collect();
         for space in affected {
             let scoped = LifecycleRuntime {
                 workspace_id: Some(&space),
                 current_pane_id: None,
                 ..*runtime
             };
-            if self.unavailable.is_empty() {
-                let namespace = crate::StateNamespace::for_space(runtime.session_socket_id, &space);
-                let live = self
-                    .terminals
-                    .values()
-                    .filter(|terminal| terminal.state == "live" && terminal.workspace() == space)
-                    .filter_map(|terminal| {
-                        terminal
-                            .session()
-                            .map(|session| (terminal.address.clone(), AgentSessionId::new(session)))
-                    })
-                    .collect::<Vec<_>>();
-                if let Err(error) = store.transaction(|transaction| {
-                    transaction.reconcile_prompt_recipients(&namespace, &live, &attribution)
-                }) {
-                    errors.push(error.to_string());
-                }
+            let namespace = crate::StateNamespace::for_space(runtime.session_socket_id, &space);
+            let live = self
+                .terminals
+                .values()
+                .filter(|terminal| terminal.state == "live" && terminal.workspace() == space)
+                .filter_map(|terminal| {
+                    terminal
+                        .session()
+                        .map(|session| (terminal.address.clone(), AgentSessionId::new(session)))
+                })
+                .collect::<Vec<_>>();
+            if let Err(error) = store.transaction(|transaction| {
+                transaction.reconcile_prompt_recipients(
+                    &namespace,
+                    &live,
+                    &unavailable_panes,
+                    &attribution,
+                )
+            }) {
+                errors.push(error.to_string());
             }
             if !active_spaces.contains(&space) {
                 continue;
@@ -582,11 +594,6 @@ impl Subscriber {
                 errors.push(error);
             }
         }
-        errors.extend(
-            self.unavailable
-                .iter()
-                .map(|(pane, error)| format!("{pane}: {error}")),
-        );
         if errors.is_empty() {
             Ok(())
         } else {

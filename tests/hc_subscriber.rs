@@ -251,7 +251,7 @@ fn missed_reconciles_healthy_terminal_after_failed_get() {
         *fixture.get_failure.borrow_mut() = Some("t1".into());
         let result = namedrop::host::hc::events::Subscriber::default()
             .handle_line(r#"{"method":"missed","params":{}}"#, runtime);
-        assert!(result.is_err());
+        result.unwrap();
         let addresses = namedrop::StateStore::open(runtime.state_directory)
             .unwrap()
             .transaction(|tx| {
@@ -2121,11 +2121,7 @@ fn queued_snapshot_preserves_newer_bound_terminal() {
                     *fixture.get_failure.borrow_mut() = Some("t2".into());
                 }
                 let result = subscriber.handle_line(&snapshot, runtime);
-                assert_eq!(
-                    result.is_err(),
-                    unavailable,
-                    "fresh terminal inspection: {result:?}"
-                );
+                result.unwrap();
                 let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
                 let bindings = namedrop::StateStore::open(runtime.state_directory)
                     .unwrap()
