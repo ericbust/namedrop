@@ -4,7 +4,11 @@
 //! environment, working directory and stdin it was given, which is how the
 //! isolation and bounding claims are checked rather than assumed.
 
-use namedrop::{suggest_agent_persona, summarize_agent_status};
+use namedrop::environment::EnvironmentSnapshot;
+use namedrop::{
+    suggest_agent_persona_with_environment as suggest_agent_persona,
+    summarize_agent_status_with_environment as summarize_agent_status,
+};
 use serde_json::{Value, json};
 use std::{
     env, fs,
@@ -362,7 +366,8 @@ fn summarizes_the_origin_and_known_peers() {
         })),
     );
 
-    let summary = summarize_agent_status(&snapshot("ok"), &idle()).expect("summary");
+    let summary = summarize_agent_status(&snapshot("ok"), &idle(), &EnvironmentSnapshot::capture())
+        .expect("summary");
 
     assert_eq!(summary["origin_description"], "Editing the parser.");
     assert_eq!(summary["peers"][0]["pane_id"], "w44:p2");
@@ -387,7 +392,12 @@ fn accepts_a_structured_result_object() {
         }),
     );
 
-    let summary = summarize_agent_status(&snapshot("structured"), &idle()).expect("summary");
+    let summary = summarize_agent_status(
+        &snapshot("structured"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("summary");
 
     assert_eq!(summary["origin_description"], "Reading the plan.");
     assert_eq!(summary["peers"].as_array().expect("peers").len(), 0);
@@ -408,7 +418,12 @@ fn drops_pane_ids_the_snapshot_never_mentioned() {
         })),
     );
 
-    let summary = summarize_agent_status(&snapshot("unknown_peer"), &idle()).expect("summary");
+    let summary = summarize_agent_status(
+        &snapshot("unknown_peer"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("summary");
 
     let peers = summary["peers"].as_array().expect("peers");
     assert_eq!(
@@ -431,7 +446,9 @@ fn strips_control_characters_and_caps_description_length() {
         })),
     );
 
-    let summary = summarize_agent_status(&snapshot("dirty"), &idle()).expect("summary");
+    let summary =
+        summarize_agent_status(&snapshot("dirty"), &idle(), &EnvironmentSnapshot::capture())
+            .expect("summary");
 
     let origin = summary["origin_description"].as_str().expect("origin");
     assert!(
@@ -453,7 +470,12 @@ fn invokes_the_same_host_with_verified_isolation_controls() {
         &envelope(json!({"origin_description": "Working.", "peers": []})),
     );
 
-    summarize_agent_status(&snapshot("record"), &idle()).expect("summary");
+    summarize_agent_status(
+        &snapshot("record"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("summary");
     let recorded = record("record");
 
     for expected in [
@@ -521,7 +543,7 @@ fn bounds_the_model_input_and_keeps_origin_context() {
         .join("\n");
 
     let snapshot = snapshot_with("big", "claude", &origin_excerpt, &peer_excerpt);
-    summarize_agent_status(&snapshot, &idle()).expect("summary");
+    summarize_agent_status(&snapshot, &idle(), &EnvironmentSnapshot::capture()).expect("summary");
 
     let recorded = record("big");
     let bytes: usize = recorded
@@ -555,8 +577,10 @@ fn reuses_a_valid_summary_instead_of_spending_again() {
     );
     let snapshot = snapshot("cache");
 
-    let first = summarize_agent_status(&snapshot, &idle()).expect("first summary");
-    let second = summarize_agent_status(&snapshot, &idle()).expect("second summary");
+    let first = summarize_agent_status(&snapshot, &idle(), &EnvironmentSnapshot::capture())
+        .expect("first summary");
+    let second = summarize_agent_status(&snapshot, &idle(), &EnvironmentSnapshot::capture())
+        .expect("second summary");
 
     assert_eq!(calls("cache"), 1, "an unchanged snapshot must not respawn");
     assert_eq!(first, second);
@@ -572,11 +596,13 @@ fn a_changed_snapshot_is_summarized_again() {
     summarize_agent_status(
         &snapshot_with("recollect", "claude", "first state", "peer"),
         &idle(),
+        &EnvironmentSnapshot::capture(),
     )
     .expect("first summary");
     summarize_agent_status(
         &snapshot_with("recollect", "claude", "second state", "peer"),
         &idle(),
+        &EnvironmentSnapshot::capture(),
     )
     .expect("second summary");
 
@@ -598,8 +624,10 @@ fn a_new_collection_time_alone_does_not_respawn_the_worker() {
     first["observed_at_ms"] = json!(1_700_000_000_000u64);
     second["observed_at_ms"] = json!(1_700_000_999_999u64);
 
-    summarize_agent_status(&first, &idle()).expect("first summary");
-    summarize_agent_status(&second, &idle()).expect("second summary");
+    summarize_agent_status(&first, &idle(), &EnvironmentSnapshot::capture())
+        .expect("first summary");
+    summarize_agent_status(&second, &idle(), &EnvironmentSnapshot::capture())
+        .expect("second summary");
 
     assert_eq!(
         calls("restamp"),
@@ -618,8 +646,10 @@ fn a_replaced_session_never_reuses_the_previous_summary() {
     let mut second = first.clone();
     second["origin"]["session_id"] = json!("sess-replaced");
 
-    summarize_agent_status(&first, &idle()).expect("first summary");
-    summarize_agent_status(&second, &idle()).expect("second summary");
+    summarize_agent_status(&first, &idle(), &EnvironmentSnapshot::capture())
+        .expect("first summary");
+    summarize_agent_status(&second, &idle(), &EnvironmentSnapshot::capture())
+        .expect("second summary");
 
     assert_eq!(
         calls("resession"),
@@ -638,7 +668,12 @@ fn the_worker_prompt_is_staged_in_a_file_not_a_pipe() {
         &envelope(json!({"origin_description": "Working.", "peers": []})),
     );
 
-    summarize_agent_status(&snapshot("stdinkind"), &idle()).expect("summary");
+    summarize_agent_status(
+        &snapshot("stdinkind"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("summary");
 
     let recorded = record("stdinkind");
     assert!(
@@ -671,7 +706,8 @@ fn a_near_limit_prompt_still_cancels_promptly() {
             *requested_at.lock().expect("clock") = Some(Instant::now());
             cancelled.store(true, Ordering::Relaxed);
         });
-        summarize_agent_status(&snapshot, &cancelled).expect_err("cancelled")
+        summarize_agent_status(&snapshot, &cancelled, &EnvironmentSnapshot::capture())
+            .expect_err("cancelled")
     });
 
     assert!(error.contains("cancelled"), "got {error:?}");
@@ -701,8 +737,12 @@ fn an_oversized_worker_is_stopped_while_it_is_still_running() {
         scope.spawn(|| {
             *started_at.lock().expect("clock") = Some(started("flood"));
         });
-        summarize_agent_status(&snapshot("flood"), &cancelled)
-            .expect_err("an oversized worker must not succeed")
+        summarize_agent_status(
+            &snapshot("flood"),
+            &cancelled,
+            &EnvironmentSnapshot::capture(),
+        )
+        .expect_err("an oversized worker must not succeed")
     });
 
     assert!(
@@ -726,8 +766,12 @@ fn a_slow_worker_can_finish_after_the_former_deadline() {
         "slow_success",
         &envelope(json!({"origin_description": "Delayed but valid summary.", "peers": []})),
     );
-    let summary = summarize_agent_status(&snapshot("slow_success"), &idle())
-        .expect("a running worker must not be cancelled just because ten seconds passed");
+    let summary = summarize_agent_status(
+        &snapshot("slow_success"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("a running worker must not be cancelled just because ten seconds passed");
     assert_eq!(summary["origin_description"], "Delayed but valid summary.");
 }
 
@@ -749,8 +793,12 @@ fn cancellation_stops_a_running_worker() {
             *requested_at.lock().expect("clock") = Some(Instant::now());
             cancelled.store(true, Ordering::Relaxed);
         });
-        summarize_agent_status(&snapshot("slow_cancel"), &cancelled)
-            .expect_err("a cancelled worker must not succeed")
+        summarize_agent_status(
+            &snapshot("slow_cancel"),
+            &cancelled,
+            &EnvironmentSnapshot::capture(),
+        )
+        .expect_err("a cancelled worker must not succeed")
     });
 
     assert!(
@@ -772,8 +820,12 @@ fn cancellation_stops_a_running_worker() {
 fn an_already_cancelled_request_never_spawns_a_worker() {
     let cancelled = AtomicBool::new(true);
 
-    let error = summarize_agent_status(&snapshot("never"), &cancelled)
-        .expect_err("a cancelled request must not summarize");
+    let error = summarize_agent_status(
+        &snapshot("never"),
+        &cancelled,
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("a cancelled request must not summarize");
 
     assert!(error.contains("cancelled"), "got {error:?}");
     assert_eq!(calls("never"), 0, "no worker may be spawned");
@@ -781,7 +833,7 @@ fn an_already_cancelled_request_never_spawns_a_worker() {
 
 #[test]
 fn a_failing_worker_falls_back_instead_of_retrying() {
-    let error = summarize_agent_status(&snapshot("fail"), &idle())
+    let error = summarize_agent_status(&snapshot("fail"), &idle(), &EnvironmentSnapshot::capture())
         .expect_err("a failing worker must not succeed");
 
     assert!(
@@ -795,8 +847,12 @@ fn a_failing_worker_falls_back_instead_of_retrying() {
 fn malformed_output_is_rejected() {
     respond("garbage", &json!("not the expected envelope"));
 
-    let error = summarize_agent_status(&snapshot("garbage"), &idle())
-        .expect_err("malformed output must not be rendered");
+    let error = summarize_agent_status(
+        &snapshot("garbage"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("malformed output must not be rendered");
 
     assert!(
         error.contains("malformed") || error.contains("unexpected shape"),
@@ -811,8 +867,12 @@ fn an_oversized_response_is_rejected() {
         &json!({"type": "result", "result": "x".repeat(5000)}),
     );
 
-    let error = summarize_agent_status(&snapshot("oversized"), &idle())
-        .expect_err("an oversized response must not be rendered");
+    let error = summarize_agent_status(
+        &snapshot("oversized"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("an oversized response must not be rendered");
 
     assert!(error.contains("exceeded its limit"), "got {error:?}");
 }
@@ -828,8 +888,12 @@ fn a_denied_model_is_reported_rather_than_upgraded() {
         }),
     );
 
-    let error = summarize_agent_status(&snapshot("denied"), &idle())
-        .expect_err("a denied model must not be rendered");
+    let error = summarize_agent_status(
+        &snapshot("denied"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("a denied model must not be rendered");
 
     assert!(
         error.contains("reported an error") && error.contains("not available"),
@@ -845,8 +909,9 @@ fn an_empty_origin_description_is_rejected() {
         &envelope(json!({"origin_description": "   ", "peers": []})),
     );
 
-    let error = summarize_agent_status(&snapshot("empty"), &idle())
-        .expect_err("an empty description must not be rendered");
+    let error =
+        summarize_agent_status(&snapshot("empty"), &idle(), &EnvironmentSnapshot::capture())
+            .expect_err("an empty description must not be rendered");
 
     assert!(error.contains("no origin description"), "got {error:?}");
 }
@@ -865,6 +930,7 @@ fn codex_runs_contained_by_a_child_only_sandbox() {
     let summary = summarize_agent_status(
         &snapshot_with("codexrun", "codex", "editing the parser", "peer"),
         &idle(),
+        &EnvironmentSnapshot::capture(),
     )
     .expect("summary");
     assert_eq!(summary["model"], "gpt-5.6-luna");
@@ -964,8 +1030,12 @@ fn the_generated_read_profile_denies_unrelated_files() {
         "canary",
         &json!({"origin_description": "Working.", "peers": []}),
     );
-    summarize_agent_status(&snapshot_with("canary", "codex", "work", "work"), &idle())
-        .expect("summary");
+    summarize_agent_status(
+        &snapshot_with("canary", "codex", "work", "work"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("summary");
 
     let dir = fixture();
     let profile = fs::read_to_string(dir.join("last-profile.txt")).expect("generated profile");
@@ -1016,7 +1086,12 @@ fn the_claude_worker_disables_extended_thinking() {
         &envelope(json!({"origin_description": "Working.", "peers": []})),
     );
 
-    summarize_agent_status(&snapshot("thinking"), &idle()).expect("summary");
+    summarize_agent_status(
+        &snapshot("thinking"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("summary");
 
     let recorded = record("thinking");
     assert!(
@@ -1076,10 +1151,16 @@ fn a_seeded_parent_environment_is_stripped_and_overridden() {
         &json!({"origin_description": "Working.", "peers": []}),
     );
 
-    summarize_agent_status(&snapshot("seeded"), &idle()).expect("claude summary");
+    summarize_agent_status(
+        &snapshot("seeded"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("claude summary");
     summarize_agent_status(
         &snapshot_with("seededcodex", "codex", "work", "work"),
         &idle(),
+        &EnvironmentSnapshot::capture(),
     )
     .expect("codex summary");
 
@@ -1119,7 +1200,12 @@ fn both_hosts_are_stripped_of_inherited_agent_session_identity() {
         &envelope(json!({"origin_description": "Working.", "peers": []})),
     );
 
-    summarize_agent_status(&snapshot("identity"), &idle()).expect("summary");
+    summarize_agent_status(
+        &snapshot("identity"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("summary");
     let recorded = record("identity");
 
     // Observed on a live pane: the invoking agent exports its own session
@@ -1138,8 +1224,12 @@ fn both_hosts_are_stripped_of_inherited_agent_session_identity() {
 
 #[test]
 fn an_unsupported_host_is_reported_rather_than_substituted() {
-    let error = summarize_agent_status(&snapshot_with("shell", "bash", "work", "work"), &idle())
-        .expect_err("a shell pane has no agent CLI");
+    let error = summarize_agent_status(
+        &snapshot_with("shell", "bash", "work", "work"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("a shell pane has no agent CLI");
 
     assert!(error.contains("unavailable for this host"), "got {error:?}");
     assert_eq!(calls("shell"), 0, "no other provider may be used");
@@ -1150,15 +1240,20 @@ fn a_pane_with_no_agent_is_reported() {
     let mut snapshot = snapshot("hostless");
     snapshot["origin"]["host"] = Value::Null;
 
-    let error = summarize_agent_status(&snapshot, &idle()).expect_err("no host, no summary");
+    let error = summarize_agent_status(&snapshot, &idle(), &EnvironmentSnapshot::capture())
+        .expect_err("no host, no summary");
 
     assert!(error.contains("no known agent"), "got {error:?}");
 }
 
 #[test]
 fn a_snapshot_without_an_origin_is_rejected() {
-    let error = summarize_agent_status(&json!({"panes": []}), &idle())
-        .expect_err("a snapshot must carry its origin");
+    let error = summarize_agent_status(
+        &json!({"panes": []}),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("a snapshot must carry its origin");
 
     assert!(error.contains("missing its origin"), "got {error:?}");
 }
@@ -1196,6 +1291,7 @@ fn suggests_a_persona_from_the_name_and_the_draft() {
         "digs into options and writes them up",
         "claude",
         &idle(),
+        &EnvironmentSnapshot::capture(),
     )
     .expect("suggestion");
 
@@ -1217,6 +1313,7 @@ fn suggests_a_persona_on_codex_under_the_same_containment() {
         "reviews changes",
         "codex",
         &idle(),
+        &EnvironmentSnapshot::capture(),
     )
     .expect("suggestion");
 
@@ -1261,6 +1358,7 @@ fn only_the_supplied_name_and_draft_reach_the_persona_worker() {
         "handles scheduling",
         "claude",
         &idle(),
+        &EnvironmentSnapshot::capture(),
     )
     .expect("suggestion");
 
@@ -1321,8 +1419,22 @@ fn suggesting_again_generates_again() {
     );
     let alias = persona_alias("persona_again");
 
-    suggest_agent_persona(&alias, "same draft", "claude", &idle()).expect("first suggestion");
-    suggest_agent_persona(&alias, "same draft", "claude", &idle()).expect("second suggestion");
+    suggest_agent_persona(
+        &alias,
+        "same draft",
+        "claude",
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("first suggestion");
+    suggest_agent_persona(
+        &alias,
+        "same draft",
+        "claude",
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("second suggestion");
 
     assert_eq!(
         calls("persona_again"),
@@ -1346,6 +1458,7 @@ fn cancellation_stops_a_running_persona_worker() {
             "draft",
             "claude",
             &cancelled,
+            &EnvironmentSnapshot::capture(),
         )
         .expect_err("a cancelled suggestion must not succeed")
     });
@@ -1369,6 +1482,7 @@ fn an_already_cancelled_persona_request_never_spawns_a_worker() {
         "draft",
         "claude",
         &AtomicBool::new(true),
+        &EnvironmentSnapshot::capture(),
     )
     .expect_err("a cancelled request must not suggest");
 
@@ -1378,8 +1492,14 @@ fn an_already_cancelled_persona_request_never_spawns_a_worker() {
 
 #[test]
 fn a_failing_persona_worker_is_reported_without_retrying() {
-    let error = suggest_agent_persona(&persona_alias("persona_fail"), "draft", "claude", &idle())
-        .expect_err("a failing worker must not succeed");
+    let error = suggest_agent_persona(
+        &persona_alias("persona_fail"),
+        "draft",
+        "claude",
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("a failing worker must not succeed");
 
     assert!(
         error.contains("model worker failed"),
@@ -1397,9 +1517,14 @@ fn a_persona_suggestion_is_sanitized_and_capped() {
         })),
     );
 
-    let suggestion =
-        suggest_agent_persona(&persona_alias("persona_dirty"), "draft", "claude", &idle())
-            .expect("suggestion");
+    let suggestion = suggest_agent_persona(
+        &persona_alias("persona_dirty"),
+        "draft",
+        "claude",
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect("suggestion");
 
     assert!(
         !suggestion.contains('\u{1b}') && !suggestion.contains('\n'),
@@ -1416,8 +1541,14 @@ fn a_persona_suggestion_is_sanitized_and_capped() {
 fn an_empty_persona_suggestion_is_rejected() {
     respond("persona_empty", &envelope(json!({"description": "   "})));
 
-    let error = suggest_agent_persona(&persona_alias("persona_empty"), "draft", "claude", &idle())
-        .expect_err("an empty suggestion must not be offered");
+    let error = suggest_agent_persona(
+        &persona_alias("persona_empty"),
+        "draft",
+        "claude",
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("an empty suggestion must not be offered");
 
     assert!(error.contains("no persona description"), "got {error:?}");
 }
@@ -1436,8 +1567,14 @@ fn a_persona_description_must_not_be_a_serialized_json_document() {
         ("persona_nested_long", long_object.as_str()),
     ] {
         respond(mode, &envelope(json!({"description": description})));
-        let error = suggest_agent_persona(&persona_alias(mode), "", "claude", &idle())
-            .expect_err("encoded JSON is not persona prose");
+        let error = suggest_agent_persona(
+            &persona_alias(mode),
+            "",
+            "claude",
+            &idle(),
+            &EnvironmentSnapshot::capture(),
+        )
+        .expect_err("encoded JSON is not persona prose");
         assert!(error.contains("plain prose"), "{error}");
         assert_eq!(calls(mode), 1, "a rejected suggestion is not retried");
     }
@@ -1446,7 +1583,14 @@ fn a_persona_description_must_not_be_a_serialized_json_document() {
         &envelope(json!({"description": "Reviews JSON APIs and their documentation."})),
     );
     assert_eq!(
-        suggest_agent_persona(&persona_alias("persona_prose_json"), "", "claude", &idle()).unwrap(),
+        suggest_agent_persona(
+            &persona_alias("persona_prose_json"),
+            "",
+            "claude",
+            &idle(),
+            &EnvironmentSnapshot::capture()
+        )
+        .unwrap(),
         "Reviews JSON APIs and their documentation."
     );
 }
@@ -1460,6 +1604,7 @@ fn malformed_persona_output_is_rejected() {
         "draft",
         "claude",
         &idle(),
+        &EnvironmentSnapshot::capture(),
     )
     .expect_err("malformed output must not be offered");
 
@@ -1477,23 +1622,39 @@ fn a_persona_and_a_status_summary_are_never_swapped() {
         "persona_mixed",
         &envelope(json!({"origin_description": "Editing the parser.", "peers": []})),
     );
-    let error = suggest_agent_persona(&persona_alias("persona_mixed"), "", "claude", &idle())
-        .expect_err("a status summary is not a persona");
+    let error = suggest_agent_persona(
+        &persona_alias("persona_mixed"),
+        "",
+        "claude",
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("a status summary is not a persona");
     assert!(error.contains("no persona description"), "got {error:?}");
 
     respond(
         "statusmixed",
         &envelope(json!({"description": "Researches options."})),
     );
-    let error = summarize_agent_status(&snapshot("statusmixed"), &idle())
-        .expect_err("a persona is not a status summary");
+    let error = summarize_agent_status(
+        &snapshot("statusmixed"),
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("a persona is not a status summary");
     assert!(error.contains("no origin description"), "got {error:?}");
 }
 
 #[test]
 fn an_unsupported_persona_host_is_reported_rather_than_substituted() {
-    let error = suggest_agent_persona(&persona_alias("persona_host"), "draft", "bash", &idle())
-        .expect_err("a shell pane has no agent CLI");
+    let error = suggest_agent_persona(
+        &persona_alias("persona_host"),
+        "draft",
+        "bash",
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("a shell pane has no agent CLI");
 
     assert!(error.contains("unavailable for this host"), "got {error:?}");
     assert_eq!(calls("persona_host"), 0, "no other provider may be used");
@@ -1503,8 +1664,14 @@ fn an_unsupported_persona_host_is_reported_rather_than_substituted() {
 fn a_request_with_nothing_to_describe_never_spawns_a_worker() {
     fixture();
 
-    let error = suggest_agent_persona("   ", "  ", "claude", &idle())
-        .expect_err("there is nothing to describe");
+    let error = suggest_agent_persona(
+        "   ",
+        "  ",
+        "claude",
+        &idle(),
+        &EnvironmentSnapshot::capture(),
+    )
+    .expect_err("there is nothing to describe");
 
     assert!(
         error.contains("needs a name or a description"),

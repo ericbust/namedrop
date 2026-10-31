@@ -1,5 +1,6 @@
 #[path = "support/hc_socket.rs"]
 mod hc_socket;
+use namedrop::environment::EnvironmentSnapshot;
 use namedrop::{HerdrCommandExecutor, ProcessHerdr, runtime::HostKind};
 use std::{
     fs,
@@ -110,13 +111,13 @@ fn hc_process_boundary_child() {
     argv.extend(arguments);
     for invalid in [vec!["run", "--bg"], vec!["run", "--"]] {
         assert!(
-            ProcessHerdr::for_host(HostKind::Hc)
+            ProcessHerdr::from_snapshot(HostKind::Hc, &EnvironmentSnapshot::capture())
                 .execute(&invalid)
                 .unwrap_err()
                 .contains("requires an executable after --")
         );
     }
-    let output = ProcessHerdr::for_host(HostKind::Hc)
+    let output = ProcessHerdr::from_snapshot(HostKind::Hc, &EnvironmentSnapshot::capture())
         .with_socket(Some("must-not-be-injected".into()))
         .with_child_executable(env!("CARGO_BIN_EXE_namedrop").into())
         .execute(&argv)

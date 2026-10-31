@@ -70,6 +70,23 @@ impl RuntimeOptions {
             plugin_state: self.plugin_state.is_some(),
         }
         .explicit_selection()
+        .map_err(|_| {
+            let flags = [
+                ("--herdr-socket", self.herdr_socket.is_some()),
+                ("--herdr-workspace", self.herdr_workspace.is_some()),
+                ("--herdr-pane", self.herdr_pane.is_some()),
+                ("--plugin-state", self.plugin_state.is_some()),
+                ("--hc-terminal", self.hc_terminal.is_some()),
+                ("--hc-space", self.hc_space.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(flag, present)| present.then_some(flag))
+            .collect::<Vec<_>>();
+            format!(
+                "Host flags conflict: {}. Select --host tui or --host hc.",
+                flags.join(", ")
+            )
+        })
     }
 
     pub fn host_kind(&self) -> Result<crate::runtime::HostKind, String> {

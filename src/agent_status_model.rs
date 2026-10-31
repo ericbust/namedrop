@@ -996,14 +996,6 @@ fn validate_summary(response: &Value, input: &WorkerInput, model: &str) -> Resul
 /// Returns the summary described by the agent status contract. Any failure is
 /// an `Err` carrying a short reason: callers render the snapshot's facts
 /// without descriptions rather than showing invented prose.
-pub fn summarize_agent_status(snapshot: &Value, cancelled: &AtomicBool) -> Result<Value, String> {
-    summarize_agent_status_with_environment(
-        snapshot,
-        cancelled,
-        &crate::environment::EnvironmentSnapshot::capture(),
-    )
-}
-
 pub fn summarize_agent_status_with_environment(
     snapshot: &Value,
     cancelled: &AtomicBool,
@@ -1105,21 +1097,6 @@ fn validate_suggestion(response: &Value) -> Result<String, String> {
 /// no context or Herdr identifier. The result is draft text for the user to
 /// accept or discard, so nothing is stored and nothing is cached; a failure is
 /// an `Err` carrying a short reason and is not retried.
-pub fn suggest_agent_persona(
-    alias: &str,
-    description: &str,
-    host: &str,
-    cancelled: &AtomicBool,
-) -> Result<String, String> {
-    suggest_agent_persona_with_environment(
-        alias,
-        description,
-        host,
-        cancelled,
-        &crate::environment::EnvironmentSnapshot::capture(),
-    )
-}
-
 pub fn suggest_agent_persona_with_environment(
     alias: &str,
     description: &str,

@@ -3,8 +3,7 @@ mod agent_status_model;
 pub mod cli;
 pub use agent_status::collect_agent_status;
 pub use agent_status_model::{
-    suggest_agent_persona, suggest_agent_persona_with_environment, summarize_agent_status,
-    summarize_agent_status_with_environment,
+    suggest_agent_persona_with_environment, summarize_agent_status_with_environment,
 };
 mod codex_app_server;
 mod context;

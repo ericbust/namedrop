@@ -841,7 +841,10 @@ mod budget_tests {
             Budget::remaining(&deadline).unwrap_err(),
             "The agent status snapshot was cancelled."
         );
-        let host = crate::TuiHost::new(crate::ProcessHerdr::default());
+        let host = crate::TuiHost::new(crate::ProcessHerdr::from_snapshot(
+            crate::runtime::HostKind::Tui,
+            &crate::environment::EnvironmentSnapshot::capture(),
+        ));
         let excerpt = ExcerptBudget {
             timeout: Duration::from_secs(1),
             cancelled: &cancelled,

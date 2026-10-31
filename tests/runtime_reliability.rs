@@ -1,6 +1,7 @@
 #[path = "support/environment.rs"]
 mod environment;
 use environment::CommandHome;
+use namedrop::environment::EnvironmentSnapshot;
 
 use namedrop::{
     ActorKind, AgentSessionId, DeliveryAttemptId, DeliveryId, DeliveryState, LeaseDraft,
@@ -581,7 +582,10 @@ fn timeout_overrides_are_bounded_and_cannot_disable_command_execution() {
 #[test]
 fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
     use namedrop::{HerdrCommandExecutor, ProcessHerdr, PromptFailureKind};
-    let herdr = ProcessHerdr::default();
+    let herdr = ProcessHerdr::from_snapshot(
+        namedrop::runtime::HostKind::Tui,
+        &EnvironmentSnapshot::capture(),
+    );
     for error in [
         "Herdr command timed out after 10000 ms",
         "connection closed after writing prompt",

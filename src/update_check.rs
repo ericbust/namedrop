@@ -98,15 +98,6 @@ pub(crate) fn available(state: &Path, settings_path: Option<&Path>) -> Option<Av
 /// Called only by startup reconciliation and pane lifecycle events. The child
 /// owns the lock and all subprocess/network work, so pane handling never waits.
 #[doc(hidden)]
-pub fn start(state: &Path, now: u64) {
-    start_with_environment(
-        state,
-        now,
-        &crate::environment::EnvironmentSnapshot::capture(),
-    );
-}
-
-#[doc(hidden)]
 pub fn start_with_environment(
     state: &Path,
     now: u64,
@@ -167,8 +158,13 @@ fn save_notice(state: &Path, notice: &Notice) -> Option<()> {
 /// Add only a person-visible field. This also works without a pane runtime,
 /// such as Codex's shared app-server or an unnamed session's first hook.
 #[doc(hidden)]
-pub fn session_notice(input: &str, state: &Path, now: u64, output: Option<Value>) -> Option<Value> {
-    let environment = crate::environment::EnvironmentSnapshot::capture();
+pub fn session_notice(
+    input: &str,
+    state: &Path,
+    now: u64,
+    output: Option<Value>,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Option<Value> {
     let path = environment
         .agent_config()
         .update_settings(environment.home());

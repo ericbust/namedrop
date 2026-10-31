@@ -1,5 +1,6 @@
 //! Where setup writes shortcuts. This binary holds a single test because it
 //! changes the process environment.
+use namedrop::environment::EnvironmentSnapshot;
 use std::fs;
 
 #[test]
@@ -21,14 +22,16 @@ fn xdg_config_home_applies_only_to_this_users_own_home() {
     }
     // Activating for another home (a test or an isolated profile) never uses
     // this user's XDG directory.
-    let report = namedrop::install_shortcuts(None, Some(&home)).unwrap();
+    let report =
+        namedrop::install_shortcuts(None, Some(&home), &EnvironmentSnapshot::capture()).unwrap();
     assert_eq!(report["path"], default.to_str().unwrap());
     assert!(!xdg.exists());
 
     // The process's own home follows XDG_CONFIG_HOME, as Herdr does.
     unsafe { std::env::set_var("HOME", &home) };
     fs::remove_file(&default).unwrap();
-    let report = namedrop::install_shortcuts(None, Some(&home)).unwrap();
+    let report =
+        namedrop::install_shortcuts(None, Some(&home), &EnvironmentSnapshot::capture()).unwrap();
     assert_eq!(
         report["path"],
         xdg.join("herdr/config.toml").to_str().unwrap()
@@ -37,7 +40,8 @@ fn xdg_config_home_applies_only_to_this_users_own_home() {
 
     // A relative XDG_CONFIG_HOME is invalid under the XDG spec and ignored.
     unsafe { std::env::set_var("XDG_CONFIG_HOME", "relative/config") };
-    let report = namedrop::install_shortcuts(None, Some(&home)).unwrap();
+    let report =
+        namedrop::install_shortcuts(None, Some(&home), &EnvironmentSnapshot::capture()).unwrap();
     assert_eq!(report["path"], default.to_str().unwrap());
     let _ = fs::remove_dir_all(&root);
 }

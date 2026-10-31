@@ -1,6 +1,7 @@
 #[path = "support/environment.rs"]
 mod environment;
 use environment::CommandHome;
+use namedrop::environment::EnvironmentSnapshot;
 
 use namedrop::{AgentRuntime, install_integration_package};
 #[path = "support/update_profile.rs"]
@@ -56,6 +57,7 @@ impl Fixture {
             &self.state,
             now,
             None,
+            &EnvironmentSnapshot::capture(),
         )
     }
 
@@ -214,7 +216,8 @@ fn rebuilt_sessions_do_not_claim_the_notice_and_existing_banner_is_combined() {
                 &input.to_string(),
                 &f.state,
                 1000,
-                Some(banner.clone())
+                Some(banner.clone()),
+                &EnvironmentSnapshot::capture()
             ),
             Some(banner.clone())
         );
@@ -225,6 +228,7 @@ fn rebuilt_sessions_do_not_claim_the_notice_and_existing_banner_is_combined() {
         &f.state,
         1000,
         Some(banner.clone()),
+        &EnvironmentSnapshot::capture(),
     )
     .unwrap();
     assert!(

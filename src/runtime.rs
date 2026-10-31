@@ -26,12 +26,11 @@ pub struct HostSignals {
 
 impl HostSignals {
     pub fn explicit_selection(self) -> Result<Option<HostKind>, String> {
-        if (self.tui_transport && self.hc_transport)
-            || (self.host == Some(HostKind::Tui) && self.hc_transport)
-            || (self.host == Some(HostKind::Hc) && self.tui_transport)
-            || (self.host.is_none() && self.plugin_state && self.hc_transport)
-        {
-            return Err("Host flags conflict: --host must agree with --herdr-socket/--herdr-workspace/--herdr-pane or --hc-terminal/--hc-space; --plugin-state without --host selects tui.".to_owned());
+        if let Some(host) = self.host {
+            return Ok(Some(host));
+        }
+        if (self.tui_transport || self.plugin_state) && self.hc_transport {
+            return Err("Host flags conflict".to_owned());
         }
         Ok(self.host.or({
             if self.tui_transport || self.plugin_state {
@@ -46,103 +45,77 @@ impl HostSignals {
 }
 
 impl HostKind {
-    pub fn detect(
-        signals: HostSignals,
-        variable: impl Fn(&str) -> Option<String>,
-    ) -> Result<Self, String> {
-        if let Some(host) = signals.explicit_selection()? {
-            return Ok(host);
-        }
-        let Some(terminal) = variable("HC_TERMINAL_ID") else {
-            return Ok(Self::Tui);
-        };
-        let environment = crate::environment::EnvironmentSnapshot::from_variables(
-            [
-                "HOME",
-                "XDG_STATE_HOME",
-                "XDG_CONFIG_HOME",
-                "XDG_DATA_HOME",
-                "XDG_RUNTIME_DIR",
-                "HC_SOCKET",
-                "HC_TERMINAL_SOCKET",
-                "HC_SESSION",
-                "HERDR_PANE_ID",
-                "HERDR_SOCKET_PATH",
-                "HERDR_BIN_PATH",
-                "HC_BIN_PATH",
-                "NAMEDROP_HERDR_TIMEOUT_MS",
-                "PATH",
-            ]
-            .into_iter()
-            .filter_map(|key| variable(key).map(|value| (key.into(), value.into())))
-            .chain(std::iter::once(("HC_TERMINAL_ID".into(), terminal.into()))),
-        );
-        Self::from_snapshot(None, &environment)
-    }
-
     pub fn from_snapshot(
         explicit: Option<Self>,
         environment: &crate::environment::EnvironmentSnapshot,
     ) -> Result<Self, String> {
-        if let Some(host) = explicit {
-            return Ok(host);
-        }
-        let variable = |key| environment.var(key);
-        let Some(terminal) = variable("HC_TERMINAL_ID") else {
-            return Ok(Self::Tui);
-        };
-        let Some(pane) = variable("HERDR_PANE_ID") else {
-            return Ok(if variable("HERDR_SOCKET_PATH").is_some() {
-                Self::Tui
-            } else {
-                Self::Hc
-            });
-        };
-        Ok(Self::innermost_host(&pane, &terminal, environment).unwrap_or(Self::Tui))
-    }
-
-    fn innermost_host(
-        pane: &str,
-        terminal: &str,
-        environment: &crate::environment::EnvironmentSnapshot,
-    ) -> Option<Self> {
         use crate::Budget;
         let budget = IdentityBudget {
             deadline: Instant::now() + Duration::from_millis(1500),
             cancelled: AtomicBool::new(false),
         };
-        let tui = crate::TuiHost::new(ProcessHerdr::from_snapshot(Self::Tui, environment));
-        let hc = crate::HcHost::new(ProcessHerdr::from_snapshot(Self::Hc, environment));
-        let tui_pid = tui.shell_pid(pane, &budget)?;
-        let hc_pid = hc.shell_pid(terminal, &budget)?;
+        Self::from_snapshot_with_identity(
+            explicit,
+            environment,
+            |pane, terminal| {
+                let tui = crate::TuiHost::new(ProcessHerdr::from_snapshot(Self::Tui, environment));
+                let hc = crate::HcHost::new(ProcessHerdr::from_snapshot(Self::Hc, environment));
+                Some((
+                    tui.shell_pid(pane, &budget)?,
+                    hc.shell_pid(terminal, &budget)?,
+                ))
+            },
+            |pid| {
+                budget.remaining().ok()?;
+                crate::terminal::parent_pid(pid)
+            },
+        )
+    }
+
+    fn from_snapshot_with_identity(
+        explicit: Option<Self>,
+        environment: &crate::environment::EnvironmentSnapshot,
+        identity: impl FnOnce(&str, &str) -> Option<(u32, u32)>,
+        mut parent: impl FnMut(u32) -> Option<u32>,
+    ) -> Result<Self, String> {
+        if let Some(host) = explicit {
+            return Ok(host);
+        }
+        let Some(terminal) = environment.var("HC_TERMINAL_ID") else {
+            return Ok(Self::Tui);
+        };
+        let Some(pane) = environment.var("HERDR_PANE_ID") else {
+            return Ok(if environment.var("HERDR_SOCKET_PATH").is_some() {
+                Self::Tui
+            } else {
+                Self::Hc
+            });
+        };
+        let Some((tui_pid, hc_pid)) = identity(&pane, &terminal) else {
+            return Ok(Self::Tui);
+        };
         let mut ancestors = Vec::new();
         let mut pid = std::process::id();
         for _ in 0..1024 {
-            budget.remaining().ok()?;
-            pid = crate::terminal::parent_pid(pid)?;
+            let Some(next) = parent(pid) else {
+                return Ok(Self::Tui);
+            };
+            pid = next;
             if pid == 0 {
                 break;
             }
             ancestors.push(pid);
         }
-        budget.remaining().ok()?;
         if pid != 0 {
-            return None;
+            return Ok(Self::Tui);
         }
         let tui_position = ancestors.iter().position(|pid| *pid == tui_pid);
         let hc_position = ancestors.iter().position(|pid| *pid == hc_pid);
-        Some(match (tui_position, hc_position) {
+        Ok(match (tui_position, hc_position) {
             (None, _) => Self::Hc,
             (Some(tui), Some(hc)) if hc < tui => Self::Hc,
             _ => Self::Tui,
         })
-    }
-
-    pub fn from_environment(explicit: Option<Self>) -> Result<Self, String> {
-        Self::from_snapshot(
-            explicit,
-            &crate::environment::EnvironmentSnapshot::capture(),
-        )
     }
 }
 
@@ -368,17 +341,7 @@ pub struct ProcessHerdr {
     environment: crate::environment::EnvironmentSnapshot,
 }
 
-impl Default for ProcessHerdr {
-    fn default() -> Self {
-        Self::for_host(HostKind::Tui)
-    }
-}
-
 impl ProcessHerdr {
-    pub fn for_host(host: HostKind) -> Self {
-        Self::from_snapshot(host, &crate::environment::EnvironmentSnapshot::capture())
-    }
-
     pub fn from_snapshot(
         host: HostKind,
         environment: &crate::environment::EnvironmentSnapshot,
@@ -823,7 +786,10 @@ mod bounded_read_tests {
 
     #[test]
     fn hc_commands_remove_terminal_identity_but_retain_core_routing() {
-        let executor = ProcessHerdr::for_host(HostKind::Hc);
+        let executor = ProcessHerdr::from_snapshot(
+            HostKind::Hc,
+            &crate::environment::EnvironmentSnapshot::capture(),
+        );
         let command = executor.command();
         use std::os::unix::ffi::OsStrExt;
         assert!(command.get_envs().all(|(key, value)| value.is_none()
@@ -890,7 +856,10 @@ mod bounded_read_tests {
                 let executor = ProcessHerdr {
                     host,
                     timeout: configured,
-                    ..ProcessHerdr::default()
+                    ..ProcessHerdr::from_snapshot(
+                        crate::runtime::HostKind::Tui,
+                        &crate::environment::EnvironmentSnapshot::capture(),
+                    )
                 };
                 let send_timeout = executor
                     .bounded_timeout(executor.command_timeout(&["send", "t1", "hello", "--json"]));
@@ -1066,82 +1035,107 @@ mod host_selection_tests {
     use super::*;
 
     #[test]
-    fn detection_obeys_explicit_then_innermost_host() {
-        let cases = [
-            (None, vec![], Some(HostKind::Tui)),
-            (None, vec!["HC_SESSION", "HC_SOCKET"], Some(HostKind::Tui)),
-            (None, vec!["HC_TERMINAL_ID"], Some(HostKind::Hc)),
-            (None, vec!["HERDR_SOCKET_PATH"], Some(HostKind::Tui)),
+    fn snapshot_selection_table_covers_identity_and_ancestry_failures() {
+        let environment = crate::environment::EnvironmentSnapshot::from_variables([
+            ("HC_TERMINAL_ID".into(), "".into()),
+            ("HERDR_PANE_ID".into(), "".into()),
+        ]);
+        for (name, identity, ancestors, expected) in [
             (
-                Some(HostKind::Hc),
-                vec!["HERDR_PANE_ID"],
-                Some(HostKind::Hc),
+                "hc nearer",
+                Some((2, 1)),
+                vec![Some(1), Some(2), Some(0)],
+                HostKind::Hc,
             ),
             (
-                Some(HostKind::Tui),
-                vec!["HC_TERMINAL_ID"],
-                Some(HostKind::Tui),
+                "tui nearer",
+                Some((1, 2)),
+                vec![Some(1), Some(2), Some(0)],
+                HostKind::Tui,
             ),
-        ];
-        for (explicit, keys, expected) in cases {
-            assert_eq!(
-                HostKind::detect(
-                    HostSignals {
-                        host: explicit,
-                        ..HostSignals::default()
-                    },
-                    |key| { keys.contains(&key).then(|| "value".into()) }
-                )
-                .ok(),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn tui_only_detection_reads_one_environment_variable() {
-        let reads = std::cell::RefCell::new(Vec::new());
-        assert_eq!(
-            HostKind::detect(HostSignals::default(), |key| {
-                reads.borrow_mut().push(key.to_owned());
-                (key == "HERDR_SOCKET_PATH").then(|| "socket".into())
-            })
-            .unwrap(),
-            HostKind::Tui
-        );
-        assert_eq!(*reads.borrow(), ["HC_TERMINAL_ID"]);
-    }
-
-    #[test]
-    fn explicit_host_and_transport_flags_do_not_read_environment() {
-        for (explicit, tui, hc, state, expected) in [
-            (Some(HostKind::Hc), true, true, false, None),
-            (Some(HostKind::Tui), true, true, false, None),
-            (Some(HostKind::Hc), true, false, false, None),
-            (Some(HostKind::Tui), false, true, false, None),
-            (Some(HostKind::Hc), false, false, true, Some(HostKind::Hc)),
-            (Some(HostKind::Hc), false, true, true, Some(HostKind::Hc)),
-            (Some(HostKind::Tui), false, false, true, Some(HostKind::Tui)),
-            (None, true, false, false, Some(HostKind::Tui)),
-            (None, false, true, false, Some(HostKind::Hc)),
-            (None, false, false, true, Some(HostKind::Tui)),
-            (None, false, true, true, None),
-            (None, true, true, false, None),
+            (
+                "stale tui",
+                Some((3, 1)),
+                vec![Some(1), Some(0)],
+                HostKind::Hc,
+            ),
+            (
+                "stale hc",
+                Some((1, 3)),
+                vec![Some(1), Some(0)],
+                HostKind::Tui,
+            ),
+            ("tie", Some((1, 1)), vec![Some(1), Some(0)], HostKind::Tui),
+            (
+                "neither ancestor",
+                Some((2, 3)),
+                vec![Some(1), Some(0)],
+                HostKind::Hc,
+            ),
+            ("identity failed", None, vec![], HostKind::Tui),
+            (
+                "parent lookup failed",
+                Some((2, 1)),
+                vec![Some(1), None],
+                HostKind::Tui,
+            ),
+            (
+                "depth exhausted",
+                Some((2, 1)),
+                vec![Some(1); 1024],
+                HostKind::Tui,
+            ),
+            (
+                "depth boundary complete",
+                Some((2, 1)),
+                [vec![Some(1); 1023], vec![Some(0)]].concat(),
+                HostKind::Hc,
+            ),
         ] {
+            let mut parents = ancestors.into_iter();
             assert_eq!(
-                HostKind::detect(
-                    HostSignals {
-                        host: explicit,
-                        tui_transport: tui,
-                        hc_transport: hc,
-                        plugin_state: state
+                HostKind::from_snapshot_with_identity(
+                    None,
+                    &environment,
+                    |pane, terminal| {
+                        assert_eq!((pane, terminal), ("", ""));
+                        identity
                     },
-                    |_| panic!("unexpected environment read")
+                    |_| parents.next().expect("walk exceeded fixture")
                 )
-                .ok(),
-                expected
+                .unwrap(),
+                expected,
+                "{name}"
             );
         }
+    }
+
+    #[test]
+    fn public_snapshot_selector_reads_only_hc_identity_for_tui_shells() {
+        for variables in [vec![], vec![("HERDR_PANE_ID".into(), "pane".into())]] {
+            let environment = crate::environment::EnvironmentSnapshot::from_variables(variables);
+            assert_eq!(
+                HostKind::from_snapshot(None, &environment).unwrap(),
+                HostKind::Tui
+            );
+            assert_eq!(environment.recorded_reads(), ["HC_TERMINAL_ID"]);
+        }
+        for host in [HostKind::Tui, HostKind::Hc] {
+            let environment = crate::environment::EnvironmentSnapshot::from_variables([]);
+            assert_eq!(
+                HostKind::from_snapshot(Some(host), &environment).unwrap(),
+                host
+            );
+            assert!(environment.recorded_reads().is_empty());
+        }
+        let environment = crate::environment::EnvironmentSnapshot::from_variables([(
+            "HC_TERMINAL_ID".into(),
+            "".into(),
+        )]);
+        assert_eq!(
+            HostKind::from_snapshot(None, &environment).unwrap(),
+            HostKind::Hc
+        );
     }
 
     #[test]

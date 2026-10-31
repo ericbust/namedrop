@@ -1,6 +1,7 @@
 #[path = "support/environment.rs"]
 mod environment;
 use environment::CommandHome;
+use namedrop::environment::EnvironmentSnapshot;
 
 #[path = "support/hc_socket.rs"]
 mod hc_socket;
@@ -84,11 +85,15 @@ fn guard_child() {
         return;
     };
     if expected == "detect" {
-        assert_eq!(HostKind::from_environment(None).unwrap(), HostKind::Tui);
+        assert_eq!(
+            HostKind::from_snapshot(None, &EnvironmentSnapshot::capture()).unwrap(),
+            HostKind::Tui
+        );
         return;
     }
     if expected == "checked" || expected == "checked-stopped" {
-        let command = ProcessHerdr::for_host(HostKind::Hc).checked_command();
+        let command = ProcessHerdr::from_snapshot(HostKind::Hc, &EnvironmentSnapshot::capture())
+            .checked_command();
         if expected == "checked-stopped" {
             assert!(command.is_err());
         } else {
@@ -110,20 +115,17 @@ fn guard_child() {
     };
     let cancelled = AtomicBool::new(expected == "cancelled");
     let start = Instant::now();
-    let result = std::thread::scope(|scope| {
-        if expected == "waiting-cancelled" {
-            scope.spawn(|| {
-                std::thread::sleep(Duration::from_millis(20));
-                cancelled.store(true, Ordering::Relaxed);
-            });
-        }
-        ProcessHerdr::for_host(HostKind::Hc).execute_bounded(
-            &["--version"],
-            timeout,
-            &cancelled,
-            1024,
-        )
-    });
+    let result =
+        std::thread::scope(|scope| {
+            if expected == "waiting-cancelled" {
+                scope.spawn(|| {
+                    std::thread::sleep(Duration::from_millis(20));
+                    cancelled.store(true, Ordering::Relaxed);
+                });
+            }
+            ProcessHerdr::from_snapshot(HostKind::Hc, &EnvironmentSnapshot::capture())
+                .execute_bounded(&["--version"], timeout, &cancelled, 1024)
+        });
     assert!(
         start.elapsed() < Duration::from_secs(1),
         "preflight exceeded budget"
@@ -169,11 +171,7 @@ fn doctor_explains_overlong_socket_paths_without_launching_hc() {
     // SAFETY: an all-zero sockaddr_un is valid for inspecting its pathname capacity.
     let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     let max_bytes = address.sun_path.len() - 1;
-    for source in [
-        "HC_SOCKET",
-        "XDG_RUNTIME_DIR",
-        "config",
-    ] {
+    for source in ["HC_SOCKET", "XDG_RUNTIME_DIR", "config"] {
         for character in ["x", "é"] {
             let f = Fixture::new();
             let long_path = format!("/{}", character.repeat(max_bytes.div_ceil(character.len())));
@@ -282,7 +280,17 @@ fn socket_precedence_and_child_routing() {
 
 #[test]
 fn invalid_config_falls_back_but_invalid_session_never_launches() {
-    for config in ["socket = 42", "socket = [", "socket = '/wrong.sock'\nnotes = 3", "socket = '/wrong.sock'\nwait_timeout = 'bad'", "socket = '/wrong.sock'\ndetach_key = false", "socket = '/wrong.sock'\nheadless = 42", "socket = '/wrong.sock'\nhistory_mb = []", "socket = '/wrong.sock'\nnotes_quiet = false", "socket = '/wrong.sock'\nmachine_timeout = 'bad'"] {
+    for config in [
+        "socket = 42",
+        "socket = [",
+        "socket = '/wrong.sock'\nnotes = 3",
+        "socket = '/wrong.sock'\nwait_timeout = 'bad'",
+        "socket = '/wrong.sock'\ndetach_key = false",
+        "socket = '/wrong.sock'\nheadless = 42",
+        "socket = '/wrong.sock'\nhistory_mb = []",
+        "socket = '/wrong.sock'\nnotes_quiet = false",
+        "socket = '/wrong.sock'\nmachine_timeout = 'bad'",
+    ] {
         let f = Fixture::new();
         let _listener = f.listener("run/herdr-core/default.sock");
         f.write(".config/herdr-core/config.toml", config);
@@ -425,12 +433,15 @@ fn full_accept_queue_obeys_deadline_and_cancellation() {
 fn socket_config_load_matches_core_types_and_io_fallbacks() {
     let f = Fixture::new();
     let path = f.0.join(".config/herdr-core/config.toml");
-    let resolve = || hc_socket_path(|key| match key {
-        "HOME" => Some(f.0.to_str().unwrap().into()),
-        "XDG_RUNTIME_DIR" => Some(f.0.join("run").to_str().unwrap().into()),
-        "HC_TERMINAL_SOCKET" => Some("/ignored.sock".into()),
-        _ => None,
-    }).unwrap();
+    let resolve = || {
+        hc_socket_path(|key| match key {
+            "HOME" => Some(f.0.to_str().unwrap().into()),
+            "XDG_RUNTIME_DIR" => Some(f.0.join("run").to_str().unwrap().into()),
+            "HC_TERMINAL_SOCKET" => Some("/ignored.sock".into()),
+            _ => None,
+        })
+        .unwrap()
+    };
     let fallback = f.0.join("run/herdr-core/default.sock");
     assert_eq!(resolve(), fallback);
     fs::create_dir_all(&path).unwrap();
@@ -441,7 +452,10 @@ fn socket_config_load_matches_core_types_and_io_fallbacks() {
     for (config, expected) in [
         ("socket = ''", ""),
         ("socket = '/chosen.sock'\nunknown = []", "/chosen.sock"),
-        ("socket = '/chosen.sock'\nnotes = true\nwait_timeout = 3\nnotes_quiet = 1.5\nhistory_mb = nan\nmachine_timeout = inf\nheadless = 'not-validated-by-load'\ndetach_key = 'also-not-validated'", "/chosen.sock"),
+        (
+            "socket = '/chosen.sock'\nnotes = true\nwait_timeout = 3\nnotes_quiet = 1.5\nhistory_mb = nan\nmachine_timeout = inf\nheadless = 'not-validated-by-load'\ndetach_key = 'also-not-validated'",
+            "/chosen.sock",
+        ),
     ] {
         fs::write(&path, config).unwrap();
         assert_eq!(resolve(), PathBuf::from(expected), "{config}");

@@ -59,8 +59,8 @@ fn contains_key(item: &Item, key: &str) -> bool {
 pub fn install_shortcuts(
     config: Option<&Path>,
     home: Option<&Path>,
+    environment: &crate::environment::EnvironmentSnapshot,
 ) -> Result<serde_json::Value, String> {
-    let environment = crate::environment::EnvironmentSnapshot::capture();
     let captured = if environment.home() == home {
         environment.agent_config().shortcut_config(home)
     } else {
@@ -236,7 +236,12 @@ mod tests {
                 .unwrap();
             }
 
-            let report = install_shortcuts(Some(&config), None).unwrap();
+            let report = install_shortcuts(
+                Some(&config),
+                None,
+                &crate::environment::EnvironmentSnapshot::from_variables([]),
+            )
+            .unwrap();
             assert_eq!(report["status"], "installed");
             let bindings = report["bindings"].as_array().unwrap();
             assert_eq!(bindings.len(), 5);
@@ -270,7 +275,12 @@ mod tests {
                 assert_eq!(command["type"].as_str(), Some("plugin_action"));
             }
 
-            let repeated = install_shortcuts(Some(&config), None).unwrap();
+            let repeated = install_shortcuts(
+                Some(&config),
+                None,
+                &crate::environment::EnvironmentSnapshot::from_variables([]),
+            )
+            .unwrap();
             assert_eq!(repeated["status"], "already_configured");
             assert_eq!(fs::read_to_string(&config).unwrap(), contents);
         }

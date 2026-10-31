@@ -11,6 +11,8 @@ use std::{
 pub struct EnvironmentSnapshot(Arc<Snapshot>);
 
 struct Snapshot {
+    #[cfg(test)]
+    reads: std::sync::Mutex<Vec<String>>,
     variables: BTreeMap<OsString, OsString>,
     home: Option<PathBuf>,
     state: Option<PathBuf>,
@@ -55,6 +57,8 @@ impl EnvironmentSnapshot {
             .filter(|path| path.is_absolute())
             .or_else(|| home.as_ref().map(|home| home.join(".config")));
         Self(Arc::new(Snapshot {
+            #[cfg(test)]
+            reads: std::sync::Mutex::new(Vec::new()),
             state: root("XDG_STATE_HOME", ".local/state"),
             data: root("XDG_DATA_HOME", ".local/share"),
             runtime: value("XDG_RUNTIME_DIR")
@@ -72,7 +76,14 @@ impl EnvironmentSnapshot {
         }))
     }
 
+    #[cfg(test)]
+    pub(crate) fn recorded_reads(&self) -> Vec<String> {
+        self.0.reads.lock().unwrap().clone()
+    }
+
     pub fn var_os(&self, key: &str) -> Option<OsString> {
+        #[cfg(test)]
+        self.0.reads.lock().unwrap().push(key.to_owned());
         self.0.variables.get(OsStr::new(key)).cloned()
     }
 

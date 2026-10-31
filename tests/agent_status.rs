@@ -1,4 +1,5 @@
 //! Shared wiring and conflict-safe shortcut installation acceptance.
+use namedrop::environment::EnvironmentSnapshot;
 use std::{
     fs,
     path::PathBuf,
@@ -164,7 +165,7 @@ struct Fixture(PathBuf);
 fn live_origin_probe() {
     use namedrop::{
         LifecycleRuntime, ProcessHerdr, ProcessIds, SystemClock, collect_agent_status,
-        summarize_agent_status,
+        summarize_agent_status_with_environment as summarize_agent_status,
     };
     use serde_json::json;
     use std::{env, sync::atomic::AtomicBool, time::Instant};
@@ -175,7 +176,11 @@ fn live_origin_probe() {
     let state = PathBuf::from(env::var("HERDR_PLUGIN_STATE_DIR").expect("state required"));
     let home = env::var_os("HOME").map(PathBuf::from);
     let cwd = env::current_dir().unwrap();
-    let herdr = ProcessHerdr::default().with_socket(Some(socket.clone()));
+    let herdr = ProcessHerdr::from_snapshot(
+        namedrop::runtime::HostKind::Tui,
+        &EnvironmentSnapshot::capture(),
+    )
+    .with_socket(Some(socket.clone()));
     let before = namedrop::Host::space(
         &namedrop::TuiHost::new(&herdr),
         namedrop::SpaceLocator::Workspace(&workspace),
@@ -238,13 +243,14 @@ fn live_origin_probe() {
         wait["description"] = json!("Review the status popup before integration.");
     }
     let cold_started = Instant::now();
-    let cold = summarize_agent_status(&snapshot, &cancelled);
+    let cold = summarize_agent_status(&snapshot, &cancelled, &EnvironmentSnapshot::capture());
     let cold_ms = cold_started.elapsed().as_millis();
     let mut warm_ms = None;
     let mut cache_reused = false;
     if let Ok(summary) = &cold {
         let warm_started = Instant::now();
-        let warm = summarize_agent_status(&snapshot, &cancelled).unwrap();
+        let warm =
+            summarize_agent_status(&snapshot, &cancelled, &EnvironmentSnapshot::capture()).unwrap();
         warm_ms = Some(warm_started.elapsed().as_millis());
         cache_reused = &warm == summary;
     }
@@ -411,7 +417,7 @@ fn shortcut_and_package_contract() {
 #[test]
 #[ignore = "requires approval for four bounded synthetic provider calls"]
 fn synthetic_worker_reliability_probe() {
-    use namedrop::summarize_agent_status;
+    use namedrop::summarize_agent_status_with_environment as summarize_agent_status;
     use serde_json::json;
     use std::{env, sync::atomic::AtomicBool, time::Instant};
     assert_eq!(env::var("NAMEDROP_VERIFY_LIVE").as_deref(), Ok("1"));
@@ -436,13 +442,14 @@ fn synthetic_worker_reliability_probe() {
         "panes":panes,"waits":[],"handoffs_available":true,"warnings":[],"omitted_panes":0,"observed_at_ms":0});
     let cancel = AtomicBool::new(false);
     let start = Instant::now();
-    let result = summarize_agent_status(&snapshot, &cancel);
+    let result = summarize_agent_status(&snapshot, &cancel, &EnvironmentSnapshot::capture());
     let elapsed_ms = start.elapsed().as_millis();
     let mut warm_ms = None;
     let mut reused = false;
     if let Ok(summary) = &result {
         let start = Instant::now();
-        let warm = summarize_agent_status(&snapshot, &cancel).unwrap();
+        let warm =
+            summarize_agent_status(&snapshot, &cancel, &EnvironmentSnapshot::capture()).unwrap();
         warm_ms = Some(start.elapsed().as_millis());
         reused = warm == *summary;
     }
