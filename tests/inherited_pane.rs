@@ -742,11 +742,21 @@ else: raise AssertionError(args)
     assert!(named.status.success(), "{}", text(&named));
     let result: serde_json::Value = serde_json::from_slice(&named.stdout).unwrap();
     for runtime in ["claude-code", "codex"] {
-        let package = Path::new(result["data"]["integration_packages"][runtime]["path"].as_str().unwrap());
-        let hooks: serde_json::Value = serde_json::from_slice(&fs::read(package.join("hooks/hooks.json")).unwrap()).unwrap();
+        let package = Path::new(
+            result["data"]["integration_packages"][runtime]["path"]
+                .as_str()
+                .unwrap(),
+        );
+        let hooks: serde_json::Value =
+            serde_json::from_slice(&fs::read(package.join("hooks/hooks.json")).unwrap()).unwrap();
         for event in ["SessionStart", "UserPromptSubmit"] {
-            let timeout = hooks["hooks"][event][0]["hooks"][0]["timeout"].as_f64().unwrap();
-            assert!(timeout > 10.2 && timeout <= 60.0, "HC {runtime} {event} framework timeout {timeout} can kill an in-flight send");
+            let timeout = hooks["hooks"][event][0]["hooks"][0]["timeout"]
+                .as_f64()
+                .unwrap();
+            assert!(
+                timeout > 10.2 && timeout <= 60.0,
+                "HC {runtime} {event} framework timeout {timeout} can kill an in-flight send"
+            );
         }
     }
 
@@ -895,7 +905,14 @@ else: raise AssertionError(args)
                         if package != tui_package {
                             args.extend([
                                 "--hc-hook".into(),
-                                serde_json::from_slice::<serde_json::Value>(&fs::read(package.join(".agents/plugins/marketplace.json")).unwrap()).unwrap()["name"].as_str().unwrap().to_owned(),
+                                serde_json::from_slice::<serde_json::Value>(
+                                    &fs::read(package.join(".agents/plugins/marketplace.json"))
+                                        .unwrap(),
+                                )
+                                .unwrap()["name"]
+                                    .as_str()
+                                    .unwrap()
+                                    .to_owned(),
                             ]);
                         }
                         args.extend([

@@ -110,23 +110,34 @@ fn main() -> ExitCode {
             );
         }
     };
-    let selected_state = cli
-        .runtime
-        .plugin_state
-        .clone()
-        .or_else(|| {
-            cli.user_prompt_submit_hook_state_directory()
-                .map(Path::to_path_buf)
-        })
-        .or_else(|| {
-            cli.mailbox_wake_hook_state_directory()
-                .map(Path::to_path_buf)
-        })
-        .or_else(|| {
-            cli.session_start_hook_state_directory()
-                .map(Path::to_path_buf)
-        })
-        .or_else(|| cli.runtime.state_directory().ok());
+    let hook_state = cli
+        .user_prompt_submit_hook_state_directory()
+        .or_else(|| cli.mailbox_wake_hook_state_directory())
+        .or_else(|| cli.session_start_hook_state_directory());
+    let selected_state = if let Some(owner) = cli.runtime.hc_hook.as_deref() {
+        if hook_state.is_none() || HostKind::from_environment(None) != Ok(HostKind::Hc) {
+            return ExitCode::SUCCESS;
+        }
+        let Ok(state) = cli.runtime.state_directory() else {
+            return ExitCode::SUCCESS;
+        };
+        if namedrop::hc_package_identity(&state) != owner {
+            return ExitCode::SUCCESS;
+        }
+        Some(state)
+    } else {
+        if hook_state.is_some()
+            && cli.runtime.plugin_state.is_none()
+            && cli.runtime.host_kind() == Ok(HostKind::Hc)
+        {
+            return ExitCode::SUCCESS;
+        }
+        cli.runtime
+            .plugin_state
+            .clone()
+            .or_else(|| hook_state.map(Path::to_path_buf))
+            .or_else(|| cli.runtime.state_directory().ok())
+    };
     // A dashboard successor started mid-update waits a bounded time rather
     // than parking forever behind a stuck migration.
     let gate_wait = cli.is_dashboard_server().then_some(Duration::from_secs(60));
@@ -771,7 +782,12 @@ fn run_context_hook(
     }
     let hc = options.host_kind() == Ok(HostKind::Hc);
     let mut hc_active = false;
-    let state_directory = options.plugin_state.as_deref().unwrap_or(state_directory);
+    let resolved_state = if options.hc_hook.is_some() {
+        options.state_directory().ok()
+    } else {
+        options.plugin_state.clone()
+    };
+    let state_directory = resolved_state.as_deref().unwrap_or(state_directory);
     let mut output = (!hc)
         .then(|| namedrop::execute_codex_app_server_hook(&input))
         .flatten()
@@ -847,7 +863,12 @@ fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
 /// pane: it reconciles the whole space and takes no identity from the
 /// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
 fn run_mailbox_wake_hook(state_directory: &Path, options: &RuntimeOptions) -> ExitCode {
-    let state_directory = options.plugin_state.as_deref().unwrap_or(state_directory);
+    let resolved_state = if options.hc_hook.is_some() {
+        options.state_directory().ok()
+    } else {
+        options.plugin_state.clone()
+    };
+    let state_directory = resolved_state.as_deref().unwrap_or(state_directory);
     let wake = || -> Result<(), String> {
         let kind = options.host_kind()?;
         let transport = ProcessHerdr::for_host(kind).with_socket(options.herdr_socket.clone());

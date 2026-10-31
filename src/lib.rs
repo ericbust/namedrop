@@ -57,11 +57,17 @@ pub use health::{
 pub use hook::{
     execute_codex_app_server_hook, execute_session_start_hook, execute_user_prompt_submit_hook,
 };
+
+#[cfg(test)]
+pub(crate) use install::user_hook_activation_guidance;
+
+#[doc(hidden)]
+pub use install::hc_package_identity;
+
 pub use install::{AgentConfigDirectories, install_integration_package, package_directory};
 pub(crate) use install::{
-    IntegrationPackageInstallation, disclosed_user_package_targets,
-    integration_package_attention_source, refresh_user_integration_packages,
-    user_hook_activation_guidance,
+    IntegrationPackageInstallation, integration_package_attention_source,
+    refresh_user_integration_packages,
 };
 #[doc(hidden)]
 pub use installed_runtime::command_guard as runtime_command_guard;

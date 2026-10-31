@@ -38,6 +38,8 @@ pub struct Cli {
 /// Omitted values retain the existing Herdr environment behavior.
 #[derive(Clone, Debug, Default, Args)]
 pub struct RuntimeOptions {
+    #[arg(long, global = true, hide = true)]
+    pub hc_hook: Option<String>,
     #[arg(long, global = true, value_enum)]
     pub host: Option<crate::runtime::HostKind>,
     #[arg(long, global = true, value_name = "TERMINAL")]

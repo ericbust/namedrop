@@ -1394,9 +1394,12 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
         let token = operation.get("token")?.as_str()?;
         let input = operation.get("input")?;
         let mut command = shell_single_quote(executable);
-        if let Some(state_directory) =
-            located("NAMEDROP_STATE_DIR").or_else(|| located("HERDR_PLUGIN_STATE_DIR"))
-        {
+        let state_key = if located("NAMEDROP_HOST") == Some("hc") {
+            "NAMEDROP_STATE_DIR"
+        } else {
+            "HERDR_PLUGIN_STATE_DIR"
+        };
+        if let Some(state_directory) = located(state_key) {
             command.push_str(&format!(
                 " --plugin-state {}",
                 shell_single_quote(state_directory)
@@ -1865,7 +1868,10 @@ mod guidance_state_tests {
             "operations":[{"token":"address.list", "argv":["address", "list"], "input":{}}]
         });
         let guidance = super::delivery_command_guidance(&tool).unwrap();
-        assert!(guidance.contains("--plugin-state '/tui-state'"), "{guidance}");
+        assert!(
+            guidance.contains("--plugin-state '/tui-state'"),
+            "{guidance}"
+        );
         assert!(!guidance.contains("/hc-state"), "{guidance}");
     }
 }

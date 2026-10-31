@@ -501,16 +501,23 @@ where
         "activate" => {
             let input: ActivateInput = parse_input(input)?;
             if !input.confirmed {
-                let hook_activation = crate::user_hook_activation_guidance(
-                    runtime.home_directory,
+                let package_context = runtime.home_directory.map(|home| {
+                    crate::install::PackageContext::new(
+                        home,
+                        runtime.state_directory,
+                        runtime.is_hc(),
+                    )
+                });
+                let hook_activation = crate::install::hook_activation_guidance(
+                    package_context.as_ref(),
                     runtime.agent_config,
                 );
                 return Err(format!(
                     "activation requires confirmation: Space={}, state_directory={}, shared_agent_integration_packages={{{}}} created or refreshed on activation and shared by every space on this machine, agent_integration_hook_activation={}, safe_defaults={{settled_delay_ms:500, ordinary_panes_auto_registered:false, routing_scope:space}}",
                     discovered.workspace_id,
                     runtime.state_directory.display(),
-                    crate::disclosed_user_package_targets(
-                        runtime.home_directory,
+                    crate::install::disclosed_package_targets(
+                        package_context.as_ref(),
                         runtime.agent_config
                     ),
                     hook_activation

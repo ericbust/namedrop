@@ -82,6 +82,7 @@ pub(crate) fn install_shell_command(
     };
     let script = format!(
         r#"{OWNER}namedrop_explicit_host=
+namedrop_transport_host=
 namedrop_previous_arg=
 for namedrop_arg do
   if [ "$namedrop_previous_arg" = --host ]; then
@@ -90,10 +91,15 @@ for namedrop_arg do
   fi
   case "$namedrop_arg" in
     --host=*) namedrop_explicit_host=${{namedrop_arg#--host=}}; break ;;
+    --herdr-socket|--herdr-socket=*|--herdr-workspace|--herdr-workspace=*|--herdr-pane|--herdr-pane=*) namedrop_transport_host=tui ;;
+    --hc-terminal|--hc-terminal=*|--hc-space|--hc-space=*)
+      [ "$namedrop_transport_host" = tui ] || namedrop_transport_host=hc ;;
+
   esac
   namedrop_previous_arg=$namedrop_arg
 done
-if [ "$namedrop_explicit_host" = hc ] || {{ [ -z "$namedrop_explicit_host" ] && {{ [ "${{NAMEDROP_HOST-}}" = hc ] || {{ [ -z "${{HERDR_SOCKET_PATH-}}${{HERDR_PANE_ID-}}" ] && [ -n "${{HC_TERMINAL_ID-}}" ]; }}; }}; }}; then
+namedrop_selected_host=${{namedrop_explicit_host:-$namedrop_transport_host}}
+if [ "$namedrop_selected_host" = hc ] || {{ [ -z "$namedrop_selected_host" ] && {{ [ "${{NAMEDROP_HOST-}}" = hc ] || {{ [ -z "${{HERDR_SOCKET_PATH-}}${{HERDR_PANE_ID-}}" ] && [ -n "${{HC_TERMINAL_ID-}}" ]; }}; }}; }}; then
   if [ -z "$namedrop_explicit_host" ]; then set -- --host hc "$@"; fi
   exec {executable} "$@"
 fi
@@ -225,19 +231,46 @@ mod tests {
             )
         );
         for flag in ["--herdr-socket", "--herdr-workspace", "--herdr-pane"] {
-            for args in [vec![flag.to_owned(), "value".to_owned()], vec![format!("{flag}=value")]] {
-                let output = Command::new(&launcher).args(&args).arg("doctor")
-                    .env_remove("HERDR_SOCKET_PATH").env_remove("HERDR_PANE_ID")
-                    .env("HC_TERMINAL_ID", "t1").env_remove("NAMEDROP_HOST").output().unwrap();
-                assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("tui\n--plugin-state\n{}\n{}\ndoctor\n", state.display(), args.join("\n")));
+            for args in [
+                vec![flag.to_owned(), "value".to_owned()],
+                vec![format!("{flag}=value")],
+            ] {
+                let output = Command::new(&launcher)
+                    .args(&args)
+                    .arg("doctor")
+                    .env_remove("HERDR_SOCKET_PATH")
+                    .env_remove("HERDR_PANE_ID")
+                    .env("HC_TERMINAL_ID", "t1")
+                    .env_remove("NAMEDROP_HOST")
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap(),
+                    format!(
+                        "tui\n--plugin-state\n{}\n{}\ndoctor\n",
+                        state.display(),
+                        args.join("\n")
+                    )
+                );
             }
         }
         for flag in ["--hc-terminal", "--hc-space"] {
-            for args in [vec![flag.to_owned(), "value".to_owned()], vec![format!("{flag}=value")]] {
-                let output = Command::new(&launcher).args(&args).arg("doctor")
-                    .env("HERDR_SOCKET_PATH", "tui").env_remove("HC_TERMINAL_ID")
-                    .env_remove("NAMEDROP_HOST").output().unwrap();
-                assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("hc\n--host\nhc\n{}\ndoctor\n", args.join("\n")));
+            for args in [
+                vec![flag.to_owned(), "value".to_owned()],
+                vec![format!("{flag}=value")],
+            ] {
+                let output = Command::new(&launcher)
+                    .args(&args)
+                    .arg("doctor")
+                    .env("HERDR_SOCKET_PATH", "tui")
+                    .env_remove("HC_TERMINAL_ID")
+                    .env_remove("NAMEDROP_HOST")
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    String::from_utf8(output.stdout).unwrap(),
+                    format!("hc\n--host\nhc\n{}\ndoctor\n", args.join("\n"))
+                );
             }
         }
         fs::remove_dir_all(root).unwrap();

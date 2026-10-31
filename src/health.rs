@@ -183,6 +183,7 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
             agent_runtime,
             runtime.state_directory,
             runtime.agent_config,
+            runtime.is_hc(),
         ) {
             failed_packages.push(agent_runtime);
             let mut package_issue = issue(
@@ -199,7 +200,7 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
             package_issue.diagnostic = serde_json::json!({
                 "source_id": crate::integration_package_attention_source(agent_runtime),
                 "runtime": agent_runtime,
-                "path": runtime.home_directory.map(|home| crate::package_directory(home, agent_runtime)),
+                "path": runtime.home_directory.map(|home| crate::install::PackageContext::new(home, runtime.state_directory, runtime.is_hc()).directory(agent_runtime)),
             });
             add_operation(
                 &mut package_issue,
@@ -212,7 +213,14 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
             issues.push(package_issue);
         } else if agent_runtime == crate::AgentRuntime::Codex
             && runtime.home_directory.is_some_and(|home| {
-                !crate::install::codex_configuration_current(home, runtime.agent_config)
+                !crate::install::codex_configuration_current(
+                    &crate::install::PackageContext::new(
+                        home,
+                        runtime.state_directory,
+                        runtime.is_hc(),
+                    ),
+                    runtime.agent_config,
+                )
             })
         {
             let mut hook_issue = issue(
@@ -223,10 +231,20 @@ fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
                 HealthRepairKind::ProductAction,
                 "Follow the reported Codex plugin setup steps.",
             );
-            hook_issue.diagnostic =
-                crate::user_hook_activation_guidance(runtime.home_directory, runtime.agent_config)
-                    ["codex"]
-                    .clone();
+            hook_issue.diagnostic = crate::install::hook_activation_guidance(
+                runtime
+                    .home_directory
+                    .map(|home| {
+                        crate::install::PackageContext::new(
+                            home,
+                            runtime.state_directory,
+                            runtime.is_hc(),
+                        )
+                    })
+                    .as_ref(),
+                runtime.agent_config,
+            )["codex"]
+                .clone();
             issues.push(hook_issue);
         }
     }
