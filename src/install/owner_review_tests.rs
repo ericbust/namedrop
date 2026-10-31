@@ -1067,3 +1067,155 @@ esac
     fs::remove_dir_all(root).unwrap();
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+#[test]
+fn hc_onboarding_inspects_packages_without_repairing_them() {
+    let root = owner_review_root("onboarding-read-only");
+    let home = root.join("foreign-home");
+    let state = root.join("state");
+    let claude = root.join("foreign-claude");
+    let codex = root.join("foreign-codex");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&claude).unwrap();
+    fs::create_dir_all(&codex).unwrap();
+    let ids = crate::ProcessIds::default();
+    let runtime = LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&home),
+        agent_config: AgentConfigDirectories {
+            claude: Some(&claude),
+            codex: Some(&codex),
+        },
+        cwd: &root,
+        workspace_id: Some("space"),
+        current_pane_id: None,
+        session_socket_id: "hc:read-only",
+        host: crate::HcHost::new(&NoCalls),
+        clock: &crate::SystemClock,
+        ids: &ids,
+    };
+    let discovered = DiscoveredWorktree {
+        worktree_id: crate::WorktreeId::new("worktree"),
+        workspace_id: "space".into(),
+        worktree_attached: false,
+        label: None,
+        branch: None,
+        panes: vec![],
+    };
+    let namespace = discovered.namespace(runtime.session_socket_id);
+    StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.activate_worktree(
+                &namespace,
+                &MutationAttribution::new(crate::ActorKind::Human, "test", 1),
+            )
+        })
+        .unwrap();
+    let roots = [&home, &claude, &codex];
+    let snapshots = || roots.map(|path| tree_snapshot(path));
+    let missing = snapshots();
+    let installation =
+        crate::integration::onboard_settled_integrations(&runtime, &discovered).unwrap();
+    assert!(installation.failed(AgentRuntime::Codex));
+    assert!(installation.failed(AgentRuntime::ClaudeCode));
+    assert_eq!(
+        snapshots(),
+        missing,
+        "onboarding must not install missing packages"
+    );
+    let installation = refresh_user_integration_packages(&runtime, &discovered).unwrap();
+    assert!(!installation.failed(AgentRuntime::Codex));
+    assert!(!installation.failed(AgentRuntime::ClaudeCode));
+    let installed = snapshots();
+    let installation =
+        crate::integration::onboard_settled_integrations(&runtime, &discovered).unwrap();
+    assert!(!installation.failed(AgentRuntime::Codex));
+    assert!(!installation.failed(AgentRuntime::ClaudeCode));
+    assert_eq!(snapshots(), installed);
+    for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        let file = PackageContext::new(&home, true)
+            .directory(agent)
+            .join(INSTRUCTIONS_FILE);
+        fs::write(file, "damaged package").unwrap();
+    }
+    for (path, snapshot) in roots.iter().zip(&installed) {
+        for (relative, (_, contents)) in snapshot {
+            fs::set_permissions(
+                path.join(relative),
+                fs::Permissions::from_mode(if contents.is_some() { 0o400 } else { 0o500 }),
+            )
+            .unwrap();
+        }
+    }
+    let damaged = snapshots();
+    let installation =
+        crate::integration::onboard_settled_integrations(&runtime, &discovered).unwrap();
+    assert!(installation.failed(AgentRuntime::Codex));
+    assert!(installation.failed(AgentRuntime::ClaudeCode));
+    assert_eq!(
+        snapshots(),
+        damaged,
+        "read-only packages must preserve bytes and modes"
+    );
+    let attention = StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| tx.unresolved_attention_items(&namespace))
+        .unwrap();
+    assert_eq!(
+        attention
+            .iter()
+            .filter(|item| item
+                .source_id
+                .starts_with(crate::INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX))
+            .count(),
+        2
+    );
+    for (path, snapshot) in roots.iter().zip(&installed) {
+        for (relative, (mode, _)) in snapshot {
+            fs::set_permissions(path.join(relative), fs::Permissions::from_mode(*mode)).unwrap();
+        }
+    }
+    let installation = refresh_user_integration_packages(&runtime, &discovered).unwrap();
+    assert!(!installation.failed(AgentRuntime::Codex));
+    assert!(!installation.failed(AgentRuntime::ClaudeCode));
+    assert_eq!(snapshots(), installed);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hc_permission_owner_uses_the_state_root_and_explicit_home() {
+    const CHILD: &str = "NAMEDROP_PERMISSION_OWNER_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let home = Path::new("/explicit-home");
+        let context = PackageContext::new(home, true);
+        let expected = std::env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"))
+            .join("namedrop-app");
+        assert_eq!(context.permission_owner(Path::new("/state/one")), expected);
+        assert_eq!(context.permission_owner(Path::new("/state/two")), expected);
+        assert_eq!(
+            PackageContext::new(home, false).permission_owner(Path::new("/tui-state")),
+            Path::new("/tui-state")
+        );
+        return;
+    }
+    for xdg in [None, Some("/foreign-xdg-state")] {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "install::owner_review_tests::hc_permission_owner_uses_the_state_root_and_explicit_home", "--nocapture"])
+            .env(CHILD, "1")
+            .env("HOME", "/unrelated-process-home")
+            .env_remove("XDG_STATE_HOME");
+        if let Some(xdg) = xdg {
+            child.env("XDG_STATE_HOME", xdg);
+        }
+        let output = child.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
