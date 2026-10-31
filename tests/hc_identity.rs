@@ -9,6 +9,7 @@ use std::cell::RefCell;
 struct Fixture {
     terminal: RefCell<Value>,
     calls: RefCell<Vec<Vec<String>>>,
+    state: std::path::PathBuf,
 }
 impl Fixture {
     fn new(pid: u32, program: &str) -> Self {
@@ -23,6 +24,14 @@ impl Fixture {
         Self {
             terminal: RefCell::new(terminal),
             calls: RefCell::default(),
+            state: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                std::env::temp_dir().join(format!(
+                    "namedrop-hc-identity-{}-{}",
+                    std::process::id(),
+                    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ))
+            },
         }
     }
     fn calls(&self, verb: &str) -> Vec<Vec<String>> {
@@ -34,7 +43,17 @@ impl Fixture {
             .collect()
     }
 }
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if self.state.exists() {
+            std::fs::remove_dir_all(&self.state).unwrap();
+        }
+    }
+}
 impl HerdrCommandExecutor for Fixture {
+    fn state_directory(&self) -> Option<&std::path::Path> {
+        Some(&self.state)
+    }
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         self.calls
             .borrow_mut()
@@ -78,11 +97,9 @@ fn stale_shell_owner_cannot_receive_agent_prompts() {
     fixture.calls.borrow_mut().clear();
     assert_eq!(
         host.prompt("t1", "hello").unwrap_err().kind,
-        PromptFailureKind::DeferredUntilSettle {
-            observed_status_ms: None
-        }
+        PromptFailureKind::TemporaryPreInvocation
     );
-    assert_eq!(fixture.calls("get").len(), 1);
+    assert_eq!(fixture.calls("get").len(), 2);
     assert!(fixture.calls("send").is_empty());
     assert_eq!(fixture.terminal.borrow()["labels"]["namedrop.session"], "");
     assert_eq!(
@@ -195,7 +212,7 @@ fn exited_owner_is_cleared_even_when_hc_foreground_and_status_are_stale() {
     assert!(pane.agent_session_id.is_none());
     fixture.calls.borrow_mut().clear();
     assert!(host.prompt("t1", "hello").is_err());
-    assert_eq!(fixture.calls("get").len(), 1);
+    assert_eq!(fixture.calls("get").len(), 2);
     assert_eq!(fixture.calls("label").len(), 1);
     assert!(fixture.calls("send").is_empty());
 }
@@ -247,7 +264,7 @@ fn reused_pid_with_a_different_start_cannot_own_the_old_session() {
     );
     fixture.calls.borrow_mut().clear();
     assert!(host.prompt("t1", "hello").is_err());
-    assert_eq!(fixture.calls("get").len(), 1);
+    assert_eq!(fixture.calls("get").len(), 2);
     assert!(fixture.calls("send").is_empty());
     assert_eq!(
         fixture.terminal.borrow()["labels"]["namedrop.session.start"],
