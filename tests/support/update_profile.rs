@@ -1,5 +1,4 @@
-#[path = "cleanup.rs"]
-mod cleanup;
+use crate::cleanup;
 
 use std::{
     env,

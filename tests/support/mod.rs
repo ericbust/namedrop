@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-mod cleanup;
+use crate::cleanup;
 
 use namedrop::{
     ActorKind, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,

@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
-#[path = "cleanup.rs"]
-mod cleanup;
+use crate::cleanup;
 
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
