@@ -49,6 +49,59 @@ fn remote_and_broken_records_do_not_hide_local_discovery() {
     }
 }
 #[test]
+fn partial_discovery_cannot_prove_a_checkouts_space_is_unique() {
+    struct PartialDiscovery;
+    impl HerdrCommandExecutor for PartialDiscovery {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            let stdout = match args {
+                ["ls", "--json"] => json!({"terminals":[
+                    {"address":"t1","state":"live"},
+                    {"address":"t2","state":"live"}
+                ]})
+                .to_string(),
+                ["get", "t1", "--json"] => return Err("terminal metadata timed out".into()),
+                ["get", "t2", "--json"] => {
+                    let mut terminal: Value =
+                        serde_json::from_str(include_str!("fixtures/hc/get-labeled.stdout"))
+                            .unwrap();
+                    terminal["address"] = json!("t2");
+                    terminal["foreground"]["cwd"] = json!(env!("CARGO_MANIFEST_DIR"));
+                    terminal.to_string()
+                }
+                _ => panic!("unexpected argv {args:?}"),
+            };
+            Ok(HerdrCommandOutput { stdout })
+        }
+    }
+
+    let host = HcHost::new(PartialDiscovery);
+    let panes = host.panes(PaneScope::All).unwrap();
+    assert_eq!(panes.len(), 1);
+    assert_eq!(panes[0].pane_id, "t2");
+    let explicit = host
+        .space(SpaceLocator::Workspace("fixture-space"), None)
+        .unwrap();
+    assert_eq!(explicit.workspace_id, "fixture-space");
+    assert_eq!(explicit.panes.len(), 1);
+    assert_eq!(explicit.panes[0].pane_id, "t2");
+    assert_eq!(explicit.unavailable_panes, ["t1"]);
+
+    let error = match host.space(
+        SpaceLocator::Checkout(Path::new(env!("CARGO_MANIFEST_DIR"))),
+        None,
+    ) {
+        Ok(space) => panic!(
+            "partial discovery falsely selected checkout space {}",
+            space.workspace_id
+        ),
+        Err(error) => error.message,
+    };
+    for detail in ["t1", "terminal metadata timed out", "--hc-space"] {
+        assert!(error.contains(detail), "missing {detail:?} in {error:?}");
+    }
+}
+
+#[test]
 fn explicit_remote_target_is_rejected_before_transport() {
     let fixture = Fixture {
         calls: RefCell::default(),
