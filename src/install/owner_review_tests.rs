@@ -787,3 +787,129 @@ fn hc_command_forms_match_only_operation_scoped_permissions() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn hc_bootstrap_stale_runtime_only_inspects_the_shared_command() {
+    const CHILD_ROOT: &str = "NAMEDROP_BOOTSTRAP_STALE_TEST_ROOT";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let home = root.join("home");
+        let state = root.join("state");
+        let executable = PathBuf::from(crate::collaboration_executable().unwrap());
+        let command = home.join(".local/bin/namedrop-app");
+        for damage in [
+            "intact",
+            "deleted",
+            "corrupt",
+            "nonexecutable",
+            "unowned",
+            "symlink",
+        ] {
+            let _ = fs::remove_file(&command);
+            install_shell_command(&home, &executable, &state, true).unwrap();
+            match damage {
+                "deleted" => fs::remove_file(&command).unwrap(),
+                "corrupt" => fs::write(
+                    &command,
+                    "#!/bin/sh\n# Managed by Namedrop: shell command.\nexit 41\n",
+                )
+                .unwrap(),
+                "nonexecutable" => {
+                    fs::set_permissions(&command, fs::Permissions::from_mode(0o644)).unwrap()
+                }
+                "unowned" => fs::write(&command, "#!/bin/sh\nexit 41\n").unwrap(),
+                "symlink" => {
+                    fs::rename(&command, root.join("outside-command")).unwrap();
+                    std::os::unix::fs::symlink(root.join("outside-command"), &command).unwrap();
+                }
+                _ => {}
+            }
+            let before = fs::read(&command).ok();
+            let mode = fs::symlink_metadata(&command)
+                .ok()
+                .map(|m| m.permissions().mode());
+            let installation = refresh_hc_packages(&home, &state);
+            for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+                assert_eq!(
+                    installation.failed(agent),
+                    damage != "intact",
+                    "stale runtime accepted {damage} bootstrap"
+                );
+            }
+            assert_eq!(
+                fs::read(&command).ok(),
+                before,
+                "stale runtime changed {damage} bootstrap"
+            );
+            assert_eq!(
+                fs::symlink_metadata(&command)
+                    .ok()
+                    .map(|m| m.permissions().mode()),
+                mode
+            );
+            assert!(
+                !home.join(".agents").exists(),
+                "stale runtime installed packages"
+            );
+        }
+        return;
+    }
+    let root = owner_review_root("bootstrap-stale-runtime");
+    let runtime = root.join("runtime");
+    let old = runtime.join("releases").join("a".repeat(64));
+    let current = runtime.join("releases").join("b".repeat(64));
+    fs::create_dir_all(&old).unwrap();
+    fs::create_dir_all(&current).unwrap();
+    fs::copy(std::env::current_exe().unwrap(), old.join("namedrop")).unwrap();
+    fs::write(old.join("runtime.json"), include_str!("../../runtime.json")).unwrap();
+    fs::write(current.join("namedrop"), "active runtime").unwrap();
+    fs::write(runtime.join("namedrop"), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(runtime.join("namedrop"), fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(
+        Path::new("releases").join("b".repeat(64)),
+        runtime.join("current"),
+    )
+    .unwrap();
+    let output = std::process::Command::new(old.join("namedrop"))
+        .args(["--exact", "install::owner_review_tests::hc_bootstrap_stale_runtime_only_inspects_the_shared_command", "--nocapture"])
+        .env(CHILD_ROOT, &root)
+        .output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hc_bootstrap_inspection_accepts_another_states_activated_executable() {
+    let root = owner_review_root("bootstrap-portability");
+    let home = root.join("home");
+    let first = root.join("first-state");
+    let second = root.join("second-state");
+    let installation = refresh_hc_packages(&home, &first);
+    for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        assert!(!installation.failed(agent));
+    }
+    let executable = root.join("other executable with ' quote");
+    fs::write(&executable, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+    install_shell_command(&home, &executable, &second, true).unwrap();
+    let before = tree_snapshot(&home);
+    for state in [&first, &second] {
+        for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+            inspect_integration_package(
+                Some(&home),
+                agent,
+                state,
+                AgentConfigDirectories::default(),
+                true,
+            )
+            .unwrap();
+        }
+    }
+    assert_eq!(tree_snapshot(&home), before);
+    fs::remove_dir_all(root).unwrap();
+}

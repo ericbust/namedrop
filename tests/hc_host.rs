@@ -1698,3 +1698,212 @@ fn screen_and_history_reads_share_the_remaining_budget() {
         );
     }
 }
+
+#[test]
+fn hc_bootstrap_first_name_installs_the_shared_command() {
+    check_hc_bootstrap(None);
+}
+
+#[test]
+fn hc_bootstrap_doctor_detects_deleted_command() {
+    check_hc_bootstrap(Some("deleted"));
+}
+
+#[test]
+fn hc_bootstrap_doctor_detects_corrupt_command() {
+    check_hc_bootstrap(Some("corrupt"));
+}
+
+#[test]
+fn hc_bootstrap_doctor_detects_nonexecutable_command() {
+    check_hc_bootstrap(Some("nonexecutable"));
+}
+
+#[test]
+fn hc_bootstrap_doctor_detects_unowned_command() {
+    check_hc_bootstrap(Some("unowned"));
+}
+
+#[test]
+fn hc_bootstrap_doctor_detects_symlink_command() {
+    check_hc_bootstrap(Some("symlink"));
+}
+
+#[test]
+fn hc_bootstrap_doctor_detects_symlink_parent() {
+    check_hc_bootstrap(Some("symlink-parent"));
+}
+
+#[test]
+fn hc_bootstrap_doctor_detects_missing_fallback() {
+    check_hc_bootstrap(Some("missing-fallback"));
+}
+
+fn check_hc_bootstrap(damage: Option<&str>) {
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
+    let fixture = Fixture::default();
+    fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["claude"]);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/bootstrap-checks")
+        .join(format!(
+            "{}-{}",
+            damage.unwrap_or("fresh-name"),
+            std::process::id()
+        ));
+    let _ = fs::remove_dir_all(&root);
+    let home = root.join("home");
+    let state = root.join("state");
+    fs::create_dir_all(&home).unwrap();
+    let clock = namedrop::SystemClock;
+    let ids = namedrop::ProcessIds::default();
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&home),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    let command = home.join(".local/bin/namedrop-app");
+    if damage.is_none() {
+        let result = namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"alice","pane_type":"agent"}),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(result["activation_was_needed"], true);
+        assert!(
+            command.is_file(),
+            "first HC name must install its required bootstrap"
+        );
+        assert_ne!(
+            fs::metadata(&command).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        assert!(!home.join(".local/bin/namedrop").exists());
+        assert!(!home.join(".bashrc").exists());
+        assert!(!home.join(".profile").exists());
+    } else {
+        namedrop::execute_lifecycle_operation("activate", json!({"confirmed":true}), &runtime)
+            .unwrap();
+        let baseline = namedrop::diagnose_collaboration(&runtime);
+        assert!(
+            !baseline
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-INTEGRATION-001"),
+            "{baseline:?}"
+        );
+        let original = fs::read(&command).unwrap();
+        let damage = damage.unwrap();
+        match damage {
+            "deleted" => fs::remove_file(&command).unwrap(),
+            "missing-fallback" => fs::write(
+                &command,
+                format!(
+                    "#!/bin/sh\n# Managed by Namedrop: shell command.\nexec '{}' \"$@\"\n",
+                    root.join("missing-executable").display()
+                ),
+            )
+            .unwrap(),
+            "corrupt" => fs::write(
+                &command,
+                "#!/bin/sh\n# Managed by Namedrop: shell command.\nexit 41\n",
+            )
+            .unwrap(),
+            "nonexecutable" => {
+                fs::set_permissions(&command, fs::Permissions::from_mode(0o644)).unwrap()
+            }
+            "unowned" => fs::write(&command, "#!/bin/sh\nexit 41\n").unwrap(),
+            "symlink" => {
+                fs::rename(&command, root.join("outside-command")).unwrap();
+                symlink(root.join("outside-command"), &command).unwrap();
+            }
+            "symlink-parent" => {
+                fs::rename(home.join(".local/bin"), root.join("outside-bin")).unwrap();
+                symlink(root.join("outside-bin"), home.join(".local/bin")).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let before = fs::read(&command).ok();
+        let mode = fs::symlink_metadata(&command)
+            .ok()
+            .map(|m| m.permissions().mode());
+        let report = namedrop::diagnose_collaboration(&runtime);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-INTEGRATION-001"),
+            "doctor accepted {damage} required bootstrap: {report:?}"
+        );
+        assert_eq!(
+            fs::read(&command).ok(),
+            before,
+            "doctor must not repair the command"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&command)
+                .ok()
+                .map(|m| m.permissions().mode()),
+            mode
+        );
+        let result = namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"alice","pane_type":"agent"}),
+            &runtime,
+        )
+        .unwrap();
+        if matches!(damage, "unowned" | "symlink" | "symlink-parent") {
+            for agent in ["codex", "claude-code"] {
+                assert_eq!(
+                    result["integration_packages"][agent]["installed"], false,
+                    "{result}"
+                );
+            }
+            assert_eq!(result["ready"], false);
+            let attention = namedrop::StateStore::open(&state)
+                .unwrap()
+                .transaction(|tx| {
+                    tx.unresolved_attention_items(&namedrop::StateNamespace::for_space(
+                        "hc:fixture",
+                        "fixture-space",
+                    ))
+                })
+                .unwrap();
+            assert_eq!(
+                attention
+                    .iter()
+                    .filter(|item| item.summary.contains("namedrop-app"))
+                    .count(),
+                2
+            );
+            assert_eq!(fs::read(&command).ok(), before);
+        } else {
+            assert_eq!(
+                fs::read(&command).unwrap(),
+                original,
+                "common refresh repairs owned bootstrap"
+            );
+            assert_eq!(
+                fs::metadata(&command).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            assert!(
+                !namedrop::diagnose_collaboration(&runtime)
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "ND-INTEGRATION-001")
+            );
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
