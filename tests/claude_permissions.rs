@@ -223,7 +223,11 @@ fn activation_ignores_python_shims_on_path() {
 
     let f = Fixture::new();
     let python = f.root.join("python3");
-    fs::write(&python, "#!/bin/sh\necho unexpected-python-shim >&2\nexit 97\n").unwrap();
+    fs::write(
+        &python,
+        "#!/bin/sh\necho unexpected-python-shim >&2\nexit 97\n",
+    )
+    .unwrap();
     fs::set_permissions(&python, fs::Permissions::from_mode(0o700)).unwrap();
     let output = f
         .command_for("workspace-1")
