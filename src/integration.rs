@@ -462,6 +462,17 @@ where
     };
     let discovered = integration_discovery(runtime)?;
     let namespace = discovered.namespace(runtime.session_socket_id);
+    if runtime.is_hc()
+        && StateStore::open(runtime.state_directory)
+            .map_err(|error| error.to_string())?
+            .transaction(|transaction| {
+                transaction.prompt_is_deferred(&namespace, &pane.pane_id, agent_session_id)
+            })
+            .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+
     if StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
         .transaction(|transaction| {
@@ -612,6 +623,30 @@ where
             TransitionKind::Submitted,
             &attribution,
         ),
+        Err(error) if error.kind == PromptFailureKind::DeferredUntilSettle => {
+            let attribution = MutationAttribution::new(
+                crate::ActorKind::Plugin,
+                "namedrop-onboarding",
+                runtime.clock.now_unix_ms(),
+            );
+            StateStore::open(runtime.state_directory)
+                .map_err(|error| error.to_string())?
+                .transaction(|transaction| {
+                    transaction.finish_integration_challenge_prompt(
+                        &namespace,
+                        &challenge.registration_id,
+                        TransitionKind::Challenged,
+                        &attribution,
+                    )?;
+                    transaction.defer_prompt_until_settle(
+                        &namespace,
+                        &pane.pane_id,
+                        agent_session_id,
+                        &attribution,
+                    )
+                })
+                .map_err(|error| error.to_string())
+        }
         Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {
             finish_challenge_prompt(
                 runtime,

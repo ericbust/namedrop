@@ -723,9 +723,34 @@ where
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
     }
+    let namespace = crate::StateNamespace::for_space(runtime.session_socket_id, space_id);
+    if runtime.is_hc()
+        && StateStore::open(runtime.state_directory)
+            .map_err(|error| error.to_string())?
+            .transaction(|transaction| transaction.prompt_is_deferred(&namespace, pane_id, &live))
+            .map_err(|error| error.to_string())?
+    {
+        return Err("Not sent; waiting for the agent's next settled status.".to_owned());
+    }
     let prompt = doctor_assistance_prompt(&report, pane_id, &live);
     match runtime.host.prompt(pane_id, &prompt) {
         Ok(_) => Ok(()),
+        Err(error) if error.kind == PromptFailureKind::DeferredUntilSettle => {
+            let attribution = crate::MutationAttribution::new(
+                crate::ActorKind::Plugin,
+                "namedrop-doctor",
+                runtime.clock.now_unix_ms(),
+            );
+            StateStore::open(runtime.state_directory)
+                .map_err(|error| error.to_string())?
+                .transaction(|transaction| {
+                    transaction.defer_prompt_until_settle(&namespace, pane_id, &live, &attribution)
+                })
+                .map_err(|error| error.to_string())?;
+            Err(format!(
+                "Not sent; waiting for the agent's next settled status: {error}"
+            ))
+        }
         Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }

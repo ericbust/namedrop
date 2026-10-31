@@ -78,7 +78,7 @@ fn stale_shell_owner_cannot_receive_agent_prompts() {
     fixture.calls.borrow_mut().clear();
     assert_eq!(
         host.prompt("t1", "hello").unwrap_err().kind,
-        PromptFailureKind::TemporaryPreInvocation
+        PromptFailureKind::DeferredUntilSettle
     );
     assert_eq!(fixture.calls("get").len(), 1);
     assert!(fixture.calls("send").is_empty());
@@ -124,7 +124,7 @@ fn live_owner_with_other_foreground_defers_but_retains_session() {
     fixture.calls.borrow_mut().clear();
     assert_eq!(
         host.prompt("t1", "hello").unwrap_err().kind,
-        PromptFailureKind::TemporaryPreInvocation
+        PromptFailureKind::DeferredUntilSettle
     );
     assert!(host.run_in_pane("t1", "echo denied").is_err());
     assert!(fixture.calls("send").is_empty());

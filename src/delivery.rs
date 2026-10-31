@@ -608,6 +608,17 @@ where
                     .map_err(|error| error.to_string())?;
                 report.submitted.push(leased.attempt_id);
             }
+            Err(error) if error.kind == PromptFailureKind::DeferredUntilSettle => {
+                store
+                    .transaction(|transaction| {
+                        transaction.defer_delivery_attempt_until_settle(
+                            &namespace,
+                            &leased.attempt_id,
+                            &attribution,
+                        )
+                    })
+                    .map_err(|error| error.to_string())?;
+            }
             Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {
                 store
                     .transaction(|transaction| {

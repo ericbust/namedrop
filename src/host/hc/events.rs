@@ -109,6 +109,11 @@ impl Subscriber {
                 if !active(&scoped)? {
                     return Ok(());
                 }
+                if matches!(event.kind, Kind::Status | Kind::Turn)
+                    && let Some(terminal) = &terminal
+                {
+                    resume_settled_recipient(terminal, &scoped)?;
+                }
                 match event.kind {
                     Kind::Created | Kind::Restarted => {
                         if let Some(terminal) = terminal {
@@ -231,6 +236,10 @@ impl Subscriber {
                 .filter(|terminal| terminal.workspace() == space)
             {
                 if let Err(error) = self.reconcile_move(terminal, runtime) {
+                    errors.push(error);
+                    continue;
+                }
+                if let Err(error) = resume_settled_recipient(terminal, &scoped) {
                     errors.push(error);
                     continue;
                 }
@@ -796,4 +805,43 @@ pub fn run(state: &Path) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(250));
     }
     Ok(())
+}
+
+fn resume_settled_recipient<E: HerdrCommandExecutor, C: Clock, I>(
+    terminal: &Terminal,
+    runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
+) -> Result<(), String> {
+    let Some(status_ms) = terminal.status_ms else {
+        return Ok(());
+    };
+    let Occupancy::Agent {
+        session: Some(session),
+        state: AgentState::Foreground(Some(StatusWord::Idle | StatusWord::Done)),
+        ..
+    } = terminal.occupancy()
+    else {
+        return Ok(());
+    };
+    if terminal.state != "live" || runtime.workspace_id != Some(terminal.workspace()) {
+        return Ok(());
+    }
+    let namespace =
+        crate::StateNamespace::for_space(runtime.session_socket_id, terminal.workspace());
+    let attribution = crate::MutationAttribution::new(
+        crate::ActorKind::Plugin,
+        "namedrop-hc-settle",
+        runtime.clock.now_unix_ms(),
+    );
+    StateStore::open(runtime.state_directory)
+        .map_err(|error| error.to_string())?
+        .transaction(|transaction| {
+            transaction.resume_prompt_after_settle(
+                &namespace,
+                &terminal.address,
+                &AgentSessionId::new(session),
+                status_ms,
+                &attribution,
+            )
+        })
+        .map_err(|error| error.to_string())
 }

@@ -266,11 +266,11 @@ fn errors_classify_by_kind_and_pretyping_hint() {
     for (kind, hint, expected) in [
         ("not_found", "", PromptFailureKind::TemporaryPreInvocation),
         ("finished", "", PromptFailureKind::TemporaryPreInvocation),
-        ("blocked", "", PromptFailureKind::TemporaryPreInvocation),
+        ("blocked", "", PromptFailureKind::DeferredUntilSettle),
         (
             "status_mismatch",
             "",
-            PromptFailureKind::TemporaryPreInvocation,
+            PromptFailureKind::DeferredUntilSettle,
         ),
         (
             "unavailable",
@@ -2176,14 +2176,15 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
         ActorKind, AgentSessionId, Clock, DeliveryId, DeliveryState, MessageDraft, MessageId,
         MessageRecipientDraft, MutationAttribution, StateStore, ThreadId,
     };
-    for refusal in ["blocked", "status_mismatch"] {
+    for (refusal, recovery) in [("blocked", "status"), ("status_mismatch", "snapshot")] {
         let fixture = Fixture::default();
         let agent = process::AgentProcess::new();
         fixture.agent(agent.pid());
         fixture.terminals.borrow_mut()[0]["status_ms"] = json!(900);
         let mut other = fixture.terminals.borrow()[0].clone();
         other["address"] = json!("t2");
-        other["labels"] = json!({"herdr.space":"fixture-space"});
+        other["labels"]["namedrop.session"] = json!("other-session");
+        other["labels"]["namedrop.name"] = json!("");
         fixture.terminals.borrow_mut().push(other);
         let state = std::env::temp_dir().join(format!(
             "namedrop-hc-deferred-{}-{refusal}",
@@ -2218,6 +2219,21 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
             .transaction(|tx| tx.active_pane_bindings(&namespace))
             .unwrap()
             .remove(0);
+        namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"bob"}),
+            &namedrop::LifecycleRuntime {
+                current_pane_id: Some("t2"),
+                ..runtime
+            },
+        )
+        .unwrap();
+        let other_binding = store
+            .transaction(|tx| tx.active_pane_bindings(&namespace))
+            .unwrap()
+            .into_iter()
+            .find(|binding| binding.pane_id == "t2")
+            .unwrap();
         let attribution = MutationAttribution::new(ActorKind::Human, "test", 1_000);
         store
             .transaction(|tx| {
@@ -2250,6 +2266,10 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
                 Ok(())
             })
             .unwrap();
+        let attention_before = store
+            .transaction(|tx| tx.unresolved_attention_items(&namespace))
+            .unwrap()
+            .len();
         fixture.take_calls();
         *fixture.send_error.borrow_mut() =
             Some(json!({"error":{"kind":refusal,"message":"not sent"}}).to_string());
@@ -2260,6 +2280,31 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
         );
         assert!(!report.awaits_retry());
         assert!(report.failed.is_empty());
+        assert_eq!(
+            store
+                .transaction(|tx| tx.unresolved_attention_items(&namespace))
+                .unwrap()
+                .len(),
+            attention_before
+        );
+        let database = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT state FROM mailbox_deliveries WHERE delivery_id = 'test-delivery'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "queued"
+        );
+        assert_eq!(
+            database
+                .query_row("SELECT COUNT(*) FROM leases", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
         let facts = store
             .transaction(|tx| tx.transition_facts(&namespace))
             .unwrap();
@@ -2286,11 +2331,66 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
                 .calls
                 .borrow()
                 .iter()
-                .filter(|call| call[0] == "send")
+                .filter(|call| call[0] == "send" && call[1] == "t1")
                 .count(),
             1
         );
         *fixture.send_error.borrow_mut() = None;
+        store
+            .transaction(|tx| {
+                tx.append_message(
+                    &namespace,
+                    &MessageDraft {
+                        thread_id: ThreadId::new("test-thread"),
+                        message_id: MessageId::new("other-message"),
+                        in_reply_to: None,
+                        author_address_id: binding.address_id.clone(),
+                        author_kind: ActorKind::Human,
+                        author_alias_snapshot: "alice".into(),
+                        author_agent_session_snapshot: None,
+                        request_id: "other-request".into(),
+                        authored_source: "@bob other work".into(),
+                        body: "other work".into(),
+                        grammar_version: "mention/v1".into(),
+                        recipients: vec![MessageRecipientDraft {
+                            address_id: other_binding.address_id.clone(),
+                            alias_snapshot: "bob".into(),
+                            agent_session_snapshot: Some(AgentSessionId::new("other-session")),
+                            delivery_id: DeliveryId::new("other-delivery"),
+                        }],
+                        context_references: Vec::new(),
+                    },
+                    &attribution,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let other = namedrop::drain_mailboxes(&runtime).unwrap();
+        assert_eq!(other.submitted.len(), 1);
+        let mut timer = namedrop::host::hc::events::Subscriber::default();
+        timer
+            .handle_line(
+                &json!({"method":"event","params":{"type":"status","terminal":"t2"}}).to_string(),
+                &runtime,
+            )
+            .unwrap();
+        clock.0.set(31_000);
+        timer.tick(&runtime).unwrap();
+        assert_eq!(
+            store
+                .transaction(|tx| tx.delivery_attempt_state(&namespace, &other.submitted[0]))
+                .unwrap(),
+            DeliveryState::Settled
+        );
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "send" && call[1] == "t1")
+                .count(),
+            1
+        );
         for event in ["labels", "status", "turn"] {
             let mut subscriber = namedrop::host::hc::events::Subscriber::default();
             for pane in ["t1", "t2"] {
@@ -2320,7 +2420,7 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
                     .calls
                     .borrow()
                     .iter()
-                    .filter(|call| call[0] == "send")
+                    .filter(|call| call[0] == "send" && call[1] == "t1")
                     .count(),
                 1,
                 "{event} retried deferred work"
@@ -2328,16 +2428,160 @@ fn refused_hc_delivery_waits_for_new_target_settle_without_failure() {
         }
         fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"done"});
         fixture.terminals.borrow_mut()[0]["status_ms"] = json!(clock.0.get());
+        let recovered = if recovery == "snapshot" {
+            json!({"terminals":*fixture.terminals.borrow()})
+        } else {
+            json!({"method":"event","params":{"type":"status","terminal":"t1"}})
+        };
         namedrop::host::hc::events::Subscriber::default()
+            .handle_line(&recovered.to_string(), &runtime)
+            .unwrap();
+        namedrop::drain_mailboxes(&runtime).unwrap();
+        let calls = fixture.calls.borrow();
+        let sends: Vec<_> = calls
+            .iter()
+            .filter(|call| call[0] == "send" && call[1] == "t1")
+            .collect();
+        assert_eq!(sends.len(), 2);
+        assert_eq!(&sends[1][3..], &["--json"]);
+        std::fs::remove_dir_all(state).unwrap();
+    }
+}
+
+#[test]
+fn onboarding_and_doctor_refusals_wait_for_new_settle() {
+    use namedrop::{Clock, StateNamespace, StateStore, TransitionKind};
+    for (caller, refusal) in [
+        ("onboarding", "blocked"),
+        ("doctor", "status_mismatch"),
+        ("unnamed-doctor", "blocked"),
+    ] {
+        let fixture = Fixture::default();
+        let agent = process::AgentProcess::new();
+        fixture.agent(agent.pid());
+        fixture.terminals.borrow_mut()[0]["status_ms"] = json!(900);
+        let state = std::env::temp_dir().join(format!(
+            "namedrop-hc-{caller}-deferred-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&state);
+        struct TestClock(std::cell::Cell<u64>);
+        impl Clock for TestClock {
+            fn now_unix_ms(&self) -> u64 {
+                self.0.get()
+            }
+            fn wait_ms(&self, _: u64) {}
+        }
+        let clock = TestClock(std::cell::Cell::new(1_000));
+        let ids = namedrop::ProcessIds::default();
+        let runtime = namedrop::LifecycleRuntime {
+            state_directory: &state,
+            home_directory: Some(&state),
+            agent_config: namedrop::AgentConfigDirectories::default(),
+            cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+            workspace_id: Some("fixture-space"),
+            current_pane_id: Some("t1"),
+            session_socket_id: "hc:fixture",
+            host: HcHost::new(&fixture),
+            clock: &clock,
+            ids: &ids,
+        };
+        if caller == "unnamed-doctor" {
+            namedrop::execute_lifecycle_operation("activate", json!({"confirmed":true}), &runtime)
+                .unwrap();
+        } else {
+            namedrop::execute_lifecycle_operation("name", json!({"alias":"alice"}), &runtime)
+                .unwrap();
+        }
+        let namespace = StateNamespace::for_space("hc:fixture", "fixture-space");
+        let mut store = StateStore::open(&state).unwrap();
+        if caller == "onboarding" {
+            let db = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+            db.execute(
+                "UPDATE pane_roles SET description = 'Manually configured collaborator'",
+                [],
+            )
+            .unwrap();
+            db.execute("UPDATE integration_registrations SET active = 0", [])
+                .unwrap();
+        } else {
+            namedrop::execute_control_operation("worktree.pause", json!({}), &runtime).unwrap();
+        }
+        let invoke = || {
+            if caller == "onboarding" {
+                namedrop::execute_lifecycle_operation("reconcile", json!({}), &runtime).unwrap();
+            } else {
+                let error =
+                    namedrop::request_doctor_assistance(&runtime, "fixture-session").unwrap_err();
+                assert!(error.starts_with("Not sent"), "{error}");
+            }
+        };
+        fixture.take_calls();
+        *fixture.send_error.borrow_mut() =
+            Some(json!({"error":{"kind":refusal,"message":"not sent"}}).to_string());
+        invoke();
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "send")
+                .count(),
+            1,
+            "{caller}"
+        );
+        *fixture.send_error.borrow_mut() = None;
+        invoke();
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        for status in ["idle", "working"] {
+            fixture.terminals.borrow_mut()[0]["status"] = json!({"state":status});
+            subscriber
+                .handle_line(
+                    &json!({"method":"event","params":{"type":"status","terminal":"t1"}})
+                        .to_string(),
+                    &runtime,
+                )
+                .unwrap();
+            invoke();
+        }
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "send")
+                .count(),
+            1
+        );
+        assert!(
+            !store
+                .transaction(|tx| tx.transition_facts(&namespace))
+                .unwrap()
+                .iter()
+                .any(|fact| fact.transition_kind == TransitionKind::Failed)
+        );
+        clock.0.set(2_000);
+        fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"done"});
+        fixture.terminals.borrow_mut()[0]["status_ms"] = json!(2_000);
+        subscriber
             .handle_line(
                 &json!({"method":"event","params":{"type":"status","terminal":"t1"}}).to_string(),
                 &runtime,
             )
             .unwrap();
-        let calls = fixture.calls.borrow();
-        let sends: Vec<_> = calls.iter().filter(|call| call[0] == "send").collect();
-        assert_eq!(sends.len(), 2);
-        assert_eq!(&sends[1][3..], &["--json"]);
+        if caller != "onboarding" {
+            namedrop::request_doctor_assistance(&runtime, "fixture-session").unwrap();
+        }
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "send")
+                .count(),
+            2,
+            "{caller}"
+        );
         std::fs::remove_dir_all(state).unwrap();
     }
 }

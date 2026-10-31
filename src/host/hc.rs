@@ -33,6 +33,7 @@ pub(super) struct Terminal {
     pid: Option<u32>,
     foreground: Option<Foreground>,
     status: Option<Status>,
+    status_ms: Option<u64>,
     reported: bool,
     rows: usize,
 }
@@ -59,22 +60,18 @@ enum StatusWord {
     Done,
     Blocked,
     Error,
+    #[serde(other)]
+    Unknown,
 }
 
 impl StatusWord {
-    fn prompt_condition(&self) -> Option<&'static str> {
-        match self {
-            Self::Idle | Self::Done => Some("idle"),
-            _ => None,
-        }
-    }
-
     fn as_str(&self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Working => "working",
             Self::Done => "done",
             Self::Blocked | Self::Error => "blocked",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -113,10 +110,13 @@ fn pre_invocation(error: HostError) -> PromptFailure {
     }
 }
 
-fn prompt_failure(raw: String) -> PromptFailure {
+fn prompt_failure(raw: String, wait_for_settle: bool) -> PromptFailure {
     let kind = serde_json::from_str::<ErrorEnvelope>(&raw)
         .ok()
         .map(|envelope| match envelope.error.kind.as_str() {
+            "blocked" | "status_mismatch" if wait_for_settle => {
+                PromptFailureKind::DeferredUntilSettle
+            }
             "not_found" | "finished" | "blocked" | "status_mismatch" => {
                 PromptFailureKind::TemporaryPreInvocation
             }
@@ -699,25 +699,28 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         ) {
             self.clear_session(&terminal).map_err(pre_invocation)?;
         }
-        let condition = match occupancy {
+        let status = match occupancy {
             Occupancy::Agent {
                 session: Some(_),
-                state: AgentState::Foreground(Some(status)),
+                state: AgentState::Foreground(Some(status @ (StatusWord::Idle | StatusWord::Done))),
                 ..
-            } if terminal.state == "live" => status.prompt_condition(),
-            _ => None,
+            } if terminal.state == "live" => status,
+            _ => {
+                return Err(PromptFailure {
+                    kind: PromptFailureKind::DeferredUntilSettle,
+                    message: "hc terminal has no settled foreground session owner".to_owned(),
+                });
+            }
         };
-        let Some(condition) = condition else {
-            return Err(pre_invocation(
-                "hc terminal has no settled foreground session owner"
-                    .to_owned()
-                    .into(),
-            ));
+        let args = if matches!(status, StatusWord::Idle) {
+            vec!["send", pane, text, "--if", "idle", "--json"]
+        } else {
+            vec!["send", pane, text, "--json"]
         };
         self.transport
-            .execute(&["send", pane, text, "--if", condition, "--json"])
+            .execute(&args)
             .map(|_| ())
-            .map_err(prompt_failure)
+            .map_err(|raw| prompt_failure(raw, true))
     }
 
     fn run_in_pane(&self, pane: &str, command: &str) -> Result<(), PromptFailure> {
@@ -739,7 +742,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         self.transport
             .execute(&["send", pane, command, "--json"])
             .map(|_| ())
-            .map_err(prompt_failure)
+            .map_err(|raw| prompt_failure(raw, false))
     }
 
     fn interrupt(&self, pane: &str) -> Result<(), HostError> {

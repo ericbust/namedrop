@@ -49,6 +49,7 @@ mod coordination_bridge;
 mod coordination_ownership;
 pub mod dashboard;
 mod missing_disposition;
+mod prompt_deferral;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
 mod groups;
@@ -4407,6 +4408,9 @@ impl StateTransaction<'_> {
         let Some((binding_id, pane_id)) = binding else {
             return Ok(None);
         };
+        if self.prompt_is_deferred(namespace, &pane_id, &agent_session_id)? {
+            return Ok(None);
+        }
         let head_delivery_id = self
             .transaction
             .query_row(
@@ -4518,6 +4522,9 @@ impl StateTransaction<'_> {
             return Err(StoreError::invalid_input(
                 "delivery attempt requires the address's active pane binding",
             ));
+        }
+        if self.binding_prompt_is_deferred(namespace, &lease.binding_id, &lease.agent_session_id)? {
+            return Ok(None);
         }
         let active_attempt = self
             .transaction
@@ -6939,6 +6946,7 @@ fn parse_transition_entity_kind(value: String) -> rusqlite::Result<TransitionEnt
         "agent_disposition" => Ok(TransitionEntityKind::AgentDisposition),
         "attention_item" => Ok(TransitionEntityKind::AttentionItem),
         "coordination_ownership" => Ok(TransitionEntityKind::CoordinationOwnership),
+        "prompt_recipient" => Ok(TransitionEntityKind::PromptRecipient),
         _ => Err(invalid_text("transition entity kind", value)),
     }
 }
@@ -7771,6 +7779,44 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn prompt_deferral_survives_reopen_and_only_newer_exact_recipient_settle_resumes_it() {
+        let directory = TestDirectory::new();
+        let namespace = StateNamespace::for_space("hc:one", "space");
+        let other_namespace = StateNamespace::for_space("hc:two", "space");
+        let session = crate::AgentSessionId::new("session");
+        let replacement = crate::AgentSessionId::new("replacement");
+        let at = |time| MutationAttribution::new(ActorKind::Plugin, "test", time);
+        let mut store = StateStore::open(&directory.0).unwrap();
+        store
+            .transaction(|tx| {
+                tx.activate_worktree(&namespace, &at(1))?;
+                tx.activate_worktree(&other_namespace, &at(1))?;
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, &at(100))
+            })
+            .unwrap();
+        drop(store);
+        let mut store = StateStore::open(&directory.0).unwrap();
+        store
+            .transaction(|tx| {
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                assert!(!tx.prompt_is_deferred(&namespace, "t2", &session)?);
+                assert!(!tx.prompt_is_deferred(&namespace, "t1", &replacement)?);
+                assert!(!tx.prompt_is_deferred(&other_namespace, "t1", &session)?);
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 100, &at(200))?;
+                tx.resume_prompt_after_settle(&namespace, "t2", &session, 101, &at(200))?;
+                tx.resume_prompt_after_settle(&namespace, "t1", &replacement, 101, &at(200))?;
+                tx.resume_prompt_after_settle(&other_namespace, "t1", &session, 101, &at(200))?;
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 101, &at(200))?;
+                assert!(!tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, &at(150))?;
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

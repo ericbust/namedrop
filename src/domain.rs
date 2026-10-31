@@ -733,6 +733,7 @@ pub enum TransitionEntityKind {
     /// One session's tenure over one coordination. The entity id is
     /// `{coordination_id}:{owner_session_id}`.
     CoordinationOwnership,
+    PromptRecipient,
 }
 
 impl TransitionEntityKind {
@@ -748,6 +749,7 @@ impl TransitionEntityKind {
             Self::AgentDisposition => "agent_disposition",
             Self::AttentionItem => "attention_item",
             Self::CoordinationOwnership => "coordination_ownership",
+            Self::PromptRecipient => "prompt_recipient",
         }
     }
 }
