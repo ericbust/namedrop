@@ -327,7 +327,19 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let first_discovery = discover(runtime)?;
+    drain_mailboxes_with_discovery(runtime, discover(runtime)?, true)
+}
+
+pub(crate) fn drain_mailboxes_with_discovery<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    first_discovery: crate::DiscoveredWorktree,
+    publish_metadata: bool,
+) -> Result<DrainReport, String>
+where
+    H: Host,
+    C: Clock,
+    I: IdGenerator,
+{
     let namespace = first_discovery.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let reconciliation_completed = store
@@ -702,7 +714,9 @@ where
                 .collect::<Result<Vec<_>, StoreError>>()
         })
         .map_err(|e| e.to_string())?;
-    publish_status_metadata(runtime, &first_discovery)?;
+    if publish_metadata {
+        publish_status_metadata(runtime, &first_discovery)?;
+    }
     Ok(report)
 }
 

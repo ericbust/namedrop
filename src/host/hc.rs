@@ -23,7 +23,7 @@ struct TerminalSummary {
     state: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(super) struct Terminal {
     pub(super) address: String,
     state: String,
@@ -38,7 +38,7 @@ pub(super) struct Terminal {
     rows: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Foreground {
     pid: i32,
     name: String,
@@ -47,12 +47,12 @@ struct Foreground {
     cwd: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct Status {
     state: StatusWord,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum StatusWord {
     Idle,
@@ -481,6 +481,101 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
         Ok(discovery)
     }
 
+    pub(super) fn space_from_discovery(
+        at: SpaceLocator<'_>,
+        discovery: TerminalDiscovery,
+    ) -> Result<DiscoveredWorktree, HostError> {
+        let terminals = discovery.terminals;
+        let mut roots_by_cwd = BTreeMap::<PathBuf, Option<PathBuf>>::new();
+        let mut cached_root = |cwd: &Path| {
+            roots_by_cwd
+                .entry(cwd.to_owned())
+                .or_insert_with(|| git_root(cwd))
+                .clone()
+        };
+        let workspace = match at {
+            SpaceLocator::Workspace(id) => id.to_owned(),
+            SpaceLocator::Checkout(cwd) => {
+                if !discovery.warnings.is_empty() {
+                    let failures = discovery
+                        .warnings
+                        .iter()
+                        .map(|warning| format!("{}: {}", warning.terminal, warning.message))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(format!(
+                        "hc cannot resolve this checkout because terminal discovery is incomplete ({failures}). Pass --hc-space <space-id>."
+                    )
+                    .into());
+                }
+                let root = cached_root(cwd).ok_or_else(|| {
+                    "hc cannot resolve this checkout. Pass --hc-space <space-id>.".to_owned()
+                })?;
+                let spaces: BTreeSet<&str> = terminals
+                    .iter()
+                    .filter(|terminal| {
+                        terminal
+                            .cwd()
+                            .and_then(|cwd| cached_root(Path::new(cwd)))
+                            .as_ref()
+                            == Some(&root)
+                    })
+                    .map(Terminal::workspace)
+                    .collect();
+                match spaces.len() {
+                    1 => (*spaces.first().unwrap()).to_owned(),
+                    0 => {
+                        return Err(
+                            "No hc space owns this checkout. Pass --hc-space <space-id>."
+                                .to_owned()
+                                .into(),
+                        );
+                    }
+                    _ => return Err(
+                        "More than one hc space owns this checkout. Pass --hc-space <space-id>."
+                            .to_owned()
+                            .into(),
+                    ),
+                }
+            }
+        };
+        let unavailable_panes = discovery
+            .warnings
+            .into_iter()
+            .map(|warning| warning.terminal)
+            .chain(
+                terminals
+                    .iter()
+                    .filter(|terminal| terminal.workspace() != workspace)
+                    .map(|terminal| terminal.address.clone()),
+            )
+            .collect();
+        let terminals: Vec<_> = terminals
+            .iter()
+            .filter(|terminal| terminal.workspace() == workspace)
+            .collect();
+        let roots: Option<Vec<PathBuf>> = terminals
+            .iter()
+            .map(|terminal| terminal.cwd().and_then(|cwd| cached_root(Path::new(cwd))))
+            .collect();
+        let root = roots
+            .as_ref()
+            .filter(|roots| !roots.is_empty() && roots.iter().all(|root| root == &roots[0]))
+            .map(|roots| &roots[0]);
+        Ok(DiscoveredWorktree {
+            unavailable_panes,
+            worktree_id: WorktreeId::new(
+                root.map(|root| root.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| format!("hc-space:{workspace}")),
+            ),
+            workspace_id: workspace,
+            worktree_attached: root.is_some(),
+            label: terminals.first().map(|terminal| terminal.space_label()),
+            branch: None,
+            panes: terminals.iter().map(|terminal| terminal.pane()).collect(),
+        })
+    }
+
     pub fn discovery_warnings(&self) -> Result<Vec<DiscoveryWarning>, HostError> {
         Ok(self.discover(None)?.warnings)
     }
@@ -637,95 +732,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         budget: Option<&dyn Budget>,
     ) -> Result<DiscoveredWorktree, HostError> {
         let discovery = self.discover(budget)?;
-        let terminals = discovery.terminals;
-        let mut roots_by_cwd = BTreeMap::<PathBuf, Option<PathBuf>>::new();
-        let mut cached_root = |cwd: &Path| {
-            roots_by_cwd
-                .entry(cwd.to_owned())
-                .or_insert_with(|| git_root(cwd))
-                .clone()
-        };
-        let workspace = match at {
-            SpaceLocator::Workspace(id) => id.to_owned(),
-            SpaceLocator::Checkout(cwd) => {
-                if !discovery.warnings.is_empty() {
-                    let failures = discovery
-                        .warnings
-                        .iter()
-                        .map(|warning| format!("{}: {}", warning.terminal, warning.message))
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    return Err(format!(
-                        "hc cannot resolve this checkout because terminal discovery is incomplete ({failures}). Pass --hc-space <space-id>."
-                    )
-                    .into());
-                }
-                let root = cached_root(cwd).ok_or_else(|| {
-                    "hc cannot resolve this checkout. Pass --hc-space <space-id>.".to_owned()
-                })?;
-                let spaces: BTreeSet<&str> = terminals
-                    .iter()
-                    .filter(|terminal| {
-                        terminal
-                            .cwd()
-                            .and_then(|cwd| cached_root(Path::new(cwd)))
-                            .as_ref()
-                            == Some(&root)
-                    })
-                    .map(Terminal::workspace)
-                    .collect();
-                match spaces.len() {
-                    1 => (*spaces.first().unwrap()).to_owned(),
-                    0 => {
-                        return Err(
-                            "No hc space owns this checkout. Pass --hc-space <space-id>."
-                                .to_owned()
-                                .into(),
-                        );
-                    }
-                    _ => return Err(
-                        "More than one hc space owns this checkout. Pass --hc-space <space-id>."
-                            .to_owned()
-                            .into(),
-                    ),
-                }
-            }
-        };
-        let unavailable_panes = discovery
-            .warnings
-            .into_iter()
-            .map(|warning| warning.terminal)
-            .chain(
-                terminals
-                    .iter()
-                    .filter(|terminal| terminal.workspace() != workspace)
-                    .map(|terminal| terminal.address.clone()),
-            )
-            .collect();
-        let terminals: Vec<_> = terminals
-            .iter()
-            .filter(|terminal| terminal.workspace() == workspace)
-            .collect();
-        let roots: Option<Vec<PathBuf>> = terminals
-            .iter()
-            .map(|terminal| terminal.cwd().and_then(|cwd| cached_root(Path::new(cwd))))
-            .collect();
-        let root = roots
-            .as_ref()
-            .filter(|roots| !roots.is_empty() && roots.iter().all(|root| root == &roots[0]))
-            .map(|roots| &roots[0]);
-        Ok(DiscoveredWorktree {
-            unavailable_panes,
-            worktree_id: WorktreeId::new(
-                root.map(|root| root.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| format!("hc-space:{workspace}")),
-            ),
-            workspace_id: workspace,
-            worktree_attached: root.is_some(),
-            label: terminals.first().map(|terminal| terminal.space_label()),
-            branch: None,
-            panes: terminals.iter().map(|terminal| terminal.pane()).collect(),
-        })
+        Self::space_from_discovery(at, discovery)
     }
 
     fn spaces(&self) -> Result<Vec<ListedWorkspace>, HostError> {

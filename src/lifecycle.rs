@@ -273,7 +273,29 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let discovered = runtime.host.space(runtime.space_locator(), None)?;
+    execute_lifecycle_operation_with_discovery(operation, input, runtime, None)
+}
+
+pub(crate) fn execute_lifecycle_operation_with_discovery<H, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    snapshot: Option<&std::collections::BTreeMap<String, DiscoveredWorktree>>,
+) -> Result<Value, String>
+where
+    H: Host + Copy,
+    C: Clock,
+    I: IdGenerator,
+{
+    let discover = |at: crate::SpaceLocator<'_>| {
+        if let (Some(snapshot), crate::SpaceLocator::Workspace(space)) = (snapshot, &at) {
+            return snapshot.get(*space).cloned().ok_or_else(|| {
+                crate::host::HostError::from(format!("Missing subscriber snapshot for {space}"))
+            });
+        }
+        runtime.host.space(at, None)
+    };
+    let discovered = discover(runtime.space_locator())?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let (actor_kind, actor_id) = if operation.starts_with("event.") || operation == "reconcile" {
         (ActorKind::Plugin, "herdr")
@@ -499,6 +521,7 @@ where
                 runtime,
                 &attribution,
                 false,
+                snapshot.is_none(),
             )?;
             let served =
                 crate::codex_app_server::served_codex_panes(runtime, std::slice::from_ref(pane));
@@ -617,6 +640,7 @@ where
                 runtime,
                 &attribution,
                 false,
+                snapshot.is_none(),
             )?;
             let shortcuts = if runtime.is_hc() {
                 json!({"status":"app_managed", "next_step":"Install the Namedrop mod in herdr-app to enable its commands and shortcuts."})
@@ -973,6 +997,7 @@ where
                 runtime,
                 &attribution,
                 operation == "reconcile",
+                snapshot.is_none(),
             )?;
             Ok(json!({
                 "space_id": discovered.workspace_id,
@@ -985,9 +1010,8 @@ where
             let event: PaneLifecycleEvent = parse_input(input)?;
             match event {
                 PaneLifecycleEvent::Created { pane } => {
-                    if let Ok(event_worktree) = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&pane.workspace_id), None)
+                    if let Ok(event_worktree) =
+                        discover(crate::SpaceLocator::Workspace(&pane.workspace_id))
                     {
                         let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                         let event_runtime = LifecycleRuntime {
@@ -1011,9 +1035,7 @@ where
                     pane_id,
                     workspace_id,
                 } => {
-                    let event_worktree = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
+                    let event_worktree = discover(crate::SpaceLocator::Workspace(&workspace_id))?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &event_namespace)?;
                     let removed_address_id = store
@@ -1045,9 +1067,7 @@ where
                         workspace_id: Some(&workspace_id),
                         ..*runtime
                     };
-                    let refreshed = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
+                    let refreshed = discover(crate::SpaceLocator::Workspace(&workspace_id))?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &event_namespace,
@@ -1067,7 +1087,15 @@ where
                             Ok(())
                         })
                         .map_err(|error| error.to_string())?;
-                    let drain = crate::drain_mailboxes(&event_runtime)?;
+                    let drain = if snapshot.is_some() {
+                        crate::delivery::drain_mailboxes_with_discovery(
+                            &event_runtime,
+                            discover(event_runtime.space_locator())?,
+                            false,
+                        )?
+                    } else {
+                        crate::drain_mailboxes(&event_runtime)?
+                    };
                     Ok(json!({
                         "type": "pane_unavailable",
                         "handled": true,
@@ -1079,9 +1107,7 @@ where
                     tab_id,
                     workspace_id,
                 } => {
-                    let event_worktree = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
+                    let event_worktree = discover(crate::SpaceLocator::Workspace(&workspace_id))?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &event_namespace)?;
                     let removed_bindings = store
@@ -1122,16 +1148,22 @@ where
                         workspace_id: Some(&workspace_id),
                         ..*runtime
                     };
-                    let refreshed = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
+                    let refreshed = discover(crate::SpaceLocator::Workspace(&workspace_id))?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &event_namespace,
                         &refreshed,
                         &event_runtime,
                     );
-                    let drain = crate::drain_mailboxes(&event_runtime)?;
+                    let drain = if snapshot.is_some() {
+                        crate::delivery::drain_mailboxes_with_discovery(
+                            &event_runtime,
+                            discover(event_runtime.space_locator())?,
+                            false,
+                        )?
+                    } else {
+                        crate::drain_mailboxes(&event_runtime)?
+                    };
                     Ok(json!({
                         "type": "tab_unavailable",
                         "handled": true,
@@ -1159,14 +1191,10 @@ where
                         closed_tab_id,
                         closed_workspace_id,
                     );
-                    let source = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&previous_workspace_id), None)?;
+                    let source = discover(crate::SpaceLocator::Workspace(&previous_workspace_id))?;
                     let source_namespace = source.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &source_namespace)?;
-                    let destination = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&pane.workspace_id), None)?;
+                    let destination = discover(crate::SpaceLocator::Workspace(&pane.workspace_id))?;
                     store
                         .transaction(|transaction| {
                             apply_pane_move(
@@ -1194,9 +1222,8 @@ where
                         workspace_id: Some(&previous_workspace_id),
                         ..*runtime
                     };
-                    let refreshed = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&previous_workspace_id), None)?;
+                    let refreshed =
+                        discover(crate::SpaceLocator::Workspace(&previous_workspace_id))?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &source_namespace,
@@ -1216,7 +1243,15 @@ where
                             Ok(())
                         })
                         .map_err(|error| error.to_string())?;
-                    let drain = crate::drain_mailboxes(&event_runtime)?;
+                    let drain = if snapshot.is_some() {
+                        crate::delivery::drain_mailboxes_with_discovery(
+                            &event_runtime,
+                            discover(event_runtime.space_locator())?,
+                            false,
+                        )?
+                    } else {
+                        crate::drain_mailboxes(&event_runtime)?
+                    };
                     Ok(json!({
                         "type": "pane_moved",
                         "handled": true,
@@ -1236,9 +1271,7 @@ where
                 event.title,
                 event.state_labels,
             );
-            let event_worktree = runtime
-                .host
-                .space(crate::SpaceLocator::Workspace(&event.workspace_id), None)?;
+            let event_worktree = discover(crate::SpaceLocator::Workspace(&event.workspace_id))?;
             let event_namespace = event_worktree.namespace(runtime.session_socket_id);
             require_activated(&mut store, &event_namespace)?;
             if !event_worktree
@@ -1286,7 +1319,15 @@ where
                 )),
                 AgentStatusEventType::Changed => None,
             };
-            let drain = crate::drain_mailboxes(&event_runtime)?;
+            let drain = if snapshot.is_some() {
+                crate::delivery::drain_mailboxes_with_discovery(
+                    &event_runtime,
+                    discover(event_runtime.space_locator())?,
+                    false,
+                )?
+            } else {
+                crate::drain_mailboxes(&event_runtime)?
+            };
             Ok(json!({
                 "type": "pane_agent_status_changed",
                 "handled": true,
@@ -1421,6 +1462,7 @@ fn reconcile_worktree<H, C, I>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
     attribution: &MutationAttribution,
     after_restart: bool,
+    publish_metadata: bool,
 ) -> Result<WorktreeReconciliation, String>
 where
     H: Host,
@@ -1455,13 +1497,19 @@ where
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    publish_status_metadata(runtime, discovered)?;
+    if publish_metadata {
+        publish_status_metadata(runtime, discovered)?;
+    }
     reconcile_managed_tab_labels(store, namespace, discovered, runtime)?;
     let epoch = store
         .transaction(|transaction| transaction.complete_reconciliation(namespace))
         .map_err(|error| error.to_string())?;
     let installation = onboard_settled_integrations(runtime, discovered)?;
-    let drain = crate::drain_mailboxes(runtime)?;
+    let drain = if publish_metadata {
+        crate::drain_mailboxes(runtime)?
+    } else {
+        crate::delivery::drain_mailboxes_with_discovery(runtime, discovered.clone(), false)?
+    };
     Ok(WorktreeReconciliation {
         epoch,
         drain,

@@ -1,5 +1,5 @@
 use super::*;
-use crate::{Clock, IdGenerator, LifecycleRuntime, StateStore, execute_lifecycle_operation};
+use crate::{Clock, IdGenerator, LifecycleRuntime, StateStore};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::CommandExt;
@@ -43,9 +43,70 @@ enum Kind {
     Ignored,
 }
 
+#[derive(Clone, Default)]
+struct DirtyTerminal {
+    invalidate: bool,
+    resume: bool,
+    unavailable: bool,
+    removed: bool,
+}
+
+#[derive(Default)]
+struct Pending {
+    snapshot: Option<Vec<Terminal>>,
+    full: bool,
+    dirty: BTreeMap<String, DirtyTerminal>,
+}
+
+impl Pending {
+    fn push(&mut self, line: &str) -> Result<(), String> {
+        match serde_json::from_str::<StreamLine>(line)
+            .map_err(|error| format!("Invalid hc event: {error}"))?
+        {
+            StreamLine::Snapshot { terminals } => {
+                self.snapshot = Some(terminals);
+                self.full = false;
+            }
+            StreamLine::Notification {
+                method: Method::Missed,
+                ..
+            } => self.full = true,
+            StreamLine::Notification {
+                method: Method::Heartbeat,
+                ..
+            } => (),
+            StreamLine::Notification {
+                method: Method::Event,
+                params,
+            } => {
+                let event: Event =
+                    serde_json::from_value(params).map_err(|error| error.to_string())?;
+                if !matches!(event.kind, Kind::Ignored) {
+                    let pane = event.terminal.ok_or("hc terminal event has no terminal")?;
+                    let dirty = self.dirty.entry(pane).or_default();
+                    dirty.invalidate |= matches!(event.kind, Kind::Lost | Kind::Restarted);
+                    dirty.resume |= matches!(event.kind, Kind::Status | Kind::Turn);
+                    dirty.unavailable |=
+                        matches!(event.kind, Kind::Lost | Kind::Finished | Kind::Removed);
+                    dirty.removed = matches!(event.kind, Kind::Removed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        !self.full && self.snapshot.is_none() && self.dirty.is_empty()
+    }
+}
+
 #[derive(Default)]
 pub struct Subscriber {
     spaces: BTreeMap<String, String>,
+    terminals: BTreeMap<String, Terminal>,
+    unavailable: BTreeMap<String, String>,
+    pending: Pending,
+    initialized: bool,
     next_wake_ms: Option<u64>,
 }
 
@@ -55,108 +116,75 @@ impl Subscriber {
         line: &str,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
-        match serde_json::from_str::<StreamLine>(line)
-            .map_err(|error| format!("Invalid hc event: {error}"))?
-        {
-            StreamLine::Snapshot { terminals } => {
-                let _ = terminals;
-                self.reconcile_all(runtime)
-            }
-            StreamLine::Notification {
-                method: Method::Missed,
-                ..
-            } => self.reconcile_all(runtime),
-            StreamLine::Notification {
-                method: Method::Heartbeat,
-                ..
-            } => Ok(()),
-            StreamLine::Notification {
-                method: Method::Event,
-                params,
-            } => {
-                let event: Event =
-                    serde_json::from_value(params).map_err(|error| error.to_string())?;
-                if matches!(event.kind, Kind::Ignored) {
-                    return Ok(());
-                }
-                let pane = event.terminal.ok_or("hc terminal event has no terminal")?;
-                let _lock = label_lock(runtime.state_directory)?;
-                if matches!(event.kind, Kind::Lost | Kind::Restarted) {
-                    runtime
-                        .host
-                        .invalidate_session(runtime.state_directory, &pane)?;
-                }
-                let mut terminal = match runtime.host.terminal(&pane, None) {
-                    Ok(terminal) => Some(terminal),
-                    Err(_) if matches!(event.kind, Kind::Removed) => None,
-                    Err(error) => return Err(error.to_string()),
-                };
-                let session_refreshed = if let Some(terminal) = &mut terminal {
-                    let observed = LifecycleRuntime {
-                        workspace_id: Some(terminal.workspace()),
-                        ..*runtime
-                    };
-                    if active(&observed)? {
-                        runtime
-                            .host
-                            .reconcile_session(runtime.state_directory, terminal)?
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-                let space = terminal
-                    .as_ref()
-                    .map(|terminal| terminal.workspace().to_owned())
-                    .or_else(|| self.spaces.get(&pane).cloned());
-                let Some(space) = space else {
-                    return self.reconcile_all(runtime);
-                };
-                let scoped = LifecycleRuntime {
-                    workspace_id: Some(&space),
-                    current_pane_id: None,
-                    ..*runtime
-                };
-                if matches!(event.kind, Kind::Status | Kind::Turn)
-                    && let Some(terminal) = &terminal
-                {
-                    resume_settled_recipient(terminal, &scoped)?;
-                }
-                if let Some(terminal) = &terminal {
-                    self.reconcile_move(terminal, runtime)?;
-                }
-                self.spaces.insert(pane.clone(), space.clone());
-                if !active(&scoped)? {
-                    return Ok(());
-                }
-                match event.kind {
-                    Kind::Created | Kind::Restarted => {
-                        if let Some(terminal) = terminal {
-                            self.operation("event.pane-lifecycle", json!({"type":"pane_created", "pane":{
-                                "pane_id":pane, "terminal_id":pane, "workspace_id":space, "tab_id":terminal.labels.get("herdr.tab").cloned().unwrap_or_default(), "focused":false, "agent_status":terminal.status.as_ref().map(|status| status.state.as_str()).unwrap_or("unknown"), "revision":0
-                            }}), &scoped)?;
-                        }
-                        self.operation("event.reconcile", json!({}), &scoped)
-                    }
-                    Kind::Lost | Kind::Finished | Kind::Removed => {
-                        let kind = if matches!(event.kind, Kind::Removed) { "pane_closed" } else { "pane_exited" };
-                        self.operation("event.pane-lifecycle", json!({"type":kind, "pane_id":pane, "workspace_id":space}), &scoped)?;
-                        if matches!(event.kind, Kind::Removed) { self.spaces.remove(&pane); }
-                        Ok(())
-                    }
-                    Kind::Status | Kind::Turn => self.operation("event.agent-status-changed", json!({"type":"pane_agent_status_changed", "pane_id":pane, "workspace_id":space}), &scoped),
-                    Kind::Labels => {
-                        self.reconcile_name(&pane, &scoped)?;
-                        if session_refreshed {
-                            self.operation("event.reconcile", json!({}), &scoped)?;
-                        }
-                        Ok(())
-                    },
-                    Kind::Ignored => Ok(()),
-                }
+        self.handle_lines(std::iter::once(line), runtime)
+    }
+
+    pub fn handle_lines<'a, E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
+        &mut self,
+        lines: impl IntoIterator<Item = &'a str>,
+        runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
+    ) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for line in lines {
+            if let Err(error) = self.pending.push(line) {
+                errors.push(error);
             }
         }
+        if let Err(error) = self.reconcile_pending(runtime) {
+            errors.push(error);
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    fn discovery(&self) -> TerminalDiscovery {
+        TerminalDiscovery {
+            terminals: self
+                .terminals
+                .values()
+                .filter(|terminal| {
+                    terminal.state == "live" && !self.unavailable.contains_key(&terminal.address)
+                })
+                .cloned()
+                .collect(),
+            warnings: self
+                .unavailable
+                .iter()
+                .map(|(terminal, message)| DiscoveryWarning {
+                    terminal: terminal.clone(),
+                    message: message.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn snapshots<E: HerdrCommandExecutor + Copy, C, I>(
+        &self,
+        runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
+    ) -> Result<BTreeMap<String, crate::DiscoveredWorktree>, String> {
+        let mut spaces: BTreeSet<String> = self
+            .terminals
+            .values()
+            .map(|terminal| terminal.workspace().to_owned())
+            .collect();
+        spaces.extend(self.spaces.values().cloned());
+        spaces.extend(active_spaces(runtime)?);
+        if let Some(space) = runtime.workspace_id {
+            spaces.insert(space.to_owned());
+        }
+        spaces
+            .into_iter()
+            .map(|space| {
+                let discovered = HcHost::<E>::space_from_discovery(
+                    SpaceLocator::Workspace(&space),
+                    self.discovery(),
+                )?;
+                Ok((space, discovered))
+            })
+            .collect()
     }
 
     fn operation<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
@@ -165,7 +193,14 @@ impl Subscriber {
         input: Value,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
-        let result = execute_lifecycle_operation(operation, input, runtime)?;
+        let snapshot = self.snapshots(runtime)?;
+        let _lock = label_lock(runtime.state_directory)?;
+        let result = crate::lifecycle::execute_lifecycle_operation_with_discovery(
+            operation,
+            input,
+            runtime,
+            Some(&snapshot),
+        )?;
         if let Some(drain) = result.get("drain") {
             self.remember_drain(drain, runtime.clock.now_unix_ms());
         }
@@ -199,6 +234,28 @@ impl Subscriber {
             .is_some_and(|due| due <= runtime.clock.now_unix_ms())
         {
             self.next_wake_ms = None;
+            let active: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
+            for (pane, terminal) in &mut self.terminals {
+                if !active.contains(terminal.workspace()) {
+                    continue;
+                }
+                match runtime
+                    .host
+                    .reconcile_session(runtime.state_directory, terminal)
+                {
+                    Ok(true) => {
+                        self.pending.dirty.entry(pane.clone()).or_default();
+                    }
+                    Ok(false) => (),
+                    Err(error) => {
+                        self.unavailable.insert(pane.clone(), error.to_string());
+                        self.pending.dirty.entry(pane.clone()).or_default();
+                    }
+                }
+            }
+            if !self.pending.is_empty() {
+                self.reconcile_pending(runtime)?;
+            }
             let mut errors = Vec::new();
             for space in active_spaces(runtime)? {
                 let scoped = LifecycleRuntime {
@@ -206,12 +263,20 @@ impl Subscriber {
                     current_pane_id: None,
                     ..*runtime
                 };
-                match crate::drain_mailboxes(&scoped) {
+                let discovered = if self.initialized {
+                    HcHost::<E>::space_from_discovery(scoped.space_locator(), self.discovery())?
+                } else {
+                    runtime.host.space(scoped.space_locator(), None)?
+                };
+                match crate::delivery::drain_mailboxes_with_discovery(&scoped, discovered, false) {
                     Ok(report) => self.remember_drain(
                         &serde_json::to_value(report).map_err(|error| error.to_string())?,
                         runtime.clock.now_unix_ms(),
                     ),
                     Err(error) => errors.push(error),
+                }
+                if let Err(error) = self.publish_counters(&scoped) {
+                    errors.push(error);
                 }
             }
             if !errors.is_empty() {
@@ -222,126 +287,293 @@ impl Subscriber {
         Ok(())
     }
 
-    fn reconcile_all<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
+    fn reconcile_pending<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
         &mut self,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
-        let _lock = label_lock(runtime.state_directory)?;
-        let spaces: Vec<_> = StateStore::open(runtime.state_directory)
-            .map_err(|error| error.to_string())?
-            .dashboard_spaces()
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .filter(|row| row.namespace.session_socket_id == runtime.session_socket_id)
-            .collect();
-        if spaces.is_empty() {
+        if self.pending.is_empty() {
             return Ok(());
         }
-        let discovery = runtime.host.discover(None)?;
-        let mut terminals = discovery.terminals;
-        for terminal in &mut terminals {
-            if spaces.iter().any(|row| {
-                row.namespace.space_id.as_str() == terminal.workspace()
-                    && row.state.activated
-                    && !row.state.deactivated
-            }) {
-                runtime
+        let _lock = label_lock(runtime.state_directory)?;
+        let mut pending = std::mem::take(&mut self.pending);
+        if !self.initialized && pending.snapshot.is_none() {
+            pending.full = true;
+        }
+        let full = pending.full || pending.snapshot.is_some();
+        let mut errors = Vec::new();
+        let mut affected = BTreeSet::new();
+        let active_spaces: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
+        if full {
+            let discovery = if pending.full {
+                match runtime.host.discover(None) {
+                    Ok(discovery) => discovery,
+                    Err(error) => {
+                        self.pending = pending;
+                        self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
+                        return Err(error.to_string());
+                    }
+                }
+            } else {
+                TerminalDiscovery {
+                    terminals: pending.snapshot.take().unwrap(),
+                    warnings: vec![],
+                }
+            };
+            self.unavailable = discovery
+                .warnings
+                .into_iter()
+                .map(|warning| (warning.terminal, warning.message))
+                .collect();
+            let mut terminals: BTreeMap<_, _> = discovery
+                .terminals
+                .into_iter()
+                .map(|terminal| (terminal.address.clone(), terminal))
+                .collect();
+            for pane in self.unavailable.keys() {
+                if let Some(terminal) = self.terminals.get(pane) {
+                    terminals.insert(pane.clone(), terminal.clone());
+                }
+            }
+            for (pane, terminal) in &mut terminals {
+                if !active_spaces.contains(terminal.workspace()) {
+                    continue;
+                }
+                if let Err(error) = runtime
                     .host
-                    .reconcile_session(runtime.state_directory, terminal)?;
+                    .reconcile_session(runtime.state_directory, terminal)
+                {
+                    self.unavailable.insert(pane.clone(), error.to_string());
+                    errors.push(error.to_string());
+                }
+            }
+            self.terminals = terminals;
+            self.initialized = true;
+            affected.extend(active_spaces.iter().cloned());
+        }
+        let mut dirty: BTreeMap<String, DirtyTerminal> = if full {
+            self.terminals
+                .keys()
+                .map(|pane| {
+                    (
+                        pane.clone(),
+                        DirtyTerminal {
+                            resume: true,
+                            ..Default::default()
+                        },
+                    )
+                })
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        for (pane, change) in &pending.dirty {
+            if let Some(space) = self.spaces.get(pane) {
+                affected.insert(space.clone());
+            }
+            if change.invalidate
+                && let Err(error) = runtime
+                    .host
+                    .invalidate_session(runtime.state_directory, pane)
+            {
+                self.unavailable.insert(pane.clone(), error.to_string());
+                errors.push(error.to_string());
+                continue;
+            }
+            match runtime.host.terminal(pane, None) {
+                Ok(mut terminal) => {
+                    if active_spaces.contains(terminal.workspace())
+                        && let Err(error) = runtime
+                            .host
+                            .reconcile_session(runtime.state_directory, &mut terminal)
+                    {
+                        self.unavailable.insert(pane.clone(), error.to_string());
+                        errors.push(error.to_string());
+                        continue;
+                    }
+                    self.unavailable.remove(pane);
+                    self.terminals.insert(pane.clone(), terminal);
+                }
+                Err(_) if change.removed => {
+                    self.terminals.remove(pane);
+                    self.unavailable.remove(pane);
+                }
+                Err(error) => {
+                    self.unavailable.insert(pane.clone(), error.to_string());
+                    errors.push(error.to_string());
+                    continue;
+                }
+            }
+            dirty.insert(pane.clone(), change.clone());
+        }
+        for (pane, change) in &dirty {
+            if self.unavailable.contains_key(pane) {
+                continue;
+            }
+            if let Some(mut terminal) = self.terminals.get(pane).cloned() {
+                affected.insert(terminal.workspace().to_owned());
+                if let Some(space) = self.spaces.get(pane) {
+                    affected.insert(space.clone());
+                }
+                if let Err(error) = self.reconcile_move(&mut terminal, runtime) {
+                    errors.push(error);
+                    continue;
+                }
+                self.terminals.insert(pane.clone(), terminal.clone());
+                let scoped = LifecycleRuntime {
+                    workspace_id: Some(terminal.workspace()),
+                    current_pane_id: None,
+                    ..*runtime
+                };
+                if change.resume
+                    && let Err(error) = resume_settled_recipient(&terminal, &scoped)
+                {
+                    errors.push(error);
+                }
+                if terminal.state == "live"
+                    && active_spaces.contains(terminal.workspace())
+                    && let Err(error) = self.reconcile_name(&terminal, &scoped)
+                {
+                    errors.push(error);
+                }
+            }
+            if change.unavailable
+                && let Some(space) = self.spaces.get(pane).cloned()
+            {
+                let scoped = LifecycleRuntime {
+                    workspace_id: Some(&space),
+                    current_pane_id: None,
+                    ..*runtime
+                };
+                if active_spaces.contains(&space) {
+                    let kind = if change.removed {
+                        "pane_closed"
+                    } else {
+                        "pane_exited"
+                    };
+                    if let Err(error) = self.operation(
+                        "event.pane-lifecycle",
+                        json!({"type":kind,"pane_id":pane,"workspace_id":space}),
+                        &scoped,
+                    ) {
+                        errors.push(error);
+                    }
+                }
+                if change.removed {
+                    self.spaces.remove(pane);
+                }
             }
         }
-        if discovery.warnings.is_empty() {
-            let mut store =
-                StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
-            let attribution = crate::MutationAttribution::new(
-                crate::ActorKind::Plugin,
-                "namedrop-hc-reconcile",
-                runtime.clock.now_unix_ms(),
-            );
-            for row in &spaces {
-                let live = terminals
-                    .iter()
-                    .filter(|terminal| terminal.workspace() == row.namespace.space_id.as_str())
+        let mut store =
+            StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
+        let attribution = crate::MutationAttribution::new(
+            crate::ActorKind::Plugin,
+            "namedrop-hc-reconcile",
+            runtime.clock.now_unix_ms(),
+        );
+        for space in affected {
+            let scoped = LifecycleRuntime {
+                workspace_id: Some(&space),
+                current_pane_id: None,
+                ..*runtime
+            };
+            if self.unavailable.is_empty() {
+                let namespace = crate::StateNamespace::for_space(runtime.session_socket_id, &space);
+                let live = self
+                    .terminals
+                    .values()
+                    .filter(|terminal| terminal.state == "live" && terminal.workspace() == space)
                     .filter_map(|terminal| {
                         terminal
                             .session()
                             .map(|session| (terminal.address.clone(), AgentSessionId::new(session)))
                     })
                     .collect::<Vec<_>>();
-                store
-                    .transaction(|transaction| {
-                        transaction.reconcile_prompt_recipients(&row.namespace, &live, &attribution)
-                    })
-                    .map_err(|error| error.to_string())?;
-            }
-        }
-
-        let mut errors: Vec<String> = discovery
-            .warnings
-            .into_iter()
-            .map(|warning| format!("{}: {}", warning.terminal, warning.message))
-            .collect();
-        for terminal in &terminals {
-            if spaces
-                .iter()
-                .any(|row| row.namespace.space_id.as_str() == terminal.workspace())
-            {
-                let scoped = LifecycleRuntime {
-                    workspace_id: Some(terminal.workspace()),
-                    ..*runtime
-                };
-                if let Err(error) = resume_settled_recipient(terminal, &scoped) {
-                    errors.push(error);
+                if let Err(error) = store.transaction(|transaction| {
+                    transaction.reconcile_prompt_recipients(&namespace, &live, &attribution)
+                }) {
+                    errors.push(error.to_string());
                 }
             }
-        }
-        let mut failed_moves = BTreeSet::new();
-        for terminal in &terminals {
-            if let Err(error) = self.reconcile_move(terminal, runtime) {
-                failed_moves.insert(terminal.address.as_str());
-                errors.push(error);
-            }
-        }
-        for row in spaces {
-            let space = row.namespace.space_id.as_str();
-            if !row.state.activated || row.state.deactivated {
+            if !active_spaces.contains(&space) {
                 continue;
-            }
-            let scoped = LifecycleRuntime {
-                workspace_id: Some(space),
-                current_pane_id: None,
-                ..*runtime
-            };
-            for terminal in terminals
-                .iter()
-                .filter(|terminal| terminal.workspace() == space)
-            {
-                if failed_moves.contains(terminal.address.as_str()) {
-                    continue;
-                }
-                if let Err(error) = self.reconcile_name(&terminal.address, &scoped) {
-                    errors.push(error);
-                }
             }
             if let Err(error) = self.operation("event.reconcile", json!({}), &scoped) {
                 errors.push(error);
             }
+            if let Err(error) = self.publish_counters(&scoped) {
+                errors.push(error);
+            }
         }
+        errors.extend(
+            self.unavailable
+                .iter()
+                .map(|(pane, error)| format!("{pane}: {error}")),
+        );
         if errors.is_empty() {
             Ok(())
         } else {
+            self.pending.dirty.extend(pending.dirty);
+            if full {
+                self.pending.full = true;
+            }
+            self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
             Err(errors.join("; "))
         }
     }
 
+    fn publish_counters<E: HerdrCommandExecutor + Copy, C, I>(
+        &mut self,
+        runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
+    ) -> Result<(), String> {
+        let Some(space) = runtime.workspace_id else {
+            return Ok(());
+        };
+        let namespace = crate::StateNamespace::for_space(runtime.session_socket_id, space);
+        let (waiting, attention, bindings) = StateStore::open(runtime.state_directory)
+            .map_err(|error| error.to_string())?
+            .transaction(|transaction| {
+                let (waiting, _) = transaction.delivery_health(&namespace)?;
+                Ok((
+                    waiting.to_string(),
+                    transaction
+                        .unresolved_attention_items(&namespace)?
+                        .len()
+                        .to_string(),
+                    transaction.active_pane_bindings(&namespace)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        for binding in bindings {
+            if self.unavailable.contains_key(&binding.pane_id) {
+                continue;
+            }
+            if let Some(terminal) = self.terminals.get_mut(&binding.pane_id) {
+                runtime.host.update_labels(
+                    terminal,
+                    &[
+                        ("namedrop.awaiting", &waiting),
+                        ("namedrop.attention", &attention),
+                    ],
+                )?;
+                terminal
+                    .labels
+                    .insert("namedrop.awaiting".into(), waiting.clone());
+                terminal
+                    .labels
+                    .insert("namedrop.attention".into(), attention.clone());
+            }
+        }
+        Ok(())
+    }
+
     fn reconcile_move<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
         &mut self,
-        terminal: &Terminal,
+        terminal: &mut Terminal,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
         let _lock = label_lock(runtime.state_directory)?;
         let pane = &terminal.address;
-        let destination = terminal.workspace();
+        let destination = terminal.workspace().to_owned();
         let mut previous: BTreeSet<String> = self.spaces.get(pane).cloned().into_iter().collect();
         let mut store =
             StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
@@ -356,14 +588,19 @@ impl Subscriber {
                 previous.insert(space);
             }
         }
-        previous.retain(|source| source != destination);
+        previous.retain(|source| source != &destination);
         if !previous.is_empty() {
             let namespace =
-                crate::StateNamespace::for_space(runtime.session_socket_id, destination);
+                crate::StateNamespace::for_space(runtime.session_socket_id, &destination);
             let alias = committed_alias(runtime.state_directory, &namespace, pane)?;
-            runtime
-                .host
-                .set_labels(pane, &[("namedrop.name", alias.as_deref().unwrap_or(""))])?;
+            runtime.host.update_labels(
+                terminal,
+                &[("namedrop.name", alias.as_deref().unwrap_or(""))],
+            )?;
+            terminal
+                .labels
+                .insert("namedrop.name".to_owned(), alias.unwrap_or_default());
+            self.terminals.insert(pane.clone(), terminal.clone());
         }
         for source in previous {
             let scoped = LifecycleRuntime {
@@ -386,12 +623,11 @@ impl Subscriber {
 
     fn reconcile_name<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
         &mut self,
-        pane: &str,
+        terminal: &Terminal,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
         let _lock = label_lock(runtime.state_directory)?;
-        // Read the current label, since a queued event can precede a release.
-        let terminal = runtime.host.terminal(pane, None)?;
+        let pane = terminal.address.as_str();
         let requested = terminal
             .labels
             .get("namedrop.name")
@@ -414,10 +650,12 @@ impl Subscriber {
             current_pane_id: Some(pane),
             ..*runtime
         };
-        let result = crate::lifecycle::execute_lifecycle_operation_locked(
+        let snapshot = self.snapshots(&scoped)?;
+        let result = crate::lifecycle::execute_lifecycle_operation_with_discovery(
             "event.name",
             json!({"alias":requested}),
             &scoped,
+            Some(&snapshot),
         );
         if let Ok(value) = &result
             && let Some(drain) = value.get("drain")
@@ -878,7 +1116,13 @@ pub fn run_with_environment(
             }
             match line {
                 Ok(Ok(line)) => {
-                    if let Err(error) = subscriber.handle_line(&line, &runtime) {
+                    let mut lines = vec![line];
+                    while let Ok(Ok(line)) = receiver.try_recv() {
+                        lines.push(line);
+                    }
+                    if let Err(error) =
+                        subscriber.handle_lines(lines.iter().map(String::as_str), &runtime)
+                    {
                         eprintln!("Namedrop hc event: {error}");
                     }
                 }

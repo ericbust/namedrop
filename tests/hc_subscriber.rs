@@ -22,6 +22,7 @@ struct Fixture {
     name_write_failure: RefCell<Option<bool>>,
     session_clear_failure: RefCell<bool>,
     replacement_on_get: RefCell<Option<(usize, Value)>>,
+    counter_failure: RefCell<bool>,
 }
 impl Default for Fixture {
     fn default() -> Self {
@@ -43,6 +44,7 @@ impl Default for Fixture {
             name_write_failure: RefCell::new(None),
             session_clear_failure: RefCell::new(false),
             replacement_on_get: RefCell::new(None),
+            counter_failure: RefCell::new(false),
         }
     }
 }
@@ -103,6 +105,13 @@ impl HerdrCommandExecutor for Fixture {
             ["label", id, labels @ ..] => {
                 if labels.contains(&"namedrop.session=") && *self.session_clear_failure.borrow() {
                     return Err("session cleanup failed".into());
+                }
+                if *self.counter_failure.borrow()
+                    && labels
+                        .iter()
+                        .any(|label| label.starts_with("namedrop.awaiting="))
+                {
+                    return Err("postcommit counter publication failed".into());
                 }
                 let failure = if labels
                     .iter()
@@ -742,15 +751,8 @@ fn doctor_reports_partial_discovery_and_activation_repair_without_writes() {
 #[test]
 fn postcommit_failure_preserves_the_committed_alias() {
     check("postcommit", |fixture, runtime| {
-        *fixture.fail_ls_at.borrow_mut() = Some(
-            fixture
-                .calls
-                .borrow()
-                .iter()
-                .filter(|call| call[0] == "ls")
-                .count()
-                + 2,
-        );
+        *fixture.counter_failure.borrow_mut() = true;
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.awaiting"] = json!("-1");
         fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("bob");
         let result =
             namedrop::host::hc::events::Subscriber::default().handle_line(&labels(), runtime);
@@ -767,15 +769,10 @@ fn postcommit_failure_preserves_the_committed_alias() {
         assert_eq!(addresses[0].alias, "bob");
         let terminal = &fixture.terminals.borrow()[0];
         assert_eq!(terminal["labels"]["namedrop.name"], "bob");
-        let error: Value =
-            serde_json::from_str(terminal["labels"]["namedrop.name.error"].as_str().unwrap())
-                .unwrap();
-        assert_eq!(error["requested"], "bob");
         assert!(
-            error["message"]
-                .as_str()
-                .unwrap()
-                .contains("postcommit discovery failed")
+            result
+                .unwrap_err()
+                .contains("postcommit counter publication failed")
         );
     });
 }
@@ -1460,14 +1457,23 @@ fn inactive_space_session_labels_are_not_reconciled() {
 #[test]
 fn subscriber_snapshot_and_created_events_do_not_rescan_other_terminals() {
     check("bounded-created-discovery", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
         let mut subscriber = namedrop::host::hc::events::Subscriber::default();
         fixture.calls.borrow_mut().clear();
         subscriber
-            .handle_line(&json!({"terminals":*fixture.terminals.borrow()}).to_string(), runtime)
+            .handle_line(
+                &json!({"terminals":*fixture.terminals.borrow()}).to_string(),
+                runtime,
+            )
             .unwrap();
         assert!(
-            fixture.calls.borrow().iter().all(|call| call[0] != "ls" && call[0] != "get"),
-            "snapshot discarded its terminal records: {:?}", fixture.calls.borrow()
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .all(|call| call[0] != "ls" && call[0] != "get"),
+            "snapshot discarded its terminal records: {:?}",
+            fixture.calls.borrow()
         );
         for index in 2..=11 {
             let pane = format!("t{index}");
@@ -1476,10 +1482,107 @@ fn subscriber_snapshot_and_created_events_do_not_rescan_other_terminals() {
             terminal["labels"]["namedrop.name"] = json!("");
             fixture.terminals.borrow_mut().push(terminal);
             fixture.calls.borrow_mut().clear();
-            subscriber.handle_line(&json!({"method":"event","params":{"type":"created","terminal":pane}}).to_string(), runtime).unwrap();
+            subscriber
+                .handle_line(
+                    &json!({"method":"event","params":{"type":"created","terminal":pane}})
+                        .to_string(),
+                    runtime,
+                )
+                .unwrap();
             let calls = fixture.calls.borrow();
-            assert!(calls.len() <= 3, "created {pane} made {} hc calls: {calls:?}", calls.len());
-            assert!(calls.iter().all(|call| call[0] != "ls" && (call[0] != "get" || call[1] == pane)), "created {pane} touched another terminal: {calls:?}");
+            assert!(
+                calls.len() <= 3,
+                "created {pane} made {} hc calls: {calls:?}",
+                calls.len()
+            );
+            assert!(
+                calls
+                    .iter()
+                    .all(|call| call[0] != "ls" && (call[0] != "get" || call[1] == pane)),
+                "created {pane} touched another terminal: {calls:?}"
+            );
         }
+    });
+}
+
+#[test]
+fn subscriber_coalesces_queued_events_and_missed_notifications() {
+    check("coalesced-discovery", |fixture, runtime| {
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(
+                &json!({"terminals":*fixture.terminals.borrow()}).to_string(),
+                runtime,
+            )
+            .unwrap();
+        let epoch = || {
+            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3"))
+                .unwrap()
+                .query_row("SELECT epoch FROM reconciliation_epochs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        let mut lines = Vec::new();
+        for index in 2..=11 {
+            let pane = format!("t{index}");
+            let mut terminal = fixture.terminals.borrow()[0].clone();
+            terminal["address"] = json!(pane);
+            terminal["labels"]["namedrop.name"] = json!("");
+            fixture.terminals.borrow_mut().push(terminal);
+            for kind in ["created", "labels", "status", "turn", "labels"] {
+                lines.push(
+                    json!({"method":"event","params":{"type":kind,"terminal":pane}}).to_string(),
+                );
+            }
+        }
+        fixture.calls.borrow_mut().clear();
+        let before = epoch();
+        subscriber
+            .handle_lines(lines.iter().map(String::as_str), runtime)
+            .unwrap();
+        assert_eq!(
+            epoch(),
+            before + 1,
+            "queued events must share one reconciliation"
+        );
+        assert_eq!(
+            fixture.calls.borrow().len(),
+            10,
+            "one fresh get per changed terminal: {:?}",
+            fixture.calls.borrow()
+        );
+        assert!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .all(|call| call[0] == "get" && call[1] != "t1")
+        );
+        fixture.calls.borrow_mut().clear();
+        let missed = r#"{"method":"missed","params":{}}"#;
+        let before = epoch();
+        subscriber
+            .handle_lines([missed, missed, missed], runtime)
+            .unwrap();
+        assert_eq!(epoch(), before + 1);
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "ls")
+                .count(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "get")
+                .count(),
+            11
+        );
     });
 }
