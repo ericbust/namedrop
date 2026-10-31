@@ -731,6 +731,26 @@ else: raise AssertionError(args)
     let diagnosis: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(diagnosis["data"]["host"], "herdr-core");
     assert_eq!(diagnosis["data"]["host_version"], "herdr-core 0.1.14");
+    let package = result["data"]["integration_packages"]["claude-code"]["path"].as_str().unwrap();
+    let mut stale: serde_json::Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    let mut unrelated = unrelated_process();
+    stale["pid"] = serde_json::json!(unrelated.id());
+    stale["labels"].as_object_mut().unwrap().remove("namedrop.session");
+    fs::write(&record, stale.to_string()).unwrap();
+    fs::write(f.0.join("hc-calls"), "").unwrap();
+    let mut wrapper = Command::new(Path::new(package).join("scripts/session-start"));
+    wrapper.env("HC_BIN_PATH", &hc).env("HC_TERMINAL_ID", "t1")
+        .env("HC_SESSION", "hook-core").env("HC_SOCKET", "hook-socket")
+        .env("NAMEDROP_STATE_DIR", f.0.join("state"))
+        .env_remove("HERDR_SOCKET_PATH").env_remove("HERDR_PANE_ID")
+        .env_remove("CODEX_SESSION_ID").env_remove("CLAUDE_CODE_SESSION_ID");
+    let stale_output = codex_app_server::run_with_stdin(&mut wrapper,
+        r#"{"hook_event_name":"SessionStart","session_id":"stale-hook-session","source":"startup"}"#);
+    unrelated.kill().unwrap(); unrelated.wait().unwrap();
+    assert!(stale_output.stdout.is_empty(), "stale inherited terminal must be declined");
+    let calls = fs::read_to_string(f.0.join("hc-calls")).unwrap();
+    assert!(!calls.lines().any(|line| line.starts_with("[\"label\"")), "stale inherited terminal wrote a label: {calls}");
+
 }
 
 #[test]
