@@ -129,7 +129,8 @@ impl StateTransaction<'_> {
                       SELECT MAX(latest.history_order) FROM alias_history latest
                       WHERE latest.session_socket_id = h.session_socket_id
                         AND latest.worktree_id = h.worktree_id
-                        AND latest.address_id = h.address_id))",
+                        AND latest.address_id = h.address_id
+                        AND latest.transition_kind = 'claimed'))",
             params![
                 namespace.session_socket_id,
                 namespace.space_id.as_str(),

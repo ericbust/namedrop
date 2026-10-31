@@ -757,6 +757,7 @@ impl StateTransaction<'_> {
                  SELECT address_id, alias, MAX(history_order)
                  FROM alias_history
                  WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND transition_kind = 'claimed'
                  GROUP BY address_id),
              address_rows AS (
              SELECT a.address_id, COALESCE(c.alias, h.alias, ltrim(r.name, '@')), r.name, a.persona, a.pane_type, a.retired,
