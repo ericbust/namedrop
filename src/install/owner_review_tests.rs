@@ -1,3 +1,5 @@
+#[path = "../../tests/support/hc_socket.rs"]
+mod hc_socket;
 use super::*;
 struct NoCalls;
 impl crate::HerdrCommandExecutor for NoCalls {
@@ -969,7 +971,10 @@ fn generated_hc_hooks_decline_tui_context_before_locked_state() {
     };
     let binary =
         PathBuf::from(std::env::var_os("NAMEDROP_TEST_BINARY").expect("set NAMEDROP_TEST_BINARY"));
-    let root = owner_review_root("generated-hc-hook-origin");
+    let root = std::env::temp_dir().join(format!("namedrop-generated-hook-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let socket = root.join("hc.sock");
+    let _socket = hc_socket::HcSocket::bind(&socket).unwrap();
     let home = root.join("home");
     let state = root.join("state");
     fs::create_dir_all(state.join("runtime")).unwrap();
@@ -1033,6 +1038,7 @@ esac
                 .env("IDENTITY_LOG", &identity_log)
                 .env("NAMEDROP_STATE_DIR", &state)
                 .env("HC_BIN_PATH", &identity)
+                .env("HC_SOCKET", &socket)
                 .env("HERDR_BIN_PATH", &identity)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())

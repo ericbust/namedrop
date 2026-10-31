@@ -1,3 +1,5 @@
+#[path = "support/hc_socket.rs"]
+mod hc_socket;
 use namedrop::{HerdrCommandExecutor, ProcessHerdr, runtime::HostKind};
 use std::{
     fs,
@@ -9,6 +11,8 @@ use std::{
 fn hc_client_and_daemon_child_drop_tui_environment_and_preserve_arguments() {
     let root = std::env::temp_dir().join(format!("namedrop-hc-boundary-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
+    let socket = root.join("hc.sock");
+    let _socket = hc_socket::HcSocket::bind(&socket).unwrap();
     let fake = root.join("hc");
     fs::write(
         &fake,
@@ -50,7 +54,8 @@ sys.exit(result.returncode)
         .env("HC_TERMINAL_ID", "inherited-terminal")
         .env("HC_TERMINAL_SOCKET", "inherited-terminal-socket")
         .env("HC_SESSION", "kept-session")
-        .env("HC_SOCKET", "kept-socket")
+        .env("HC_SOCKET", &socket)
+        .env("EXPECTED_HC_SOCKET", &socket)
         .env("UNRELATED", "kept-value")
         .output()
         .unwrap();
@@ -69,7 +74,7 @@ sys.exit(result.returncode)
     );
     for (key, expected) in [
         ("HC_SESSION", "kept-session"),
-        ("HC_SOCKET", "kept-socket"),
+        ("HC_SOCKET", socket.to_str().unwrap()),
         ("UNRELATED", "kept-value"),
     ] {
         assert_eq!(client[key], expected);
@@ -128,7 +133,10 @@ fn hc_process_boundary_child() {
     );
     assert_eq!(target["argv"], serde_json::json!(arguments));
     assert_eq!(environment["HC_SESSION"], "kept-session");
-    assert_eq!(environment["HC_SOCKET"], "kept-socket");
+    assert_eq!(
+        environment["HC_SOCKET"],
+        std::env::var("EXPECTED_HC_SOCKET").unwrap()
+    );
     assert_eq!(environment["HC_TERMINAL_ID"], "daemon-terminal");
     assert_eq!(environment["HC_TERMINAL_SOCKET"], "daemon-terminal-socket");
 }

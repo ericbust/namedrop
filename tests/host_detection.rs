@@ -1,3 +1,5 @@
+#[path = "support/hc_socket.rs"]
+mod hc_socket;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 #[test]
@@ -195,6 +197,8 @@ fn cli_host_detection_table_returns_before_state_input_or_host_io() {
     let root = std::env::temp_dir().join(format!("namedrop-host-detection-{}", std::process::id()));
     fs::create_dir_all(root.join("state/runtime")).unwrap();
     fs::create_dir_all(root.join("home")).unwrap();
+    let socket = root.join("hc.sock");
+    let _socket = hc_socket::HcSocket::bind(&socket).unwrap();
     let probe = root.join("probe");
     fs::write(
         &probe,
@@ -252,6 +256,7 @@ esac
             .env("far", std::process::id().to_string())
             .env("IDENTITY_LOG", root.join("identity-log"))
             .envs(case.env.iter().map(|key| (key, "value")))
+            .env("HC_SOCKET", &socket)
             .env("HERDR_PLUGIN_STATE_DIR", root.join("state"))
             .env("NAMEDROP_STATE_DIR", root.join("state"))
             .args(&case.flags)
@@ -327,6 +332,8 @@ esac
 fn ambiguous_host_identity_is_cached_and_bounded_across_both_native_lookups() {
     let root = std::env::temp_dir().join(format!("namedrop-host-budget-{}", std::process::id()));
     fs::create_dir_all(&root).unwrap();
+    let socket = root.join("hc.sock");
+    let _socket = hc_socket::HcSocket::bind(&socket).unwrap();
     let probe = root.join("identity");
     fs::write(&probe, r#"#!/usr/bin/python3
 import json, os, sys, time
@@ -361,6 +368,7 @@ else:
             .env("HC_TERMINAL_ID", "hc")
             .env("HERDR_BIN_PATH", &probe)
             .env("HC_BIN_PATH", &probe)
+            .env("HC_SOCKET", &socket)
             .env("IDENTITY_LOG", &log)
             .env("IDENTITY_MODE", mode)
             .env("EXPECTED_HOST", expected)

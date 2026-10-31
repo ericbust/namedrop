@@ -2,6 +2,8 @@
 mod app_popup;
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
+#[path = "support/hc_socket.rs"]
+mod hc_socket;
 use namedrop::{HerdrCommandExecutor, HerdrCommandOutput};
 use std::{
     fs,
@@ -153,6 +155,8 @@ esac
     fn host<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         command
             .env("HOME", self.0.join("home"))
+            .env("PATH", "/usr/bin:/bin")
+            .env("HC_SOCKET", self.0.join("hc.sock"))
             .env("CLAUDE_CONFIG_DIR", self.0.join("home").join(".claude"))
             .env("CODEX_HOME", self.0.join("home").join(".codex"))
             .env_remove("XDG_CONFIG_HOME")
@@ -533,6 +537,7 @@ fn a_session_start_inside_codex_s_shared_app_server_gets_its_notice_without_a_ru
 #[test]
 fn hc_binary_verifies_inherited_identity() {
     let f = Fixture::new("hc");
+    let _socket = hc_socket::HcSocket::bind(&f.0.join("hc.sock")).unwrap();
     let hc = f.0.join("hc");
     let record = f.0.join("hc-terminal.json");
     let mut terminal: serde_json::Value =
@@ -544,10 +549,10 @@ case "$1" in
   get) cat '{}' ;;
   ls) printf '{{"terminals":[{{"address":"t1","state":"live"}}]}}' ;;
   server) printf '{{"core":{{"id":"test-core"}}}}' ;;
-  send) test -z "${{HC_TERMINAL_ID+x}}" && test -z "${{HC_TERMINAL_SOCKET+x}}" && test "$HC_SESSION" = fixture-session && test "$HC_SOCKET" = fixture-socket || exit 1; printf '{{}}' ;;
+  send) test -z "${{HC_TERMINAL_ID+x}}" && test -z "${{HC_TERMINAL_SOCKET+x}}" && test "$HC_SESSION" = fixture-session && test "$HC_SOCKET" = '{}/hc.sock' || exit 1; printf '{{}}' ;;
   *) exit 1 ;;
 esac
-"#, record.display())).unwrap();
+"#, record.display(), f.0.display())).unwrap();
     fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
     let run = |session: Option<&str>| {
         let mut command = f.namedrop_command(&[
@@ -580,6 +585,7 @@ esac
 #[test]
 fn hc_hooks_write_sessions_only_in_active_spaces_and_preserve_core_routing() {
     let f = Fixture::new("hc-hooks");
+    let _socket = hc_socket::HcSocket::bind(&f.0.join("hc.sock")).unwrap();
     f.activate();
     let hc_state = f.0.join("hc-state");
     let tui_packages = [
@@ -621,7 +627,7 @@ args = sys.argv[1:]
 assert 'HC_TERMINAL_ID' not in os.environ
 assert 'HC_TERMINAL_SOCKET' not in os.environ
 assert os.environ['HC_SESSION'] in ('hook-core', 'other-hook-core')
-assert os.environ['HC_SOCKET'] == 'hook-socket'
+assert os.environ['HC_SOCKET'] == str(root / 'hc.sock')
 with (root / 'hc-calls').open('a') as out:
     out.write(json.dumps(args) + '\n')
 record_path = root / ('second-record.json' if len(args) > 1 and args[1] == 't2' else 'record.json')
@@ -648,7 +654,7 @@ elif args[0] == 'send':
     assert 'HC_TERMINAL_ID' not in os.environ
     assert 'HC_TERMINAL_SOCKET' not in os.environ
     assert os.environ['HC_SESSION'] in ('hook-core', 'other-hook-core')
-    assert os.environ['HC_SOCKET'] == 'hook-socket'
+    assert os.environ['HC_SOCKET'] == str(root / 'hc.sock')
     print(json.dumps({'started':True}))
 else: raise AssertionError(args)
 "#,
@@ -668,7 +674,7 @@ else: raise AssertionError(args)
             .env("HC_TERMINAL_ID", "t1")
             .env("HC_TERMINAL_SOCKET", "inherited-terminal-socket")
             .env("HC_SESSION", "hook-core")
-            .env("HC_SOCKET", "hook-socket");
+            .env("HC_SOCKET", f.0.join("hc.sock"));
         command
     };
     let run_hook = || {
@@ -693,16 +699,21 @@ else: raise AssertionError(args)
     let before: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
     assert!(before["labels"]["namedrop.session"].is_null());
-    let namespace = namedrop::StateNamespace::for_space("hc:hook-test", "fixture-space");
-    namedrop::StateStore::open(hc_state.clone())
-        .unwrap()
-        .transaction(|transaction| {
-            transaction.activate_worktree(
-                &namespace,
-                &namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "test", 1),
-            )
-        })
-        .unwrap();
+    let activated = command(&[
+        "--host",
+        "hc",
+        "--hc-terminal",
+        "t1",
+        "--hc-space",
+        "fixture-space",
+        "activate",
+        "--input-json",
+        "{\"confirmed\":true}",
+    ])
+    .output()
+    .unwrap();
+    assert!(activated.status.success(), "{}", text(&activated));
+    fs::write(f.0.join("hc-calls"), "").unwrap();
     let active = run_hook();
     assert!(active.status.success(), "{}", text(&active));
     assert!(
@@ -809,7 +820,7 @@ else: raise AssertionError(args)
     f.host(&mut foreign)
         .env("HC_BIN_PATH", &hc)
         .env("HC_SESSION", "other-hook-core")
-        .env("HC_SOCKET", "hook-socket")
+        .env("HC_SOCKET", f.0.join("hc.sock"))
         .arg("--plugin-state")
         .arg(&foreign_state)
         .args([
@@ -860,7 +871,7 @@ else: raise AssertionError(args)
             .env("HC_BIN_PATH", &hc)
             .env("HC_TERMINAL_ID", "t1")
             .env("HC_SESSION", "hook-core")
-            .env("HC_SOCKET", "hook-socket")
+            .env("HC_SOCKET", f.0.join("hc.sock"))
             .env("NAMEDROP_STATE_DIR", hc_state.clone())
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_PANE_ID")
@@ -1061,7 +1072,7 @@ else: raise AssertionError(args)
         .env("HC_BIN_PATH", &hc)
         .env("HC_TERMINAL_ID", "t1")
         .env("HC_SESSION", "hook-core")
-        .env("HC_SOCKET", "hook-socket")
+        .env("HC_SOCKET", f.0.join("hc.sock"))
         .env("NAMEDROP_STATE_DIR", hc_state.clone())
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_PANE_ID")
@@ -1100,12 +1111,13 @@ else: raise AssertionError(args)
         String::from_utf8(output.stdout).unwrap(),
         "selected-runtime\ndoctor\n--host\nhc\n"
     );
-    app_popup::assert_tour(&f.0, 1);
+    app_popup::assert_tour(&f.0, 2);
 }
 
 #[test]
 fn explicit_transport_flags_select_the_host_without_environment() {
     let fixture = Fixture::new("explicit-host-flags");
+    let _socket = hc_socket::HcSocket::bind(&fixture.0.join("hc.sock")).unwrap();
     let herdr = fixture.0.join("herdr");
     fs::write(&herdr, fs::read_to_string(&herdr).unwrap().replace("/repo", std::env::current_dir().unwrap().to_str().unwrap()).replace("case \"$1 $2\" in", "case \"$1 $2\" in\n  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\"}]}}';;")).unwrap();
     let run = |args: &[&str]| {

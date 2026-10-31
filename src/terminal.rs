@@ -487,7 +487,7 @@ mod foreground_transition_tests {
     struct HcSamples(Cell<usize>);
     impl crate::HerdrCommandExecutor for HcSamples {
         fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
-            assert_eq!(args, ["get", "remote/t1", "--json"]);
+            assert_eq!(args, ["get", "t1", "--json"]);
             let sample = self.0.get();
             self.0.set(sample + 1);
             let mut terminal: serde_json::Value =
@@ -513,7 +513,7 @@ mod foreground_transition_tests {
         let samples = HcSamples(Cell::new(0));
         assert!(runner_in_foreground(
             &crate::HcHost::new(&samples),
-            "remote/t1",
+            "t1",
             true,
             Duration::from_millis(300)
         ));
@@ -530,7 +530,7 @@ mod foreground_transition_tests {
         let samples = HcSamples(Cell::new(0));
         assert!(!runner_in_foreground(
             &crate::HcHost::new(&samples),
-            "remote/t1",
+            "t1",
             true,
             Duration::ZERO
         ));
