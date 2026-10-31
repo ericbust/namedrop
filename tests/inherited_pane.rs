@@ -748,7 +748,7 @@ fn explicit_transport_flags_select_the_host_without_environment() {
             .env_remove("HC_TERMINAL_ID").env("HC_BIN_PATH", "/not-an-hc-executable")
             .output().unwrap();
         assert!(!text(&output).contains("Host is unknown"), "{flag}: {}", text(&output));
-        assert!(text(&output).contains("not-an-hc-executable"), "{}", text(&output));
+        assert!(text(&output).contains("hc did not report its core identity"), "{}", text(&output));
     }
 }
 
