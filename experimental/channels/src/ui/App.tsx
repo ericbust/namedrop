@@ -519,6 +519,7 @@ export function App() {
   const drawerOpen = phone && drawer;
   const sidebarId = useId();
   const toggleFocus = useRef(false);
+  const toggleFocusLost = useRef(false);
   useEffect(() => {
     if (!phone) setDrawer(false);
   }, [phone]);
@@ -673,6 +674,7 @@ export function App() {
       state={state}
       open={drawerOpen}
       controls={sidebarId}
+      focusLost={toggleFocusLost}
       onOpen={() => setDrawer(true)}
     />
   ) : null;
@@ -902,6 +904,7 @@ export function App() {
             busy={activity.count}
             id={sidebarId}
             drawer={phone ? { open: drawerOpen, onClose: closeDrawer } : null}
+            toggleFocusLost={toggleFocusLost}
             onSelect={(key) => {
               select(key);
               if (drawerOpen) closeDrawer();

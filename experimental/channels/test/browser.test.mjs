@@ -10404,3 +10404,61 @@ test("UI-R5 R5-4: with a thread open beside the channel, focus that leaves the c
     "a blur inside a visible channel leaves focus where the reader put it",
   );
 });
+
+async function focusMatches(page, selector, what) {
+  const deadline = Date.now() + 5000;
+  const matches = () =>
+    page.evaluate(
+      (selector) => document.activeElement?.matches(selector) === true,
+      selector,
+    );
+  while (!(await matches())) {
+    if (Date.now() > deadline)
+      assert.fail(`${what}: focus is on ${await activeName(page)}`);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+test("UI-R5 R5-1: when the phone layout ends with focus on the Channels button, focus moves to the current row in the sidebar column, whether the button loses focus before the wider layout renders or with it", async (t) => {
+  const currentRow =
+    '.sidebar .channels-navigation button[aria-current="page"]';
+  const activityRow = '.sidebar .activity-entry[aria-current="page"]';
+  const cases = [
+    { view: "channel", to: [844, 390], row: currentRow },
+    { view: "All activity", to: [1440, 900], row: activityRow },
+    { view: "thread covering the channel", to: [844, 390], row: currentRow },
+  ];
+  for (const order of ["blur first", "render first"])
+    for (const { view, to, row } of cases) {
+      const what = `${order}, ${view}, 390x844 to ${to.join("x")}`;
+      await t.test(what, async (t) => {
+        const { page, toggle, dialog } = await phoneDrawer(t);
+        if (view === "thread covering the channel") {
+          await page
+            .getByRole("region", { name: "Message history" })
+            .getByRole("button", { name: /^1 reply from/ })
+            .click();
+          await page.getByRole("complementary", { name: "Thread" }).waitFor();
+        }
+        await toggle.click();
+        await dialog.waitFor();
+        if (view === "All activity")
+          await dialog.getByRole("link", { name: /^All activity/ }).click();
+        else await page.keyboard.press("Escape");
+        await dialog.waitFor({ state: "detached" });
+        await focusMatches(
+          page,
+          ".channels-toggle",
+          `${what}: the drawer closed`,
+        );
+        const button = page.locator(".channels-toggle");
+        if (order === "blur first") {
+          await forceVisibility(button, "hidden");
+          await focusLandsOn(page, "the page", `${what}: the hidden button`);
+          await forceVisibility(button, null);
+        }
+        await resize(page, ...to);
+        assert.equal(await button.count(), 0, `${what}: no Channels button`);
+        await focusMatches(page, row, what);
+      });
+    }
+});
