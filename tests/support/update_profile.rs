@@ -1,5 +1,8 @@
+#[path = "cleanup.rs"]
+mod cleanup;
+
 use std::{
-    env, fs,
+    env,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -35,6 +38,6 @@ pub fn isolate(root: &Path, home: &Path) -> bool {
 
 pub fn cleanup(root: &Path) {
     if env::var_os(ROOT).is_none() {
-        fs::remove_dir_all(root).unwrap();
+        cleanup::remove_fixture(root).unwrap();
     }
 }

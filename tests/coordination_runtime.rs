@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::*;
 use serde_json::{Value, json};
 use std::{
@@ -439,7 +442,7 @@ impl Fixture {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        let _ = cleanup::remove_fixture(&self.root);
     }
 }
 impl Clock for Fixture {
