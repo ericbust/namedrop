@@ -20,7 +20,7 @@ sys.path.insert(0, str(REPO / 'scripts'))
 from runtime import LAUNCHER
 SCHEMA_VERSION = int(re.search(r'const SCHEMA_VERSION: u32 = (\d+);', (REPO/'src/store.rs').read_text())[1])
 assert int(re.search(r'^SCHEMA_VERSION = (\d+)$', (REPO/'scripts/update.py').read_text(), re.M)[1]) == SCHEMA_VERSION, 'Updater preflight must be reviewed when the store schema changes'
-HOST = r'''#!/usr/bin/env python3
+HOST = r'''#!/usr/bin/python3
 import json, os, pathlib, shutil, sqlite3, sys
 base = pathlib.Path(os.environ['FIXTURE'])
 args = sys.argv[1:]
@@ -114,7 +114,7 @@ else:
     sys.exit('unexpected: '+repr(args))
 '''
 
-GIT = r'''#!/usr/bin/env python3
+GIT = r'''#!/usr/bin/python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
 if args[:1] == ['-C']: args = args[2:]

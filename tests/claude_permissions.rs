@@ -641,6 +641,8 @@ fn input_file_errors_never_echo_unknown_keys_or_values() {
                 .isolated_home(&f.home)
                 .env("CLAUDE_CONFIG_DIR", f.home.join(".claude"))
                 .env("CODEX_HOME", f.home.join(".codex"))
+                .env("HERDR_BIN_PATH", f.root.join("herdr"))
+                .env("TEST_WORKSPACE", "workspace-1")
                 .output()
                 .unwrap();
             assert!(!output.status.success());
