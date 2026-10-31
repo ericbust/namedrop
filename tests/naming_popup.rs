@@ -1362,6 +1362,7 @@ fn the_persona_editor_stays_live_while_a_suggestion_runs_in_a_real_terminal() {
     fs::write(f.0.join("delay-4"), "8").unwrap();
     let command = f.command();
     let out = Command::new("/usr/bin/python3")
+        .isolated_home(f.0.join("home"))
         .envs(command.get_envs().filter_map(|(key, value)| value.map(|v| (key, v))))
         .env("TEST_AGENT", "1")
         .env("TEST_HOST", "claude")
@@ -1460,6 +1461,7 @@ fn management_single_keys_and_escape_work_in_a_real_terminal() {
     assert!(f.manage("\nxy\n").status.success());
     let command = f.command();
     let out = Command::new("/usr/bin/python3")
+        .isolated_home(f.0.join("home"))
         .envs(command.get_envs().filter_map(|(key, value)| value.map(|v| (key, v))))
         // Colour splits a hint into runs; this test reads words, not colour.
         .env("NO_COLOR", "1")
