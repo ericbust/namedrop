@@ -36,6 +36,11 @@ elif sys.argv[1:] == ['events', '--json']:
     if os.path.exists(root+'/eof'):
         raise SystemExit(0)
     print('{{"method":"heartbeat","params":{{}}}}', flush=True)
+    if os.path.exists(root+'/repeat'):
+        with open(root+'/calls') as log:
+            streams = sum(json.loads(line) == ['events', '--json'] for line in log)
+        if streams < 6:
+            raise SystemExit(0)
     while not os.path.exists(root+'/disconnect'):
         time.sleep(.01)
 elif sys.argv[1:] == ['ls', '--json']:
@@ -216,10 +221,29 @@ fn singleton_sigterm_and_dead_pid_recovery() {
 
 #[test]
 fn doctor_does_not_start_subscriber_without_active_worktree() {
-    for existing in [false, true] {
+    for state_kind in ["fresh", "empty", "deactivated", "other-core"] {
         let fixture = Fixture::new();
-        if existing {
-            namedrop::StateStore::open(&fixture.root.join("state")).unwrap();
+        if state_kind != "fresh" {
+            let mut store = namedrop::StateStore::open(fixture.root.join("state")).unwrap();
+            if matches!(state_kind, "deactivated" | "other-core") {
+                let socket = if state_kind == "other-core" {
+                    "hc:other"
+                } else {
+                    "hc:628bcf8129aa037b1fa5aad3504926a6"
+                };
+                let namespace = namedrop::StateNamespace::for_space(socket, "fixture");
+                let attribution =
+                    namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "fixture", 0);
+                store
+                    .transaction(|tx| {
+                        tx.activate_worktree(&namespace, &attribution)?;
+                        if state_kind == "deactivated" {
+                            tx.deactivate_worktree(&namespace, &attribution)?;
+                        }
+                        Ok(())
+                    })
+                    .unwrap();
+            }
         }
         let output = fixture
             .command()
@@ -238,4 +262,46 @@ fn doctor_does_not_start_subscriber_without_active_worktree() {
             "doctor created subscriber records without activation"
         );
     }
+}
+
+#[test]
+fn valid_stream_input_resets_reconnect_budget() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.root.join("repeat"), "").unwrap();
+    let mut child = fixture.spawn();
+    until(
+        || fixture.streams() == 6,
+        5,
+        "valid heartbeat did not reset reconnect budget",
+    );
+    assert!(child.exited().is_none());
+    assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
+    until(|| child.exited().is_some(), 2, "subscriber did not stop");
+    assert!(child.exited().unwrap().success());
+}
+
+#[test]
+fn sigterm_during_reconnect_exits_cleanly() {
+    let mut fixture = Fixture::new();
+    let mut child = fixture.spawn();
+    until(|| fixture.streams() == 1, 5, "stream did not start");
+    fixture.socket.take();
+    std::fs::remove_file(fixture.root.join("core.sock")).unwrap();
+    std::fs::write(fixture.root.join("disconnect"), "").unwrap();
+    until(
+        || {
+            std::fs::read_to_string(fixture.root.join("stderr"))
+                .unwrap()
+                .contains("reconnect attempt 1/3")
+        },
+        2,
+        "subscriber did not begin reconnect",
+    );
+    assert_eq!(unsafe { libc::kill(child.0.id() as i32, libc::SIGTERM) }, 0);
+    until(
+        || child.exited().is_some(),
+        1,
+        "SIGTERM did not interrupt reconnect wait",
+    );
+    assert!(child.exited().unwrap().success());
 }

@@ -1151,7 +1151,21 @@ pub fn run_with_environment(
         ids: &ids,
     };
     let mut subscriber = Subscriber::default();
+    let mut reconnect: Option<(u8, std::time::Instant)> = None;
     while !record.should_stop(&directory, state) {
+        if let Some((attempts, started)) = &mut reconnect {
+            if *attempts == 3 || started.elapsed() >= Duration::from_secs(12) {
+                break;
+            }
+            for _ in 0..10 {
+                if record.should_stop(&directory, state) {
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            *attempts += 1;
+            eprintln!("Namedrop hc reconnect attempt {attempts}/3");
+        }
         let mut command = match transport.checked_command_bounded(Duration::from_millis(250), &STOP)
         {
             Ok(command) => command,
@@ -1161,7 +1175,7 @@ pub fn run_with_environment(
                     || error == "Herdr command timed out during hc socket preflight" =>
             {
                 eprintln!("Namedrop hc reconnect: {error}");
-                std::thread::sleep(Duration::from_millis(250));
+                reconnect.get_or_insert((0, std::time::Instant::now()));
                 continue;
             }
             Err(error) => return Err(error),
@@ -1191,7 +1205,10 @@ pub fn run_with_environment(
         });
         'stream: loop {
             let line = receiver.recv_timeout(Duration::from_millis(250));
-            if record.should_stop(&directory, state) {
+            if record.should_stop(&directory, state)
+                || reconnect
+                    .is_some_and(|(_, started)| started.elapsed() >= Duration::from_secs(12))
+            {
                 break;
             }
             let guard = loop {
@@ -1199,7 +1216,11 @@ pub fn run_with_environment(
                     Ok(guard) => break guard,
                     Err(error) => {
                         eprintln!("Namedrop hc runtime: {error}");
-                        if record.should_stop(&directory, state) {
+                        if record.should_stop(&directory, state)
+                            || reconnect.is_some_and(|(_, started)| {
+                                started.elapsed() >= Duration::from_secs(12)
+                            })
+                        {
                             break 'stream;
                         }
                         std::thread::sleep(Duration::from_millis(25));
@@ -1214,6 +1235,13 @@ pub fn run_with_environment(
                     let mut lines = vec![line];
                     while let Ok(Ok(line)) = receiver.try_recv() {
                         lines.push(line);
+                    }
+                    if reconnect.is_some()
+                        && lines
+                            .iter()
+                            .any(|line| Pending::default().push(line).is_ok())
+                    {
+                        reconnect = None;
                     }
                     if let Err(error) =
                         subscriber.handle_lines(lines.iter().map(String::as_str), &runtime)
@@ -1232,7 +1260,7 @@ pub fn run_with_environment(
         crate::runtime::stop_process_group(&mut child);
         drop(receiver);
         let _ = reader.join();
-        std::thread::sleep(Duration::from_millis(250));
+        reconnect.get_or_insert((0, std::time::Instant::now()));
     }
     Ok(())
 }

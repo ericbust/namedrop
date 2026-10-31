@@ -117,9 +117,29 @@ pub fn append_hc_diagnostics<H: Host, C: Clock, I: IdGenerator, E: crate::HerdrC
             report.status = HealthStatus::NeedsAttention;
         }
     }
-    let subscriber =
-        crate::host::hc::events::status(runtime.state_directory, runtime.session_socket_id)
-            .or_else(|_| {
+    let active = StateStore::open_read_only(runtime.state_directory)
+        .map_err(|error| error.to_string())
+        .and_then(|store| {
+            let Some(mut store) = store else {
+                return Ok(false);
+            };
+            store
+                .dashboard_spaces()
+                .map(|spaces| {
+                    spaces.iter().any(|space| {
+                        space.namespace.session_socket_id == runtime.session_socket_id
+                            && space.state.activated
+                            && !space.state.deactivated
+                    })
+                })
+                .map_err(|error| error.to_string())
+        });
+    if matches!(active, Ok(false)) {
+        return;
+    }
+    let subscriber = active.and_then(|_| {
+        crate::host::hc::events::status(runtime.state_directory, runtime.session_socket_id).or_else(
+            |_| {
                 let environment = host
                     .environment_snapshot()
                     .ok_or("HC subscriber restart requires the captured environment")?;
@@ -131,7 +151,9 @@ pub fn append_hc_diagnostics<H: Host, C: Clock, I: IdGenerator, E: crate::HerdrC
                     environment,
                 )
                 .map_err(|error| error.to_string())
-            });
+            },
+        )
+    });
     if let Err(error) = subscriber {
         let mut note = issue(
             "ND-HC-SUBSCRIBER-001",

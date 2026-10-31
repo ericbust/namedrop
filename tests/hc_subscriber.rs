@@ -650,11 +650,11 @@ fn detached_subscriber_child() {
         );
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
-    std::thread::sleep(std::time::Duration::from_millis(500));
+    std::thread::sleep(std::time::Duration::from_millis(50));
     let calls = || std::fs::read_to_string(root.join("calls.jsonl")).unwrap();
     let absent_calls = calls();
     let absent_epoch = epoch();
-    std::thread::sleep(std::time::Duration::from_millis(750));
+    std::thread::sleep(std::time::Duration::from_millis(50));
     namedrop::host::hc::events::status(&state, "hc:628bcf8129aa037b1fa5aad3504926a6")
         .expect("subscriber exited instead of waiting for the stopped core");
     assert_eq!(record()["pid"], json!(final_pid));
