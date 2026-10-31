@@ -5,6 +5,260 @@ impl crate::HerdrCommandExecutor for NoCalls {
         panic!("unexpected host call {args:?}")
     }
 }
+
+fn owner_review_root(name: &str) -> PathBuf {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("target/root-boundary-checks")
+        .join(format!(
+            "{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    fs::create_dir_all(&root).unwrap();
+    root
+}
+
+fn tree_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (u32, Option<Vec<u8>>)> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        entries: &mut std::collections::BTreeMap<PathBuf, (u32, Option<Vec<u8>>)>,
+    ) {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        let contents = metadata.is_file().then(|| fs::read(path).unwrap());
+        entries.insert(
+            path.strip_prefix(root).unwrap().to_owned(),
+            (metadata.permissions().mode(), contents),
+        );
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                visit(root, &entry.unwrap().path(), entries);
+            }
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    visit(root, root, &mut entries);
+    entries
+}
+
+fn refresh_hc_packages(home: &Path, state: &Path) -> IntegrationPackageInstallation {
+    let runtime = LifecycleRuntime {
+        state_directory: state,
+        home_directory: Some(home),
+        agent_config: AgentConfigDirectories::default(),
+        cwd: home,
+        workspace_id: Some("space"),
+        current_pane_id: None,
+        session_socket_id: "hc:root-boundary-test",
+        host: crate::HcHost::new(&NoCalls),
+        clock: &crate::SystemClock,
+        ids: &crate::ProcessIds::default(),
+    };
+    let discovered = DiscoveredWorktree {
+        worktree_id: crate::WorktreeId::new("worktree"),
+        workspace_id: "space".into(),
+        worktree_attached: false,
+        label: None,
+        branch: None,
+        panes: vec![],
+    };
+    StateStore::open(state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction.ensure_namespace(
+                &discovered.namespace(runtime.session_socket_id),
+                &MutationAttribution::new(crate::ActorKind::Plugin, "root-boundary-test", 1),
+            )
+        })
+        .unwrap();
+    refresh_user_integration_packages(&runtime, &discovered).unwrap()
+}
+
+#[test]
+fn hc_integrations_symlink_cannot_refresh_tui_packages_or_permissions() {
+    let root = owner_review_root("tui-isolation");
+    let home = root.join("home");
+    let tui_state = root.join("tui");
+    let hc_state = root.join("hc");
+    fs::create_dir_all(&hc_state).unwrap();
+    let executable = PathBuf::from(crate::collaboration_executable().unwrap());
+    for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        install_integration_package(&home, agent, &executable, &tui_state).unwrap();
+    }
+    let codex_package = package_directory(&home, AgentRuntime::Codex);
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(codex_package.join(CODEX_MANIFEST_FILE)).unwrap())
+            .unwrap();
+    let cache = home
+        .join(".codex/plugins/cache/namedrop/namedrop")
+        .join(manifest["version"].as_str().unwrap());
+    for relative in CODEX_SNAPSHOT_FILES {
+        let target = cache.join(relative);
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::copy(codex_package.join(relative), target).unwrap();
+    }
+    fs::write(home.join(".codex/config.toml"), format!(
+        "[marketplaces.namedrop]\nsource_type = \"local\"\nsource = {:?}\n[plugins.\"namedrop@namedrop\"]\nenabled = true\n",
+        codex_package.to_str().unwrap()
+    )).unwrap();
+    let tui_context = PackageContext::new(&home, &tui_state, false);
+    assert!(codex_configuration_current(
+        &tui_context,
+        AgentConfigDirectories::default()
+    ));
+    let before = tree_snapshot(&home);
+    std::os::unix::fs::symlink(&home, hc_state.join("integrations")).unwrap();
+
+    let installation = refresh_hc_packages(&home, &hc_state);
+    assert_eq!(
+        [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent| installation.failed(agent)),
+        [true, true],
+        "HC must refuse its symlinked integrations boundary for both agents"
+    );
+    let after = tree_snapshot(&home);
+    assert_eq!(
+        before.keys().collect::<Vec<_>>(),
+        after.keys().collect::<Vec<_>>()
+    );
+    for (path, original) in before {
+        assert!(
+            after[&path] == original,
+            "HC changed bytes or mode at {}",
+            path.display()
+        );
+    }
+    assert!(codex_configuration_current(
+        &tui_context,
+        AgentConfigDirectories::default()
+    ));
+    for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        inspect_integration_package(
+            Some(&home),
+            agent,
+            &tui_state,
+            AgentConfigDirectories::default(),
+            false,
+        )
+        .unwrap();
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hc_inspection_rejects_integrations_symlink_even_when_packages_match() {
+    let root = owner_review_root("inspection");
+    let home = root.join("home");
+    let state = root.join("hc");
+    let installation = refresh_hc_packages(&home, &state);
+    for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        assert!(!installation.failed(agent));
+        inspect_integration_package(
+            Some(&home),
+            agent,
+            &state,
+            AgentConfigDirectories::default(),
+            true,
+        )
+        .unwrap();
+    }
+    let owned = state.join("integrations");
+    let moved = root.join("moved-integrations");
+    fs::rename(&owned, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &owned).unwrap();
+    let before = tree_snapshot(&moved);
+    let rejected = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent| {
+        inspect_integration_package(
+            Some(&home),
+            agent,
+            &state,
+            AgentConfigDirectories::default(),
+            true,
+        )
+        .is_err()
+    });
+    assert_eq!(
+        rejected,
+        [true, true],
+        "inspection must reject the owned symlink boundary"
+    );
+    assert_eq!(tree_snapshot(&moved), before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn hc_integrations_file_is_preserved_and_blocks_both_agents() {
+    let root = owner_review_root("file-boundary");
+    let home = root.join("home");
+    let state = root.join("hc");
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let owned = state.join("integrations");
+    fs::write(&owned, "user data").unwrap();
+    fs::set_permissions(&owned, fs::Permissions::from_mode(0o640)).unwrap();
+    let before = tree_snapshot(&home);
+    let installation = refresh_hc_packages(&home, &state);
+    for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+        assert!(installation.failed(agent));
+        assert!(
+            inspect_integration_package(
+                Some(&home),
+                agent,
+                &state,
+                AgentConfigDirectories::default(),
+                true
+            )
+            .is_err()
+        );
+    }
+    assert_eq!(fs::read(&owned).unwrap(), b"user data");
+    assert_eq!(
+        fs::metadata(&owned).unwrap().permissions().mode() & 0o777,
+        0o640
+    );
+    assert_eq!(tree_snapshot(&home), before);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn package_installation_accepts_explicit_home_and_state_symlinks() {
+    let root = owner_review_root("trusted-bases");
+    let home = root.join("home");
+    let state_base = root.join("state");
+    let state = state_base.join("session");
+    let real_home = root.join("real-home");
+    let real_state = root.join("real-state");
+    fs::create_dir_all(&real_home).unwrap();
+    fs::create_dir_all(real_state.join("session")).unwrap();
+    std::os::unix::fs::symlink(&real_home, &home).unwrap();
+    std::os::unix::fs::symlink(&real_state, &state_base).unwrap();
+    let executable = PathBuf::from(crate::collaboration_executable().unwrap());
+    for hc in [false, true] {
+        let context = PackageContext::new(&home, &state, hc);
+        for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
+            install_integration_package_with_config(
+                &context,
+                agent,
+                &executable,
+                &state,
+                AgentConfigDirectories::default(),
+            )
+            .unwrap();
+            inspect_integration_package(
+                Some(&home),
+                agent,
+                &state,
+                AgentConfigDirectories::default(),
+                hc,
+            )
+            .unwrap();
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn hc_refresh_does_not_change_tui_packages_and_owns_private_packages() {
     let root = std::env::temp_dir().join(format!("namedrop-owner-review-{}", std::process::id()));
