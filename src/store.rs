@@ -54,7 +54,6 @@ mod coordination;
 mod coordination_bridge;
 mod coordination_ownership;
 pub mod dashboard;
-mod mailbox_migration;
 mod missing_disposition;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
@@ -7434,20 +7433,7 @@ fn initialize_schema(
             transaction.execute_batch(gap.ddl)?;
         }
     }
-    let had_entity_index: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_schema
-         WHERE type = 'index' AND name = 'transition_facts_by_entity')",
-        [],
-        |row| row.get(0),
-    )?;
     transaction.execute_batch(TRANSITION_ENTITY_INDEX)?;
-    let transaction = if !had_entity_index {
-        let mut migration = StateTransaction { transaction };
-        migration.migrate_mailbox_deferrals()?;
-        migration.transaction
-    } else {
-        transaction
-    };
     if version < SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
