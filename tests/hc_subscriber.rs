@@ -611,34 +611,39 @@ fn postcommit_failure_preserves_the_committed_alias() {
 fn stopped_core_error_survives_doctor_composition() {
     let root = std::env::temp_dir().join(format!("namedrop-stopped-doctor-{}", std::process::id()));
     std::fs::create_dir_all(root.join("home")).unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
-        .args(["--host", "hc", "--plugin-state"])
-        .arg(root.join("state"))
-        .args(["--hc-space", "fixture-space", "doctor"])
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("HOME", root.join("home"))
-        .env("XDG_CONFIG_HOME", root.join("config"))
-        .env("XDG_STATE_HOME", root.join("xdg"))
-        .env("XDG_RUNTIME_DIR", &root)
-        .env("CODEX_HOME", root.join("codex"))
-        .env("CLAUDE_CONFIG_DIR", root.join("claude"))
-        .env("HC_SOCKET", root.join("missing.sock"))
-        .env("HC_BIN_PATH", root.join("hc-must-not-run"))
-        .output()
-        .unwrap();
-    let response = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!output.status.success());
-    assert!(
-        response.contains("hc core is unavailable"),
-        "lost core preflight error: {response}"
-    );
-    assert!(response.contains("missing.sock"));
-    assert!(!root.join("missing.sock").exists());
+    for inherited in [None, Some("stale-terminal")] {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        command
+            .args(["--host", "hc", "--plugin-state"])
+            .arg(root.join("state"))
+            .args(["--hc-space", "fixture-space", "doctor"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", root.join("home"))
+            .env("XDG_CONFIG_HOME", root.join("config"))
+            .env("XDG_STATE_HOME", root.join("xdg"))
+            .env("XDG_RUNTIME_DIR", &root)
+            .env("CODEX_HOME", root.join("codex"))
+            .env("CLAUDE_CONFIG_DIR", root.join("claude"))
+            .env("HC_SOCKET", root.join("missing.sock"))
+            .env("HC_BIN_PATH", root.join("hc-must-not-run"));
+        if let Some(pane) = inherited {
+            command.env("HC_TERMINAL_ID", pane);
+        }
+        let output = command.output().unwrap();
+        let response = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.status.success());
+        assert!(
+            response.contains("hc core is unavailable"),
+            "lost core preflight error: {response}"
+        );
+        assert!(response.contains("missing.sock"));
+        assert!(!root.join("missing.sock").exists());
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
