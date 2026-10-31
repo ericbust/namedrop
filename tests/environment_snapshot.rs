@@ -350,3 +350,17 @@ fn tui_children_drop_all_captured_and_late_hc_keys() {
     let neutral: serde_json::Value = serde_json::from_slice(&neutral.stdout).unwrap();
     assert_eq!(neutral["HC_SOCKET"], "/hc.sock");
 }
+
+#[test]
+fn tui_children_remove_synthesized_hc_socket_after_identity_resolution() {
+    let snapshot = namedrop::environment::EnvironmentSnapshot::from_variables([
+        ("HERDR_BIN_PATH".into(), "/usr/bin/python3".into()),
+        ("XDG_RUNTIME_DIR".into(), "/private/runtime".into()),
+    ]);
+    assert_eq!(snapshot.hc_endpoint().unwrap(), std::path::Path::new("/private/runtime/herdr-core/default.sock"));
+    let output = namedrop::ProcessHerdr::from_snapshot(HostKind::Tui, &snapshot).command()
+        .args(["-c", "import os; print(os.environ.get('HC_SOCKET', 'unset'))"])
+        .output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "unset\n");
+}
