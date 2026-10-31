@@ -337,6 +337,7 @@ pub struct ProcessHerdr {
     host: HostKind,
     timeout: Duration,
     socket: Option<String>,
+    state_directory: Option<PathBuf>,
     child_executable: Option<std::path::PathBuf>,
     environment: crate::environment::EnvironmentSnapshot,
 }
@@ -359,6 +360,7 @@ impl ProcessHerdr {
                 })
                 .unwrap_or_else(|| if host == HostKind::Hc { "hc" } else { "herdr" }.to_owned()),
             socket: None,
+            state_directory: None,
             child_executable: None,
             timeout: Duration::from_millis(
                 environment
@@ -413,6 +415,11 @@ impl ProcessHerdr {
         let mut command = self.command();
         command.env("HC_SOCKET", socket);
         Ok(command)
+    }
+
+    pub fn with_state_directory(mut self, state_directory: PathBuf) -> Self {
+        self.state_directory = Some(state_directory);
+        self
     }
 
     pub fn with_child_executable(mut self, executable: std::path::PathBuf) -> Self {
@@ -619,6 +626,26 @@ pub fn exec_hc_child(arguments: &[std::ffi::OsString]) -> std::io::Error {
 }
 
 impl HerdrCommandExecutor for ProcessHerdr {
+    fn state_directory(&self) -> Option<&Path> {
+        self.state_directory.as_deref()
+    }
+
+    fn open_hc_popup(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        let app = Self {
+            binary: self
+                .environment
+                .var("HERDR_APP_BIN_PATH")
+                .unwrap_or_else(|| "herdr-app".to_owned()),
+            host: HostKind::Hc,
+            timeout: self.timeout,
+            socket: None,
+            state_directory: self.state_directory.clone(),
+            child_executable: None,
+            environment: self.environment.clone(),
+        };
+        app.execute_bounded(args, app.timeout, &AtomicBool::new(false), 512 * 1024)
+    }
+
     fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
         Some(&self.environment)
     }
@@ -815,6 +842,7 @@ mod bounded_read_tests {
             host: HostKind::Hc,
             timeout: Duration::from_millis(10),
             socket: None,
+            state_directory: None,
             child_executable: None,
             environment: crate::environment::EnvironmentSnapshot::capture(),
         };
@@ -904,6 +932,7 @@ mod bounded_read_tests {
             host: HostKind::Hc,
             timeout: Duration::from_millis(DEFAULT_HERDR_TIMEOUT_MS),
             socket: None,
+            state_directory: None,
             child_executable: None,
             environment: crate::environment::EnvironmentSnapshot::capture(),
         };
@@ -919,6 +948,7 @@ mod bounded_read_tests {
             host: HostKind::Tui,
             timeout: Duration::from_secs(2),
             socket: None,
+            state_directory: None,
             child_executable: None,
             environment: crate::environment::EnvironmentSnapshot::capture(),
         };
