@@ -10892,3 +10892,33 @@ test("UI-R6 3: where a pane covers the channel, the kept-draft line under the ch
       );
     });
 });
+
+test("UI-R6 fix1: a Channels button that mounts after an earlier claim never takes focus from a row the reader chose", async (t) => {
+  const { page, toggle, dialog } = await phoneDrawer(t);
+  await toggle.click();
+  await dialog.waitFor();
+  await dialog.getByRole("link", { name: /^All activity/ }).click();
+  await dialog.waitFor({ state: "detached" });
+  await focusMatches(page, ".channels-toggle", "All activity chosen");
+  // The button hides with focus, as when the browser drops it before a new
+  // layout renders, so its claim stands when the reader opens the drawer.
+  const button = page.locator(".channels-toggle");
+  await forceVisibility(button, "hidden");
+  await focusLandsOn(page, "the page", "the hidden button");
+  await forceVisibility(button, null);
+  await toggle.click();
+  await dialog.waitFor();
+  const beta = dialog.getByRole("button", { name: /^beta/ });
+  await beta.focus();
+  await page.evaluate(() => history.back());
+  await readsAs(
+    page.getByRole("main").getByRole("heading", { level: 1 }),
+    "alpha",
+  );
+  await nextFrame(page);
+  assert.equal(
+    await beta.evaluate((element) => element === document.activeElement),
+    true,
+    `focus stays on beta, not on ${await activeName(page)}`,
+  );
+});

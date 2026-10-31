@@ -354,9 +354,9 @@ export function ChannelsToggle({
     const element = button.current;
     // On a phone the button moves to another header as a pane opens or closes
     // and as back or forward switches views. The one that mounts takes the
-    // focus the one that left held, then starts clean.
-    if (focusLost.current && document.activeElement === document.body)
-      element?.focus();
+    // focus the one that left held, then starts clean. A claim can't take
+    // focus from a drawer row, because the header is inert under the drawer.
+    if (focusLost.current) element?.focus();
     focusLost.current = false;
     return () => {
       if (document.activeElement === element) focusLost.current = true;

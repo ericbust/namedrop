@@ -169,9 +169,8 @@ main column paints outside it.
 Those floors add up to 373px: the 56px header, the 39px one-line member strip,
 the banner's 56px and its two 12px gaps, the timeline's 112px and the 86px
 composer. A window under 420px tall, such as a phone in landscape, lowers them:
-the header is 48px, the banner's floor 40px, the gap above it 8px and the
-timeline's 48px, 281px in all. The member strip keeps its one line, and the
-banner keeps its 12px gap above the timeline. So the
+the header is 48px, the banner's floor 40px and the timeline's 48px, 285px in
+all. The member strip keeps its one line and the gaps stay 12px. So the
 composer stays whole down to a 300px column, the Reconnecting bar included.
 Under that, as the last resort, the main column and a pane scroll as a whole
 (`overflow-y: auto`) instead of clipping, so the composer and the thread's
@@ -485,9 +484,8 @@ its tooltip. Show three items, then a "Show N more" button.
 The banner takes at most 40 percent of the window's height, shrinks before the
 timeline would drop under 112px (48px in a window under 420px tall), and
 scrolls inside. 12px separate it from the
-timeline. In a window under 420px tall the gap above the banner is 8px, and
-each item's padding is 6px top and bottom with no gap between its rows, so a card with one item
-shows its whole action row, Details included, in a 390 by 460 window at 125
+timeline. In a window under 420px tall each item's padding is 6px top and
+bottom with no gap between its rows, so a card with one item shows its whole action row, Details included, in a 390 by 460 window at 125
 percent zoom (312 by 368 CSS pixels). A longer card scrolls inside. See App
 shell for each layout.
 Announce new items through a polite live region.

@@ -2108,12 +2108,11 @@ code.inline {
   .channel-header {
     height: 48px;
   }
-  /* The Needs-you card tightens, so a card with one item shows its last row of
-     actions whole in a 390x460 window at 125 % zoom. A longer card scrolls. */
   .attention {
     min-height: 40px;
-    margin-top: var(--space-2);
   }
+  /* The Needs-you card tightens, so a card with one item shows its last row of
+     actions whole in a 390x460 window at 125 % zoom. A longer card scrolls. */
   .attention-item {
     row-gap: 0;
     padding-block: 6px;
