@@ -280,6 +280,8 @@ elif sys.argv[1:] == ['events', '--json']:
     while not os.path.exists(os.environ['SUBSCRIBER_TEST_ROOT']+'/disconnect'):
         print('{{"method":"missed","params":{{}}}}', flush=True)
         time.sleep(.05)
+    with open(os.environ['SUBSCRIBER_TEST_ROOT']+'/stream-ended', 'w') as ended:
+        ended.write(str(os.getpid()))
 elif sys.argv[1:] == ['ls', '--json']:
     print('{{"terminals":[]}}')
 else:
@@ -465,7 +467,7 @@ fn detached_subscriber_child() {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "subscriber did not exit after replacement or stopped core"
+                "subscriber did not exit after replacement or verified stop"
             );
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
@@ -518,10 +520,68 @@ fn detached_subscriber_child() {
     std::fs::remove_file(state.join("runtime/current/namedrop")).unwrap();
     std::os::unix::fs::symlink(&successor, state.join("runtime/current/namedrop")).unwrap();
     wait_exit(selected_pid);
+    let before_restart_epoch = epoch();
     namedrop::host::hc::events::start(&host, &launcher, &state).unwrap();
     let final_pid = record()["pid"].as_u64().unwrap() as i32;
-    std::fs::remove_file(std::env::var_os("HC_TERMINAL_SOCKET").unwrap()).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while epoch() <= before_restart_epoch {
+        assert!(std::time::Instant::now() < deadline, "final subscriber stream did not start");
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let socket = std::path::PathBuf::from(std::env::var_os("HC_TERMINAL_SOCKET").unwrap());
+    std::fs::remove_file(&socket).unwrap();
     std::fs::write(root.join("disconnect"), "").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !root.join("stream-ended").exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fake stream did not disconnect"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let calls = || std::fs::read_to_string(root.join("calls.jsonl")).unwrap();
+    let absent_calls = calls();
+    let absent_epoch = epoch();
+    std::thread::sleep(std::time::Duration::from_millis(750));
+    namedrop::host::hc::events::status(&state, "hc:628bcf8129aa037b1fa5aad3504926a6")
+        .expect("subscriber exited instead of waiting for the stopped core");
+    assert_eq!(record()["pid"], json!(final_pid));
+    assert_eq!(
+        calls(),
+        absent_calls,
+        "subscriber invoked hc while the socket was absent"
+    );
+    std::fs::remove_file(root.join("disconnect")).unwrap();
+    let _reconnected = hc_socket::HcSocket::bind(&socket).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while epoch() <= absent_epoch {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "reconnected stream did not reconcile its missed event"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(
+        record()["pid"],
+        json!(final_pid),
+        "reconnect replaced the subscriber"
+    );
+    assert!(
+        calls()[absent_calls.len()..].lines().any(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["args"] == json!(["events", "--json"])
+        }),
+        "subscriber did not reopen the stream"
+    );
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::remove_file(root.join("stream-ended")).unwrap();
+    std::fs::write(root.join("disconnect"), "").unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while !root.join("stream-ended").exists() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    std::fs::write(directory.join("stop-request.json"), record().to_string()).unwrap();
     wait_exit(final_pid);
 }
 
