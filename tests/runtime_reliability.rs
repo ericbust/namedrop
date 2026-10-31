@@ -1635,7 +1635,6 @@ fn eventless_rejections_keep_pane_lock_deferrals_on_the_short_retry() {
             .state()
             .join("agent-status-reconciliation")
             .join(scope);
-        // Keep only setup events so the rejection deadline schedules the next drain.
         for entry in fs::read_dir(directory).unwrap() {
             let path = entry.unwrap().path();
             let name = path.file_name().unwrap().to_string_lossy();
