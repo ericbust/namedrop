@@ -378,6 +378,101 @@ fn name_succeeds_with_a_warning_when_the_cosmetic_tab_label_cannot_be_applied() 
 }
 
 #[test]
+fn name_warns_when_the_tab_label_cannot_be_read() {
+    struct RenameFailureHerdr {
+        database_path: PathBuf,
+        saw_durable_intent: Mutex<bool>,
+    }
+    impl HerdrCommandExecutor for RenameFailureHerdr {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            let stdout = match args {
+                ["workspace", "list"] => {
+                    r#"{"result":{"workspaces":[{"workspace_id":"workspace-1"}]}}"#
+                }
+                ["worktree", "list", "--cwd", "/repo", "--json"]
+                | ["worktree", "list", "--json"] => {
+                    r#"{"result":{"worktrees":[{"path":"/repo","open_workspace_id":"workspace-1"}]}}"#
+                }
+                ["pane", "list", "--workspace", "workspace-1"] => {
+                    r#"{"result":{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"workspace-1","agent":"codex","agent_session":{"value":"session-1"},"agent_status":"idle"}]}}"#
+                }
+                ["pane", "report-metadata", "pane-1", ..] => "{}",
+                ["tab", "get", "tab-1"] => return Err("tab lookup failed".into()),
+                ["tab", "rename", "tab-1", "@reviewer"] => {
+                    *self.saw_durable_intent.lock().unwrap() =
+                        Connection::open(&self.database_path)
+                            .unwrap()
+                            .query_row(
+                                "SELECT pending_label = '@reviewer'
+                             FROM managed_tab_labels WHERE tab_id = 'tab-1'",
+                                [],
+                                |row| row.get(0),
+                            )
+                            .unwrap();
+                    return Err("tab was closed during rename".to_owned());
+                }
+                _ => return Err(format!("unexpected Herdr command: {args:?}")),
+            };
+            Ok(HerdrCommandOutput {
+                stdout: stdout.to_owned(),
+            })
+        }
+    }
+
+    struct RenameFailureIds(AtomicU64);
+    impl IdGenerator for RenameFailureIds {
+        fn next_id(&self, kind: &str) -> String {
+            format!("{kind}-{}", self.0.fetch_add(1, Ordering::Relaxed))
+        }
+    }
+    struct RenameFailureClock;
+    impl Clock for RenameFailureClock {
+        fn now_unix_ms(&self) -> u64 {
+            100
+        }
+        fn wait_ms(&self, _duration_ms: u64) {}
+    }
+
+    let directory = TestDirectory::new();
+    let herdr = RenameFailureHerdr {
+        database_path: directory.path().join("namedrop.sqlite3"),
+        saw_durable_intent: Mutex::new(false),
+    };
+    let ids = RenameFailureIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-1"),
+        session_socket_id: "socket-a",
+        host: namedrop::TuiHost::new(&herdr),
+        clock: &RenameFailureClock,
+        ids: &ids,
+    };
+
+    let result =
+        execute_lifecycle_operation("name", serde_json::json!({"alias": "@reviewer"}), &runtime)
+            .expect("durable naming must not fail because a cosmetic host label failed");
+
+    assert_eq!(result["alias"], "@reviewer");
+    assert_eq!(result["tab_label"]["status"], "warning");
+    assert_eq!(
+        result["tab_label"]["message"],
+        "Pane named, but its tab label could not be updated."
+    );
+    assert_eq!(
+        StateStore::open(directory.path())
+            .unwrap()
+            .transaction(|transaction| transaction.list_pane_addresses(&namespace()))
+            .unwrap()[0]
+            .alias,
+        "reviewer"
+    );
+}
+
+#[test]
 fn managed_singleton_tab_labels_restore_only_while_the_plugin_still_owns_them() {
     struct ManagedLabelHerdr {
         split: Mutex<bool>,

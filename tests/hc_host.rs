@@ -11,6 +11,7 @@ struct Fixture {
     send_error: Option<String>,
     read_text: Option<String>,
     clear_error: RefCell<Option<String>>,
+    rename_error: RefCell<bool>,
 }
 impl Default for Fixture {
     fn default() -> Self {
@@ -22,6 +23,7 @@ impl Default for Fixture {
             send_error: None,
             read_text: None,
             clear_error: RefCell::new(None),
+            rename_error: RefCell::new(false),
         }
     }
 }
@@ -55,6 +57,12 @@ impl HerdrCommandExecutor for Fixture {
             }
             ["--version"] => "herdr-core 0.1.14\n".to_owned(),
             ["label", id, labels @ ..] => {
+                if *self.rename_error.borrow()
+                    && (labels.contains(&"namedrop.name=bob")
+                        || (*id == "t2" && labels.contains(&"namedrop.name=alice")))
+                {
+                    return Err("label replacement failed".into());
+                }
                 if labels.contains(&"namedrop.name=")
                     && let Some(error) = self.clear_error.borrow().as_ref()
                 {
@@ -334,6 +342,156 @@ fn checkout_ownership_uses_all_roots_and_rejects_multiple_spaces() {
         .unwrap();
     assert!(!space.worktree_attached);
     assert_eq!(space.worktree_id.as_str(), "hc-space:fixture-space");
+}
+
+fn check_name_mutation(operation: &str, failure: bool) {
+    check_name_mutation_failure(operation, failure, false);
+}
+
+fn check_name_mutation_failure(operation: &str, failure: bool, target_failure: bool) {
+    let fixture = Fixture::default();
+    let state = std::env::temp_dir().join(format!(
+        "namedrop-hc-mutation-{}-{operation}-{failure}-{target_failure}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&state);
+    std::fs::create_dir_all(&state).unwrap();
+    let home = state.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let clock = namedrop::SystemClock;
+    let ids = namedrop::ProcessIds::default();
+    let runtime = namedrop::LifecycleRuntime {
+        state_directory: &state,
+        home_directory: Some(&home),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:fixture",
+        host: HcHost::new(&fixture),
+        clock: &clock,
+        ids: &ids,
+    };
+    namedrop::execute_lifecycle_operation(
+        "name",
+        json!({"alias":"alice","pane_type":"terminal"}),
+        &runtime,
+    )
+    .unwrap();
+    let names = || {
+        namedrop::StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                tx.list_pane_addresses(&namedrop::StateNamespace::for_space(
+                    "hc:fixture",
+                    "fixture-space",
+                ))
+            })
+            .unwrap()
+    };
+    let address_id = names()[0].id.clone();
+    let mut other = fixture.terminals.borrow()[0].clone();
+    other["address"] = json!("t2");
+    other["labels"]["namedrop.name"] = json!("");
+    fixture.terminals.borrow_mut().push(other);
+    let rename = matches!(operation, "name" | "address.rename");
+    if failure {
+        if rename || target_failure {
+            *fixture.rename_error.borrow_mut() = true;
+        } else {
+            *fixture.clear_error.borrow_mut() = Some("label clear failed".into());
+        }
+    }
+    let input = match operation {
+        "name" => json!({"alias":"bob","pane_type":"terminal"}),
+        "address.rename" => json!({"address_id":address_id,"alias":"bob"}),
+        "address.bind" => json!({"address_id":address_id,"pane_id":"t2"}),
+        "address.unbind" => json!({"address_id":address_id}),
+        _ => unreachable!(),
+    };
+    let result = namedrop::execute_lifecycle_operation(operation, input.clone(), &runtime);
+    if failure {
+        assert!(
+            result.is_err(),
+            "{operation} must report the failed label write"
+        );
+        assert_eq!(names()[0].alias, "alice", "failed rename must not commit");
+        assert_eq!(names()[0].pane_id.as_deref(), Some("t1"));
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+            "alice"
+        );
+        assert_eq!(fixture.terminals.borrow()[1]["labels"]["namedrop.name"], "");
+        *fixture.rename_error.borrow_mut() = false;
+        *fixture.clear_error.borrow_mut() = None;
+        namedrop::execute_lifecycle_operation(operation, input, &runtime).unwrap();
+    } else {
+        result.unwrap();
+    }
+    assert_eq!(
+        fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+        if rename { "bob" } else { "" }
+    );
+    assert_eq!(names()[0].alias, if rename { "bob" } else { "alice" });
+    if rename {
+        let event = json!({"jsonrpc":"2.0","method":"event","params":{"type":"labels","terminal":"t1","data":{}}}).to_string();
+        namedrop::host::hc::events::Subscriber::default()
+            .handle_line(&event, &runtime)
+            .unwrap();
+        assert_eq!(
+            names()[0].alias,
+            "bob",
+            "queued label events must preserve the rename"
+        );
+    } else {
+        assert_eq!(
+            names()[0].pane_id.as_deref(),
+            if operation == "address.bind" {
+                Some("t2")
+            } else {
+                None
+            }
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[1]["labels"]["namedrop.name"],
+            if operation == "address.bind" {
+                "alice"
+            } else {
+                ""
+            }
+        );
+    }
+    std::fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn existing_name_replacement_rolls_back_on_label_failure() {
+    check_name_mutation("name", true);
+}
+#[test]
+fn address_rename_rolls_back_on_label_failure() {
+    check_name_mutation("address.rename", true);
+}
+#[test]
+fn unbind_clears_the_old_pane_name() {
+    check_name_mutation("address.unbind", false);
+}
+#[test]
+fn unbind_rolls_back_on_label_clear_failure() {
+    check_name_mutation("address.unbind", true);
+}
+#[test]
+fn rebind_clears_the_old_pane_name() {
+    check_name_mutation("address.bind", false);
+}
+#[test]
+fn rebind_rolls_back_on_label_clear_failure() {
+    check_name_mutation("address.bind", true);
+}
+
+#[test]
+fn rebind_restores_the_old_label_if_the_new_label_fails() {
+    check_name_mutation_failure("address.bind", true, true);
 }
 
 #[test]
