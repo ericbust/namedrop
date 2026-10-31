@@ -8245,8 +8245,7 @@ mod tests {
                     )?;
                     let error = tx
                         .message_route(&ns, &MessageId::new("second"))
-                        .err()
-                        .expect("corrupt parent cycle must be refused");
+                        .expect_err("corrupt parent cycle must be refused");
                     assert_eq!(error.kind(), StoreErrorKind::Internal);
                     assert_eq!(error.message(), "reply ancestry contains a cycle");
                     Ok(())
