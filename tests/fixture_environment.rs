@@ -38,6 +38,31 @@ fn isolated_home_overrides_every_ambient_xdg_directory() {
     assert_eq!(output.lines().count(), directories.len());
 }
 
+fn assigns_home_directly(source: &str, _extension: &str) -> bool {
+    let compact: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains(".env(\"HOME\",")
+}
+
+#[test]
+fn home_assignment_guard_covers_rust_and_python_setters() {
+    for (extension, source, expected) in [
+        ("rs", r#"command.env("HOME", home)"#, true),
+        ("rs", r#"command.envs([("HOME", home)])"#, true),
+        ("rs", r#"command.isolated_home(home)"#, false),
+        ("py", "env.update(HOME=str(home))", true),
+        ("py", "env = {'HOME': str(home)}", true),
+        ("py", "os.environ['HOME'] = str(home)", true),
+        ("py", "env.update(XDG_STATE_HOME=str(state))", false),
+        ("py", "env.update(isolated_home(home))", false),
+    ] {
+        assert_eq!(
+            assigns_home_directly(source, extension),
+            expected,
+            "{source}"
+        );
+    }
+}
+
 #[test]
 fn command_fixtures_use_the_shared_home_helper() {
     fn audit(directory: &Path, violations: &mut Vec<String>) {
