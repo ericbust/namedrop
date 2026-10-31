@@ -190,7 +190,7 @@ impl ProcessHerdr {
 
     fn bounded_timeout(&self, timeout: Duration) -> Duration {
         if self.host == HostKind::Hc {
-            timeout
+            timeout.min(Duration::from_millis(MAX_HERDR_TIMEOUT_MS))
         } else {
             timeout.min(self.timeout)
         }
