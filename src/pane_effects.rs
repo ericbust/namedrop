@@ -106,7 +106,7 @@ fn checked(file: File, directory: bool) -> io::Result<File> {
     Ok(file)
 }
 
-fn open_at(directory: &File, name: &CString, flags: i32) -> io::Result<File> {
+fn raw_open_at(directory: &File, name: &CString, flags: i32) -> io::Result<File> {
     let fd = unsafe {
         libc::openat(
             directory.as_raw_fd(),
@@ -118,7 +118,11 @@ fn open_at(directory: &File, name: &CString, flags: i32) -> io::Result<File> {
     if fd < 0 {
         return Err(io::Error::last_os_error());
     }
-    checked(unsafe { File::from_raw_fd(fd) }, false)
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+fn open_at(directory: &File, name: &CString, flags: i32) -> io::Result<File> {
+    checked(raw_open_at(directory, name, flags)?, false)
 }
 
 impl PaneEffects {
@@ -131,6 +135,16 @@ impl PaneEffects {
         socket: &str,
         pane: &str,
         timeout: Duration,
+    ) -> Result<Self, AcquireError> {
+        Self::acquire_for_with_lock_open(state, socket, pane, timeout, raw_open_at)
+    }
+
+    fn acquire_for_with_lock_open(
+        state: &Path,
+        socket: &str,
+        pane: &str,
+        timeout: Duration,
+        mut open_lock: impl FnMut(&File, &CString, i32) -> io::Result<File>,
     ) -> Result<Self, AcquireError> {
         std::fs::DirBuilder::new()
             .recursive(true)
@@ -163,7 +177,8 @@ impl PaneEffects {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let lock_name = CString::new(format!("{key}.lock")).map_err(io::Error::from)?;
-        let lock = open_at(&directory, &lock_name, libc::O_RDWR | libc::O_CREAT)?;
+        let lock = open_lock(&directory, &lock_name, libc::O_RDWR | libc::O_CREAT)?;
+        let lock = checked(lock, false)?;
         acquire_flock(lock.as_raw_fd(), timeout)?;
         Ok(Self {
             _lock: lock,
@@ -472,6 +487,50 @@ mod tests {
             let mut release = String::new();
             io::stdin().lock().read_line(&mut release).unwrap();
         }
+    }
+
+    #[test]
+    fn transient_lock_open_enoent_recovers_with_exclusion() {
+        let state = State::new();
+        let mut calls = 0;
+        let mut first_open = None;
+        let gate = PaneEffects::acquire_for_with_lock_open(
+            &state.0,
+            "socket",
+            "pane",
+            Duration::ZERO,
+            |directory, name, flags| {
+                calls += 1;
+                let metadata = directory.metadata().unwrap();
+                assert!(metadata.is_dir());
+                assert!(metadata.nlink() > 0);
+                assert_eq!(metadata.uid(), unsafe { libc::geteuid() });
+                assert_eq!(metadata.mode() & 0o777, 0o700);
+                let arguments = (directory.as_raw_fd(), name.clone(), flags);
+                if calls == 1 {
+                    assert_eq!(flags, libc::O_RDWR | libc::O_CREAT);
+                    first_open = Some(arguments);
+                    Err(io::Error::from_raw_os_error(libc::ENOENT))
+                } else {
+                    assert_eq!(Some(arguments), first_open);
+                    raw_open_at(directory, name, flags)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 2);
+        let metadata = gate._lock.metadata().unwrap();
+        assert!(matches!(
+            PaneEffects::acquire_for(&state.0, "socket", "pane", Duration::ZERO),
+            Err(AcquireError::Contended)
+        ));
+        let _other =
+            PaneEffects::acquire_for(&state.0, "socket", "other-pane", Duration::ZERO).unwrap();
+        drop(gate);
+        let gate = PaneEffects::acquire_for(&state.0, "socket", "pane", Duration::ZERO).unwrap();
+        let reacquired = gate._lock.metadata().unwrap();
+        assert_eq!(reacquired.dev(), metadata.dev());
+        assert_eq!(reacquired.ino(), metadata.ino());
     }
 
     #[test]
