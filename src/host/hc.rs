@@ -1,6 +1,7 @@
 pub mod events;
 
 use super::*;
+use crate::terminal::{process_is_shell, process_start};
 use crate::{AgentRuntime, AgentSessionId, HerdrCommandExecutor, WorktreeId};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::collections::{BTreeMap, BTreeSet};
@@ -173,23 +174,6 @@ fn process_runtime(pid: u32) -> Option<AgentRuntime> {
         .or_else(|| program_runtime(crate::terminal::process_executable(pid)?.to_str()?))
 }
 
-#[cfg(target_os = "linux")]
-fn process_start(pid: u32) -> Option<String> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    Some(
-        stat.rsplit_once(')')?
-            .1
-            .split_whitespace()
-            .nth(19)?
-            .to_owned(),
-    )
-}
-
-#[cfg(not(target_os = "linux"))]
-fn process_start(_: u32) -> Option<String> {
-    None
-}
-
 fn local_terminal(pane: &str) -> Result<(), HostError> {
     if pane.contains('/') {
         return Err("Namedrop supports local hc terminals only"
@@ -237,9 +221,8 @@ impl Terminal {
     fn session_owner(&self) -> Option<(u32, AgentRuntime)> {
         let pid = self.labels.get("namedrop.session.pid")?.parse().ok()?;
         let runtime = process_runtime(pid)?;
-        if let Some(start) = self.labels.get("namedrop.session.start")
-            && process_start(pid).as_ref() != Some(start)
-        {
+        let start = self.labels.get("namedrop.session.start")?;
+        if start.is_empty() || process_start(pid).as_ref() != Some(start) {
             return None;
         }
         Some((pid, runtime))
@@ -491,7 +474,8 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
             .copied()
             .find(|pid| process_runtime(*pid).is_some())
             .ok_or("hc terminal has no recognized agent ancestor to own a session".to_owned())?;
-        let start = process_start(pid).unwrap_or_default();
+        let start = process_start(pid)
+            .ok_or("Could not verify the agent process start identity".to_owned())?;
         self.update_labels(
             &terminal,
             &[
@@ -505,7 +489,7 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
     pub fn invalidate_session(&self, state: &Path, pane: &str) -> Result<(), HostError> {
         let _lock = label_lock(state)?;
         let terminal = self.terminal(pane, None)?;
-        if terminal.session().is_some() {
+        if terminal.state == "live" && terminal.session().is_some() {
             return Ok(());
         }
         self.clear_session(&terminal)
@@ -652,7 +636,9 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
 
     fn process_info(&self, pane: &str) -> Option<ProcessInfo> {
         let terminal = self.terminal(pane, None).ok()?;
-        let shell_pid = terminal.pid.filter(|pid| *pid > 0)?;
+        let shell_pid = terminal
+            .pid
+            .filter(|pid| *pid > 0 && process_is_shell(*pid))?;
         let foreground = u32::try_from(terminal.foreground?.pid)
             .ok()
             .filter(|pid| *pid > 0)?;
@@ -732,7 +718,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         if terminal.state != "live"
             || !matches!(terminal.occupancy(), Occupancy::Terminal)
             || !shell_foreground
-            || terminal.pid.is_none()
+            || !terminal.pid.is_some_and(process_is_shell)
         {
             return Err(pre_invocation(
                 "hc terminal is not an available shell".to_owned().into(),
@@ -916,6 +902,8 @@ pub(crate) mod testing {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         record["labels"]["namedrop.session.pid"] = serde_json::json!(agent.id().to_string());
+        record["labels"]["namedrop.session.start"] =
+            serde_json::json!(process_start(agent.id()).unwrap());
         record["foreground"] =
             serde_json::json!({"pid":agent.id(),"argv":["codex"],"name":"codex"});
         record["status"] = word
@@ -952,13 +940,23 @@ pub(crate) mod testing {
 
     #[test]
     fn golden_argv() {
-        #[derive(Default)]
-        struct Executor(std::cell::RefCell<Vec<Vec<String>>>);
+        struct Executor(std::cell::RefCell<Vec<Vec<String>>>, u32);
         impl HerdrCommandExecutor for Executor {
             fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
                 self.0
                     .borrow_mut()
                     .push(args.iter().map(|arg| (*arg).to_owned()).collect());
+                if matches!(args, ["get", ..]) {
+                    let mut terminal: serde_json::Value = serde_json::from_str(include_str!(
+                        "../../tests/fixtures/hc/get-labeled.stdout"
+                    ))
+                    .unwrap();
+                    terminal["pid"] = serde_json::json!(self.1);
+                    terminal["foreground"]["pid"] = serde_json::json!(self.1);
+                    return Ok(crate::HerdrCommandOutput {
+                        stdout: terminal.to_string(),
+                    });
+                }
                 let stdout = match args {
                     ["ls", "--json"] => include_str!("../../tests/fixtures/hc/ls.stdout"),
                     ["get", ..] => include_str!("../../tests/fixtures/hc/get-labeled.stdout"),
@@ -972,13 +970,33 @@ pub(crate) mod testing {
                 Ok(crate::HerdrCommandOutput { stdout })
             }
         }
-        let executor = Executor::default();
+        let mut shell = Command::new("/bin/bash")
+            .args([
+                "--noprofile",
+                "--norc",
+                "-c",
+                "printf 'ready\\n'; read -r _",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(shell.stdout.take().unwrap()),
+            &mut ready,
+        )
+        .unwrap();
+        assert_eq!(ready, "ready\n");
+        let executor = Executor(std::cell::RefCell::default(), shell.id());
         let host = HcHost::new(&executor);
         host.panes(PaneScope::All).unwrap();
         host.read("t1", 40, None).unwrap();
         host.read("t1", 1000, None).unwrap();
         assert!(host.prompt("t1", "hello").is_err());
         host.run_in_pane("t1", "command").unwrap();
+        shell.kill().unwrap();
+        shell.wait().unwrap();
         host.interrupt("t1").unwrap();
         host.set_labels("t1", &[("namedrop.session", "next-session")])
             .unwrap();

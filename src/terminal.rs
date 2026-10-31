@@ -1,3 +1,8 @@
+mod process_identity;
+#[cfg(target_os = "macos")]
+use process_identity::process_bsd_info;
+pub(crate) use process_identity::process_start;
+
 use crate::{ActorKind, Clock, DeliveryAttemptId, IdGenerator, MutationAttribution, StateStore};
 use crate::{Host, LifecycleRuntime, PaneType};
 use std::{
@@ -216,6 +221,28 @@ pub(crate) fn shell_is_available(herdr: &impl Host, pane_id: &str) -> bool {
         .is_some_and(|p| p.shell_pid > 0 && p.shell_pid == p.foreground_process_group_id)
 }
 
+pub(crate) fn process_is_shell(pid: u32) -> bool {
+    let Some(executable) = process_executable(pid) else {
+        return false;
+    };
+    process_arguments(pid).is_some()
+        && matches!(
+            executable.file_name().and_then(|name| name.to_str()),
+            Some(
+                "sh" | "bash"
+                    | "zsh"
+                    | "fish"
+                    | "dash"
+                    | "ksh"
+                    | "mksh"
+                    | "ash"
+                    | "nu"
+                    | "csh"
+                    | "tcsh"
+            )
+        )
+}
+
 pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
     std::iter::successors(parent_pid(pid).filter(|pid| *pid != 0), |pid| {
         parent_pid(*pid).filter(|pid| *pid != 0)
@@ -345,26 +372,7 @@ pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
-    let pid = libc::pid_t::try_from(pid).ok()?;
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
-    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
-    // SAFETY: proc_pidinfo writes at most `size` bytes into `info`, and only a
-    // return value equal to `size` means the whole struct was filled.
-    let written = unsafe {
-        libc::proc_pidinfo(
-            pid,
-            libc::PROC_PIDTBSDINFO,
-            0,
-            info.as_mut_ptr().cast(),
-            size,
-        )
-    };
-    if written != size {
-        return None;
-    }
-    // SAFETY: the call above filled every byte of the struct.
-    let info = unsafe { info.assume_init() };
-    Some(info.pbi_ppid)
+    Some(process_bsd_info(pid)?.pbi_ppid)
 }
 
 /// Detection never infers a terminal merely from a missing native session ID.
@@ -484,7 +492,15 @@ mod foreground_transition_tests {
         true
     }
 
-    struct HcSamples(Cell<usize>);
+    #[allow(dead_code)]
+    mod process {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/hc/process.rs"
+        ));
+    }
+
+    struct HcSamples(Cell<usize>, process::AgentProcess);
     impl crate::HerdrCommandExecutor for HcSamples {
         fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
             assert_eq!(args, ["get", "t1", "--json"]);
@@ -493,6 +509,7 @@ mod foreground_transition_tests {
             let mut terminal: serde_json::Value =
                 serde_json::from_str(include_str!("../tests/fixtures/hc/get-labeled.stdout"))
                     .unwrap();
+            terminal["pid"] = serde_json::json!(self.1.pid());
             let group = unsafe { libc::getpgid(0) };
             assert_ne!(group as u32, std::process::id());
             terminal["foreground"]["pid"] =
@@ -510,7 +527,7 @@ mod foreground_transition_tests {
         ) {
             return;
         }
-        let samples = HcSamples(Cell::new(0));
+        let samples = HcSamples(Cell::new(0), process::AgentProcess::shell());
         assert!(runner_in_foreground(
             &crate::HcHost::new(&samples),
             "t1",
@@ -527,7 +544,7 @@ mod foreground_transition_tests {
         ) {
             return;
         }
-        let samples = HcSamples(Cell::new(0));
+        let samples = HcSamples(Cell::new(0), process::AgentProcess::shell());
         assert!(!runner_in_foreground(
             &crate::HcHost::new(&samples),
             "t1",
