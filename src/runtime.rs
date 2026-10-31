@@ -144,7 +144,6 @@ const MAX_HERDR_TIMEOUT_MS: u64 = 60_000;
 pub struct ProcessHerdr {
     binary: String,
     host: HostKind,
-    remove_env: Vec<String>,
     timeout: Duration,
     socket: Option<String>,
     child_executable: Option<std::path::PathBuf>,
@@ -154,7 +153,6 @@ impl Default for ProcessHerdr {
     fn default() -> Self {
         Self {
             host: HostKind::Tui,
-            remove_env: Vec::new(),
             binary: env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned()),
             socket: None,
             child_executable: None,
@@ -177,23 +175,22 @@ impl ProcessHerdr {
             HostKind::Hc => Self {
                 host,
                 binary: env::var("HC_BIN_PATH").unwrap_or_else(|_| "hc".to_owned()),
-                remove_env: vec!["HC_TERMINAL_ID".into(), "HC_TERMINAL_SOCKET".into()],
                 ..Self::default()
             },
         }
     }
 
     pub fn command(&self) -> Command {
-        let mut command = Command::new(&self.binary);
-        for key in &self.remove_env {
-            command.env_remove(key);
+        match self.host {
+            HostKind::Hc => hc_command(&self.binary),
+            HostKind::Tui => {
+                let mut command = Command::new(&self.binary);
+                if let Some(socket) = &self.socket {
+                    command.env("HERDR_SOCKET_PATH", socket);
+                }
+                command
+            }
         }
-        if self.host == HostKind::Hc {
-            remove_tui_environment(&mut command);
-        } else if let Some(socket) = &self.socket {
-            command.env("HERDR_SOCKET_PATH", socket);
-        }
-        command
     }
 
     pub fn with_child_executable(mut self, executable: std::path::PathBuf) -> Self {
@@ -370,6 +367,15 @@ impl ProcessHerdr {
     }
 }
 
+pub(crate) fn hc_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    let mut command = Command::new(program);
+    command
+        .env_remove("HC_TERMINAL_ID")
+        .env_remove("HC_TERMINAL_SOCKET");
+    remove_tui_environment(&mut command);
+    command
+}
+
 fn remove_tui_environment(command: &mut Command) {
     use std::os::unix::ffi::OsStrExt;
     for (key, _) in env::vars_os() {
@@ -536,7 +542,6 @@ mod bounded_read_tests {
         let executor = ProcessHerdr {
             binary: "/bin/sh".into(),
             host: HostKind::Hc,
-            remove_env: Vec::new(),
             timeout: Duration::from_millis(10),
             socket: None,
             child_executable: None,
@@ -620,7 +625,6 @@ mod bounded_read_tests {
         let executor = ProcessHerdr {
             binary: binary.to_string_lossy().into_owned(),
             host: HostKind::Hc,
-            remove_env: Vec::new(),
             timeout: Duration::from_millis(DEFAULT_HERDR_TIMEOUT_MS),
             socket: None,
             child_executable: None,
@@ -635,7 +639,6 @@ mod bounded_read_tests {
         let executor = ProcessHerdr {
             binary: "/bin/sh".to_owned(),
             host: HostKind::Tui,
-            remove_env: Vec::new(),
             timeout: Duration::from_secs(2),
             socket: None,
             child_executable: None,
