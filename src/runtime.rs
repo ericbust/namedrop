@@ -207,14 +207,44 @@ pub fn hc_socket_path(variable: impl Fn(&str) -> Option<String>) -> Result<PathB
     hc_socket_path_os(|key| variable(key).map(Into::into))
 }
 
+fn hc_config_socket(text: &str) -> Option<String> {
+    let config = text.parse::<toml_edit::DocumentMut>().ok()?;
+    for key in ["socket", "detach_key", "headless"] {
+        if config
+            .get(key)
+            .is_some_and(|value| value.as_str().is_none())
+        {
+            return None;
+        }
+    }
+    for key in [
+        "wait_timeout",
+        "notes_quiet",
+        "history_mb",
+        "machine_timeout",
+    ] {
+        if config
+            .get(key)
+            .is_some_and(|value| value.as_float().is_none() && value.as_integer().is_none())
+        {
+            return None;
+        }
+    }
+    if config
+        .get("notes")
+        .is_some_and(|value| value.as_bool().is_none())
+    {
+        return None;
+    }
+    config.get("socket")?.as_str().map(str::to_owned)
+}
+
 pub(crate) fn hc_socket_path_os(
     variable: impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Result<PathBuf, String> {
     let session = hc_session(|key| variable(key)?.into_string().ok())?;
-    for key in ["HC_SOCKET", "HC_TERMINAL_SOCKET"] {
-        if let Some(socket) = variable(key).filter(|value| !value.is_empty()) {
-            return Ok(socket.into());
-        }
+    if let Some(socket) = variable("HC_SOCKET").filter(|value| !value.is_empty()) {
+        return Ok(socket.into());
     }
     let config_root = variable("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
@@ -222,26 +252,11 @@ pub(crate) fn hc_socket_path_os(
         .or_else(|| variable("HOME").map(|home| PathBuf::from(home).join(".config")));
     if let Some(root) = config_root {
         let path = root.join("herdr-core/config.toml");
-        match fs::read_to_string(&path) {
-            Ok(contents) => {
-                let config = contents
-                    .parse::<toml_edit::DocumentMut>()
-                    .map_err(|error| format!("Invalid hc config {}: {error}", path.display()))?;
-                if let Some(socket) = config.get("socket") {
-                    let socket = socket
-                        .as_str()
-                        .filter(|socket| !socket.is_empty())
-                        .ok_or_else(|| {
-                            format!(
-                                "Invalid hc config {}: socket must be a nonempty string",
-                                path.display()
-                            )
-                        })?;
-                    return Ok(socket.into());
-                }
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("Cannot read hc config {}: {error}", path.display())),
+        if let Some(socket) = fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| hc_config_socket(&text))
+        {
+            return Ok(socket.into());
         }
     }
     let runtime = variable("XDG_RUNTIME_DIR")
