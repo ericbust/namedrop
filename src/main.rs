@@ -841,13 +841,13 @@ fn with_runtime_options<T>(
     let environment = &options.environment;
     let home_directory = environment.home().filter(|path| path.is_absolute());
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
-    let transport = ProcessHerdr::from_snapshot(kind, &options.environment).with_socket(
-        if kind == HostKind::Tui {
+    let transport = ProcessHerdr::from_snapshot(kind, &options.environment)
+        .with_socket(if kind == HostKind::Tui {
             options.herdr_socket.clone()
         } else {
             None
-        },
-    );
+        })
+        .with_state_directory(state_directory.to_owned());
     let host = RuntimeHost::new(kind, &transport);
     let hc_socket_id = match host {
         RuntimeHost::Hc(host) => Some(host.core_identity()?),
@@ -997,7 +997,8 @@ fn run_mailbox_wake_hook(state_directory: &Path, options: &RuntimeOptions) -> Ex
     let wake = || -> Result<(), String> {
         let kind = options.host_kind()?;
         let transport = ProcessHerdr::from_snapshot(kind, &options.environment)
-            .with_socket(options.herdr_socket.clone());
+            .with_socket(options.herdr_socket.clone())
+            .with_state_directory(state_directory.to_owned());
         let host = RuntimeHost::new(kind, &transport);
         let socket_id = match host {
             RuntimeHost::Hc(host) => host.core_identity()?,

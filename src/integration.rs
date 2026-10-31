@@ -240,7 +240,10 @@ pub(crate) fn tool_environment(
                 environment.insert("HC_SESSION".to_owned(), session);
             }
             if let Ok(endpoint) = captured.hc_endpoint() {
-                environment.insert("HC_SOCKET".to_owned(), endpoint.to_string_lossy().into_owned());
+                environment.insert(
+                    "HC_SOCKET".to_owned(),
+                    endpoint.to_string_lossy().into_owned(),
+                );
             }
         }
         return environment;
