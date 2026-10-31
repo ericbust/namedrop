@@ -1359,6 +1359,19 @@ fn cached_session_after_other_pane_event(cleanup_failure: bool) {
                     *fixture.session_clear_failure.borrow_mut() = cleanup_failure;
                     let event = json!({"method":"event","params":{"type":kind,"terminal":"t2"}})
                         .to_string();
+                    subscriber.handle_line(&event, runtime).unwrap();
+                    assert!(
+                        fixture
+                            .calls
+                            .borrow()
+                            .iter()
+                            .all(|call| call[0] != "get" || call[1] == "t2")
+                    );
+                    assert_eq!(
+                        fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+                        "original-session"
+                    );
+                    let event = session_event("labels", fixture);
                     let result = subscriber.handle_line(&event, runtime);
                     if cleanup_failure {
                         assert!(result.unwrap_err().contains("session cleanup failed"));
@@ -1446,7 +1459,7 @@ fn cached_session_after_other_pane_event(cleanup_failure: bool) {
 }
 
 #[test]
-fn cached_dead_session_clears_on_other_pane_event() {
+fn cached_dead_session_waits_for_own_pane_event() {
     cached_session_after_other_pane_event(false);
 }
 
@@ -1489,7 +1502,7 @@ fn stale_observation_refresh_preserves_replacement_session() {
         replacement["labels"]["namedrop.session.start"] = json!(process::start(fresh.pid()));
         replacement["foreground"]["pid"] = json!(fresh.pid());
         drop(old);
-        *fixture.replacement_on_get.borrow_mut() = Some((2, replacement));
+        *fixture.replacement_on_get.borrow_mut() = Some((1, replacement));
         namedrop::host::hc::events::Subscriber::default()
             .handle_line(&session_event("status", fixture), runtime)
             .unwrap();
@@ -1558,8 +1571,7 @@ fn stale_session_refresh_preserves_labels_after_move_to_inactive_space() {
                     .map(|key| (key, moved["labels"][key].clone()))
                     .collect();
                     drop(old);
-                    *fixture.replacement_on_get.borrow_mut() =
-                        Some((if kind == "snapshot" { 1 } else { 2 }, moved));
+                    *fixture.replacement_on_get.borrow_mut() = Some((1, moved));
                     subscriber
                         .handle_line(&session_event(kind, fixture), runtime)
                         .unwrap();
@@ -2492,14 +2504,29 @@ fn due_mailbox_tick_does_not_retry_an_unavailable_dead_owner() {
 fn carried_missed_snapshot_and_dirty_read_each_pane_once() {
     check("carried-missed", |fixture, runtime| {
         let mut subscriber = namedrop::host::hc::events::Subscriber::default();
-        subscriber.handle_line(&session_event("snapshot", fixture), runtime).unwrap();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), runtime)
+            .unwrap();
         fixture.calls.borrow_mut().clear();
-        let snapshot = json!({"method":"missed","params":{"seq":10,"terminals":*fixture.terminals.borrow()}}).to_string();
-        let dirty = json!({"method":"event","params":{"seq":11,"type":"labels","terminal":"t1"}}).to_string();
-        subscriber.handle_lines([snapshot.as_str(), dirty.as_str()], runtime).unwrap();
+        let snapshot =
+            json!({"method":"missed","params":{"seq":10,"terminals":*fixture.terminals.borrow()}})
+                .to_string();
+        let dirty = json!({"method":"event","params":{"seq":11,"type":"labels","terminal":"t1"}})
+            .to_string();
+        subscriber
+            .handle_lines([snapshot.as_str(), dirty.as_str()], runtime)
+            .unwrap();
         let calls = fixture.calls.borrow();
-        assert_eq!(calls.iter().filter(|call| call[0] == "ls").count(), 0, "carried snapshot must not discover: {calls:?}");
-        assert_eq!(calls.iter().filter(|call| call[0] == "get").count(), 1, "one observation per pane: {calls:?}");
+        assert_eq!(
+            calls.iter().filter(|call| call[0] == "ls").count(),
+            0,
+            "carried snapshot must not discover: {calls:?}"
+        );
+        assert_eq!(
+            calls.iter().filter(|call| call[0] == "get").count(),
+            1,
+            "one observation per pane: {calls:?}"
+        );
     });
 }
 
@@ -2509,14 +2536,162 @@ fn dirty_alias_and_dead_session_share_one_fresh_read() {
         let agent = process::AgentProcess::new();
         queued_agent(fixture, runtime, agent.pid());
         let mut subscriber = namedrop::host::hc::events::Subscriber::default();
-        subscriber.handle_line(&session_event("snapshot", fixture), runtime).unwrap();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), runtime)
+            .unwrap();
         drop(agent);
         fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("new-alias");
         fixture.calls.borrow_mut().clear();
-        subscriber.handle_line(&session_event("labels", fixture), runtime).unwrap();
+        subscriber
+            .handle_line(&session_event("labels", fixture), runtime)
+            .unwrap();
         let calls = fixture.calls.borrow();
-        assert_eq!(calls.iter().filter(|call| call[0] == "get").count(), 1, "cleanup and naming must reuse the observation: {calls:?}");
-        assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.session"], "");
-        assert_eq!(fixture.terminals.borrow()[0]["labels"]["namedrop.name"], "new-alias");
+        assert_eq!(
+            calls.iter().filter(|call| call[0] == "get").count(),
+            1,
+            "cleanup and naming must reuse the observation: {calls:?}"
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            ""
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.name"],
+            "new-alias"
+        );
+    });
+}
+
+#[test]
+fn missed_snapshots_validate_records_and_supersede_older_events() {
+    check("missed-sequences", |fixture, runtime| {
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), runtime)
+            .unwrap();
+        fixture.calls.borrow_mut().clear();
+        let old = json!({"method":"event","params":{"seq":9,"type":"removed","terminal":"t1"}})
+            .to_string();
+        let snapshot =
+            json!({"method":"missed","params":{"seq":10,"terminals":*fixture.terminals.borrow()}})
+                .to_string();
+        subscriber
+            .handle_lines([old.as_str(), snapshot.as_str(), old.as_str()], runtime)
+            .unwrap();
+        subscriber.handle_line(&old, runtime).unwrap();
+        assert!(
+            fixture.calls.borrow().is_empty(),
+            "superseded events must not fetch or close: {:?}",
+            fixture.calls.borrow()
+        );
+        for malformed in [json!(null), json!({}), json!([{"address":"incomplete"}])] {
+            assert!(
+                subscriber
+                    .handle_line(
+                        &json!({"method":"missed","params":{"seq":11,"terminals":malformed}})
+                            .to_string(),
+                        runtime
+                    )
+                    .is_err()
+            );
+        }
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .handle_line(
+                r#"{"method":"missed","params":{"seq":12,"terminals":[]}}"#,
+                runtime,
+            )
+            .unwrap();
+        assert!(
+            fixture.calls.borrow().iter().all(|call| call[0] != "ls"),
+            "an empty carried snapshot is not missing"
+        );
+    });
+}
+
+#[test]
+fn created_burst_with_thirty_cached_neighbors_reads_only_new_panes() {
+    check("burst-neighbors", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+        for index in 2..=30 {
+            let mut terminal = fixture.terminals.borrow()[0].clone();
+            terminal["address"] = json!(format!("t{index}"));
+            terminal["labels"]["namedrop.name"] = json!("");
+            fixture.terminals.borrow_mut().push(terminal);
+        }
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), runtime)
+            .unwrap();
+        let mut events = Vec::new();
+        for index in 31..=40 {
+            let pane = format!("t{index}");
+            let mut terminal = fixture.terminals.borrow()[1].clone();
+            terminal["address"] = json!(pane);
+            fixture.terminals.borrow_mut().push(terminal);
+            for kind in ["created", "labels", "status", "turn"] {
+                events.push(
+                    json!({"method":"event","params":{"type":kind,"terminal":pane}}).to_string(),
+                );
+            }
+        }
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .handle_lines(events.iter().map(String::as_str), runtime)
+            .unwrap();
+        let calls = fixture.calls.borrow();
+        assert_eq!(calls.len(), 10, "one call for each new pane: {calls:?}");
+        for index in 31..=40 {
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| call.as_slice() == ["get", &format!("t{index}"), "--json"])
+                    .count(),
+                1
+            );
+        }
+    });
+}
+
+#[test]
+fn first_name_uses_the_dirty_terminal_observation() {
+    check("first-name-one-read", |fixture, runtime| {
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), runtime)
+            .unwrap();
+        let mut terminal = fixture.terminals.borrow()[0].clone();
+        terminal["address"] = json!("t2");
+        terminal["labels"]["namedrop.name"] = json!("bob");
+        terminal["labels"]["namedrop.session"] = json!("");
+        terminal["foreground"] = json!({"pid":fixture._shell.pid(),"name":"bash","argv":["bash"]});
+        fixture.terminals.borrow_mut().push(terminal);
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .handle_line(
+                r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#,
+                runtime,
+            )
+            .unwrap();
+        let calls = fixture.calls.borrow();
+        assert_eq!(
+            calls.iter().filter(|call| call[0] == "get").count(),
+            1,
+            "first name reused its observation: {calls:?}"
+        );
+        assert!(
+            calls.iter().all(|call| call[0] != "ls"),
+            "first name must not discover: {calls:?}"
+        );
+        let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+        let addresses = namedrop::StateStore::open(runtime.state_directory)
+            .unwrap()
+            .transaction(|tx| tx.list_pane_addresses(&namespace))
+            .unwrap();
+        assert!(
+            addresses
+                .iter()
+                .any(|address| address.alias == "bob" && address.pane_id.as_deref() == Some("t2"))
+        );
     });
 }

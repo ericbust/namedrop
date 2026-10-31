@@ -1171,7 +1171,7 @@ fn removal_serializes_with_a_name_request_already_being_read() {
         .transaction(|transaction| transaction.list_pane_addresses(&namespace))
         .unwrap()
         .remove(0);
-    let (entered, resume) = fixture.pause_on_get(2);
+    let (entered, resume) = fixture.pause_on_get(1);
     std::thread::scope(|scope| {
         let event = scope.spawn(|| {
             namedrop::host::hc::events::Subscriber::default().handle_line(
