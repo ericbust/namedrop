@@ -2036,12 +2036,20 @@ else:
                     summary.contains("@planner")
                         && !summary.contains("address-w1-planner")
                         && !summary.contains("gate")
-                        && !summary.contains("pane effects:")
-                        && !summary.contains("send the message again")
-                        && summary.contains("review the conversation before retrying delivery")
-                        && (summary.contains("unsafe") || summary.contains("permission"))
+                        && !summary.contains("pane effects")
+                        && !summary.contains("retrying delivery")
+                        && summary.contains(
+                            "namedrop's lock for this pane has unsafe owner or permissions",
+                        )
+                        && summary.contains(
+                            "send it again, or ask the agent that sent it to send it again",
+                        )
                 }),
-                "permanent pane lock failure needs an actionable durable diagnostic"
+                "permanent pane lock failure needs an actionable durable diagnostic: {:?}",
+                rows.attention
+                    .iter()
+                    .map(|row| &row.item.summary)
+                    .collect::<Vec<_>>()
             );
             assert!(prompts(&f).is_empty());
         }

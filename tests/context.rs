@@ -517,6 +517,74 @@ fn a_context_reference_alone_discloses_no_context_and_starts_no_turn() {
 }
 
 #[test]
+fn stored_context_failure_preserves_a_final_period_without_repeating_the_action() {
+    let directory = TestDirectory::new();
+    git_init_space(&directory);
+    setup(&directory);
+    let herdr = FakeHerdr::new(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let source = runtime(&directory, &herdr, &ids, "pane-source");
+    let reviewer = runtime(&directory, &herdr, &ids, "pane-reviewer");
+    register("address-source", &source);
+    register("address-reviewer", &reviewer);
+    let sent = create_referenced_thread(&source);
+    let pending = execute_human_context_operation(
+        "context.grant",
+        serde_json::json!({
+            "thread_id": sent["thread_id"],
+            "source_address_id": "address-source",
+            "grantee_address_ids": ["address-reviewer"]
+        }),
+        &reviewer,
+    )
+    .unwrap();
+    let grant_id = pending["grants"][0]["grant_id"].as_str().unwrap();
+    let invalid_config = directory.root.join("invalid-config.");
+    fs::write(&invalid_config, "invalid Git config").unwrap();
+    let config = directory.repo.join(".git/config");
+    fs::write(
+        &config,
+        format!(
+            "{}\n[include]\npath = {}\n",
+            fs::read_to_string(&config).unwrap(),
+            invalid_config.display()
+        ),
+    )
+    .unwrap();
+    let error = execute_context_operation(
+        "snapshot.publish",
+        serde_json::json!({
+            "grant_ids": [grant_id],
+            "capture_git_state": true,
+            "snapshot": valid_snapshot(),
+        }),
+        &source,
+    )
+    .unwrap_err();
+    assert!(
+        error.ends_with('.'),
+        "the Git diagnostic must exercise final punctuation: {error}"
+    );
+    let failure = StateStore::open(&directory.state)
+        .unwrap()
+        .transaction(|transaction| {
+            transaction
+                .unresolved_attention_items(&StateNamespace::for_space("socket-a", "workspace-1"))
+        })
+        .unwrap()
+        .into_iter()
+        .find(|item| item.source_kind == namedrop::AttentionSourceKind::ContextGrant)
+        .unwrap();
+    assert_eq!(failure.summary, format!("Shared context failed: {error}"));
+    assert!(
+        !failure.summary.contains("Ask the sender"),
+        "{}",
+        failure.summary
+    );
+    assert!(!failure.summary.ends_with(".."), "{}", failure.summary);
+}
+
+#[test]
 fn a_pending_grant_requires_a_valid_exact_session_snapshot_and_can_be_revoked() {
     let directory = TestDirectory::new();
     git_init_space(&directory);
@@ -2672,9 +2740,13 @@ fn context_request_and_fulfillment_guard_their_reply_routes() {
     );
     assert!(failure.summary.contains("65536 bytes"));
     assert!(
-        failure
-            .summary
-            .contains("Ask the sender to fix the problem and share the context again.")
+        !failure.summary.contains("Ask the sender"),
+        "{}",
+        failure.summary
+    );
+    assert_eq!(
+        failure.summary,
+        format!("Shared context failed: {oversized}")
     );
 
     // The correctly addressed in-thread fulfillment then succeeds and resolves

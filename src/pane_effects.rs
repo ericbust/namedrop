@@ -372,6 +372,10 @@ mod tests {
     #[test]
     fn unexpected_flock_errno_is_a_fault_even_at_the_deadline() {
         let error = acquire_flock(-1, Duration::ZERO).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            io::Error::from_raw_os_error(libc::EBADF).to_string()
+        );
         assert!(
             matches!(error, AcquireError::Fault(ref error) if error.raw_os_error() == Some(libc::EBADF)),
             "{error:?}"

@@ -936,6 +936,30 @@ fn doctor_assistance_prompts_only_the_bound_live_session_and_never_claims_delive
     assert_eq!(f.host.prompts.borrow().len(), 2);
 }
 
+#[test]
+fn doctor_assistance_explains_unsafe_lock_permissions_without_internal_terms() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    f.register();
+    let runtime = LifecycleRuntime {
+        workspace_id: Some("workspace-1"),
+        ..f.runtime()
+    };
+    execute_control_operation("worktree.pause", json!({}), &runtime).unwrap();
+    let directory = f.root.join("pane-effects");
+    fs::create_dir_all(&directory).unwrap();
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
+
+    let error = request_doctor_assistance(&runtime, "session-old").unwrap_err();
+    assert_eq!(
+        error,
+        "Namedrop's lock for this pane has unsafe owner or permissions"
+    );
+    assert!(!error.contains("pane effects"), "{error}");
+    assert!(f.host.prompts.borrow().is_empty());
+}
+
 /// A Doctor popup can sit open while its pane starts a different Agent Session
 /// in the same terminal. Every read taken when the human presses the key sees
 /// only the replacement, so the session captured at launch is what makes them
