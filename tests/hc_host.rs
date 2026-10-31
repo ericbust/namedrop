@@ -1705,6 +1705,11 @@ fn hc_bootstrap_first_name_installs_the_shared_command() {
 }
 
 #[test]
+fn hc_bootstrap_first_name_refuses_unowned_command_before_registration_challenges() {
+    check_hc_bootstrap(Some("unowned-first-name"));
+}
+
+#[test]
 fn hc_bootstrap_doctor_detects_deleted_command() {
     check_hc_bootstrap(Some("deleted"));
 }
@@ -1737,6 +1742,48 @@ fn hc_bootstrap_doctor_detects_symlink_parent() {
 #[test]
 fn hc_bootstrap_doctor_detects_missing_fallback() {
     check_hc_bootstrap(Some("missing-fallback"));
+}
+
+#[test]
+fn hc_bootstrap_stale_activation_does_not_replace_the_current_fallback() {
+    const CHILD: &str = "NAMEDROP_BOOTSTRAP_STALE_ACTIVATION";
+    if std::env::var_os(CHILD).is_some() {
+        check_hc_bootstrap(Some("stale-activation"));
+        return;
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/bootstrap-checks")
+        .join(format!("stale-activation-runtime-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let old = root.join("releases").join("a".repeat(64));
+    let current = root.join("releases").join("b".repeat(64));
+    std::fs::create_dir_all(&old).unwrap();
+    std::fs::create_dir_all(&current).unwrap();
+    std::fs::hard_link(std::env::current_exe().unwrap(), old.join("namedrop")).unwrap();
+    std::fs::write(old.join("runtime.json"), include_str!("../runtime.json")).unwrap();
+    std::fs::write(current.join("namedrop"), "active runtime").unwrap();
+    std::fs::write(root.join("namedrop"), "stable launcher").unwrap();
+    std::os::unix::fs::symlink(
+        Path::new("releases").join("b".repeat(64)),
+        root.join("current"),
+    )
+    .unwrap();
+    let output = std::process::Command::new(old.join("namedrop"))
+        .args([
+            "--exact",
+            "hc_bootstrap_stale_activation_does_not_replace_the_current_fallback",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn check_hc_bootstrap(damage: Option<&str>) {
@@ -1772,7 +1819,45 @@ fn check_hc_bootstrap(damage: Option<&str>) {
         ids: &ids,
     };
     let command = home.join(".local/bin/namedrop-app");
-    if damage.is_none() {
+    if damage == Some("unowned-first-name") {
+        fs::create_dir_all(command.parent().unwrap()).unwrap();
+        let unowned = "#!/bin/sh\nexit 41\n";
+        fs::write(&command, unowned).unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
+        let result = namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"alice","pane_type":"agent"}),
+            &runtime,
+        )
+        .unwrap();
+        for agent in ["codex", "claude-code"] {
+            assert_eq!(
+                result["integration_packages"][agent]["installed"], false,
+                "{result}"
+            );
+        }
+        assert_eq!(result["ready"], false);
+        assert!(
+            !fixture
+                .take_calls()
+                .iter()
+                .any(|args| args.first().is_some_and(|arg| arg == "send")),
+            "unowned bootstrap must block registration challenges"
+        );
+        assert_eq!(fs::read_to_string(&command).unwrap(), unowned);
+    } else if damage == Some("stale-activation") {
+        fs::create_dir_all(command.parent().unwrap()).unwrap();
+        let script = "#!/bin/sh\n# Managed by Namedrop: shell command.\nexec '/bin/sh' \"$@\"\n";
+        fs::write(&command, script).unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
+        namedrop::execute_lifecycle_operation("activate", json!({"confirmed":true}), &runtime)
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(&command).unwrap(),
+            script,
+            "stale activation overwrote the current bootstrap"
+        );
+    } else if damage.is_none() {
         let result = namedrop::execute_lifecycle_operation(
             "name",
             json!({"alias":"alice","pane_type":"agent"}),
@@ -1882,7 +1967,10 @@ fn check_hc_bootstrap(damage: Option<&str>) {
             assert_eq!(
                 attention
                     .iter()
-                    .filter(|item| item.summary.contains("namedrop-app"))
+                    .filter(|item| matches!(
+                        item.source_id.as_str(),
+                        "integration-package-codex" | "integration-package-claude-code"
+                    ))
                     .count(),
                 2
             );

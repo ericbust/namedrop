@@ -253,6 +253,9 @@ fn package_installation_accepts_explicit_home_and_state_symlinks() {
     let executable = PathBuf::from(crate::collaboration_executable().unwrap());
     for hc in [false, true] {
         let context = PackageContext::new(&home, hc);
+        if hc {
+            install_shell_command(&home, &executable, &state, true).unwrap();
+        }
         for agent in [AgentRuntime::Codex, AgentRuntime::ClaudeCode] {
             install_integration_package_with_config(
                 &context,
@@ -860,7 +863,7 @@ fn hc_bootstrap_stale_runtime_only_inspects_the_shared_command() {
     let current = runtime.join("releases").join("b".repeat(64));
     fs::create_dir_all(&old).unwrap();
     fs::create_dir_all(&current).unwrap();
-    fs::copy(std::env::current_exe().unwrap(), old.join("namedrop")).unwrap();
+    fs::hard_link(std::env::current_exe().unwrap(), old.join("namedrop")).unwrap();
     fs::write(old.join("runtime.json"), include_str!("../../runtime.json")).unwrap();
     fs::write(current.join("namedrop"), "active runtime").unwrap();
     fs::write(runtime.join("namedrop"), "#!/bin/sh\nexit 0\n").unwrap();
