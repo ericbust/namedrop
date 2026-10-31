@@ -2835,7 +2835,7 @@ fn assert_installed_package(home_directory: &Path, runtime: AgentRuntime) {
     let package = integration_package(runtime);
     let installed_instructions = fs::read_to_string(directory.join("SKILL.md")).unwrap();
     assert!(
-        installed_instructions.contains("The TUI fallback command prefix is"),
+        installed_instructions.contains("Use this exact installed command prefix"),
         "{} instructions omit their generated installed command",
         runtime.as_str()
     );
@@ -4463,7 +4463,7 @@ fn managed_claude_rules_reject_environment_injection() {
 }
 
 #[test]
-fn installed_hooks_route_hc_state_dynamically() {
+fn tui_hook_rendering_keeps_baked_context_even_in_hc_environment() {
     let directory = TestDirectory::new();
     let executable = directory.path().join("hook-result");
     let log = directory.path().join("hook-argv");
@@ -4500,18 +4500,14 @@ fn installed_hooks_route_hc_state_dynamically() {
         fs::read_to_string(&log).unwrap()
     };
     let argv = run(None);
-    assert!(
-        argv.starts_with("--host\nhc\n--hc-terminal\nt3\n--plugin-state\n"),
-        "{argv}"
-    );
-    assert!(
-        argv.contains(&format!(
-            "{}/xdg/namedrop/hc/second-core\n",
+    assert_eq!(
+        argv,
+        format!(
+            "hook\nsession-start\n--state-directory\n{}\n",
             directory.path().display()
-        )),
-        "{argv}"
+        )
     );
-    assert!(run(Some("/explicit-state")).contains("--plugin-state\n/explicit-state\n"));
+    assert_eq!(run(Some("/explicit-state")), argv);
 }
 
 fn package_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, u32)> {

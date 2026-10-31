@@ -576,6 +576,26 @@ esac
 #[test]
 fn hc_hooks_write_sessions_only_in_active_spaces_and_preserve_core_routing() {
     let f = Fixture::new("hc-hooks");
+    f.activate();
+    let hc_state = f.0.join("hc-state");
+    let tui_packages = [
+        namedrop::AgentRuntime::ClaudeCode,
+        namedrop::AgentRuntime::Codex,
+    ]
+    .map(|agent| {
+        let path = namedrop::package_directory(&f.0.join("home"), agent);
+        let snapshot = integration_snapshot(&path);
+        (path, snapshot)
+    });
+    let launcher = f.0.join("home/.local/bin/namedrop");
+    let tui_fallback = fs::read_to_string(&launcher)
+        .unwrap()
+        .split_once("# TUI command\n")
+        .unwrap()
+        .1
+        .to_owned();
+    let tui_rules = fs::read(f.0.join("home/.codex/rules/namedrop.rules")).unwrap();
+
     let hc = f.0.join("hc");
     let record = f.0.join("record.json");
     let mut terminal: serde_json::Value =
@@ -605,10 +625,14 @@ assert os.environ['HC_SESSION'] == 'hook-core'
 assert os.environ['HC_SOCKET'] == 'hook-socket'
 with (root / 'hc-calls').open('a') as out:
     out.write(json.dumps(args) + '\n')
-record = json.loads((root / 'record.json').read_text())
+record_path = root / ('second-record.json' if len(args) > 1 and args[1] == 't2' else 'record.json')
+record = json.loads(record_path.read_text())
 if args[0] == '--version': print('herdr-core 0.1.14')
 elif args[0] == 'get': print(json.dumps(record))
-elif args[0] == 'ls': print(json.dumps({'terminals':[record]}))
+elif args[0] == 'ls':
+    records = [record]
+    if (root / 'second-record.json').exists(): records.append(json.loads((root / 'second-record.json').read_text()))
+    print(json.dumps({'terminals':records}))
 elif args[0] == 'server': print(json.dumps({'core':{'id':'hook-test'}}))
 elif args[0] == 'label':
     for arg in args[2:]:
@@ -616,7 +640,7 @@ elif args[0] == 'label':
         key, value = arg.split('=', 1)
         if value: record['labels'][key] = value
         else: record['labels'].pop(key, None)
-    (root / 'record.json').write_text(json.dumps(record))
+    record_path.write_text(json.dumps(record))
     print(json.dumps(record))
 elif args[0] == 'run':
     print(json.dumps({'error':{'kind':'name_taken','message':'already running'}}), file=sys.stderr)
@@ -633,7 +657,11 @@ else: raise AssertionError(args)
     .unwrap();
     fs::set_permissions(&hc, fs::Permissions::from_mode(0o755)).unwrap();
     let command = |args: &[&str]| {
-        let mut command = f.namedrop_command(args);
+        let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+        f.host(&mut command)
+            .arg("--plugin-state")
+            .arg(&hc_state)
+            .args(args);
         command
             .env("HC_BIN_PATH", &hc)
             .env("HC_TERMINAL_ID", "t1")
@@ -654,7 +682,7 @@ else: raise AssertionError(args)
                 "hook",
                 "session-start",
                 "--state-directory",
-                f.0.join("state").to_str().unwrap(),
+                hc_state.clone().to_str().unwrap(),
             ]),
             r#"{"hook_event_name":"SessionStart","session_id":"real-hook-session","source":"startup"}"#,
         )
@@ -664,7 +692,7 @@ else: raise AssertionError(args)
         serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
     assert!(before["labels"]["namedrop.session"].is_null());
     let namespace = namedrop::StateNamespace::for_space("hc:hook-test", "fixture-space");
-    namedrop::StateStore::open(f.0.join("state"))
+    namedrop::StateStore::open(hc_state.clone())
         .unwrap()
         .transaction(|transaction| {
             transaction.activate_worktree(
@@ -713,6 +741,15 @@ else: raise AssertionError(args)
     .unwrap();
     assert!(named.status.success(), "{}", text(&named));
     let result: serde_json::Value = serde_json::from_slice(&named.stdout).unwrap();
+    for runtime in ["claude-code", "codex"] {
+        let package = Path::new(result["data"]["integration_packages"][runtime]["path"].as_str().unwrap());
+        let hooks: serde_json::Value = serde_json::from_slice(&fs::read(package.join("hooks/hooks.json")).unwrap()).unwrap();
+        for event in ["SessionStart", "UserPromptSubmit"] {
+            let timeout = hooks["hooks"][event][0]["hooks"][0]["timeout"].as_f64().unwrap();
+            assert!(timeout > 10.2 && timeout <= 60.0, "HC {runtime} {event} framework timeout {timeout} can kill an in-flight send");
+        }
+    }
+
     assert_eq!(
         result["data"]["registered"], true,
         "the ordinary native naming path registers this session"
@@ -731,70 +768,412 @@ else: raise AssertionError(args)
     let diagnosis: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
     assert_eq!(diagnosis["data"]["host"], "herdr-core");
     assert_eq!(diagnosis["data"]["host_version"], "herdr-core 0.1.14");
-    let package = result["data"]["integration_packages"]["claude-code"]["path"].as_str().unwrap();
-    let mut stale: serde_json::Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    for (path, before) in &tui_packages {
+        assert_eq!(
+            &integration_snapshot(path),
+            before,
+            "HC reconcile changed TUI bytes"
+        );
+    }
+    assert_eq!(
+        fs::read(f.0.join("home/.codex/rules/namedrop.rules")).unwrap(),
+        tui_rules
+    );
+    let tui_doctor = f.namedrop(&["doctor"]);
+    let diagnosis: serde_json::Value = serde_json::from_slice(&tui_doctor.stdout).unwrap();
+    assert!(
+        !diagnosis.to_string().contains("ND-INTEGRATION-001"),
+        "{}",
+        text(&tui_doctor)
+    );
+    let foreign_state = f.0.join("foreign-hc");
+    let mut foreign = Command::new(env!("CARGO_BIN_EXE_namedrop"));
+    f.host(&mut foreign)
+        .env("HC_BIN_PATH", &hc)
+        .env("HC_SESSION", "hook-core")
+        .env("HC_SOCKET", "hook-socket")
+        .arg("--plugin-state")
+        .arg(&foreign_state)
+        .args([
+            "--host",
+            "hc",
+            "--hc-space",
+            "fixture-space",
+            "activate",
+            "--input-json",
+            "{\"confirmed\":true}",
+        ]);
+    let foreign = foreign.output().unwrap();
+    assert!(foreign.status.success(), "{}", text(&foreign));
+    let foreign: serde_json::Value = serde_json::from_slice(&foreign.stdout).unwrap();
+    assert_eq!(
+        fs::read_to_string(&launcher)
+            .unwrap()
+            .split_once("# TUI command\n")
+            .unwrap()
+            .1,
+        tui_fallback
+    );
+    let mut fallback = Command::new(&launcher);
+    f.host(&mut fallback)
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("HERDR_WORKSPACE_ID")
+        .env_remove("HC_TERMINAL_ID")
+        .env_remove("NAMEDROP_HOST")
+        .args([
+            "--herdr-socket",
+            "isolated-socket",
+            "--herdr-workspace",
+            "w1",
+            "--herdr-pane",
+            "p1",
+            "address",
+            "list",
+        ]);
+    let fallback = fallback.output().unwrap();
+    assert!(fallback.status.success(), "{}", text(&fallback));
+    let inherited_hook = |program: &Path, args: &[&str], payload: &str| {
+        let mut command = Command::new(program);
+        command
+            .env("HOME", f.0.join("home"))
+            .env("CLAUDE_CONFIG_DIR", f.0.join("home/.claude"))
+            .env("CODEX_HOME", f.0.join("home/.codex"))
+            .args(args)
+            .env("HC_BIN_PATH", &hc)
+            .env("HC_TERMINAL_ID", "t1")
+            .env("HC_SESSION", "hook-core")
+            .env("HC_SOCKET", "hook-socket")
+            .env("NAMEDROP_STATE_DIR", hc_state.clone())
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("CODEX_SESSION_ID")
+            .env_remove("CLAUDE_CODE_SESSION_ID");
+        codex_app_server::run_with_stdin(&mut command, payload)
+    };
+    for runtime in ["claude-code", "codex"] {
+        let active_package = Path::new(
+            result["data"]["integration_packages"][runtime]["path"]
+                .as_str()
+                .unwrap(),
+        );
+        let foreign_package = Path::new(
+            foreign["data"]["integration_packages"][runtime]["path"]
+                .as_str()
+                .unwrap(),
+        );
+        let tui_package = &tui_packages[usize::from(runtime == "codex")].0;
+        for order in [
+            [tui_package.as_path(), active_package, foreign_package],
+            [foreign_package, active_package, tui_package.as_path()],
+        ] {
+            for event in ["session-start", "user-prompt-submit", "mailbox-wake"] {
+                fs::write(f.0.join("hc-calls"), "").unwrap();
+                for package in order {
+                    let calls_before = fs::read_to_string(f.0.join("hc-calls")).unwrap();
+                    let guards = [
+                        f.0.join("state/runtime/namedrop"),
+                        hc_state.join("runtime/namedrop"),
+                    ];
+                    if package != active_package {
+                        for guard in &guards {
+                            fs::create_dir_all(guard.parent().unwrap()).unwrap();
+                            fs::write(guard, "#!/bin/sh\nexit 97\n").unwrap();
+                            fs::set_permissions(guard, fs::Permissions::from_mode(0o700)).unwrap();
+                        }
+                    }
+
+                    let output = if event == "mailbox-wake" {
+                        let state = if package == tui_package {
+                            f.0.join("state")
+                        } else if package == foreign_package {
+                            foreign_state.clone()
+                        } else {
+                            hc_state.clone()
+                        };
+                        let mut args = vec!["--host".to_owned(), "hc".to_owned()];
+                        if package != tui_package {
+                            args.extend([
+                                "--hc-hook".into(),
+                                serde_json::from_slice::<serde_json::Value>(&fs::read(package.join(".agents/plugins/marketplace.json")).unwrap()).unwrap()["name"].as_str().unwrap().to_owned(),
+                            ]);
+                        }
+                        args.extend([
+                            "hook".into(),
+                            event.into(),
+                            "--state-directory".into(),
+                            state.to_string_lossy().into_owned(),
+                        ]);
+                        inherited_hook(
+                            Path::new(env!("CARGO_BIN_EXE_namedrop")),
+                            &args.iter().map(String::as_str).collect::<Vec<_>>(),
+                            "",
+                        )
+                    } else {
+                        let payload = if event == "session-start" {
+                            r#"{"hook_event_name":"SessionStart","session_id":"real-hook-session","source":"startup"}"#
+                        } else {
+                            r#"{"hook_event_name":"UserPromptSubmit","prompt":"ordinary local prompt"}"#
+                        };
+                        inherited_hook(&package.join("scripts").join(event), &[], payload)
+                    };
+                    if package != active_package {
+                        for guard in &guards {
+                            fs::remove_file(guard).unwrap();
+                        }
+                    }
+                    assert!(output.status.success(), "{event}: {}", text(&output));
+                    if package != active_package {
+                        assert!(output.stdout.is_empty(), "foreign package emitted {event}");
+                        assert_eq!(
+                            fs::read_to_string(f.0.join("hc-calls")).unwrap(),
+                            calls_before,
+                            "foreign package dispatched {event}"
+                        );
+                    }
+                }
+                let calls = fs::read_to_string(f.0.join("hc-calls")).unwrap();
+                if event == "session-start" {
+                    assert_eq!(
+                        calls
+                            .lines()
+                            .filter(|line| line.starts_with("[\"run\""))
+                            .count(),
+                        1,
+                        "one current package must dispatch SessionStart: {calls}"
+                    );
+                }
+                assert!(
+                    calls.contains("[\"server\""),
+                    "current {event} must run: {calls}"
+                );
+            }
+        }
+        let output = Command::new(active_package.join("scripts/session-start"))
+            .env("HERDR_SOCKET_PATH", "tui")
+            .env_remove("HC_TERMINAL_ID")
+            .output()
+            .unwrap();
+        assert!(output.stdout.is_empty());
+    }
+    let mut recipient: serde_json::Value =
+        serde_json::from_slice(&fs::read(&record).unwrap()).unwrap();
+    recipient["address"] = serde_json::json!("t2");
+    recipient["labels"]["namedrop.session"] = serde_json::json!("recipient-session");
+    recipient["labels"]
+        .as_object_mut()
+        .unwrap()
+        .remove("namedrop.name");
+    fs::write(f.0.join("second-record.json"), recipient.to_string()).unwrap();
+    let recipient = command(&[
+        "--host",
+        "hc",
+        "--hc-terminal",
+        "t2",
+        "--hc-space",
+        "fixture-space",
+        "name",
+        "target-agent",
+    ])
+    .output()
+    .unwrap();
+    assert!(recipient.status.success(), "{}", text(&recipient));
+    let packages = [
+        tui_packages[0].0.clone(),
+        PathBuf::from(
+            result["data"]["integration_packages"]["claude-code"]["path"]
+                .as_str()
+                .unwrap(),
+        ),
+        PathBuf::from(
+            foreign["data"]["integration_packages"]["claude-code"]["path"]
+                .as_str()
+                .unwrap(),
+        ),
+    ];
+    let db = rusqlite::Connection::open(hc_state.join("namedrop.sqlite3")).unwrap();
+    let count = || {
+        db.query_row("SELECT COUNT(*) FROM collaboration_messages", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    for order in [[0, 1, 2], [2, 1, 0]] {
+        let before = count();
+        for index in order {
+            let mut args = vec!["--host".to_owned(), "hc".to_owned()];
+            if index != 0 {
+                let manifest: serde_json::Value = serde_json::from_slice(
+                    &fs::read(packages[index].join(".agents/plugins/marketplace.json")).unwrap(),
+                )
+                .unwrap();
+                args.extend([
+                    "--hc-hook".into(),
+                    manifest["name"].as_str().unwrap().to_owned(),
+                ]);
+            }
+            args.extend([
+                "hook".into(),
+                "user-prompt-submit".into(),
+                "--state-directory".into(),
+                f.0.join("state").to_string_lossy().into_owned(),
+            ]);
+            let output = inherited_hook(
+                Path::new(env!("CARGO_BIN_EXE_namedrop")),
+                &args.iter().map(String::as_str).collect::<Vec<_>>(),
+                r#"{"hook_event_name":"UserPromptSubmit","prompt":"@target-agent one owner review mention"}"#,
+            );
+            assert!(output.status.success(), "{}", text(&output));
+            if index == 1 {
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("Collaboration message sent."),
+                    "{}",
+                    text(&output)
+                );
+            } else {
+                assert!(output.stdout.is_empty());
+            }
+        }
+        assert_eq!(
+            count(),
+            before + 1,
+            "co-loaded packages must persist one actual mention"
+        );
+    }
+    let package = result["data"]["integration_packages"]["claude-code"]["path"]
+        .as_str()
+        .unwrap();
+    let mut stale: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
     let mut unrelated = unrelated_process();
     stale["pid"] = serde_json::json!(unrelated.id());
-    stale["labels"].as_object_mut().unwrap().remove("namedrop.session");
+    stale["labels"]
+        .as_object_mut()
+        .unwrap()
+        .remove("namedrop.session");
     fs::write(&record, stale.to_string()).unwrap();
     fs::write(f.0.join("hc-calls"), "").unwrap();
     let mut wrapper = Command::new(Path::new(package).join("scripts/session-start"));
-    wrapper.env("HC_BIN_PATH", &hc).env("HC_TERMINAL_ID", "t1")
-        .env("HC_SESSION", "hook-core").env("HC_SOCKET", "hook-socket")
-        .env("NAMEDROP_STATE_DIR", f.0.join("state"))
-        .env_remove("HERDR_SOCKET_PATH").env_remove("HERDR_PANE_ID")
-        .env_remove("CODEX_SESSION_ID").env_remove("CLAUDE_CODE_SESSION_ID");
-    let stale_output = codex_app_server::run_with_stdin(&mut wrapper,
-        r#"{"hook_event_name":"SessionStart","session_id":"stale-hook-session","source":"startup"}"#);
-    unrelated.kill().unwrap(); unrelated.wait().unwrap();
-    assert!(stale_output.stdout.is_empty(), "stale inherited terminal must be declined");
+    wrapper
+        .env("HOME", f.0.join("home"))
+        .env("CLAUDE_CONFIG_DIR", f.0.join("home/.claude"))
+        .env("CODEX_HOME", f.0.join("home/.codex"))
+        .env("HC_BIN_PATH", &hc)
+        .env("HC_TERMINAL_ID", "t1")
+        .env("HC_SESSION", "hook-core")
+        .env("HC_SOCKET", "hook-socket")
+        .env("NAMEDROP_STATE_DIR", hc_state.clone())
+        .env_remove("HERDR_SOCKET_PATH")
+        .env_remove("HERDR_PANE_ID")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID");
+    let stale_output = codex_app_server::run_with_stdin(
+        &mut wrapper,
+        r#"{"hook_event_name":"SessionStart","session_id":"stale-hook-session","source":"startup"}"#,
+    );
+    unrelated.kill().unwrap();
+    unrelated.wait().unwrap();
+    assert!(
+        stale_output.stdout.is_empty(),
+        "stale inherited terminal must be declined"
+    );
     let calls = fs::read_to_string(f.0.join("hc-calls")).unwrap();
-    assert!(!calls.lines().any(|line| line.starts_with("[\"label\"")), "stale inherited terminal wrote a label: {calls}");
-
+    assert!(
+        !calls.lines().any(|line| line.starts_with("[\"label\"")),
+        "stale inherited terminal wrote a label: {calls}"
+    );
 }
 
 #[test]
 fn explicit_transport_flags_select_the_host_without_environment() {
     let fixture = Fixture::new("explicit-host-flags");
-    for (flag, value) in [
-        ("--herdr-socket", "socket"),
-        ("--herdr-workspace", "w1"),
-        ("--herdr-pane", "p1"),
-    ] {
-        let output = fixture
-            .namedrop_command(&[flag, value, "address", "list"])
+    let herdr = fixture.0.join("herdr");
+    fs::write(&herdr, fs::read_to_string(&herdr).unwrap().replace("/repo", std::env::current_dir().unwrap().to_str().unwrap()).replace("case \"$1 $2\" in", "case \"$1 $2\" in\n  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[{\"workspace_id\":\"w1\"}]}}';;")).unwrap();
+    let run = |args: &[&str]| {
+        fixture
+            .namedrop_command(args)
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_PANE_ID")
             .env_remove("HC_TERMINAL_ID")
             .output()
-            .unwrap();
-        assert!(
-            !text(&output).contains("Host is unknown"),
-            "{flag}: {}",
-            text(&output)
-        );
+            .unwrap()
+    };
+    for (flag, value) in [
+        ("--herdr-socket", "socket"),
+        ("--herdr-workspace", "w1"),
+        ("--herdr-pane", "p1"),
+    ] {
+        let activation = run(&[
+            flag,
+            value,
+            "activate",
+            "--input-json",
+            "{\"confirmed\":true}",
+        ]);
+        assert!(activation.status.success(), "{flag}: {}", text(&activation));
+        let output = run(&[flag, value, "address", "list"]);
+        assert!(output.status.success(), "{flag}: {}", text(&output));
     }
-    for flag in ["--hc-terminal", "--hc-space"] {
+    let hc = fixture.0.join("selection-hc");
+    fs::write(
+        &hc,
+        format!(
+            r#"#!/bin/sh
+case "$1" in
+get) cat '{}' ;;
+ls) printf '%s\n' '{{"terminals":[]}}' ;;
+server) printf '%s\n' '{{"core":{{"id":"selection"}}}}' ;;
+*) exit 1 ;;
+esac
+"#,
+            fixture.0.join("selection.json").display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(
+        fixture.0.join("selection.json"),
+        include_str!("fixtures/hc/get-labeled.stdout"),
+    )
+    .unwrap();
+    namedrop::StateStore::open(fixture.0.join("state"))
+        .unwrap()
+        .transaction(|tx| {
+            tx.activate_worktree(
+                &namedrop::StateNamespace::for_space("hc:selection", "fixture-space"),
+                &namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "test", 1),
+            )
+        })
+        .unwrap();
+    for (flag, value) in [("--hc-terminal", "t1"), ("--hc-space", "fixture-space")] {
         let output = fixture
-            .namedrop_command(&[flag, "explicit", "address", "list"])
+            .namedrop_command(&[flag, value, "address", "list"])
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_PANE_ID")
             .env_remove("HC_TERMINAL_ID")
-            .env("HC_BIN_PATH", "/not-an-hc-executable")
+            .env("HC_BIN_PATH", &hc)
             .output()
             .unwrap();
-        assert!(
-            !text(&output).contains("Host is unknown"),
-            "{flag}: {}",
-            text(&output)
-        );
-        assert!(
-            text(&output).contains("hc did not report its core identity") || text(&output).contains("not-an-hc-executable"),
-            "{}",
-            text(&output)
-        );
+        assert!(output.status.success(), "{flag}: {}", text(&output));
     }
+    let unknown = run(&["address", "list"]);
+    assert!(
+        text(&unknown).contains("Host is unknown"),
+        "{}",
+        text(&unknown)
+    );
+    let override_host = run(&[
+        "--host",
+        "tui",
+        "--hc-space",
+        "ignored",
+        "--herdr-workspace",
+        "w1",
+        "address",
+        "list",
+    ]);
+    assert!(override_host.status.success(), "{}", text(&override_host));
 }
 
 #[test]
@@ -825,4 +1204,30 @@ fn tui_ignores_hc_state_for_execution_and_command_guard() {
         1,
         "HC state must not be opened"
     );
+}
+
+fn integration_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, u32)> {
+    fn walk(
+        root: &Path,
+        path: &Path,
+        entries: &mut std::collections::BTreeMap<PathBuf, (Vec<u8>, u32)>,
+    ) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                walk(root, &path, entries);
+            } else {
+                entries.insert(
+                    path.strip_prefix(root).unwrap().to_owned(),
+                    (
+                        fs::read(&path).unwrap(),
+                        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    ),
+                );
+            }
+        }
+    }
+    let mut entries = std::collections::BTreeMap::new();
+    walk(root, root, &mut entries);
+    entries
 }
