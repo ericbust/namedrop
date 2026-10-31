@@ -607,6 +607,20 @@ where
     {
         return Err("No issues remain; nothing was sent.".to_owned());
     }
+    let alias = StateStore::open_read_only(runtime.state_directory)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|tx| {
+                    tx.routing_author_for_pane(
+                        &crate::StateNamespace::for_space(runtime.session_socket_id, space_id),
+                        pane_id,
+                    )
+                })
+                .ok()
+        })
+        .map(|address| address.alias);
     // Immediately before dispatch: the pane must still hold the exact Agent
     // Session the popup was opened for, so a replacement session can never
     // receive the session-bound diagnostics of the one it replaced.
@@ -615,7 +629,7 @@ where
         runtime.session_socket_id,
         pane_id,
     )
-    .map_err(|error| error.to_string())?;
+    .map_err(|error| error.with_alias(alias.as_deref()).to_string())?;
     let live = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());

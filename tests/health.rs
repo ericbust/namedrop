@@ -1028,12 +1028,19 @@ fn doctor_assistance_explains_unsafe_lock_permissions_without_internal_terms() {
     fs::create_dir_all(&directory).unwrap();
     fs::set_permissions(&directory, fs::Permissions::from_mode(0o777)).unwrap();
 
-    let error = request_doctor_assistance(&runtime, "session-old").unwrap_err();
-    assert_eq!(
-        error,
-        "Namedrop's pane lock for pane-1 is not private to you"
-    );
-    assert!(!error.contains("pane effects"), "{error}");
+    for (pane_id, target) in [("pane-1", "@reviewer"), ("unnamed-pane", "unnamed-pane")] {
+        let runtime = LifecycleRuntime {
+            current_pane_id: Some(pane_id),
+            workspace_id: Some("workspace-1"),
+            ..f.runtime()
+        };
+        let error = request_doctor_assistance(&runtime, "session-old").unwrap_err();
+        assert_eq!(
+            error,
+            format!("Namedrop's pane lock for {target} is not private to you")
+        );
+        assert!(!error.contains("pane effects"), "{error}");
+    }
     assert!(f.host.prompts.borrow().is_empty());
 }
 
