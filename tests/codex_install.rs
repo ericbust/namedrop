@@ -289,3 +289,85 @@ fn codex_policy_checker_accepts_only_installed_collaboration_commands() {
         "allow"
     );
 }
+
+#[test]
+fn global_state_binding_rejects_duplicates_across_command_levels_for_both_hosts() {
+    let cases = [
+        vec![
+            "--plugin-state",
+            "/first",
+            "--plugin-state=/second",
+            "describe",
+        ],
+        vec![
+            "--plugin-state=/first",
+            "describe",
+            "--plugin-state",
+            "/second",
+        ],
+        vec![
+            "describe",
+            "--plugin-state",
+            "/first",
+            "--plugin-state=/second",
+        ],
+        vec![
+            "--plugin-state",
+            "/first",
+            "handoff",
+            "--plugin-state=/second",
+            "status",
+        ],
+        vec![
+            "handoff",
+            "--plugin-state=/first",
+            "status",
+            "--plugin-state",
+            "/second",
+        ],
+    ];
+    let mut failures = Vec::new();
+    for host in ["tui", "hc"] {
+        for arguments in &cases {
+            let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+                .env_clear()
+                .args(["--host", host, "--print-host"])
+                .args(arguments)
+                .output()
+                .unwrap();
+            println!("{host} {arguments:?} => {:?}", output.status.code());
+            if output.status.code() != Some(64) {
+                failures.push(format!("{host} {arguments:?}"));
+            }
+        }
+        for arguments in [
+            vec!["--plugin-state", "/state", "describe"],
+            vec!["describe", "--plugin-state=/state"],
+            vec!["handoff", "status", "--plugin-state", "/state"],
+            vec![
+                "describe",
+                "--plugin-state",
+                "/state",
+                "--",
+                "--plugin-state=literal-operation",
+            ],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+                .env_clear()
+                .args(["--host", host, "--print-host"])
+                .args(&arguments)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{host} {arguments:?}: {output:?}");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("{host}\n")
+            );
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "duplicate state bindings accepted: {}",
+        failures.join("; ")
+    );
+}
