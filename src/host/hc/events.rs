@@ -721,8 +721,24 @@ pub fn run(state: &Path) -> Result<(), String> {
     };
     let mut subscriber = Subscriber::default();
     while !record.should_stop(&directory, state) {
-        let mut child = transport
-            .checked_command()?
+        let mut command = match transport.checked_command_bounded(Duration::from_millis(250), &STOP)
+        {
+            Ok(command) => command,
+            Err(_) if record.should_stop(&directory, state) => break,
+            Err(error)
+                if error.starts_with("hc core is unavailable at ")
+                    || error == "Herdr command timed out during hc socket preflight" =>
+            {
+                eprintln!("Namedrop hc reconnect: {error}");
+                std::thread::sleep(Duration::from_millis(250));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if record.should_stop(&directory, state) {
+            break;
+        }
+        let mut child = command
             .args(["events", "--json"])
             .process_group(0)
             .stdin(Stdio::null())

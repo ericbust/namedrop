@@ -525,7 +525,10 @@ fn detached_subscriber_child() {
     let final_pid = record()["pid"].as_u64().unwrap() as i32;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
     while epoch() <= before_restart_epoch {
-        assert!(std::time::Instant::now() < deadline, "final subscriber stream did not start");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "final subscriber stream did not start"
+        );
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     let socket = std::path::PathBuf::from(std::env::var_os("HC_TERMINAL_SOCKET").unwrap());
