@@ -225,8 +225,11 @@ fn golden_argv_and_idempotent_metadata() {
 
 #[test]
 fn status_words_and_program_fallback_keep_unknown_distinct() {
+    let claude = process::AgentProcess::with_program("claude");
+    let codex = process::AgentProcess::new();
     let fixture = Fixture::default();
     fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["claude"]);
+    fixture.terminals.borrow_mut()[0]["foreground"]["pid"] = json!(claude.pid());
     let host = HcHost::new(&fixture);
     for (word, expected) in [
         ("idle", "idle"),
@@ -245,6 +248,7 @@ fn status_words_and_program_fallback_keep_unknown_distinct() {
     fixture.terminals.borrow_mut()[0]["status"] = Value::Null;
     fixture.terminals.borrow_mut()[0]["reported"] = json!(false);
     fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["/bin/codex"]);
+    fixture.terminals.borrow_mut()[0]["foreground"]["pid"] = json!(codex.pid());
     let pane = host.panes(PaneScope::All).unwrap().remove(0);
     assert_eq!(pane.agent_status, None);
     assert_eq!(pane.agent.as_deref(), Some("codex"));
@@ -818,6 +822,7 @@ fn subscriber_start_is_idempotent_only_for_name_taken() {
 
 #[test]
 fn doctor_reports_only_observed_unreported_codex_and_uses_hc_repairs() {
+    let agent = process::AgentProcess::new();
     let fixture = Fixture::default();
     let state = std::env::temp_dir().join(format!("namedrop-hc-doctor-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&state);
@@ -846,6 +851,7 @@ fn doctor_reports_only_observed_unreported_codex_and_uses_hc_repairs() {
         })
         .unwrap();
     fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["codex"]);
+    fixture.terminals.borrow_mut()[0]["foreground"]["pid"] = json!(agent.pid());
     for (reported, status, note) in [
         (false, Value::Null, true),
         (true, Value::Null, false),
@@ -1581,6 +1587,7 @@ fn foreground_programs_are_agents_only_when_recognized() {
         ("python", Some("custom-agent"), None),
         ("namedrop", Some("custom-agent"), None),
     ] {
+        let process = process::AgentProcess::with_program(program);
         for (reported, argv) in [(false, true), (true, true), (false, false)] {
             let fixture = Fixture::default();
             {
@@ -1591,6 +1598,7 @@ fn foreground_programs_are_agents_only_when_recognized() {
                     json!([])
                 };
                 terminals[0]["foreground"]["name"] = json!(program);
+                terminals[0]["foreground"]["pid"] = json!(process.pid());
                 terminals[0]["status"] =
                     app.map_or(Value::Null, |app| json!({"state":"idle", "app":app}));
                 terminals[0]["reported"] = json!(reported);
@@ -1882,8 +1890,10 @@ fn check_hc_bootstrap(damage: Option<&str>) {
         fs::remove_dir_all(root).unwrap();
         return;
     }
+    let claude = process::AgentProcess::with_program("claude");
     let fixture = Fixture::default();
     fixture.terminals.borrow_mut()[0]["foreground"]["argv"] = json!(["claude"]);
+    fixture.terminals.borrow_mut()[0]["foreground"]["pid"] = json!(claude.pid());
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target/bootstrap-checks")
         .join(format!(

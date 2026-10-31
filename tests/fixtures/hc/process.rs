@@ -4,9 +4,12 @@ use std::process::{Child, Command};
 pub struct AgentProcess(Child);
 impl AgentProcess {
     pub fn new() -> Self {
+        Self::with_program("codex")
+    }
+    pub fn with_program(program: &str) -> Self {
         let agent = Self(
             Command::new("/bin/sleep")
-                .arg0("codex")
+                .arg0(program)
                 .arg("600")
                 .spawn()
                 .unwrap(),
@@ -15,7 +18,7 @@ impl AgentProcess {
         {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             while !std::fs::read(format!("/proc/{}/cmdline", agent.pid()))
-                .is_ok_and(|args| args.starts_with(b"codex\0"))
+                .is_ok_and(|args| args.starts_with(format!("{program}\0").as_bytes()))
             {
                 assert!(
                     std::time::Instant::now() < deadline,
