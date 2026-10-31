@@ -218,7 +218,10 @@ pub(crate) fn shell_is_available(herdr: &impl Host, pane_id: &str) -> bool {
 
 /// The ancestors of `pid`, nearest first, at most 1024 of them.
 pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
-    std::iter::successors(parent_pid(pid), |pid| parent_pid(*pid)).take(1024)
+    std::iter::successors(parent_pid(pid).filter(|pid| *pid != 0), |pid| {
+        parent_pid(*pid).filter(|pid| *pid != 0)
+    })
+    .take(1024)
 }
 
 /// The pids Herdr reports in a pane's foreground process group, or `None` when
@@ -332,17 +335,17 @@ pub(crate) fn process_executable(pid: u32) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn parent_pid(pid: u32) -> Option<u32> {
+pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
     // `/proc/<pid>/stat` is `pid (comm) state ppid ...`; comm may hold spaces
     // and parentheses, so the fields start after the last `)`.
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, after_comm) = stat.rsplit_once(')')?;
     let parent = after_comm.split_whitespace().nth(1)?.parse::<u32>().ok()?;
-    (parent != 0).then_some(parent)
+    Some(parent)
 }
 
 #[cfg(target_os = "macos")]
-fn parent_pid(pid: u32) -> Option<u32> {
+pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
     let pid = libc::pid_t::try_from(pid).ok()?;
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
     let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
@@ -362,7 +365,7 @@ fn parent_pid(pid: u32) -> Option<u32> {
     }
     // SAFETY: the call above filled every byte of the struct.
     let info = unsafe { info.assume_init() };
-    (info.pbi_ppid != 0).then_some(info.pbi_ppid)
+    Some(info.pbi_ppid)
 }
 
 /// Detection never infers a terminal merely from a missing native session ID.

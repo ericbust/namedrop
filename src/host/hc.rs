@@ -250,6 +250,15 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
         Self { transport }
     }
 
+    pub(crate) fn shell_pid(&self, terminal: &str, budget: &dyn Budget) -> Option<u32> {
+        let response: serde_json::Value = self
+            .execute(&["get", terminal, "--json"], Some(budget))
+            .ok()?;
+        u32::try_from(response["pid"].as_u64()?)
+            .ok()
+            .filter(|pid| *pid > 0)
+    }
+
     fn execute<T: DeserializeOwned>(
         &self,
         args: &[&str],

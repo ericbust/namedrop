@@ -1,5 +1,9 @@
 use namedrop::{HerdrCommandExecutor, ProcessHerdr, runtime::HostKind};
-use std::{fs, os::unix::fs::PermissionsExt, process::Command};
+use std::{
+    fs,
+    os::unix::{ffi::OsStringExt, fs::PermissionsExt},
+    process::Command,
+};
 
 #[test]
 fn hc_client_and_daemon_child_drop_tui_environment_and_preserve_arguments() {
@@ -15,6 +19,7 @@ with open(os.environ['CLIENT_LOG'], 'w') as log:
 args = sys.argv[1:]
 os.environ.update(HERDR_SOCKET_PATH='daemon-socket', HERDR_PANE_ID='daemon-pane',
                   HERDR_UNKNOWN_DAEMON='daemon\nvalue $(touch never) *')
+os.environb.update({b'HERDR_bad-name': b'bad', b'HERDR_nonutf8_\xff': b'bytes', b'HERDR_NEWLINE\n': b'newline'})
 result = subprocess.run(args[args.index('--') + 1:], capture_output=True)
 sys.stdout.buffer.write(result.stdout)
 sys.stderr.buffer.write(result.stderr)
@@ -37,6 +42,10 @@ sys.exit(result.returncode)
         .env("HERDR_SOCKET_PATH", "client-socket")
         .env("HERDR_PANE_ID", "client-pane")
         .env("HERDR_ARBITRARY_NEW_KEY", "client\nvalue")
+        .env(
+            std::ffi::OsString::from_vec(b"HERDR_client_nonutf8_\xff".to_vec()),
+            "bytes",
+        )
         .env("HC_TERMINAL_ID", "inherited-terminal")
         .env("HC_TERMINAL_SOCKET", "inherited-terminal-socket")
         .env("HC_SESSION", "kept-session")
@@ -93,8 +102,17 @@ fn hc_process_boundary_child() {
         "import json,os,sys; print(json.dumps({'env':dict(os.environ),'argv':sys.argv[1:]}))",
     ];
     argv.extend(arguments);
+    for invalid in [vec!["run", "--bg"], vec!["run", "--"]] {
+        assert!(
+            ProcessHerdr::for_host(HostKind::Hc)
+                .execute(&invalid)
+                .unwrap_err()
+                .contains("requires an executable after --")
+        );
+    }
     let output = ProcessHerdr::for_host(HostKind::Hc)
         .with_socket(Some("must-not-be-injected".into()))
+        .with_child_executable(env!("CARGO_BIN_EXE_namedrop").into())
         .execute(&argv)
         .unwrap();
     let target: serde_json::Value = serde_json::from_str(&output.stdout).unwrap();
@@ -110,4 +128,41 @@ fn hc_process_boundary_child() {
     assert_eq!(target["argv"], serde_json::json!(arguments));
     assert_eq!(environment["HC_SESSION"], "kept-session");
     assert_eq!(environment["HC_SOCKET"], "kept-socket");
+}
+
+#[test]
+fn hc_child_exec_preserves_non_utf8_arguments_and_requires_separator() {
+    for args in [
+        vec!["--hc-exec-child"],
+        vec!["--hc-exec-child", "/bin/true"],
+        vec!["--hc-exec-child", "--"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(64));
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("requires -- followed by an executable")
+        );
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .args([
+            "--hc-exec-child",
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import os,sys; print(os.fsencode(sys.argv[1]).hex())",
+        ])
+        .arg(std::ffi::OsString::from_vec(
+            b"original-argument-\xff".to_vec(),
+        ))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "6f726967696e616c2d617267756d656e742dff\n"
+    );
 }

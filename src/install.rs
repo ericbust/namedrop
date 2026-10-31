@@ -1160,7 +1160,7 @@ fn hook_script_for_context(
     }
 }
 
-const HC_HOOK_PREAMBLE: &str = "[ -z \"${HERDR_SOCKET_PATH-}${HERDR_PANE_ID-}\" ] && [ -n \"${HC_TERMINAL_ID-}\" ] || exit 0\nnamedrop_state=\"${NAMEDROP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/namedrop/hc/${HC_SESSION:-default}}\"\n";
+const HC_HOOK_PREAMBLE: &str = "[ -n \"${HC_TERMINAL_ID-}\" ] || exit 0\nnamedrop_state=\"${NAMEDROP_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/namedrop/hc/${HC_SESSION:-default}}\"\n";
 
 fn hook_script(
     runtime: AgentRuntime,

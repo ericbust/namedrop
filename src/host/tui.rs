@@ -32,6 +32,16 @@ impl<E: HerdrCommandExecutor> TuiHost<E> {
             message,
         })
     }
+    pub(crate) fn shell_pid(&self, pane: &str, budget: &dyn Budget) -> Option<u32> {
+        let output = self
+            .execute(&["pane", "process-info", "--pane", pane], Some(budget))
+            .ok()?;
+        let response: Value = serde_json::from_str(&output.stdout).ok()?;
+        u32::try_from(response["result"]["process_info"]["shell_pid"].as_u64()?)
+            .ok()
+            .filter(|pid| *pid > 0)
+    }
+
     fn discover_worktree(
         &self,
         cwd: &Path,

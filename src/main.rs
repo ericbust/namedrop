@@ -36,6 +36,20 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let arguments: Vec<_> = env::args_os().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--hc-exec-child")
+    {
+        if arguments.get(1).is_none_or(|argument| argument != "--") || arguments.len() < 3 {
+            eprintln!("hc child requires -- followed by an executable");
+            return ExitCode::from(64);
+        }
+        eprintln!(
+            "could not execute hc child: {}",
+            namedrop::runtime::exec_hc_child(&arguments[2..])
+        );
+        return ExitCode::from(65);
+    }
     // Activation invokes this only behind the exclusive runtime command gate.
     // It performs the existing atomic migration without host or package actions.
     if arguments.len() == 2 && arguments[0] == "--migrate-runtime-state" {
@@ -151,9 +165,9 @@ fn main() -> ExitCode {
         .or_else(|| cli.mailbox_wake_hook_state_directory())
         .or_else(|| cli.session_start_hook_state_directory());
     if hook_state.is_some() {
-        let ambient = HostKind::from_environment(None);
-        if (cli.runtime.hc_hook && ambient == Ok(HostKind::Tui))
-            || (!cli.runtime.hc_hook && ambient == Ok(HostKind::Hc))
+        let ambient = cli.runtime.ambient_host_kind();
+        if (cli.runtime.hc_hook && ambient == HostKind::Tui)
+            || (!cli.runtime.hc_hook && ambient == HostKind::Hc)
         {
             return ExitCode::SUCCESS;
         }

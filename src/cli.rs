@@ -41,6 +41,8 @@ pub struct Cli {
 /// Omitted values retain the existing Herdr environment behavior.
 #[derive(Clone, Debug, Default, Args)]
 pub struct RuntimeOptions {
+    #[arg(skip)]
+    pub ambient_host: std::cell::OnceCell<crate::runtime::HostKind>,
     #[arg(long, global = true, hide = true)]
     pub hc_hook: bool,
     #[arg(long, global = true, value_enum)]
@@ -62,14 +64,24 @@ pub struct RuntimeOptions {
 impl RuntimeOptions {
     pub fn host_kind(&self) -> Result<crate::runtime::HostKind, String> {
         use crate::runtime::HostKind;
-        HostKind::detect(
-            self.host,
-            self.herdr_socket.is_some()
-                || self.herdr_workspace.is_some()
-                || self.herdr_pane.is_some(),
-            self.hc_terminal.is_some() || self.hc_space.is_some(),
-            |key| std::env::var(key).ok(),
-        )
+        let tui_flags = self.herdr_socket.is_some()
+            || self.herdr_workspace.is_some()
+            || self.herdr_pane.is_some();
+        let hc_flags = self.hc_terminal.is_some() || self.hc_space.is_some();
+        if self.host.is_some() || tui_flags || hc_flags {
+            HostKind::detect(self.host, tui_flags, hc_flags, |key| {
+                std::env::var(key).ok()
+            })
+        } else {
+            Ok(self.ambient_host_kind())
+        }
+    }
+
+    pub fn ambient_host_kind(&self) -> crate::runtime::HostKind {
+        *self.ambient_host.get_or_init(|| {
+            crate::runtime::HostKind::from_environment(None)
+                .unwrap_or(crate::runtime::HostKind::Tui)
+        })
     }
 
     pub fn state_directory(&self) -> Result<PathBuf, String> {

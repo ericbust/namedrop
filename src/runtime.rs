@@ -36,17 +36,76 @@ impl HostKind {
             (false, true) => return Ok(Self::Hc),
             (false, false) => {}
         }
-        if variable("HERDR_SOCKET_PATH").is_some() || variable("HERDR_PANE_ID").is_some() {
+        let Some(terminal) = variable("HC_TERMINAL_ID") else {
             return Ok(Self::Tui);
+        };
+        let Some(pane) = variable("HERDR_PANE_ID") else {
+            return Ok(if variable("HERDR_SOCKET_PATH").is_some() {
+                Self::Tui
+            } else {
+                Self::Hc
+            });
+        };
+        Ok(Self::innermost_host(&pane, &terminal).unwrap_or(Self::Tui))
+    }
+
+    fn innermost_host(pane: &str, terminal: &str) -> Option<Self> {
+        use crate::Budget;
+        let budget = IdentityBudget {
+            deadline: Instant::now() + Duration::from_millis(1500),
+            cancelled: AtomicBool::new(false),
+        };
+        let tui = crate::TuiHost::new(ProcessHerdr::for_host(Self::Tui));
+        let hc = crate::HcHost::new(ProcessHerdr::for_host(Self::Hc));
+        let tui_pid = tui.shell_pid(pane, &budget)?;
+        let hc_pid = hc.shell_pid(terminal, &budget)?;
+        let mut ancestors = Vec::new();
+        let mut pid = std::process::id();
+        for _ in 0..1024 {
+            budget.remaining().ok()?;
+            pid = crate::terminal::parent_pid(pid)?;
+            if pid == 0 {
+                break;
+            }
+            ancestors.push(pid);
         }
-        if variable("HC_TERMINAL_ID").is_some() {
-            return Ok(Self::Hc);
+        budget.remaining().ok()?;
+        if pid != 0 {
+            return None;
         }
-        Ok(Self::Tui)
+        let tui_position = ancestors.iter().position(|pid| *pid == tui_pid);
+        let hc_position = ancestors.iter().position(|pid| *pid == hc_pid);
+        Some(match (tui_position, hc_position) {
+            (None, _) => Self::Hc,
+            (Some(tui), Some(hc)) if hc < tui => Self::Hc,
+            _ => Self::Tui,
+        })
     }
 
     pub fn from_environment(explicit: Option<Self>) -> Result<Self, String> {
         Self::detect(explicit, false, false, |key| env::var(key).ok())
+    }
+}
+
+struct IdentityBudget {
+    deadline: Instant,
+    cancelled: AtomicBool,
+}
+
+impl crate::Budget for IdentityBudget {
+    fn remaining(&self) -> Result<Duration, String> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|remaining| !remaining.is_zero())
+            .ok_or_else(|| "Host identity deadline exceeded".into())
+    }
+
+    fn cancelled(&self) -> &AtomicBool {
+        &self.cancelled
+    }
+
+    fn max_output_bytes(&self) -> usize {
+        512 * 1024
     }
 }
 
@@ -88,6 +147,7 @@ pub struct ProcessHerdr {
     remove_env: Vec<String>,
     timeout: Duration,
     socket: Option<String>,
+    child_executable: Option<std::path::PathBuf>,
 }
 
 impl Default for ProcessHerdr {
@@ -97,6 +157,7 @@ impl Default for ProcessHerdr {
             remove_env: Vec::new(),
             binary: env::var("HERDR_BIN_PATH").unwrap_or_else(|_| "herdr".to_owned()),
             socket: None,
+            child_executable: None,
             timeout: Duration::from_millis(
                 env::var("NAMEDROP_HERDR_TIMEOUT_MS")
                     .ok()
@@ -127,10 +188,17 @@ impl ProcessHerdr {
         for key in &self.remove_env {
             command.env_remove(key);
         }
-        if let Some(socket) = &self.socket {
+        if self.host == HostKind::Hc {
+            remove_tui_environment(&mut command);
+        } else if let Some(socket) = &self.socket {
             command.env("HERDR_SOCKET_PATH", socket);
         }
         command
+    }
+
+    pub fn with_child_executable(mut self, executable: std::path::PathBuf) -> Self {
+        self.child_executable = Some(executable);
+        self
     }
 
     pub fn with_socket(mut self, socket: Option<String>) -> Self {
@@ -221,7 +289,26 @@ impl ProcessHerdr {
             return Err("Herdr read cancelled".to_owned());
         }
         let mut command = self.command();
-        command.args(args).process_group(0);
+        if self.host == HostKind::Hc && args.first() == Some(&"run") {
+            let separator = args
+                .iter()
+                .position(|argument| *argument == "--")
+                .filter(|index| *index + 1 < args.len())
+                .ok_or("hc run requires an executable after --")?;
+            let executable = match &self.child_executable {
+                Some(executable) => executable.clone(),
+                None => env::current_exe().map_err(|error| error.to_string())?,
+            };
+            command
+                .args(&args[..=separator])
+                .arg(executable)
+                .arg("--hc-exec-child")
+                .arg("--")
+                .args(&args[separator + 1..]);
+        } else {
+            command.args(args);
+        }
+        command.process_group(0);
         let timeout = self.bounded_timeout(timeout);
         let stdout = self.output_file("stdout")?;
         let stderr = self.output_file("stderr")?;
@@ -281,6 +368,28 @@ impl ProcessHerdr {
             stderr,
         })
     }
+}
+
+fn remove_tui_environment(command: &mut Command) {
+    use std::os::unix::ffi::OsStrExt;
+    for (key, _) in env::vars_os() {
+        if key.as_bytes().starts_with(b"HERDR_") {
+            command.env_remove(key);
+        }
+    }
+}
+
+pub fn exec_hc_child(arguments: &[std::ffi::OsString]) -> std::io::Error {
+    let Some((program, arguments)) = arguments.split_first() else {
+        return std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "hc child executable is missing",
+        );
+    };
+    let mut command = Command::new(program);
+    command.args(arguments);
+    remove_tui_environment(&mut command);
+    command.exec()
 }
 
 impl HerdrCommandExecutor for ProcessHerdr {
@@ -404,9 +513,21 @@ mod bounded_read_tests {
             .get_envs()
             .map(|(key, value)| (key.to_str().unwrap(), value))
             .collect();
+        let mut expected: Vec<_> = env::vars_os()
+            .map(|(key, _)| key)
+            .filter(|key| {
+                use std::os::unix::ffi::OsStrExt;
+                key.as_bytes().starts_with(b"HERDR_")
+            })
+            .collect();
+        expected.extend(["HC_TERMINAL_ID".into(), "HC_TERMINAL_SOCKET".into()]);
+        expected.sort();
         assert_eq!(
             removals,
-            vec![("HC_TERMINAL_ID", None), ("HC_TERMINAL_SOCKET", None)]
+            expected
+                .iter()
+                .map(|key| (key.to_str().unwrap(), None))
+                .collect::<Vec<_>>()
         );
     }
 
@@ -418,6 +539,7 @@ mod bounded_read_tests {
             remove_env: Vec::new(),
             timeout: Duration::from_millis(10),
             socket: None,
+            child_executable: None,
         };
         assert_eq!(
             executor.bounded_timeout(Duration::from_secs(120)),
@@ -501,6 +623,7 @@ mod bounded_read_tests {
             remove_env: Vec::new(),
             timeout: Duration::from_millis(DEFAULT_HERDR_TIMEOUT_MS),
             socket: None,
+            child_executable: None,
         };
         let result = crate::HcHost::new(executor).prompt("t1", "hello");
         fs::remove_dir_all(root).unwrap();
@@ -515,6 +638,7 @@ mod bounded_read_tests {
             remove_env: Vec::new(),
             timeout: Duration::from_secs(2),
             socket: None,
+            child_executable: None,
         };
         let cancelled = AtomicBool::new(false);
         let deadline = Duration::from_millis(80);
@@ -634,11 +758,6 @@ mod host_selection_tests {
             (None, vec![], Some(HostKind::Tui)),
             (None, vec!["HC_SESSION", "HC_SOCKET"], Some(HostKind::Tui)),
             (None, vec!["HC_TERMINAL_ID"], Some(HostKind::Hc)),
-            (
-                None,
-                vec!["HERDR_PANE_ID", "HC_TERMINAL_ID"],
-                Some(HostKind::Tui),
-            ),
             (None, vec!["HERDR_SOCKET_PATH"], Some(HostKind::Tui)),
             (
                 Some(HostKind::Hc),

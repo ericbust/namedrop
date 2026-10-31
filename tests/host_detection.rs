@@ -283,3 +283,91 @@ esac
     );
 }
 
+#[test]
+fn ambiguous_host_identity_is_cached_and_bounded_across_both_native_lookups() {
+    let root = std::env::temp_dir().join(format!("namedrop-host-budget-{}", std::process::id()));
+    fs::create_dir_all(&root).unwrap();
+    let probe = root.join("identity");
+    fs::write(&probe, r#"#!/usr/bin/python3
+import json, os, sys, time
+host = 'tui' if sys.argv[1] == 'pane' else 'hc'
+with open(os.environ['IDENTITY_LOG'], 'a') as log:
+    log.write(host + '\n')
+mode = os.environ['IDENTITY_MODE']
+if mode == 'deadline':
+    time.sleep(0.95)
+if mode == host + '-failure':
+    sys.exit(91)
+if mode == 'oversized':
+    print(' ' * (512 * 1024 + 1))
+else:
+    print(json.dumps({'result': {'process_info': {'shell_pid': 999999998}}} if host == 'tui' else {'pid': 999999999}))
+"#).unwrap();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o700)).unwrap();
+    for (mode, expected, probes) in [
+        ("cache", "hc", 2),
+        ("tui-failure", "tui", 1),
+        ("hc-failure", "tui", 2),
+        ("oversized", "tui", 1),
+        ("deadline", "tui", 2),
+    ] {
+        let log = root.join(mode);
+        let start = std::time::Instant::now();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "cached_host_child", "--nocapture"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HERDR_PANE_ID", "tui")
+            .env("HC_TERMINAL_ID", "hc")
+            .env("HERDR_BIN_PATH", &probe)
+            .env("HC_BIN_PATH", &probe)
+            .env("IDENTITY_LOG", &log)
+            .env("IDENTITY_MODE", mode)
+            .env("EXPECTED_HOST", expected)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(3),
+            "{mode} exceeded the shared identity deadline"
+        );
+        assert_eq!(
+            fs::read_to_string(log).unwrap().lines().count(),
+            probes,
+            "{mode}"
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore]
+fn cached_host_child() {
+    use namedrop::{cli::RuntimeOptions, runtime::HostKind};
+    let options = RuntimeOptions {
+        plugin_state: Some("/unused-state".into()),
+        ..RuntimeOptions::default()
+    };
+    let expected = if std::env::var("EXPECTED_HOST").unwrap() == "hc" {
+        HostKind::Hc
+    } else {
+        HostKind::Tui
+    };
+    assert_eq!(options.ambient_host_kind(), expected);
+    assert_eq!(options.host_kind().unwrap(), expected);
+    assert_eq!(options.clone().host_kind().unwrap(), expected);
+    assert_eq!(
+        options.state_directory().unwrap(),
+        std::path::Path::new("/unused-state")
+    );
+    let explicit = RuntimeOptions {
+        host: Some(HostKind::Tui),
+        ..options.clone()
+    };
+    assert_eq!(explicit.host_kind().unwrap(), HostKind::Tui);
+}
