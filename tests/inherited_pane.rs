@@ -926,6 +926,7 @@ else: raise AssertionError(args)
         let mut command = Command::new(program);
         command
             .isolated_home(f.0.join("home"))
+            .env("PATH", "/usr/bin:/bin")
             .env("CLAUDE_CONFIG_DIR", f.0.join("home/.claude"))
             .env("CODEX_HOME", f.0.join("home/.codex"))
             .args(args)
