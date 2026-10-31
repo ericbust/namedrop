@@ -547,6 +547,18 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         let workspace = match at {
             SpaceLocator::Workspace(id) => id.to_owned(),
             SpaceLocator::Checkout(cwd) => {
+                if !discovery.warnings.is_empty() {
+                    let failures = discovery
+                        .warnings
+                        .iter()
+                        .map(|warning| format!("{}: {}", warning.terminal, warning.message))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    return Err(format!(
+                        "hc cannot resolve this checkout because terminal discovery is incomplete ({failures}). Pass --hc-space <space-id>."
+                    )
+                    .into());
+                }
                 let root = cached_root(cwd).ok_or_else(|| {
                     "hc cannot resolve this checkout. Pass --hc-space <space-id>.".to_owned()
                 })?;
