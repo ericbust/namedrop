@@ -714,8 +714,7 @@ fn hc_permission_ownership_survives_state_changes_and_deactivation() {
     fs::remove_dir_all(root).unwrap();
 }
 
-#[path = "../../tests/support/bash_rules.rs"]
-mod bash_rules;
+use crate::bash_rules;
 
 #[test]
 fn hc_command_forms_match_only_operation_scoped_permissions() {
