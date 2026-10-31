@@ -1329,3 +1329,40 @@ mod permission_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod owner_review_tests {
+    use super::*;
+    struct NoCalls;
+    impl crate::HerdrCommandExecutor for NoCalls {
+        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> { panic!("unexpected host call {args:?}") }
+    }
+    #[test]
+    fn hc_refresh_does_not_change_tui_packages_and_owns_private_packages() {
+        let root = std::env::temp_dir().join(format!("namedrop-owner-review-{}", std::process::id()));
+        let home = root.join("home");
+        let tui_state = root.join("tui");
+        let hc_state = root.join("hc");
+        fs::create_dir_all(&tui_state).unwrap();
+        let executable = PathBuf::from(crate::collaboration_executable().unwrap());
+        let packages = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent| {
+            let package = install_integration_package(&home, agent, &executable, &tui_state).unwrap();
+            let bytes = fs::read(package.join(INSTRUCTIONS_FILE)).unwrap();
+            (agent, package, bytes)
+        });
+        let runtime = LifecycleRuntime {
+            state_directory: &hc_state, home_directory: Some(&home), agent_config: AgentConfigDirectories::default(),
+            cwd: &root, workspace_id: Some("space"), current_pane_id: None, session_socket_id: "hc:test",
+            host: crate::HcHost::new(&NoCalls), clock: &crate::SystemClock, ids: &crate::ProcessIds::default(),
+        };
+        let discovered = DiscoveredWorktree { worktree_id: crate::WorktreeId::new("worktree"), workspace_id: "space".into(), worktree_attached: false, label: None, branch: None, panes: vec![] };
+        let installation = refresh_user_integration_packages(&runtime, &discovered).unwrap();
+        for (agent, package, bytes) in packages {
+            assert!(!installation.failed(agent));
+            assert_eq!(fs::read(package.join(INSTRUCTIONS_FILE)).unwrap(), bytes, "HC changed TUI package");
+            assert!(package_directory(&hc_state.join("integrations"), agent).join(INSTRUCTIONS_FILE).exists());
+            inspect_integration_package(Some(&home), agent, &tui_state, AgentConfigDirectories::default()).unwrap();
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}

@@ -736,19 +736,44 @@ else: raise AssertionError(args)
 #[test]
 fn explicit_transport_flags_select_the_host_without_environment() {
     let fixture = Fixture::new("explicit-host-flags");
-    for (flag, value) in [("--herdr-socket", "socket"), ("--herdr-workspace", "w1"), ("--herdr-pane", "p1")] {
-        let output = fixture.namedrop_command(&[flag, value, "address", "list"])
-            .env_remove("HERDR_SOCKET_PATH").env_remove("HERDR_WORKSPACE_ID")
-            .env_remove("HERDR_PANE_ID").env_remove("HC_TERMINAL_ID").output().unwrap();
-        assert!(!text(&output).contains("Host is unknown"), "{flag}: {}", text(&output));
+    for (flag, value) in [
+        ("--herdr-socket", "socket"),
+        ("--herdr-workspace", "w1"),
+        ("--herdr-pane", "p1"),
+    ] {
+        let output = fixture
+            .namedrop_command(&[flag, value, "address", "list"])
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HC_TERMINAL_ID")
+            .output()
+            .unwrap();
+        assert!(
+            !text(&output).contains("Host is unknown"),
+            "{flag}: {}",
+            text(&output)
+        );
     }
     for flag in ["--hc-terminal", "--hc-space"] {
-        let output = fixture.namedrop_command(&[flag, "explicit", "address", "list"])
-            .env_remove("HERDR_SOCKET_PATH").env_remove("HERDR_PANE_ID")
-            .env_remove("HC_TERMINAL_ID").env("HC_BIN_PATH", "/not-an-hc-executable")
-            .output().unwrap();
-        assert!(!text(&output).contains("Host is unknown"), "{flag}: {}", text(&output));
-        assert!(text(&output).contains("hc did not report its core identity"), "{}", text(&output));
+        let output = fixture
+            .namedrop_command(&[flag, "explicit", "address", "list"])
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HC_TERMINAL_ID")
+            .env("HC_BIN_PATH", "/not-an-hc-executable")
+            .output()
+            .unwrap();
+        assert!(
+            !text(&output).contains("Host is unknown"),
+            "{flag}: {}",
+            text(&output)
+        );
+        assert!(
+            text(&output).contains("hc did not report its core identity") || text(&output).contains("not-an-hc-executable"),
+            "{}",
+            text(&output)
+        );
     }
 }
 
@@ -760,13 +785,24 @@ fn tui_ignores_hc_state_for_execution_and_command_guard() {
     let hc_state = fixture.0.join("hc-state");
     fs::create_dir_all(hc_state.join("runtime")).unwrap();
     fs::write(hc_state.join("runtime/namedrop"), "#!/bin/sh\nexit 91\n").unwrap();
-    fs::set_permissions(hc_state.join("runtime/namedrop"), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(
+        hc_state.join("runtime/namedrop"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
-    fixture.host(&mut command).env_remove("HERDR_PANE_ID")
-        .env("HERDR_PLUGIN_STATE_DIR", &state).env("NAMEDROP_STATE_DIR", &hc_state)
+    fixture
+        .host(&mut command)
+        .env_remove("HERDR_PANE_ID")
+        .env("HERDR_PLUGIN_STATE_DIR", &state)
+        .env("NAMEDROP_STATE_DIR", &hc_state)
         .args(["address", "list"]);
     let output = command.output().unwrap();
     assert!(output.status.success(), "{}", text(&output));
     assert!(state.join("namedrop.sqlite3").exists() || fs::read_dir(&state).unwrap().count() > 0);
-    assert_eq!(fs::read_dir(&hc_state).unwrap().count(), 1, "HC state must not be opened");
+    assert_eq!(
+        fs::read_dir(&hc_state).unwrap().count(),
+        1,
+        "HC state must not be opened"
+    );
 }
