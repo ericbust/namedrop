@@ -165,7 +165,12 @@ fn doctor_explains_overlong_socket_paths_without_launching_hc() {
     // SAFETY: an all-zero sockaddr_un is valid for inspecting its pathname capacity.
     let address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     let max_bytes = address.sun_path.len() - 1;
-    for source in ["HC_SOCKET", "HC_TERMINAL_SOCKET", "XDG_RUNTIME_DIR", "config"] {
+    for source in [
+        "HC_SOCKET",
+        "HC_TERMINAL_SOCKET",
+        "XDG_RUNTIME_DIR",
+        "config",
+    ] {
         for character in ["x", "é"] {
             let f = Fixture::new();
             let long_path = format!("/{}", character.repeat(max_bytes.div_ceil(character.len())));

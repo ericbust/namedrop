@@ -236,8 +236,16 @@ fn connect_hc_socket(path: &Path, deadline: Instant, cancelled: &AtomicBool) -> 
     // SAFETY: zero initializes the sockaddr padding and the pathname terminator.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     let bytes = path.as_os_str().as_bytes();
-    if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= address.sun_path.len() {
+    if bytes.is_empty() || bytes.contains(&0) {
         return Err(format!("Invalid hc socket path: {}", path.display()));
+    }
+    if bytes.len() >= address.sun_path.len() {
+        return Err(format!(
+            "hc socket path is too long ({} bytes; maximum {} bytes): {}. Set HC_SOCKET to a shorter path matching the running core's socket.",
+            bytes.len(),
+            address.sun_path.len() - 1,
+            path.display()
+        ));
     }
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
     for (destination, source) in address.sun_path.iter_mut().zip(bytes) {

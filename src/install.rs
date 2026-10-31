@@ -815,7 +815,7 @@ fn installed_instructions(
     let (state_variable, location_flags) = if hc_owner.is_some() {
         (
             "NAMEDROP_STATE_DIR",
-            "For bound operations, append `--plugin-state`, `--host hc`, `--hc-space`, and `--hc-terminal` with the exact `control.tool.environment` values. The operation follows the installed prefix; host and location flags follow the operation.",
+            "For bound operations, append `--plugin-state`, `--host hc`, `--hc-space`, and `--hc-terminal` with the exact `control.tool.environment` values. The operation follows the installed prefix; host and location flags follow the operation. If doctor reports that the socket path is too long, configure the core at a shorter path and set `HC_SOCKET` to that path.",
         )
     } else {
         (
