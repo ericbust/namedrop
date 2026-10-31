@@ -207,7 +207,7 @@ impl EnvironmentSnapshot {
         command
     }
 
-    pub(crate) fn hc_command(&self, program: impl AsRef<OsStr>) -> Command {
+    pub fn hc_command(&self, program: impl AsRef<OsStr>) -> Command {
         use std::os::unix::ffi::OsStrExt;
         let mut command = self.command(program);
         for key in self

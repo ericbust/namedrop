@@ -1128,7 +1128,12 @@ fn worker_options(
 
 fn status_worker_command(options: &RuntimeOptions) -> Result<Command, String> {
     use std::os::unix::process::CommandExt;
-    let mut command = options.environment.command(namedrop::runtime_executable()?);
+    let executable = namedrop::runtime_executable()?;
+    let mut command = if options.host_kind()? == HostKind::Hc {
+        options.environment.hc_command(executable)
+    } else {
+        options.environment.command(executable)
+    };
     if let Some(state) = &options.plugin_state {
         command.arg("--plugin-state").arg(state);
     }
