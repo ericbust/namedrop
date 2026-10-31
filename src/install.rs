@@ -492,7 +492,7 @@ fn prepare_integration_package(
     if runtime == AgentRuntime::ClaudeCode {
         validate_claude_permission_paths(executable, state_directory)?;
     }
-    let directory = verified_package_directory(&context.root, runtime)?;
+    let directory = verified_package_directory(context, runtime)?;
     let package = integration_package(runtime);
     let instructions = installed_instructions(
         package.instructions,
@@ -869,9 +869,7 @@ where
         .map(|home| PackageContext::new(home, runtime.state_directory, runtime.is_hc()));
     let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
         let outcome = match (context.as_ref(), &executable) {
-            (Some(context), _) if !current => {
-                verified_package_directory(&context.root, agent_runtime)
-            }
+            (Some(context), _) if !current => verified_package_directory(context, agent_runtime),
             (Some(context), Ok(executable)) => install_integration_package_with_config(
                 context,
                 agent_runtime,
@@ -1303,7 +1301,11 @@ fn verify_owned_plugin_targets(
 
 /// Refuses every unowned target before anything is written, so a conflict never
 /// follows or modifies what it found.
-fn verified_package_directory(root: &Path, runtime: AgentRuntime) -> Result<PathBuf, String> {
+fn verified_package_directory(
+    context: &PackageContext,
+    runtime: AgentRuntime,
+) -> Result<PathBuf, String> {
+    let root = &context.root;
     if !root.is_absolute() {
         return Err(format!(
             "the {} Agent Integration package requires an absolute installation root, not {}",
@@ -1311,8 +1313,19 @@ fn verified_package_directory(root: &Path, runtime: AgentRuntime) -> Result<Path
             root.display()
         ));
     }
-    let mut path = root.to_path_buf();
-    for component in package_components(runtime) {
+    let mut path = if context.hc {
+        root.parent()
+            .expect("HC integration root has a state directory parent")
+            .to_path_buf()
+    } else {
+        root.to_path_buf()
+    };
+    for component in context
+        .hc
+        .then_some("integrations")
+        .into_iter()
+        .chain(package_components(runtime))
+    {
         path.push(component);
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_symlink() => {
