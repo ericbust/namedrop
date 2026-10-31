@@ -226,12 +226,8 @@ fn doctor_does_not_start_subscriber_without_active_worktree() {
             .args(["--hc-space", "fixture", "doctor", "--json"])
             .output()
             .unwrap();
-        assert!(
-            output.status.success(),
-            "stdout={} stderr={}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["status"], "ok", "{report}");
         assert_eq!(
             fixture.streams(),
             0,
