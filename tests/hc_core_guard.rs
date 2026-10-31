@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[path = "support/hc_socket.rs"]
 mod hc_socket;
 
@@ -40,7 +44,7 @@ impl Fixture {
             .args(["--exact", "guard_child", "--nocapture"])
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("HOME", &self.0)
+            .isolated_home(&self.0)
             .env("XDG_RUNTIME_DIR", self.0.join("run"))
             .env("HC_BIN_PATH", self.0.join("hc"))
             .env("LOG", self.0.join("calls"))
@@ -186,7 +190,7 @@ fn doctor_explains_overlong_socket_paths_without_launching_hc() {
                 .args(["doctor", "--json"])
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
-                .env("HOME", &f.0)
+                .isolated_home(&f.0)
                 .env("XDG_RUNTIME_DIR", f.0.join("run"))
                 .env("HC_BIN_PATH", f.0.join("hc"))
                 .env("LOG", f.0.join("calls"));

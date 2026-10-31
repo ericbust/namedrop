@@ -203,6 +203,7 @@ fn hc_background_lifecycle_preserves_packages_until_a_user_refreshes_them() {
         agent_config: AgentConfigDirectories {
             claude: Some(&claude),
             codex: Some(&codex),
+            ..Default::default()
         },
         cwd: &root,
         workspace_id: Some("fixture-space"),

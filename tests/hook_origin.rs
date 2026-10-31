@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 use std::{
     fs,
     os::unix::fs::PermissionsExt,
@@ -40,7 +44,7 @@ fn cross_host_hooks_decline_before_locked_state_runtime_or_socket_access() {
             let mut command = Command::new(&binary);
             command
                 .env_clear()
-                .env("HOME", root.join("home"))
+                .isolated_home(root.join("home"))
                 .env("PATH", "/usr/bin:/bin")
                 .env("HC_BIN_PATH", &tripwire)
                 .env("HERDR_BIN_PATH", &tripwire)
@@ -233,7 +237,7 @@ fn explicit_hook_selection_precedes_origin_state_and_host_io() {
             command
                 .env_clear()
                 .env("PATH", "/usr/bin:/bin")
-                .env("HOME", root.join("home"))
+                .isolated_home(root.join("home"))
                 .env("NAMEDROP_STATE_DIR", root.join("hc"))
                 .env("HERDR_PLUGIN_STATE_DIR", root.join("unused-tui"))
                 .env("HERDR_BIN_PATH", &host)

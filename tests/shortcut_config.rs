@@ -14,6 +14,9 @@ fn xdg_config_home_applies_only_to_this_users_own_home() {
     unsafe {
         std::env::remove_var("HERDR_CONFIG_PATH");
         std::env::set_var("XDG_CONFIG_HOME", &xdg);
+        std::env::set_var("XDG_STATE_HOME", root.join("state"));
+        std::env::set_var("XDG_DATA_HOME", root.join("data"));
+        std::env::set_var("XDG_RUNTIME_DIR", root.join("run"));
         std::env::set_var("HOME", root.join("someone-else"));
     }
     // Activating for another home (a test or an isolated profile) never uses

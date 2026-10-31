@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
 #[test]
@@ -52,7 +56,7 @@ esac
     let activated = Command::new(env!("CARGO_BIN_EXE_namedrop"))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", root.join("home"))
+        .isolated_home(root.join("home"))
         .env("HERDR_BIN_PATH", &host)
         .env("SHELL", "/bin/bash")
         .arg("--plugin-state")

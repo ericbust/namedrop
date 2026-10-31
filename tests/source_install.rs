@@ -2,6 +2,10 @@
 //! command Herdr runs before it registers the plugin, and the setup helper that
 //! links a local checkout or activates an already registered installation.
 //! Every fixture path contains a space so quoting is exercised throughout.
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use std::{
@@ -197,7 +201,7 @@ chmod 755 "$directory/$target/release/namedrop"
         command
             .arg(checkout.join("scripts/build.sh"))
             .env("PATH", &self.tools)
-            .env("HOME", self.root.join("home"))
+            .isolated_home(self.root.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.root.join("home").join(".claude"))
             .env("CODEX_HOME", self.root.join("home").join(".codex"))
             .env_remove("XDG_CONFIG_HOME")
@@ -220,7 +224,7 @@ chmod 755 "$directory/$target/release/namedrop"
         command
             .env("PATH", format!("{}:/usr/bin:/bin", self.tools.display()))
             .env("PYTHONPATH", &self.tools)
-            .env("HOME", self.root.join("home"))
+            .isolated_home(self.root.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.root.join("home").join(".claude"))
             .env("CODEX_HOME", self.root.join("home").join(".codex"))
             .env_remove("XDG_CONFIG_HOME")

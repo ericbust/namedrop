@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 use namedrop::{
     ActorKind, AgentSessionId, DeliveryAttemptId, DeliveryId, DeliveryState, LeaseDraft,
     MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft,
@@ -59,7 +63,7 @@ impl Fixture {
             .env("TEST_SHELL_PID", std::process::id().to_string())
             .env("HERDR_BIN_PATH", self.root.join("herdr"))
             .env("NAMEDROP_TEST_FIXTURE", &self.root)
-            .env("HOME", self.root.join("home"))
+            .isolated_home(self.root.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.root.join("home").join(".claude"))
             .env("CODEX_HOME", self.root.join("home").join(".codex"))
             .env_remove("XDG_CONFIG_HOME")

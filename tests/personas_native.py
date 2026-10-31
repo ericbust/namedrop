@@ -25,6 +25,8 @@ import sys
 import tempfile
 import time
 
+from support.environment import isolated_home
+
 from seamless_native import FIXTURE_ROOT, fixture_shell
 
 REPO = Path(__file__).resolve().parent.parent
@@ -43,7 +45,8 @@ def main():
            if not k.startswith(('HERDR_', 'CODEX_', 'CLAUDE_', 'NAMEDROP_', 'GIT_CONFIG_'))}
     for name in ('home', 'config', 'state', 'data', 'run', 'workspace', 'evidence'):
         (base / name).mkdir()
-    env.update(HOME=str(base / 'home'), XDG_CONFIG_HOME=str(base / 'config'),
+    env.update(isolated_home(base / 'home'))
+    env.update(XDG_CONFIG_HOME=str(base / 'config'),
                XDG_STATE_HOME=str(base / 'state'), XDG_DATA_HOME=str(base / 'data'),
                XDG_RUNTIME_DIR=str(base / 'run'), CODEX_HOME=str(base / 'home/.codex'),
                CLAUDE_CONFIG_DIR=str(base / 'home/.claude'),

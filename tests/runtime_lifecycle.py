@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 
+from support.environment import isolated_home
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'scripts'))
 import runtime
@@ -20,7 +22,8 @@ def main():
     subprocess.run([actual, '--validate-update-manifest', REPO / 'herdr-plugin.toml'], check=True)
     with tempfile.TemporaryDirectory(prefix='namedrop runtime ') as directory:
         base = Path(directory)
-        os.environ.update(HOME=str(base/'home'), CLAUDE_CONFIG_DIR=str(base/'home/.claude'), CODEX_HOME=str(base/'home/.codex'))
+        os.environ.update(isolated_home(base / 'home'))
+        os.environ.update(CLAUDE_CONFIG_DIR=str(base/'home/.claude'), CODEX_HOME=str(base/'home/.codex'))
         invalid = base / 'invalid.toml'
         invalid.write_text((REPO / 'herdr-plugin.toml').read_text().replace(
             '"sh", "./scripts/run.sh", "reconcile"', '"./bin/namedrop", "reconcile"'))

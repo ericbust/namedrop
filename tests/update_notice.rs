@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 use namedrop::{AgentRuntime, install_integration_package};
 #[path = "support/update_profile.rs"]
 mod update_profile;
@@ -69,7 +73,7 @@ impl Fixture {
             .args(["--plugin-state"])
             .arg(&self.state)
             .args(args)
-            .env("HOME", &self.home)
+            .isolated_home(&self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("CODEX_HOME", self.home.join(".codex"))
             .env("CLAUDE_CONFIG_DIR", self.home.join(".claude"))

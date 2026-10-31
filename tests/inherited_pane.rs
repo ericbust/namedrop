@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[path = "support/app_popup.rs"]
 mod app_popup;
 #[path = "support/codex_app_server.rs"]
@@ -156,7 +160,7 @@ esac
     }
     fn host<'a>(&self, command: &'a mut Command) -> &'a mut Command {
         command
-            .env("HOME", self.0.join("home"))
+            .isolated_home(self.0.join("home"))
             .env("PATH", "/usr/bin:/bin")
             .env("HC_SOCKET", self.0.join("hc.sock"))
             .env("CLAUDE_CONFIG_DIR", self.0.join("home").join(".claude"))
@@ -921,7 +925,7 @@ else: raise AssertionError(args)
     let inherited_hook = |program: &Path, args: &[&str], payload: &str| {
         let mut command = Command::new(program);
         command
-            .env("HOME", f.0.join("home"))
+            .isolated_home(f.0.join("home"))
             .env("CLAUDE_CONFIG_DIR", f.0.join("home/.claude"))
             .env("CODEX_HOME", f.0.join("home/.codex"))
             .args(args)
@@ -1122,7 +1126,7 @@ else: raise AssertionError(args)
     fs::write(f.0.join("hc-calls"), "").unwrap();
     let mut wrapper = Command::new(Path::new(package).join("scripts/session-start"));
     wrapper
-        .env("HOME", f.0.join("home"))
+        .isolated_home(f.0.join("home"))
         .env("CLAUDE_CONFIG_DIR", f.0.join("home/.claude"))
         .env("CODEX_HOME", f.0.join("home/.codex"))
         .env("HERDR_APP_BIN_PATH", f.0.join("app-popup"))

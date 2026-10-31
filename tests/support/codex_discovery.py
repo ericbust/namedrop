@@ -9,8 +9,10 @@ import sys
 import time
 import tomllib
 
+from environment import isolated_home
+
 root = Path(sys.argv[1]).resolve()
-environment = dict(os.environ, HOME=str(root / "home"), CODEX_HOME=str(root / "codex"))
+environment = dict(os.environ, **isolated_home(root / "home"), CODEX_HOME=str(root / "codex"))
 log = (root / "app-server.stderr").open("w")
 server = subprocess.Popen(
     ["codex", "app-server"],

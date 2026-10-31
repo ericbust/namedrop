@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 use namedrop::{
     ActorKind, AgentRuntime, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput,
     IdGenerator, LifecycleRuntime, MutationAttribution, PaneAddressDraft, PaneAddressId,
@@ -2119,7 +2123,7 @@ fn cli_exposes_all_features_and_keeps_management_out_of_delivery_permissions() {
     let run = |argv: &[&str], input: serde_json::Value| {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .current_dir(&directory.repo)
-            .env("HOME", &directory.home)
+            .isolated_home(&directory.home)
             .env("CLAUDE_CONFIG_DIR", directory.home.join(".claude"))
             .env("CODEX_HOME", directory.home.join(".codex"))
             .env_remove("XDG_CONFIG_HOME")

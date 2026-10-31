@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[test]
 fn codex_activation_installs_and_verifies_the_local_plugin() {
     let output = std::process::Command::new("python3")
@@ -114,7 +118,7 @@ fn linux_preflight_requires_landlock_and_named_prerequisites() {
             ))
             .env_clear()
             .env("PATH", &bin)
-            .env("HOME", &root)
+            .isolated_home(&root)
             .env("CLAUDE_CONFIG_DIR", root.join(".claude"))
             .env("CODEX_HOME", root.join(".codex"))
             .env("FAKE_LANDLOCK", landlock)

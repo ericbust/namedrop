@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[allow(dead_code)]
 #[path = "fixtures/hc/process.rs"]
 mod process;
@@ -298,7 +302,7 @@ else:
         .args(["--exact", "detached_subscriber_child", "--nocapture"])
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
-        .env("HOME", root.join("home"))
+        .isolated_home(root.join("home"))
         .env("XDG_CONFIG_HOME", root.join("config"))
         .env("XDG_STATE_HOME", root.join("xdg"))
         .env("XDG_RUNTIME_DIR", &root)
@@ -712,7 +716,7 @@ fn stopped_core_error_survives_doctor_composition() {
             .args(["--hc-space", "fixture-space", "doctor"])
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
-            .env("HOME", root.join("home"))
+            .isolated_home(root.join("home"))
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_STATE_HOME", root.join("xdg"))
             .env("XDG_RUNTIME_DIR", &root)

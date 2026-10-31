@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[path = "support/hc_socket.rs"]
 mod hc_socket;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
@@ -235,7 +239,7 @@ esac
             .args(["-c", &script, "host-detection"])
             .arg(&binary)
             .env_clear()
-            .env("HOME", root.join("home"))
+            .isolated_home(root.join("home"))
             .env("PATH", "/usr/bin:/bin")
             .env(
                 "HC_BIN_PATH",

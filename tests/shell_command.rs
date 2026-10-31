@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
 struct Fixture(PathBuf);
@@ -29,7 +33,7 @@ esac
     fn command(&self, executable: impl AsRef<std::ffi::OsStr>) -> Command {
         let mut command = Command::new(executable);
         command
-            .env("HOME", self.home())
+            .isolated_home(self.home())
             .env("CLAUDE_CONFIG_DIR", self.home().join(".claude"))
             .env("CODEX_HOME", self.home().join(".codex"))
             .env_remove("XDG_CONFIG_HOME")

@@ -228,6 +228,10 @@ fn fixture() -> &'static PathBuf {
             // Safety: initialized once before tests start workers, like the CLI overrides.
             unsafe {
                 env::set_var("HOME", dir.join("home"));
+                env::set_var("XDG_STATE_HOME", dir.join("home/.local/state"));
+                env::set_var("XDG_CONFIG_HOME", dir.join("home/.config"));
+                env::set_var("XDG_DATA_HOME", dir.join("home/.local/share"));
+                env::set_var("XDG_RUNTIME_DIR", dir.join("home/.runtime"));
                 env::set_var("CODEX_HOME", dir.join("codex-home"));
                 env::set_var(
                     "NAMEDROP_TEST_PROJECT_CANARY",

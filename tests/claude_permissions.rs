@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 use namedrop::*;
 use serde_json::{Value, json};
 use std::{
@@ -74,7 +78,7 @@ print(json.dumps({'result':result}))
                 "--herdr-pane",
                 "pane-1",
             ])
-            .env("HOME", &self.home)
+            .isolated_home(&self.home)
             .env("CLAUDE_CONFIG_DIR", &self.claude)
             .env("CODEX_HOME", self.home.join(".codex"))
             .env("HERDR_BIN_PATH", self.root.join("herdr"))
@@ -108,6 +112,7 @@ print(json.dumps({'result':result}))
             agent_config: namedrop::AgentConfigDirectories {
                 claude: Some(&self.claude),
                 codex: None,
+                ..Default::default()
             },
             cwd: Path::new("/repo"),
             workspace_id: None,
@@ -613,7 +618,7 @@ fn input_file_errors_never_echo_unknown_keys_or_values() {
                     "--herdr-pane",
                     "pane-1",
                 ])
-                .env("HOME", &f.home)
+                .isolated_home(&f.home)
                 .env("CLAUDE_CONFIG_DIR", f.home.join(".claude"))
                 .env("CODEX_HOME", f.home.join(".codex"))
                 .output()
@@ -674,7 +679,7 @@ fn an_inherited_claude_config_directory_is_not_used_by_in_process_helpers() {
             "--nocapture",
         ])
         .env(CHILD, "1")
-        .env("HOME", &f.home)
+        .isolated_home(&f.home)
         .env("CLAUDE_CONFIG_DIR", parent)
         .env("CODEX_HOME", f.home.join(".codex"))
         .output()
@@ -861,7 +866,7 @@ fn input_file_operational_errors_match_inline_errors() {
             "--type",
             "agent",
         ])
-        .env("HOME", &f.home)
+        .isolated_home(&f.home)
         .env("CLAUDE_CONFIG_DIR", &f.claude)
         .env("CODEX_HOME", f.home.join(".codex"))
         .env("HERDR_BIN_PATH", f.root.join("herdr"))
@@ -1062,7 +1067,7 @@ fn registration_flags_override_every_inherited_transport_value() {
         issue_registration_challenge(&address.id, AgentRuntime::ClaudeCode, &runtime).unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
         .args(["--plugin-state", f.root.to_str().unwrap(), "register", "--herdr-socket", "socket-a", "--herdr-workspace", "workspace-1", "--herdr-pane", "pane-1", "--input-json", &json!({"runtime":"claude-code", "protocol_version":"collab/v1", "nonce":challenge.nonce, "capabilities":complete_capability_profile()}).to_string()])
-        .env("HOME", &f.home).env("CLAUDE_CONFIG_DIR", &f.claude).env("CODEX_HOME", f.home.join(".codex"))
+        .isolated_home(&f.home).env("CLAUDE_CONFIG_DIR", &f.claude).env("CODEX_HOME", f.home.join(".codex"))
         .env("HERDR_BIN_PATH", f.root.join("herdr")).env("TEST_WORKSPACE", "workspace-1")
         .env("HERDR_PLUGIN_STATE_DIR", f.root.join("wrong-state")).env("HERDR_SOCKET_PATH", "wrong-socket")
         .env("HERDR_WORKSPACE_ID", "wrong-workspace").env("HERDR_PANE_ID", "wrong-pane")

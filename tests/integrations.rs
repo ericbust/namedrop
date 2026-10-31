@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[path = "support/bash_rules.rs"]
 mod bash_rules;
 use bash_rules::bash_rule_matches;
@@ -4484,7 +4488,7 @@ fn tui_hook_rendering_keeps_baked_context_even_in_hc_environment() {
     let run = |state: Option<&str>| {
         let mut command = Command::new(&wrapper);
         command
-            .env("HOME", directory.home())
+            .isolated_home(directory.home())
             .env("XDG_STATE_HOME", directory.path().join("xdg"))
             .env("HC_SESSION", "second-core")
             .env("HC_TERMINAL_ID", "t3")
