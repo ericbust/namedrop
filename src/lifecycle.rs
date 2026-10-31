@@ -255,7 +255,7 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let _label_lock = if runtime.is_hc() {
+    let _label_lock = if runtime.is_hc() && operation != "address.list" {
         Some(crate::host::hc::label_lock(runtime.state_directory)?)
     } else {
         None
