@@ -181,15 +181,21 @@ impl EnvironmentSnapshot {
     pub(crate) fn hc_command(&self, program: impl AsRef<OsStr>) -> Command {
         use std::os::unix::ffi::OsStrExt;
         let mut command = self.command(program);
-        for key in self.0.variables.keys() {
-            if key.as_bytes().starts_with(b"HERDR_") {
+        for key in self
+            .0
+            .variables
+            .keys()
+            .cloned()
+            .chain(std::env::vars_os().map(|(key, _)| key))
+        {
+            if key.as_bytes().starts_with(b"HERDR_")
+                || key.as_bytes().starts_with(b"HC_TERMINAL_")
+                || key == "HC_SCOPE"
+                || key == "HC_RUNTIME"
+            {
                 command.env_remove(key);
             }
         }
-        crate::runtime::remove_tui_environment(&mut command);
-        command
-            .env_remove("HC_TERMINAL_ID")
-            .env_remove("HC_TERMINAL_SOCKET");
         if let Ok(endpoint) = self.hc_endpoint() {
             command.env("HC_SOCKET", endpoint);
         }
