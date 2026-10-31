@@ -977,6 +977,10 @@ fn move_label_failure_preserves_source_proof_until_fresh_subscriber_repairs_mirr
                             destination_alias.unwrap_or("empty")
                         ),
                         |fixture, runtime| {
+                            let mut healthy = fixture.terminals.borrow()[0].clone();
+                            healthy["address"] = json!("t2");
+                            healthy["labels"]["namedrop.name"] = json!("healthy");
+                            fixture.terminals.borrow_mut().push(healthy);
                             fixture.terminals.borrow_mut()[0]["labels"]["herdr.space"] =
                                 json!("destination");
                             let destination = namedrop::LifecycleRuntime {
@@ -1012,6 +1016,15 @@ fn move_label_failure_preserves_source_proof_until_fresh_subscriber_repairs_mirr
                                 .handle_line(&event(first), runtime)
                                 .unwrap_err();
                             assert!(error.contains("transient name write failed"), "{error}");
+                            namedrop::execute_lifecycle_operation(
+                                "name",
+                                json!({"alias":"healthy", "pane_type":"terminal"}),
+                                &namedrop::LifecycleRuntime {
+                                    current_pane_id: Some("t2"),
+                                    ..*runtime
+                                },
+                            )
+                            .unwrap();
                             let mut store =
                                 namedrop::StateStore::open(runtime.state_directory).unwrap();
                             let source =
@@ -1022,7 +1035,9 @@ fn move_label_failure_preserves_source_proof_until_fresh_subscriber_repairs_mirr
                                 store
                                     .transaction(|tx| tx.active_pane_bindings(&source))
                                     .unwrap()
-                                    .len(),
+                                    .iter()
+                                    .filter(|binding| binding.pane_id == "t1")
+                                    .count(),
                                 1,
                                 "failed mirror write lost durable source binding: applied={applied}, first={first}, retry={retry}"
                             );
@@ -1033,7 +1048,8 @@ fn move_label_failure_preserves_source_proof_until_fresh_subscriber_repairs_mirr
                                 store
                                     .transaction(|tx| tx.active_pane_bindings(&source))
                                     .unwrap()
-                                    .is_empty()
+                                    .iter()
+                                    .all(|binding| binding.pane_id != "t1")
                             );
                             let destination_addresses = store
                                 .transaction(|tx| tx.list_pane_addresses(&target))
