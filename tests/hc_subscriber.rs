@@ -1823,18 +1823,23 @@ fn removed_binding_survives_failed_close_until_tick_retry() {
                     ids: runtime.ids,
                 };
                 let mut subscriber = namedrop::host::hc::events::Subscriber::default();
-                if initialized {
-                    subscriber
-                        .handle_line(&session_event("snapshot", fixture), &runtime)
-                        .unwrap();
-                } else {
-                    subscriber
-                        .handle_line(r#"{"terminals":[]}"#, &runtime)
-                        .unwrap();
+                subscriber
+                    .handle_line(&session_event("snapshot", fixture), &runtime)
+                    .unwrap();
+                let pane = if initialized { "t1" } else { "t2" };
+                if !initialized {
+                    let mut second = fixture.terminals.borrow()[0].clone();
+                    second["address"] = json!(pane);
+                    second["labels"]["namedrop.name"] = json!("");
+                    fixture.terminals.borrow_mut().push(second);
+                    let second_runtime = namedrop::LifecycleRuntime {
+                        current_pane_id: Some(pane),
+                        ..runtime
+                    };
                     namedrop::execute_lifecycle_operation(
                         "name",
-                        json!({"alias":"alice", "pane_type":"terminal"}),
-                        &runtime,
+                        json!({"alias":"bob", "pane_type":"terminal"}),
+                        &second_runtime,
                     )
                     .unwrap();
                 }
@@ -1842,8 +1847,13 @@ fn removed_binding_survives_failed_close_until_tick_retry() {
                     rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3"))
                         .unwrap();
                 connection.execute_batch("CREATE TRIGGER fail_unbind BEFORE UPDATE OF active ON pane_bindings WHEN NEW.active=0 BEGIN SELECT RAISE(ABORT, 'injected unbind failure'); END;").unwrap();
-                fixture.terminals.borrow_mut().clear();
-                let events = ["lost", "removed"].map(|kind| session_event(kind, fixture));
+                fixture
+                    .terminals
+                    .borrow_mut()
+                    .retain(|terminal| terminal["address"] != pane);
+                let events = ["created", "lost", "removed"].map(|kind| {
+                    json!({"method":"event","params":{"type":kind,"terminal":pane}}).to_string()
+                });
                 let result = subscriber.handle_lines(events.iter().map(String::as_str), &runtime);
                 assert!(
                     result.is_err(),
@@ -1859,8 +1869,8 @@ fn removed_binding_survives_failed_close_until_tick_retry() {
                 subscriber.tick(&retry).unwrap();
                 let active: i64 = connection
                     .query_row(
-                        "SELECT count(*) FROM pane_bindings WHERE active=1",
-                        [],
+                        "SELECT count(*) FROM pane_bindings WHERE active=1 AND pane_id=?1",
+                        [pane],
                         |row| row.get(0),
                     )
                     .unwrap();
@@ -2022,4 +2032,39 @@ fn queued_snapshot_does_not_reverse_committed_move() {
             "bob"
         );
     });
+}
+
+#[test]
+fn unavailable_terminal_clears_session_with_still_running_owner() {
+    for state in ["lost", "finished"] {
+        for kind in ["lost", "restarted"] {
+            check(
+                &format!("unavailable-owner-{state}-{kind}"),
+                |fixture, runtime| {
+                    let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                    subscriber
+                        .handle_line(&session_event("snapshot", fixture), runtime)
+                        .unwrap();
+                    let agent = process::AgentProcess::new();
+                    queued_agent(fixture, runtime, agent.pid());
+                    fixture.terminals.borrow_mut()[0]["state"] = json!(state);
+                    subscriber
+                        .handle_line(&session_event(kind, fixture), runtime)
+                        .unwrap();
+                    for key in [
+                        "namedrop.session",
+                        "namedrop.session.pid",
+                        "namedrop.session.start",
+                    ] {
+                        assert_eq!(
+                            fixture.terminals.borrow()[0]["labels"][key],
+                            "",
+                            "{state}/{kind} kept {key}"
+                        );
+                    }
+                    assert!(fixture.calls.borrow().iter().all(|call| call[0] != "send"));
+                },
+            );
+        }
+    }
 }
