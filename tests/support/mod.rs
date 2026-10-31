@@ -1,7 +1,5 @@
 #![allow(dead_code)]
 
-mod pane_effects_diagnostics;
-
 use namedrop::{
     ActorKind, AgentSessionId, Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator,
     MutationAttribution, PaneAddressDraft, PaneAddressId, PaneBindingId, PaneRoleId,
@@ -46,7 +44,10 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        pane_effects_diagnostics::emit(&self.path);
+        if let Ok(record) = fs::read(self.path.join("pane-effects-retries.log")) {
+            use std::io::Write;
+            let _ = std::io::stderr().lock().write_all(&record);
+        }
         fs::remove_dir_all(&self.path).unwrap();
     }
 }

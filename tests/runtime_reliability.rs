@@ -1,6 +1,3 @@
-#[path = "support/pane_effects_diagnostics.rs"]
-mod pane_effects_diagnostics;
-
 use namedrop::{
     ActorKind, AgentSessionId, DeliveryAttemptId, DeliveryId, DeliveryState, LeaseDraft,
     MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft,
@@ -399,7 +396,10 @@ impl Drop for Worker {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        pane_effects_diagnostics::emit(&self.state());
+        if let Ok(record) = fs::read(self.state().join("pane-effects-retries.log")) {
+            use std::io::Write;
+            let _ = std::io::stderr().lock().write_all(&record);
+        }
         fs::remove_dir_all(&self.root).unwrap();
     }
 }
