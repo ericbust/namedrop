@@ -1079,9 +1079,9 @@ impl StateTransaction<'_> {
         pane_id: &str,
         tab_id: &str,
     ) -> Result<(), StoreError> {
-        if pane_id.is_empty() || tab_id.is_empty() {
+        if pane_id.is_empty() {
             return Err(StoreError::invalid_input(
-                "pane and tab identities are required for a binding location",
+                "pane identity is required for a binding location",
             ));
         }
         let changed = self.transaction.execute(
@@ -1093,7 +1093,7 @@ impl StateTransaction<'_> {
                 namespace.space_id.as_str(),
                 address_id.as_str(),
                 pane_id,
-                tab_id,
+                (!tab_id.is_empty()).then_some(tab_id),
             ],
         )?;
         if changed != 1 {
