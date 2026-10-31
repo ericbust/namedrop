@@ -810,16 +810,17 @@ export function App() {
   const paneWasOpen = useRef(false);
   const view = viewOf(state.selection);
   const shownView = useRef(view);
+  const focusPaneControl = useCallback(() => {
+    document
+      .getElementById(paneId)
+      ?.querySelector<HTMLElement>(
+        pane === "thread" ? 'button[aria-label="Close thread"]' : ".peek-text",
+      )
+      ?.focus();
+  }, [pane, paneId]);
   useLayoutEffect(() => {
     if (pane !== null && focusPane.current) {
-      document
-        .getElementById(paneId)
-        ?.querySelector<HTMLElement>(
-          pane === "thread"
-            ? 'button[aria-label="Close thread"]'
-            : ".peek-text",
-        )
-        ?.focus();
+      focusPaneControl();
       focusPane.current = false;
     }
     const unmounted =
@@ -931,6 +932,22 @@ export function App() {
             tabIndex={-1}
             ref={main}
             inert={drawerOpen}
+            onBlurCapture={(event) => {
+              // A narrowing window lets the open pane cover the channel, and
+              // the focus it held falls to the page. The pane takes it.
+              if (
+                pane === null ||
+                event.relatedTarget !== null ||
+                event.currentTarget.checkVisibility({
+                  visibilityProperty: true,
+                })
+              )
+                return;
+              requestAnimationFrame(() => {
+                if (document.activeElement === document.body)
+                  focusPaneControl();
+              });
+            }}
           >
             {state.selection.kind === "activity" && state.channels.size > 0 ? (
               <ActivityView
@@ -986,15 +1003,16 @@ export function App() {
                     label={composerPlaceholder(channel)}
                     rule={channelRule}
                     notice={
-                      channelResponse?.preparation === "preserved" ? (
+                      (channelResponse?.preparation === "unavailable" ||
+                        channelResponse?.preparation === "preserved") &&
+                      messageAbsence !== null ? (
+                        <p className="composer-guard" role="status">
+                          {absenceCopy(messageAbsence)}
+                        </p>
+                      ) : channelResponse?.preparation === "preserved" ? (
                         <p className="composer-guard" role="status">
                           Your draft is still here. Send or clear it, then press{" "}
                           {responseCopy.message(messaged)} again.
-                        </p>
-                      ) : channelResponse?.preparation === "unavailable" &&
-                        messageAbsence !== null ? (
-                        <p className="composer-guard" role="status">
-                          {absenceCopy(messageAbsence)}
                         </p>
                       ) : null
                     }

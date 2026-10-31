@@ -149,7 +149,9 @@ drawer) goes:
 When the pane takes the channel's place, its header's "in #alpha" is the only
 context, and its close button or Escape is the way back. There is no back
 button. Focus returns where it does in the other layouts: to the thread button,
-or to the chip, name or row that opened the screen. The breakpoints are media
+or to the chip, name or row that opened the screen. When the window narrows
+until an open pane covers the channel, focus that was in the channel moves into
+the pane: to the thread's Close button, or to the screen's text. The breakpoints are media
 queries in `style.css`. JavaScript reads two facts, in `ui/measure.ts`: the
 600px phone width, because it decides where the connection dot is and whether
 the sidebar is a modal drawer, and the 560px short window, because the member
@@ -704,6 +706,8 @@ main column, under the timeline, and at the bottom of the thread pane.
   reads, in 12px `--text` like the recipient guard: "Your draft is still here.
   Send or clear it, then press Message @claude again.", with the pressed
   button's own label. There is no link in it; the card's button is the retry.
+  If the agent goes while the notice shows, the row reads why instead, as
+  below, since the button it names is gone.
   The notice stays until the next edit of the box, a send, or a clear; then the
   recipient guard and the hint return, so "@Codex hi" typed after it reads
   "Names are lowercase: @codex". The message that button prepared is not

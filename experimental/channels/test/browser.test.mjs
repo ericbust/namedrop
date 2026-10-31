@@ -10197,3 +10197,122 @@ test("UI-R4 review H Low 2: in a thread, a pasted U+FEFF before a leading name d
   await until(() => ui.posts.attempts.length === 1, "the reply");
   assert.equal(JSON.parse(ui.posts.attempts[0].raw).source, "@claude look too");
 });
+
+test("UI-R4 fix1 1 and 3: a window that narrows until the open pane covers the channel hands focus from the composer to the pane, and the cover starts at 899 px tall, not 900", async (t) => {
+  const ui = await open(t, (client) => replay(client, [layoutChannel()]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const main = ui.page.getByRole("main");
+  const box = main.getByRole("combobox");
+  const active = () =>
+    ui.page.evaluate(() => {
+      const element = document.activeElement;
+      return element === document.body
+        ? "body"
+        : (element.getAttribute("aria-label") ?? element.className);
+    });
+  for (const [from, to] of [
+    [
+      [1440, 900],
+      [390, 844],
+    ],
+    [
+      [860, 1000],
+      [860, 899],
+    ],
+    [
+      [861, 899],
+      [700, 899],
+    ],
+  ]) {
+    const at = `${from.join("x")} to ${to.join("x")}`;
+    await resize(ui.page, ...from);
+    await ui.page
+      .getByRole("region", { name: "Message history" })
+      .getByRole("button", { name: /^1 reply from/ })
+      .click();
+    await threadPane(ui).waitFor();
+    assert.equal(await main.isVisible(), true, `both show at ${from}`);
+    await box.click();
+    await box.fill(`draft ${at}`);
+    await resize(ui.page, ...to);
+    assert.equal(await main.isVisible(), false, `the thread covers at ${to}`);
+    await eventually(
+      async () => (await active()) === "Close thread",
+      `focus moves to Close thread at ${at}, not ${await active()}`,
+    );
+    await ui.page.keyboard.press("Escape");
+    await threadPane(ui).waitFor({ state: "detached" });
+    assert.equal(await box.inputValue(), `draft ${at}`);
+  }
+  for (const [width, height, covers] of [
+    [860, 900, false],
+    [860, 899, true],
+    [601, 900, false],
+    [600, 900, true],
+  ]) {
+    await resize(ui.page, width, height);
+    await ui.page
+      .getByRole("region", { name: "Message history" })
+      .getByRole("button", { name: /^1 reply from/ })
+      .click();
+    await threadPane(ui).waitFor();
+    assert.equal(
+      await main.isVisible(),
+      !covers,
+      `${width}x${height} ${covers ? "covers" : "stacks"}`,
+    );
+    await ui.page.keyboard.press("Escape");
+    await threadPane(ui).waitFor({ state: "detached" });
+  }
+  await resize(ui.page, 1440, 900);
+  await main
+    .getByRole("list", { name: "Members" })
+    .getByRole("button", { name: /@codex/ })
+    .click();
+  await drawer(ui).waitFor();
+  await box.click();
+  await resize(ui.page, 390, 844);
+  await eventually(
+    async () =>
+      ui.page.evaluate(() =>
+        document.activeElement?.classList.contains("peek-text"),
+      ),
+    "focus moves to the screen's text when the peek covers the channel",
+  );
+});
+
+test("UI-R4 fix1 2: a kept draft's line says why once the agent's pane closes, instead of asking for a Message press that is gone", async (t) => {
+  const { value, left, context } = leavesAfterPress("message", "closed");
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    { onContext: () => context },
+  );
+  await ui.live();
+  const draft = ui.page.locator("main .composer").getByRole("combobox");
+  await draft.fill("my own words");
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  await card
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  const status = ui.page.locator("main .composer-status");
+  await readsAs(
+    status.locator(".composer-guard"),
+    "Your draft is still here. Send or clear it, then press Message @codex again.",
+  );
+  ui.connections[0].send("space", left);
+  await readsAs(
+    status.locator(".composer-guard"),
+    "@codex's pane is closed, so it can't take a message.",
+  );
+  assert.equal(
+    await ui.page
+      .getByRole("button", { name: "Message @codex", exact: true })
+      .count(),
+    0,
+  );
+  assert.equal(await draft.inputValue(), "my own words");
+  assert.equal(ui.posts.attempts.length, 0);
+});
