@@ -5,7 +5,7 @@ use namedrop::{
 };
 use std::{
     fs,
-    os::unix::{ffi::OsStringExt, fs::PermissionsExt, net::UnixListener},
+    os::unix::{fs::PermissionsExt, net::UnixListener},
     time::{Duration, Instant},
 };
 
@@ -15,9 +15,19 @@ fn popup_executor_uses_captured_program_scrubbed_environment_and_bounded_childre
     let socket = root.join("core.sock");
     socket_fixture::assert_socket_path(&socket);
     let listener = UnixListener::bind(&socket).unwrap();
-    let program = root.join(std::ffi::OsString::from_vec(
-        b"app with spaces-\xff".to_vec(),
-    ));
+    let program = root.join("app with spaces");
+    #[cfg(target_os = "linux")]
+    let program = {
+        use std::os::unix::ffi::OsStringExt;
+        program.with_file_name(std::ffi::OsString::from_vec(
+            b"app with spaces-\xff".to_vec(),
+        ))
+    };
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        program.file_name().unwrap().as_encoded_bytes(),
+        b"app with spaces-\xff"
+    );
     let fallback = root.join("herdr-app");
     fs::write(
         &fallback,

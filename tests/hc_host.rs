@@ -2243,9 +2243,16 @@ fn hc_popup_uses_native_override_and_scrubs_environment() {
     use std::os::unix::ffi::OsStringExt;
     let root = hc_socket::fixture::short_socket_root();
     let fake = app_popup::fake(&root);
-    let native_path = root.join(std::ffi::OsString::from_vec(
+    let native_path = root.join("app with spaces");
+    #[cfg(target_os = "linux")]
+    let native_path = native_path.with_file_name(std::ffi::OsString::from_vec(
         b"app with spaces-\xff".to_vec(),
     ));
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        native_path.file_name().unwrap().as_encoded_bytes(),
+        b"app with spaces-\xff"
+    );
     std::fs::rename(fake, &native_path).unwrap();
     let path = app_popup::tripwire(&root);
     let socket = root.join("core.sock");
