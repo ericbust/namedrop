@@ -2611,6 +2611,12 @@ fn assert_onboarding_and_doctor_refusals(mark_invoked: bool) {
                         (SELECT MAX(worktree_order)+1 FROM transition_facts),entity_kind,entity_id,'invoked',actor_kind,actor_id,occurred_at_ms
                     FROM transition_facts WHERE entity_kind='integration_registration'
                     AND transition_kind='dispatching' ORDER BY worktree_order DESC LIMIT 1", []).unwrap();
+                db.execute(
+                    "UPDATE order_counters SET next_order=next_order+1
+                    WHERE stream_kind='worktree_transition'",
+                    [],
+                )
+                .unwrap();
             }));
         }
         invoke();
