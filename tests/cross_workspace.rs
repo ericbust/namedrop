@@ -2265,9 +2265,11 @@ fn address_list_reads_every_workspace_when_asked() {
 fn every_unsent_delivery_cancel_goes_through_the_one_reflecting_helper() {
     fn mailbox_cancel_count(text: &str) -> usize {
         let compact: String = text.split_whitespace().collect();
-        compact
-            .matches("UPDATEmailbox_deliveriesSETstate='cancelled'")
-            .count()
+        let cancellations = compact.matches("SETstate='cancelled'").count();
+        let reservations = compact
+            .matches("UPDATEdelivery_attempt_stateSETstate='cancelled'")
+            .count();
+        cancellations - reservations
     }
 
     assert_eq!(
