@@ -110,7 +110,11 @@ fn prompt_failure(raw: String) -> PromptFailure {
             }
             "unavailable"
                 if envelope.error.hint.contains("nothing was typed")
-                    || envelope.error.hint.contains("program was lost") =>
+                    || (envelope
+                        .error
+                        .message
+                        .ends_with(" is lost, waiting for its new shell")
+                        && envelope.error.hint == "retry after the restarted event") =>
             {
                 PromptFailureKind::TemporaryPreInvocation
             }
