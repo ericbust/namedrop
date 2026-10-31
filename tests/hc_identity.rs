@@ -262,3 +262,34 @@ fn publish_never_falls_back_to_the_terminal_shell() {
     assert!(fixture.calls("label").is_empty());
     std::fs::remove_dir_all(state).unwrap();
 }
+
+#[test]
+fn missing_or_empty_start_cannot_own_a_session() {
+    let agent = process::AgentProcess::new();
+    for start in [None, Some("")] {
+        let fixture = Fixture::new(agent.pid(), "codex");
+        if let Some(start) = start {
+            fixture.terminal.borrow_mut()["labels"]["namedrop.session.start"] = json!(start);
+        } else {
+            fixture.terminal.borrow_mut()["labels"].as_object_mut().unwrap().remove("namedrop.session.start");
+        }
+        let host = HcHost::new(&fixture);
+        assert!(host.panes(PaneScope::All).unwrap()[0].agent_session_id.is_none(), "legacy session without start identity was accepted");
+        assert!(host.prompt("t1", "old session prompt").is_err());
+        assert!(fixture.calls("send").is_empty());
+        assert_eq!(fixture.terminal.borrow()["labels"]["namedrop.session"], "");
+    }
+}
+
+#[test]
+fn non_shell_terminal_root_never_receives_runner_text() {
+    for program in ["vim", "python3"] {
+        let process = process::AgentProcess::with_program(program);
+        let fixture = Fixture::new(process.pid(), program);
+        fixture.terminal.borrow_mut()["pid"] = json!(process.pid());
+        let host = HcHost::new(&fixture);
+        assert!(host.run_in_pane("t1", "namedrop terminal-execute attempt").is_err(), "direct {program} terminal accepted shell text");
+        assert!(host.process_info("t1").is_none(), "direct {program} terminal advertised an available shell");
+        assert!(fixture.calls("send").is_empty());
+    }
+}
