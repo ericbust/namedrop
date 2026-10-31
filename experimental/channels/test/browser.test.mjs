@@ -10601,7 +10601,6 @@ const jumpFacts = async (timeline, jump, reply) =>
       };
       const port = scroller.getBoundingClientRect();
       const left = port.left + scroller.clientLeft;
-      const right = left + scroller.clientWidth;
       const bottom = port.top + scroller.clientTop + scroller.clientHeight;
       const pill = jump.getBoundingClientRect();
       const target = reply.getBoundingClientRect();
