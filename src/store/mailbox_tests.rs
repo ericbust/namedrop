@@ -192,7 +192,7 @@ fn ready(tx: &mut StateTransaction<'_>, ns: &StateNamespace) -> Result<(), Store
         AgentRuntime::ClaudeCode,
         crate::INTEGRATION_PROTOCOL_VERSION,
         "nonce",
-        &crate::complete_capability_profile(),
+        crate::complete_capability_profile(),
         &at(3),
     )?;
     tx.complete_reconciliation(ns)?;
@@ -394,7 +394,7 @@ fn tui_dispatch_and_lease_skip_settle_queries_and_hc_queries_only_selected_heads
         unsafe {
             rusqlite::ffi::sqlite3_trace_v2(
                 store.connection.handle(),
-                rusqlite::ffi::SQLITE_TRACE_STMT as u32,
+                rusqlite::ffi::SQLITE_TRACE_STMT,
                 Some(trace),
                 (&mut queries as *mut Vec<String>).cast(),
             );

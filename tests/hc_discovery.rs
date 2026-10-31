@@ -296,7 +296,10 @@ fn foreign_live_terminals_do_not_hide_the_no_agent_diagnosis() {
         };
         let report = namedrop::diagnose_collaboration(&runtime);
         assert_eq!(
-            report.issues.iter().any(|issue| issue.code == "ND-SETUP-003"),
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-SETUP-003"),
             !broken,
             "broken={broken}: {report:?}"
         );
