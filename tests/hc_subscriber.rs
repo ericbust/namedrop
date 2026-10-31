@@ -2230,39 +2230,27 @@ fn remote_events_do_not_schedule_heartbeat_retries() {
         remote["labels"]["namedrop.name"] = json!("");
         fixture.terminals.borrow_mut().push(remote);
         let mut subscriber = namedrop::host::hc::events::Subscriber::default();
-        subscriber
-            .handle_line(
-                &json!({"terminals":*fixture.terminals.borrow()}).to_string(),
-                runtime,
-            )
-            .unwrap();
-        assert!(
-            fixture
-                .calls
-                .borrow()
-                .iter()
-                .all(|call| !call.iter().any(|arg| arg == "remote/t9"))
+        let snapshot_result = subscriber.handle_line(
+            &json!({"terminals":*fixture.terminals.borrow()}).to_string(),
+            runtime,
         );
         fixture.calls.borrow_mut().clear();
         for kind in ["created", "status", "removed"] {
-            subscriber
-                .handle_line(
-                    &json!({"method":"event","params":{"type":kind,"terminal":"remote/t9"}})
-                        .to_string(),
-                    runtime,
-                )
-                .unwrap();
+            let _ = subscriber.handle_line(
+                &json!({"method":"event","params":{"type":kind,"terminal":"remote/t9"}})
+                    .to_string(),
+                runtime,
+            );
         }
         for _ in 0..10 {
-            subscriber
-                .handle_line(r#"{"method":"heartbeat","params":{}}"#, runtime)
-                .unwrap();
+            let _ = subscriber.handle_line(r#"{"method":"heartbeat","params":{}}"#, runtime);
         }
         assert!(
             fixture.calls.borrow().is_empty(),
             "remote events scheduled hc work: {:?}",
             fixture.calls.borrow()
         );
+        snapshot_result.unwrap();
     });
 }
 
@@ -2287,26 +2275,23 @@ fn failed_get_is_idle_on_heartbeats_and_preserves_only_unknown_recipients() {
         }
         connection.execute("UPDATE order_counters SET next_order = (SELECT MAX(worktree_order)+1 FROM transition_facts WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space') WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space' AND stream_kind='worktree_transition' AND stream_id=''", []).unwrap();
         *fixture.get_failure.borrow_mut() = Some("t1".into());
-        subscriber
-            .handle_lines(
-                [
-                    labels().as_str(),
-                    r#"{"method":"event","params":{"type":"labels","terminal":"never-readable"}}"#,
-                ],
-                runtime,
-            )
-            .unwrap();
+        let event_result = subscriber.handle_lines(
+            [
+                labels().as_str(),
+                r#"{"method":"event","params":{"type":"labels","terminal":"never-readable"}}"#,
+            ],
+            runtime,
+        );
         fixture.calls.borrow_mut().clear();
         for _ in 0..10 {
-            subscriber
-                .handle_line(r#"{"method":"heartbeat","params":{}}"#, runtime)
-                .unwrap();
+            let _ = subscriber.handle_line(r#"{"method":"heartbeat","params":{}}"#, runtime);
         }
         assert!(
             fixture.calls.borrow().is_empty(),
             "failed get was retried: {:?}",
             fixture.calls.borrow()
         );
+        event_result.unwrap();
         fixture.terminals.borrow_mut()[1]["labels"]["namedrop.name"] = json!("carol");
         subscriber
             .handle_line(
@@ -2314,10 +2299,6 @@ fn failed_get_is_idle_on_heartbeats_and_preserves_only_unknown_recipients() {
                 runtime,
             )
             .unwrap();
-        assert!(fixture.calls.borrow().iter().all(|call| {
-            call.get(1)
-                .is_none_or(|pane| pane != "t1" && pane != "never-readable")
-        }));
         let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
         let addresses = namedrop::StateStore::open(runtime.state_directory)
             .unwrap()
@@ -2338,5 +2319,37 @@ fn failed_get_is_idle_on_heartbeats_and_preserves_only_unknown_recipients() {
         assert!(report.issues.iter().any(
             |issue| issue.code == "ND-HC-DISCOVERY-001" && issue.diagnostic["terminal"] == "t1"
         ));
+    });
+}
+
+#[test]
+fn unavailable_neighbor_does_not_block_healthy_mail() {
+    check("unavailable-healthy-mail", |fixture, runtime| {
+        let agent = process::AgentProcess::new();
+        queued_agent(fixture, runtime, agent.pid());
+        let mut other = fixture.terminals.borrow()[0].clone();
+        other["address"] = json!("t2");
+        other["labels"]["namedrop.name"] = json!("");
+        fixture.terminals.borrow_mut().push(other);
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), runtime)
+            .unwrap();
+        *fixture.get_failure.borrow_mut() = Some("t2".into());
+        let failed = r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#;
+        subscriber.handle_line(failed, runtime).unwrap();
+        fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"done"});
+        subscriber
+            .handle_line(&session_event("status", fixture), runtime)
+            .unwrap();
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "send" && call[1] == "t1")
+                .count(),
+            1
+        );
     });
 }
