@@ -7,6 +7,7 @@ command=${1-}
 # refuses an inherited pane it cannot trace to the caller's shell, so pass
 # Herdr's value as the explicit pane, including to activation's runtime call.
 namedrop_explicit_host=
+namedrop_transport_host=
 namedrop_previous_arg=
 for namedrop_arg do
   if [ "$namedrop_previous_arg" = --host ]; then
@@ -15,10 +16,14 @@ for namedrop_arg do
   fi
   case "$namedrop_arg" in
     --host=*) namedrop_explicit_host=${namedrop_arg#--host=}; break ;;
+    --herdr-socket|--herdr-socket=*|--herdr-workspace|--herdr-workspace=*|--herdr-pane|--herdr-pane=*) namedrop_transport_host=tui ;;
+    --hc-terminal|--hc-terminal=*|--hc-space|--hc-space=*)
+      [ "$namedrop_transport_host" = tui ] || namedrop_transport_host=hc ;;
   esac
   namedrop_previous_arg=$namedrop_arg
 done
-if [ "$namedrop_explicit_host" = hc ] || { [ -z "$namedrop_explicit_host" ] && { [ "${NAMEDROP_HOST-}" = hc ] || { [ -z "${HERDR_SOCKET_PATH-}${HERDR_PANE_ID-}" ] && [ -n "${HC_TERMINAL_ID-}" ]; }; }; }; then
+namedrop_selected_host=${namedrop_explicit_host:-$namedrop_transport_host}
+if [ "$namedrop_selected_host" = hc ] || { [ -z "$namedrop_selected_host" ] && [ -z "${HERDR_SOCKET_PATH-}${HERDR_PANE_ID-}" ] && [ -n "${HC_TERMINAL_ID-}" ]; }; then
   if [ -z "$namedrop_explicit_host" ]; then set -- --host hc "$@"; fi
   if [ -x "$namedrop_root/bin/namedrop" ]; then
     exec "$namedrop_root/bin/namedrop" "$@"

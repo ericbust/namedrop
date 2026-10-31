@@ -339,7 +339,7 @@ fn codex_plugin_configuration(
                 .join(&context.marketplace)
                 .join(PACKAGE_OWNER)
                 .join(version);
-            codex_snapshot_matches(package, &cached_package).then_some(())
+            codex_snapshot_matches(package, &cached_package, context.hc).then_some(())
         })
         .is_some();
     (
@@ -349,15 +349,10 @@ fn codex_plugin_configuration(
     )
 }
 
-fn codex_snapshot_matches(installed: &Path, cached: &Path) -> bool {
+fn codex_snapshot_matches(installed: &Path, cached: &Path, hc: bool) -> bool {
     CODEX_SNAPSHOT_FILES
         .into_iter()
-        .chain(
-            installed
-                .join(HC_CODEX_SKILL_FILE)
-                .exists()
-                .then_some(HC_CODEX_SKILL_FILE),
-        )
+        .chain(hc.then_some(HC_CODEX_SKILL_FILE))
         .all(|relative| {
             fs::read(installed.join(relative))
                 .ok()

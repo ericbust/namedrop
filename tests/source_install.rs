@@ -1029,7 +1029,12 @@ fn run_script_respects_explicit_host_before_environment_routing() {
         (vec![], false, false, vec!["--host", "hc"]),
         (vec![], true, false, vec!["--herdr-pane", "tui-pane"]),
         (vec![], true, true, vec!["--herdr-pane", "tui-pane"]),
-        (vec!["--hc-space", "space"], true, false, vec!["--host", "hc"]),
+        (
+            vec!["--hc-space", "space"],
+            true,
+            false,
+            vec!["--host", "hc"],
+        ),
         (vec!["--hc-terminal=t1"], true, true, vec!["--host", "hc"]),
         (vec!["--herdr-socket", "socket"], false, true, vec![]),
         (vec!["--herdr-workspace=space"], false, true, vec![]),
@@ -1072,8 +1077,14 @@ fn run_script_respects_explicit_host_before_environment_routing() {
             "flags={flags:?}, tui_env={tui_env}, hc_env={hc_env}"
         );
     }
-    let output = Command::new("/bin/sh").arg(checkout.join("scripts/run.sh")).arg("reconcile")
-        .env_clear().env("PATH", &fixture.tools).env("NAMEDROP_HOST", "hc").output().unwrap();
+    let output = Command::new("/bin/sh")
+        .arg(checkout.join("scripts/run.sh"))
+        .arg("reconcile")
+        .env_clear()
+        .env("PATH", &fixture.tools)
+        .env("NAMEDROP_HOST", "hc")
+        .output()
+        .unwrap();
     assert!(output.status.success());
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "reconcile\n");
 }

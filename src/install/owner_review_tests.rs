@@ -293,6 +293,7 @@ fn tui_cache_inspection_ignores_unowned_nested_skill_files() {
     }
     fs::create_dir_all(installed.join("skills/namedrop")).unwrap();
     fs::write(installed.join(HC_CODEX_SKILL_FILE), "unowned TUI file").unwrap();
-    assert!(codex_snapshot_matches(&installed, &cached));
+    assert!(codex_snapshot_matches(&installed, &cached, false));
+    assert!(!codex_snapshot_matches(&installed, &cached, true));
     fs::remove_dir_all(root).unwrap();
 }

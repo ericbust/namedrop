@@ -99,7 +99,7 @@ for namedrop_arg do
   namedrop_previous_arg=$namedrop_arg
 done
 namedrop_selected_host=${{namedrop_explicit_host:-$namedrop_transport_host}}
-if [ "$namedrop_selected_host" = hc ] || {{ [ -z "$namedrop_selected_host" ] && {{ [ "${{NAMEDROP_HOST-}}" = hc ] || {{ [ -z "${{HERDR_SOCKET_PATH-}}${{HERDR_PANE_ID-}}" ] && [ -n "${{HC_TERMINAL_ID-}}" ]; }}; }}; }}; then
+if [ "$namedrop_selected_host" = hc ] || {{ [ -z "$namedrop_selected_host" ] && [ -z "${{HERDR_SOCKET_PATH-}}${{HERDR_PANE_ID-}}" ] && [ -n "${{HC_TERMINAL_ID-}}" ]; }}; then
   if [ -z "$namedrop_explicit_host" ]; then set -- --host hc "$@"; fi
   exec {executable} "$@"
 fi
@@ -277,12 +277,22 @@ mod tests {
             let mut command = Command::new(&launcher);
             command.arg("doctor").env("NAMEDROP_HOST", "hc");
             if tui_environment {
-                command.env("HERDR_SOCKET_PATH", "tui").env("HERDR_PANE_ID", "p1").env("HC_TERMINAL_ID", "t1");
+                command
+                    .env("HERDR_SOCKET_PATH", "tui")
+                    .env("HERDR_PANE_ID", "p1")
+                    .env("HC_TERMINAL_ID", "t1");
             } else {
-                command.env_remove("HERDR_SOCKET_PATH").env_remove("HERDR_PANE_ID").env_remove("HC_TERMINAL_ID");
+                command
+                    .env_remove("HERDR_SOCKET_PATH")
+                    .env_remove("HERDR_PANE_ID")
+                    .env_remove("HC_TERMINAL_ID");
             }
             let output = command.output().unwrap();
-            assert_eq!(String::from_utf8(output.stdout).unwrap(), format!("tui\n--plugin-state\n{}\ndoctor\n", state.display()), "NAMEDROP_HOST is not a host selector");
+            assert_eq!(
+                String::from_utf8(output.stdout).unwrap(),
+                format!("tui\n--plugin-state\n{}\ndoctor\n", state.display()),
+                "NAMEDROP_HOST is not a host selector"
+            );
         }
         fs::remove_dir_all(root).unwrap();
     }
