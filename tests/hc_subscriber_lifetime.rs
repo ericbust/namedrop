@@ -94,6 +94,10 @@ else:
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        let _ = namedrop::host::hc::events::stop(
+            &self.root.join("state"),
+            "hc:628bcf8129aa037b1fa5aad3504926a6",
+        );
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
