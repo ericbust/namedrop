@@ -219,6 +219,10 @@ the whole width.
   activity, as it stays on the row when the drawer was open. Both handoffs
   hold whether the browser drops the focus before the new layout renders or
   as it renders.
+- On a phone the Channels button moves to another header as a pane opens or
+  closes, and as back or forward switches between a channel and All activity.
+  If it had focus, the button in the new header takes it. Widening the window
+  moves focus to the sidebar column only when the button itself held it.
 
 ### Landing and navigation
 
@@ -480,7 +484,10 @@ its tooltip. Show three items, then a "Show N more" button.
 The banner takes at most 40 percent of the window's height, shrinks before the
 timeline would drop under 112px (48px in a window under 420px tall), and
 scrolls inside. 12px separate it from the
-timeline. See App shell for each layout.
+timeline. In a window under 420px tall each item's padding is 6px top and
+bottom with no gap between its rows, so a card with one item shows its whole action row, Details included, in a 390 by 460 window at 125
+percent zoom (312 by 368 CSS pixels). A longer card scrolls inside. See App
+shell for each layout.
 Announce new items through a polite live region.
 
 | `source`                                | Title                                                                                                | Hint                                                            |
