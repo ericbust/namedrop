@@ -691,8 +691,9 @@ The way back is always at the bottom.
   the short timeline and take clicks meant for messages and their reply
   buttons. There it is a 28px round icon button with the same arrow, colors,
   border and shadow, and no visible text. It sits 12px (`--space-3`) from
-  the timeline's bottom and right edges, clear of the left-aligned reply
-  buttons. The name and tooltip stay. A 390 by 460 window at 125 percent zoom
+  the timeline's bottom and left edges, over the avatar gutter, where nothing
+  takes a click. The right edge holds the reply counts, so a corner there
+  would take their clicks. The name and tooltip stay. A 390 by 460 window at 125 percent zoom
   (312 by 368 CSS pixels) gets it too.
 - While browsing, the last row of the timeline is a hairline divider that reads
   "Newer messages aren't loaded", with a **Jump to latest** text button, so

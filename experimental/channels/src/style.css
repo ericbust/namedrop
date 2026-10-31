@@ -2113,16 +2113,17 @@ code.inline {
     min-height: 48px;
   }
   /* The centered pill would cover the middle of so short a timeline, so the
-     control shrinks to its icon in the bottom-right corner. */
+     control shrinks to its icon in the bottom-left corner, over the avatar
+     gutter, where nothing takes a click; the right edge holds reply counts. */
   .jump-dock {
-    justify-content: flex-end;
+    justify-content: flex-start;
   }
   .jump-latest {
     justify-content: center;
     width: 28px;
     height: 28px;
     padding: 0;
-    translate: calc(var(--pad-inline) - var(--space-3))
+    translate: calc(var(--space-3) - var(--pad-inline))
       calc(var(--pad-bottom) - var(--space-3));
   }
   .jump-label {

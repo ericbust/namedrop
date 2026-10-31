@@ -10600,12 +10600,25 @@ const jumpFacts = async (timeline, jump, reply) =>
         return text.trim();
       };
       const port = scroller.getBoundingClientRect();
-      const right = port.left + scroller.clientLeft + scroller.clientWidth;
+      const left = port.left + scroller.clientLeft;
+      const right = left + scroller.clientWidth;
       const bottom = port.top + scroller.clientTop + scroller.clientHeight;
       const pill = jump.getBoundingClientRect();
       const target = reply.getBoundingClientRect();
       const x = target.left + target.width / 2;
       const y = target.top + target.height / 2;
+      // The reply row scrolled down to the timeline's bottom edge, where a
+      // corner control could cover its right-aligned count.
+      const top = scroller.scrollTop;
+      scroller.scrollTop += target.bottom - (bottom - 4);
+      const low = reply.getBoundingClientRect();
+      const edges = [low.left + 2, low.right - 2].map(
+        (at) =>
+          document
+            .elementFromPoint(at, low.top + low.height / 2)
+            ?.closest("button") === reply,
+      );
+      scroller.scrollTop = top;
       return {
         name: jump.getAttribute("aria-label"),
         title: jump.title,
@@ -10615,21 +10628,19 @@ const jumpFacts = async (timeline, jump, reply) =>
           Number.parseFloat(getComputedStyle(jump).borderTopLeftRadius) >=
           pill.height / 2,
         corner:
-          pill.right <= right &&
+          pill.left >= left &&
           pill.bottom <= bottom &&
-          pill.left >= right - 48 &&
+          pill.right <= left + 48 &&
           pill.top >= bottom - 48,
-        inset: [
-          Math.round(right - pill.right),
-          Math.round(bottom - pill.bottom),
-        ],
+        inset: [Math.round(pill.left - left), Math.round(bottom - pill.bottom)],
         replyInView: y > port.top && y < bottom,
         hit: document.elementFromPoint(x, y)?.closest("button") === reply,
+        lowHit: edges.every(Boolean),
       };
     },
     [await jump.elementHandle(), await reply.elementHandle()],
   );
-test("UI-R5 R5-3: under 420 px tall the Jump control is a 28 px round icon button in the timeline's bottom-right corner, so a click on a reply button in the timeline's middle reaches it; taller windows keep the pill", async (t) => {
+test("UI-R5 R5-3: under 420 px tall the Jump control is a 28 px round icon button in the timeline's bottom-left corner, so a reply button in the timeline's middle or along its bottom edge takes the click; taller windows keep the pill", async (t) => {
   for (const [width, height, short] of [
     [844, 300, true],
     [320, 260, true],
@@ -10664,6 +10675,7 @@ test("UI-R5 R5-3: under 420 px tall the Jump control is a 28 px round icon butto
               corner: true,
               inset: [12, 12],
               hit: true,
+              lowHit: true,
             }
           : {
               text: "Jump to latest",
@@ -10672,6 +10684,7 @@ test("UI-R5 R5-3: under 420 px tall the Jump control is a 28 px round icon butto
               corner: false,
               inset: facts.inset,
               hit: facts.hit,
+              lowHit: facts.lowHit,
             }),
       });
       await reply.click({ timeout: 2000 });
