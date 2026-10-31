@@ -1323,7 +1323,11 @@ fn session_start_script(
         ),
         AgentRuntime::ClaudeCode => String::new(),
     };
-    let update_notice = forward_update_notice(runtime);
+    let update_notice = if hc.is_some() {
+        String::new()
+    } else {
+        forward_update_notice(runtime)
+    };
     let preamble = if hc.is_some() { HC_HOOK_PREAMBLE } else { "" };
     let invocation = if hc.is_some() {
         "\"$HOME/.local/bin/namedrop-app\" --hc-hook".to_owned()
