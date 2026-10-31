@@ -1202,7 +1202,7 @@ fn hook_script(
     }
     let preamble = if hc.is_some() { HC_HOOK_PREAMBLE } else { "" };
     let invocation = if hc.is_some() {
-        "\"$HOME/.local/bin/namedrop-app\" --host hc --hc-hook".to_owned()
+        "\"$HOME/.local/bin/namedrop-app\" --hc-hook".to_owned()
     } else {
         shell_single_quote(executable)
     };
@@ -1258,7 +1258,7 @@ fn session_start_script(
     let update_notice = forward_update_notice(runtime);
     let preamble = if hc.is_some() { HC_HOOK_PREAMBLE } else { "" };
     let invocation = if hc.is_some() {
-        "\"$HOME/.local/bin/namedrop-app\" --host hc --hc-hook".to_owned()
+        "\"$HOME/.local/bin/namedrop-app\" --hc-hook".to_owned()
     } else {
         shell_single_quote(executable)
     };

@@ -412,3 +412,54 @@ fn cached_host_child() {
     };
     assert_eq!(explicit.host_kind().unwrap(), HostKind::Tui);
 }
+
+#[test]
+fn describe_validates_conflicts_before_runtime_dispatch_and_keeps_explicit_state() {
+    let root = std::env::temp_dir().join(format!(
+        "namedrop-describe-selection-{}",
+        std::process::id()
+    ));
+    fs::create_dir_all(root.join("state/runtime")).unwrap();
+    let tripwire = root.join("tripwire");
+    let marker = root.join("contacted");
+    fs::write(
+        &tripwire,
+        format!(
+            "#!/bin/sh\nprintf touched > '{}'\nexit 97\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&tripwire, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::copy(&tripwire, root.join("state/runtime/namedrop")).unwrap();
+    for flags in [vec!["--host", "hc", "--herdr-pane", "pane"], vec![]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            .env_clear()
+            .env("HC_TERMINAL_ID", "terminal")
+            .env("HERDR_PANE_ID", "pane")
+            .env("HC_BIN_PATH", &tripwire)
+            .env("HERDR_BIN_PATH", &tripwire)
+            .arg("--plugin-state")
+            .arg(root.join("state"))
+            .args(&flags)
+            .args(["--json", "describe"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(if flags.is_empty() { 97 } else { 64 })
+        );
+        if !flags.is_empty() {
+            let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(body.to_string().contains("invalid_request"));
+            assert!(
+                !marker.exists(),
+                "conflicting describe accessed runtime or host"
+            );
+            assert!(!root.join("state/runtime/commands.lock").exists());
+        } else {
+            assert!(marker.exists(), "describe bypassed selected runtime");
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
+}

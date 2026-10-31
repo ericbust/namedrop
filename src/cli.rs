@@ -61,19 +61,22 @@ pub struct RuntimeOptions {
 }
 
 impl RuntimeOptions {
-    pub fn host_kind(&self) -> Result<crate::runtime::HostKind, String> {
-        use crate::runtime::HostKind;
-        let tui_flags = self.herdr_socket.is_some()
-            || self.herdr_workspace.is_some()
-            || self.herdr_pane.is_some();
-        let hc_flags = self.hc_terminal.is_some() || self.hc_space.is_some();
-        if self.host.is_some() || tui_flags || hc_flags {
-            HostKind::detect(self.host, tui_flags, hc_flags, |key| {
-                std::env::var(key).ok()
-            })
-        } else {
-            Ok(self.ambient_host_kind())
+    pub fn explicit_host_kind(&self) -> Result<Option<crate::runtime::HostKind>, String> {
+        crate::runtime::HostSignals {
+            host: self.host,
+            tui_transport: self.herdr_socket.is_some()
+                || self.herdr_workspace.is_some()
+                || self.herdr_pane.is_some(),
+            hc_transport: self.hc_terminal.is_some() || self.hc_space.is_some(),
+            plugin_state: self.plugin_state.is_some(),
         }
+        .explicit_selection()
+    }
+
+    pub fn host_kind(&self) -> Result<crate::runtime::HostKind, String> {
+        Ok(self
+            .explicit_host_kind()?
+            .unwrap_or_else(|| self.ambient_host_kind()))
     }
 
     pub fn ambient_host_kind(&self) -> crate::runtime::HostKind {

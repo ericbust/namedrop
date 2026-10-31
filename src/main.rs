@@ -142,6 +142,20 @@ fn main() -> ExitCode {
             cli.human_output(io::stdout().is_terminal()),
         );
     }
+    let explicit_host = match cli.runtime.explicit_host_kind() {
+        Ok(host) => host,
+        Err(error) if cli.print_host() => {
+            eprintln!("{error}");
+            return ExitCode::from(64);
+        }
+        Err(error) => {
+            return write_result(
+                &CommandResult::invalid_request(error),
+                64,
+                cli.human_output(io::stdout().is_terminal()),
+            );
+        }
+    };
     if cli.print_host() {
         return match cli.runtime.host_kind() {
             Ok(host) => {
@@ -164,25 +178,27 @@ fn main() -> ExitCode {
         .user_prompt_submit_hook_state_directory()
         .or_else(|| cli.mailbox_wake_hook_state_directory())
         .or_else(|| cli.session_start_hook_state_directory());
-    if hook_state.is_some() {
-        let ambient = cli.runtime.ambient_host_kind();
-        if (cli.runtime.hc_hook && ambient == HostKind::Tui)
-            || (!cli.runtime.hc_hook && ambient == HostKind::Hc)
-        {
+    let selected_state = if let Some(hook_state) = hook_state {
+        let host = explicit_host.unwrap_or_else(|| cli.runtime.ambient_host_kind());
+        if explicit_host.is_none() && cli.runtime.hc_hook != (host == HostKind::Hc) {
             return ExitCode::SUCCESS;
         }
-    }
-    let selected_state = if cli.runtime.hc_hook {
-        let Ok(state) = cli.runtime.state_directory() else {
-            return ExitCode::SUCCESS;
-        };
-        Some(state)
+        match host {
+            HostKind::Hc => {
+                let Ok(state) = cli.runtime.state_directory() else {
+                    return ExitCode::SUCCESS;
+                };
+                Some(state)
+            }
+            HostKind::Tui => Some(
+                cli.runtime
+                    .plugin_state
+                    .clone()
+                    .unwrap_or_else(|| hook_state.to_path_buf()),
+            ),
+        }
     } else {
-        cli.runtime
-            .plugin_state
-            .clone()
-            .or_else(|| hook_state.map(Path::to_path_buf))
-            .or_else(|| cli.runtime.state_directory().ok())
+        cli.runtime.state_directory().ok()
     };
     // A dashboard successor started mid-update waits a bounded time rather
     // than parking forever behind a stuck migration.
@@ -257,17 +273,24 @@ fn main() -> ExitCode {
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
-        return run_context_hook(state_directory, &cli.runtime, |input, runtime| {
-            execute_user_prompt_submit_hook(input, runtime)
-        });
+        return run_context_hook(
+            selected_state.as_deref().unwrap_or(state_directory),
+            &cli.runtime,
+            |input, runtime: &ProcessRuntime<'_>| execute_user_prompt_submit_hook(input, runtime),
+        );
     }
     if let Some(state_directory) = cli.session_start_hook_state_directory() {
-        return run_context_hook(state_directory, &cli.runtime, |input, runtime| {
-            execute_session_start_hook(input, runtime)
-        });
+        return run_context_hook(
+            selected_state.as_deref().unwrap_or(state_directory),
+            &cli.runtime,
+            |input, runtime: &ProcessRuntime<'_>| execute_session_start_hook(input, runtime),
+        );
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
-        return run_mailbox_wake_hook(state_directory, &cli.runtime);
+        return run_mailbox_wake_hook(
+            selected_state.as_deref().unwrap_or(state_directory),
+            &cli.runtime,
+        );
     }
     if cli.is_agent_status_changed_hook() {
         return run_agent_status_changed_hook(&cli.runtime);
@@ -653,6 +676,66 @@ fn parse_plugin_event_input(
 #[cfg(test)]
 mod session_event_tests {
     #[test]
+    fn hc_status_worker_carries_explicit_host_with_state() {
+        let options = super::worker_options(std::path::Path::new("/state"), "hc:session", "space");
+        let command = super::status_worker_command(&options).unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--plugin-state", "/state"])
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--host", "hc"]));
+        assert!(!args.iter().any(|arg| arg.starts_with("--herdr-")));
+    }
+
+    #[test]
+    fn hook_runtime_state_keeps_cached_hc_selection() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("namedrop-hook-runtime-host-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let host = root.join("host");
+        std::fs::write(&host, "#!/bin/sh\n[ \"$*\" = 'server status --json' ] || exit 97\nprintf '%s\\n' '{\"core\":{\"id\":\"selection-test\"}}'\n").unwrap();
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "session_event_tests::cached_hc_hook_runtime_child",
+            ])
+            .env_clear()
+            .env("HC_BIN_PATH", &host)
+            .env("HERDR_BIN_PATH", &host)
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn cached_hc_hook_runtime_child() {
+        let options = super::RuntimeOptions {
+            ambient_host: std::cell::OnceCell::from(super::HostKind::Hc),
+            ..Default::default()
+        };
+        super::with_runtime_at(std::path::Path::new("/hook-state"), &options, |runtime| {
+            assert!(matches!(runtime.host, super::RuntimeHost::Hc(_)));
+            assert_eq!(runtime.state_directory, std::path::Path::new("/hook-state"));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn agent_detection_events_reuse_registration_worker() {
         let data = serde_json::json!({"type":"pane_agent_detected", "pane_id":"w1:p1",
             "workspace_id":"w1", "agent":"codex", "released":false});
@@ -733,6 +816,7 @@ fn with_runtime_at<T>(
 ) -> Result<T, String> {
     with_runtime_options(
         &RuntimeOptions {
+            host: Some(options.host_kind()?),
             plugin_state: options
                 .plugin_state
                 .clone()
@@ -828,12 +912,6 @@ fn run_context_hook(
     }
     let hc = options.host_kind() == Ok(HostKind::Hc);
     let mut hc_active = false;
-    let resolved_state = if options.hc_hook {
-        options.state_directory().ok()
-    } else {
-        options.plugin_state.clone()
-    };
-    let state_directory = resolved_state.as_deref().unwrap_or(state_directory);
     let mut output = (!hc)
         .then(|| namedrop::execute_codex_app_server_hook(&input))
         .flatten()
@@ -909,12 +987,6 @@ fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
 /// pane: it reconciles the whole space and takes no identity from the
 /// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
 fn run_mailbox_wake_hook(state_directory: &Path, options: &RuntimeOptions) -> ExitCode {
-    let resolved_state = if options.hc_hook {
-        options.state_directory().ok()
-    } else {
-        options.plugin_state.clone()
-    };
-    let state_directory = resolved_state.as_deref().unwrap_or(state_directory);
     let wake = || -> Result<(), String> {
         let kind = options.host_kind()?;
         let transport = ProcessHerdr::for_host(kind).with_socket(options.herdr_socket.clone());

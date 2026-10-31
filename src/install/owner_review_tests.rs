@@ -579,6 +579,8 @@ fn hc_wrappers_derive_runtime_state_without_claiming_the_inherited_terminal() {
                 );
                 let argv = fs::read_to_string(&log).unwrap();
                 assert!(argv.contains("--hc-hook\nhook\n"), "{argv}");
+                assert!(!argv.contains("--host"), "{argv}");
+                assert!(!argv.contains("--plugin-state"), "{argv}");
                 assert!(!argv.contains("--hc-terminal"), "{argv}");
                 assert!(!argv.contains("inherited-t3"), "{argv}");
                 assert!(
@@ -989,6 +991,21 @@ fn generated_hc_hooks_decline_tui_context_before_locked_state() {
     .unwrap();
     fs::set_permissions(&tripwire, fs::Permissions::from_mode(0o700)).unwrap();
     fs::copy(&tripwire, state.join("runtime/namedrop")).unwrap();
+    let identity = root.join("identity");
+    let identity_log = root.join("identity-log");
+    fs::write(
+        &identity,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$IDENTITY_LOG"
+case "$1" in
+  pane) printf '{"result":{"process_info":{"shell_pid":%s}}}\n' "$TUI_PID" ;;
+  get) printf '{"pid":999999999}\n' ;;
+  *) exit 97 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&identity, fs::Permissions::from_mode(0o700)).unwrap();
     let context = PackageContext::new(&home, true);
     install_shell_command(&home, &binary, &state, true).unwrap();
     let mut failures = Vec::new();
@@ -1009,9 +1026,12 @@ fn generated_hc_hooks_decline_tui_context_before_locked_state() {
                 .env("HOME", &home)
                 .env("HC_TERMINAL_ID", "outer-hc")
                 .env("HERDR_SOCKET_PATH", "inner-tui")
+                .env("HERDR_PANE_ID", "inner-tui")
+                .env("TUI_PID", std::process::id().to_string())
+                .env("IDENTITY_LOG", &identity_log)
                 .env("NAMEDROP_STATE_DIR", &state)
-                .env("HC_BIN_PATH", &tripwire)
-                .env("HERDR_BIN_PATH", &tripwire)
+                .env("HC_BIN_PATH", &identity)
+                .env("HERDR_BIN_PATH", &identity)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1042,6 +1062,7 @@ fn generated_hc_hooks_decline_tui_context_before_locked_state() {
         }
     }
     assert!(!marker.exists(), "generated HC hook contacted runtime/host");
+    assert_eq!(fs::read_to_string(identity_log).unwrap().lines().count(), 8);
     drop(lock);
     fs::remove_dir_all(root).unwrap();
     assert!(failures.is_empty(), "{}", failures.join("\n"));

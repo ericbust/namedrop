@@ -15,26 +15,42 @@ pub enum HostKind {
     Hc,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HostSignals {
+    pub host: Option<HostKind>,
+    pub tui_transport: bool,
+    pub hc_transport: bool,
+    pub plugin_state: bool,
+}
+
+impl HostSignals {
+    pub fn explicit_selection(self) -> Result<Option<HostKind>, String> {
+        if (self.tui_transport && self.hc_transport)
+            || (self.host == Some(HostKind::Tui) && self.hc_transport)
+            || (self.host == Some(HostKind::Hc) && self.tui_transport)
+            || (self.host.is_none() && self.plugin_state && self.hc_transport)
+        {
+            return Err("Host flags conflict: --host must agree with --herdr-socket/--herdr-workspace/--herdr-pane or --hc-terminal/--hc-space; --plugin-state without --host selects tui.".to_owned());
+        }
+        Ok(self.host.or({
+            if self.tui_transport || self.plugin_state {
+                Some(HostKind::Tui)
+            } else if self.hc_transport {
+                Some(HostKind::Hc)
+            } else {
+                None
+            }
+        }))
+    }
+}
+
 impl HostKind {
     pub fn detect(
-        explicit: Option<Self>,
-        tui_flags: bool,
-        hc_flags: bool,
+        signals: HostSignals,
         variable: impl Fn(&str) -> Option<String>,
     ) -> Result<Self, String> {
-        if let Some(host) = explicit {
+        if let Some(host) = signals.explicit_selection()? {
             return Ok(host);
-        }
-        match (tui_flags, hc_flags) {
-            (true, true) => {
-                return Err(
-                    "Host flags conflict: --herdr-socket/--herdr-workspace/--herdr-pane and --hc-terminal/--hc-space require --host tui|hc."
-                        .to_owned(),
-                );
-            }
-            (true, false) => return Ok(Self::Tui),
-            (false, true) => return Ok(Self::Hc),
-            (false, false) => {}
         }
         let Some(terminal) = variable("HC_TERMINAL_ID") else {
             return Ok(Self::Tui);
@@ -83,7 +99,13 @@ impl HostKind {
     }
 
     pub fn from_environment(explicit: Option<Self>) -> Result<Self, String> {
-        Self::detect(explicit, false, false, |key| env::var(key).ok())
+        Self::detect(
+            HostSignals {
+                host: explicit,
+                ..HostSignals::default()
+            },
+            |key| env::var(key).ok(),
+        )
     }
 }
 
@@ -775,9 +797,13 @@ mod host_selection_tests {
         ];
         for (explicit, keys, expected) in cases {
             assert_eq!(
-                HostKind::detect(explicit, false, false, |key| {
-                    keys.contains(&key).then(|| "value".into())
-                })
+                HostKind::detect(
+                    HostSignals {
+                        host: explicit,
+                        ..HostSignals::default()
+                    },
+                    |key| { keys.contains(&key).then(|| "value".into()) }
+                )
                 .ok(),
                 expected
             );
@@ -788,7 +814,7 @@ mod host_selection_tests {
     fn tui_only_detection_reads_one_environment_variable() {
         let reads = std::cell::RefCell::new(Vec::new());
         assert_eq!(
-            HostKind::detect(None, false, false, |key| {
+            HostKind::detect(HostSignals::default(), |key| {
                 reads.borrow_mut().push(key.to_owned());
                 (key == "HERDR_SOCKET_PATH").then(|| "socket".into())
             })
@@ -800,15 +826,31 @@ mod host_selection_tests {
 
     #[test]
     fn explicit_host_and_transport_flags_do_not_read_environment() {
-        for (explicit, tui, hc, expected) in [
-            (Some(HostKind::Hc), true, true, None),
-            (Some(HostKind::Tui), true, true, None),
-            (None, true, false, Some(HostKind::Tui)),
-            (None, false, true, Some(HostKind::Hc)),
-            (None, true, true, None),
+        for (explicit, tui, hc, state, expected) in [
+            (Some(HostKind::Hc), true, true, false, None),
+            (Some(HostKind::Tui), true, true, false, None),
+            (Some(HostKind::Hc), true, false, false, None),
+            (Some(HostKind::Tui), false, true, false, None),
+            (Some(HostKind::Hc), false, false, true, Some(HostKind::Hc)),
+            (Some(HostKind::Hc), false, true, true, Some(HostKind::Hc)),
+            (Some(HostKind::Tui), false, false, true, Some(HostKind::Tui)),
+            (None, true, false, false, Some(HostKind::Tui)),
+            (None, false, true, false, Some(HostKind::Hc)),
+            (None, false, false, true, Some(HostKind::Tui)),
+            (None, false, true, true, None),
+            (None, true, true, false, None),
         ] {
             assert_eq!(
-                HostKind::detect(explicit, tui, hc, |_| panic!("unexpected environment read")).ok(),
+                HostKind::detect(
+                    HostSignals {
+                        host: explicit,
+                        tui_transport: tui,
+                        hc_transport: hc,
+                        plugin_state: state
+                    },
+                    |_| panic!("unexpected environment read")
+                )
+                .ok(),
                 expected
             );
         }

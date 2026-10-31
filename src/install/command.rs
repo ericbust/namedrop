@@ -74,15 +74,10 @@ pub(crate) fn install_shell_command(
         })
         .collect::<Result<Vec<_>, String>>()?;
     fs::create_dir_all(&bin).map_err(|e| conflict(&bin, &e.to_string()))?;
-    let executable = shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?);
-    let state = shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?);
     let script = format!(
-        r#"{OWNER}namedrop_selected_host=$({executable} --print-host "$@") || exit $?
-if [ "$namedrop_selected_host" = hc ]; then
-  exec {executable} "$@"
-fi
-exec {executable} --plugin-state {state} "$@"
-"#
+        "{OWNER}exec {} --plugin-state {} \"$@\"\n",
+        shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?),
+        shell_single_quote(state.to_str().ok_or("state path is not UTF-8")?)
     );
     replace_if_changed(&launcher, &script, Some(0o755))?;
     for (path, text, mode) in &updates {

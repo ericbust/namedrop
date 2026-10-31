@@ -72,6 +72,11 @@ fn cross_host_hooks_decline_before_locked_state_runtime_or_socket_access() {
                 ));
             }
             let output = child.wait_with_output().unwrap();
+            println!(
+                "{event}: no selector, hc_origin={hc_origin}: status={:?} state={:?}",
+                output.status.code(),
+                fs::read_to_string(&marker).ok()
+            );
             if !output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty() {
                 failures.push(format!(
                     "hc_origin={hc_origin} {event} did not quietly decline: {}",
@@ -121,8 +126,45 @@ fn explicit_hook_selection_precedes_origin_state_and_host_io() {
         fs::set_permissions(launcher, fs::Permissions::from_mode(0o700)).unwrap();
     }
     let mut failures = Vec::new();
+    let plugin_state = root.join("plugin");
+    let plugin_state = plugin_state.to_str().unwrap();
     for event in ["session-start", "user-prompt-submit", "mailbox-wake"] {
         for (name, flags, hc_origin, hc_ambient, expected) in [
+            (
+                "plugin state selects tui",
+                vec!["--plugin-state", plugin_state],
+                false,
+                true,
+                Some("plugin"),
+            ),
+            (
+                "hc host accepts plugin state",
+                vec!["--host", "hc", "--plugin-state", plugin_state],
+                false,
+                false,
+                Some("plugin"),
+            ),
+            (
+                "plugin state rejects hc transport without host",
+                vec!["--plugin-state", plugin_state, "--hc-terminal", "terminal"],
+                false,
+                true,
+                None,
+            ),
+            (
+                "tui transport overrides hc ambient",
+                vec!["--herdr-pane", "pane"],
+                false,
+                true,
+                Some("baked"),
+            ),
+            (
+                "hc transport overrides tui ambient",
+                vec!["--hc-space", "space"],
+                true,
+                false,
+                Some("hc"),
+            ),
             (
                 "tui overrides hc ambient",
                 vec!["--host", "tui"],
@@ -212,6 +254,19 @@ fn explicit_hook_selection_precedes_origin_state_and_host_io() {
                 .arg(root.join("baked"))
                 .output()
                 .unwrap();
+            println!(
+                "{event}: {name}: status={:?} state={:?}",
+                output.status.code(),
+                fs::read_to_string(&marker).ok()
+            );
+            if expected.is_none() {
+                for state in ["baked", "hc", "plugin"] {
+                    assert!(
+                        !root.join(state).join("runtime/commands.lock").exists(),
+                        "conflict accessed runtime gate"
+                    );
+                }
+            }
             let valid = if let Some(state) = expected {
                 output.status.code() == Some(98)
                     && fs::read_to_string(&marker).ok().as_deref() == Some(state)
@@ -234,6 +289,9 @@ fn explicit_hook_selection_precedes_origin_state_and_host_io() {
             }
             assert!(!host_marker.exists(), "{event}: {name} accessed host");
             let _ = fs::remove_file(&marker);
+            for state in ["baked", "hc", "plugin"] {
+                let _ = fs::remove_file(root.join(state).join("runtime/commands.lock"));
+            }
         }
     }
     fs::remove_dir_all(root).unwrap();

@@ -839,16 +839,28 @@ fn doctor_reports_only_observed_unreported_codex_and_uses_hc_repairs() {
                 .iter()
                 .any(|issue| issue.code == "ND-HC-SPACE-001")
         );
+        let mut state_commands = 0;
         for command in report
             .issues
             .iter()
             .filter_map(|issue| issue.repair.command.as_ref())
         {
+            if command.iter().any(|arg| arg == "--plugin-state") {
+                state_commands += 1;
+                assert!(
+                    command.windows(2).any(|pair| pair == ["--host", "hc"]),
+                    "{command:?}"
+                );
+            }
             assert!(
                 !command.iter().any(|arg| arg.starts_with("--herdr-")),
                 "{command:?}"
             );
         }
+        assert!(
+            state_commands > 0,
+            "doctor must provide an executable state repair"
+        );
     }
     std::fs::remove_dir_all(state).unwrap();
 }

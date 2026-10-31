@@ -1001,77 +1001,61 @@ fn activation_shows_the_shared_app_server_advice_on_the_update_and_first_install
 }
 
 #[test]
-fn run_script_respects_explicit_host_before_environment_routing() {
+fn run_script_forwards_tui_pane_and_arguments_without_host_prepass() {
     let fixture = Fixture::new();
     let checkout = fixture.checkout();
     fs::create_dir_all(checkout.join("bin")).unwrap();
-    let fake = fixture.stub("namedrop", &format!("#!/bin/sh\nif [ \"${{1-}}\" = --print-host ]; then exec '{}' \"$@\"; fi\nprintf '%s\\n' \"$@\"\n", env!("CARGO_BIN_EXE_namedrop")));
+    let fake = fixture.stub("namedrop", "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
     fs::copy(fake, checkout.join("bin/namedrop")).unwrap();
-    for (flags, tui_env, hc_env, prefix) in [
-        (vec!["--host", "tui"], false, true, vec![]),
-        (vec!["--host=tui"], false, true, vec![]),
-        (
-            vec!["--host", "tui"],
-            true,
-            true,
-            vec!["--herdr-pane", "tui-pane"],
-        ),
-        (
-            vec!["--host=tui"],
-            true,
-            true,
-            vec!["--herdr-pane", "tui-pane"],
-        ),
-        (vec!["--host", "hc"], true, false, vec![]),
-        (vec!["--host=hc"], true, false, vec![]),
-        (vec!["--host", "hc"], false, true, vec![]),
-        (vec!["--host=hc"], false, true, vec![]),
-        (vec![], false, false, vec![]),
-        (vec![], true, false, vec!["--herdr-pane", "tui-pane"]),
-        (vec![], true, true, vec!["--herdr-pane", "tui-pane"]),
-        (vec!["--hc-space", "space"], true, false, vec![]),
-        (vec!["--hc-terminal=t1"], true, true, vec![]),
-        (vec!["--herdr-socket", "socket"], false, true, vec![]),
-        (vec!["--herdr-workspace=space"], false, true, vec![]),
-        (vec!["--herdr-pane", "pane"], false, true, vec![]),
+    for flags in [
+        vec![],
+        vec!["--host", "tui"],
+        vec!["--host=tui"],
+        vec!["--host", "hc"],
+        vec!["--host=hc"],
+        vec!["--hc-space", "space"],
+        vec!["--hc-terminal=t1"],
+        vec!["--herdr-socket", "socket"],
+        vec!["--herdr-workspace=space"],
+        vec!["--herdr-pane", "pane"],
     ] {
-        let mut command = Command::new("/bin/sh");
-        command
-            .arg(checkout.join("scripts/run.sh"))
-            .args(&flags)
-            .arg("reconcile")
-            .env_clear()
-            .env("PATH", &fixture.tools)
-            .env("HC_TERMINAL_ID", "hc-terminal");
-        if tui_env {
-            command
-                .env("HERDR_PANE_ID", "tui-pane")
-                .env("HERDR_SOCKET_PATH", "tui-socket");
+        for tui_env in [false, true] {
+            for hc_env in [false, true] {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .arg(checkout.join("scripts/run.sh"))
+                    .args(&flags)
+                    .arg("reconcile")
+                    .env_clear()
+                    .env("PATH", &fixture.tools);
+                let mut expected = Vec::new();
+                if tui_env {
+                    command
+                        .env("HERDR_PANE_ID", "tui-pane")
+                        .env("HERDR_SOCKET_PATH", "tui-socket");
+                    expected.extend(["--herdr-pane", "tui-pane"]);
+                }
+                if hc_env {
+                    command
+                        .env("HC_TERMINAL_ID", "hc-terminal")
+                        .env("NAMEDROP_HOST", "hc");
+                }
+                expected.extend(flags.iter().copied());
+                expected.push("reconcile");
+                let output = command.output().unwrap();
+                assert_eq!(
+                    succeeded(&output).lines().collect::<Vec<_>>(),
+                    expected,
+                    "flags={flags:?}, tui_env={tui_env}, hc_env={hc_env}"
+                );
+            }
         }
-        if hc_env {
-            command.env("NAMEDROP_HOST", "hc");
-        }
-        let output = command.output().unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let expected = prefix
-            .iter()
-            .chain(&flags)
-            .copied()
-            .chain(["reconcile"])
-            .collect::<Vec<_>>();
-        assert_eq!(
-            String::from_utf8(output.stdout)
-                .unwrap()
-                .lines()
-                .collect::<Vec<_>>(),
-            expected,
-            "flags={flags:?}, tui_env={tui_env}, hc_env={hc_env}"
-        );
     }
+    fs::copy(
+        env!("CARGO_BIN_EXE_namedrop"),
+        checkout.join("bin/namedrop"),
+    )
+    .unwrap();
     for flags in [
         vec!["--herdr-socket", "tui", "--hc-space", "hc"],
         vec!["--hc-terminal=terminal", "--herdr-pane=pane"],
@@ -1079,24 +1063,14 @@ fn run_script_respects_explicit_host_before_environment_routing() {
         let output = Command::new("/bin/sh")
             .arg(checkout.join("scripts/run.sh"))
             .args(flags)
-            .arg("doctor")
+            .args(["--json", "doctor"])
             .env_clear()
             .env("PATH", &fixture.tools)
-            .env("HERDR_PANE_ID", "ambient-pane")
             .output()
             .unwrap();
         assert_eq!(output.status.code(), Some(64));
-        assert!(output.stdout.is_empty());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("conflict"));
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(response.to_string().contains("invalid_request"));
+        assert!(response.to_string().contains("conflict"));
     }
-    let output = Command::new("/bin/sh")
-        .arg(checkout.join("scripts/run.sh"))
-        .arg("reconcile")
-        .env_clear()
-        .env("PATH", &fixture.tools)
-        .env("NAMEDROP_HOST", "hc")
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "reconcile\n");
 }

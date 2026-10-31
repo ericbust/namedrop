@@ -71,10 +71,8 @@ esac
             &format!(
                 r#"#!/bin/sh
 if [ "${{1:-}}" = --version ]; then printf 'namedrop {version}\n'; exit 0; fi
-if [ "${{1:-}}" = --print-host ]; then exec '{binary}' "$@"; fi
 printf '%s\n' "$*" >> "${{NAMEDROP_TEST_ENTRYPOINT_LOG:-/dev/null}}"
 "#,
-                binary = env!("CARGO_BIN_EXE_namedrop").replace('\'', "'\"'\"'"),
             ),
         )
     }
