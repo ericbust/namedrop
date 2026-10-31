@@ -228,7 +228,8 @@ fn doctor_does_not_start_subscriber_without_active_worktree() {
             .unwrap();
         assert!(
             output.status.success(),
-            "{}",
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         assert_eq!(
