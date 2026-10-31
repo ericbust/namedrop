@@ -506,7 +506,7 @@ where
             Ok(effects) => effects,
             Err(error) => {
                 let summary = format!(
-                    "Could not send to @{}. {error}. Check the state directory permissions and available file descriptors, then review the conversation before retrying delivery.",
+                    "Could not send to @{}. {error}. Check the state directory permissions and available file descriptors, then review the conversation and send it again, or ask the agent that sent it to send it again.",
                     second.alias,
                 );
                 let failed = store

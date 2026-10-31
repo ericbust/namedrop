@@ -701,7 +701,7 @@ pub(crate) fn record_snapshot_activation_failure<E, C, I>(
             transaction.record_context_grant_activation_failure(
                 &namespace,
                 &ContextGrantId::new(grant_id),
-                &format!("Shared context failed: {error}. Ask the sender to fix the problem and share the context again."),
+                &format!("Shared context failed: {error}"),
                 &attribution,
             )?;
             Ok(())

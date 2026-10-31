@@ -99,7 +99,9 @@ fn checked(file: File, directory: bool) -> io::Result<File> {
             !metadata.is_file() || metadata.nlink() != 1
         }
     {
-        return Err(io::Error::other("unsafe pane effects ownership file"));
+        return Err(io::Error::other(
+            "Namedrop's lock for this pane has unsafe owner or permissions",
+        ));
     }
     Ok(file)
 }
