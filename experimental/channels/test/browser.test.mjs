@@ -10462,3 +10462,114 @@ test("UI-R5 R5-1: when the phone layout ends with focus on the Channels button, 
       });
     }
 });
+
+async function pressMessage(t, size, { draft = "", gone = false } = {}) {
+  const { value, left, context } = leavesAfterPress("message", "closed");
+  const loaded = held();
+  if (!gone) loaded.release();
+  const ui = await open(
+    t,
+    (client) => replay(client, [value]),
+    () => [],
+    {
+      onContext: async () => {
+        await loaded.gate;
+        return context;
+      },
+    },
+  );
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await resize(ui.page, ...size);
+  await ui.live();
+  const box = ui.page.locator("main .composer textarea");
+  if (draft !== "") await box.fill(draft);
+  await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: "Message @codex", exact: true })
+    .click();
+  if (gone) {
+    await until(() => ui.contextRequests.length === 1, "the conversation");
+    ui.connections[0].send("space", left);
+    await readsAs(
+      ui.page.locator(".attention-hint"),
+      "@codex's pane is closed, so it can't take a message.",
+    );
+    loaded.release();
+  }
+  return { ui, box };
+}
+const composerFocus = (box) =>
+  box.evaluate((element) => ({
+    focused: element === document.activeElement,
+    caret: [element.selectionStart, element.selectionEnd],
+  }));
+test("UI-R5 R5-2: where a pane covers the channel, Message @codex closes the pane and leaves focus in the channel composer with the prepared message, the caret at the end of its first line; beside or above the channel the pane stays open", async (t) => {
+  const first = "@codex About your coordination report: ";
+  for (const [width, height, covers] of [
+    [700, 899, true],
+    [390, 844, true],
+    [700, 1000, false],
+    [1440, 900, false],
+  ])
+    await t.test(`${width}x${height}`, async (t) => {
+      const { ui, box } = await pressMessage(t, [width, height]);
+      await eventually(
+        async () => (await box.inputValue()) === `${first}\nRef: decision-1`,
+        "the prepared message",
+      );
+      await eventually(
+        async () =>
+          isDeepStrictEqual(await composerFocus(box), {
+            focused: true,
+            caret: [first.length, first.length],
+          }),
+        `focus and caret in the channel composer, not ${JSON.stringify(await composerFocus(box))} on ${await activeName(ui.page)}`,
+      );
+      assert.equal(await ui.page.getByRole("main").isVisible(), true);
+      if (covers) assert.equal(await threadPane(ui).count(), 0, "pane closed");
+      else
+        await readsAs(
+          threadPane(ui).locator(".thread-answer"),
+          "Answer tracked work in the channel. Your message to @codex is ready there.",
+        );
+      await ui.page.keyboard.type("ship option B");
+      assert.equal(
+        await box.inputValue(),
+        `${first}ship option B\nRef: decision-1`,
+      );
+    });
+});
+test("UI-R5 R5-2: where a pane covers the channel, a kept draft or an absent agent closes the pane too, so the line under the channel composer shows, with focus in that composer", async (t) => {
+  for (const [state, line, options] of [
+    [
+      "kept draft",
+      "Your draft is still here. Send or clear it, then press Message @codex again.",
+      { draft: "my own words" },
+    ],
+    [
+      "absent agent",
+      "@codex's pane is closed, so it can't take a message.",
+      { draft: "my own words", gone: true },
+    ],
+  ])
+    for (const size of [
+      [700, 899],
+      [390, 844],
+    ])
+      await t.test(`${state} at ${size.join("x")}`, async (t) => {
+        const { ui, box } = await pressMessage(t, size, options);
+        const guard = ui.page.locator("main .composer-guard");
+        await readsAs(guard, line);
+        await eventually(
+          async () => (await threadPane(ui).count()) === 0,
+          "the pane to close",
+        );
+        assert.equal(await guard.isVisible(), true, "the line shows");
+        await eventually(
+          async () => (await composerFocus(box)).focused,
+          `focus in the channel composer, not on ${await activeName(ui.page)}`,
+        );
+        assert.equal(await box.inputValue(), "my own words");
+        assert.equal(ui.posts.attempts.length, 0);
+      });
+});

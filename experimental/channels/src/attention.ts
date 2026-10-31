@@ -48,7 +48,10 @@ export type FocusedEvidence =
       version: number;
       request: EvidenceRequest;
       context: MessageContext;
-    };
+    }
+  // The pane closed so the channel composer could show where a pane covered
+  // it. The response stays, for the line under that composer.
+  | { kind: "in-channel"; version: number; request: EvidenceRequest };
 export type EvidenceEvent =
   | { type: "open"; request: EvidenceRequest }
   | { type: "retry" }
@@ -59,6 +62,7 @@ export type EvidenceEvent =
       result: "prepared" | "preserved" | "unavailable";
     }
   | { type: "close" }
+  | { type: "to-channel" }
   | { type: "draft-edited"; key: SpaceKey }
   | { type: "sent"; key: SpaceKey; messageId: string | null }
   | { type: "loaded"; version: number; context: MessageContext }
@@ -84,6 +88,10 @@ export function evidenceReduce(
         : state;
     case "close":
       return { kind: "closed", version: state.version + 1 };
+    case "to-channel":
+      return state.kind === "ready"
+        ? { kind: "in-channel", version: state.version, request: state.request }
+        : state;
     case "prepare-message":
       return state.kind === "ready" &&
         state.request.response?.kind === "message" &&
@@ -114,7 +122,7 @@ export function evidenceReduce(
           }
         : state;
     case "draft-edited":
-      return state.kind === "ready" &&
+      return (state.kind === "ready" || state.kind === "in-channel") &&
         state.request.key === event.key &&
         state.request.response?.kind === "message" &&
         (state.request.response.preparation === "preserved" ||
@@ -128,7 +136,10 @@ export function evidenceReduce(
           }
         : state;
     case "sent": {
-      if (state.kind !== "ready" || state.request.key !== event.key)
+      if (
+        (state.kind !== "ready" && state.kind !== "in-channel") ||
+        state.request.key !== event.key
+      )
         return state;
       const response = state.request.response;
       if (response?.kind === "reply" && response.messageId === event.messageId)
