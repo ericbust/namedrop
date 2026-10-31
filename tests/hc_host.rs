@@ -2692,3 +2692,6 @@ fn assert_onboarding_and_doctor_refusals(mark_invoked: bool) {
         std::fs::remove_dir_all(state).unwrap();
     }
 }
+
+#[path = "support/hc_prompt_race.rs"]
+mod prompt_race;
