@@ -372,17 +372,16 @@ impl Subscriber {
             if let Some(space) = self.spaces.get(pane) {
                 affected.insert(space.clone());
             }
-            if change.invalidate
-                && let Err(error) = runtime
-                    .host
-                    .invalidate_session(runtime.state_directory, pane)
-            {
-                self.unavailable.insert(pane.clone(), error.to_string());
-                errors.push(error.to_string());
-                continue;
-            }
             match runtime.host.terminal(pane, None) {
                 Ok(mut terminal) => {
+                    if change.invalidate
+                        && (terminal.state != "live" || terminal.session().is_none())
+                        && let Err(error) = runtime.host.clear_session(&mut terminal)
+                    {
+                        self.unavailable.insert(pane.clone(), error.to_string());
+                        errors.push(error.to_string());
+                        continue;
+                    }
                     if active_spaces.contains(terminal.workspace())
                         && let Err(error) = runtime.host.reconcile_session(
                             runtime.state_directory,

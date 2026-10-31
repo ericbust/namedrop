@@ -639,11 +639,11 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
 
     pub fn invalidate_session(&self, state: &Path, pane: &str) -> Result<(), HostError> {
         let _lock = label_lock(state)?;
-        let terminal = self.terminal(pane, None)?;
+        let mut terminal = self.terminal(pane, None)?;
         if terminal.state == "live" && terminal.session().is_some() {
             return Ok(());
         }
-        self.clear_session(&terminal)
+        self.clear_session(&mut terminal)
     }
 
     pub(super) fn reconcile_session(
@@ -678,20 +678,13 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
             .map_err(|error| error.to_string())?
             .is_some_and(|state| state.activated && !state.deactivated);
         if active && (current.state != "live" || current.session().is_none()) {
-            self.clear_session(&current)?;
-            for key in [
-                "namedrop.session",
-                "namedrop.session.pid",
-                "namedrop.session.start",
-            ] {
-                current.labels.remove(key);
-            }
+            self.clear_session(&mut current)?;
         }
         *terminal = current;
         Ok(true)
     }
 
-    fn clear_session(&self, terminal: &Terminal) -> Result<(), HostError> {
+    fn clear_session(&self, terminal: &mut Terminal) -> Result<(), HostError> {
         self.update_labels(
             terminal,
             &[
@@ -699,7 +692,15 @@ impl<E: HerdrCommandExecutor> HcHost<E> {
                 ("namedrop.session.pid", ""),
                 ("namedrop.session.start", ""),
             ],
-        )
+        )?;
+        for key in [
+            "namedrop.session",
+            "namedrop.session.pid",
+            "namedrop.session.start",
+        ] {
+            terminal.labels.remove(key);
+        }
+        Ok(())
     }
 
     pub fn version(&self) -> Result<String, HostError> {
