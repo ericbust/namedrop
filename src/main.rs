@@ -1081,8 +1081,9 @@ fn run_agent_status_worker() -> ExitCode {
         };
         match result {
             Ok(result) => match drain_report(&result) {
-                Ok(report) if report.awaits_retry() => {
-                    if !report.submitted.is_empty()
+                Ok(report) => {
+                    if !report.awaits_retry()
+                        || !report.submitted.is_empty()
                         || !report.settled.is_empty()
                         || !report.failed.is_empty()
                         || !report.held.is_empty()
@@ -1090,15 +1091,22 @@ fn run_agent_status_worker() -> ExitCode {
                     {
                         failures = 0;
                     }
-                    wait_for_reconciliation_retry(&mut failures, report.retry_without_event);
-                }
-                Ok(report) => {
-                    let _ = fs::remove_file(marker);
-                    failures = 0;
+                    let retry_due_ms = report.awaits_retry().then(|| {
+                        let delay =
+                            reconciliation_retry_delay(failures, report.retry_without_event);
+                        failures = failures.saturating_add(1);
+                        SystemClock
+                            .now_unix_ms()
+                            .saturating_add(delay.as_millis() as u64)
+                    });
                     deadline_ms = deadline_ms
                         .into_iter()
+                        .chain(retry_due_ms)
                         .chain(report.next_grace_due_ms())
                         .min();
+                    if fs::remove_file(marker).is_err() {
+                        wait_for_reconciliation_retry(&mut failures, false);
+                    }
                 }
                 Err(_) => {
                     let _ = fs::remove_file(marker);
