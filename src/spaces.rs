@@ -1195,6 +1195,7 @@ mod tests {
     #[test]
     fn live_spaces_for_one_workspace_read_nothing_from_herdr() {
         let here = crate::DiscoveredWorktree {
+            unavailable_panes: vec![],
             worktree_id: crate::WorktreeId::new("herdr-space:w1"),
             workspace_id: "w1".to_owned(),
             worktree_attached: false,

@@ -132,6 +132,7 @@ pub(crate) struct DeliveryReconciliationReport {
 pub(crate) fn reconcile_delivery_state(
     transaction: &mut StateTransaction<'_>,
     namespace: &StateNamespace,
+    unavailable_panes: &[String],
     panes: &[DiscoveredPane],
     restart: bool,
     attribution: &MutationAttribution,
@@ -153,6 +154,9 @@ pub(crate) fn reconcile_delivery_state(
                     attribution,
                 )?;
                 report.settled.push(attempt.attempt_id);
+                continue;
+            }
+            if attempt.binding_active && unavailable_panes.contains(&attempt.pane_id) {
                 continue;
             }
             let same = attempt.binding_active
@@ -178,6 +182,9 @@ pub(crate) fn reconcile_delivery_state(
             }
             // Shell status alone never means command completion. Only the
             // claimed runner can persist an exit status and settle this work.
+            continue;
+        }
+        if attempt.binding_active && unavailable_panes.contains(&attempt.pane_id) {
             continue;
         }
         match observe_agent_attempt(&attempt, pane, restart, attribution.occurred_at_ms) {
@@ -336,6 +343,9 @@ where
         .transaction(|tx| tx.inflight_delivery_attempts(&namespace))
         .map_err(|e| e.to_string())?;
     for attempt in inflight {
+        if first_discovery.unavailable_panes.contains(&attempt.pane_id) {
+            continue;
+        }
         let terminal = store
             .transaction(|tx| tx.terminal_execution(&namespace, &attempt.attempt_id))
             .map_err(|e| e.to_string())?;
@@ -363,6 +373,7 @@ where
             reconcile_delivery_state(
                 transaction,
                 &namespace,
+                &first_discovery.unavailable_panes,
                 &first_discovery.panes,
                 false,
                 &MutationAttribution::new(ActorKind::Plugin, "namedrop-dispatch", now),
@@ -753,6 +764,7 @@ mod observation_tests {
                 settled_delay_ms: 500,
             };
             let discovered = crate::DiscoveredWorktree {
+                unavailable_panes: vec![],
                 worktree_id: crate::WorktreeId::new("hc-space:fixture-space"),
                 workspace_id: "fixture-space".into(),
                 worktree_attached: false,

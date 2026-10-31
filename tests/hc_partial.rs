@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 #[path = "fixtures/hc/process.rs"]
 mod process;
 
@@ -78,6 +79,22 @@ fn partial_discovery_preserves_binding_and_inflight_while_healthy_pane_progresse
 #[test]
 fn naming_healthy_pane_does_not_remove_unavailable_neighbor() {
     check_partial("event.name");
+}
+#[test]
+fn unavailable_binding_is_not_compacted_onto_another_pane() {
+    check_partial("compaction");
+}
+#[test]
+fn explicit_close_still_removes_an_unavailable_pane() {
+    check_partial("pane_closed");
+}
+#[test]
+fn explicit_exit_still_removes_an_unavailable_pane() {
+    check_partial("pane_exited");
+}
+#[test]
+fn explicit_unbind_still_holds_an_unavailable_panes_inflight_delivery() {
+    check_partial("unbind");
 }
 fn check_partial(operation: &str) {
     let agent = process::AgentProcess::new();
@@ -171,13 +188,23 @@ fn check_partial(operation: &str) {
         })
         .unwrap();
     fixture.unavailable.set(true);
+    if operation == "compaction" {
+        let mut duplicate = fixture.terminals.borrow()[0].clone();
+        duplicate["address"] = json!("t3");
+        fixture.terminals.borrow_mut().push(duplicate);
+    }
     fixture.terminals.borrow_mut()[1]["labels"]["herdr.tab"] = json!("moved-tab");
     let input = if operation == "event.name" {
         json!({"alias":"shell"})
     } else {
         json!({})
     };
-    execute_lifecycle_operation(operation, input, &healthy).unwrap();
+    let reconcile_operation = if operation == "event.name" {
+        operation
+    } else {
+        "event.reconcile"
+    };
+    execute_lifecycle_operation(reconcile_operation, input, &healthy).unwrap();
     store
         .transaction(|tx| {
             let bindings = tx.active_pane_bindings(&namespace)?;
@@ -202,7 +229,76 @@ fn check_partial(operation: &str) {
         })
         .unwrap();
     assert_eq!(*fixture.sends.borrow(), ["t2"]);
+    if operation == "unbind" {
+        store
+            .transaction(|tx| {
+                let binding = tx
+                    .active_pane_bindings(&namespace)?
+                    .into_iter()
+                    .find(|b| b.pane_id == "t1")
+                    .unwrap();
+                tx.unbind_pane(&namespace, &binding.address_id, &attribution)
+            })
+            .unwrap();
+        drain_mailboxes(&healthy).unwrap();
+        assert_eq!(
+            store
+                .transaction(|tx| tx.delivery_attempt_state(&namespace, &attempt))
+                .unwrap(),
+            DeliveryState::Held
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    if matches!(operation, "pane_closed" | "pane_exited") {
+        execute_lifecycle_operation(
+            "event.pane-lifecycle",
+            json!({
+                "type": operation, "pane_id":"t1", "workspace_id":"fixture-space"
+            }),
+            &healthy,
+        )
+        .unwrap();
+        store
+            .transaction(|tx| {
+                assert!(
+                    !tx.active_pane_bindings(&namespace)?
+                        .iter()
+                        .any(|b| b.pane_id == "t1")
+                );
+                assert_eq!(
+                    tx.delivery_attempt_state(&namespace, &attempt)?,
+                    DeliveryState::Cancelled
+                );
+                Ok(())
+            })
+            .unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+        return;
+    }
     fixture.unavailable.set(false);
+    fixture.terminals.borrow_mut().truncate(2);
+    fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("recovered-session");
+    fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"working"});
+    execute_lifecycle_operation("event.reconcile", json!({}), &healthy).unwrap();
+    store
+        .transaction(|tx| {
+            let addresses = tx.list_pane_addresses(&namespace)?;
+            let recovered = addresses
+                .iter()
+                .find(|a| a.pane_id.as_deref() == Some("t1"))
+                .unwrap();
+            assert_eq!(
+                recovered.agent_session_id.as_ref().map(|s| s.as_str()),
+                Some("recovered-session")
+            );
+            assert_eq!(
+                tx.delivery_attempt_state(&namespace, &attempt)?,
+                DeliveryState::Held
+            );
+            Ok(())
+        })
+        .unwrap();
     fixture.terminals.borrow_mut().remove(0);
     execute_lifecycle_operation("event.reconcile", json!({}), &healthy).unwrap();
     store
@@ -235,4 +331,55 @@ fn dead_untagged_foreground_is_not_an_agent() {
     let panes = HcHost::new(&fixture).panes(PaneScope::All).unwrap();
     assert_eq!(panes[0].agent, None);
     assert_eq!(panes[0].agent_session_id, None);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/hc-partial/dead-foreground");
+    let ids = ProcessIds::default();
+    let runtime = LifecycleRuntime {
+        state_directory: &root,
+        home_directory: Some(&root),
+        agent_config: AgentConfigDirectories::default(),
+        cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+        workspace_id: Some("fixture-space"),
+        current_pane_id: Some("t1"),
+        session_socket_id: "hc:partial",
+        host: HcHost::new(&fixture),
+        clock: &TestClock,
+        ids: &ids,
+    };
+    assert_ne!(detect_pane_type(&runtime).unwrap(), Some(PaneType::Agent));
+}
+
+#[test]
+fn concrete_core_identity_preserves_transport_failure() {
+    struct Unavailable;
+    impl HerdrCommandExecutor for Unavailable {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            assert_eq!(args, ["server", "status", "--json"]);
+            Err("hc core is unavailable; start it explicitly".into())
+        }
+    }
+    let host = HcHost::new(Unavailable);
+    assert_eq!(
+        host.core_identity().unwrap_err().message,
+        "hc core is unavailable; start it explicitly"
+    );
+    assert_eq!(host.socket_id(), None);
+}
+
+#[test]
+fn discovery_retains_failed_terminal_ids_without_stale_observations() {
+    let agent = process::AgentProcess::new();
+    let fixture = Fixture::new(agent.pid());
+    fixture.unavailable.set(true);
+    let discovered = HcHost::new(&fixture)
+        .space(SpaceLocator::Workspace("fixture-space"), None)
+        .unwrap();
+    assert_eq!(discovered.unavailable_panes, ["t1"]);
+    assert_eq!(
+        discovered
+            .panes
+            .iter()
+            .map(|p| p.pane_id.as_str())
+            .collect::<Vec<_>>(),
+        ["t2"]
+    );
 }

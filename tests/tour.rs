@@ -340,6 +340,7 @@ fn pane(id: &str, agent: Option<&str>) -> DiscoveredPane {
 
 fn worktree(panes: Vec<DiscoveredPane>) -> DiscoveredWorktree {
     DiscoveredWorktree {
+        unavailable_panes: vec![],
         worktree_id: WorktreeId::new("worktree-1"),
         workspace_id: "workspace-1".to_owned(),
         worktree_attached: true,

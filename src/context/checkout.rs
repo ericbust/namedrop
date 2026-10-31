@@ -689,6 +689,7 @@ mod tests {
 
     fn space(root: Option<&Path>) -> DiscoveredWorktree {
         DiscoveredWorktree {
+            unavailable_panes: vec![],
             worktree_id: WorktreeId::new(
                 root.map_or("herdr-space:workspace-1".to_owned(), |root| {
                     root.display().to_string()

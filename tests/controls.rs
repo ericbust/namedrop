@@ -1204,6 +1204,7 @@ fn ambiguous_binding_recovery_opens_one_attention_item_until_an_explicit_rebind(
             reconcile_discovered_panes(
                 transaction,
                 &namespace,
+                &[],
                 &[
                     namedrop::DiscoveredPane {
                         pane_id: "pane-ambiguous".to_owned(),

@@ -17,6 +17,8 @@ pub struct DiscoveredWorktree {
     pub label: Option<String>,
     pub branch: Option<String>,
     pub panes: Vec<DiscoveredPane>,
+    /// Listed panes whose current observations could not be read.
+    pub unavailable_panes: Vec<String>,
 }
 
 impl DiscoveredWorktree {
@@ -984,6 +986,7 @@ where
                             reconcile_delivery_state(
                                 transaction,
                                 &event_namespace,
+                                &refreshed.unavailable_panes,
                                 &refreshed.panes,
                                 false,
                                 &attribution,
@@ -1025,7 +1028,11 @@ where
                                         })
                                 });
                                 if binding.tab_id.as_deref() == Some(tab_id.as_str())
-                                    || (binding.tab_id.is_none() && !exact_pane_is_live)
+                                    || (binding.tab_id.is_none()
+                                        && !event_worktree
+                                            .unavailable_panes
+                                            .contains(&binding.pane_id)
+                                        && !exact_pane_is_live)
                                 {
                                     transaction.cancel_and_remove_pane_address(
                                         &event_namespace,
@@ -1102,6 +1109,7 @@ where
                                 reconcile_compacted_pane_bindings(
                                     transaction,
                                     &source_namespace,
+                                    &destination.unavailable_panes,
                                     &destination.panes,
                                     &attribution,
                                 )?;
@@ -1127,6 +1135,7 @@ where
                             reconcile_delivery_state(
                                 transaction,
                                 &source_namespace,
+                                &refreshed.unavailable_panes,
                                 &refreshed.panes,
                                 false,
                                 &attribution,
@@ -1173,6 +1182,7 @@ where
                     reconcile_discovered_panes(
                         transaction,
                         &event_namespace,
+                        &event_worktree.unavailable_panes,
                         &event_worktree.panes,
                         runtime.ids,
                         &attribution,
@@ -1180,6 +1190,7 @@ where
                     reconcile_delivery_state(
                         transaction,
                         &event_namespace,
+                        &event_worktree.unavailable_panes,
                         &event_worktree.panes,
                         false,
                         &attribution,
@@ -1318,12 +1329,14 @@ where
             reconcile_compacted_pane_bindings(
                 transaction,
                 namespace,
+                &discovered.unavailable_panes,
                 &discovered.panes,
                 attribution,
             )?;
             reconcile_discovered_panes(
                 transaction,
                 namespace,
+                &discovered.unavailable_panes,
                 &discovered.panes,
                 runtime.ids,
                 attribution,
@@ -1331,6 +1344,7 @@ where
             reconcile_delivery_state(
                 transaction,
                 namespace,
+                &discovered.unavailable_panes,
                 &discovered.panes,
                 after_restart,
                 attribution,
@@ -1478,6 +1492,15 @@ where
         })
         .map_err(|error| error.to_string())?;
     for mut label in managed {
+        let address = addresses
+            .iter()
+            .find(|address| !address.retired && address.id == label.address_id);
+        if address
+            .and_then(|address| address.pane_id.as_ref())
+            .is_some_and(|pane| discovered.unavailable_panes.contains(pane))
+        {
+            continue;
+        }
         let panes = discovered
             .panes
             .iter()
@@ -1491,9 +1514,6 @@ where
                 .map_err(|error| error.to_string())?;
             continue;
         }
-        let address = addresses
-            .iter()
-            .find(|address| !address.retired && address.id == label.address_id);
         let bound_pane = address.and_then(|address| address.pane_id.as_deref());
         // While the named pane stays in this tab, keep the record so its alias
         // returns once the tab again holds no other agent.
@@ -1819,6 +1839,7 @@ pub fn pane_workspace(host: &impl crate::Host, pane_id: &str) -> Result<String, 
 /// The current space state used by the read-only health check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CollaborationSetup {
+    pub unavailable_panes: Vec<String>,
     pub worktree_state: Option<WorktreeState>,
     pub panes: Vec<DiscoveredPane>,
     pub addresses: Vec<PaneAddressRecord>,
@@ -1864,6 +1885,7 @@ pub(crate) fn load_collaboration_setup_from_store(
         })
         .map_err(|error| error.to_string())?;
     Ok(CollaborationSetup {
+        unavailable_panes: discovered.unavailable_panes.clone(),
         worktree_state,
         panes: discovered.panes.clone(),
         addresses,
@@ -1887,11 +1909,15 @@ pub(crate) fn terminal_safe_text(value: &str) -> String {
 pub fn reconcile_discovered_panes(
     transaction: &mut StateTransaction<'_>,
     namespace: &StateNamespace,
+    unavailable_panes: &[String],
     panes: &[DiscoveredPane],
     ids: &impl IdGenerator,
     attribution: &MutationAttribution,
 ) -> Result<(), StoreError> {
     for binding in transaction.active_pane_bindings(namespace)? {
+        if unavailable_panes.contains(&binding.pane_id) {
+            continue;
+        }
         let mut matches = panes.iter().filter(|pane| pane.pane_id == binding.pane_id);
         let first = matches.next();
         if first.is_none() {
@@ -2023,6 +2049,7 @@ fn apply_pane_move(
 fn reconcile_compacted_pane_bindings(
     transaction: &mut StateTransaction<'_>,
     namespace: &StateNamespace,
+    unavailable_panes: &[String],
     panes: &[DiscoveredPane],
     attribution: &MutationAttribution,
 ) -> Result<(), StoreError> {
@@ -2034,10 +2061,10 @@ fn reconcile_compacted_pane_bindings(
         .map(|binding| binding.pane_id.clone())
         .collect::<std::collections::BTreeSet<_>>();
 
-    for binding in bindings
-        .iter()
-        .filter(|binding| !panes.iter().any(|pane| pane.pane_id == binding.pane_id))
-    {
+    for binding in bindings.iter().filter(|binding| {
+        !unavailable_panes.contains(&binding.pane_id)
+            && !panes.iter().any(|pane| pane.pane_id == binding.pane_id)
+    }) {
         let Some(expected_session) = addresses
             .iter()
             .find(|address| address.id == binding.address_id)

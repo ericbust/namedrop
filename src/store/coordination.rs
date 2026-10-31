@@ -547,6 +547,11 @@ impl StateTransaction<'_> {
                         .active_pane_bindings(ns)?
                         .into_iter()
                         .find(|b| b.address_id.as_str() == owner_address);
+                    if owner_binding.as_ref().is_some_and(|binding| {
+                        discovered.unavailable_panes.contains(&binding.pane_id)
+                    }) {
+                        continue;
+                    }
                     let owner_live = owner_binding.as_ref().is_some_and(|b| {
                         discovered.panes.iter().any(|p| {
                             p.pane_id == b.pane_id
@@ -594,6 +599,12 @@ impl StateTransaction<'_> {
                 .active_pane_bindings(ns)?
                 .into_iter()
                 .find(|b| b.address_id == owner.address_id);
+            if binding
+                .as_ref()
+                .is_some_and(|binding| discovered.unavailable_panes.contains(&binding.pane_id))
+            {
+                continue;
+            }
             if !binding.as_ref().is_some_and(|b| {
                 discovered.panes.iter().any(|p| {
                     p.pane_id == b.pane_id
@@ -808,6 +819,12 @@ impl StateTransaction<'_> {
                 .active_pane_bindings(seat_ns)?
                 .into_iter()
                 .find(|b| b.address_id.as_str() == address);
+            if binding
+                .as_ref()
+                .is_some_and(|binding| discovered.unavailable_panes.contains(&binding.pane_id))
+            {
+                return Ok(false);
+            }
             let pane = binding
                 .as_ref()
                 .and_then(|b| discovered.panes.iter().find(|p| p.pane_id == b.pane_id));

@@ -274,8 +274,7 @@ impl Terminal {
             };
         }
         if let Some((pid, runtime)) = foreground
-            && (!self.labels.contains_key("namedrop.session.pid")
-                || process_runtime(pid) == Some(runtime))
+            && process_runtime(pid) == Some(runtime)
         {
             return Occupancy::Agent {
                 runtime,
@@ -357,6 +356,19 @@ pub(crate) fn label_lock(state: &Path) -> Result<std::fs::File, String> {
 impl<E: HerdrCommandExecutor> HcHost<E> {
     pub fn new(transport: E) -> Self {
         Self { transport }
+    }
+
+    pub fn core_identity(&self) -> Result<String, HostError> {
+        #[derive(Deserialize)]
+        struct Core {
+            id: String,
+        }
+        #[derive(Deserialize)]
+        struct Server {
+            core: Core,
+        }
+        self.execute::<Server>(&["server", "status", "--json"], None)
+            .map(|server| format!("hc:{}", server.core.id))
     }
 
     pub(crate) fn shell_pid(&self, terminal: &str, budget: &dyn Budget) -> Option<u32> {
@@ -539,7 +551,8 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
         at: SpaceLocator<'_>,
         budget: Option<&dyn Budget>,
     ) -> Result<DiscoveredWorktree, HostError> {
-        let terminals = self.terminals(budget)?;
+        let discovery = self.discover(budget)?;
+        let terminals = discovery.terminals;
         let mut roots_by_cwd = BTreeMap::<PathBuf, Option<PathBuf>>::new();
         let mut cached_root = |cwd: &Path| {
             roots_by_cwd
@@ -594,6 +607,11 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
             .filter(|roots| !roots.is_empty() && roots.iter().all(|root| root == &roots[0]))
             .map(|roots| &roots[0]);
         Ok(DiscoveredWorktree {
+            unavailable_panes: discovery
+                .warnings
+                .into_iter()
+                .map(|warning| warning.terminal)
+                .collect(),
             worktree_id: WorktreeId::new(
                 root.map(|root| root.to_string_lossy().into_owned())
                     .unwrap_or_else(|| format!("hc-space:{workspace}")),
@@ -801,17 +819,7 @@ impl<E: HerdrCommandExecutor> Host for HcHost<E> {
             .map(Path::to_path_buf)
     }
     fn socket_id(&self) -> Option<String> {
-        #[derive(Deserialize)]
-        struct Core {
-            id: String,
-        }
-        #[derive(Deserialize)]
-        struct Server {
-            core: Core,
-        }
-        self.execute::<Server>(&["server", "status", "--json"], None)
-            .ok()
-            .map(|server| format!("hc:{}", server.core.id))
+        self.core_identity().ok()
     }
     fn caller_identity(&self, claim: &CallerClaim) -> Result<CallerIdentity, HostError> {
         if let Some(pane) = &claim.pane {

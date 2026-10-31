@@ -58,6 +58,7 @@ fn refresh_hc_packages(home: &Path, state: &Path) -> IntegrationPackageInstallat
         ids: &crate::ProcessIds::default(),
     };
     let discovered = DiscoveredWorktree {
+        unavailable_panes: vec![],
         worktree_id: crate::WorktreeId::new("worktree"),
         workspace_id: "space".into(),
         worktree_attached: false,
@@ -304,6 +305,7 @@ fn hc_refresh_does_not_change_tui_packages_and_owns_private_packages() {
         ids: &crate::ProcessIds::default(),
     };
     let discovered = DiscoveredWorktree {
+        unavailable_panes: vec![],
         worktree_id: crate::WorktreeId::new("worktree"),
         workspace_id: "space".into(),
         worktree_attached: false,
@@ -1095,6 +1097,7 @@ fn hc_onboarding_inspects_packages_without_repairing_them() {
         ids: &ids,
     };
     let discovered = DiscoveredWorktree {
+        unavailable_panes: vec![],
         worktree_id: crate::WorktreeId::new("worktree"),
         workspace_id: "space".into(),
         worktree_attached: false,

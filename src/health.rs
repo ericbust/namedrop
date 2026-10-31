@@ -755,6 +755,7 @@ where
     else {
         return Ok(HealthSnapshot {
             setup: CollaborationSetup {
+                unavailable_panes: discovered.unavailable_panes,
                 worktree_state: None,
                 panes: discovered.panes,
                 addresses: Vec::new(),

@@ -277,6 +277,7 @@ impl<E: HerdrCommandExecutor> TuiHost<E> {
             serde_json::from_str(&pane_output.stdout).map_err(|error| error.to_string())?;
         let panes = Self::map_panes(panes);
         Ok(DiscoveredWorktree {
+            unavailable_panes: vec![],
             worktree_id: WorktreeId::new(worktree_path),
             workspace_id,
             worktree_attached,
