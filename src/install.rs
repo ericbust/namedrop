@@ -611,6 +611,9 @@ pub(crate) fn inspect_integration_package(
 ) -> Result<(), String> {
     let home = home.ok_or("no absolute user home directory is available")?;
     let executable = PathBuf::from(crate::collaboration_executable()?);
+    if hc {
+        command::inspect_hc_shell_command(home)?;
+    }
     let prepared = prepare_integration_package(
         &PackageContext::new(home, hc),
         runtime,
@@ -926,14 +929,31 @@ where
         .map(|home| PackageContext::new(home, runtime.is_hc()));
     let outcomes = [AgentRuntime::Codex, AgentRuntime::ClaudeCode].map(|agent_runtime| {
         let outcome = match (context.as_ref(), &executable) {
-            (Some(context), _) if !current => verified_package_directory(context, agent_runtime),
-            (Some(context), Ok(executable)) => install_integration_package_with_config(
-                context,
-                agent_runtime,
-                executable,
-                runtime.state_directory,
-                runtime.agent_config,
-            ),
+            (Some(context), _) if !current => verified_package_directory(context, agent_runtime)
+                .and_then(|directory| {
+                    if context.hc {
+                        command::inspect_hc_shell_command(&context.home)?;
+                    }
+                    Ok(directory)
+                }),
+            (Some(context), Ok(executable)) => (|| {
+                if context.hc {
+                    verified_package_directory(context, agent_runtime)?;
+                    install_shell_command(
+                        &context.home,
+                        executable,
+                        runtime.state_directory,
+                        true,
+                    )?;
+                }
+                install_integration_package_with_config(
+                    context,
+                    agent_runtime,
+                    executable,
+                    runtime.state_directory,
+                    runtime.agent_config,
+                )
+            })(),
             (None, _) => Err(
                 "no user home directory is available for the shared Agent Integration package"
                     .to_owned(),

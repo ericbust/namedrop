@@ -31,13 +31,7 @@ pub(crate) fn install_shell_command(
 
     if hc {
         fs::create_dir_all(&bin).map_err(|e| conflict(&bin, &e.to_string()))?;
-        let executable =
-            shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?);
-        replace_if_changed(
-            &launcher,
-            &format!("{OWNER}exec {executable} \"$@\"\n"),
-            Some(0o755),
-        )?;
+        replace_if_changed(&launcher, &hc_script(executable)?, Some(0o755))?;
         return Ok(json!({"path": launcher, "shell_startup_files": [], "path_configured": false}));
     }
     let shell = env::var("SHELL").unwrap_or_default();
@@ -107,6 +101,42 @@ exec {executable} --plugin-state {state} "$@"
             "Open a new terminal, or run the current_shell command in this terminal."
         }
     }))
+}
+
+fn hc_script(executable: &Path) -> Result<String, String> {
+    let executable = shell_single_quote(executable.to_str().ok_or("executable path is not UTF-8")?);
+    Ok(format!("{OWNER}exec {executable} \"$@\"\n"))
+}
+
+pub(super) fn inspect_hc_shell_command(home: &Path) -> Result<(), String> {
+    let launcher = home.join(".local/bin/namedrop-app");
+    let (text, mode) = read_target(home, &launcher)?
+        .ok_or_else(|| conflict(&launcher, "is missing; activate again to install it"))?;
+    let executable = text
+        .strip_prefix(OWNER)
+        .and_then(|body| body.strip_prefix("exec '"))
+        .and_then(|body| body.strip_suffix("' \"$@\"\n"))
+        .map(|path| path.replace(r#"'"'"'"#, "'"))
+        .ok_or_else(|| conflict(&launcher, "is not an owned Namedrop bootstrap"))?;
+    let executable = Path::new(&executable);
+    if !executable.is_absolute() || text != hc_script(executable)? {
+        return Err(conflict(&launcher, "has an invalid bootstrap command"));
+    }
+    if mode != 0o755 {
+        return Err(conflict(
+            &launcher,
+            "has incorrect permissions; activate again to repair them",
+        ));
+    }
+    if !fs::metadata(executable)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+    {
+        return Err(conflict(
+            &launcher,
+            "references an unavailable executable; activate again to refresh it",
+        ));
+    }
+    Ok(())
 }
 
 fn read_target(home: &Path, target: &Path) -> Result<Option<(String, u32)>, String> {

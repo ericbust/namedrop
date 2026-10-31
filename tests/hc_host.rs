@@ -1857,26 +1857,7 @@ fn check_hc_bootstrap(damage: Option<&str>) {
             script,
             "stale activation overwrote the current bootstrap"
         );
-    } else if damage.is_none() {
-        let result = namedrop::execute_lifecycle_operation(
-            "name",
-            json!({"alias":"alice","pane_type":"agent"}),
-            &runtime,
-        )
-        .unwrap();
-        assert_eq!(result["activation_was_needed"], true);
-        assert!(
-            command.is_file(),
-            "first HC name must install its required bootstrap"
-        );
-        assert_ne!(
-            fs::metadata(&command).unwrap().permissions().mode() & 0o111,
-            0
-        );
-        assert!(!home.join(".local/bin/namedrop").exists());
-        assert!(!home.join(".bashrc").exists());
-        assert!(!home.join(".profile").exists());
-    } else {
+    } else if let Some(damage) = damage {
         namedrop::execute_lifecycle_operation("activate", json!({"confirmed":true}), &runtime)
             .unwrap();
         let baseline = namedrop::diagnose_collaboration(&runtime);
@@ -1888,7 +1869,6 @@ fn check_hc_bootstrap(damage: Option<&str>) {
             "{baseline:?}"
         );
         let original = fs::read(&command).unwrap();
-        let damage = damage.unwrap();
         match damage {
             "deleted" => fs::remove_file(&command).unwrap(),
             "missing-fallback" => fs::write(
@@ -1992,6 +1972,25 @@ fn check_hc_bootstrap(damage: Option<&str>) {
                     .any(|issue| issue.code == "ND-INTEGRATION-001")
             );
         }
+    } else {
+        let result = namedrop::execute_lifecycle_operation(
+            "name",
+            json!({"alias":"alice","pane_type":"agent"}),
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(result["activation_was_needed"], true);
+        assert!(
+            command.is_file(),
+            "first HC name must install its required bootstrap"
+        );
+        assert_ne!(
+            fs::metadata(&command).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        assert!(!home.join(".local/bin/namedrop").exists());
+        assert!(!home.join(".bashrc").exists());
+        assert!(!home.join(".profile").exists());
     }
     fs::remove_dir_all(root).unwrap();
 }

@@ -519,14 +519,19 @@ where
                     hook_activation
                 ));
             }
-            let shell_command = crate::install::install_shell_command(
-                runtime
-                    .home_directory
-                    .ok_or("no HOME is available for shell command installation")?,
-                Path::new(&crate::collaboration_executable()?),
-                runtime.state_directory,
-                runtime.is_hc(),
-            )?;
+            let home = runtime
+                .home_directory
+                .ok_or("no HOME is available for shell command installation")?;
+            let shell_command = if runtime.is_hc() {
+                json!({"path": home.join(".local/bin/namedrop-app"), "shell_startup_files": [], "path_configured": false})
+            } else {
+                crate::install::install_shell_command(
+                    home,
+                    Path::new(&crate::collaboration_executable()?),
+                    runtime.state_directory,
+                    false,
+                )?
+            };
             store
                 .transaction(|transaction| transaction.activate_worktree(&namespace, &attribution))
                 .map_err(|error| error.to_string())?;
