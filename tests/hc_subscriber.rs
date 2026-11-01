@@ -4019,124 +4019,135 @@ fn full_discovery_preserves_new_unreadable_pane_retry() {
 }
 
 #[test]
-fn saved_resume_runs_on_labels_echo_and_survives_failed_get() {
-    for recovery in ["labels", "failed-get-labels", "failed-get-tick"] {
-        check(&format!("saved-resume-{recovery}"), |fixture, runtime| {
-            let owner = process::AgentProcess::new();
-            queued_agent(fixture, runtime, owner.pid());
-            let runtime = namedrop::LifecycleRuntime {
-                clock: &RetryClock(10_000),
-                state_directory: runtime.state_directory,
-                home_directory: runtime.home_directory,
-                agent_config: runtime.agent_config,
-                cwd: runtime.cwd,
-                workspace_id: runtime.workspace_id,
-                current_pane_id: runtime.current_pane_id,
-                session_socket_id: runtime.session_socket_id,
-                host: runtime.host,
-                ids: runtime.ids,
-            };
-            let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+fn saved_resume_runs_on_labels_echo() {
+    check_saved_resume("labels");
+}
+
+#[test]
+fn saved_resume_survives_failed_get_before_labels_echo() {
+    check_saved_resume("failed-get-labels");
+}
+
+#[test]
+fn saved_resume_recovers_on_read_retry() {
+    check_saved_resume("failed-get-tick");
+}
+
+fn check_saved_resume(recovery: &str) {
+    check(&format!("saved-resume-{recovery}"), |fixture, runtime| {
+        let owner = process::AgentProcess::new();
+        queued_agent(fixture, runtime, owner.pid());
+        let runtime = namedrop::LifecycleRuntime {
+            clock: &RetryClock(10_000),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            host: runtime.host,
+            ids: runtime.ids,
+        };
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        let connection =
+            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3")).unwrap();
+        let recipient = json!(["t1", "original-session"]).to_string();
+        for (kind, time) in [("observed", 100), ("paused", 10_000)] {
+            connection.execute("INSERT INTO transition_facts SELECT 'hc:fixture', 'fixture-space', MAX(worktree_order)+1, 'prompt_recipient', ?1, ?2, 'plugin', 'fixture', ?3 FROM transition_facts WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space'", rusqlite::params![recipient, kind, time]).unwrap();
+        }
+        connection.execute("UPDATE order_counters SET next_order = (SELECT MAX(worktree_order)+1 FROM transition_facts WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space') WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space' AND stream_kind='worktree_transition' AND stream_id=''", []).unwrap();
+        let resume_count = || {
+            connection.query_row("SELECT COUNT(*) FROM transition_facts WHERE entity_kind='prompt_recipient' AND entity_id=?1 AND transition_kind='resumed'", [&recipient], |row| row.get::<_, i64>(0)).unwrap()
+        };
+        connection.execute_batch("CREATE TRIGGER fail_resume BEFORE INSERT ON transition_facts WHEN NEW.entity_kind='prompt_recipient' AND NEW.transition_kind='resumed' BEGIN SELECT RAISE(ABORT, 'injected resume failure'); END;").unwrap();
+        fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"done"});
+        fixture.terminals.borrow_mut()[0]["status_ms"] = json!(101);
+        let error = subscriber
+            .handle_line(&session_event("status", fixture), &runtime)
+            .unwrap_err();
+        assert!(
+            error.contains("injected resume failure"),
+            "wrong fault boundary: {error}"
+        );
+        assert_eq!(resume_count(), 0);
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "original-session"
+        );
+        connection
+            .execute_batch("DROP TRIGGER fail_resume;")
+            .unwrap();
+        if recovery != "labels" {
+            *fixture.get_failure.borrow_mut() = Some("t1".into());
             subscriber
-                .handle_line(&session_event("snapshot", fixture), &runtime)
+                .handle_line(
+                    &labels(),
+                    &namedrop::LifecycleRuntime {
+                        clock: &RetryClock(10_100),
+                        ..runtime
+                    },
+                )
                 .unwrap();
-            let connection =
-                rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3"))
-                    .unwrap();
-            let recipient = json!(["t1", "original-session"]).to_string();
-            for (kind, time) in [("observed", 100), ("paused", 10_000)] {
-                connection.execute("INSERT INTO transition_facts SELECT 'hc:fixture', 'fixture-space', MAX(worktree_order)+1, 'prompt_recipient', ?1, ?2, 'plugin', 'fixture', ?3 FROM transition_facts WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space'", rusqlite::params![recipient, kind, time]).unwrap();
-            }
-            connection.execute("UPDATE order_counters SET next_order = (SELECT MAX(worktree_order)+1 FROM transition_facts WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space') WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space' AND stream_kind='worktree_transition' AND stream_id=''", []).unwrap();
-            let resume_count = || {
-                connection.query_row("SELECT COUNT(*) FROM transition_facts WHERE entity_kind='prompt_recipient' AND entity_id=?1 AND transition_kind='resumed'", [&recipient], |row| row.get::<_, usize>(0)).unwrap()
-            };
-            connection.execute_batch("CREATE TRIGGER fail_resume BEFORE INSERT ON transition_facts WHEN NEW.entity_kind='prompt_recipient' AND NEW.transition_kind='resumed' BEGIN SELECT RAISE(ABORT, 'injected resume failure'); END;").unwrap();
-            fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"done"});
-            fixture.terminals.borrow_mut()[0]["status_ms"] = json!(101);
-            let error = subscriber
-                .handle_line(&session_event("status", fixture), &runtime)
-                .unwrap_err();
-            assert!(
-                error.contains("injected resume failure"),
-                "wrong fault boundary: {error}"
-            );
             assert_eq!(resume_count(), 0);
-            assert_eq!(
-                fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
-                "original-session"
-            );
-            connection
-                .execute_batch("DROP TRIGGER fail_resume;")
-                .unwrap();
-            if recovery != "labels" {
-                *fixture.get_failure.borrow_mut() = Some("t1".into());
-                subscriber
-                    .handle_line(
-                        &labels(),
-                        &namedrop::LifecycleRuntime {
-                            clock: &RetryClock(10_100),
-                            ..runtime
-                        },
-                    )
-                    .unwrap();
-                assert_eq!(resume_count(), 0);
-                fixture.calls.borrow_mut().clear();
-                subscriber
-                    .tick(&namedrop::LifecycleRuntime {
-                        clock: &RetryClock(10_500),
-                        ..runtime
-                    })
-                    .unwrap();
-                assert_retry_calls(fixture, &[], 0);
-                *fixture.get_failure.borrow_mut() = None;
-            }
-            if recovery == "failed-get-tick" {
-                subscriber
-                    .tick(&namedrop::LifecycleRuntime {
-                        clock: &RetryClock(10_600),
-                        ..runtime
-                    })
-                    .unwrap();
-                assert_eq!(
-                    fixture
-                        .calls
-                        .borrow()
-                        .iter()
-                        .filter(|call| call[0] == "get")
-                        .map(|call| call[1].clone())
-                        .collect::<Vec<_>>(),
-                    ["t1"]
-                );
-            } else {
-                subscriber
-                    .handle_line(
-                        &labels(),
-                        &namedrop::LifecycleRuntime {
-                            clock: &RetryClock(10_501),
-                            ..runtime
-                        },
-                    )
-                    .unwrap();
-            }
-            assert_eq!(
-                resume_count(),
-                1,
-                "{recovery} must resume the same recipient exactly once"
-            );
-            let state: String = connection.query_row("SELECT transition_kind FROM transition_facts WHERE entity_kind='prompt_recipient' AND entity_id=?1 ORDER BY worktree_order DESC LIMIT 1", [&recipient], |row| row.get(0)).unwrap();
-            assert_eq!(state, "resumed");
             fixture.calls.borrow_mut().clear();
-            for now in [11_000, 11_500, 40_000] {
-                subscriber
-                    .tick(&namedrop::LifecycleRuntime {
-                        clock: &RetryClock(now),
-                        ..runtime
-                    })
-                    .unwrap();
-            }
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(10_500),
+                    ..runtime
+                })
+                .unwrap();
             assert_retry_calls(fixture, &[], 0);
-            assert_eq!(resume_count(), 1);
-        });
-    }
+            *fixture.get_failure.borrow_mut() = None;
+        }
+        if recovery == "failed-get-tick" {
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(10_600),
+                    ..runtime
+                })
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| call[0] == "get")
+                    .map(|call| call[1].clone())
+                    .collect::<Vec<_>>(),
+                ["t1"]
+            );
+        } else {
+            subscriber
+                .handle_line(
+                    &labels(),
+                    &namedrop::LifecycleRuntime {
+                        clock: &RetryClock(if recovery == "labels" { 10_001 } else { 10_501 }),
+                        ..runtime
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            resume_count(),
+            1,
+            "{recovery} must resume the same recipient exactly once"
+        );
+        let state: String = connection.query_row("SELECT transition_kind FROM transition_facts WHERE entity_kind='prompt_recipient' AND entity_id=?1 ORDER BY worktree_order DESC LIMIT 1", [&recipient], |row| row.get(0)).unwrap();
+        assert_eq!(state, "resumed");
+        fixture.calls.borrow_mut().clear();
+        for now in [11_000, 11_500, 40_000] {
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(now),
+                    ..runtime
+                })
+                .unwrap();
+        }
+        assert_retry_calls(fixture, &[], 0);
+        assert_eq!(resume_count(), 1);
+    });
 }
