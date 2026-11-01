@@ -28,6 +28,21 @@ test("roster Agent status opens the selected row target", () => {
 });
 
 const folders = ["management", "doctor", "agent-status", "tour"];
+test("popup manifests match each launcher's window key and CLI entry", async () => {
+  for (const folder of folders) {
+    const manifest = JSON.parse(readFileSync(new URL(`../namedrop-${folder}/mod.json`, import.meta.url), "utf8"));
+    const { launchPopup: launch } = await import(`../namedrop-${folder}/launcher.js`);
+    const calls = [], overlays = [];
+    await launch({ home: () => "/h", focused: () => ({ terminal: "t1" }),
+      terminals: () => [{ address: "t1", state: "live", labels: {} }],
+      exec: async () => ({ code: 0 }),
+      hc: async (args) => { calls.push(args); return { code: 0, stdout: '{"address":"t9"}' }; },
+      openOverlay: (spec) => overlays.push(spec) });
+    assert.equal(manifest.overlay.key, overlays[0].key, folder);
+    assert.equal(manifest.overlay.props.popup, calls[0].at(-1), folder);
+  }
+});
+
 test("launcher source copies differ only by popup identifier", () => {
   for (const file of ["main.js", "launcher.js"]) {
     const copies = folders.map((folder) => readFileSync(new URL(`../namedrop-${folder}/${file}`, import.meta.url), "utf8").replace(/const popup = "[^"]+"/, 'const popup = "POPUP"'));
