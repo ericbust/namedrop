@@ -115,6 +115,40 @@ fn popup_target_claim_uses_hc_flags_only_without_target_environment() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_target_environment_suppresses_hc_flag_fallback() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let outcomes = [
+        "NAMEDROP_TARGET_WORKSPACE",
+        "NAMEDROP_TARGET_PANE",
+        "NAMEDROP_TARGET_TERMINAL",
+        "NAMEDROP_TARGET_SESSION",
+    ]
+    .map(|field| {
+        let options = namedrop::cli::RuntimeOptions {
+            environment: namedrop::environment::EnvironmentSnapshot::from_variables([(
+                field.into(),
+                OsString::from_vec(vec![0xff]),
+            )]),
+            host: Some(namedrop::runtime::HostKind::Hc),
+            hc_space: Some("flag-space".to_owned()),
+            hc_terminal: Some("flag-terminal".to_owned()),
+            ..Default::default()
+        };
+        (field, options.popup_target_claim().err())
+    });
+    for (field, error) in &outcomes {
+        assert_eq!(
+            error.as_deref(),
+            Some("This popup is missing its invoking space"),
+            "{field}: {outcomes:?}"
+        );
+    }
+}
+
 fn run(arguments: &[&str]) -> std::process::Output {
     run_with_environment(arguments, &[])
 }
