@@ -85,31 +85,34 @@ where
         Ok(snapshot) => snapshot,
         Err(error) => return unavailable_report(&error),
     };
-    if let Some(worktree) = worktree.as_deref()
-        && let Err(error) =
-            crate::install::codex_sandbox::check_worktree(runtime.state_directory, worktree)
-    {
-        return HealthReport {
-            status: HealthStatus::NeedsAttention,
-            available_agents: 0,
-            available_terminals: 0,
-            waiting_messages,
-            hook_verification: "unverified".to_owned(),
-            issues: vec![issue(
+    let worktree_issue = worktree.as_deref().and_then(|worktree| {
+        crate::install::codex_sandbox::check_worktree(runtime.state_directory, worktree)
+            .err()
+            .map(|error| issue(
                 "ND-INTEGRATION-001",
                 HealthSeverity::Broken,
                 "The Space worktree exposes trusted Namedrop state to Codex.",
                 &error,
                 HealthRepairKind::HumanDecision,
                 "Move the worktree or Namedrop state as instructed, then activate Namedrop again.",
-            )],
-        };
-    }
+            ))
+    });
+    let unsafe_worktree = worktree_issue.is_some();
     if setup
         .worktree_state
         .as_ref()
         .is_none_or(|state| !state.activated || state.deactivated)
     {
+        if let Some(worktree_issue) = worktree_issue {
+            return HealthReport {
+                status: HealthStatus::NeedsAttention,
+                available_agents: 0,
+                available_terminals: 0,
+                waiting_messages,
+                hook_verification: "unverified".to_owned(),
+                issues: vec![worktree_issue],
+            };
+        }
         let mut inactive = issue(
             "ND-SETUP-001",
             HealthSeverity::Blocked,
@@ -136,7 +139,7 @@ where
         };
     }
 
-    let mut issues = Vec::new();
+    let mut issues: Vec<_> = worktree_issue.into_iter().collect();
     #[cfg(target_os = "linux")]
     if setup
         .panes
@@ -168,6 +171,10 @@ where
             continue;
         }
         inspected_packages.push(crate::integration_package_attention_source(agent_runtime));
+        if unsafe_worktree && agent_runtime == crate::AgentRuntime::Codex {
+            failed_packages.push(agent_runtime);
+            continue;
+        }
         if let Err(error) = crate::install::inspect_integration_package(
             runtime.home_directory,
             agent_runtime,
