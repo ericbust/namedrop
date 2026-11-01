@@ -8,9 +8,11 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    ffi::{CString, OsString},
     fs,
     io::Read,
-    path::{Component, Path},
+    os::unix::ffi::{OsStrExt, OsStringExt},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -1652,7 +1654,7 @@ fn capture_git_state_pin(worktree: &Path, pin_id: &str) -> Result<CapturedGitSta
     });
     let head_tree = git_output(worktree, &["rev-parse", "HEAD^{tree}"])
         .map_err(|error| format!("git state capture could not read the HEAD tree: {error}"))?;
-    let pinned_tree = pin_worktree_tree(worktree, pin_id)
+    let pinned_tree = pin_worktree_tree(worktree)
         .map_err(|error| format!("git state capture could not pin uncommitted work: {error}"))?;
     let (pinned_commit, dirty) = if pinned_tree == head_tree {
         (head.clone(), false)
@@ -1694,24 +1696,37 @@ fn capture_git_state_pin(worktree: &Path, pin_id: &str) -> Result<CapturedGitSta
     })
 }
 
-/// Snapshots the worktree content — tracked modifications plus untracked files
-/// that are not ignored — as a tree object, through a throwaway index so the
-/// user's real index is never touched. The index file name carries a
-/// process-wide sequence because pin ids are only unique per id generator.
-fn pin_worktree_tree(worktree: &Path, pin_id: &str) -> Result<String, String> {
-    static PIN_INDEX_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let sequence = PIN_INDEX_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let index = std::env::temp_dir().join(format!(
-        "herdr-context-pin-{}-{sequence}-{pin_id}.index",
-        std::process::id()
-    ));
-    let tree = (|| {
-        run_git(worktree, Some(&index), &["read-tree", "HEAD"])?;
-        run_git(worktree, Some(&index), &["add", "-A"])?;
-        run_git(worktree, Some(&index), &["write-tree"])
-    })();
-    let _ = fs::remove_file(&index);
-    tree
+/// Snapshots tracked and untracked work through a private throwaway index,
+/// leaving the user's real index untouched.
+fn pin_worktree_tree(worktree: &Path) -> Result<String, String> {
+    with_private_pin_index(&std::env::temp_dir(), |index| {
+        run_git(worktree, Some(index), &["read-tree", "HEAD"])?;
+        run_git(worktree, Some(index), &["add", "-A"])?;
+        run_git(worktree, Some(index), &["write-tree"])
+    })
+}
+
+fn with_private_pin_index<T>(
+    parent: &Path,
+    capture: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let template = parent.join("herdr-context-pin-XXXXXX");
+    let mut template = CString::new(template.as_os_str().as_bytes())
+        .map_err(|error| error.to_string())?
+        .into_bytes_with_nul();
+    // mkdtemp atomically creates a fresh 0700 directory, never reusing a path.
+    let created = unsafe { libc::mkdtemp(template.as_mut_ptr().cast()) };
+    if created.is_null() {
+        return Err(format!(
+            "could not create private context index directory: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    template.pop();
+    let directory = PathBuf::from(OsString::from_vec(template));
+    let result = capture(&directory.join("index"));
+    let _ = fs::remove_dir_all(&directory);
+    result
 }
 
 /// Deletes pin refs whose Context Grants are all terminal, or that no stored
@@ -1974,6 +1989,47 @@ mod pin_index_tests {
     use super::*;
 
     #[test]
+    fn private_pin_index_is_fresh_and_cleans_up_success_and_git_error() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        with_private_pin_index(&std::env::temp_dir(), |outer_index| {
+            let parent = outer_index.parent().unwrap();
+            let planted = parent.join("herdr-context-pin-XXXXXX");
+            symlink("missing-target", &planted).unwrap();
+            for fail in [false, true] {
+                let mut allocated = None;
+                let result = with_private_pin_index(parent, |index| {
+                    let directory = index.parent().unwrap();
+                    allocated = Some(directory.to_path_buf());
+                    assert_ne!(directory, planted);
+                    assert_eq!(index.file_name().unwrap(), "index");
+                    assert_eq!(
+                        fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+                        0o700
+                    );
+                    assert!(!index.exists());
+                    fs::write(index, "temporary index").unwrap();
+                    fs::write(index.with_extension("lock"), "temporary lock").unwrap();
+                    if fail {
+                        run_git(parent, Some(index), &["read-tree", "HEAD"])
+                    } else {
+                        Ok("captured".to_owned())
+                    }
+                });
+                assert_eq!(result.is_err(), fail);
+                assert!(!allocated.unwrap().exists());
+                assert_eq!(
+                    fs::read_link(&planted).unwrap(),
+                    Path::new("missing-target")
+                );
+                assert!(!parent.join("missing-target").exists());
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn preexisting_pin_index_and_lock_do_not_affect_capture() {
         let root = std::env::temp_dir().join(format!("namedrop-pin-test-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
@@ -2003,7 +2059,7 @@ mod pin_index_tests {
             let lock = index.with_extension("index.lock");
             fs::write(&index, "foreign index").unwrap();
             fs::write(&lock, "foreign lock").unwrap();
-            let captured = pin_worktree_tree(&root, pin_id);
+            let captured = pin_worktree_tree(&root);
             let index_after = fs::read_to_string(&index);
             let lock_after = fs::read_to_string(&lock);
             let _ = fs::remove_file(&index);
@@ -2012,6 +2068,10 @@ mod pin_index_tests {
             assert_eq!(index_after.unwrap(), "foreign index");
             assert_eq!(lock_after.unwrap(), "foreign lock");
             assert_eq!(fs::read(root.join(".git/index")).unwrap(), user_index);
+            fs::write(root.join("tracked"), "original").unwrap();
+            let error = capture_git_state_pin(&root, "../../escaped").err().unwrap();
+            assert!(error.contains("could not anchor the pin ref"), "{error}");
+            assert!(!root.join("escaped").exists());
             assert_eq!(
                 git_output(&root, &["show", &format!("{tree}:tracked")])?,
                 "changed"
