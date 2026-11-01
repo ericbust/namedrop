@@ -2981,8 +2981,9 @@ fn unrelated_batch_error_cannot_bypass_failed_get_backoff() {
                         .borrow()
                         .iter()
                         .filter(|call| call[0] == "get")
-                        .count(),
-                    1,
+                        .map(|call| call[1].clone())
+                        .collect::<Vec<_>>(),
+                    ["t1"],
                     "batch retry discarded failed pane readiness"
                 );
             },
@@ -3353,6 +3354,13 @@ fn batch_retry_only_reads_failed_pane_on_its_due_tick() {
         subscriber
             .handle_line(&session_event("snapshot", fixture), &runtime)
             .unwrap_err();
+        fixture.terminals.borrow_mut()[2]["labels"]["namedrop.name"] = json!("carol-new");
+        subscriber
+            .handle_line(
+                r#"{"method":"event","params":{"type":"labels","terminal":"t3"}}"#,
+                &runtime,
+            )
+            .unwrap();
         for due in [
             10_500, 11_500, 13_500, 17_500, 25_500, 41_500, 71_500, 101_500,
         ] {
@@ -3597,4 +3605,73 @@ fn published_name_rejections_schedule_no_batch_retry() {
             assert_retry_calls(fixture, &[], 0);
         });
     }
+}
+
+#[test]
+fn partial_batch_error_still_arms_new_session_generation_watch() {
+    check("partial-batch-new-watch", |fixture, runtime| {
+        let runtime = namedrop::LifecycleRuntime {
+            clock: &RetryClock(10_000),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            host: runtime.host,
+            ids: runtime.ids,
+        };
+        let mut other = fixture.terminals.borrow()[0].clone();
+        other["address"] = json!("t2");
+        other["labels"]["namedrop.name"] = json!("bob");
+        fixture.terminals.borrow_mut().push(other);
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        let owner = process::AgentProcess::new();
+        {
+            let mut terminals = fixture.terminals.borrow_mut();
+            terminals[0]["labels"]["namedrop.session"] = json!("new-generation");
+            terminals[0]["labels"]["namedrop.session.pid"] = json!(owner.pid().to_string());
+            terminals[0]["labels"]["namedrop.session.start"] = json!(process::start(owner.pid()));
+            terminals[0]["foreground"] = json!({"pid":owner.pid(),"name":"codex","argv":["codex"]});
+            terminals[0]["status"] = json!({"state":"working"});
+            terminals[1]["labels"]["namedrop.name"] = json!("");
+        }
+        *fixture.name_write_failure.borrow_mut() = Some(false);
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap_err();
+        drop(owner);
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .tick(&namedrop::LifecycleRuntime {
+                clock: &RetryClock(10_500),
+                ..runtime
+            })
+            .unwrap();
+        for key in [
+            "namedrop.session",
+            "namedrop.session.pid",
+            "namedrop.session.start",
+        ] {
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"][key],
+                "",
+                "stale {key}"
+            );
+        }
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "get")
+                .map(|call| call[1].clone())
+                .collect::<Vec<_>>(),
+            ["t1", "t2"]
+        );
+    });
 }
