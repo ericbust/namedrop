@@ -467,7 +467,7 @@ fn spool_symlinks_never_read_or_overwrite_their_targets() {
     assert!(!output.status.success());
     assert_eq!(fixture.message_count(), 0);
     assert_eq!(fs::read(&target).unwrap(), saved_request);
-    fs::remove_file(&request).unwrap();
+    assert!(!request.symlink_metadata().is_ok());
     fs::write(&request, &saved_request).unwrap();
     let mut altered: Value = serde_json::from_slice(&saved_request).unwrap();
     altered["operation"] = json!("shell");
@@ -551,7 +551,7 @@ fn a_replaced_registration_cannot_execute_an_older_queued_command() {
 }
 
 #[test]
-fn malformed_receipt_is_quarantined_and_committed_command_is_recovered() {
+fn malformed_receipt_is_removed_and_committed_command_is_recovered() {
     let fixture = Fixture::new();
     let input = send("corrupt-receipt", "original");
     let pending = response(fixture.sandbox_command(&["send"], input.clone()));
@@ -586,18 +586,14 @@ fn malformed_receipt_is_quarantined_and_committed_command_is_recovered() {
         committed["result"]["Ok"]["message_id"]
     );
     assert_eq!(fs::read(request).unwrap(), original);
-    assert!(
-        fs::read_dir(fixture.spool().join("rejected"))
-            .unwrap()
-            .any(|entry| fs::read(entry.unwrap().path()).unwrap() == b"not json")
-    );
+    assert!(!fixture.spool().join("rejected").exists());
     let next = response(fixture.sandbox_command(&["send"], send("after-corrupt-receipt", "next")));
     assert!(next["data"]["message_id"].is_string(), "{next}");
     assert_eq!(fixture.message_count(), 2);
 }
 
 #[test]
-fn tampered_request_is_quarantined_without_retrying_or_blocking_valid_commands() {
+fn tampered_request_is_removed_without_retrying_or_blocking_valid_commands() {
     let fixture = Fixture::new();
     let pending =
         response(fixture.sandbox_command(&["send"], send("tampered-request", "original")));
@@ -608,11 +604,6 @@ fn tampered_request_is_quarantined_without_retrying_or_blocking_valid_commands()
     tampered["input"]["source"] = json!("@reviewer tampered");
     let bytes = serde_json::to_vec(&tampered).unwrap();
     fs::write(&request, &bytes).unwrap();
-    let rejected = fixture.spool().join("rejected");
-    fs::create_dir(&rejected).unwrap();
-    for index in 0..100 {
-        fs::write(rejected.join(format!("rejected-{index:020}.json")), "old").unwrap();
-    }
     let mut worker = fixture.worker();
     wait_for(|| {
         assert!(
@@ -622,16 +613,46 @@ fn tampered_request_is_quarantined_without_retrying_or_blocking_valid_commands()
         !marker.exists()
     });
     assert!(!request.exists());
-    assert_eq!(fs::read_dir(&rejected).unwrap().count(), 100);
-    assert!(!rejected.join("rejected-00000000000000000000.json").exists());
     assert!(!Path::new(pending["data"]["receipt"].as_str().unwrap()).exists());
     assert_eq!(fixture.message_count(), 0);
-    assert!(
-        fs::read_dir(fixture.spool().join("rejected"))
-            .unwrap()
-            .any(|entry| fs::read(entry.unwrap().path()).unwrap() == bytes)
-    );
+    assert!(!fixture.spool().join("rejected").exists());
     let next = response(fixture.sandbox_command(&["send"], send("after-tampered-request", "next")));
     assert!(next["data"]["message_id"].is_string(), "{next}");
     assert_eq!(fixture.message_count(), 1);
+}
+
+#[test]
+fn nonregular_records_are_removed_and_valid_commands_drain() {
+    use std::{ffi::CString, os::unix::{ffi::OsStrExt, fs::symlink}};
+    for suffix in ["request", "receipt"] {
+        for fifo in [false, true] {
+            let fixture = Fixture::new();
+            let pending = response(fixture.sandbox_command(&["send"], send("invalid-record", "original")));
+            let key = pending["data"]["operation_id"].as_str().unwrap();
+            let record = fixture.spool().join(format!("{key}.{suffix}.json"));
+            let victim = fixture.directory.path().join("victim");
+            fs::write(&victim, "unchanged").unwrap();
+            if record.exists() { fs::remove_file(&record).unwrap(); }
+            if fifo {
+                let path = CString::new(record.as_os_str().as_bytes()).unwrap();
+                assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            } else {
+                symlink(&victim, &record).unwrap();
+            }
+            let _worker = fixture.worker();
+            let marker = fixture.spool().join("pending").join(format!("{key}.json"));
+            wait_for(|| !marker.exists());
+            assert_eq!(fs::read(&victim).unwrap(), b"unchanged");
+            if suffix == "request" {
+                assert!(fs::symlink_metadata(&record).is_err());
+                assert_eq!(fixture.message_count(), 0);
+            } else {
+                assert!(fs::symlink_metadata(&record).unwrap().is_file());
+                assert_eq!(fixture.message_count(), 1);
+            }
+            let next = response(fixture.sandbox_command(&["send"], send("after-invalid", "next")));
+            assert!(next["data"]["message_id"].is_string(), "{next}");
+            assert_eq!(fixture.message_count(), if suffix == "receipt" { 2 } else { 1 });
+        }
+    }
 }
