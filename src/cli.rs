@@ -134,6 +134,7 @@ impl Parser for Cli {
             .and_then(|matches| RuntimeOptions::from_arg_matches(&matches))
         {
             Ok(runtime) => runtime,
+            Err(error) if help.kind() == clap::error::ErrorKind::DisplayHelp => return Err(error),
             Err(_) => return Err(help),
         };
         if runtime.host_kind() != Ok(crate::runtime::HostKind::Tui) {
