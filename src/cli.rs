@@ -252,7 +252,7 @@ impl RuntimeOptions {
                 "NAMEDROP_TARGET_SESSION",
             ]
             .iter()
-            .all(|name| self.environment.var(name).is_none());
+            .all(|name| self.environment.var_os(name).is_none());
         let field = |name: &str, fallback: Option<&String>, error: &str| {
             self.environment
                 .var(name)
