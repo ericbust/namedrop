@@ -290,7 +290,10 @@ fn hook_typo_with_malformed_runtime_flags_preserves_original_error() {
         ] {
             let output = run_with_environment(&arguments, &variables);
             assert_eq!(output.status.code(), Some(64), "{host}: {arguments:?}");
-            assert!(output.stderr.is_empty(), "{host}: {arguments:?}: {output:?}");
+            assert!(
+                output.stderr.is_empty(),
+                "{host}: {arguments:?}: {output:?}"
+            );
             if output.stdout != expected {
                 mismatches.push(format!("{host}: {arguments:?}: {output:?}"));
             }
