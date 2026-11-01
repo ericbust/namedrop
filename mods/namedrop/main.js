@@ -104,6 +104,13 @@ export default class Namedrop extends View {
     let delay = 1000;
     let recovering = false;
     const attempt = (cx) => cx.spawn(async (cx) => {
+      let active = true;
+      if (recovering) cx.timer.after(500, (cx) => {
+        if (generation !== this.watchGeneration || !active || !recovering) return;
+        recovering = false;
+        delay = 1000;
+        this.dispatch({ type: "wake", now: Date.now() }, cx);
+      });
       try {
         while (generation === this.watchGeneration) {
           const paths = await watchFolder(directory);
@@ -114,6 +121,7 @@ export default class Namedrop extends View {
           if (refresh) this.dispatch({ type: "wake", now: Date.now() }, cx);
         }
       } catch {
+        active = false;
         if (generation !== this.watchGeneration) return;
         recovering = true;
         cx.timer.after(delay, (cx) => {
