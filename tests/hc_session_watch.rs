@@ -12,6 +12,7 @@ use std::{
     os::unix::process::CommandExt,
     path::Path,
     process::{Child, Command, Stdio},
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -56,6 +57,7 @@ impl Drop for Agent {
 struct Fixture {
     terminals: RefCell<Vec<Value>>,
     calls: RefCell<Vec<Vec<String>>>,
+    on_counter_labels: RefCell<Option<Box<dyn FnOnce()>>>,
 }
 impl HerdrCommandExecutor for Fixture {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
@@ -77,6 +79,14 @@ impl HerdrCommandExecutor for Fixture {
                 for label in labels.iter().filter(|s| **s != "--json") {
                     let (k, v) = label.split_once('=').unwrap();
                     t["labels"][k] = json!(v);
+                }
+                if labels
+                    .iter()
+                    .any(|label| label.starts_with("namedrop.awaiting="))
+                {
+                    if let Some(callback) = self.on_counter_labels.borrow_mut().take() {
+                        callback();
+                    }
                 }
                 "{}".into()
             }
@@ -536,6 +546,73 @@ fn session_first_seen_in_labels_gets_a_local_owner_watch() {
             fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
             "",
             "new owner observation did not arm an exit watch"
+        );
+    });
+}
+
+#[test]
+fn owner_exit_during_counter_publication_clears_without_another_event() {
+    check("counter-exit", |fixture, runtime, _| {
+        let agent = Rc::new(RefCell::new(Some(Agent::new(
+            runtime.home_directory.unwrap(),
+        ))));
+        let pid = agent.borrow().as_ref().unwrap().pid();
+        {
+            let mut terminals = fixture.terminals.borrow_mut();
+            let terminal = &mut terminals[0];
+            terminal["pid"] = json!(pid);
+            terminal["foreground"] = json!({"pid":pid,"name":"codex","argv":["codex"]});
+            terminal["labels"]["namedrop.session.pid"] = json!(pid.to_string());
+            terminal["labels"]["namedrop.session.start"] = json!(process::start(pid));
+            terminal["labels"]["namedrop.awaiting"] = json!("999");
+        }
+        let owner = Rc::clone(&agent);
+        *fixture.on_counter_labels.borrow_mut() = Some(Box::new(move || {
+            drop(owner.borrow_mut().take());
+        }));
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        let snapshot = json!({"terminals": *fixture.terminals.borrow()}).to_string();
+        subscriber.handle_line(&snapshot, runtime).unwrap();
+        assert!(
+            agent.borrow().is_none(),
+            "counter publication did not exit the owner"
+        );
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "original"
+        );
+        fixture.calls.borrow_mut().clear();
+        let started = Instant::now();
+        for elapsed in [500, 1000, 1500, 2000] {
+            subscriber
+                .tick(&LifecycleRuntime {
+                    clock: &TestClock(10_000 + elapsed),
+                    ..*runtime
+                })
+                .unwrap();
+        }
+        for key in [
+            "namedrop.session",
+            "namedrop.session.pid",
+            "namedrop.session.start",
+        ] {
+            assert_eq!(
+                fixture.terminals.borrow()[0]["labels"][key],
+                "",
+                "owner exiting during counter publication left stale {key}"
+            );
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let calls = fixture.calls.borrow();
+        assert!(
+            calls
+                .iter()
+                .all(|c| c[0] != "ls" && !(c[0] == "get" && c[1] != "t1")),
+            "untargeted calls {calls:?}"
+        );
+        assert!(
+            calls.iter().filter(|c| c[0] == "get").count() <= 3,
+            "unbounded checks {calls:?}"
         );
     });
 }
