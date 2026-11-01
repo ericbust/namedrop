@@ -226,3 +226,49 @@ fn help_does_not_probe_hosts_when_unchanged_or_explicitly_selected() {
     assert!(!marker.exists(), "TUI error contacted a host");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn tui_hook_missing_command_lists_only_supported_hooks() {
+    let output = run(&["hook"]);
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stderr.is_empty());
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(message.contains("agent-status-changed"), "{message}");
+    assert!(message.contains("session-start"), "{message}");
+    assert!(!message.contains("session-end"), "{message}");
+}
+
+#[test]
+fn tui_hook_typo_suggests_only_session_start() {
+    let output = run(&["hook", "session-ed"]);
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stderr.is_empty());
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let message = body["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("tip: a similar subcommand exists: 'session-start'"),
+        "{message}"
+    );
+    assert!(!message.contains("session-end"), "{message}");
+}
+
+#[test]
+fn hc_hook_missing_command_and_typo_preserve_output() {
+    let output = run(&["--host", "hc", "hook"]);
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        r#"{"protocol_version":"collab/v1","status":"rejected","operation":null,"error":{"code":"invalid_request","message":"Runtime hooks installed for supported agents\n\nUsage: namedrop hook [OPTIONS] <COMMAND>\n\nCommands:\n  agent-status-changed  \n  agent-status-worker   \n  mailbox-wake          \n  session-start         \n  session-end           \n  user-prompt-submit    \n  help                  Print this message or the help of the given subcommand(s)\n\nOptions:\n      --json                         Print the complete JSON response, including when running in a terminal\n      --human                        Print readable output, including when piping or saving it to a file\n      --input-json <JSON>            Structured input for agent-facing operations. Run `describe <operation-token>` for the schema and examples [default: {}]\n      --input-json-file <PATH>       Read structured input from a file without shell substitution\n      --host <HOST>                  [possible values: tui, hc]\n      --hc-terminal <TERMINAL>       \n      --hc-space <SPACE>             \n      --plugin-state <PATH>          \n      --herdr-socket <SOCKET>        \n      --herdr-workspace <WORKSPACE>  \n      --herdr-pane <PANE>            \n  -h, --help                         Print help\n"}}
+"#
+    );
+    let output = run(&["--host", "hc", "hook", "session-ed"]);
+    assert_eq!(output.status.code(), Some(64));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        r#"{"protocol_version":"collab/v1","status":"rejected","operation":null,"error":{"code":"invalid_request","message":"error: unrecognized subcommand 'session-ed'\n\n  tip: some similar subcommands exist: 'session-start', 'session-end'\n\nUsage: namedrop hook [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"}}
+"#
+    );
+}
