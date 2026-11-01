@@ -870,6 +870,8 @@ impl Subscriber {
             }
         }
         self.schedule_owner_watches(&dirty, full, &active_spaces, runtime.clock.now_unix_ms());
+        self.read_retries
+            .retain(|pane, _| self.unavailable.contains_key(pane));
         for (pane, change) in dirty {
             if self.read_retries.contains_key(&pane) {
                 if let Some(retry) = self.pane_retries.get_mut(&pane) {
@@ -899,8 +901,6 @@ impl Subscriber {
             self.read_retries.retain(|pane, _| retained(pane));
             self.unavailable.retain(|pane, _| retained(pane));
         }
-        self.read_retries
-            .retain(|pane, _| self.unavailable.contains_key(pane));
         if errors.is_empty() {
             Ok(())
         } else {
