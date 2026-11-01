@@ -443,7 +443,10 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
             if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
             }
-            if pending_directory.read(&format!("{key}.json")).is_err() {
+            if pending_directory
+                .check_regular(&format!("{key}.json"))
+                .is_err()
+            {
                 pending_directory
                     .remove(&format!("{key}.json"))
                     .map_err(|e| e.to_string())?;
@@ -498,9 +501,13 @@ pub fn execute_queued(
     reexec_if_updated(state)?;
     let directory = directory(state, socket)?;
     let pending = pending_directory(&directory)?;
-    let lock = directory
-        .lock(&format!("{key}.lock"))
-        .map_err(|e| e.to_string())?;
+    let lock = match directory.lock(&format!("{key}.lock")) {
+        Ok(lock) => lock,
+        Err(error) => {
+            clear_pending(&pending, key)?;
+            return Err(error.to_string());
+        }
+    };
     lock.lock().map_err(|e| e.to_string())?;
     let request_path = format!("{key}.request.json");
     let request = directory
@@ -517,19 +524,26 @@ pub fn execute_queued(
     let request = match request {
         Ok(request) => request,
         Err(error) => {
-            directory.remove(&request_path).map_err(|e| e.to_string())?;
+            let removed = directory.remove(&request_path);
             clear_pending(&pending, key)?;
+            removed.map_err(|e| e.to_string())?;
             return Err(error);
         }
     };
     let receipt = format!("{key}.receipt.json");
-    match directory.read(&receipt) {
-        Ok(bytes) => match decode_receipt(&bytes, &request.fingerprint) {
-            Ok(_) => return clear_pending(&pending, key),
-            Err(_) => directory.remove(&receipt).map_err(|e| e.to_string())?,
-        },
+    match directory.read(&receipt).and_then(|bytes| {
+        decode_receipt(&bytes, &request.fingerprint)
+            .map(|_| ())
+            .map_err(io::Error::other)
+    }) {
+        Ok(()) => return clear_pending(&pending, key),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(_) => directory.remove(&receipt).map_err(|e| e.to_string())?,
+        Err(_) => {
+            if let Err(error) = directory.remove(&receipt) {
+                clear_pending(&pending, key)?;
+                return Err(error.to_string());
+            }
+        }
     }
     let result = execute_request(state, &request);
     if let Ok(value) = &result {

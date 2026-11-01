@@ -4,7 +4,10 @@ use std::{
     io::{self, Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd, IntoRawFd},
-        unix::{ffi::OsStringExt, fs::OpenOptionsExt},
+        unix::{
+            ffi::OsStringExt,
+            fs::{MetadataExt, OpenOptionsExt},
+        },
     },
     path::{Path, PathBuf},
 };
@@ -31,14 +34,20 @@ fn checked(result: libc::c_int) -> io::Result<libc::c_int> {
 
 impl Dir {
     pub fn open(path: &Path) -> io::Result<Self> {
+        if path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        {
+            return Err(io::Error::other(
+                "spool directory cannot contain parent components",
+            ));
+        }
+        let path: PathBuf = path.components().collect();
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-            .open(path)?;
-        Ok(Self {
-            file,
-            path: path.into(),
-        })
+            .open(&path)?;
+        Ok(Self { file, path })
     }
 
     pub fn child(&self, leaf: &str) -> io::Result<Self> {
@@ -96,6 +105,10 @@ impl Dir {
         Ok(bytes)
     }
 
+    pub fn check_regular(&self, leaf: &str) -> io::Result<()> {
+        self.regular(leaf, libc::O_RDONLY).map(drop)
+    }
+
     pub fn contains(&self, leaf: &str) -> io::Result<bool> {
         let leaf = name(leaf)?;
         let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
@@ -140,6 +153,7 @@ impl Dir {
         let result = (|| {
             file.write_all(bytes)?;
             file.sync_all()?;
+            let original = file.metadata()?;
             match checked(unsafe {
                 libc::linkat(
                     self.file.as_raw_fd(),
@@ -150,19 +164,38 @@ impl Dir {
                 )
             }) {
                 Ok(_) => {
-                    if let Err(error) = self.regular(leaf, libc::O_RDONLY) {
-                        self.remove(leaf)?;
-                        return Err(error);
-                    }
+                    self.check_publication(leaf, Some(&original))?;
                     self.file.sync_all()
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    self.regular(leaf, libc::O_RDONLY).map(|_| ())
+                    self.check_publication(leaf, None)
                 }
                 Err(error) => Err(error),
             }
         })();
         self.remove(temporary)?;
+        result
+    }
+
+    fn check_publication(
+        &self,
+        leaf: &str,
+        original: Option<&std::fs::Metadata>,
+    ) -> io::Result<()> {
+        let result = self.regular(leaf, libc::O_RDONLY).and_then(|file| {
+            let actual = file.metadata()?;
+            if original.is_some_and(|original| {
+                original.dev() != actual.dev() || original.ino() != actual.ino()
+            }) {
+                return Err(io::Error::other(
+                    "temporary publication record was replaced",
+                ));
+            }
+            Ok(())
+        });
+        if result.is_err() {
+            self.remove(leaf)?;
+        }
         result
     }
 
@@ -186,7 +219,7 @@ impl Dir {
             libc::openat(
                 self.file.as_raw_fd(),
                 dot.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
             )
         })?;
         let file = unsafe { File::from_raw_fd(fd) };
@@ -229,6 +262,60 @@ impl Dir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_leaf_aliases_are_refused_but_parent_aliases_work() {
+        let root = std::env::temp_dir().join(format!("namedrop-dir-leaf-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("state")).unwrap();
+        std::os::unix::fs::symlink(root.join("state"), root.join("leaf")).unwrap();
+        for suffix in ["", "/", "/."] {
+            assert!(
+                Dir::open(&PathBuf::from(format!(
+                    "{}{suffix}",
+                    root.join("leaf").display()
+                )))
+                .is_err()
+            );
+        }
+        std::os::unix::fs::symlink(&root, root.join("parent")).unwrap();
+        let dir = Dir::open(&root.join("parent/state")).unwrap();
+        dir.publish("record", b"owned", ".temporary").unwrap();
+        assert_eq!(std::fs::read(root.join("state/record")).unwrap(), b"owned");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn refused_publication_targets_are_unlinked_without_touching_their_target() {
+        let root =
+            std::env::temp_dir().join(format!("namedrop-dir-publish-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("victim"), b"untouched").unwrap();
+        let dir = Dir::open(&root).unwrap();
+        for fifo in [false, true] {
+            if fifo {
+                assert_eq!(
+                    unsafe {
+                        libc::mkfifoat(
+                            dir.file.as_raw_fd(),
+                            name("record").unwrap().as_ptr(),
+                            0o600,
+                        )
+                    },
+                    0
+                );
+            } else {
+                std::os::unix::fs::symlink(root.join("victim"), root.join("record")).unwrap();
+            }
+            assert!(dir.publish("record", b"owned", ".temporary").is_err());
+            assert!(std::fs::symlink_metadata(root.join("record")).is_err());
+            assert_eq!(std::fs::read(root.join("victim")).unwrap(), b"untouched");
+            dir.publish("record", b"owned", ".temporary").unwrap();
+            assert_eq!(dir.read("record").unwrap(), b"owned");
+            dir.remove("record").unwrap();
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn descriptor_stays_in_original_directory_after_name_is_replaced() {
         let root = std::env::temp_dir().join(format!("namedrop-dir-swap-{}", std::process::id()));
