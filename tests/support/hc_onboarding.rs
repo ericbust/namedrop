@@ -96,12 +96,13 @@ fn exercise(mode: &str) {
                     id: address.clone(),
                     role_id: crate::PaneRoleId::new("role"),
                     role_name: "Worker".into(),
-                    role_description: if mode == "automatic" {
-                        "Native collaborator addressed as @worker"
-                    } else {
-                        "Manual worker"
-                    }
-                    .into(),
+                    role_description:
+                        if matches!(mode, "automatic" | "automatic_session_changed") {
+                            "Native collaborator addressed as @worker"
+                        } else {
+                            "Manual worker"
+                        }
+                        .into(),
                     alias: "worker".into(),
                 },
                 &attribution,
@@ -125,6 +126,9 @@ fn exercise(mode: &str) {
         })
         .unwrap();
     crate::refresh_user_integration_packages(&runtime, &observed).unwrap();
+    if mode.ends_with("session_changed") {
+        core.terminal.lock().unwrap()["labels"]["namedrop.session"] = json!("session-B");
+    }
     if mode == "working" {
         core.terminal.lock().unwrap()["status"]["state"] = json!("working");
     }
@@ -148,10 +152,26 @@ fn exercise(mode: &str) {
     };
     if mode == "mismatch" {
         assert!(result.is_err());
-    } else {
-        result.unwrap();
+    } else if !mode.ends_with("session_changed") {
+        result.as_ref().unwrap();
     }
     let requests = core.requests.lock().unwrap();
+    if mode.ends_with("session_changed") {
+        assert!(
+            !requests.iter().any(|args| args[0] == "send"),
+            "stale session A challenge sent to current session B: {requests:?}"
+        );
+        let registration = StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| tx.active_integration_registration(&namespace, &address, &session))
+            .unwrap();
+        assert!(
+            registration.is_none(),
+            "stale session A was registered while core owns session B: {registration:?}"
+        );
+        assert!(result.is_err(), "stale session must be rejected");
+        return;
+    }
     assert_eq!(
         requests.iter().filter(|args| args[0] == "ls").count(),
         usize::from(mode == "public"),
@@ -223,4 +243,13 @@ fn invoked_challenge_failure_uses_batch() {
 #[test]
 fn public_challenge_still_discovers_fresh() {
     exercise("public");
+}
+
+#[test]
+fn manual_session_changed_before_batch_is_not_prompted() {
+    exercise("manual_session_changed");
+}
+#[test]
+fn automatic_session_changed_before_batch_is_not_registered() {
+    exercise("automatic_session_changed");
 }
