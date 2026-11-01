@@ -5,7 +5,7 @@ use environment::CommandHome;
 use serde_json::{Value, json};
 use std::{
     io::{BufRead, BufReader, Write},
-    os::unix::net::UnixListener,
+    os::unix::{fs::PermissionsExt, net::UnixListener},
     path::Path,
     process::Command,
 };
@@ -119,10 +119,17 @@ impl Drop for PrivateHome {
 }
 
 fn run(home: &Path, socket: &Path, host: &str) -> std::process::Output {
+    let hc = home.join("hc-fixture");
+    std::fs::write(
+        &hc,
+        "#!/bin/sh\nprintf called >> \"$HOME/hc.log\"\nexit 97\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hc, std::fs::Permissions::from_mode(0o700)).unwrap();
     Command::new(env!("CARGO_BIN_EXE_namedrop"))
         .isolated_home(home)
         .env("HC_SOCKET", socket)
-        .env("HC_BIN_PATH", "/bin/false")
+        .env("HC_BIN_PATH", hc)
         .env("NAMEDROP_STATE_DIR", home.join("state"))
         .args(["--host", host, "roster", "--json"])
         .output()
@@ -161,6 +168,7 @@ fn running_core_uses_one_status_rpc_and_keeps_state_absent() {
     let (output, request) = run_core(home.path(), json!({"core":{"id":"current"}}));
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     assert_eq!(request["method"], "server.status");
+    assert!(!home.path().join("hc.log").exists());
     assert_eq!(
         serde_json::from_slice::<Value>(&output.stdout).unwrap(),
         json!({"core":"current","rows":[],"state_directory":home.path().join("state")})
