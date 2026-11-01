@@ -202,6 +202,12 @@ fn serve(mut stream: UnixStream, world: Arc<Mutex<World>>, stop: Arc<AtomicBool>
     }
 }
 struct Subscriber(Child);
+struct FixtureRoot(std::path::PathBuf);
+impl Drop for FixtureRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 impl Drop for Subscriber {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -260,6 +266,7 @@ fn registered_agents_and_settled_mailbox_are_quiet_without_burst() {
 
 fn exercise_burst(burst: bool) {
     let root = socket_fixture::short_socket_root();
+    let _root_guard = FixtureRoot(root.clone());
     let state = root.join("state");
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -459,7 +466,6 @@ fn exercise_burst(burst: bool) {
         );
         drop(subscriber);
         drop(core);
-        std::fs::remove_dir_all(root).unwrap();
         return;
     }
     world.lock().unwrap().requests.clear();
@@ -547,5 +553,4 @@ fn exercise_burst(burst: bool) {
     );
     drop(subscriber);
     drop(core);
-    std::fs::remove_dir_all(root).unwrap();
 }
