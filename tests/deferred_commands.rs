@@ -467,7 +467,7 @@ fn spool_symlinks_never_read_or_overwrite_their_targets() {
     assert!(!output.status.success());
     assert_eq!(fixture.message_count(), 0);
     assert_eq!(fs::read(&target).unwrap(), saved_request);
-    assert!(!request.symlink_metadata().is_ok());
+    assert!(request.symlink_metadata().is_err());
     fs::write(&request, &saved_request).unwrap();
     let mut altered: Value = serde_json::from_slice(&saved_request).unwrap();
     altered["operation"] = json!("shell");
@@ -562,6 +562,13 @@ fn malformed_receipt_is_removed_and_committed_command_is_recovered() {
     let worker = fixture.worker();
     wait_for(|| receipt.exists());
     let committed: Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    wait_for(|| {
+        !fixture
+            .spool()
+            .join("pending")
+            .join(format!("{key}.json"))
+            .exists()
+    });
     drop(worker);
     fs::write(&receipt, "not json").unwrap();
     fs::write(
@@ -623,16 +630,22 @@ fn tampered_request_is_removed_without_retrying_or_blocking_valid_commands() {
 
 #[test]
 fn nonregular_records_are_removed_and_valid_commands_drain() {
-    use std::{ffi::CString, os::unix::{ffi::OsStrExt, fs::symlink}};
+    use std::{
+        ffi::CString,
+        os::unix::{ffi::OsStrExt, fs::symlink},
+    };
     for suffix in ["request", "receipt"] {
         for fifo in [false, true] {
             let fixture = Fixture::new();
-            let pending = response(fixture.sandbox_command(&["send"], send("invalid-record", "original")));
+            let pending =
+                response(fixture.sandbox_command(&["send"], send("invalid-record", "original")));
             let key = pending["data"]["operation_id"].as_str().unwrap();
             let record = fixture.spool().join(format!("{key}.{suffix}.json"));
             let victim = fixture.directory.path().join("victim");
             fs::write(&victim, "unchanged").unwrap();
-            if record.exists() { fs::remove_file(&record).unwrap(); }
+            if record.exists() {
+                fs::remove_file(&record).unwrap();
+            }
             if fifo {
                 let path = CString::new(record.as_os_str().as_bytes()).unwrap();
                 assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
@@ -652,7 +665,10 @@ fn nonregular_records_are_removed_and_valid_commands_drain() {
             }
             let next = response(fixture.sandbox_command(&["send"], send("after-invalid", "next")));
             assert!(next["data"]["message_id"].is_string(), "{next}");
-            assert_eq!(fixture.message_count(), if suffix == "receipt" { 2 } else { 1 });
+            assert_eq!(
+                fixture.message_count(),
+                if suffix == "receipt" { 2 } else { 1 }
+            );
         }
     }
 }

@@ -1,0 +1,258 @@
+use std::{
+    ffi::{CStr, CString, OsString},
+    fs::{File, OpenOptions},
+    io::{self, Read, Write},
+    os::{
+        fd::{AsRawFd, FromRawFd, IntoRawFd},
+        unix::{ffi::OsStringExt, fs::OpenOptionsExt},
+    },
+    path::{Path, PathBuf},
+};
+
+pub(super) struct Dir {
+    file: File,
+    pub path: PathBuf,
+}
+
+fn name(value: &str) -> io::Result<CString> {
+    if value.is_empty() || value.contains('/') || value == "." || value == ".." {
+        return Err(io::Error::other("invalid spool filename"));
+    }
+    CString::new(value).map_err(io::Error::other)
+}
+
+fn checked(result: libc::c_int) -> io::Result<libc::c_int> {
+    if result == -1 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(result)
+    }
+}
+
+impl Dir {
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        Ok(Self {
+            file,
+            path: path.into(),
+        })
+    }
+
+    pub fn child(&self, leaf: &str) -> io::Result<Self> {
+        let leaf_c = name(leaf)?;
+        let made = unsafe { libc::mkdirat(self.file.as_raw_fd(), leaf_c.as_ptr(), 0o700) };
+        if made == 0 {
+            self.file.sync_all()?;
+        } else if io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
+            return Err(io::Error::last_os_error());
+        }
+        let fd = checked(unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                leaf_c.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        })?;
+        Ok(Self {
+            file: unsafe { File::from_raw_fd(fd) },
+            path: self.path.join(leaf),
+        })
+    }
+
+    fn regular(&self, leaf: &str, flags: i32) -> io::Result<File> {
+        let leaf = name(leaf)?;
+        let fd = checked(unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                leaf.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                0o600,
+            )
+        })?;
+        let file = unsafe { File::from_raw_fd(fd) };
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("deferred record is not a regular file"));
+        }
+        Ok(file)
+    }
+
+    pub fn lock(&self, leaf: &str) -> io::Result<File> {
+        match self.regular(leaf, libc::O_RDWR | libc::O_CREAT) {
+            Ok(file) => Ok(file),
+            Err(error) => {
+                self.remove(leaf)?;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn read(&self, leaf: &str) -> io::Result<Vec<u8>> {
+        let mut file = self.regular(leaf, libc::O_RDONLY)?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn contains(&self, leaf: &str) -> io::Result<bool> {
+        let leaf = name(leaf)?;
+        let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+        let result = unsafe {
+            libc::fstatat(
+                self.file.as_raw_fd(),
+                leaf.as_ptr(),
+                stat.as_mut_ptr(),
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        match checked(result) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn remove(&self, leaf: &str) -> io::Result<()> {
+        let leaf = name(leaf)?;
+        let result = unsafe { libc::unlinkat(self.file.as_raw_fd(), leaf.as_ptr(), 0) };
+        match checked(result) {
+            Ok(_) => self.file.sync_all(),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error)
+                if error.raw_os_error() == Some(libc::EISDIR)
+                    || error.raw_os_error() == Some(libc::EPERM) =>
+            {
+                checked(unsafe {
+                    libc::unlinkat(self.file.as_raw_fd(), leaf.as_ptr(), libc::AT_REMOVEDIR)
+                })?;
+                self.file.sync_all()
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn publish(&self, leaf: &str, bytes: &[u8], temporary: &str) -> io::Result<()> {
+        let destination = name(leaf)?;
+        let source = name(temporary)?;
+        let mut file = self.regular(temporary, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
+        let result = (|| {
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            match checked(unsafe {
+                libc::linkat(
+                    self.file.as_raw_fd(),
+                    source.as_ptr(),
+                    self.file.as_raw_fd(),
+                    destination.as_ptr(),
+                    0,
+                )
+            }) {
+                Ok(_) => {
+                    if let Err(error) = self.regular(leaf, libc::O_RDONLY) {
+                        self.remove(leaf)?;
+                        return Err(error);
+                    }
+                    self.file.sync_all()
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    self.regular(leaf, libc::O_RDONLY).map(|_| ())
+                }
+                Err(error) => Err(error),
+            }
+        })();
+        self.remove(temporary)?;
+        result
+    }
+
+    pub fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        let from = name(from)?;
+        let to = name(to)?;
+        checked(unsafe {
+            libc::renameat(
+                self.file.as_raw_fd(),
+                from.as_ptr(),
+                self.file.as_raw_fd(),
+                to.as_ptr(),
+            )
+        })?;
+        self.file.sync_all()
+    }
+
+    pub fn entries(&self) -> io::Result<Vec<OsString>> {
+        let dot = CString::new(".").unwrap();
+        let fd = checked(unsafe {
+            libc::openat(
+                self.file.as_raw_fd(),
+                dot.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        })?;
+        let file = unsafe { File::from_raw_fd(fd) };
+        let stream = unsafe { libc::fdopendir(file.as_raw_fd()) };
+        if stream.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let _ = file.into_raw_fd();
+        let mut entries = Vec::new();
+        let read_result = loop {
+            #[cfg(target_os = "linux")]
+            unsafe {
+                *libc::__errno_location() = 0;
+            }
+            #[cfg(target_os = "macos")]
+            unsafe {
+                *libc::__error() = 0;
+            }
+            let entry = unsafe { libc::readdir(stream) };
+            if entry.is_null() {
+                let error = io::Error::last_os_error();
+                break if error.raw_os_error() == Some(0) {
+                    Ok(())
+                } else {
+                    Err(error)
+                };
+            }
+            let bytes = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+            if bytes != b"." && bytes != b".." {
+                entries.push(OsString::from_vec(bytes.to_vec()));
+            }
+        };
+        let close_result = checked(unsafe { libc::closedir(stream) });
+        read_result?;
+        close_result?;
+        Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn descriptor_stays_in_original_directory_after_name_is_replaced() {
+        let root = std::env::temp_dir().join(format!("namedrop-dir-swap-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("queue")).unwrap();
+        std::fs::create_dir_all(root.join("victim")).unwrap();
+        let dir = Dir::open(&root.join("queue")).unwrap();
+        std::fs::write(root.join("victim/record"), b"untouched").unwrap();
+        std::fs::rename(root.join("queue"), root.join("original")).unwrap();
+        std::os::unix::fs::symlink(root.join("victim"), root.join("queue")).unwrap();
+        dir.publish("record", b"owned", ".temporary").unwrap();
+        assert_eq!(dir.read("record").unwrap(), b"owned");
+        assert!(dir.entries().unwrap().contains(&OsString::from("record")));
+        dir.rename("record", "renamed").unwrap();
+        dir.remove("renamed").unwrap();
+        assert_eq!(
+            std::fs::read(root.join("victim/record")).unwrap(),
+            b"untouched"
+        );
+        assert!(
+            std::fs::read_dir(root.join("original"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

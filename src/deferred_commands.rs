@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    env, fs,
-    io::{self, Read, Write},
-    os::unix::{fs::OpenOptionsExt, net::UnixStream, process::CommandExt},
+    env, fs, io,
+    os::unix::{net::UnixStream, process::CommandExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -83,59 +82,21 @@ fn hash(bytes: &[u8]) -> String {
     crate::lower_hex(&Sha256::digest(bytes))
 }
 
-fn directory(state: &Path, socket: &str) -> Result<PathBuf, String> {
-    if !state.is_absolute() || !fs::symlink_metadata(state).is_ok_and(|m| m.is_dir()) {
-        return Err("deferred state must be an absolute directory, not a symbolic link".into());
+mod spool;
+use spool::Dir;
+
+fn directory(state: &Path, socket: &str) -> Result<Dir, String> {
+    if !state.is_absolute() {
+        return Err("deferred state must be an absolute directory".into());
     }
-    let mut path = state.to_path_buf();
-    for component in ["deferred-commands".to_owned(), hash(socket.as_bytes())] {
-        path.push(component);
-        match fs::create_dir(&path) {
-            Ok(()) => fs::File::open(path.parent().expect("spool directory has a parent"))
-                .and_then(|parent| parent.sync_all())
-                .map_err(|e| e.to_string())?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.to_string()),
-        }
-        if !fs::symlink_metadata(&path)
-            .map_err(|e| e.to_string())?
-            .is_dir()
-        {
-            return Err("deferred spool must be a directory, not a symbolic link".into());
-        }
-    }
-    Ok(path)
+    Dir::open(state)
+        .and_then(|state| state.child("deferred-commands"))
+        .and_then(|root| root.child(&hash(socket.as_bytes())))
+        .map_err(|e| e.to_string())
 }
 
-fn pending_directory(directory: &Path) -> Result<PathBuf, String> {
-    let pending = directory.join("pending");
-    match fs::create_dir(&pending) {
-        Ok(()) => fs::File::open(directory)
-            .and_then(|parent| parent.sync_all())
-            .map_err(|e| e.to_string())?,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.to_string()),
-    }
-    if !fs::symlink_metadata(&pending)
-        .map_err(|e| e.to_string())?
-        .is_dir()
-    {
-        return Err("deferred pending queue must be a directory, not a symbolic link".into());
-    }
-    Ok(pending)
-}
-
-fn read_file(path: &Path) -> io::Result<Vec<u8>> {
-    let mut file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(path)?;
-    if !file.metadata()?.is_file() {
-        return Err(io::Error::other("deferred record is not a regular file"));
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+fn pending_directory(directory: &Dir) -> Result<Dir, String> {
+    directory.child("pending").map_err(|e| e.to_string())
 }
 
 fn stored_caller(state: &Path, namespace: StateNamespace, pane: String) -> Result<Caller, String> {
@@ -274,49 +235,43 @@ impl Request {
     }
 }
 
-fn publish(path: &Path, value: &impl Serialize) -> Result<(), String> {
-    let parent = path.parent().ok_or("missing spool directory")?;
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    let temporary = parent.join(format!(".{}", ProcessIds::default().next_id("publish")));
-    let result = (|| {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&temporary)?;
-        file.write_all(&serde_json::to_vec(value).map_err(io::Error::other)?)?;
-        file.sync_all()?;
-        fs::hard_link(&temporary, path)?;
-        fs::File::open(parent)?.sync_all()
-    })();
-    let _ = fs::remove_file(temporary);
-    match result {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
+fn publish(directory: &Dir, name: &str, value: &impl Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value).map_err(|e| e.to_string())?;
+    directory
+        .publish(
+            name,
+            &bytes,
+            &format!(".{}", ProcessIds::default().next_id("publish")),
+        )
+        .map_err(|e| e.to_string())
 }
 
-fn enqueue(state: &Path, request: &Request) -> Result<PathBuf, String> {
+fn enqueue(state: &Path, request: &Request) -> Result<Dir, String> {
     let directory = directory(state, &request.caller.namespace.session_socket_id)?;
-    let path = directory.join(format!("{}.request.json", request.key));
+    let name = format!("{}.request.json", request.key);
     // The marker precedes the request so a published request always has a wake.
     // An interrupted producer leaves an inert marker until its request arrives.
     publish(
-        &pending_directory(&directory)?.join(format!("{}.json", request.key)),
+        &pending_directory(&directory)?,
+        &format!("{}.json", request.key),
         &json!({}),
     )?;
-    publish(&path, request)?;
-    let existing: Request = serde_json::from_slice(&read_file(&path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    publish(&directory, &name, request)?;
+    let existing: Request =
+        serde_json::from_slice(&directory.read(&name).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
     if existing.fingerprint != request.fingerprint {
         return Err("request id was already queued with different command content".into());
     }
-    Ok(directory.join(format!("{}.receipt.json", request.key)))
+    Ok(directory)
 }
 
-fn read_receipt(path: &Path, fingerprint: &str) -> Result<Option<Result<Value, String>>, String> {
-    let bytes = match read_file(path) {
+fn read_receipt(
+    directory: &Dir,
+    name: &str,
+    fingerprint: &str,
+) -> Result<Option<Result<Value, String>>, String> {
+    let bytes = match directory.read(name) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
@@ -375,10 +330,12 @@ pub fn try_defer(
             caller,
             env::current_dir().map_err(|e| e.to_string())?,
         )?;
-        let receipt = enqueue(&state, &request)?;
+        let directory = enqueue(&state, &request)?;
+        let receipt_name = format!("{}.receipt.json", request.key);
+        let receipt = directory.path.join(&receipt_name);
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            if let Some(result) = read_receipt(&receipt, &request.fingerprint)? {
+            if let Some(result) = read_receipt(&directory, &receipt_name, &request.fingerprint)? {
                 return result;
             }
             if Instant::now() >= deadline {
@@ -418,7 +375,6 @@ fn reexec_if_updated(state: &Path) -> Result<(), String> {
 pub fn ensure_worker(state: &Path, socket: &str) -> Result<(), String> {
     UnixStream::connect(socket).map_err(|e| e.to_string())?;
     let directory = directory(state, socket)?;
-    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let lock = worker_lock(&directory)?;
     if lock.try_lock().is_err() {
         return Ok(());
@@ -439,37 +395,28 @@ pub fn ensure_worker(state: &Path, socket: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn worker_lock(directory: &Path) -> Result<fs::File, String> {
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(directory.join("worker.lock"))
-        .map_err(|e| e.to_string())?;
-    if !lock.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err("deferred worker lock is not a regular file".into());
-    }
-    Ok(lock)
+fn worker_lock(directory: &Dir) -> Result<fs::File, String> {
+    directory.lock("worker.lock").map_err(|e| e.to_string())
 }
 
 pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
     UnixStream::connect(socket).map_err(|e| e.to_string())?;
     reexec_if_updated(state)?;
     let directory = directory(state, socket)?;
-    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let lock = worker_lock(&directory)?;
     if lock.try_lock().is_err() {
         return Ok(());
     }
-    let marker = directory.join(format!(".{}", ProcessIds::default().next_id("worker")));
+    let marker = format!(".{}", ProcessIds::default().next_id("worker"));
     publish(
+        &directory,
         &marker,
         &json!({"pid":std::process::id(),"started_at_ms":SystemClock.now_unix_ms()}),
     )?;
-    fs::rename(marker, directory.join("worker.json")).map_err(|e| e.to_string())?;
+    directory
+        .rename(&marker, "worker.json")
+        .map_err(|e| e.to_string())?;
+    let pending_directory = pending_directory(&directory)?;
     let mut last_probe = Instant::now();
     loop {
         reexec_if_updated(state)?;
@@ -488,19 +435,27 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
             }
             last_probe = Instant::now();
         }
-        let pending_directory = pending_directory(&directory)?;
-        let mut pending = fs::read_dir(&pending_directory)
-            .map_err(|e| e.to_string())?
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let name = entry.file_name();
-                let key = name.to_str()?.strip_suffix(".json")?;
-                (key.len() == 64
-                    && key.bytes().all(|b| b.is_ascii_hexdigit())
-                    && directory.join(format!("{key}.request.json")).exists())
-                .then(|| key.to_owned())
-            })
-            .collect::<Vec<_>>();
+        let mut pending = Vec::new();
+        for name in pending_directory.entries().map_err(|e| e.to_string())? {
+            let Some(key) = name.to_str().and_then(|name| name.strip_suffix(".json")) else {
+                continue;
+            };
+            if key.len() != 64 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
+            if pending_directory.read(&format!("{key}.json")).is_err() {
+                pending_directory
+                    .remove(&format!("{key}.json"))
+                    .map_err(|e| e.to_string())?;
+                continue;
+            }
+            if directory
+                .contains(&format!("{key}.request.json"))
+                .map_err(|e| e.to_string())?
+            {
+                pending.push(key.to_owned());
+            }
+        }
         pending.sort();
         for key in pending {
             let mut child = Command::new(launcher(state)?)
@@ -542,23 +497,16 @@ pub fn execute_queued(
     let _guard = crate::runtime_command_guard(state)?;
     reexec_if_updated(state)?;
     let directory = directory(state, socket)?;
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .mode(0o600)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(directory.join(format!("{key}.lock")))
+    let pending = pending_directory(&directory)?;
+    let lock = directory
+        .lock(&format!("{key}.lock"))
         .map_err(|e| e.to_string())?;
-    if !lock.metadata().map_err(|e| e.to_string())?.is_file() {
-        return Err("deferred command lock is not a regular file".into());
-    }
     lock.lock().map_err(|e| e.to_string())?;
-    let request_path = directory.join(format!("{key}.request.json"));
-    let bytes = read_file(&request_path).map_err(|e| e.to_string())?;
-    let request = serde_json::from_slice::<Request>(&bytes)
+    let request_path = format!("{key}.request.json");
+    let request = directory
+        .read(&request_path)
         .map_err(|e| e.to_string())
+        .and_then(|bytes| serde_json::from_slice::<Request>(&bytes).map_err(|e| e.to_string()))
         .and_then(|request| {
             request.validate()?;
             if request.key != key || request.caller.namespace.session_socket_id != socket {
@@ -569,19 +517,19 @@ pub fn execute_queued(
     let request = match request {
         Ok(request) => request,
         Err(error) => {
-            quarantine(&directory, &request_path)?;
-            clear_pending(&directory, key)?;
+            directory.remove(&request_path).map_err(|e| e.to_string())?;
+            clear_pending(&pending, key)?;
             return Err(error);
         }
     };
-    let receipt = directory.join(format!("{key}.receipt.json"));
-    match read_file(&receipt) {
+    let receipt = format!("{key}.receipt.json");
+    match directory.read(&receipt) {
         Ok(bytes) => match decode_receipt(&bytes, &request.fingerprint) {
-            Ok(_) => return clear_pending(&directory, key),
-            Err(_) => quarantine(&directory, &receipt)?,
+            Ok(_) => return clear_pending(&pending, key),
+            Err(_) => directory.remove(&receipt).map_err(|e| e.to_string())?,
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.to_string()),
+        Err(_) => directory.remove(&receipt).map_err(|e| e.to_string())?,
     }
     let result = execute_request(state, &request);
     if let Ok(value) = &result {
@@ -596,6 +544,7 @@ pub fn execute_queued(
         );
     }
     publish(
+        &directory,
         &receipt,
         &Receipt {
             fingerprint: request.fingerprint,
@@ -603,57 +552,13 @@ pub fn execute_queued(
             result,
         },
     )?;
-    clear_pending(&directory, key)
+    clear_pending(&pending, key)
 }
 
-fn clear_pending(directory: &Path, key: &str) -> Result<(), String> {
-    let pending = pending_directory(directory)?;
-    match fs::remove_file(pending.join(format!("{key}.json"))) {
-        Ok(()) => fs::File::open(pending)
-            .and_then(|file| file.sync_all())
-            .map_err(|e| e.to_string()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
-fn quarantine(directory: &Path, path: &Path) -> Result<(), String> {
-    let rejected = directory.join("rejected");
-    match fs::create_dir(&rejected) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.to_string()),
-    }
-    if !fs::symlink_metadata(&rejected)
-        .map_err(|e| e.to_string())?
-        .is_dir()
-    {
-        return Err("deferred rejected queue must be a directory, not a symbolic link".into());
-    }
-    let name = format!(
-        "rejected-{:020}-{}-{}",
-        SystemClock.now_unix_ms(),
-        ProcessIds::default().next_id("record"),
-        path.file_name()
-            .ok_or("missing record filename")?
-            .to_string_lossy(),
-    );
-    fs::rename(path, rejected.join(name)).map_err(|e| e.to_string())?;
-    let mut entries = fs::read_dir(&rejected)
-        .map_err(|e| e.to_string())?
-        .map(|entry| entry.map(|entry| entry.path()))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    entries.sort();
-    for path in entries.iter().take(entries.len().saturating_sub(100)) {
-        fs::remove_file(path).map_err(|e| e.to_string())?;
-    }
-    for path in [&rejected, directory] {
-        fs::File::open(path)
-            .and_then(|file| file.sync_all())
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+fn clear_pending(pending: &Dir, key: &str) -> Result<(), String> {
+    pending
+        .remove(&format!("{key}.json"))
+        .map_err(|e| e.to_string())
 }
 
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
