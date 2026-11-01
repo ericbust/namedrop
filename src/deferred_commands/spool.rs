@@ -264,6 +264,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn permission_denied_does_not_unlink_existing_lock() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("namedrop-lock-permission-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("worker.lock");
+        std::fs::write(&path, b"held lock").unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        let error = Dir::open(&root).unwrap().lock("worker.lock").unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+        assert_eq!(std::fs::read(&path).unwrap(), b"held lock");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn state_leaf_aliases_are_refused_but_parent_aliases_work() {
         let root = std::env::temp_dir().join(format!("namedrop-dir-leaf-{}", std::process::id()));
         std::fs::create_dir_all(root.join("state")).unwrap();

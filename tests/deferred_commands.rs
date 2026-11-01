@@ -145,6 +145,15 @@ else: print('{}')
     }
 
     fn sandbox_command(&self, operation: &[&str], input: Value) -> Output {
+        self.sandbox_command_with_read_only_state(operation, input, false)
+    }
+
+    fn sandbox_command_with_read_only_state(
+        &self,
+        operation: &[&str],
+        input: Value,
+        read_only: bool,
+    ) -> Output {
         let mut command = self.command();
         command
             .arg("--plugin-state")
@@ -162,8 +171,8 @@ else: print('{}')
             ]);
         // This is the syscall boundary Codex denies. No test-only production switch.
         unsafe {
-            command.pre_exec(|| {
-                let filter = [
+            command.pre_exec(move || {
+                let mut filter = vec![
                     libc::sock_filter {
                         code: 0x20,
                         jt: 0,
@@ -189,6 +198,34 @@ else: print('{}')
                         k: 0x7fff_0000,
                     },
                 ];
+                if read_only {
+                    filter.pop();
+                    for syscall in [
+                        libc::SYS_chmod,
+                        libc::SYS_fchmod,
+                        libc::SYS_fchmodat,
+                        libc::SYS_mkdirat,
+                    ] {
+                        filter.push(libc::sock_filter {
+                            code: 0x15,
+                            jt: 0,
+                            jf: 1,
+                            k: syscall as u32,
+                        });
+                        filter.push(libc::sock_filter {
+                            code: 0x06,
+                            jt: 0,
+                            jf: 0,
+                            k: 0x0005_0000 | libc::EROFS as u32,
+                        });
+                    }
+                    filter.push(libc::sock_filter {
+                        code: 0x06,
+                        jt: 0,
+                        jf: 0,
+                        k: 0x7fff_0000,
+                    });
+                }
                 let program = libc::sock_fprog {
                     len: filter.len() as u16,
                     filter: filter.as_ptr() as *mut _,
@@ -634,13 +671,17 @@ fn nonregular_records_are_removed_and_valid_commands_drain() {
         ffi::CString,
         os::unix::{ffi::OsStrExt, fs::symlink},
     };
-    for suffix in ["request", "receipt"] {
+    for suffix in ["request", "receipt", "lock"] {
         for fifo in [false, true] {
             let fixture = Fixture::new();
             let pending =
                 response(fixture.sandbox_command(&["send"], send("invalid-record", "original")));
             let key = pending["data"]["operation_id"].as_str().unwrap();
-            let record = fixture.spool().join(format!("{key}.{suffix}.json"));
+            let record = fixture.spool().join(if suffix == "lock" {
+                format!("{key}.lock")
+            } else {
+                format!("{key}.{suffix}.json")
+            });
             let victim = fixture.directory.path().join("victim");
             fs::write(&victim, "unchanged").unwrap();
             if record.exists() {
@@ -656,7 +697,7 @@ fn nonregular_records_are_removed_and_valid_commands_drain() {
             let marker = fixture.spool().join("pending").join(format!("{key}.json"));
             wait_for(|| !marker.exists());
             assert_eq!(fs::read(&victim).unwrap(), b"unchanged");
-            if suffix == "request" {
+            if suffix != "receipt" {
                 assert!(fs::symlink_metadata(&record).is_err());
                 assert_eq!(fixture.message_count(), 0);
             } else {
@@ -669,6 +710,75 @@ fn nonregular_records_are_removed_and_valid_commands_drain() {
                 fixture.message_count(),
                 if suffix == "receipt" { 2 } else { 1 }
             );
+        }
+    }
+}
+
+#[test]
+fn producer_reads_existing_state_without_writes_or_directory_creation() {
+    let fixture = Fixture::new();
+    response(fixture.sandbox_command(&["send"], send("prepare-spool", "first")));
+    let database = fixture.directory.path().join("namedrop.sqlite3");
+    let before = fs::read(&database).unwrap();
+    let mut entries_before: Vec<_> = fs::read_dir(fixture.directory.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    entries_before.sort();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o400)).unwrap();
+    fs::set_permissions(fixture.directory.path(), fs::Permissions::from_mode(0o500)).unwrap();
+    let output =
+        fixture.sandbox_command_with_read_only_state(&["send"], send("read-only", "second"), true);
+    let db_mode = fs::metadata(&database).unwrap().permissions().mode() & 0o777;
+    let state_mode = fs::metadata(fixture.directory.path())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    fs::set_permissions(fixture.directory.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(&database, fs::Permissions::from_mode(0o600)).unwrap();
+    let result = response(output);
+    assert_eq!(result["data"]["state"], "pending");
+    assert_eq!(db_mode, 0o400);
+    assert_eq!(state_mode, 0o500);
+    assert_eq!(fs::read(&database).unwrap(), before);
+    let mut entries_after: Vec<_> = fs::read_dir(fixture.directory.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    entries_after.sort();
+    assert_eq!(entries_after, entries_before);
+    assert_eq!(fixture.message_count(), 0);
+}
+
+#[test]
+fn invalid_pending_markers_never_execute_and_other_commands_drain() {
+    for directory in [false, true] {
+        let fixture = Fixture::new();
+        let queued =
+            response(fixture.sandbox_command(&["send"], send("bad-marker", "must not commit")));
+        let key = queued["data"]["operation_id"].as_str().unwrap();
+        let marker = fixture.spool().join("pending").join(format!("{key}.json"));
+        fs::remove_file(&marker).unwrap();
+        if directory {
+            fs::create_dir(&marker).unwrap();
+            fs::write(marker.join("keep"), "untouched").unwrap();
+        } else {
+            std::os::unix::fs::symlink(
+                fixture.spool().join(format!("{key}.request.json")),
+                &marker,
+            )
+            .unwrap();
+        }
+        let _worker = fixture.worker();
+        let next = response(fixture.sandbox_command(&["send"], send("valid-marker", "next")));
+        assert!(next["data"]["message_id"].is_string(), "{next}");
+        assert_eq!(fixture.message_count(), 1);
+        assert!(!Path::new(queued["data"]["receipt"].as_str().unwrap()).exists());
+        if directory {
+            assert_eq!(fs::read(marker.join("keep")).unwrap(), b"untouched");
+        } else {
+            assert!(fs::symlink_metadata(marker).is_err());
         }
     }
 }
