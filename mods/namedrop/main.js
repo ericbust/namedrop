@@ -1,6 +1,6 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Button } from "gpui-base";
-import { terminals, panes, spaces, placement, theme, run, exec, home, watchFolder, notify, props, closeOverlay } from "herdr";
+import { terminals, panes, spaces, placement, theme, run, exec, home, watchFolder, notify, openOverlay, props, closeOverlay } from "herdr";
 import { roster } from "./roster.js";
 import { initialModel, transition, watchedStoreFile } from "./model.js";
 
@@ -110,7 +110,10 @@ export default class Namedrop extends View {
     if (dot && (edge === "left" || edge === "top")) button.child(dot);
     button.child(body);
     if (dot && (edge === "right" || edge === "bottom")) button.child(dot);
-    return button;
+    return h_flex().w_full().gap(4).child(button)
+      .child(Button.new(`status-${row.address}`).h(28).px(7).text_size(11)
+        .on_click(() => openOverlay({ mod: "namedrop-agent-status", kind: "window", width: 720, height: 500,
+          props: { terminal: row.address } })).child("Agent status"));
   }
 
   render() {

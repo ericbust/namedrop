@@ -51,7 +51,7 @@ operation("structured name_taken reopens only a live named terminal", async () =
   const overlays = [];
   const deps = { home: () => "/h", focused: () => ({ terminal: "t1" }), terminals: () => [
     { address: "t1", state: "live", labels: {} }, { address: "t9", name: "namedrop-management", state: "live" }],
-    exec: async (_command, args) => args[0] === "--version" ? { code: 0 } : { code: 65, stdout: '{"error":{"code":"name_taken","message":"taken"}}' },
+    exec: async (_command, args) => args[0] === "--version" ? { code: 0 } : { code: 65, stdout: '{"error":{"kind":"name_taken","message":"taken"}}' },
     openOverlay: (spec) => overlays.push(spec) };
   await launchPopup(deps);
   assert.equal(overlays[0].layout.children[1].content.terminal, "t9");
