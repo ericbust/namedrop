@@ -6,6 +6,104 @@ use environment::CommandHome;
 mod hc_socket;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
+fn capture_child_ancestry() {
+    let path = std::env::var_os("HOST_ANCESTRY_DIAGNOSTIC").unwrap();
+    let mut diagnostic = format!("child ancestry pid={}\n", std::process::id());
+    let mut pid = std::process::id();
+    for _ in 0..1024 {
+        let (parent, row) = ancestry_row(pid);
+        diagnostic.push_str(&row);
+        match parent {
+            Some(parent) if parent != 0 => pid = parent,
+            _ => break,
+        }
+    }
+    fs::write(path, diagnostic).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn ancestry_row(pid: u32) -> (Option<u32>, String) {
+    let path = format!("/proc/{pid}/stat");
+    match fs::read_to_string(&path) {
+        Ok(stat) => {
+            let parent = stat
+                .rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().nth(1))
+                .and_then(|parent| parent.parse().ok());
+            (
+                parent,
+                format!(
+                    "{path} pid={pid} parent={parent:?} return={} errno=0 stat={stat:?}\n",
+                    stat.len()
+                ),
+            )
+        }
+        Err(error) => (
+            None,
+            format!(
+                "{path} pid={pid} parent=None return=-1 errno={:?} error={error}\n",
+                error.raw_os_error()
+            ),
+        ),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ancestry_row(pid: u32) -> (Option<u32>, String) {
+    let pid = libc::pid_t::try_from(pid).unwrap();
+    let mut full = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+    let mut short = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+    let full_size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).unwrap();
+    let short_size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).unwrap();
+    // SAFETY: each buffer has the requested size; errno is thread-local.
+    let (full_return, full_errno, short_return, short_errno) = unsafe {
+        *libc::__error() = 0;
+        let full_return = libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            full.as_mut_ptr().cast(),
+            full_size,
+        );
+        let full_errno = *libc::__error();
+        *libc::__error() = 0;
+        let short_return = libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            short.as_mut_ptr().cast(),
+            short_size,
+        );
+        (full_return, full_errno, short_return, *libc::__error())
+    };
+    // SAFETY: a parent is read only when the call filled the entire struct.
+    let full_parent = (full_return == full_size).then(|| unsafe { full.assume_init() }.pbi_ppid);
+    // SAFETY: a parent is read only when the call filled the entire struct.
+    let short_parent =
+        (short_return == short_size).then(|| unsafe { short.assume_init() }.pbsi_ppid);
+    (
+        short_parent.or(full_parent),
+        format!(
+            "PROC_PIDTBSDINFO pid={pid} parent={full_parent:?} return={full_return} errno={full_errno}\nPROC_PIDT_SHORTBSDINFO pid={pid} parent={short_parent:?} return={short_return} errno={short_errno}\n"
+        ),
+    )
+}
+
+fn child_failure(
+    name: &str,
+    output: &std::process::Output,
+    diagnostic: &std::path::Path,
+) -> String {
+    format!(
+        "{name} => status={} stdout={:?} stderr={:?}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(diagnostic)
+            .unwrap_or_else(|error| format!("ancestry unavailable: {error}"))
+    )
+}
+
 #[test]
 fn snapshot_host_detection_table_returns_before_state_or_dispatch() {
     struct Case {
@@ -226,8 +324,10 @@ esac
     .unwrap();
     fs::set_permissions(&identity, fs::Permissions::from_mode(0o700)).unwrap();
     let binary = std::env::current_exe().unwrap();
+    let diagnostic = root.join("child-ancestry");
     let mut failures = Vec::new();
     for case in cases {
+        let _ = fs::remove_file(&diagnostic);
         let mut command = Command::new("/bin/sh");
         let script = if let Some((tui, hc)) = case.ancestry {
             format!("export TUI_PID={tui} HC_PID={hc}; \"$@\"; status=$?; exit \"$status\"")
@@ -261,6 +361,7 @@ esac
             .env("HC_SOCKET", &socket)
             .env("HERDR_PLUGIN_STATE_DIR", root.join("state"))
             .env("NAMEDROP_STATE_DIR", root.join("state"))
+            .env("HOST_ANCESTRY_DIAGNOSTIC", &diagnostic)
             .env("HOST_FLAGS", serde_json::to_string(&case.flags).unwrap())
             .env("EXPECTED_HOST", case.expected.unwrap_or("conflict"))
             .args([
@@ -271,15 +372,8 @@ esac
             ])
             .output()
             .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let valid = output.status.success();
-        println!(
-            "{} => status={} stdout={stdout:?} stderr={stderr:?}",
-            case.name, output.status
-        );
-        if !valid {
-            failures.push(case.name.clone());
+        if !output.status.success() {
+            failures.push(child_failure(&case.name, &output, &diagnostic));
         }
         let ambiguous = case.flags.is_empty()
             && case.env.contains(&"HC_TERMINAL_ID")
@@ -296,8 +390,10 @@ esac
             let probes = fs::read_to_string(root.join("identity-log")).unwrap_or_default();
             if probes.lines().count() != case.expected_probes {
                 failures.push(format!(
-                    "{} expected {} identity lookups, observed {probes:?}",
-                    case.name, case.expected_probes
+                    "{} expected {} identity lookups, observed {probes:?}\n{}",
+                    case.name,
+                    case.expected_probes,
+                    fs::read_to_string(&diagnostic).unwrap()
                 ));
             }
             let _ = fs::remove_file(root.join("identity-log"));
@@ -354,6 +450,8 @@ else:
         ("deadline", "tui", 2),
     ] {
         let log = root.join(mode);
+        let diagnostic = root.join("child-ancestry");
+        let _ = fs::remove_file(&diagnostic);
         let start = std::time::Instant::now();
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--exact", "cached_host_child", "--nocapture"])
@@ -365,6 +463,7 @@ else:
             .env("HC_BIN_PATH", &probe)
             .env("HC_SOCKET", &socket)
             .env("IDENTITY_LOG", &log)
+            .env("HOST_ANCESTRY_DIAGNOSTIC", &diagnostic)
             .env("IDENTITY_MODE", mode)
             .env("EXPECTED_HOST", expected)
             .env("HERDR_PLUGIN_STATE_DIR", "/unused-state")
@@ -373,9 +472,8 @@ else:
             .unwrap();
         assert!(
             output.status.success(),
-            "{mode}: {} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            "{}",
+            child_failure(mode, &output, &diagnostic)
         );
         assert!(
             start.elapsed() < std::time::Duration::from_secs(3),
@@ -393,6 +491,7 @@ else:
 #[test]
 #[ignore]
 fn cached_host_child() {
+    capture_child_ancestry();
     use namedrop::{cli::RuntimeOptions, runtime::HostKind};
     let options = RuntimeOptions {
         ..RuntimeOptions::default()
@@ -473,6 +572,7 @@ fn describe_validates_conflicts_before_runtime_dispatch_and_keeps_explicit_state
 #[test]
 #[ignore]
 fn snapshot_host_detection_child() {
+    capture_child_ancestry();
     use clap::Parser;
     let flags: Vec<String> = serde_json::from_str(&std::env::var("HOST_FLAGS").unwrap()).unwrap();
     let cli = namedrop::cli::Cli::try_parse_from(
@@ -506,4 +606,42 @@ fn snapshot_host_detection_child() {
         };
         assert_eq!(cli.runtime.host_kind().unwrap(), expected);
     }
+}
+
+#[test]
+fn child_ancestry_is_captured_alive_and_only_reported_on_failure() {
+    use std::process::Stdio;
+    let root = hc_socket::fixture::short_socket_root();
+    let diagnostic = root.join("child-ancestry");
+    for expected in ["tui", "hc"] {
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "snapshot_host_detection_child",
+                "--nocapture",
+            ])
+            .isolated_env(root.join("home"))
+            .env("HOST_FLAGS", "[]")
+            .env("EXPECTED_HOST", expected)
+            .env("HOST_ANCESTRY_DIAGNOSTIC", &diagnostic)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.success(), expected == "tui");
+        let captured = fs::read_to_string(&diagnostic).unwrap();
+        assert!(captured.starts_with(&format!("child ancestry pid={pid}\n")));
+        assert!(captured.contains(&format!("pid={pid} parent=Some(")));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("child ancestry"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("child ancestry"));
+        if !output.status.success() {
+            let failure = child_failure("forced wrong host", &output, &diagnostic);
+            assert!(failure.contains("forced wrong host"));
+            assert!(failure.contains(&captured));
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
 }
