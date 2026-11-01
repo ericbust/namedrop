@@ -501,3 +501,41 @@ fn foreground_without_owner_watch_has_no_core_or_store_work() {
         assert_eq!(epoch(), before);
     });
 }
+
+#[test]
+fn session_first_seen_in_labels_gets_a_local_owner_watch() {
+    check("labels-owner", |fixture, runtime, agent| {
+        let labels = fixture.terminals.borrow()[0]["labels"].clone();
+        for key in [
+            "namedrop.session",
+            "namedrop.session.pid",
+            "namedrop.session.start",
+        ] {
+            fixture.terminals.borrow_mut()[0]["labels"][key] = json!("");
+        }
+        fixture.terminals.borrow_mut()[0]["foreground"] =
+            json!({"pid":0,"name":"bash","argv":["bash"]});
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(
+                &json!({"terminals": *fixture.terminals.borrow()}).to_string(),
+                runtime,
+            )
+            .unwrap();
+        fixture.terminals.borrow_mut()[0]["labels"] = labels;
+        subscriber.handle_line(&event("labels"), runtime).unwrap();
+        agent.0.kill().unwrap();
+        agent.0.wait().unwrap();
+        subscriber
+            .tick(&LifecycleRuntime {
+                clock: &TestClock(10_500),
+                ..*runtime
+            })
+            .unwrap();
+        assert_eq!(
+            fixture.terminals.borrow()[0]["labels"]["namedrop.session"],
+            "",
+            "new owner observation did not arm an exit watch"
+        );
+    });
+}
