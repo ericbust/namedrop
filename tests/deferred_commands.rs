@@ -753,16 +753,20 @@ fn producer_reads_existing_state_without_writes_or_directory_creation() {
 
 #[test]
 fn invalid_pending_markers_never_execute_and_other_commands_drain() {
-    for directory in [false, true] {
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    for marker_type in ["symlink", "fifo", "directory"] {
         let fixture = Fixture::new();
         let queued =
             response(fixture.sandbox_command(&["send"], send("bad-marker", "must not commit")));
         let key = queued["data"]["operation_id"].as_str().unwrap();
         let marker = fixture.spool().join("pending").join(format!("{key}.json"));
         fs::remove_file(&marker).unwrap();
-        if directory {
+        if marker_type == "directory" {
             fs::create_dir(&marker).unwrap();
             fs::write(marker.join("keep"), "untouched").unwrap();
+        } else if marker_type == "fifo" {
+            let path = CString::new(marker.as_os_str().as_bytes()).unwrap();
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
         } else {
             std::os::unix::fs::symlink(
                 fixture.spool().join(format!("{key}.request.json")),
@@ -775,7 +779,7 @@ fn invalid_pending_markers_never_execute_and_other_commands_drain() {
         assert!(next["data"]["message_id"].is_string(), "{next}");
         assert_eq!(fixture.message_count(), 1);
         assert!(!Path::new(queued["data"]["receipt"].as_str().unwrap()).exists());
-        if directory {
+        if marker_type == "directory" {
             assert_eq!(fs::read(marker.join("keep")).unwrap(), b"untouched");
         } else {
             assert!(fs::symlink_metadata(marker).is_err());
