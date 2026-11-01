@@ -4,11 +4,32 @@ use environment::CommandHome;
 use std::process::Command;
 
 fn run(arguments: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_namedrop"))
-        .isolated_env(std::env::temp_dir().join(format!("nd-cli-home-{}", std::process::id())))
+    run_with_environment(arguments, &[])
+}
+
+fn run_with_environment(arguments: &[&str], variables: &[(&str, &str)]) -> std::process::Output {
+    static SEQUENCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let home = std::env::temp_dir().join(format!(
+        "nd-cli-home-{}-{}",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .isolated_env(&home)
+        .env("HC_SOCKET", home.join("absent.sock"))
+        .env("HC_BIN_PATH", "/bin/false")
+        .env("HERDR_BIN_PATH", "/bin/false")
+        .env("NAMEDROP_STATE_DIR", home.join("state"))
+        .env("HERDR_PLUGIN_STATE_DIR", home.join("state"))
+        .envs(variables.iter().copied())
         .args(arguments)
         .output()
-        .unwrap()
+        .unwrap();
+    assert!(
+        !home.exists(),
+        "help/error invocation created state at {home:?}"
+    );
+    output
 }
 
 #[test]
@@ -82,8 +103,126 @@ fn tui_session_end_help_uses_the_unknown_subcommand_envelope() {
         assert_eq!(body["protocol_version"], "collab/v1");
         assert_eq!(body["status"], "rejected");
         assert_eq!(body["error"]["code"], "invalid_request");
-        assert!(body["error"]["message"].as_str().unwrap().contains(
-            "unrecognized subcommand 'session-end'"
-        ), "{arguments:?}: {body}");
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unrecognized subcommand 'session-end'"),
+            "{arguments:?}: {body}"
+        );
     }
+}
+
+#[test]
+fn hook_help_obeys_explicit_host_precedence_and_flag_placement() {
+    let ambient = [
+        ("HC_TERMINAL_ID", "inherited-terminal"),
+        ("HERDR_PANE_ID", "inherited-pane"),
+    ];
+    for arguments in [
+        vec!["--host=tui", "--hc-terminal", "other", "hook", "--help"],
+        vec!["hook", "--help", "--host", "tui"],
+        vec!["--herdr-pane", "pane", "hook", "--help"],
+        vec!["--input-json=--host=hc", "--host=tui", "hook", "--help"],
+        vec!["--input-json", "hook", "--host=tui", "hook", "--help"],
+        vec!["--host=tui", "hook", "--help", "--", "--host=hc"],
+    ] {
+        let output = run_with_environment(&arguments, &ambient);
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(!text.contains("session-end"), "{arguments:?}: {text}");
+    }
+    for arguments in [
+        vec!["--host=hc", "--herdr-pane", "pane", "hook", "--help"],
+        vec!["hook", "--help", "--host", "hc"],
+        vec!["--host=hc", "hook", "--help", "--", "--host=tui"],
+        vec!["hook", "session-end", "--help", "--host", "hc"],
+        vec!["--host=hc", "help", "hook", "session-end"],
+        vec!["--host=hc", "hook", "help", "session-end"],
+        vec!["--hc-terminal", "terminal", "hook", "session-end", "--help"],
+    ] {
+        let output = run_with_environment(&arguments, &ambient);
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+        assert!(
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .contains("session-end")
+        );
+    }
+}
+
+#[test]
+fn session_end_keeps_normal_hook_parsing_and_quiet_cross_host_decline() {
+    use clap::Parser;
+
+    for host in ["tui", "hc"] {
+        let cli = namedrop::cli::Cli::try_parse_from([
+            "namedrop",
+            "--host",
+            host,
+            "--hc-hook",
+            "hook",
+            "session-end",
+            "--state-directory",
+            "/unused-hook-state",
+        ])
+        .unwrap();
+        assert_eq!(cli.operation(), "hook.session-end");
+        assert_eq!(
+            cli.session_end_hook_state_directory(),
+            Some(std::path::Path::new("/unused-hook-state"))
+        );
+    }
+    let output = run(&[
+        "--hc-hook",
+        "hook",
+        "session-end",
+        "--state-directory",
+        "/unused-hook-state",
+    ]);
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn help_does_not_probe_hosts_when_unchanged_or_explicitly_selected() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("nd-cli-tripwire-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let marker = root.join("called");
+    let executable = root.join("host");
+    std::fs::write(
+        &executable,
+        format!(
+            "#!/bin/sh\nprintf called > '{}'\nexit 97\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let variables = [
+        ("HC_TERMINAL_ID", "inherited-terminal"),
+        ("HERDR_PANE_ID", "inherited-pane"),
+        ("HC_BIN_PATH", executable.to_str().unwrap()),
+        ("HERDR_BIN_PATH", executable.to_str().unwrap()),
+    ];
+    for arguments in [
+        vec!["--help"],
+        vec!["--version"],
+        vec!["describe", "--help"],
+        vec!["events", "--help"],
+        vec!["hook", "session-start", "--help"],
+        vec!["--host=tui", "hook", "--help"],
+        vec!["--host=hc", "hook", "session-end", "--help"],
+    ] {
+        let output = run_with_environment(&arguments, &variables);
+        assert!(output.status.success(), "{arguments:?}: {output:?}");
+        assert!(!marker.exists(), "{arguments:?} contacted a host");
+    }
+    let output = run_with_environment(&["--host=tui", "hook", "session-end", "--help"], &variables);
+    assert_eq!(output.status.code(), Some(64));
+    assert!(!marker.exists(), "TUI error contacted a host");
+    std::fs::remove_dir_all(root).unwrap();
 }

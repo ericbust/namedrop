@@ -1,8 +1,9 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::Value;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Args)]
 #[command(name = "namedrop", version, about)]
 pub struct Cli {
     /// Print the complete JSON response, including when running in a terminal.
@@ -32,6 +33,111 @@ pub struct Cli {
 
     #[command(subcommand)]
     command: Command,
+}
+
+impl CommandFactory for Cli {
+    fn command() -> clap::Command {
+        Self::augment_args(clap::Command::new("namedrop"))
+    }
+
+    fn command_for_update() -> clap::Command {
+        Self::augment_args_for_update(clap::Command::new("namedrop"))
+    }
+}
+
+impl Parser for Cli {
+    fn parse() -> Self {
+        Self::try_parse().unwrap_or_else(|error| error.exit())
+    }
+
+    fn parse_from<I, T>(arguments: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        Self::try_parse_from(arguments).unwrap_or_else(|error| error.exit())
+    }
+
+    fn try_parse() -> Result<Self, clap::Error> {
+        Self::try_parse_from(std::env::args_os())
+    }
+
+    fn try_parse_from<I, T>(arguments: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let arguments: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
+        let command = Self::command();
+        let help = match command.clone().try_get_matches_from(&arguments) {
+            Ok(matches) => return Self::from_arg_matches(&matches),
+            Err(error) if error.kind() == clap::error::ErrorKind::DisplayHelp => error,
+            Err(error) => return Err(error),
+        };
+        let tui_command = command.clone().mut_subcommand("hook", |hook| {
+            clap::Command::new("hook")
+                .about(hook.get_about().unwrap().clone())
+                .hide(true)
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommands(
+                    hook.get_subcommands()
+                        .filter(|child| child.get_name() != "session-end")
+                        .cloned(),
+                )
+        });
+        let tui_help = match tui_command.try_get_matches_from(&arguments) {
+            Ok(matches) => return Self::from_arg_matches(&matches),
+            Err(error) => error,
+        };
+        if tui_help.to_string() == help.to_string() {
+            return Err(help);
+        }
+        let mut runtime_arguments = vec![OsString::from("namedrop")];
+        let mut arguments_iter = arguments.iter().skip(1);
+        while let Some(argument) = arguments_iter.next() {
+            if argument == "--" {
+                break;
+            }
+            let Some(long) = argument.to_str().and_then(|value| value.strip_prefix("--")) else {
+                continue;
+            };
+            let (name, inline_value) = long
+                .split_once('=')
+                .map_or((long, None), |(name, value)| (name, Some(value)));
+            let Some(flag) = command
+                .get_arguments()
+                .find(|flag| flag.get_long() == Some(name))
+            else {
+                continue;
+            };
+            let value = (inline_value.is_none() && flag.get_action().takes_values())
+                .then(|| arguments_iter.next())
+                .flatten();
+            if matches!(
+                name,
+                "host"
+                    | "hc-terminal"
+                    | "hc-space"
+                    | "plugin-state"
+                    | "herdr-socket"
+                    | "herdr-workspace"
+                    | "herdr-pane"
+            ) {
+                runtime_arguments.push(argument.clone());
+                if let Some(value) = value {
+                    runtime_arguments.push(value.clone());
+                }
+            }
+        }
+        let runtime_matches = RuntimeOptions::augment_args(clap::Command::new("namedrop"))
+            .try_get_matches_from(runtime_arguments)?;
+        let runtime = RuntimeOptions::from_arg_matches(&runtime_matches)?;
+        if runtime.host_kind() != Ok(crate::runtime::HostKind::Tui) {
+            return Err(help);
+        }
+        Err(tui_help)
+    }
 }
 
 /// Explicit transport context for permission-matchable direct invocations.
