@@ -1142,6 +1142,7 @@ else:
                 .arg(&f.state)
                 .arg("dashboard-server")
                 .env("HERDR_BIN_PATH", &shim)
+                .env("TMPDIR", &f.root)
                 .env("HOME", f.root.join("home"))
                 .env("CODEX_HOME", f.root.join("home/.codex"))
                 .env("NAMEDROP_CHANNEL_ROUTER", "off")
@@ -1740,6 +1741,7 @@ else:
             .env("HERDR_WORKSPACE_ID", "w1")
             .env("HERDR_PANE_ID", "pane-1-lead")
             .env("HERDR_BIN_PATH", f.root.join("http-herdr"))
+            .env("TMPDIR", &f.root)
             .env("HOME", f.root.join("home"))
             .env("CODEX_HOME", f.root.join("home/.codex"))
             .output()
@@ -1904,7 +1906,13 @@ else:
         f.reply_to("w1", "pane-1-planner", &envelope, "@operator done");
         let scope = namedrop::lower_hex(&Sha256::digest("socket-a\0w1"));
         let worker_directory = f.state.join("agent-status-reconciliation").join(scope);
-        wait_until("settled mailbox watcher clears pending work", || {
+        wait_until("settled mailbox watcher releases its worker lock", || {
+            let Ok(worker_lock) = fs::File::open(worker_directory.join("worker.lock")) else {
+                return false;
+            };
+            if worker_lock.try_lock().is_err() {
+                return false;
+            }
             let Ok(entries) = fs::read_dir(&worker_directory) else {
                 return false;
             };
@@ -2152,6 +2160,7 @@ else:
             Command::new(env!("CARGO_BIN_EXE_namedrop"))
                 .args(["hook", "mailbox-wake", "--state-directory"])
                 .arg(&f.state)
+                .env("TMPDIR", &f.root)
                 .env("HERDR_BIN_PATH", f.root.join("http-herdr"))
                 .env("HERDR_SOCKET_PATH", "socket-a")
                 .env("HERDR_WORKSPACE_ID", "w1")

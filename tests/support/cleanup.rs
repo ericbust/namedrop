@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::{self, Write},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 pub fn remove_fixture(root: &Path) -> io::Result<()> {
@@ -24,6 +24,19 @@ fn copy_retry_records(root: &Path) {
             && let Ok(record) = fs::read(entry.path())
         {
             let _ = io::stderr().lock().write_all(&record);
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub struct FixtureDirectory(pub PathBuf);
+
+impl Drop for FixtureDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = remove_fixture(&self.0)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            eprintln!("remove fixture {}: {error}", self.0.display());
         }
     }
 }

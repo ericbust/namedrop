@@ -70,6 +70,7 @@ impl Server {
             .arg("--plugin-state")
             .arg(state)
             .arg("dashboard-server")
+            .env("TMPDIR", state.parent().unwrap())
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_SOCKET_PATH")

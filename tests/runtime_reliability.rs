@@ -37,6 +37,13 @@ impl Fixture {
         ));
         fs::create_dir(&root).unwrap();
         fs::create_dir(root.join("home")).unwrap();
+        let settings = root.join("home/.config/herdr/plugins/config/namedrop");
+        fs::create_dir_all(&settings).unwrap();
+        fs::write(
+            settings.join("settings.json"),
+            r#"{"check_for_updates":false}"#,
+        )
+        .unwrap();
         let fixture = Self { root };
         fixture.set_herdr(HERDR_SCRIPT);
         fixture
@@ -62,6 +69,7 @@ impl Fixture {
             .env("TEST_SHELL_PID", std::process::id().to_string())
             .env("HERDR_BIN_PATH", self.root.join("herdr"))
             .env("NAMEDROP_TEST_FIXTURE", &self.root)
+            .env("TMPDIR", &self.root)
             .env("HOME", self.root.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.root.join("home").join(".claude"))
             .env("CODEX_HOME", self.root.join("home").join(".codex"))
@@ -1312,7 +1320,10 @@ fn worker_at_capped_eventless_retry(
     fixture.queue_message();
     let script = fs::read_to_string(fixture.root.join("herdr")).unwrap();
     fixture.set_herdr(&format!(
-        r#"if [ "$1 $2" = 'agent prompt' ]; then
+        r#"if [ "$1 $2" = 'pane report-metadata' ] && [ -f "$NAMEDROP_TEST_FIXTURE/release-capped-retry" ]; then
+             touch "$NAMEDROP_TEST_FIXTURE/capped-drain-completed"
+           fi
+           if [ "$1 $2" = 'agent prompt' ]; then
              if [ "$3" = 'pane-grace' ]; then
                printf 'x' >> "$NAMEDROP_TEST_FIXTURE/other-prompts"
                printf '%s\n' '{{}}'
@@ -1367,19 +1378,17 @@ fn worker_at_capped_eventless_retry(
                 .starts_with("pending-")
         })
         .collect();
-    assert_eq!(pending.len(), 1);
-    let input: serde_json::Value = serde_json::from_slice(&fs::read(&pending[0]).unwrap()).unwrap();
-    assert_eq!(input, serde_json::json!({"operation": "mailbox-wake"}));
-    (worker, pending.into_iter().next().unwrap())
+    assert!(pending.is_empty(), "deadline drain must not write a marker");
+    (worker, fixture.root.join("capped-drain-completed"))
 }
 
 #[test]
 fn eventless_backoff_serves_new_markers_at_the_retry_cap() {
     let fixture = Fixture::new();
-    let (_worker, capped_marker) = worker_at_capped_eventless_retry(&fixture, || {});
+    let (_worker, capped_drain) = worker_at_capped_eventless_retry(&fixture, || {});
     fs::write(fixture.root.join("release-capped-retry"), "ready").unwrap();
-    wait_for_runtime("capped retry did not finish its marker", 30, || {
-        !capped_marker.exists()
+    wait_for_runtime("capped retry did not publish drain metadata", 30, || {
+        capped_drain.exists()
     });
     assert_eq!(fixture.prompt_counts(), (9, 0));
 
@@ -1407,7 +1416,7 @@ fn eventless_backoff_serves_other_recipients_grace_at_the_retry_cap() {
     let fixture = Fixture::new();
     let namespace = fixture.namespace();
     let attempt = DeliveryAttemptId::new("grace-attempt");
-    let (_worker, capped_marker) = worker_at_capped_eventless_retry(&fixture, || {
+    let (_worker, capped_drain) = worker_at_capped_eventless_retry(&fixture, || {
         let created = now_ms() - 25_000;
         let attribution = MutationAttribution::new(ActorKind::Plugin, "fixture", created);
         StateStore::open(fixture.state())
@@ -1488,8 +1497,8 @@ fn eventless_backoff_serves_other_recipients_grace_at_the_retry_cap() {
     });
     assert_eq!(fixture.attempt_state(&attempt), DeliveryState::Acknowledged);
     fs::write(fixture.root.join("release-capped-retry"), "ready").unwrap();
-    wait_for_runtime("capped retry did not finish its marker", 30, || {
-        !capped_marker.exists()
+    wait_for_runtime("capped retry did not publish drain metadata", 30, || {
+        capped_drain.exists()
     });
     wait_for_runtime(
         "60 s eventless backoff delayed another recipient's grace",
@@ -1534,7 +1543,7 @@ fn eventless_rejections_keep_pane_lock_deferrals_on_the_short_retry() {
     let fixture = Fixture::new();
     let namespace = fixture.namespace();
     let mut pane_lock = None;
-    let (_worker, mixed_marker) = worker_at_capped_eventless_retry(&fixture, || {
+    let (_worker, mixed_drain) = worker_at_capped_eventless_retry(&fixture, || {
         let attribution = MutationAttribution::new(ActorKind::Plugin, "fixture", now_ms());
         StateStore::open(fixture.state())
             .unwrap()
@@ -1642,8 +1651,8 @@ fn eventless_rejections_keep_pane_lock_deferrals_on_the_short_retry() {
         }
     });
     fs::write(fixture.root.join("release-capped-retry"), "ready").unwrap();
-    wait_for_runtime("mixed drain did not finish its marker", 30, || {
-        !mixed_marker.exists()
+    wait_for_runtime("mixed drain did not publish drain metadata", 30, || {
+        mixed_drain.exists()
     });
     assert!(!fixture.root.join("other-prompts").exists());
     drop(pane_lock);

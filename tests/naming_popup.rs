@@ -117,7 +117,8 @@ else printf '%s\n' '{}'; fi
     }
     fn command(&self) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_namedrop"));
-        cmd.env("HERDR_BIN_PATH", self.0.join("herdr"))
+        cmd.env("TMPDIR", &self.0)
+            .env("HERDR_BIN_PATH", self.0.join("herdr"))
             .env("HERDR_PLUGIN_STATE_DIR", self.0.join("state"))
             .env("HOME", self.0.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.0.join("home").join(".claude"))

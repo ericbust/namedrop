@@ -57,6 +57,7 @@ fn dropping_a_fixture_stops_its_mailbox_and_status_workers() {
         }
         workers.push(Worker(
             command
+                .env("TMPDIR", &f.root)
                 .env("HERDR_PLUGIN_STATE_DIR", &f.state)
                 .env("HERDR_SOCKET_PATH", "socket-a")
                 .env("HERDR_WORKSPACE_ID", space)
@@ -103,9 +104,10 @@ fn dropping_a_fixture_stops_its_mailbox_and_status_workers() {
 fn a_worker_does_not_recreate_a_deleted_state_directory() {
     let f = xws::Fixture::new();
     let state = f.state.clone();
-    fs::remove_dir_all(&state).unwrap();
+    cleanup::remove_fixture(&state).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
         .args(["hook", "agent-status-worker"])
+        .env("TMPDIR", &f.root)
         .env("HERDR_PLUGIN_STATE_DIR", &state)
         .env("HERDR_SOCKET_PATH", "socket-a")
         .env("HERDR_WORKSPACE_ID", "w1")

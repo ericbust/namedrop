@@ -179,6 +179,7 @@ impl Dashboard {
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         command
             .current_dir(self.root())
+            .env("TMPDIR", self.root())
             .args(["--json", "--plugin-state"])
             .arg(self.state())
             .args([
@@ -1538,6 +1539,7 @@ fn inherited_server(dashboard: &Dashboard) -> Command {
         .args(["--plugin-state"])
         .arg(dashboard.state())
         .args(["dashboard-server", "--inherit-claim"])
+        .env("TMPDIR", dashboard.root())
         .env_remove("HERDR_PANE_ID")
         .env_remove("HERDR_WORKSPACE_ID")
         .env_remove("HERDR_SOCKET_PATH")
