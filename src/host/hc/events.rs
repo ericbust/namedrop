@@ -647,6 +647,11 @@ impl Subscriber {
             }
         }
         for (pane, change) in &mut dirty {
+            if let Some(retry) = self.pane_retries.get(pane) {
+                change.resume |= retry.change.resume;
+                change.unavailable |= retry.change.unavailable;
+                change.removed |= retry.change.removed;
+            }
             if let Some(space) = self.spaces.get(pane) {
                 affected.insert(space.clone());
             }
@@ -866,7 +871,11 @@ impl Subscriber {
         }
         self.schedule_owner_watches(&dirty, full, &active_spaces, runtime.clock.now_unix_ms());
         for (pane, change) in dirty {
-            if failed_panes.contains(&pane) && !self.read_retries.contains_key(&pane) {
+            if self.read_retries.contains_key(&pane) {
+                if let Some(retry) = self.pane_retries.get_mut(&pane) {
+                    retry.change = change;
+                }
+            } else if failed_panes.contains(&pane) {
                 let deadline = RetryDeadline::failed(
                     self.pane_retries.get(&pane).map(|retry| &retry.deadline),
                     runtime.clock.now_unix_ms(),
