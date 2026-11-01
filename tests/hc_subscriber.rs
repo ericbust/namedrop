@@ -3130,3 +3130,164 @@ fn restart_unknown_terminal_does_not_release_alias() {
         assert_eq!(alice.pane_id.as_deref(), Some("t1"));
     });
 }
+
+#[test]
+fn restart_cancels_held_mail_only_after_confirmed_terminal_close() {
+    use namedrop::*;
+    for observation in ["snapshot", "missed", "unknown"] {
+        for label in [false, true] {
+            check(
+                &format!("restart-held-{observation}-{label}"),
+                |fixture, runtime| {
+                    let owner = process::AgentProcess::new();
+                    queued_agent(fixture, runtime, owner.pid());
+                    let namespace = StateNamespace::for_space("hc:fixture", "fixture-space");
+                    let mut subscriber = host::hc::events::Subscriber::default();
+                    subscriber
+                        .handle_line(&session_event("snapshot", fixture), runtime)
+                        .unwrap();
+                    let mut store = StateStore::open(runtime.state_directory).unwrap();
+                    let attempt = DeliveryAttemptId::new("restart-held-attempt");
+                    let attribution = MutationAttribution::new(
+                        ActorKind::Human,
+                        "restart-held",
+                        runtime.clock.now_unix_ms(),
+                    );
+                    let old_address = store
+                        .transaction(|tx| {
+                            let binding = tx.active_pane_bindings(&namespace)?.remove(0);
+                            let leased = tx.lease_mailbox_head(
+                                &namespace,
+                                &binding.address_id,
+                                &LeaseDraft {
+                                    attempt_id: attempt.clone(),
+                                    binding_id: binding.id,
+                                    agent_session_id: AgentSessionId::new("original-session"),
+                                    retry_of_attempt_id: None,
+                                    owner: "restart-held".into(),
+                                    acquired_at_ms: runtime.clock.now_unix_ms(),
+                                    expires_at_ms: runtime.clock.now_unix_ms() + 60_000,
+                                },
+                                &attribution,
+                            )?;
+                            assert!(leased.is_some(), "fixture must lease actual queued mail");
+                            tx.hold_delivery_attempt(&namespace, &attempt, &attribution)?;
+                            assert_eq!(
+                                tx.delivery_attempt_state(&namespace, &attempt)?,
+                                DeliveryState::Held
+                            );
+                            Ok(binding.address_id)
+                        })
+                        .unwrap();
+                    let mut replacement = fixture.terminals.borrow()[0].clone();
+                    replacement["address"] = json!("t0");
+                    replacement["labels"] = json!({"herdr.space":"fixture-space", "herdr.tab":"fixture-tab", "namedrop.name": if label { "alice" } else { "" }});
+                    replacement["foreground"] =
+                        json!({"pid":fixture._shell.pid(),"name":"bash","argv":["bash"]});
+                    replacement["status"] = json!({"state":"done"});
+                    fixture.terminals.borrow_mut()[0]["state"] = json!("finished");
+                    fixture.terminals.borrow_mut()[0]["reason"] = json!("server_stop");
+                    if observation == "unknown" {
+                        *fixture.get_failure.borrow_mut() = Some("t1".into());
+                    } else {
+                        fixture.terminals.borrow_mut().push(replacement.clone());
+                    }
+                    fixture.calls.borrow_mut().clear();
+                    let reconnect = match observation {
+                        "missed" => session_event("missed", fixture),
+                        "unknown" => json!({"terminals":[]}).to_string(),
+                        _ => json!({"terminals":[replacement]}).to_string(),
+                    };
+                    let result = subscriber.handle_line(&reconnect, runtime);
+                    let expected = if observation == "unknown" {
+                        DeliveryState::Held
+                    } else {
+                        DeliveryState::Cancelled
+                    };
+                    assert_eq!(
+                        store
+                            .transaction(|tx| tx.delivery_attempt_state(&namespace, &attempt))
+                            .unwrap(),
+                        expected,
+                        "{observation}/{label}: held mail must follow confirmed-close semantics; {result:?}"
+                    );
+                    result.unwrap();
+                    let db = rusqlite::Connection::open(
+                        runtime.state_directory.join("namedrop.sqlite3"),
+                    )
+                    .unwrap();
+                    let delivery: (String, String) = db.query_row(
+                    "SELECT address_id, state FROM mailbox_deliveries WHERE delivery_id='death-delivery'", [],
+                    |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+                    assert_eq!(delivery.0, old_address.as_str());
+                    assert_eq!(
+                        delivery.1,
+                        if observation == "unknown" {
+                            "held"
+                        } else {
+                            "cancelled"
+                        }
+                    );
+                    let addresses = store
+                        .transaction(|tx| tx.list_pane_addresses(&namespace))
+                        .unwrap();
+                    if observation == "unknown" {
+                        let alice = addresses
+                            .iter()
+                            .find(|address| address.id == old_address)
+                            .unwrap();
+                        assert_eq!(alice.alias, "alice");
+                        assert_eq!(alice.pane_id.as_deref(), Some("t1"));
+                    } else {
+                        assert!(
+                            addresses.iter().all(|address| address.id != old_address),
+                            "closed address must be removed"
+                        );
+                        if !label {
+                            execute_lifecycle_operation(
+                                "name",
+                                json!({"alias":"alice","pane_type":"terminal"}),
+                                &LifecycleRuntime {
+                                    current_pane_id: Some("t0"),
+                                    ..*runtime
+                                },
+                            )
+                            .unwrap();
+                        }
+                        let addresses = store
+                            .transaction(|tx| tx.list_pane_addresses(&namespace))
+                            .unwrap();
+                        let alice = addresses
+                            .iter()
+                            .find(|address| address.alias == "alice")
+                            .unwrap();
+                        assert_ne!(alice.id, old_address);
+                        assert_eq!(alice.pane_id.as_deref(), Some("t0"));
+                        let terminals = fixture.terminals.borrow();
+                        let replacement = terminals
+                            .iter()
+                            .find(|terminal| terminal["address"] == "t0")
+                            .unwrap();
+                        assert_eq!(replacement["labels"]["namedrop.name"], "alice");
+                        assert!(
+                            replacement["labels"]["namedrop.name.error"]
+                                .as_str()
+                                .is_none_or(str::is_empty)
+                        );
+                    }
+                    subscriber.tick(runtime).unwrap();
+                    assert!(
+                        fixture.calls.borrow().iter().all(|call| call[0] != "send"),
+                        "old mail must not reach a replacement"
+                    );
+                    assert_eq!(
+                        store
+                            .transaction(|tx| tx.delivery_attempt_state(&namespace, &attempt))
+                            .unwrap(),
+                        expected
+                    );
+                },
+            );
+        }
+    }
+}
