@@ -563,6 +563,7 @@ impl Subscriber {
         let mut errors = Vec::new();
         let mut affected = BTreeSet::new();
         let mut failed_panes = BTreeSet::new();
+        let mut observed_unavailable = BTreeSet::new();
         let active_spaces: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
         let mut store =
             StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
@@ -595,6 +596,7 @@ impl Subscriber {
                 }
             };
             for warning in &discovery.warnings {
+                observed_unavailable.insert(warning.terminal.clone());
                 self.schedule_read_retry(&warning.terminal, runtime.clock.now_unix_ms());
             }
             self.unavailable = discovery
@@ -878,6 +880,16 @@ impl Subscriber {
         pending.full = false;
         pending.snapshot = None;
         pending.dirty.clear();
+        if full {
+            let retained = |pane: &String| {
+                self.terminals.contains_key(pane)
+                    || bound_spaces.contains_key(pane)
+                    || observed_unavailable.contains(pane)
+            };
+            self.pane_retries.retain(|pane, _| retained(pane));
+            self.read_retries.retain(|pane, _| retained(pane));
+            self.unavailable.retain(|pane, _| retained(pane));
+        }
         self.read_retries
             .retain(|pane, _| self.unavailable.contains_key(pane));
         if errors.is_empty() {
