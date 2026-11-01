@@ -41,3 +41,9 @@ test("distinct read errors share notification gate", () => {
   result = transition(result.model, { type: "readError", now: 1, error: "broken" });
   assert.equal(result.effects.some((effect) => effect.type === "toast"), false);
 });
+
+test("unbound stored rows never create a focus notification", () => {
+  let { model } = read(initialModel(), 0, snap(row("working", [], null)));
+  const result = read(model, 1, snap(row("blocked", [reply("r1")], null)));
+  assert.equal(result.effects.some((effect) => effect.type === "toast"), false);
+});

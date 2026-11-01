@@ -110,3 +110,8 @@ test("shown follows the pane terminal address, including panes in other tabs", (
 test("an empty check-mode snapshot produces no rows", () => {
   assert.deepEqual(roster([], [], []), []);
 });
+
+test("stored binding supplies an alias to a live terminal without a label", () => {
+  const live = { address: "t1", state: "live", labels: {}, status: "idle" };
+  assert.equal(roster([live], [], [], { core: "c", rows: [{ alias: "writer", terminal: "t1", space: "headless", waiting_on: [] }] })[0].alias, "writer");
+});
