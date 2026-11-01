@@ -393,6 +393,86 @@ mod tests {
         (environment, thread)
     }
 
+    fn delayed_command(
+        args: &[&str],
+        configured: Option<&str>,
+        delay: Duration,
+    ) -> Result<HerdrCommandOutput, String> {
+        let root = crate::runtime::hc_socket_fixture::fixture::short_socket_root();
+        let path = root.join("core.sock");
+        crate::runtime::hc_socket_fixture::fixture::assert_socket_path(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut variables = vec![("HC_SOCKET".into(), path.into_os_string())];
+        if let Some(value) = configured {
+            variables.push(("NAMEDROP_HERDR_TIMEOUT_MS".into(), value.into()));
+        }
+        let environment = EnvironmentSnapshot::from_variables(variables);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            std::thread::sleep(delay);
+            let reply = format!(
+                "{}\n",
+                json!({"jsonrpc":"2.0","id":request["id"],"result":{"ok":true}})
+            );
+            if let Err(error) = stream.write_all(reply.as_bytes()) {
+                assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        });
+        let stop = AtomicBool::new(false);
+        let rpc = SubscriberRpc::new(&environment, Path::new("/tmp"), &stop).unwrap();
+        let result = rpc.execute(args);
+        server.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn timeout_policy_get_honors_short_configuration() {
+        let result = delayed_command(
+            &["get", "%1", "--json"],
+            Some("40"),
+            Duration::from_millis(250),
+        );
+        assert!(
+            result.is_err(),
+            "get must time out before the delayed reply"
+        );
+    }
+
+    #[test]
+    fn timeout_policy_default_accepts_reply_after_two_seconds() {
+        let result = delayed_command(&["get", "%1", "--json"], None, Duration::from_secs(3));
+        assert_eq!(result.unwrap().stdout, "{\"ok\":true}");
+    }
+
+    #[test]
+    fn timeout_policy_send_outlives_short_configuration() {
+        let result = delayed_command(
+            &["send", "%1", "hi", "--json"],
+            Some("40"),
+            Duration::from_millis(250),
+        );
+        assert_eq!(result.unwrap().stdout, "{\"ok\":true}");
+    }
+
+    #[test]
+    fn timeout_policy_interrupt_has_no_two_second_floor() {
+        let result = delayed_command(
+            &["interrupt", "%1", "--timeout", "2", "--json"],
+            Some("40"),
+            Duration::from_millis(250),
+        );
+        assert!(
+            result.is_err(),
+            "interrupt must honor the configured deadline"
+        );
+    }
+
     #[test]
     fn commands_preserve_wire_params_and_results() {
         let cases = [
