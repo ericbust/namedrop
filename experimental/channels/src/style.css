@@ -798,8 +798,9 @@ button.member:not(.more):hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* The card scrolls, so it clips anything outside it. Inside the 7px hit
-   area, the ring hugs the label and stays in view. */
+/* The card scrolls, so it clips anything outside it. The hit area reaches
+   7px above and below the label and 5px to each side, and the ring sits 4px
+   inside it, so it hugs the label and stays in view. */
 .attention-actions .text-button:focus-visible {
   outline-offset: -4px;
 }
