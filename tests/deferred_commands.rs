@@ -718,6 +718,11 @@ fn nonregular_records_are_removed_and_valid_commands_drain() {
 fn producer_reads_existing_state_without_writes_or_directory_creation() {
     let fixture = Fixture::new();
     response(fixture.sandbox_command(&["send"], send("prepare-spool", "first")));
+    let runtime = fixture.directory.path().join("runtime");
+    fs::create_dir(&runtime).unwrap();
+    let command_lock = runtime.join("commands.lock");
+    fs::write(&command_lock, "").unwrap();
+    fs::set_permissions(&command_lock, fs::Permissions::from_mode(0o400)).unwrap();
     let database = fixture.directory.path().join("namedrop.sqlite3");
     let before = fs::read(&database).unwrap();
     let mut entries_before: Vec<_> = fs::read_dir(fixture.directory.path())
@@ -741,6 +746,7 @@ fn producer_reads_existing_state_without_writes_or_directory_creation() {
     assert_eq!(result["data"]["state"], "pending");
     assert_eq!(db_mode, 0o400);
     assert_eq!(state_mode, 0o500);
+    assert_eq!(fs::metadata(command_lock).unwrap().permissions().mode() & 0o777, 0o400);
     assert_eq!(fs::read(&database).unwrap(), before);
     let mut entries_after: Vec<_> = fs::read_dir(fixture.directory.path())
         .unwrap()
