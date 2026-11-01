@@ -15,22 +15,28 @@ fn run_core(home: &Path, response: Value) -> (std::process::Output, Value) {
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let worker = std::thread::spawn(move || {
-        let stream = (0..100)
-            .find_map(|_| match listener.accept() {
-                Ok((stream, _)) => Some(stream),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    None
-                }
-                Err(error) => panic!("fake core accept: {error}"),
-            });
-        let Some(stream) = stream else { return Value::Null };
+        let stream = (0..100).find_map(|_| match listener.accept() {
+            Ok((stream, _)) => Some(stream),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                None
+            }
+            Err(error) => panic!("fake core accept: {error}"),
+        });
+        let Some(stream) = stream else {
+            return Value::Null;
+        };
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
         reader.read_line(&mut line).unwrap();
         let request: Value = serde_json::from_str(&line).unwrap();
         let mut stream = reader.into_inner();
-        writeln!(stream, "{}", json!({"jsonrpc":"2.0","id":request["id"],"result":response})).unwrap();
+        writeln!(
+            stream,
+            "{}",
+            json!({"jsonrpc":"2.0","id":request["id"],"result":response})
+        )
+        .unwrap();
         request
     });
     let output = run(home, &socket, "hc");
@@ -40,12 +46,32 @@ fn run_core(home: &Path, response: Value) -> (std::process::Output, Value) {
 fn seed_address(state: &Path, core: &str, space: &str, alias: &str, session: Option<&str>) {
     namedrop::StateStore::open(state).unwrap();
     let connection = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
-    connection.execute("INSERT INTO worktrees VALUES (?1,?2,1,0,0,1)", (core, space)).unwrap();
-    connection.execute("INSERT INTO pane_roles VALUES (?1,?2,'role','agent','')", (core, space)).unwrap();
+    connection
+        .execute(
+            "INSERT INTO worktrees VALUES (?1,?2,1,0,0,1)",
+            (core, space),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO pane_roles VALUES (?1,?2,'role','agent','')",
+            (core, space),
+        )
+        .unwrap();
     connection.execute("INSERT INTO pane_addresses (session_socket_id,worktree_id,address_id,role_id,retired,collaboration_disabled,created_at_ms) VALUES (?1,?2,'address','role',0,0,1)", (core, space)).unwrap();
-    connection.execute("INSERT INTO alias_claims VALUES (?1,?2,?3,'address','active',NULL)", (core, space, alias)).unwrap();
+    connection
+        .execute(
+            "INSERT INTO alias_claims VALUES (?1,?2,?3,'address','active',NULL)",
+            (core, space, alias),
+        )
+        .unwrap();
     if let Some(session) = session {
-        connection.execute("INSERT INTO pane_bindings VALUES (?1,?2,'binding','address','%1',1,NULL,1,NULL)", (core, space)).unwrap();
+        connection
+            .execute(
+                "INSERT INTO pane_bindings VALUES (?1,?2,'binding','address','%1',1,NULL,1,NULL)",
+                (core, space),
+            )
+            .unwrap();
         connection.execute("INSERT INTO agent_session_observations VALUES (?1,?2,'observation','address',?3,'working',2)", (core, space, session)).unwrap();
     }
 }
@@ -56,7 +82,11 @@ fn metadata(state: &Path) -> Vec<(String, u64, std::time::SystemTime)> {
         .map(|entry| {
             let entry = entry.unwrap();
             let meta = entry.metadata().unwrap();
-            (entry.file_name().to_string_lossy().into_owned(), meta.len(), meta.modified().unwrap())
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                meta.len(),
+                meta.modified().unwrap(),
+            )
         })
         .collect::<Vec<_>>();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -119,7 +149,10 @@ fn stopped_core_returns_empty_snapshot() {
     drop(UnixListener::bind(&socket).unwrap());
     let output = run(home.path(), &socket, "hc");
     assert_eq!(output.status.code(), Some(0), "{output:?}");
-    assert_eq!(serde_json::from_slice::<Value>(&output.stdout).unwrap()["core"], Value::Null);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()["core"],
+        Value::Null
+    );
 }
 
 #[test]
@@ -205,7 +238,11 @@ fn waits_and_replies_are_bounded_and_keep_newest_first() {
     let state = home.path().join("state");
     seed_address(&state, "hc:current", "space", "alpha", Some("session"));
     let connection = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
-    connection.execute_batch("INSERT INTO collaboration_threads VALUES ('hc:current','space','thread','',1)").unwrap();
+    connection
+        .execute_batch(
+            "INSERT INTO collaboration_threads VALUES ('hc:current','space','thread','',1)",
+        )
+        .unwrap();
     for index in 0..52 {
         let id = format!("request-{index:03}");
         connection.execute(
@@ -248,7 +285,10 @@ fn tui_nested_roster_help_is_not_exposed() {
             .output()
             .unwrap();
         assert_ne!(output.status.code(), Some(0), "{output:?}");
-        assert!(!String::from_utf8_lossy(&output.stdout).contains("Read the current hc collaboration roster"));
+        assert!(
+            !String::from_utf8_lossy(&output.stdout)
+                .contains("Read the current hc collaboration roster")
+        );
     }
 }
 
@@ -275,15 +315,27 @@ fn one_request_with_many_recipients_emits_only_fifty_stable_waits() {
     let body: Value = serde_json::from_slice(&output.stdout).unwrap();
     let waits = body["rows"][0]["waiting_on"].as_array().unwrap();
     assert_eq!(waits.len(), 50);
-    assert_eq!(waits[0], json!({"alias":"agent-000","message_id":"request"}));
-    assert_eq!(waits[49], json!({"alias":"agent-049","message_id":"request"}));
+    assert_eq!(
+        waits[0],
+        json!({"alias":"agent-000","message_id":"request"})
+    );
+    assert_eq!(
+        waits[49],
+        json!({"alias":"agent-049","message_id":"request"})
+    );
 }
 
 #[test]
 fn previous_session_messages_do_not_enter_current_row() {
     let home = PrivateHome::new();
     let state = home.path().join("state");
-    seed_address(&state, "hc:current", "space", "alpha", Some("current-session"));
+    seed_address(
+        &state,
+        "hc:current",
+        "space",
+        "alpha",
+        Some("current-session"),
+    );
     let connection = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
     connection.execute_batch(
         "INSERT INTO collaboration_threads VALUES ('hc:current','space','thread','',1);
