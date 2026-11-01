@@ -366,6 +366,115 @@ mod tests {
     }
 
     #[test]
+    fn narrow_grant_excludes_trusted_state_and_creates_spool() {
+        let f = Fixture::new();
+        activate(&f.home(), &f.state()).unwrap();
+        let config = Config::read(&f.home().join("config.toml")).unwrap();
+        let spool = f.state().join("deferred-commands");
+        assert!(spool.is_dir());
+        assert!(config.contains(spool.to_str().unwrap()));
+        assert!(!config.contains(f.state().to_str().unwrap()));
+        let roots = config.document["sandbox_workspace_write"]["writable_roots"]
+            .as_array()
+            .unwrap();
+        for protected in [
+            f.state().join("runtime/namedrop"),
+            f.state().join("namedrop.sqlite3"),
+        ] {
+            assert!(
+                !roots
+                    .iter()
+                    .any(|root| protected.starts_with(root.as_str().unwrap()))
+            );
+        }
+    }
+
+    fn legacy_grant(f: &Fixture) {
+        f.write(&format!(
+            "model = 'keep'\n[sandbox_workspace_write]\nwritable_roots = ['/user/root', {:?}]\n",
+            f.state().to_str().unwrap()
+        ));
+        fs::create_dir_all(f.state()).unwrap();
+        save(
+            &f.state(),
+            Some(&Grant {
+                config: f.home().join("config.toml"),
+                root: f.state().to_str().unwrap().into(),
+                pending: None,
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn owned_legacy_grant_is_stale_then_migrated_and_cleaned_up() {
+        let f = Fixture::new();
+        legacy_grant(&f);
+        let before = f.text();
+        assert!(
+            inspect(&f.home(), &f.state())
+                .unwrap_err()
+                .contains("stale")
+        );
+        assert_eq!(f.text(), before);
+        activate(&f.home(), &f.state()).unwrap();
+        let config = Config::read(&f.home().join("config.toml")).unwrap();
+        assert!(!config.contains(f.state().to_str().unwrap()));
+        assert!(config.contains(f.state().join("deferred-commands").to_str().unwrap()));
+        inspect(&f.home(), &f.state()).unwrap();
+        let migrated = f.text();
+        activate(&f.home(), &f.state()).unwrap();
+        assert_eq!(f.text(), migrated);
+        assert_eq!(remove(&f.state()).unwrap(), 1);
+        assert!(f.text().contains("/user/root"));
+        assert!(f.text().contains("model = 'keep'"));
+    }
+
+    #[test]
+    fn unowned_broad_grant_is_preserved_but_reported_unsafe() {
+        for ancestor in [false, true] {
+            let f = Fixture::new();
+            let broad = if ancestor { &f.0 } else { &f.state() };
+            f.write(&format!(
+                "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
+                broad.to_str().unwrap()
+            ));
+            activate(&f.home(), &f.state()).unwrap();
+            let error = inspect(&f.home(), &f.state()).unwrap_err();
+            assert!(error.contains("unsafe"), "{error}");
+            assert!(error.contains("remove"), "{error}");
+            assert_eq!(remove(&f.state()).unwrap(), 1);
+            assert!(
+                Config::read(&f.home().join("config.toml"))
+                    .unwrap()
+                    .contains(broad.to_str().unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn linked_spool_leaf_is_refused_by_all_grant_operations() {
+        let f = Fixture::new();
+        let victim = f.0.join("victim");
+        fs::create_dir(&victim).unwrap();
+        fs::create_dir(f.state()).unwrap();
+        std::os::unix::fs::symlink(&victim, f.state().join("deferred-commands")).unwrap();
+        assert!(
+            activate(&f.home(), &f.state())
+                .unwrap_err()
+                .contains("symbolic link")
+        );
+        assert!(
+            inspect(&f.home(), &f.state())
+                .unwrap_err()
+                .contains("symbolic link")
+        );
+        assert!(remove(&f.state()).unwrap_err().contains("symbolic link"));
+        assert!(!f.home().exists());
+        assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
+    }
+
+    #[test]
     fn linked_state_leaf_cannot_grant_victim_directory() {
         let f = Fixture::new();
         let victim = f.0.join("victim");
