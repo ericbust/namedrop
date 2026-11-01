@@ -1,0 +1,488 @@
+use super::{conflict, replace_if_changed};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    io::ErrorKind,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
+use toml_edit::{DocumentMut, Item};
+
+const RECORD: &str = "codex-sandbox.json";
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Grant {
+    config: PathBuf,
+    root: String,
+    pending: Option<Pending>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pending {
+    before: Option<String>,
+    after: String,
+}
+
+fn read(path: &Path) -> Result<Option<String>, String> {
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if metadata.is_symlink() => {
+                return Err(conflict(ancestor, "is a symbolic link"));
+            }
+            Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.to_string()),
+            _ => {}
+        }
+    }
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(conflict(path, &error.to_string())),
+    }
+}
+
+fn lock(path: &Path) -> Result<fs::File, String> {
+    read(path)?;
+    fs::create_dir_all(path.parent().expect("lock parent")).map_err(|e| e.to_string())?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|e| conflict(path, &e.to_string()))?;
+    file.lock().map_err(|e| e.to_string())?;
+    Ok(file)
+}
+
+fn hash(text: &str) -> String {
+    crate::lower_hex(&Sha256::digest(text.as_bytes()))
+}
+
+fn record(state: &Path) -> Result<Option<Grant>, String> {
+    let Some(text) = read(&state.join(RECORD))? else {
+        return Ok(None);
+    };
+    let grant: Option<Grant> = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    if let Some(grant) = &grant
+        && (!grant.config.is_absolute()
+            || grant.config.file_name().is_none_or(|n| n != "config.toml")
+            || grant.root != root(state)?)
+    {
+        return Err("invalid Codex sandbox ownership record".into());
+    }
+    Ok(grant)
+}
+
+fn save(state: &Path, grant: Option<&Grant>) -> Result<(), String> {
+    replace_if_changed(
+        &state.join(RECORD),
+        &serde_json::to_string_pretty(&grant).map_err(|e| e.to_string())?,
+        Some(0o600),
+    )
+}
+
+fn root(state: &Path) -> Result<String, String> {
+    if !state.is_absolute()
+        || state
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("Namedrop state directory must be absolute without parent components".into());
+    }
+    state
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "Namedrop state directory must be UTF-8".into())
+}
+
+struct Config {
+    path: PathBuf,
+    before: Option<String>,
+    document: DocumentMut,
+    mode: u32,
+}
+impl Config {
+    fn read(path: &Path) -> Result<Self, String> {
+        let before = read(path)?;
+        let document = before
+            .as_deref()
+            .unwrap_or("")
+            .parse::<DocumentMut>()
+            .map_err(|e| conflict(path, &format!("is invalid TOML: {e}")))?;
+        if let Some(table) = document.get("sandbox_workspace_write") {
+            let table = table
+                .as_table_like()
+                .ok_or_else(|| conflict(path, "sandbox_workspace_write must be a table"))?;
+            if let Some(roots) = table.get("writable_roots") {
+                let roots = roots
+                    .as_array()
+                    .ok_or_else(|| conflict(path, "writable_roots must be an array of strings"))?;
+                if roots.iter().any(|v| v.as_str().is_none()) {
+                    return Err(conflict(path, "writable_roots must be an array of strings"));
+                }
+            }
+        }
+        let mode = fs::metadata(path)
+            .map(|m| m.permissions().mode() & 0o7777)
+            .unwrap_or(0o600);
+        Ok(Self {
+            path: path.to_owned(),
+            before,
+            document,
+            mode,
+        })
+    }
+    fn contains(&self, root: &str) -> bool {
+        self.document
+            .get("sandbox_workspace_write")
+            .and_then(Item::as_table_like)
+            .and_then(|t| t.get("writable_roots"))
+            .and_then(Item::as_array)
+            .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(root)))
+    }
+    fn add(&mut self, root: &str) {
+        if self.document.get("sandbox_workspace_write").is_none() {
+            self.document["sandbox_workspace_write"] = Item::Table(toml_edit::Table::new());
+        }
+        let table = self.document["sandbox_workspace_write"]
+            .as_table_like_mut()
+            .expect("validated table");
+        if table.get("writable_roots").is_none() {
+            table.insert("writable_roots", toml_edit::value(toml_edit::Array::new()));
+        }
+        table
+            .get_mut("writable_roots")
+            .and_then(Item::as_array_mut)
+            .expect("validated roots")
+            .push(root);
+    }
+    fn remove(&mut self, root: &str) -> bool {
+        let Some(array) = self
+            .document
+            .get_mut("sandbox_workspace_write")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|t| t.get_mut("writable_roots"))
+            .and_then(Item::as_array_mut)
+        else {
+            return false;
+        };
+        let Some(index) = array.iter().position(|v| v.as_str() == Some(root)) else {
+            return false;
+        };
+        array.remove(index);
+        true
+    }
+    fn publish(&self) -> Result<(), String> {
+        if read(&self.path)? != self.before {
+            return Err(conflict(
+                &self.path,
+                "changed during the sandbox grant update",
+            ));
+        }
+        replace_if_changed(&self.path, &self.document.to_string(), Some(self.mode))
+    }
+}
+
+fn recover(state: &Path, mut grant: Grant, config: &Config) -> Result<Option<Grant>, String> {
+    if let Some(pending) = &grant.pending {
+        let actual = config.before.as_deref().map(hash);
+        if actual.as_ref() == Some(&pending.after) {
+            grant.pending = None;
+            save(state, Some(&grant))?;
+        } else if actual == pending.before {
+            save(state, None)?;
+            return Ok(None);
+        } else {
+            return Err(conflict(
+                &grant.config,
+                "changed after an interrupted Codex sandbox grant; inspect the ownership record before repair",
+            ));
+        }
+    }
+    Ok(Some(grant))
+}
+
+fn remove_owned(state: &Path) -> Result<usize, String> {
+    let Some(grant) = record(state)? else {
+        return Ok(0);
+    };
+    let _config_guard = lock(&grant.config.with_file_name(".namedrop-sandbox.lock"))?;
+    let mut config = Config::read(&grant.config)?;
+    let Some(grant) = recover(state, grant, &config)? else {
+        return Ok(0);
+    };
+    let removed = config.remove(&grant.root);
+    if removed {
+        config.publish()?;
+    }
+    save(state, None)?;
+    Ok(usize::from(removed))
+}
+
+// Lifecycle callers hold the state transaction through activation and this write.
+pub(crate) fn activate(directory: &Path, state: &Path) -> Result<(), String> {
+    if !directory.is_absolute() {
+        return Err("CODEX_HOME must be absolute".into());
+    }
+    let root = root(state)?;
+    let path = directory.join("config.toml");
+    let _state_guard = lock(&state.join("codex-sandbox.lock"))?;
+    Config::read(&path)?;
+    if record(state)?.is_some_and(|g| g.config != path) {
+        remove_owned(state)?;
+    }
+    let _config_guard = lock(&directory.join(".namedrop-sandbox.lock"))?;
+    let mut config = Config::read(&path)?;
+    if let Some(grant) = record(state)? {
+        recover(state, grant, &config)?;
+    }
+    if config.contains(&root) {
+        return Ok(());
+    }
+    config.add(&root);
+    let mut grant = Grant {
+        config: path,
+        root,
+        pending: Some(Pending {
+            before: config.before.as_deref().map(hash),
+            after: hash(&config.document.to_string()),
+        }),
+    };
+    save(state, Some(&grant))?;
+    config.publish()?;
+    grant.pending = None;
+    save(state, Some(&grant))
+}
+
+pub(crate) fn remove(state: &Path) -> Result<usize, String> {
+    let (_package_guard, current) = crate::installed_runtime::package_guard()?;
+    if !current {
+        return Ok(0);
+    }
+    crate::StateStore::open(state)
+        .map_err(|e| e.to_string())?
+        .transaction(|tx| {
+            if tx.any_activated_worktrees()? {
+                return Ok(0);
+            }
+            let _guard = lock(&state.join("codex-sandbox.lock"))
+                .map_err(crate::StoreError::invalid_input)?;
+            remove_owned(state).map_err(crate::StoreError::invalid_input)
+        })
+        .map_err(|e| e.to_string())
+}
+
+pub(super) fn inspect(directory: &Path, state: &Path) -> Result<(), String> {
+    let path = directory.join("config.toml");
+    let grant = record(state)?;
+    if grant.is_some_and(|g| g.config != path || g.pending.is_some()) {
+        return Err(conflict(
+            &path,
+            "has a stale or pending Codex sandbox grant; activate Namedrop again to repair it",
+        ));
+    }
+    if !Config::read(&path)?.contains(&root(state)?) {
+        return Err(conflict(
+            &path,
+            "is missing the Namedrop state writable root; activate Namedrop again, then start a new Codex session. Explicit Codex permission profiles require their own state-directory grant",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "namedrop-codex-grant-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn home(&self) -> PathBuf {
+            self.0.join("custom-codex")
+        }
+        fn state(&self) -> PathBuf {
+            self.0.join("state")
+        }
+        fn write(&self, text: &str) {
+            fs::create_dir_all(self.home()).unwrap();
+            fs::write(self.home().join("config.toml"), text).unwrap();
+        }
+        fn text(&self) -> String {
+            fs::read_to_string(self.home().join("config.toml")).unwrap()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[test]
+    fn activation_grants_exact_state_preserves_settings_mode_and_is_idempotent() {
+        use std::os::unix::fs::MetadataExt;
+        let f = Fixture::new();
+        f.write("# keep this\nmodel = 'example'\napproval_policy = 'on-request'\n[sandbox_workspace_write]\nwritable_roots = ['/user/root']\nnetwork_access = false\n");
+        fs::set_permissions(
+            f.home().join("config.toml"),
+            fs::Permissions::from_mode(0o640),
+        )
+        .unwrap();
+        activate(&f.home(), &f.state()).unwrap();
+        let first = f.text();
+        assert!(first.contains("# keep this"));
+        assert!(first.contains("model = 'example'"));
+        assert!(first.contains("approval_policy = 'on-request'"));
+        assert!(first.contains("network_access = false"));
+        let config = Config::read(&f.home().join("config.toml")).unwrap();
+        assert!(config.contains(f.state().to_str().unwrap()));
+        assert!(config.contains("/user/root"));
+        assert!(!config.contains(f.0.to_str().unwrap()));
+        let metadata = fs::metadata(f.home().join("config.toml")).unwrap();
+        assert_eq!(metadata.mode() & 0o777, 0o640);
+        activate(&f.home(), &f.state()).unwrap();
+        assert_eq!(f.text(), first);
+        assert_eq!(
+            metadata.ino(),
+            fs::metadata(f.home().join("config.toml")).unwrap().ino()
+        );
+        assert_eq!(remove(&f.state()).unwrap(), 1);
+        assert!(f.text().contains("/user/root"));
+        assert!(
+            !Config::read(&f.home().join("config.toml"))
+                .unwrap()
+                .contains(f.state().to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn preexisting_root_is_never_owned_or_removed() {
+        let f = Fixture::new();
+        f.write(&format!(
+            "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
+            f.state().to_str().unwrap()
+        ));
+        let before = f.text();
+        activate(&f.home(), &f.state()).unwrap();
+        assert!(record(&f.state()).unwrap().is_none());
+        assert_eq!(remove(&f.state()).unwrap(), 0);
+        assert_eq!(before, f.text());
+    }
+
+    #[test]
+    fn inspection_is_read_only_and_detects_missing_and_moved_grants() {
+        let f = Fixture::new();
+        assert!(
+            inspect(&f.home(), &f.state())
+                .unwrap_err()
+                .contains("missing")
+        );
+        assert!(!f.home().exists());
+        assert!(!f.state().exists());
+        activate(&f.home(), &f.state()).unwrap();
+        inspect(&f.home(), &f.state()).unwrap();
+        let next = f.0.join("other-codex");
+        assert!(inspect(&next, &f.state()).unwrap_err().contains("stale"));
+        assert!(!next.exists());
+        activate(&next, &f.state()).unwrap();
+        assert!(
+            !Config::read(&f.home().join("config.toml"))
+                .unwrap()
+                .contains(f.state().to_str().unwrap())
+        );
+        inspect(&next, &f.state()).unwrap();
+        fs::write(next.join("config.toml"), "model = 'user edit'\n").unwrap();
+        assert!(inspect(&next, &f.state()).unwrap_err().contains("missing"));
+        assert_eq!(
+            fs::read_to_string(next.join("config.toml")).unwrap(),
+            "model = 'user edit'\n"
+        );
+    }
+
+    #[test]
+    fn malformed_and_symlinked_configs_are_not_modified() {
+        let f = Fixture::new();
+        for text in [
+            "not valid TOML",
+            "sandbox_workspace_write = 3",
+            "[sandbox_workspace_write]\nwritable_roots = ['/root', 1]",
+        ] {
+            f.write(text);
+            assert!(activate(&f.home(), &f.state()).is_err());
+            assert_eq!(f.text(), text);
+            assert!(record(&f.state()).unwrap().is_none());
+        }
+        let config = f.home().join("config.toml");
+        let target = f.0.join("user-config");
+        fs::rename(&config, &target).unwrap();
+        std::os::unix::fs::symlink(&target, &config).unwrap();
+        assert!(
+            activate(&f.home(), &f.state())
+                .unwrap_err()
+                .contains("symbolic link")
+        );
+        assert!(fs::symlink_metadata(config).unwrap().is_symlink());
+    }
+
+    #[test]
+    fn last_active_space_removes_the_grant() {
+        let f = Fixture::new();
+        activate(&f.home(), &f.state()).unwrap();
+        let mut store = crate::StateStore::open(&f.state()).unwrap();
+        let first = crate::StateNamespace::for_space("socket", "first");
+        let second = crate::StateNamespace::for_space("socket", "second");
+        let actor = crate::MutationAttribution::new(crate::ActorKind::Human, "test", 1);
+        store
+            .transaction(|tx| {
+                tx.activate_worktree(&first, &actor)?;
+                tx.activate_worktree(&second, &actor)
+            })
+            .unwrap();
+        assert_eq!(remove(&f.state()).unwrap(), 0);
+        store
+            .transaction(|tx| tx.deactivate_worktree(&first, &actor))
+            .unwrap();
+        assert_eq!(remove(&f.state()).unwrap(), 0);
+        store
+            .transaction(|tx| tx.deactivate_worktree(&second, &actor))
+            .unwrap();
+        assert_eq!(remove(&f.state()).unwrap(), 1);
+    }
+
+    #[test]
+    fn interrupted_publication_recovers_ownership_without_config_secrets() {
+        let f = Fixture::new();
+        f.write("api_key = 'PRIVATE'\n");
+        super::super::FAIL_DIRECTORY_SYNC
+            .with(|fault| *fault.borrow_mut() = Some(f.home().join("config.toml")));
+        assert!(activate(&f.home(), &f.state()).is_err());
+        super::super::FAIL_DIRECTORY_SYNC.with(|fault| *fault.borrow_mut() = None);
+        assert!(
+            !fs::read_to_string(f.state().join(RECORD))
+                .unwrap()
+                .contains("PRIVATE")
+        );
+        assert!(
+            inspect(&f.home(), &f.state())
+                .unwrap_err()
+                .contains("pending")
+        );
+        activate(&f.home(), &f.state()).unwrap();
+        inspect(&f.home(), &f.state()).unwrap();
+        assert_eq!(remove(&f.state()).unwrap(), 1);
+    }
+}
