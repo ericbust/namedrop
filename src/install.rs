@@ -14,6 +14,7 @@ use std::{
 use toml_edit::{DocumentMut, Item};
 
 mod claude_permissions;
+pub(crate) mod codex_sandbox;
 mod command;
 pub(crate) use claude_permissions::remove_claude_permissions;
 pub(crate) use command::install_shell_command;
@@ -118,9 +119,10 @@ pub fn disclosed_user_package_targets(
     let claude_settings = claude_permissions::settings_path(&config.claude(home_directory))
         .unwrap_or_else(|_| home_directory.join(".claude/settings.json"));
     format!(
-        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, shell command: {}, PATH entries in zsh/bash startup files",
+        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, Codex state writable root in {}, shell command: {}, PATH entries in zsh/bash startup files",
         claude_settings.display(),
         codex_home.join("rules/namedrop.rules").display(),
+        codex_home.join("config.toml").display(),
         home_directory.join(".local/bin/namedrop").display()
     )
 }
@@ -471,6 +473,9 @@ pub(crate) fn inspect_integration_package(
     }
     if let Some((path, contents)) = prepared.codex_policy {
         inspect_installed_file(&path, &contents, Some(0o600))?;
+    }
+    if runtime == AgentRuntime::Codex {
+        codex_sandbox::inspect(&config.codex(home), state)?;
     }
     if runtime == AgentRuntime::ClaudeCode {
         claude_permissions::inspect(&config.claude(home), &executable, state)?;

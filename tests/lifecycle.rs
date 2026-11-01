@@ -157,10 +157,14 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
     let directory = TestDirectory::new();
     let herdr = NameHerdr::default();
     let ids = NameIds(AtomicU64::new(1));
+    let codex_home = directory.path().join("custom-codex");
     let runtime = LifecycleRuntime {
         state_directory: directory.path(),
         home_directory: Some(directory.home()),
-        agent_config: namedrop::AgentConfigDirectories::default(),
+        agent_config: namedrop::AgentConfigDirectories {
+            codex: Some(&codex_home),
+            claude: None,
+        },
         cwd: Path::new("/repo"),
         workspace_id: None,
         current_pane_id: Some("pane-1"),
@@ -184,6 +188,62 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
             .unwrap()[0]
             .alias,
         "reviewer"
+    );
+    let config_path = codex_home.join("config.toml");
+    let granted = fs::read_to_string(&config_path).unwrap();
+    let config = granted.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(
+        config["sandbox_workspace_write"]["writable_roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![directory.path().to_str().unwrap()]
+    );
+    assert!(!directory.home().join(".codex/config.toml").exists());
+    fs::write(&config_path, "model = 'user-model'\n").unwrap();
+    let report = namedrop::diagnose_collaboration(&runtime);
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| {
+            issue.code == "ND-INTEGRATION-001" && issue.explanation.contains("writable root")
+        })
+        .unwrap();
+    assert!(issue.explanation.contains("activate Namedrop again"));
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        "model = 'user-model'\n"
+    );
+    execute_lifecycle_operation("name", serde_json::json!({"alias": "@reviewer"}), &runtime)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        "model = 'user-model'\n",
+        "repeated naming must not repair Codex config from inside an agent sandbox"
+    );
+    let repaired =
+        execute_lifecycle_operation("activate", serde_json::json!({"confirmed": true}), &runtime)
+            .unwrap();
+    assert!(
+        repaired["codex_sandbox"]["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("new Codex session")
+    );
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("writable_roots")
+    );
+    let removed =
+        execute_lifecycle_operation("deactivate", serde_json::json!({}), &runtime).unwrap();
+    assert_eq!(removed["codex_sandbox"]["removed_entries"], 1);
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("model = 'user-model'")
     );
     let commands = herdr.commands.lock().unwrap();
     assert!(commands.iter().any(|command| {
