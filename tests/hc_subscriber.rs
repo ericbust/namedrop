@@ -4171,3 +4171,103 @@ fn check_saved_resume(recovery: &str) {
         assert_eq!(resume_count(), 1);
     });
 }
+
+#[test]
+fn post_snapshot_created_pane_keeps_its_failed_read_retry() {
+    for snapshot_first in [true, false] {
+        check(
+            &format!("snapshot-created-retry-{snapshot_first}"),
+            |fixture, runtime| {
+                let runtime = namedrop::LifecycleRuntime {
+                    clock: &RetryClock(10_000),
+                    state_directory: runtime.state_directory,
+                    home_directory: runtime.home_directory,
+                    agent_config: runtime.agent_config,
+                    cwd: runtime.cwd,
+                    workspace_id: runtime.workspace_id,
+                    current_pane_id: runtime.current_pane_id,
+                    session_socket_id: runtime.session_socket_id,
+                    host: runtime.host,
+                    ids: runtime.ids,
+                };
+                let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                subscriber
+                    .handle_line(&session_event("snapshot", fixture), &runtime)
+                    .unwrap();
+                let snapshot =
+                    json!({"seq":10,"terminals":*fixture.terminals.borrow()}).to_string();
+                let created =
+                    json!({"method":"event","params":{"type":"created","terminal":"t5","seq":11}})
+                        .to_string();
+                let mut new_pane = fixture.terminals.borrow()[0].clone();
+                new_pane["address"] = json!("t5");
+                new_pane["labels"] = json!({"herdr.space":"fixture-space","namedrop.name":"eve"});
+                fixture.terminals.borrow_mut().push(new_pane);
+                *fixture.get_failure.borrow_mut() = Some("t5".into());
+                fixture.calls.borrow_mut().clear();
+                let lines = if snapshot_first {
+                    [&snapshot, &created]
+                } else {
+                    [&created, &snapshot]
+                };
+                subscriber
+                    .handle_lines(lines.map(String::as_str), &runtime)
+                    .unwrap();
+                assert_retry_calls(fixture, &["t5"], 0);
+                fixture.calls.borrow_mut().clear();
+                for now in [10_001, 10_100, 10_499] {
+                    let runtime = namedrop::LifecycleRuntime {
+                        clock: &RetryClock(now),
+                        ..runtime
+                    };
+                    subscriber
+                        .handle_line(r#"{"method":"heartbeat","params":{}}"#, &runtime)
+                        .unwrap();
+                    subscriber.tick(&runtime).unwrap();
+                    assert_retry_calls(fixture, &[], 0);
+                }
+                *fixture.get_failure.borrow_mut() = None;
+                subscriber
+                    .tick(&namedrop::LifecycleRuntime {
+                        clock: &RetryClock(10_500),
+                        ..runtime
+                    })
+                    .unwrap();
+                assert_eq!(
+                    fixture
+                        .calls
+                        .borrow()
+                        .iter()
+                        .filter(|call| call[0] == "get")
+                        .map(|call| call[1].clone())
+                        .collect::<Vec<_>>(),
+                    ["t5"],
+                    "the event newer than the snapshot must retain its read retry"
+                );
+                assert!(fixture.calls.borrow().iter().all(|call| call[0] != "ls"));
+                let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+                let addresses = namedrop::StateStore::open(runtime.state_directory)
+                    .unwrap()
+                    .transaction(|tx| tx.list_pane_addresses(&namespace))
+                    .unwrap();
+                assert!(
+                    addresses.iter().any(|address| address.alias == "eve"
+                        && address.pane_id.as_deref() == Some("t5")),
+                    "the due read must reconcile the newly observed pane"
+                );
+                fixture.calls.borrow_mut().clear();
+                for now in [11_000, 40_000] {
+                    let runtime = namedrop::LifecycleRuntime {
+                        clock: &RetryClock(now),
+                        ..runtime
+                    };
+                    subscriber
+                        .handle_line(r#"{"method":"heartbeat","params":{}}"#, &runtime)
+                        .unwrap();
+                    subscriber.tick(&runtime).unwrap();
+                }
+                assert_retry_calls(fixture, &[], 0);
+            },
+        );
+    }
+}
