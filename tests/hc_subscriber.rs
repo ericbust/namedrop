@@ -229,8 +229,8 @@ fn rejected_name_is_correlated_and_returned() {
         let result =
             namedrop::host::hc::events::Subscriber::default().handle_line(&labels(), runtime);
         assert!(
-            result.is_err(),
-            "name rejection must be returned, got {result:?}"
+            result.is_ok(),
+            "published name rejection is settled, got {result:?}"
         );
         let terminal = &fixture.terminals.borrow()[0];
         let error: Value =
@@ -735,7 +735,7 @@ fn successful_retry_clears_error_and_generic_labels_do_not_rename() {
     check("retry", |fixture, runtime| {
         let mut subscriber = namedrop::host::hc::events::Subscriber::default();
         fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("bad name");
-        assert!(subscriber.handle_line(&labels(), runtime).is_err());
+        subscriber.handle_line(&labels(), runtime).unwrap();
         fixture.calls.borrow_mut().clear();
         subscriber.handle_line(&labels(), runtime).unwrap();
         assert!(fixture.calls.borrow().iter().all(|call| call[0] != "label"));
@@ -2102,7 +2102,7 @@ fn pending_event_survives_transient_store_read_failure() {
             .execute_batch("ALTER TABLE unavailable_worktrees RENAME TO worktrees")
             .unwrap();
         let retry = namedrop::LifecycleRuntime {
-            clock: &RetryClock(11_000),
+            clock: &RetryClock(11_500),
             ..runtime
         };
         subscriber.tick(&retry).unwrap();
@@ -2488,7 +2488,7 @@ fn due_mailbox_tick_retries_unavailable_owner_and_settles_healthy_mail() {
                 .calls
                 .borrow()
                 .iter()
-                .filter(|call| call[0] == "get" && call[1] == "t1")
+                .filter(|call| call[0] == "get")
                 .count(),
             1,
             "only the failed pane needs a due refresh: {:?}",
@@ -2820,7 +2820,7 @@ fn failed_get_retries_back_off_to_thirty_seconds_without_heartbeat_work() {
                     .calls
                     .borrow()
                     .iter()
-                    .filter(|call| call[0] == "get" && call[1] == "t1")
+                    .filter(|call| call[0] == "get")
                     .count(),
                 1,
                 "missing retry at {due}"
@@ -2868,7 +2868,7 @@ fn nonshell_terminal_first_name_agrees_with_public_detection() {
                 r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#,
                 &runtime,
             )
-            .expect_err("nonshell naming must require an explicit type");
+            .expect("published uncertain-type rejection is settled");
         let error: Value = serde_json::from_str(
             fixture.terminals.borrow()[1]["labels"]["namedrop.name.error"]
                 .as_str()
@@ -2962,7 +2962,9 @@ fn unrelated_batch_error_cannot_bypass_failed_get_backoff() {
                         .calls
                         .borrow()
                         .iter()
-                        .all(|call| call[0] != "get" || call[1] != "t1"),
+                        .filter(|call| call[0] == "get")
+                        .map(|call| call[1].as_str())
+                        .eq(["t2"]),
                     "unrelated error bypassed failed pane backoff: {:?}",
                     fixture.calls.borrow()
                 );
@@ -2978,7 +2980,7 @@ fn unrelated_batch_error_cannot_bypass_failed_get_backoff() {
                         .calls
                         .borrow()
                         .iter()
-                        .filter(|call| call[0] == "get" && call[1] == "t1")
+                        .filter(|call| call[0] == "get")
                         .count(),
                     1,
                     "batch retry discarded failed pane readiness"
@@ -3295,5 +3297,304 @@ fn restart_cancels_held_mail_only_after_confirmed_terminal_close() {
                 },
             );
         }
+    }
+}
+
+fn assert_retry_calls(fixture: &Fixture, gets: &[&str], labels: usize) {
+    let calls = fixture.calls.borrow();
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| call[0] == "get")
+            .map(|call| call[1].as_str())
+            .collect::<Vec<_>>(),
+        gets,
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls.iter().filter(|call| call[0] == "ls").count(),
+        0,
+        "{calls:?}"
+    );
+    assert_eq!(
+        calls.iter().filter(|call| call[0] == "label").count(),
+        labels,
+        "{calls:?}"
+    );
+}
+
+#[test]
+fn batch_retry_only_reads_failed_pane_on_its_due_tick() {
+    check("batch-retry-owner", |fixture, runtime| {
+        let runtime = namedrop::LifecycleRuntime {
+            clock: &RetryClock(10_000),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            host: runtime.host,
+            ids: runtime.ids,
+        };
+        for (pane, name) in [("t2", "bob"), ("t3", "carol"), ("t4", "dave")] {
+            let mut other = fixture.terminals.borrow()[0].clone();
+            other["address"] = json!(pane);
+            other["labels"]["namedrop.name"] = json!(name);
+            fixture.terminals.borrow_mut().push(other);
+        }
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        fixture.terminals.borrow_mut()[1]["labels"]["namedrop.name"] = json!("");
+        *fixture.name_write_failure.borrow_mut() = Some(false);
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap_err();
+        for due in [
+            10_500, 11_500, 13_500, 17_500, 25_500, 41_500, 71_500, 101_500,
+        ] {
+            fixture.calls.borrow_mut().clear();
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(due - 1),
+                    ..runtime
+                })
+                .unwrap();
+            assert_retry_calls(fixture, &[], 0);
+            subscriber
+                .handle_line(
+                    r#"{"method":"heartbeat","params":{}}"#,
+                    &namedrop::LifecycleRuntime {
+                        clock: &RetryClock(due + 1),
+                        ..runtime
+                    },
+                )
+                .unwrap();
+            assert_retry_calls(fixture, &[], 0);
+            subscriber
+                .handle_line(
+                    r#"{"method":"event","params":{"type":"labels","terminal":"t3"}}"#,
+                    &namedrop::LifecycleRuntime {
+                        clock: &RetryClock(due - 1),
+                        ..runtime
+                    },
+                )
+                .unwrap();
+            assert_retry_calls(fixture, &["t3"], 0);
+            fixture.calls.borrow_mut().clear();
+            *fixture.name_write_failure.borrow_mut() = Some(false);
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(due),
+                    ..runtime
+                })
+                .unwrap_err();
+            assert_retry_calls(fixture, &["t2"], 1);
+            eprintln!("batch retry at {due}: gets=[t2], lists=0, labels=1");
+        }
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .tick(&namedrop::LifecycleRuntime {
+                clock: &RetryClock(131_500),
+                ..runtime
+            })
+            .unwrap();
+        assert_retry_calls(fixture, &["t2"], 1);
+        fixture.terminals.borrow_mut()[1]["labels"]["namedrop.name"] = json!("");
+        *fixture.name_write_failure.borrow_mut() = Some(false);
+        subscriber
+            .handle_line(
+                r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#,
+                &namedrop::LifecycleRuntime {
+                    clock: &RetryClock(132_000),
+                    ..runtime
+                },
+            )
+            .unwrap_err();
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .tick(&namedrop::LifecycleRuntime {
+                clock: &RetryClock(132_499),
+                ..runtime
+            })
+            .unwrap();
+        assert_retry_calls(fixture, &[], 0);
+        subscriber
+            .tick(&namedrop::LifecycleRuntime {
+                clock: &RetryClock(132_500),
+                ..runtime
+            })
+            .unwrap();
+        assert_retry_calls(fixture, &["t2"], 1);
+    });
+}
+
+#[test]
+fn space_batch_retry_uses_cached_terminals_and_retries_needed_labels() {
+    for counters in [false, true] {
+        check(
+            &format!("space-batch-retry-{counters}"),
+            |fixture, runtime| {
+                let runtime = namedrop::LifecycleRuntime {
+                    clock: &RetryClock(10_000),
+                    state_directory: runtime.state_directory,
+                    home_directory: runtime.home_directory,
+                    agent_config: runtime.agent_config,
+                    cwd: runtime.cwd,
+                    workspace_id: runtime.workspace_id,
+                    current_pane_id: runtime.current_pane_id,
+                    session_socket_id: runtime.session_socket_id,
+                    host: runtime.host,
+                    ids: runtime.ids,
+                };
+                let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                subscriber
+                    .handle_line(&session_event("snapshot", fixture), &runtime)
+                    .unwrap();
+                let connection =
+                    rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3"))
+                        .unwrap();
+                if counters {
+                    fixture.terminals.borrow_mut()[0]["labels"]["namedrop.awaiting"] = json!("-1");
+                    *fixture.counter_failure.borrow_mut() = true;
+                } else {
+                    connection.execute_batch("CREATE TRIGGER fail_reconcile BEFORE UPDATE ON reconciliation_epochs BEGIN SELECT RAISE(ABORT, 'injected reconciliation failure'); END;").unwrap();
+                }
+                subscriber.handle_line(&labels(), &runtime).unwrap_err();
+                fixture.calls.borrow_mut().clear();
+                subscriber
+                    .handle_line(
+                        r#"{"method":"heartbeat","params":{}}"#,
+                        &namedrop::LifecycleRuntime {
+                            clock: &RetryClock(10_501),
+                            ..runtime
+                        },
+                    )
+                    .unwrap();
+                assert_retry_calls(fixture, &[], 0);
+                subscriber
+                    .tick(&namedrop::LifecycleRuntime {
+                        clock: &RetryClock(10_499),
+                        ..runtime
+                    })
+                    .unwrap();
+                assert_retry_calls(fixture, &[], 0);
+                subscriber
+                    .tick(&namedrop::LifecycleRuntime {
+                        clock: &RetryClock(10_500),
+                        ..runtime
+                    })
+                    .unwrap_err();
+                assert_retry_calls(fixture, &[], usize::from(counters));
+                fixture.calls.borrow_mut().clear();
+                subscriber
+                    .tick(&namedrop::LifecycleRuntime {
+                        clock: &RetryClock(11_000),
+                        ..runtime
+                    })
+                    .unwrap();
+                assert_retry_calls(fixture, &[], 0);
+                if counters {
+                    *fixture.counter_failure.borrow_mut() = false;
+                } else {
+                    connection
+                        .execute_batch("DROP TRIGGER fail_reconcile;")
+                        .unwrap();
+                }
+                subscriber
+                    .tick(&namedrop::LifecycleRuntime {
+                        clock: &RetryClock(11_500),
+                        ..runtime
+                    })
+                    .unwrap();
+                assert_retry_calls(fixture, &[], usize::from(counters));
+                assert_eq!(
+                    fixture.terminals.borrow()[0]["labels"]["namedrop.awaiting"],
+                    "0"
+                );
+                eprintln!(
+                    "space retry counters={counters}: gets=0 lists=0 labels={}",
+                    usize::from(counters)
+                );
+            },
+        );
+    }
+}
+
+#[test]
+fn published_name_rejections_schedule_no_batch_retry() {
+    for rejection in ["invalid", "conflict", "uncertain"] {
+        check(&format!("settled-name-{rejection}"), |fixture, runtime| {
+            let runtime = namedrop::LifecycleRuntime {
+                clock: &RetryClock(10_000),
+                state_directory: runtime.state_directory,
+                home_directory: runtime.home_directory,
+                agent_config: runtime.agent_config,
+                cwd: runtime.cwd,
+                workspace_id: runtime.workspace_id,
+                current_pane_id: runtime.current_pane_id,
+                session_socket_id: runtime.session_socket_id,
+                host: runtime.host,
+                ids: runtime.ids,
+            };
+            let mut other = fixture.terminals.borrow()[0].clone();
+            other["address"] = json!("t2");
+            other["labels"] = json!({"herdr.space":"fixture-space"});
+            if rejection == "uncertain" {
+                other["pid"] = Value::Null;
+                other["foreground"] = Value::Null;
+            }
+            fixture.terminals.borrow_mut().push(other);
+            let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+            subscriber
+                .handle_line(&session_event("snapshot", fixture), &runtime)
+                .unwrap();
+            let requested = match rejection {
+                "invalid" => "bad name",
+                "conflict" => "alice",
+                _ => "unknown",
+            };
+            fixture.terminals.borrow_mut()[1]["labels"]["namedrop.name"] = json!(requested);
+            subscriber
+                .handle_line(
+                    r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#,
+                    &runtime,
+                )
+                .unwrap();
+            let response: Value = serde_json::from_str(
+                fixture.terminals.borrow()[1]["labels"]["namedrop.name.error"]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(response["requested"], requested);
+            assert!(!response["message"].as_str().unwrap().is_empty());
+            fixture.calls.borrow_mut().clear();
+            subscriber
+                .handle_line(
+                    r#"{"method":"heartbeat","params":{}}"#,
+                    &namedrop::LifecycleRuntime {
+                        clock: &RetryClock(10_501),
+                        ..runtime
+                    },
+                )
+                .unwrap();
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(10_500),
+                    ..runtime
+                })
+                .unwrap();
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(40_000),
+                    ..runtime
+                })
+                .unwrap();
+            assert_retry_calls(fixture, &[], 0);
+        });
     }
 }
