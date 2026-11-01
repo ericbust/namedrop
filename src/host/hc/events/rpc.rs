@@ -325,11 +325,10 @@ impl<'a> SubscriberRpc<'a> {
 
 impl HerdrCommandExecutor for SubscriberRpc<'_> {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
-        let timeout = if args.first() == Some(&"send") {
-            Duration::from_secs(20)
-        } else {
-            Duration::from_secs(2)
-        };
+        let timeout = crate::runtime::hc_command_timeout(
+            crate::runtime::configured_herdr_timeout(self.environment),
+            args,
+        );
         self.execute_bounded(args, timeout, self.stop, FRAME_LIMIT)
     }
     fn execute_bounded(
@@ -341,7 +340,7 @@ impl HerdrCommandExecutor for SubscriberRpc<'_> {
     ) -> Result<HerdrCommandOutput, String> {
         let (method, params) = self.command(args)?;
         let budget = Budget {
-            deadline: Instant::now() + timeout.min(Duration::from_secs(60)),
+            deadline: Instant::now() + crate::runtime::cap_hc_timeout(timeout),
             stop: self.stop,
             cancelled,
         };

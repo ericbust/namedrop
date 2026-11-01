@@ -332,6 +332,31 @@ static NEXT_HERDR_OUTPUT_FILE: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_HERDR_TIMEOUT_MS: u64 = 10_000;
 const MAX_HERDR_TIMEOUT_MS: u64 = 60_000;
 
+pub(crate) fn configured_herdr_timeout(
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Duration {
+    Duration::from_millis(
+        environment
+            .var("NAMEDROP_HERDR_TIMEOUT_MS")
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+            .unwrap_or(DEFAULT_HERDR_TIMEOUT_MS)
+            .min(MAX_HERDR_TIMEOUT_MS),
+    )
+}
+
+pub(crate) fn hc_command_timeout(configured: Duration, args: &[&str]) -> Duration {
+    if args.first() == Some(&"send") {
+        Duration::from_secs(20)
+    } else {
+        configured
+    }
+}
+
+pub(crate) fn cap_hc_timeout(timeout: Duration) -> Duration {
+    timeout.min(Duration::from_millis(MAX_HERDR_TIMEOUT_MS))
+}
+
 pub struct ProcessHerdr {
     binary: std::ffi::OsString,
     host: HostKind,
@@ -362,14 +387,7 @@ impl ProcessHerdr {
             socket: None,
             state_directory: None,
             child_executable: None,
-            timeout: Duration::from_millis(
-                environment
-                    .var("NAMEDROP_HERDR_TIMEOUT_MS")
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .filter(|ms| *ms > 0)
-                    .unwrap_or(DEFAULT_HERDR_TIMEOUT_MS)
-                    .min(MAX_HERDR_TIMEOUT_MS),
-            ),
+            timeout: configured_herdr_timeout(environment),
             environment: environment.clone(),
         }
     }
@@ -480,8 +498,8 @@ impl ProcessHerdr {
     }
 
     fn command_timeout(&self, args: &[&str]) -> Duration {
-        if self.host == HostKind::Hc && args.first() == Some(&"send") {
-            Duration::from_secs(20)
+        if self.host == HostKind::Hc {
+            hc_command_timeout(self.timeout, args)
         } else {
             self.timeout
         }
@@ -498,7 +516,7 @@ impl ProcessHerdr {
 
     fn bounded_timeout(&self, timeout: Duration) -> Duration {
         if self.host == HostKind::Hc {
-            timeout.min(Duration::from_millis(MAX_HERDR_TIMEOUT_MS))
+            cap_hc_timeout(timeout)
         } else {
             timeout.min(self.timeout)
         }
@@ -767,6 +785,41 @@ pub(crate) mod hc_socket_fixture;
 #[cfg(test)]
 mod bounded_read_tests {
     use super::*;
+
+    #[test]
+    fn shared_hc_timeout_policy() {
+        use crate::environment::EnvironmentSnapshot;
+        for (value, expected_ms) in [
+            (None, 10_000),
+            (Some("40"), 40),
+            (Some("0"), 10_000),
+            (Some("NaN"), 10_000),
+            (Some("-1"), 10_000),
+            (Some("60001"), 60_000),
+            (Some("18446744073709551615"), 60_000),
+        ] {
+            let environment = EnvironmentSnapshot::from_variables(
+                value.map(|value| ("NAMEDROP_HERDR_TIMEOUT_MS".into(), value.into())),
+            );
+            let configured = configured_herdr_timeout(&environment);
+            assert_eq!(configured, Duration::from_millis(expected_ms), "{value:?}");
+            assert_eq!(
+                hc_command_timeout(configured, &["send"]),
+                Duration::from_secs(20)
+            );
+            for command in ["get", "read", "interrupt"] {
+                assert_eq!(hc_command_timeout(configured, &[command]), configured);
+            }
+        }
+        for (input, expected) in [
+            (Duration::from_millis(40), Duration::from_millis(40)),
+            (Duration::from_secs(60), Duration::from_secs(60)),
+            (Duration::from_secs(120), Duration::from_secs(60)),
+            (Duration::MAX, Duration::from_secs(60)),
+        ] {
+            assert_eq!(cap_hc_timeout(input), expected);
+        }
+    }
 
     #[test]
     fn malformed_hc_socket_paths_remain_invalid() {
