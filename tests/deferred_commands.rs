@@ -608,6 +608,11 @@ fn tampered_request_is_quarantined_without_retrying_or_blocking_valid_commands()
     tampered["input"]["source"] = json!("@reviewer tampered");
     let bytes = serde_json::to_vec(&tampered).unwrap();
     fs::write(&request, &bytes).unwrap();
+    let rejected = fixture.spool().join("rejected");
+    fs::create_dir(&rejected).unwrap();
+    for index in 0..100 {
+        fs::write(rejected.join(format!("rejected-{index:020}.json")), "old").unwrap();
+    }
     let mut worker = fixture.worker();
     wait_for(|| {
         assert!(
@@ -617,6 +622,8 @@ fn tampered_request_is_quarantined_without_retrying_or_blocking_valid_commands()
         !marker.exists()
     });
     assert!(!request.exists());
+    assert_eq!(fs::read_dir(&rejected).unwrap().count(), 100);
+    assert!(!rejected.join("rejected-00000000000000000000.json").exists());
     assert!(!Path::new(pending["data"]["receipt"].as_str().unwrap()).exists());
     assert_eq!(fixture.message_count(), 0);
     assert!(

@@ -321,11 +321,15 @@ fn read_receipt(path: &Path, fingerprint: &str) -> Result<Option<Result<Value, S
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.to_string()),
     };
-    let receipt: Receipt = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    decode_receipt(&bytes, fingerprint).map(Some)
+}
+
+fn decode_receipt(bytes: &[u8], fingerprint: &str) -> Result<Result<Value, String>, String> {
+    let receipt: Receipt = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if receipt.fingerprint != fingerprint {
         return Err("deferred receipt content conflict".into());
     }
-    Ok(Some(receipt.result))
+    Ok(receipt.result)
 }
 
 fn permission_denied(error: &io::Error) -> bool {
@@ -499,23 +503,6 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
             .collect::<Vec<_>>();
         pending.sort();
         for key in pending {
-            let request: Result<Request, _> =
-                read_file(&directory.join(format!("{key}.request.json")))
-                    .and_then(|bytes| serde_json::from_slice(&bytes).map_err(io::Error::other));
-            if let Ok(request) = request
-                && read_receipt(
-                    &directory.join(format!("{key}.receipt.json")),
-                    &request.fingerprint,
-                )?
-                .is_some()
-            {
-                fs::remove_file(pending_directory.join(format!("{key}.json")))
-                    .map_err(|e| e.to_string())?;
-                fs::File::open(&pending_directory)
-                    .and_then(|file| file.sync_all())
-                    .map_err(|e| e.to_string())?;
-                continue;
-            }
             let mut child = Command::new(launcher(state)?)
                 .arg("--deferred-execute")
                 .arg(state)
@@ -568,17 +555,33 @@ pub fn execute_queued(
         return Err("deferred command lock is not a regular file".into());
     }
     lock.lock().map_err(|e| e.to_string())?;
-    let request: Request = serde_json::from_slice(
-        &read_file(&directory.join(format!("{key}.request.json"))).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    request.validate()?;
-    if request.key != key || request.caller.namespace.session_socket_id != socket {
-        return Err("deferred command scope mismatch".into());
-    }
+    let request_path = directory.join(format!("{key}.request.json"));
+    let bytes = read_file(&request_path).map_err(|e| e.to_string())?;
+    let request = serde_json::from_slice::<Request>(&bytes)
+        .map_err(|e| e.to_string())
+        .and_then(|request| {
+            request.validate()?;
+            if request.key != key || request.caller.namespace.session_socket_id != socket {
+                return Err("deferred command scope mismatch".into());
+            }
+            Ok(request)
+        });
+    let request = match request {
+        Ok(request) => request,
+        Err(error) => {
+            quarantine(&directory, &request_path)?;
+            clear_pending(&directory, key)?;
+            return Err(error);
+        }
+    };
     let receipt = directory.join(format!("{key}.receipt.json"));
-    if read_receipt(&receipt, &request.fingerprint)?.is_some() {
-        return Ok(());
+    match read_file(&receipt) {
+        Ok(bytes) => match decode_receipt(&bytes, &request.fingerprint) {
+            Ok(_) => return clear_pending(&directory, key),
+            Err(_) => quarantine(&directory, &receipt)?,
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.to_string()),
     }
     let result = execute_request(state, &request);
     if let Ok(value) = &result {
@@ -599,7 +602,58 @@ pub fn execute_queued(
             completed_at_ms: SystemClock.now_unix_ms(),
             result,
         },
-    )
+    )?;
+    clear_pending(&directory, key)
+}
+
+fn clear_pending(directory: &Path, key: &str) -> Result<(), String> {
+    let pending = pending_directory(directory)?;
+    match fs::remove_file(pending.join(format!("{key}.json"))) {
+        Ok(()) => fs::File::open(pending)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| e.to_string()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn quarantine(directory: &Path, path: &Path) -> Result<(), String> {
+    let rejected = directory.join("rejected");
+    match fs::create_dir(&rejected) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.to_string()),
+    }
+    if !fs::symlink_metadata(&rejected)
+        .map_err(|e| e.to_string())?
+        .is_dir()
+    {
+        return Err("deferred rejected queue must be a directory, not a symbolic link".into());
+    }
+    let name = format!(
+        "rejected-{:020}-{}-{}",
+        SystemClock.now_unix_ms(),
+        ProcessIds::default().next_id("record"),
+        path.file_name()
+            .ok_or("missing record filename")?
+            .to_string_lossy(),
+    );
+    fs::rename(path, rejected.join(name)).map_err(|e| e.to_string())?;
+    let mut entries = fs::read_dir(&rejected)
+        .map_err(|e| e.to_string())?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    entries.sort();
+    for path in entries.iter().take(entries.len().saturating_sub(100)) {
+        fs::remove_file(path).map_err(|e| e.to_string())?;
+    }
+    for path in [&rejected, directory] {
+        fs::File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
