@@ -178,6 +178,11 @@ fn change_environment(home: &Path) {
 
 fn assert_popup(host: impl Host, home: &Path, program: &str) {
     let entrypoint = std::env::var(CHILD).unwrap();
+    let mod_name = if entrypoint == "naming" {
+        "namedrop-name".to_owned()
+    } else {
+        format!("namedrop-{entrypoint}")
+    };
     let actual = host
         .open_popup(&Popup {
             entrypoint: &entrypoint,
@@ -202,7 +207,7 @@ fn assert_popup(host: impl Host, home: &Path, program: &str) {
         actual,
         serde_json::json!({
             "program": program,
-            "argv": ["do", "mod.open", "--name", format!("namedrop-{entrypoint}")],
+            "argv": ["do", "mod.open", "--name", mod_name],
             "env": expected_env,
         })
     );
