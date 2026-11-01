@@ -354,6 +354,50 @@ mod tests {
     }
 
     #[test]
+    fn linked_state_leaf_cannot_grant_victim_directory() {
+        let f = Fixture::new();
+        let victim = f.0.join("victim");
+        fs::create_dir(&victim).unwrap();
+        std::os::unix::fs::symlink(&victim, f.state()).unwrap();
+        let result = activate(&f.home(), &f.state());
+        assert!(!f.home().exists(), "activation created a redirected grant");
+        assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
+        assert!(result.unwrap_err().contains("symbolic link"));
+    }
+
+    #[test]
+    fn linked_state_leaf_cannot_validate_victim_grant() {
+        let f = Fixture::new();
+        let victim = f.0.join("victim");
+        fs::create_dir(&victim).unwrap();
+        std::os::unix::fs::symlink(&victim, f.state()).unwrap();
+        f.write(&format!(
+            "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
+            victim.to_str().unwrap()
+        ));
+        let before = f.text();
+        assert!(
+            inspect(&f.home(), &f.state())
+                .unwrap_err()
+                .contains("symbolic link")
+        );
+        assert_eq!(f.text(), before);
+        assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn linked_state_leaf_removal_does_not_open_victim_store() {
+        let f = Fixture::new();
+        let victim = f.0.join("victim");
+        fs::create_dir(&victim).unwrap();
+        std::os::unix::fs::symlink(&victim, f.state()).unwrap();
+        let result = remove(&f.state());
+        assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
+        assert!(result.unwrap_err().contains("symbolic link"));
+        assert!(!f.home().exists());
+    }
+
+    #[test]
     fn linked_parent_grants_physical_root_and_supports_owned_lifecycle() {
         let f = Fixture::new();
         let physical = f.0.canonicalize().unwrap();
