@@ -10922,3 +10922,80 @@ test("UI-R6 fix1: a Channels button that mounts after an earlier claim never tak
     `focus stays on beta, not on ${await activeName(page)}`,
   );
 });
+
+// The card's visible box, the Details label's box and its focus ring's box
+// (the button's box grown by the outline's width and offset).
+const detailsFacts = (card) =>
+  card.evaluate((element) => {
+    const { top } = element.getBoundingClientRect();
+    const inner = {
+      top: top + element.clientTop,
+      bottom: top + element.clientTop + element.clientHeight,
+    };
+    const button = [...element.querySelectorAll("button")].find(
+      (candidate) => candidate.textContent === "Details",
+    );
+    const range = document.createRange();
+    range.selectNodeContents(button);
+    const label = range.getBoundingClientRect();
+    const box = button.getBoundingClientRect();
+    const style = getComputedStyle(button);
+    const ring =
+      style.outlineStyle === "none"
+        ? 0
+        : Number.parseFloat(style.outlineWidth) +
+          Number.parseFloat(style.outlineOffset);
+    return {
+      inner,
+      label: { top: label.top, bottom: label.bottom },
+      ring: { top: box.top - ring, bottom: box.bottom + ring },
+    };
+  });
+const inside = (box, inner) =>
+  box.top >= inner.top - 0.01 && box.bottom <= inner.bottom + 0.01;
+
+test("UI-R7 1: in a window under 420 px tall the Needs-you card shows its Details label whole before anyone scrolls it", async (t) => {
+  const { value } = actionableAttention("message");
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const card = ui.page.getByRole("region", { name: "Attention needed" });
+  for (const size of [
+    [844, 300],
+    [312, 368],
+    [1440, 300],
+  ]) {
+    await resize(ui.page, ...size);
+    const { inner, label } = await detailsFacts(card);
+    assert.ok(
+      inside(label, inner),
+      `${size.join("x")}: label ${label.top}-${label.bottom} inside the card ${inner.top}-${inner.bottom}`,
+    );
+  }
+});
+
+test("UI-R7 2: Details focused from the keyboard shows its whole focus ring inside the Needs-you card", async (t) => {
+  const { value } = actionableAttention("message");
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  const page = ui.page;
+  const card = page.getByRole("region", { name: "Attention needed" });
+  for (const size of [
+    [312, 368],
+    [844, 300],
+    [390, 844],
+    [1440, 900],
+  ]) {
+    await resize(page, ...size);
+    await card.getByRole("button", { name: "Message @codex" }).focus();
+    await page.keyboard.press("Tab");
+    await focusMatches(page, ".attention button:focus-visible", "Details");
+    await nextFrame(page);
+    const { inner, ring } = await detailsFacts(card);
+    assert.ok(
+      inside(ring, inner),
+      `${size.join("x")}: ring ${ring.top}-${ring.bottom} inside the card ${inner.top}-${inner.bottom}`,
+    );
+  }
+});
