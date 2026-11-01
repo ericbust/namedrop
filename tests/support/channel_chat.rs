@@ -222,6 +222,7 @@ else:
             .arg(&f.state)
             .arg("dashboard-server")
             .env("HERDR_BIN_PATH", &shim)
+            .env("TMPDIR", &f.root)
             .env("HOME", f.root.join("home"))
             .env("CODEX_HOME", f.root.join("home/.codex"))
             .env_remove("HERDR_SOCKET_PATH")

@@ -278,6 +278,7 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_namedrop"))
             .args(["--json", "ui", "install-shortcuts", "--config"])
             .arg(self.0.join("config.toml"))
+            .env("TMPDIR", &self.0)
             .env_remove("HERDR_PLUGIN_STATE_DIR")
             .output()
             .unwrap()

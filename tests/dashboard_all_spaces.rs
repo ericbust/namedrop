@@ -94,6 +94,7 @@ fi
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_SOCKET_PATH")
             .env_remove("HERDR_PLUGIN_STATE_DIR")
+            .env("TMPDIR", root)
             .env("HERDR_BIN_PATH", herdr)
             .env("ND_TEST_SNAPSHOT", root.join("snapshot.json"))
             .env("ND_TEST_ROOT", root)

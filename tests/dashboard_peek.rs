@@ -138,6 +138,7 @@ else:
             .arg("--plugin-state")
             .arg(&f.state)
             .arg("dashboard-server")
+            .env("TMPDIR", &f.root)
             .env("HERDR_BIN_PATH", shim)
             .env("NAMEDROP_HERDR_TIMEOUT_MS", "10000")
             .env_remove("HERDR_SOCKET_PATH")
@@ -908,7 +909,8 @@ fn fixture_removes_hidden_child_scratch_after_server_is_killed() {
     let server = Server::start(&f);
     configure(&f, json!({"stdout": "ready", "leave_temp": true}));
     assert_eq!(server.get(&path("socket-a", "w1", "lead")).status, 200);
-    let scratch = std::path::PathBuf::from(fs::read_to_string(f.root.join("scratch-path")).unwrap());
+    let scratch =
+        std::path::PathBuf::from(fs::read_to_string(f.root.join("scratch-path")).unwrap());
     assert!(scratch.exists());
     drop(server);
     drop(f);
@@ -916,5 +918,9 @@ fn fixture_removes_hidden_child_scratch_after_server_is_killed() {
     if leaked {
         fs::remove_file(&scratch).unwrap();
     }
-    assert!(!leaked, "fixture left hidden child scratch behind: {}", scratch.display());
+    assert!(
+        !leaked,
+        "fixture left hidden child scratch behind: {}",
+        scratch.display()
+    );
 }
