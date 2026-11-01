@@ -113,7 +113,17 @@ fn root(state: &Path) -> Result<String, String> {
     {
         return Err("Namedrop state directory must be absolute without parent components".into());
     }
-    resolve_directory(state)?
+    let state: PathBuf = state.components().collect();
+    match fs::symlink_metadata(&state) {
+        Ok(metadata) if metadata.is_symlink() => {
+            return Err(conflict(&state, "is a symbolic link"));
+        }
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            return Err(conflict(&state, &error.to_string()));
+        }
+        _ => {}
+    }
+    resolve_directory(&state)?
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| "Namedrop state directory must be UTF-8".into())
@@ -280,6 +290,7 @@ pub(crate) fn activate(directory: &Path, state: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn remove(state: &Path) -> Result<usize, String> {
+    root(state)?;
     let (_package_guard, current) = crate::installed_runtime::package_guard()?;
     if !current {
         return Ok(0);
@@ -298,6 +309,7 @@ pub(crate) fn remove(state: &Path) -> Result<usize, String> {
 }
 
 pub(super) fn inspect(directory: &Path, state: &Path) -> Result<(), String> {
+    let root = root(state)?;
     let directory = resolve_directory(directory)?;
     let path = directory.join("config.toml");
     let grant = record(state)?;
@@ -307,7 +319,7 @@ pub(super) fn inspect(directory: &Path, state: &Path) -> Result<(), String> {
             "has a stale or pending Codex sandbox grant; activate Namedrop again to repair it",
         ));
     }
-    if !Config::read(&path)?.contains(&root(state)?) {
+    if !Config::read(&path)?.contains(&root) {
         return Err(conflict(
             &path,
             "is missing the Namedrop state writable root; activate Namedrop again, then start a new Codex session. Explicit Codex permission profiles require their own state-directory grant",
@@ -359,10 +371,13 @@ mod tests {
         let victim = f.0.join("victim");
         fs::create_dir(&victim).unwrap();
         std::os::unix::fs::symlink(&victim, f.state()).unwrap();
-        let result = activate(&f.home(), &f.state());
-        assert!(!f.home().exists(), "activation created a redirected grant");
-        assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
-        assert!(result.unwrap_err().contains("symbolic link"));
+        for suffix in ["", "/", "/."] {
+            let state = PathBuf::from(format!("{}{suffix}", f.state().display()));
+            let result = activate(&f.home(), &state);
+            assert!(!f.home().exists(), "activation created a redirected grant");
+            assert_eq!(fs::read_dir(&victim).unwrap().count(), 0);
+            assert!(result.unwrap_err().contains("symbolic link"));
+        }
     }
 
     #[test]
