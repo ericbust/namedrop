@@ -1,5 +1,5 @@
 export function initialModel() {
-  return { dirty: false, reading: false, lastRead: null, snapshot: null, error: null, lastEnsure: null, ensuring: false, timerAt: null, seen: {}, pending: [], overflow: 0, overflowLevel: null, lastToast: null, toastAt: null, errorNotified: null };
+  return { dirty: false, reading: false, lastRead: null, snapshot: null, error: null, lastEnsure: null, ensuring: false, ensureRecovery: "none", timerAt: null, seen: {}, pending: [], overflow: 0, overflowLevel: null, lastToast: null, toastAt: null, errorNotified: null };
 }
 
 export function watchedStoreFile(path) {
@@ -67,8 +67,26 @@ export function transition(current, event) {
   const model = { ...current, pending: [...current.pending] };
   const effects = [];
   if (event.type === "wake" || event.type === "retry" || event.type === "start") model.dirty = true;
-  if (event.type === "ensureDone") model.ensuring = false;
-  if ((event.type === "start" || event.type === "readError") && !model.ensuring
+  const consumingRecovery = event.type === "readError"
+    && (model.ensureRecovery === "awaitingRead" || model.ensureRecovery === "readingRecovery");
+  if (event.type === "ensureDone") {
+    model.ensuring = false;
+    if (event.active) {
+      if (model.reading) model.ensureRecovery = "awaitingRead";
+      else if (model.error) {
+        model.ensureRecovery = "queued";
+        model.dirty = true;
+      }
+    }
+  }
+  if (event.type === "readOk") model.ensureRecovery = "none";
+  if (event.type === "readError") {
+    if (model.ensureRecovery === "awaitingRead") {
+      model.ensureRecovery = "queued";
+      model.dirty = true;
+    } else if (model.ensureRecovery === "readingRecovery") model.ensureRecovery = "none";
+  }
+  if ((event.type === "start" || event.type === "readError") && !consumingRecovery && !model.ensuring
       && (model.lastEnsure === null || event.now - model.lastEnsure >= 30000)) {
     model.lastEnsure = event.now;
     model.ensuring = true;
@@ -96,6 +114,7 @@ export function transition(current, event) {
   if (event.now >= due) {
     model.dirty = false;
     model.reading = true;
+    if (model.ensureRecovery === "queued") model.ensureRecovery = "readingRecovery";
     model.lastRead = event.now;
     model.timerAt = null;
     effects.push({ type: "read" });

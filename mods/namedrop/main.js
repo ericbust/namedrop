@@ -83,8 +83,15 @@ export default class Namedrop extends View {
         });
       } else if (effect.type === "ensure" && this.binary) {
         cx.spawn(async (cx) => {
-          try { await exec(this.binary, ["--host", "hc", "events", "--ensure"]); }
-          catch {} finally { this.dispatch({ type: "ensureDone", now: Date.now() }, cx); }
+          let active = false;
+          try {
+            const result = await exec(this.binary, ["--host", "hc", "events", "--ensure"]);
+            if (result.code === 0) {
+              const status = JSON.parse(result.stdout)?.status;
+              active = status === "started" || status === "running";
+            }
+          } catch {}
+          this.dispatch({ type: "ensureDone", active, now: Date.now() }, cx);
         });
       }
     }
@@ -94,23 +101,28 @@ export default class Namedrop extends View {
     if (this.watchDirectory === directory) return;
     this.watchDirectory = directory;
     const generation = ++this.watchGeneration;
-    cx.spawn(async (cx) => {
+    let delay = 1000;
+    let recovering = false;
+    const attempt = (cx) => cx.spawn(async (cx) => {
       try {
         while (generation === this.watchGeneration) {
           const paths = await watchFolder(directory);
           if (generation !== this.watchGeneration) return;
-          if (paths.some(watchedStoreFile)) this.dispatch({ type: "wake", now: Date.now() }, cx);
+          const refresh = recovering || paths.some(watchedStoreFile);
+          recovering = false;
+          delay = 1000;
+          if (refresh) this.dispatch({ type: "wake", now: Date.now() }, cx);
         }
       } catch {
         if (generation !== this.watchGeneration) return;
-        cx.timer.after(1000, (cx) => {
-          if (generation !== this.watchGeneration) return;
-          this.watchDirectory = null;
-          this.watch(directory, cx);
-          this.dispatch({ type: "wake", now: Date.now() }, cx);
+        recovering = true;
+        cx.timer.after(delay, (cx) => {
+          if (generation === this.watchGeneration) attempt(cx);
         });
+        delay = Math.min(delay * 2, 30000);
       }
     });
+    attempt(cx);
   }
 
   row(row, edge, t) {

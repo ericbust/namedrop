@@ -8,12 +8,20 @@ export function isMissing(error) {
   return /^`herdr\.exec`: cannot run .+: .*No such file or directory \(os error 2\)/.test(String(error?.message ?? error));
 }
 
+function binaryError(result) {
+  try {
+    const message = JSON.parse(result.stdout)?.error?.message;
+    if (typeof message === "string") return message;
+  } catch {}
+  return result.stderr || `Namedrop exited with status ${result.code}`;
+}
+
 export async function findBinary(exec, home) {
   const paths = [home() + "/.local/bin/namedrop-app", "namedrop"];
   for (const path of paths) {
     try {
       const result = await exec(path, ["--version"]);
-      if (result.code !== 0) return { error: formatHcError(result.stderr ?? "") || `Namedrop version check failed with exit code ${result.code}.` };
+      if (result.code !== 0) return { error: binaryError(result) };
       return { binary: path };
     } catch (error) {
       if (!isMissing(error)) return { error: String(error?.message ?? error) };
@@ -44,14 +52,7 @@ export async function saveName({ target, alias, terminals, home, exec, hc }) {
   try {
     const result = await exec(found.binary, args);
     if (result.code === 0) return { ok: true };
-    if (result.code === 64) return { error: `Namedrop could not run: ${formatHcError(result.stderr ?? "")}` };
-    if (result.code === 65) {
-      try {
-        const message = JSON.parse(result.stdout)?.error?.message;
-        if (typeof message === "string") return { error: message };
-      } catch {}
-    }
-    return { error: formatHcError(result.stderr ?? "") || `Naming failed with exit code ${result.code}.` };
+    return { error: binaryError(result) };
   } catch (error) {
     return { error: String(error?.message ?? error) };
   }

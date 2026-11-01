@@ -38,7 +38,7 @@ export async function launchPopup({ home, focused, terminals, exec, hc, openOver
     address = terminals().find((terminal) => terminal.name === name && terminal.state === "live")?.address;
     if (!address) return { error: failure.message ?? "Existing window is no longer live." };
   } else {
-    return { error: failure?.message ?? result.stderr ?? `Launcher failed with exit code ${result.code}.` };
+    return { error: failure?.message || result.stderr || `hc exited with status ${result.code}` };
   }
   if (typeof address !== "string") return { error: "Launcher did not return a terminal address." };
   openOverlay({ kind: "window", key: name, width: 720, height: 500, layout: { type: "column", children: [

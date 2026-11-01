@@ -31,7 +31,7 @@ Herdr 0.7.5 was only checked for loading the plugin and parsing commands. The fu
 
 | Integration | Tested-version target | Verification status |
 | --- | --- | --- |
-| Herdr app host | Herdr app 0.1.9 and herdr-core 0.1.14 | HA-4 target. App `check` and live compositor checks remain in the program's final verification lane. |
+| Herdr app host | Herdr app 0.1.9 and herdr-core 0.1.14 | App checks and live checks have not run yet. This row will be updated when they do. |
 
 The six mod folders are `namedrop`, `namedrop-name`, `namedrop-management`, `namedrop-doctor`, `namedrop-agent-status`, and `namedrop-tour`. This documentation change does not claim that the app or live checks ran here.
 

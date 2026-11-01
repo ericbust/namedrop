@@ -244,10 +244,19 @@ pub struct RuntimeOptions {
 impl RuntimeOptions {
     pub fn popup_target_claim(&self) -> Result<PopupTargetClaim, String> {
         let hc = self.host_kind()? == crate::runtime::HostKind::Hc;
+        let use_flags = hc
+            && [
+                "NAMEDROP_TARGET_WORKSPACE",
+                "NAMEDROP_TARGET_PANE",
+                "NAMEDROP_TARGET_TERMINAL",
+                "NAMEDROP_TARGET_SESSION",
+            ]
+            .iter()
+            .all(|name| self.environment.var(name).is_none());
         let field = |name: &str, fallback: Option<&String>, error: &str| {
             self.environment
                 .var(name)
-                .or_else(|| if hc { fallback.cloned() } else { None })
+                .or_else(|| if use_flags { fallback.cloned() } else { None })
                 .ok_or_else(|| error.to_owned())
         };
         Ok(PopupTargetClaim {
