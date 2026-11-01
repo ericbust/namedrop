@@ -165,29 +165,14 @@ fn collect_waits(
                 .filter_map(|recipient| recipient["target"]["alias"].as_str().map(str::to_owned))
                 .collect::<Vec<_>>()
         } else {
-            let mut statement = tx.transaction.prepare(
-                "SELECT r.alias_snapshot FROM message_recipients r
-                 JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, message_id, address_id)
-                 JOIN delivery_seats s USING (session_socket_id, worktree_id, delivery_id)
-                 WHERE r.session_socket_id = ?1 AND r.worktree_id = ?2 AND r.message_id = ?3
-                   AND (s.progress NOT IN ('failed', 'cancelled') OR s.progress IN ('held', 'failed'))
-                   AND NOT EXISTS (
-                     SELECT 1 FROM delivery_attempts a
-                     JOIN delivery_dispositions p USING (session_socket_id, worktree_id, attempt_id)
-                     WHERE a.session_socket_id = d.session_socket_id AND a.worktree_id = d.worktree_id
-                       AND a.delivery_id = d.delivery_id AND p.disposition_kind IN ('reply', 'no_reply'))
-                 ORDER BY r.alias_snapshot, r.recipient_order LIMIT 50",
-            )?;
-            statement
-                .query_map(
-                    params![
-                        namespace.session_socket_id,
-                        namespace.space_id.as_str(),
-                        message.as_str()
-                    ],
-                    |row| row.get(0),
-                )?
-                .collect::<Result<Vec<String>, _>>()?
+            tx.handoff_recipients(namespace, &message)?
+                .into_iter()
+                .filter(|recipient| {
+                    recipient.result_status().is_none()
+                        || matches!(recipient.state, DeliveryState::Held | DeliveryState::Failed)
+                })
+                .map(|recipient| recipient.target.alias)
+                .collect::<Vec<_>>()
         };
         recipients.sort();
         for alias in recipients {
@@ -210,7 +195,6 @@ fn collect_replies(
     namespace: &StateNamespace,
     address: &PaneAddressRecord,
 ) -> Result<Vec<RecentReply>, StoreError> {
-    // A reply enters this list after its return delivery reaches the address.
     let mut statement = tx.transaction.prepare(
         "SELECT m.message_id, m.author_alias_snapshot, m.created_at_ms
          FROM collaboration_messages m
@@ -233,7 +217,7 @@ fn collect_replies(
                 Ok(RecentReply {
                     message_id: MessageId::new(row.get::<_, String>(0)?),
                     from: row.get(1)?,
-                    at_ms: row.get::<_, i64>(2)? as u64,
+                    at_ms: from_i64(row.get(2)?)?,
                 })
             },
         )?

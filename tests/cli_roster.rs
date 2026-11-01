@@ -407,10 +407,17 @@ fn unbound_waits_use_latest_attempt_and_keep_attention_recipients() {
             "INSERT INTO delivery_attempts VALUES ('hc:current','space',?1,?2,'address','binding','session',NULL,?3)",
             rusqlite::params![format!("attempt-{index}-old"), delivery, index],
         ).unwrap();
-        connection.execute(
-            "INSERT INTO delivery_dispositions VALUES ('hc:current','space',?1,?2,?3,?4)",
-            rusqlite::params![format!("disposition-{index}"), format!("attempt-{index}-old"), disposition, index],
-        ).unwrap();
+        connection
+            .execute(
+                "INSERT INTO delivery_dispositions VALUES ('hc:current','space',?1,?2,?3,?4)",
+                rusqlite::params![
+                    format!("disposition-{index}"),
+                    format!("attempt-{index}-old"),
+                    disposition,
+                    index
+                ],
+            )
+            .unwrap();
         if index == 3 {
             connection.execute(
                 "INSERT INTO delivery_attempts VALUES ('hc:current','space','attempt-3-new','delivery-3','address','binding','session','attempt-3-old',4)",
@@ -427,14 +434,17 @@ fn unbound_waits_use_latest_attempt_and_keep_attention_recipients() {
     let (output, _) = run_core(home.path(), json!({"core":{"id":"current"}}));
     assert_eq!(output.status.code(), Some(0), "{output:?}");
     let body: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(body["rows"][0]["waiting_on"], json!([
-        {"alias":"alpha","message_id":"request-3"},
-        {"alias":"beta","message_id":"request-3"},
-        {"alias":"alpha","message_id":"request-2"},
-        {"alias":"beta","message_id":"request-2"},
-        {"alias":"alpha","message_id":"request-1"},
-        {"alias":"beta","message_id":"request-1"}
-    ]));
+    assert_eq!(
+        body["rows"][0]["waiting_on"],
+        json!([
+            {"alias":"alpha","message_id":"request-3"},
+            {"alias":"beta","message_id":"request-3"},
+            {"alias":"alpha","message_id":"request-2"},
+            {"alias":"beta","message_id":"request-2"},
+            {"alias":"alpha","message_id":"request-1"},
+            {"alias":"beta","message_id":"request-1"}
+        ])
+    );
     assert_eq!(body["rows"][0]["recent_replies"], json!([]));
 }
 
