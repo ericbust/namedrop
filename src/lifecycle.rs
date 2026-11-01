@@ -304,16 +304,13 @@ where
             let address_id = store
                 .transaction(|transaction| {
                     if sandbox_current
+                        && let Some(home) = runtime.home_directory
                         && !transaction
                             .worktree_state(&namespace)?
                             .is_some_and(|state| state.activated && !state.deactivated)
                     {
                         crate::install::codex_sandbox::activate(
-                            &runtime
-                                .agent_config
-                                .codex(runtime.home_directory.ok_or_else(|| {
-                                    StoreError::invalid_input("no HOME is available")
-                                })?),
+                            &runtime.agent_config.codex(home),
                             runtime.state_directory,
                         )
                         .map_err(StoreError::invalid_input)?;

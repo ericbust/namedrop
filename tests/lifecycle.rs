@@ -257,6 +257,22 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
             .iter()
             .any(|command| { command == &["tab", "rename", "tab-1", "@reviewer"] })
     );
+    drop(commands);
+    let no_home = TestDirectory::new();
+    let runtime_without_home = LifecycleRuntime {
+        state_directory: no_home.path(),
+        home_directory: None,
+        agent_config: Default::default(),
+        ..runtime
+    };
+    let named = execute_lifecycle_operation(
+        "name",
+        serde_json::json!({"alias":"@reviewer"}),
+        &runtime_without_home,
+    )
+    .unwrap();
+    assert_eq!(named["alias"], "@reviewer");
+    assert!(!no_home.path().join("codex-sandbox.json").exists());
 }
 
 #[test]
