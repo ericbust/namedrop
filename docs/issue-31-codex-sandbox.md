@@ -1,10 +1,28 @@
 # Codex reply sandbox investigation
 
-Issue [ericbust/namedrop#31](https://github.com/ericbust/namedrop/issues/31) remains blocked on Linux with Codex 0.164.0. Adding only Namedrop's plugin state directory removes the database write failure, but the reply still fails when it connects to Herdr's Unix socket. A default-settings user still gets an approval prompt. Automatic review can approve the retry, which leaves the original reliability problem in place.
+Rounds 1 and 2 of [ericbust/namedrop#31](https://github.com/ericbust/namedrop/issues/31) found that sandbox settings alone do not solve this on Linux with Codex 0.164.0. Adding only Namedrop's plugin state directory removes the database write failure, but a direct reply still fails when it connects to Herdr's Unix socket. Round 3 adds a state-only command handoff to an outside Namedrop worker.
 
-The attempted activation, doctor, and deactivation implementation was tested and then removed. The final branch contains this report and no runtime change relative to main at `3864c16`.
+The initial writable-root implementation was removed after its direct-delivery experiment failed. It is now restored as part of the command handoff, with activation, read-only doctor inspection, and ownership-aware cleanup on the last deactivation. A preexisting user grant is preserved.
 
-## Observed behavior
+## Round 3 delivery handoff
+
+Before a mutating command, Namedrop probes its Herdr transport. If the sandbox denies the connection, a registered agent can publish a bound request under the plugin state directory. The bridge accepts send, reply, ack, complete, and a current-workspace roster read. It stores the full validated input, exact caller identity and original request ID; it accepts no arbitrary shell or Herdr commands. The sandbox command waits briefly for the durable result. If no result arrives, it returns an explicit pending receipt whose commit status is unknown.
+
+A persistent worker started from Herdr-owned lifecycle entrypoints polls pending markers and executes each request outside the agent sandbox. The existing routing, current native session, registration and delivery-attempt checks still run. Each bounded execution holds the normal runtime update guard; the idle worker does not block upgrades. Herdr lifecycle events can restart the worker, and queued requests survive its restart. The implementation changes no network policy.
+
+Stable request IDs and durable receipts prevent a retry from creating another logical message. Recovery also rejects changed coordination fields and can recover an existing commit after its original session ends. Recipient dispatch retains Namedrop's existing ambiguous-attempt holds. Herdr has no prompt idempotency token, so this does not claim universal exactly-once physical prompting across the socket-call crash window.
+
+Both final live checklists passed all nine steps on the same Rust code. Actual Codex calls showed no escalation request, read-only filesystem error or socket permission error. The sessions retained restricted networking and added only the plugin state directory to the default writable paths.
+
+| Live case | Queue to recipient receipt | Result |
+| --- | --- | --- |
+| Default approval reviewer | 1.944 seconds | One reply, one recipient delivery attempt |
+| Automatic approval reviewer | 0.987 seconds | One reply, one recipient delivery attempt, no approval requested |
+| Worker stopped before execution, then restarted | 0.962 seconds | One reply; deleting its result receipt and replaying still created no duplicate |
+
+These are individual functional acceptance trials, not a latency percentile or availability guarantee. A command's result receipt can arrive after its recipient receipt while the outside executor finishes mailbox work. The two-second producer timeout reports that interval as pending with an unknown commit status, and an exact retry recovers the original result.
+
+## Settings-only experiments
 
 The testbed used Herdr 0.9.1, Codex 0.164.0 with `gpt-6-sol`, and Claude Code 2.1.310. Codex ran with `--no-daemon`. Every run used a separate testbed profile and a socket under `/tmp/nd-tb-`. The real Codex and Claude configuration directories were not edited. No tool permission prompt was answered manually.
 
@@ -18,7 +36,7 @@ The patched sessions' own `thread_settings_applied` records include the exact pl
 
 A separate direct probe inside `codex sandbox` created an `AF_UNIX` socket successfully, then failed at `connect(testbed_socket)` with `PermissionError: [Errno 1] Operation not permitted`. Running `herdr pane list` under the same policy returned the same error. The probe used a named permissions profile extending `:workspace`, with only the exact Namedrop state directory added to its filesystem policy. Adding an exact `network.unix_sockets` entry alone also left the connection denied. No broader network setting was applied to the integration.
 
-## Follow-up with the network enabled
+## Round 2 follow-up with the network enabled
 
 The first socket probe omitted `network.enabled = true`. A follow-up tested that setting explicitly, with the exact state-directory write grant, only the Herdr socket in `network.unix_sockets`, and an empty `network.domains` table. Each configuration ran with `network.mode` omitted, `"limited"`, and `"full"`.
 
@@ -69,4 +87,6 @@ The maintainer's local evidence is under `~/.local/state/pstack/orchestrate/name
 
 The follow-up evidence is under `round2/`. `network-probe.json` and `proxy-network-probe.json` contain the enabled-network mode matrix and host controls. `network-probe.py` reruns it against an isolated Herdr testbed server. `run-live-network.py` configures the proxy-enabled policy before launching the default-reviewer live checklist.
 
-The experimental implementation is retained in branch history at `0936e1e`, with a test-only lint correction at `e14ae68`, for reference. It is not the delivered fix. Further work requires an upstream-supported permission path or an expanded brief covering local IPC. Do not treat the automatic-review checklist pass as proof of approval-free replies.
+Round 3 evidence is under `round3/`. `design.md` records the command and process boundaries. `run-live.py` retains real Codex calls, immutable queue requests, durable receipts and the recipient database. `assess-live.py` checks the exact filesystem grant, restricted network, absence of escalations and socket errors, and one recipient delivery per new logical message. `restart-probe.py` checks a real queued reply across worker restart and replays a committed command after losing its receipt.
+
+The original settings-only implementation remains in branch history at `0936e1e` and `e14ae68`. Its writable-root grant is useful together with the outside command worker. The upstream draft above describes the remaining Linux sandbox capability limit; it does not require Namedrop replies to use a broader network policy.
