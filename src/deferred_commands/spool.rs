@@ -52,19 +52,29 @@ impl Dir {
 
     pub fn child(&self, leaf: &str) -> io::Result<Self> {
         let leaf_c = name(leaf)?;
-        let made = unsafe { libc::mkdirat(self.file.as_raw_fd(), leaf_c.as_ptr(), 0o700) };
-        if made == 0 {
-            self.file.sync_all()?;
-        } else if io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists {
-            return Err(io::Error::last_os_error());
-        }
-        let fd = checked(unsafe {
-            libc::openat(
-                self.file.as_raw_fd(),
-                leaf_c.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        })?;
+        let open = || {
+            checked(unsafe {
+                libc::openat(
+                    self.file.as_raw_fd(),
+                    leaf_c.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            })
+        };
+        let fd = match open() {
+            Ok(fd) => fd,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match checked(unsafe {
+                    libc::mkdirat(self.file.as_raw_fd(), leaf_c.as_ptr(), 0o700)
+                }) {
+                    Ok(_) => self.file.sync_all()?,
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                open()?
+            }
+            Err(error) => return Err(error),
+        };
         Ok(Self {
             file: unsafe { File::from_raw_fd(fd) },
             path: self.path.join(leaf),
@@ -83,7 +93,10 @@ impl Dir {
         })?;
         let file = unsafe { File::from_raw_fd(fd) };
         if !file.metadata()?.is_file() {
-            return Err(io::Error::other("deferred record is not a regular file"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "deferred record is not a regular file",
+            ));
         }
         Ok(file)
     }
@@ -92,7 +105,14 @@ impl Dir {
         match self.regular(leaf, libc::O_RDWR | libc::O_CREAT) {
             Ok(file) => Ok(file),
             Err(error) => {
-                self.remove(leaf)?;
+                if error.kind() == io::ErrorKind::InvalidData
+                    || matches!(
+                        error.raw_os_error(),
+                        Some(libc::ELOOP | libc::ENOTDIR | libc::EISDIR)
+                    )
+                {
+                    self.remove(leaf)?;
+                }
                 Err(error)
             }
         }

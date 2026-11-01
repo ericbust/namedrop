@@ -100,8 +100,9 @@ fn pending_directory(directory: &Dir) -> Result<Dir, String> {
 }
 
 fn stored_caller(state: &Path, namespace: StateNamespace, pane: String) -> Result<Caller, String> {
-    StateStore::open(state)
+    StateStore::open_read_only(state)
         .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Namedrop state is missing; activate this workspace outside the sandbox before queuing commands".to_owned())?
         .transaction(|tx| Caller::read(tx, namespace, pane))
         .map_err(|e| e.to_string())
 }
@@ -447,9 +448,9 @@ pub fn run_worker(state: &Path, socket: &str) -> Result<(), String> {
                 .check_regular(&format!("{key}.json"))
                 .is_err()
             {
-                pending_directory
-                    .remove(&format!("{key}.json"))
-                    .map_err(|e| e.to_string())?;
+                if let Err(error) = pending_directory.remove(&format!("{key}.json")) {
+                    eprintln!("Cannot remove invalid deferred marker {key}.json: {error}");
+                }
                 continue;
             }
             if directory
