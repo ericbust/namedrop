@@ -44,6 +44,7 @@ export async function saveName({ target, alias, terminals, home, exec, hc }) {
   try {
     const result = await exec(found.binary, args);
     if (result.code === 0) return { ok: true };
+    if (result.code === 64) return { error: `Namedrop could not run: ${formatHcError(result.stderr ?? "")}` };
     if (result.code === 65) {
       try {
         const message = JSON.parse(result.stdout)?.error?.message;
