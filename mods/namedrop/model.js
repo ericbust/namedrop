@@ -48,12 +48,12 @@ function collect(model, snapshot) {
     const prior = model.seen[key];
     const replies = row.recent_replies ?? [];
     const latest = Math.max(0, ...replies.map((reply) => reply.at_ms));
-    if (prior) {
+    if (prior && latest >= prior.latest) {
       if (row.agent_status === "blocked" && prior.status !== "blocked") {
         queue(model, { message: `@${row.alias} is blocked`, action: { name: "agent.focus", args: { terminal: row.terminal } } });
       }
       const known = new Set(prior.ids);
-      for (const reply of latest < prior.latest ? [] : [...replies].reverse()) {
+      for (const reply of [...replies].reverse()) {
         if (reply.at_ms < prior.latest || known.has(reply.message_id)) continue;
         queue(model, { message: `@${reply.from} replied to @${row.alias}`, action: { name: "agent.focus", args: { terminal: row.terminal } } });
       }
