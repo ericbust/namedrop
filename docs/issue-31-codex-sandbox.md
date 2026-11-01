@@ -2,7 +2,15 @@
 
 Rounds 1 and 2 of [ericbust/namedrop#31](https://github.com/ericbust/namedrop/issues/31) found that sandbox settings alone do not solve this on Linux with Codex 0.164.0. Adding only Namedrop's plugin state directory removes the database write failure, but a direct reply still fails when it connects to Herdr's Unix socket. Round 3 adds a state-only command handoff to an outside Namedrop worker.
 
-The initial writable-root implementation was removed after its direct-delivery experiment failed. It is now restored as part of the command handoff, with activation, read-only doctor inspection, and ownership-aware cleanup on the last deactivation. A preexisting user grant is preserved.
+The current implementation grants write access only to `state/deferred-commands`. The sandboxed producer reads caller identity through the existing read-only store API. The runtime launcher, database, ownership record and configuration remain outside the writable grant.
+
+## Spool-only write boundary
+
+The earlier state-root grant covered code and data trusted by the outside worker. Restricting individual spool operations could not make that grant safe. Activation now creates and grants only the delivery spool. The producer opens existing parent directories without attempting to create them, and reads the database without chmod, schema migration or write transactions. The outside executor still verifies the live session and registration before committing.
+
+Doctor reports an older broad grant as stale. Activation recognizes Namedrop's ownership record, removes its old state-root grant, and installs the spool grant with the same recovery journal. Unowned user grants are preserved; a user grant covering trusted state causes an actionable activation error. Last deactivation removes only the owned grant. Start a new Codex session after activation to load the narrower permission policy.
+
+The round 3 evidence below used the obsolete broad grant. It records delivery behavior, but does not establish the current write boundary. The current narrow-grant checks and live evidence belong under `reports/ISSUE-31/round7/` in the maintainer's orchestration directory.
 
 ## Round 3 delivery handoff
 
@@ -89,4 +97,4 @@ The follow-up evidence is under `round2/`. `network-probe.json` and `proxy-netwo
 
 Round 3 evidence is under `round3/`. `design.md` records the command and process boundaries. `default-guidance/`, `auto-guidance/`, and `restart-guidance/` hold the final captures. `run-live.py` retains real Codex calls, immutable queue requests, durable receipts and the recipient database. `assess-live.py` checks the exact filesystem grant, restricted network, absence of escalations and socket errors, and one recipient delivery per new logical message. `restart-probe.py` checks a real queued reply across worker restart and replays a committed command after losing its receipt. The original terminal-check failure and the later successful observation remain separate artifacts.
 
-The original settings-only implementation remains in branch history at `0936e1e` and `e14ae68`. Its writable-root grant is useful together with the outside command worker. The upstream draft above describes the remaining Linux sandbox capability limit; it does not require Namedrop replies to use a broader network policy.
+The original settings-only implementation remains in branch history at `0936e1e` and `e14ae68`. Its broad writable-root grant is superseded by the spool-only grant above. The upstream draft describes the remaining Linux sandbox capability limit; Namedrop replies require no broader network policy.
