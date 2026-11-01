@@ -131,8 +131,21 @@ fn exercise(mode: &str) {
     if mode == "dead" {
         drop(agent);
     }
+    if mode == "invoked" {
+        issue_registration_challenge(&address, AgentRuntime::ClaudeCode, &runtime).unwrap();
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                tx.mark_integration_challenge_invoked(&namespace, &address, &session, &attribution)
+            })
+            .unwrap();
+    }
     core.requests.lock().unwrap().clear();
-    let result = onboard_settled_integrations(&runtime, &observed);
+    let result = if mode == "public" {
+        issue_registration_challenge(&address, AgentRuntime::ClaudeCode, &runtime).map(|_| ())
+    } else {
+        onboard_settled_integrations(&runtime, &observed).map(|_| ())
+    };
     if mode == "mismatch" {
         assert!(result.is_err());
     } else {
@@ -141,7 +154,7 @@ fn exercise(mode: &str) {
     let requests = core.requests.lock().unwrap();
     assert_eq!(
         requests.iter().filter(|args| args[0] == "ls").count(),
-        0,
+        usize::from(mode == "public"),
         "{mode}: {requests:?}"
     );
     let sends = requests.iter().filter(|args| args[0] == "send").count();
@@ -155,6 +168,27 @@ fn exercise(mode: &str) {
         .transaction(|tx| tx.active_integration_registration(&namespace, &address, &session))
         .unwrap();
     assert_eq!(registration.is_some(), mode == "automatic");
+    let (attention, deferred) = StateStore::open(&state)
+        .unwrap()
+        .transaction(|tx| {
+            Ok((
+                tx.unresolved_attention_items(&namespace)?,
+                tx.prompt_is_deferred(&namespace, "t1", &session)?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(
+        attention.len(),
+        usize::from(matches!(mode, "failure" | "invoked")),
+        "{mode}: {attention:?}"
+    );
+    assert_eq!(deferred, mode == "working");
+    if matches!(mode, "manual" | "failure" | "working" | "dead") {
+        assert!(
+            requests.iter().any(|args| args[0] == "get"),
+            "prompt must read current PID/status"
+        );
+    }
 }
 
 #[test]
@@ -180,4 +214,13 @@ fn working_recipient_is_not_prompted() {
 #[test]
 fn dead_owner_is_not_prompted() {
     exercise("dead");
+}
+
+#[test]
+fn invoked_challenge_failure_uses_batch() {
+    exercise("invoked");
+}
+#[test]
+fn public_challenge_still_discovers_fresh() {
+    exercise("public");
 }
