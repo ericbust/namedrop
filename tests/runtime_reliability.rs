@@ -471,24 +471,23 @@ fn status_worker_recovers_after_the_host_connection_returns() {
 }
 
 #[test]
-fn unreadable_event_survives_worker_restart_and_finishes_after_access_returns() {
+fn unreadable_event_is_quarantined_without_blocking_later_events() {
     let fixture = Fixture::new();
     fixture.initialize();
-    let marker = fixture.queue_status("temporarily-unreadable");
+    let marker = fixture.queue_status("a-unreadable");
     fs::set_permissions(&marker, fs::Permissions::from_mode(0o000)).unwrap();
+    let later = fixture.queue_status("b-readable");
     let mut worker = fixture.worker();
-    thread::sleep(Duration::from_secs(1));
-    assert!(
-        marker.exists(),
-        "a read failure must not delete durable work"
-    );
-    worker.0.kill().unwrap();
-    worker.0.wait().unwrap();
-    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).unwrap();
-    worker = fixture.worker();
     worker.finish();
     assert_eq!(fixture.recipient_status(), "idle");
     assert!(!marker.exists());
+    assert!(!later.exists());
+    assert!(
+        marker
+            .with_file_name("rejected-pending-a-unreadable")
+            .exists(),
+        "a read failure must preserve durable work in quarantine"
+    );
 }
 
 #[test]
