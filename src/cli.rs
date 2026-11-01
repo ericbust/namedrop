@@ -71,8 +71,7 @@ impl Parser for Cli {
         let command = Self::command();
         let help = match command.clone().try_get_matches_from(&arguments) {
             Ok(matches) => return Self::from_arg_matches(&matches),
-            Err(error) if error.kind() == clap::error::ErrorKind::DisplayHelp => error,
-            Err(error) => return Err(error),
+            Err(error) => error,
         };
         let tui_command = command.clone().mut_subcommand("hook", |hook| {
             clap::Command::new("hook")
