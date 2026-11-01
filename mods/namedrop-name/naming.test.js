@@ -67,12 +67,35 @@ test("nonzero version and operational failures never write labels", async () => 
   assert.equal(result.error, "already owned");
 });
 
-test("exit 64 displays the binary stderr with the run failure prefix", async () => {
-  const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1")], home: () => "/h",
-    exec: async (_cmd, args) => args[0] === "--version" ? { code: 0 } : { code: 64, stderr: "bad invocation" },
-    hc: async () => assert.fail("hc fallback") });
-  assert.deepEqual(result, { error: "Namedrop could not run: bad invocation" });
-});
+const rejected = readFileSync(new URL("./fixtures/rejected-exit64.json", import.meta.url), "utf8");
+for (const phase of ["probe", "name"]) {
+  for (const code of [64, 65, 7]) {
+    for (const [kind, stdout, stderr, expected] of [
+      ["stdout envelope", rejected, "", JSON.parse(rejected).error.message],
+      ["stdout wins", rejected, "different stderr", JSON.parse(rejected).error.message],
+      ["structured stderr stays raw", "", '{"error":{"message":"raw JSON"}}', '{"error":{"message":"raw JSON"}}'],
+      ["raw stderr", "not json", "raw failure\nwith detail", "raw failure\nwith detail"],
+      ["empty streams", "", "", `Namedrop exited with status ${code}`],
+    ]) {
+      test(`${phase} exit ${code} displays ${kind} verbatim without labeling`, async () => {
+        const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1")], home: () => "/h",
+          exec: async (_cmd, args) => phase === "name" && args[0] === "--version" ? { code: 0 } : { code, stdout, stderr },
+          hc: async () => assert.fail("hc fallback") });
+        assert.deepEqual(result, { error: expected });
+      });
+    }
+  }
+  test(`non-ENOENT rejection during ${phase} is shown without label writes`, async () => {
+    let labels = 0;
+    const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1")], home: () => "/h",
+      exec: async (_cmd, args) => {
+        if (phase === "name" && args[0] === "--version") return { code: 0 };
+        throw new Error("permission denied: executable blocked");
+      }, hc: async () => { labels++; return { code: 0 }; } });
+    assert.equal(labels, 0);
+    assert.deepEqual(result, { error: "permission denied: executable blocked" });
+  });
+}
 
 test("submit checks the fresh selected target", async () => {
   const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1", { state: "finished" })], home: () => "/h",

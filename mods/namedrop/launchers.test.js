@@ -114,3 +114,24 @@ test("popup titlebar closes its launched terminal without relaunching or hiding 
     assert.equal(stopped, true);
   }
 });
+
+for (const folder of folders) {
+  test(`${folder} empty hc failure remains visible and keeps caller open`, async () => {
+    const { launchPopup: launch } = await import(`../namedrop-${folder}/launcher.js`);
+    const closed = [], opened = [];
+    const dependencies = { View: class {}, home: () => "/h", focused: () => ({ terminal: "t1" }),
+      terminals: () => [{ address: "t1", state: "live", labels: {} }], exec: async () => ({ code: 0 }),
+      hc: async () => ({ code: 7, stdout: "", stderr: "" }), openOverlay: (spec) => opened.push(spec),
+      closeOverlay: (id) => closed.push(id), props: () => ({ overlay: "caller" }), launchPopup: launch };
+    const source = readFileSync(new URL(`../namedrop-${folder}/main.js`, import.meta.url), "utf8")
+      .replace(/^import .*;\n/gm, "").replace("export default class PopupLauncher", "class PopupLauncher");
+    const PopupLauncher = new Function(...Object.keys(dependencies), source + "\nreturn PopupLauncher;")(...Object.values(dependencies));
+    const view = new PopupLauncher(), tasks = [];
+    const cx = { notify() {}, spawn(task) { tasks.push(task(cx)); } };
+    view.init({}, cx);
+    await Promise.all(tasks);
+    assert.deepEqual(closed, [], "failure keeps caller open");
+    assert.deepEqual(opened, []);
+    assert.equal(view.error, "hc exited with status 7");
+  });
+}

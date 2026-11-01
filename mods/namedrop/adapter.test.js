@@ -152,3 +152,160 @@ test("error notices retain the native error notification level", async () => {
   await h.start();
   assert.equal(h.notices[0]?.level, "error");
 });
+
+const rosterReads = (h) => h.calls.filter((call) => call.args.includes("roster"));
+async function advance(h, until) {
+  let count = 0;
+  while (h.timers.some((timer) => timer.at <= until)) {
+    assert.ok(++count < 200, "timer loop must remain bounded");
+    await h.fire(h.timers.reduce((a, b) => a.at < b.at ? a : b));
+  }
+  h.setTime(until);
+}
+
+test("sixty seconds of watch rejections perform at most three roster execs", async () => {
+  const h = harness({ watching: async () => { throw new Error("missing directory"); } });
+  await h.start();
+  await advance(h, 60000);
+  assert.ok(rosterReads(h).length <= 3, `${rosterReads(h).length} roster execs`);
+});
+
+test("watch retries back off at 1, 2, 4, 8, 16 and 30 seconds without roster wakes", async () => {
+  const h = harness({ watching: async () => { throw new Error("missing directory"); } });
+  await h.start();
+  let now = 0;
+  for (const delay of [1000, 2000, 4000, 8000, 16000, 30000, 30000]) {
+    assert.equal(h.timers.length, 1);
+    assert.equal(h.timers[0].at, now + delay);
+    now += delay;
+    await h.fire(h.timers[0]);
+    assert.equal(rosterReads(h).length, 1, "retry must not wake roster");
+  }
+});
+
+test("a recovered watch waits for its first change then refreshes once even for irrelevant paths", async () => {
+  let pending;
+  const h = harness({ watching: () => pending ? pending.promise : Promise.reject(new Error("missing")) });
+  await h.start();
+  await h.fire(h.timers[0]);
+  pending = deferred();
+  await h.fire(h.timers[0]);
+  assert.equal(rosterReads(h).length, 1, "pending watch is not an attachment acknowledgment");
+  const first = pending; pending = deferred();
+  first.resolve(["/state/unrelated"]);
+  await h.settle();
+  assert.equal(rosterReads(h).length, 2, "first fulfillment recovers despite basename filter");
+  h.setTime(10000);
+  const next = pending; pending = deferred(); next.resolve(["/state/unrelated"]);
+  await h.settle();
+  assert.equal(rosterReads(h).length, 2, "later unrelated changes do not refresh");
+  pending.reject(new Error("removed again"));
+  await h.settle();
+  assert.equal(h.timers.length, 1);
+  assert.equal(h.timers[0].at, 11000, "success resets watch backoff");
+});
+
+for (const outcome of ["resolve", "reject"]) {
+  test(`stale watch promise ${outcome} cannot wake or retry a replaced directory`, async () => {
+    const stale = deferred();
+    const h = harness({ watching: (directory) => directory === "/state" ? stale.promise : new Promise(() => {}) });
+    await h.start();
+    h.view.watch("/new-state", h.cx);
+    await h.settle();
+    if (outcome === "resolve") stale.resolve(["/state/namedrop.sqlite3"]);
+    else stale.reject(new Error("stale directory"));
+    await h.settle();
+    assert.deepEqual(h.watches, ["/state", "/new-state"]);
+    assert.equal(rosterReads(h).length, 1);
+    assert.equal(h.timers.length, 0);
+  });
+}
+
+for (const status of ["started", "running"]) {
+  for (const order of ["read-first", "ensure-first"]) {
+    test(`${status} ensure recovers failed initial read once in ${order} order`, async () => {
+      const read = deferred(), ensure = deferred();
+      let reads = 0;
+      const h = harness({ execute: async (_command, args) => {
+        if (args.includes("--ensure")) return ensure.promise;
+        if (args.includes("roster")) return ++reads === 1 ? read.promise : ok;
+        return { code: 0 };
+      } });
+      await h.start();
+      const success = { code: 0, stdout: JSON.stringify({ status, pid: 123 }) };
+      if (order === "read-first") { read.resolve(failure); await h.settle(); ensure.resolve(success); }
+      else { ensure.resolve(success); await h.settle(); read.resolve(failure); }
+      await h.settle();
+      await advance(h, 1000);
+      assert.equal(reads, 2);
+      assert.equal(h.view.model.error, null);
+      assert.deepEqual(h.watches, ["/state"]);
+      assert.equal(h.ensures().length, 1);
+      await advance(h, 60000);
+      assert.equal(reads, 2);
+    });
+  }
+}
+
+for (const [name, result] of [
+  ["inactive", { code: 0, stdout: '{"status":"inactive","pid":null}' }],
+  ["malformed", { code: 0, stdout: 'not json' }],
+  ["nonzero", { code: 65, stdout: '{"status":"running","pid":123}' }],
+  ["thrown", new Error("ensure failed")],
+]) {
+  test(`${name} ensure does not automatically recover a failed read`, async () => {
+    const h = harness({ execute: async (_command, args) => {
+      if (args.includes("--ensure")) { if (result instanceof Error) throw result; return result; }
+      return args.includes("roster") ? failure : { code: 0 };
+    } });
+    await h.start(); await advance(h, 60000);
+    assert.equal(rosterReads(h).length, 1);
+    assert.equal(h.ensures().length, 1);
+    assert.equal(h.view.model.error, "raw database refusal\nwith detail");
+  });
+}
+
+test("successful initial read needs no duplicate read when ensure completes", async () => {
+  const ensure = deferred();
+  const h = harness({ execute: async (_command, args) => args.includes("--ensure") ? ensure.promise : args.includes("roster") ? ok : { code: 0 } });
+  await h.start();
+  ensure.resolve({ code: 0, stdout: '{"status":"started","pid":123}' });
+  await h.settle(); await advance(h, 60000);
+  assert.equal(rosterReads(h).length, 1);
+});
+
+test("a recovery read failing after thirty seconds cannot create an ensure loop", async () => {
+  const ensure = deferred(), recovery = deferred();
+  let reads = 0;
+  const h = harness({ execute: async (_command, args) => {
+    if (args.includes("--ensure")) return ensure.promise;
+    if (args.includes("roster")) return ++reads === 1 ? failure : recovery.promise;
+    return { code: 0 };
+  } });
+  await h.start();
+  ensure.resolve({ code: 0, stdout: '{"status":"running","pid":123}' });
+  await h.settle(); await advance(h, 500);
+  assert.equal(reads, 2);
+  h.setTime(31000); recovery.resolve(failure);
+  await h.settle(); await advance(h, 90000);
+  assert.equal(reads, 2);
+  assert.equal(h.ensures().length, 1);
+});
+
+test("a slow initial failure consumes successful ensure without reserving another ensure", async () => {
+  const first = deferred(), ensure = deferred();
+  let reads = 0;
+  const h = harness({ execute: async (_command, args) => {
+    if (args.includes("--ensure")) return ensure.promise;
+    if (args.includes("roster")) return ++reads === 1 ? first.promise : ok;
+    return { code: 0 };
+  } });
+  await h.start();
+  ensure.resolve({ code: 0, stdout: '{"status":"running","pid":123}' });
+  await h.settle();
+  h.setTime(31000); first.resolve(failure);
+  await h.settle(); await advance(h, 90000);
+  assert.equal(reads, 2);
+  assert.equal(h.ensures().length, 1);
+  assert.equal(h.view.model.error, null);
+});

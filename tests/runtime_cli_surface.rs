@@ -4,10 +4,26 @@ use environment::CommandHome;
 use std::process::Command;
 
 #[test]
-fn popup_target_claim_uses_hc_flags_per_missing_field() {
+fn popup_target_claim_uses_hc_flags_only_without_target_environment() {
     const CHILD: &str = "NAMEDROP_POPUP_CLAIM_CHILD";
+    const FIELDS: [&str; 4] = [
+        "NAMEDROP_TARGET_WORKSPACE",
+        "NAMEDROP_TARGET_PANE",
+        "NAMEDROP_TARGET_TERMINAL",
+        "NAMEDROP_TARGET_SESSION",
+    ];
     if std::env::var_os(CHILD).is_none() {
-        for mode in ["flags", "mixed", "tui"] {
+        for mode in [
+            "flags",
+            "tui",
+            "complete",
+            "workspace",
+            "pane",
+            "terminal",
+            "session",
+            "missing-pane",
+            "missing-terminal",
+        ] {
             let home = std::env::temp_dir().join(format!(
                 "namedrop-popup-claim-{}-{mode}",
                 std::process::id()
@@ -16,15 +32,27 @@ fn popup_target_claim_uses_hc_flags_per_missing_field() {
             command
                 .args([
                     "--exact",
-                    "popup_target_claim_uses_hc_flags_per_missing_field",
+                    "popup_target_claim_uses_hc_flags_only_without_target_environment",
                 ])
                 .isolated_env(&home)
                 .env(CHILD, mode);
-            if mode == "mixed" {
-                command
-                    .env("NAMEDROP_TARGET_WORKSPACE", "environment-space")
-                    .env("NAMEDROP_TARGET_PANE", "environment-pane")
-                    .env("NAMEDROP_TARGET_SESSION", "");
+            for field in FIELDS {
+                command.env_remove(field);
+            }
+            if matches!(
+                mode,
+                "complete" | "workspace" | "missing-pane" | "missing-terminal"
+            ) {
+                command.env(FIELDS[0], "environment-space");
+            }
+            if matches!(mode, "complete" | "pane" | "missing-terminal") {
+                command.env(FIELDS[1], "environment-pane");
+            }
+            if matches!(mode, "complete" | "terminal") {
+                command.env(FIELDS[2], "environment-terminal");
+            }
+            if matches!(mode, "complete" | "session") {
+                command.env(FIELDS[3], "");
             }
             let output = command.output().unwrap();
             assert!(output.status.success(), "{mode}: {output:?}");
@@ -39,37 +67,26 @@ fn popup_target_claim_uses_hc_flags_per_missing_field() {
         } else {
             namedrop::runtime::HostKind::Hc
         }),
-        hc_space: (mode != "tui").then(|| "flag-space".to_owned()),
-        hc_terminal: (mode != "tui").then(|| "flag-terminal".to_owned()),
+        hc_space: Some("flag-space".to_owned()),
+        hc_terminal: Some("flag-terminal".to_owned()),
         ..Default::default()
     };
-    if mode == "tui" {
-        assert_eq!(
-            options.popup_target_claim().err().as_deref(),
-            Some("This popup is missing its invoking space")
-        );
+    let missing = match mode.as_str() {
+        "tui" | "pane" | "terminal" | "session" => Some("This popup is missing its invoking space"),
+        "workspace" | "missing-pane" => Some("This popup is missing its invoking pane"),
+        "missing-terminal" => Some("This popup is missing its invoking terminal"),
+        _ => None,
+    };
+    if let Some(error) = missing {
+        assert_eq!(options.popup_target_claim().err().as_deref(), Some(error));
         return;
     }
     let claim = options.popup_target_claim().unwrap();
-    assert_eq!(
-        claim.workspace,
-        if mode == "mixed" {
-            "environment-space"
-        } else {
-            "flag-space"
-        }
-    );
-    assert_eq!(
-        claim.pane,
-        if mode == "mixed" {
-            "environment-pane"
-        } else {
-            "flag-terminal"
-        }
-    );
-    assert_eq!(claim.terminal, "flag-terminal");
-    assert_eq!(claim.session.as_deref(), (mode == "mixed").then_some(""));
-    if mode == "mixed" {
+    if mode == "complete" {
+        assert_eq!(claim.workspace, "environment-space");
+        assert_eq!(claim.pane, "environment-pane");
+        assert_eq!(claim.terminal, "environment-terminal");
+        assert_eq!(claim.session.as_deref(), Some(""));
         assert_eq!(
             claim
                 .resolved_session(true, || panic!("empty session must suppress label lookup"))
@@ -78,6 +95,10 @@ fn popup_target_claim_uses_hc_flags_per_missing_field() {
             Some("")
         );
     } else {
+        assert_eq!(claim.workspace, "flag-space");
+        assert_eq!(claim.pane, "flag-terminal");
+        assert_eq!(claim.terminal, "flag-terminal");
+        assert_eq!(claim.session, None);
         assert_eq!(
             claim
                 .resolved_session(true, || Ok(Some("label-session".to_owned())))

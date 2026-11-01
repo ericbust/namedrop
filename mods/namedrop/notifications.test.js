@@ -102,3 +102,14 @@ test("a restored address seeds its historical blocked status", () => {
   result = read(result.model, 2, snap(row("blocked", [reply("fresh", 11), reply("restored", 10)])));
   assert.equal(result.effects.find((effect) => effect.type === "toast")?.message, "@reviewer replied to @writer");
 });
+
+for (const fresh of [false, true]) {
+  test(`readError preserves reply history when recovery ${fresh ? "includes a new reply" : "has only historical replies"}`, () => {
+    let { model } = read(initialModel(), 0, snap(row("working", [reply("old", 10)])));
+    ({ model } = transition(model, { type: "readError", now: 1000, error: "read failed" }));
+    const replies = fresh ? [reply("new", 11), reply("old", 10)] : [reply("old", 10)];
+    const result = read(model, 2000, snap(row("working", replies)));
+    assert.deepEqual(result.effects.filter((effect) => effect.type === "toast").map((effect) => effect.message),
+      fresh ? ["@reviewer replied to @writer"] : []);
+  });
+}
