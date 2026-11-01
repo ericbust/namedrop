@@ -129,9 +129,13 @@ impl Parser for Cli {
                 }
             }
         }
-        let runtime_matches = RuntimeOptions::augment_args(clap::Command::new("namedrop"))
-            .try_get_matches_from(runtime_arguments)?;
-        let runtime = RuntimeOptions::from_arg_matches(&runtime_matches)?;
+        let runtime = match RuntimeOptions::augment_args(clap::Command::new("namedrop"))
+            .try_get_matches_from(runtime_arguments)
+            .and_then(|matches| RuntimeOptions::from_arg_matches(&matches))
+        {
+            Ok(runtime) => runtime,
+            Err(_) => return Err(help),
+        };
         if runtime.host_kind() != Ok(crate::runtime::HostKind::Tui) {
             return Err(help);
         }
