@@ -226,6 +226,10 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
     let repaired =
         execute_lifecycle_operation("activate", serde_json::json!({"confirmed": true}), &runtime)
             .unwrap();
+    assert_eq!(
+        repaired["codex_sandbox"]["writable_root"],
+        directory.path().join("deferred-commands").to_str().unwrap()
+    );
     assert!(
         repaired["codex_sandbox"]["guidance"]
             .as_str()
@@ -3480,4 +3484,94 @@ fn naming_a_codex_pane_the_shared_app_server_serves_gives_its_advice_instead_of_
             .unwrap()
             .contains("first prompt")
     );
+}
+
+#[test]
+fn trusted_state_worktrees_are_refused_by_activation_naming_and_doctor() {
+    struct RootHerdr(PathBuf);
+    impl HerdrCommandExecutor for RootHerdr {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            let value = match args {
+                ["workspace", "list"] => {
+                    serde_json::json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
+                }
+                ["worktree", "list", ..] => {
+                    serde_json::json!({"result":{"worktrees":[{"path":self.0,"open_workspace_id":"workspace-1"}]}})
+                }
+                ["pane", "list", ..] => {
+                    serde_json::json!({"result":{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"workspace-1","agent":"codex","agent_session":{"value":"session-1"},"agent_status":"idle"}]}})
+                }
+                _ => serde_json::json!({"result":{}}),
+            };
+            Ok(HerdrCommandOutput {
+                stdout: value.to_string(),
+            })
+        }
+    }
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now_unix_ms(&self) -> u64 {
+            42
+        }
+    }
+    struct Ids(AtomicU64);
+    impl IdGenerator for Ids {
+        fn next_id(&self, kind: &str) -> String {
+            format!("{kind}-{}", self.0.fetch_add(1, Ordering::Relaxed))
+        }
+    }
+    for variant in ["state", "ancestor", "linked-ancestor"] {
+        let directory = TestDirectory::new();
+        let state = directory.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let root = match variant {
+            "state" => state.clone(),
+            "ancestor" => directory.path().to_path_buf(),
+            _ => {
+                let link = directory.path().join("linked-root");
+                std::os::unix::fs::symlink(directory.path(), &link).unwrap();
+                link
+            }
+        };
+        let herdr = RootHerdr(root);
+        let ids = Ids(AtomicU64::new(1));
+        let runtime = LifecycleRuntime {
+            state_directory: &state,
+            home_directory: Some(directory.home()),
+            agent_config: namedrop::AgentConfigDirectories::default(),
+            cwd: Path::new("/untrusted-cwd"),
+            workspace_id: Some("workspace-1"),
+            current_pane_id: Some("pane-1"),
+            session_socket_id: "socket-a",
+            herdr: &herdr,
+            clock: &FixedClock,
+            ids: &ids,
+        };
+        for (operation, input) in [
+            ("activate", serde_json::json!({"confirmed":true})),
+            ("name", serde_json::json!({"alias":"reviewer"})),
+        ] {
+            let error = execute_lifecycle_operation(operation, input, &runtime).unwrap_err();
+            assert!(
+                error.contains("worktree") && error.contains("trusted Namedrop state"),
+                "{variant} {operation}: {error}"
+            );
+            assert!(!directory.home().join(".codex/config.toml").exists());
+        }
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.activate_worktree(&namespace(), &attribution(42))
+            })
+            .unwrap();
+        let report = namedrop::diagnose_collaboration(&runtime);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-INTEGRATION-001"
+                    && issue.explanation.contains("trusted Namedrop state")),
+            "{variant}: {report:?}"
+        );
+    }
 }

@@ -562,9 +562,9 @@ mod tests {
 
     #[test]
     fn unowned_broad_grant_is_preserved_but_reported_unsafe() {
-        for ancestor in [false, true] {
+        for suffix in ["", "..", "runtime", "namedrop.sqlite3", "runtime/new"] {
             let f = Fixture::new();
-            let broad = if ancestor { &f.0 } else { &f.state() };
+            let broad = f.state().join(suffix);
             f.write(&format!(
                 "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
                 broad.to_str().unwrap()
@@ -585,6 +585,44 @@ mod tests {
                     .unwrap()
                     .contains(broad.to_str().unwrap())
             );
+        }
+    }
+
+    #[test]
+    fn user_spool_descendants_are_allowed_and_linked_trusted_roots_are_refused() {
+        for suffix in ["deferred-commands", "deferred-commands/nested", "runtime"] {
+            let f = Fixture::new();
+            fs::create_dir_all(f.state()).unwrap();
+            let alias = f.0.join("alias");
+            std::os::unix::fs::symlink(&f.0, &alias).unwrap();
+            let user_root = alias.join("state").join(suffix);
+            f.write(&format!(
+                "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
+                user_root.to_str().unwrap()
+            ));
+            if suffix == "runtime" {
+                let before = f.text();
+                assert!(
+                    activate(&f.home(), &f.state())
+                        .unwrap_err()
+                        .contains("unsafe")
+                );
+                assert!(
+                    inspect(&f.home(), &f.state())
+                        .unwrap_err()
+                        .contains("unsafe")
+                );
+                assert_eq!(before, f.text());
+            } else {
+                activate(&f.home(), &f.state()).unwrap();
+                inspect(&f.home(), &f.state()).unwrap();
+                remove(&f.state()).unwrap();
+                assert!(
+                    Config::read(&f.home().join("config.toml"))
+                        .unwrap()
+                        .contains(user_root.to_str().unwrap())
+                );
+            }
         }
     }
 
