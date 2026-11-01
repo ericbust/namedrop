@@ -9,6 +9,27 @@ pub(crate) enum EnsureOutcome {
     Started(u32),
 }
 
+pub struct PopupTargetClaim {
+    pub workspace: String,
+    pub pane: String,
+    pub terminal: String,
+    pub session: Option<String>,
+}
+
+impl PopupTargetClaim {
+    pub fn resolved_session(
+        &self,
+        hc: bool,
+        from_terminal: impl FnOnce() -> Result<Option<String>, String>,
+    ) -> Result<Option<String>, String> {
+        match &self.session {
+            Some(session) => Ok(Some(session.clone())),
+            None if hc => from_terminal(),
+            None => Ok(None),
+        }
+    }
+}
+
 impl serde::Serialize for EnsureOutcome {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
@@ -221,6 +242,34 @@ pub struct RuntimeOptions {
 }
 
 impl RuntimeOptions {
+    pub fn popup_target_claim(&self) -> Result<PopupTargetClaim, String> {
+        let hc = self.host_kind()? == crate::runtime::HostKind::Hc;
+        let field = |name: &str, fallback: Option<&String>, error: &str| {
+            self.environment
+                .var(name)
+                .or_else(|| if hc { fallback.cloned() } else { None })
+                .ok_or_else(|| error.to_owned())
+        };
+        Ok(PopupTargetClaim {
+            workspace: field(
+                "NAMEDROP_TARGET_WORKSPACE",
+                self.hc_space.as_ref(),
+                "This popup is missing its invoking space",
+            )?,
+            pane: field(
+                "NAMEDROP_TARGET_PANE",
+                self.hc_terminal.as_ref(),
+                "This popup is missing its invoking pane",
+            )?,
+            terminal: field(
+                "NAMEDROP_TARGET_TERMINAL",
+                self.hc_terminal.as_ref(),
+                "This popup is missing its invoking terminal",
+            )?,
+            session: self.environment.var("NAMEDROP_TARGET_SESSION"),
+        })
+    }
+
     pub fn explicit_host_kind(&self) -> Result<Option<crate::runtime::HostKind>, String> {
         crate::runtime::HostSignals {
             host: self.host,

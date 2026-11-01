@@ -220,3 +220,73 @@ fn root_path(home: &Path, suffix: &str) -> std::path::PathBuf {
         home.join(suffix)
     }
 }
+
+#[test]
+fn hc_tour_run_accepts_terminal_and_space_flags_without_target_environment() {
+    let root = hc_socket::fixture::short_socket_root();
+    let home = root.join("home");
+    fs::create_dir(&home).unwrap();
+    fs::write(
+        root.join("terminal.json"),
+        include_str!("fixtures/hc/get-labeled.stdout"),
+    )
+    .unwrap();
+    let hc = root.join("hc");
+    fs::write(
+        &hc,
+        r#"#!/bin/sh
+case "$*" in
+  'server status --json') printf '%s\n' '{"core":{"id":"popup-private"}}' ;;
+  'ls --json') printf '%s\n' '{"terminals":[{"address":"t1","state":"live"}]}' ;;
+  'get t1 --json') cat "$FIXTURE_ROOT/terminal.json" ;;
+  *) printf 'unexpected hc command: %s\n' "$*" >&2; exit 97 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&hc, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = hc_socket::HcSocket::bind(&root.join("core.sock")).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .isolated_env(&home)
+        .env("HC_SOCKET", root.join("core.sock"))
+        .env("HC_BIN_PATH", &hc)
+        .env("FIXTURE_ROOT", &root)
+        .args([
+            "--host",
+            "hc",
+            "--hc-terminal",
+            "t1",
+            "--hc-space",
+            "fixture-space",
+            "--plugin-state",
+        ])
+        .arg(root.join("state"))
+        .args(["ui", "run", "tour"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Namedrop"));
+    let overridden = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .isolated_env(&home)
+        .env("HC_SOCKET", root.join("core.sock"))
+        .env("HC_BIN_PATH", &hc)
+        .env("FIXTURE_ROOT", &root)
+        .env("NAMEDROP_TARGET_TERMINAL", "other")
+        .args([
+            "--host",
+            "hc",
+            "--hc-terminal",
+            "t1",
+            "--hc-space",
+            "fixture-space",
+            "--plugin-state",
+        ])
+        .arg(root.join("state"))
+        .args(["ui", "run", "tour"])
+        .output()
+        .unwrap();
+    assert_eq!(overridden.status.code(), Some(65), "{overridden:?}");
+    assert!(String::from_utf8_lossy(&overridden.stderr).contains("invoking pane changed"));
+    drop(socket);
+    fs::remove_dir_all(root).unwrap();
+}

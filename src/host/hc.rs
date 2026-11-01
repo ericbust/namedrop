@@ -989,7 +989,14 @@ impl<E: HerdrCommandExecutor> Host for HcHost<'_, E> {
                 "do",
                 "mod.open",
                 "--name",
-                &format!("namedrop-{}", popup.entrypoint),
+                &format!(
+                    "namedrop-{}",
+                    if popup.entrypoint == "naming" {
+                        "name"
+                    } else {
+                        popup.entrypoint
+                    }
+                ),
             ])
             .map_err(host_error)?;
         Ok(serde_json::from_str(&output.stdout)

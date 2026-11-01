@@ -72,16 +72,11 @@ pub(super) fn run(options: &RuntimeOptions) -> ExitCode {
 }
 
 fn run_popup(options: &RuntimeOptions) -> Result<(), String> {
-    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE")
-        .map_err(|_| "This popup is missing its invoking space")?;
-    let pane =
-        env::var("NAMEDROP_TARGET_PANE").map_err(|_| "This popup is missing its invoking pane")?;
-    let terminal = env::var("NAMEDROP_TARGET_TERMINAL")
-        .map_err(|_| "This popup is missing its invoking terminal")?;
-    // Empty when the pane held no agent session as the popup opened.
-    let session = env::var("NAMEDROP_TARGET_SESSION")
-        .ok()
-        .filter(|value| !value.is_empty());
+    let claim = options.popup_target_claim()?;
+    let hc = options.host_kind()? == namedrop::runtime::HostKind::Hc;
+    let workspace = &claim.workspace;
+    let pane = &claim.pane;
+    let terminal = &claim.terminal;
     let (width, height) = popup_size();
     let interactive = io::stdin().is_terminal();
     // Entered before the first frame and restored on every return, including
@@ -90,10 +85,21 @@ fn run_popup(options: &RuntimeOptions) -> Result<(), String> {
     let _input_mode = InputMode::polling()?;
     super::with_runtime_options(options, |runtime| {
         let targeted = LifecycleRuntime {
-            workspace_id: Some(&workspace),
-            current_pane_id: Some(&pane),
+            workspace_id: Some(workspace),
+            current_pane_id: Some(pane),
             ..*runtime
         };
+        let session = claim.resolved_session(hc, || {
+            Ok(targeted
+                .host
+                .space(namedrop::SpaceLocator::Workspace(workspace), None)?
+                .panes
+                .into_iter()
+                .find(|candidate| candidate.pane_id == *pane && candidate.terminal_id == *terminal)
+                .and_then(|candidate| candidate.agent_session_id)
+                .map(|session| session.as_str().to_owned()))
+        })?;
+        let session = session.filter(|value| !value.is_empty());
         let collect = |cancelled: &AtomicBool| {
             namedrop::collect_agent_status(&targeted, &terminal, session.as_deref(), cancelled)
         };

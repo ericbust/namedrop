@@ -3,6 +3,97 @@ mod environment;
 use environment::CommandHome;
 use std::process::Command;
 
+#[test]
+fn popup_target_claim_uses_hc_flags_per_missing_field() {
+    const CHILD: &str = "NAMEDROP_POPUP_CLAIM_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        for mode in ["flags", "mixed", "tui"] {
+            let home = std::env::temp_dir().join(format!(
+                "namedrop-popup-claim-{}-{mode}",
+                std::process::id()
+            ));
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "popup_target_claim_uses_hc_flags_per_missing_field",
+                ])
+                .isolated_env(&home)
+                .env(CHILD, mode);
+            if mode == "mixed" {
+                command
+                    .env("NAMEDROP_TARGET_WORKSPACE", "environment-space")
+                    .env("NAMEDROP_TARGET_PANE", "environment-pane")
+                    .env("NAMEDROP_TARGET_SESSION", "");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{mode}: {output:?}");
+            let _ = std::fs::remove_dir_all(home);
+        }
+        return;
+    }
+    let mode = std::env::var(CHILD).unwrap();
+    let options = namedrop::cli::RuntimeOptions {
+        host: Some(if mode == "tui" {
+            namedrop::runtime::HostKind::Tui
+        } else {
+            namedrop::runtime::HostKind::Hc
+        }),
+        hc_space: (mode != "tui").then(|| "flag-space".to_owned()),
+        hc_terminal: (mode != "tui").then(|| "flag-terminal".to_owned()),
+        ..Default::default()
+    };
+    if mode == "tui" {
+        assert_eq!(
+            options.popup_target_claim().err().as_deref(),
+            Some("This popup is missing its invoking space")
+        );
+        return;
+    }
+    let claim = options.popup_target_claim().unwrap();
+    assert_eq!(
+        claim.workspace,
+        if mode == "mixed" {
+            "environment-space"
+        } else {
+            "flag-space"
+        }
+    );
+    assert_eq!(
+        claim.pane,
+        if mode == "mixed" {
+            "environment-pane"
+        } else {
+            "flag-terminal"
+        }
+    );
+    assert_eq!(claim.terminal, "flag-terminal");
+    assert_eq!(claim.session.as_deref(), (mode == "mixed").then_some(""));
+    if mode == "mixed" {
+        assert_eq!(
+            claim
+                .resolved_session(true, || panic!("empty session must suppress label lookup"))
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
+    } else {
+        assert_eq!(
+            claim
+                .resolved_session(true, || Ok(Some("label-session".to_owned())))
+                .unwrap()
+                .as_deref(),
+            Some("label-session")
+        );
+        assert_eq!(
+            claim
+                .resolved_session(false, || panic!("TUI must not read HC label"))
+                .unwrap(),
+            None
+        );
+    }
+}
+
 fn run(arguments: &[&str]) -> std::process::Output {
     run_with_environment(arguments, &[])
 }
