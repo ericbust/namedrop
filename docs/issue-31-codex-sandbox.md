@@ -12,13 +12,13 @@ A persistent worker started from Herdr-owned lifecycle entrypoints polls pending
 
 Stable request IDs and durable receipts prevent a retry from creating another logical message. Recovery also rejects changed coordination fields and can recover an existing commit after its original session ends. Recipient dispatch retains Namedrop's existing ambiguous-attempt holds. Herdr has no prompt idempotency token, so this does not claim universal exactly-once physical prompting across the socket-call crash window.
 
-Both final live checklists passed all nine steps on the same Rust code. Actual Codex calls showed no escalation request, read-only filesystem error or socket permission error. The sessions retained restricted networking and added only the plugin state directory to the default writable paths.
+The final default-reviewer checklist passed all nine steps. The automatic-review run passed both Codex exchanges; its initial terminal check captured Claude's earlier "running" answer before the terminal-result turn. Reapplying the unchanged terminal and settled-state checks to that later turn passed without submitting another command. Actual Codex calls showed no escalation request, read-only filesystem error or socket permission error. Both sessions retained restricted networking and added only the plugin state directory to the default writable paths.
 
 | Live case | Queue to recipient receipt | Result |
 | --- | --- | --- |
-| Default approval reviewer | 1.944 seconds | One reply, one recipient delivery attempt |
-| Automatic approval reviewer | 0.987 seconds | One reply, one recipient delivery attempt, no approval requested |
-| Worker stopped before execution, then restarted | 0.962 seconds | One reply; deleting its result receipt and replaying still created no duplicate |
+| Default approval reviewer | 1.558 seconds | One reply, one recipient delivery attempt |
+| Automatic approval reviewer | 1.211 seconds | One reply, one recipient delivery attempt, no approval requested |
+| Worker stopped before execution, then restarted | 1.374 seconds | One reply; deleting its result receipt and replaying still created no duplicate |
 
 These are individual functional acceptance trials, not a latency percentile or availability guarantee. A command's result receipt can arrive after its recipient receipt while the outside executor finishes mailbox work. The two-second producer timeout reports that interval as pending with an unknown commit status, and an exact retry recovers the original result.
 
@@ -87,6 +87,6 @@ The maintainer's local evidence is under `~/.local/state/pstack/orchestrate/name
 
 The follow-up evidence is under `round2/`. `network-probe.json` and `proxy-network-probe.json` contain the enabled-network mode matrix and host controls. `network-probe.py` reruns it against an isolated Herdr testbed server. `run-live-network.py` configures the proxy-enabled policy before launching the default-reviewer live checklist.
 
-Round 3 evidence is under `round3/`. `design.md` records the command and process boundaries. `run-live.py` retains real Codex calls, immutable queue requests, durable receipts and the recipient database. `assess-live.py` checks the exact filesystem grant, restricted network, absence of escalations and socket errors, and one recipient delivery per new logical message. `restart-probe.py` checks a real queued reply across worker restart and replays a committed command after losing its receipt.
+Round 3 evidence is under `round3/`. `design.md` records the command and process boundaries. `default-guidance/`, `auto-guidance/`, and `restart-guidance/` hold the final captures. `run-live.py` retains real Codex calls, immutable queue requests, durable receipts and the recipient database. `assess-live.py` checks the exact filesystem grant, restricted network, absence of escalations and socket errors, and one recipient delivery per new logical message. `restart-probe.py` checks a real queued reply across worker restart and replays a committed command after losing its receipt. The original terminal-check failure and the later successful observation remain separate artifacts.
 
 The original settings-only implementation remains in branch history at `0936e1e` and `e14ae68`. Its writable-root grant is useful together with the outside command worker. The upstream draft above describes the remaining Linux sandbox capability limit; it does not require Namedrop replies to use a broader network policy.
