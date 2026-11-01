@@ -3843,3 +3843,177 @@ fn fresh_space_work_preserves_counter_retry_schedule() {
         });
     }
 }
+
+#[test]
+fn full_snapshot_retires_vanished_unbound_retries() {
+    for failed_read in [false, true] {
+        check(
+            &format!("vanished-unbound-{failed_read}"),
+            |fixture, runtime| {
+                let runtime = namedrop::LifecycleRuntime {
+                    clock: &RetryClock(10_000),
+                    state_directory: runtime.state_directory,
+                    home_directory: runtime.home_directory,
+                    agent_config: runtime.agent_config,
+                    cwd: runtime.cwd,
+                    workspace_id: runtime.workspace_id,
+                    current_pane_id: runtime.current_pane_id,
+                    session_socket_id: runtime.session_socket_id,
+                    host: runtime.host,
+                    ids: runtime.ids,
+                };
+                let mut other = fixture.terminals.borrow()[0].clone();
+                other["address"] = json!("t2");
+                other["labels"] = json!({"herdr.space":"fixture-space"});
+                fixture.terminals.borrow_mut().push(other);
+                let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                subscriber
+                    .handle_line(&session_event("snapshot", fixture), &runtime)
+                    .unwrap();
+                let event = r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#;
+                if failed_read {
+                    *fixture.get_failure.borrow_mut() = Some("t2".into());
+                    subscriber.handle_line(event, &runtime).unwrap();
+                } else {
+                    fixture.terminals.borrow_mut()[1]["labels"]["namedrop.name"] =
+                        json!("bad name");
+                    *fixture.clear_error.borrow_mut() = Some("publish failed".into());
+                    assert!(
+                        subscriber
+                            .handle_line(event, &runtime)
+                            .unwrap_err()
+                            .contains("publish failed")
+                    );
+                    *fixture.clear_error.borrow_mut() = None;
+                }
+                fixture
+                    .terminals
+                    .borrow_mut()
+                    .retain(|terminal| terminal["address"] != "t2");
+                fixture.calls.borrow_mut().clear();
+                subscriber
+                    .handle_line(
+                        &session_event("snapshot", fixture),
+                        &namedrop::LifecycleRuntime {
+                            clock: &RetryClock(10_100),
+                            ..runtime
+                        },
+                    )
+                    .unwrap();
+                let snapshot_gets = fixture
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| call[0] == "get" && call[1] == "t2")
+                    .count();
+                assert!(
+                    snapshot_gets <= 1,
+                    "snapshot read vanished t2 {snapshot_gets} times"
+                );
+                fixture.calls.borrow_mut().clear();
+                for now in (10_500..=190_500).step_by(500) {
+                    let runtime = namedrop::LifecycleRuntime {
+                        clock: &RetryClock(now),
+                        ..runtime
+                    };
+                    subscriber
+                        .handle_line(r#"{"method":"heartbeat","params":{}}"#, &runtime)
+                        .unwrap();
+                    subscriber.tick(&runtime).unwrap();
+                }
+                assert_eq!(
+                    fixture
+                        .calls
+                        .borrow()
+                        .iter()
+                        .filter(|call| call[0] == "get" && call[1] == "t2")
+                        .count(),
+                    0,
+                    "vanished unbound t2 retained a retry after a full snapshot"
+                );
+
+                // An unavailable cached pane would preserve this obsolete recipient.
+                let connection =
+                    rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3"))
+                        .unwrap();
+                connection.execute("INSERT INTO transition_facts SELECT 'hc:fixture', 'fixture-space', MAX(worktree_order)+1, 'prompt_recipient', ?1, 'paused', 'plugin', 'fixture', 1 FROM transition_facts WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space'", [json!(["t2", "gone-session"]).to_string()]).unwrap();
+                connection.execute("UPDATE order_counters SET next_order = (SELECT MAX(worktree_order)+1 FROM transition_facts WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space') WHERE session_socket_id='hc:fixture' AND worktree_id='fixture-space' AND stream_kind='worktree_transition' AND stream_id=''", []).unwrap();
+                subscriber
+                    .handle_line(
+                        &labels(),
+                        &namedrop::LifecycleRuntime {
+                            clock: &RetryClock(190_501),
+                            ..runtime
+                        },
+                    )
+                    .unwrap();
+                let state: String = connection.query_row("SELECT transition_kind FROM transition_facts WHERE entity_kind='prompt_recipient' AND entity_id=?1 ORDER BY worktree_order DESC LIMIT 1", [json!(["t2", "gone-session"]).to_string()], |row| row.get(0)).unwrap();
+                assert_eq!(
+                    state, "resumed",
+                    "vanished t2 must not remain unavailable in cached discovery"
+                );
+            },
+        );
+    }
+}
+
+#[test]
+fn full_discovery_preserves_new_unreadable_pane_retry() {
+    check("full-new-unreadable", |fixture, runtime| {
+        let runtime = namedrop::LifecycleRuntime {
+            clock: &RetryClock(10_000),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            host: runtime.host,
+            ids: runtime.ids,
+        };
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        let mut other = fixture.terminals.borrow()[0].clone();
+        other["address"] = json!("t2");
+        other["labels"] = json!({"herdr.space":"fixture-space","namedrop.name":"bob"});
+        fixture.terminals.borrow_mut().push(other);
+        *fixture.get_failure.borrow_mut() = Some("t2".into());
+        subscriber
+            .handle_line(&session_event("missed", fixture), &runtime)
+            .unwrap();
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .tick(&namedrop::LifecycleRuntime {
+                clock: &RetryClock(10_499),
+                ..runtime
+            })
+            .unwrap();
+        assert_retry_calls(fixture, &[], 0);
+        *fixture.get_failure.borrow_mut() = None;
+        subscriber
+            .tick(&namedrop::LifecycleRuntime {
+                clock: &RetryClock(10_500),
+                ..runtime
+            })
+            .unwrap();
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "get")
+                .map(|call| call[1].clone())
+                .collect::<Vec<_>>(),
+            ["t2"]
+        );
+        let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+        let addresses = namedrop::StateStore::open(runtime.state_directory)
+            .unwrap()
+            .transaction(|tx| tx.list_pane_addresses(&namespace))
+            .unwrap();
+        assert!(addresses.iter().any(|address| address.alias == "bob"));
+    });
+}
