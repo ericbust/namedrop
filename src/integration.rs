@@ -1964,3 +1964,7 @@ mod guidance_state_tests {
         assert!(!guidance.contains("/hc-state"), "{guidance}");
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/hc_onboarding.rs"]
+mod hc_onboarding;
