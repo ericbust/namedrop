@@ -50,3 +50,22 @@ test("failed reads reserve ensure at most once per 30 seconds", () => {
   result = step(model, "readError", 510, { error: "bad" });
   assert.equal(result.effects.filter((effect) => effect.type === "ensure").length, 0);
 });
+
+test("stale read timers and slow reads cannot overlap or produce catch-up bursts", () => {
+  let result = step(initialModel(), "wake", 0);
+  result = step(result.model, "wake", 499);
+  result = step(result.model, "wake", 1000);
+  assert.deepEqual(result.effects, []);
+  result = step(result.model, "readOk", 1500, { snapshot: { core: null, rows: [], state_directory: "/state" } });
+  assert.deepEqual(result.effects, [{ type: "read" }]);
+  result = step(result.model, "timer", 1500, { at: 500 });
+  assert.deepEqual(result.effects, []);
+  result = step(result.model, "readOk", 1501, { snapshot: { core: null, rows: [], state_directory: "/state" } });
+  assert.deepEqual(result.effects, []);
+  result = step(result.model, "wake", 1999);
+  const at = result.model.timerAt;
+  result = step(result.model, "timer", 9000, { at });
+  assert.deepEqual(result.effects, [{ type: "read" }]);
+  result = step(result.model, "timer", 9000, { at });
+  assert.deepEqual(result.effects, []);
+});

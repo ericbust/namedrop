@@ -94,3 +94,11 @@ test("four immediately eligible updates emit only one aggregate", () => {
   assert.deepEqual(result.model.pending, []);
   assert.equal(result.model.overflow, 0);
 });
+
+test("a restored address seeds its historical blocked status", () => {
+  let { model } = read(initialModel(), 0, snap(row("working", [reply("future", 100)])));
+  let result = read(model, 1, snap(row("blocked", [reply("restored", 10)])));
+  assert.equal(result.effects.some((effect) => effect.type === "toast"), false);
+  result = read(result.model, 2, snap(row("blocked", [reply("fresh", 11), reply("restored", 10)])));
+  assert.equal(result.effects.find((effect) => effect.type === "toast")?.message, "@reviewer replied to @writer");
+});
