@@ -1060,8 +1060,16 @@ fn run_agent_status_worker_queue_with_enqueue(
                 }
                 match enqueue(directory, &serde_json::json!({"operation":"mailbox-wake"})) {
                     Ok(()) => deadline_ms = None,
-                    Err(error) if !retryable_queue_scan(&error) => return ExitCode::SUCCESS,
-                    Err(_) => wait_for_reconciliation_retry(&mut failures, false),
+                    Err(error)
+                        if retryable_queue_scan(&error)
+                            || matches!(
+                                error.raw_os_error(),
+                                Some(libc::ENOSPC | libc::EDQUOT)
+                            ) =>
+                    {
+                        wait_for_reconciliation_retry(&mut failures, false);
+                    }
+                    Err(_) => return ExitCode::SUCCESS,
                 }
                 continue;
             }
@@ -1079,10 +1087,21 @@ fn run_agent_status_worker_queue_with_enqueue(
         };
         let bytes = match fs::read(marker) {
             Ok(bytes) => bytes,
-            Err(error) if !retryable_queue_scan(&error) => return ExitCode::SUCCESS,
-            Err(_) => {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if retryable_queue_scan(&error) => {
                 wait_for_reconciliation_retry(&mut failures, false);
                 continue;
+            }
+            Err(_) => {
+                let rejected = marker.with_file_name(format!(
+                    "rejected-{}",
+                    marker.file_name().unwrap().to_string_lossy()
+                ));
+                match fs::rename(marker, rejected) {
+                    Ok(()) => continue,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => return ExitCode::SUCCESS,
+                }
             }
         };
         let input = serde_json::from_slice(&bytes);
