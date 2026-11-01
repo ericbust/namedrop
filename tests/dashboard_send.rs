@@ -1904,7 +1904,13 @@ else:
         f.reply_to("w1", "pane-1-planner", &envelope, "@operator done");
         let scope = namedrop::lower_hex(&Sha256::digest("socket-a\0w1"));
         let worker_directory = f.state.join("agent-status-reconciliation").join(scope);
-        wait_until("settled mailbox watcher clears pending work", || {
+        wait_until("settled mailbox watcher releases its worker lock", || {
+            let Ok(worker_lock) = fs::File::open(worker_directory.join("worker.lock")) else {
+                return false;
+            };
+            if worker_lock.try_lock().is_err() {
+                return false;
+            }
             let Ok(entries) = fs::read_dir(&worker_directory) else {
                 return false;
             };
