@@ -37,7 +37,7 @@ fn popup_executor_uses_captured_program_scrubbed_environment_and_bounded_childre
     fs::set_permissions(&fallback, fs::Permissions::from_mode(0o700)).unwrap();
     fs::write(&program, "#!/usr/bin/python3\nimport json,os,sys,time\nif sys.argv[1] == 'slow': time.sleep(10)\nelif sys.argv[1] == 'fail': print('app refused',file=sys.stderr);sys.exit(7)\nelse: print(json.dumps({'argv':sys.argv[1:],'env':dict(os.environ)}))\n").unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
-    let snapshot = EnvironmentSnapshot::from_variables([
+    let variables = [
         ("PATH".into(), root.clone().into_os_string()),
         ("HERDR_APP_BIN_PATH".into(), program.into_os_string()),
         ("HC_SOCKET".into(), socket.clone().into_os_string()),
@@ -45,8 +45,8 @@ fn popup_executor_uses_captured_program_scrubbed_environment_and_bounded_childre
         ("HC_SCOPE".into(), "scope".into()),
         ("HC_RUNTIME".into(), "runtime".into()),
         ("HERDR_CUSTOM".into(), "tui".into()),
-        ("NAMEDROP_HERDR_TIMEOUT_MS".into(), "80".into()),
-    ]);
+    ];
+    let snapshot = EnvironmentSnapshot::from_variables(variables.clone());
     let executor = ProcessHerdr::from_snapshot(HostKind::Hc, &snapshot);
     let output = executor
         .open_hc_popup(&["do", "mod.open", "space with 'quotes'"])
@@ -65,8 +65,14 @@ fn popup_executor_uses_captured_program_scrubbed_environment_and_bounded_childre
             .keys()
             .all(|key| !key.starts_with("HERDR_") && key != "HC_SCOPE" && key != "HC_RUNTIME")
     );
+    let slow_snapshot = EnvironmentSnapshot::from_variables(
+        variables
+            .into_iter()
+            .chain([("NAMEDROP_HERDR_TIMEOUT_MS".into(), "80".into())]),
+    );
+    let slow_executor = ProcessHerdr::from_snapshot(HostKind::Hc, &slow_snapshot);
     let start = Instant::now();
-    let error = executor.open_hc_popup(&["slow"]).unwrap_err();
+    let error = slow_executor.open_hc_popup(&["slow"]).unwrap_err();
     assert!(error.contains("timed out"), "{error}");
     assert!(start.elapsed() < Duration::from_secs(2));
     assert_eq!(
