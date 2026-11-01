@@ -561,7 +561,7 @@ impl Subscriber {
         let _lock = label_lock(runtime.state_directory)?;
         let full = pending.full || pending.snapshot.is_some();
         let mut errors = Vec::new();
-        let mut affected = due_spaces.clone();
+        let mut affected = BTreeSet::new();
         let mut failed_panes = BTreeSet::new();
         let active_spaces: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
         let mut store =
@@ -811,10 +811,8 @@ impl Subscriber {
             runtime.clock.now_unix_ms(),
         );
         let unavailable_panes = self.unavailable.keys().cloned().collect();
+        affected.extend(due_spaces.iter().cloned());
         for space in affected {
-            if self.space_retries.contains_key(&space) && !due_spaces.contains(&space) {
-                continue;
-            }
             let errors_before = errors.len();
             let scoped = LifecycleRuntime {
                 workspace_id: Some(&space),
@@ -851,11 +849,15 @@ impl Subscriber {
                 }
             }
             if errors.len() > errors_before {
-                let deadline = RetryDeadline::failed(
-                    self.space_retries.get(&space),
-                    runtime.clock.now_unix_ms(),
-                );
-                self.space_retries.insert(space, deadline);
+                let now = runtime.clock.now_unix_ms();
+                if self
+                    .space_retries
+                    .get(&space)
+                    .is_none_or(|retry| retry.due_ms <= now)
+                {
+                    let deadline = RetryDeadline::failed(self.space_retries.get(&space), now);
+                    self.space_retries.insert(space, deadline);
+                }
             } else {
                 self.space_retries.remove(&space);
             }
