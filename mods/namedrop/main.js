@@ -1,6 +1,6 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Button } from "gpui-base";
-import { terminals, panes, spaces, placement, theme, run, exec, home, watchFolder, props, closeOverlay } from "herdr";
+import { terminals, panes, spaces, placement, theme, run, exec, home, watchFolder, notify, props, closeOverlay } from "herdr";
 import { roster } from "./roster.js";
 import { initialModel, transition, watchedStoreFile } from "./model.js";
 
@@ -44,6 +44,11 @@ export default class Namedrop extends View {
       if (effect.type === "timer") {
         const at = this.model.timerAt;
         cx.timer.after(effect.delay, (cx) => this.dispatch({ type: "timer", at, now: Date.now() }, cx));
+      } else if (effect.type === "toastTimer") {
+        const at = this.model.toastAt;
+        cx.timer.after(effect.delay, (cx) => this.dispatch({ type: "toastTick", at, now: Date.now() }, cx));
+      } else if (effect.type === "toast") {
+        notify({ title: effect.message, action: effect.action });
       } else if (effect.type === "read") {
         cx.spawn(async (cx) => {
           try {
