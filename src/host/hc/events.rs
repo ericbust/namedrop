@@ -432,20 +432,20 @@ impl Subscriber {
                 .terminals
                 .get(&pane)
                 .filter(|terminal| {
-                    terminal.state == "live"
-                        && active.contains(terminal.workspace())
-                        && matches!(
-                            terminal.occupancy(),
-                            Occupancy::Agent {
-                                session: Some(_),
-                                ..
-                            }
-                        )
+                    terminal.state == "live" && active.contains(terminal.workspace())
                 })
-                .map(|terminal| SessionGeneration {
-                    session: terminal.labels["namedrop.session"].clone(),
-                    pid: terminal.labels["namedrop.session.pid"].clone(),
-                    start: terminal.labels["namedrop.session.start"].clone(),
+                .and_then(|terminal| {
+                    let session = terminal.labels.get("namedrop.session")?;
+                    let pid = terminal.labels.get("namedrop.session.pid")?;
+                    let start = terminal.labels.get("namedrop.session.start")?;
+                    if session.is_empty() || pid.is_empty() || start.is_empty() {
+                        return None;
+                    }
+                    Some(SessionGeneration {
+                        session: session.clone(),
+                        pid: pid.clone(),
+                        start: start.clone(),
+                    })
                 });
             match generation {
                 Some(generation) => {
