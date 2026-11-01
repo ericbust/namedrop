@@ -561,12 +561,14 @@ impl Subscriber {
                 dirty.entry(pane.clone()).or_default();
             }
         }
-        for (pane, change) in &dirty {
+        for (pane, change) in &mut dirty {
             if let Some(space) = self.spaces.get(pane) {
                 affected.insert(space.clone());
             }
             let refresh = if pending.full {
-                false
+                bound_spaces.contains_key(pane)
+                    && !self.terminals.contains_key(pane)
+                    && !self.unavailable.contains_key(pane)
             } else if pending.dirty.contains_key(pane) {
                 true
             } else if let Some(terminal) = self.terminals.get(pane) {
@@ -591,18 +593,25 @@ impl Subscriber {
             if refresh {
                 match runtime.host.terminal(pane, None) {
                     Ok(terminal) => {
+                        if bound_spaces.contains_key(pane) && terminal.state == "finished" {
+                            change.unavailable = true;
+                        }
                         self.terminals.insert(pane.clone(), terminal);
                         self.unavailable.remove(pane);
                         self.read_retries.remove(pane);
                     }
                     Err(error)
                         if change.removed
-                            || (full
+                            || ((full || bound_spaces.contains_key(pane))
                                 && matches!(
                                     error.code.as_deref(),
                                     Some("not_found" | "finished")
                                 )) =>
                     {
+                        if bound_spaces.contains_key(pane) {
+                            change.unavailable = true;
+                            change.removed = true;
+                        }
                         self.terminals.remove(pane);
                         self.unavailable.remove(pane);
                         self.read_retries.remove(pane);
@@ -640,6 +649,39 @@ impl Subscriber {
             if self.unavailable.contains_key(pane) {
                 continue;
             }
+            if change.unavailable
+                && let Some(space) = self.spaces.get(pane).cloned()
+            {
+                let scoped = LifecycleRuntime {
+                    workspace_id: Some(&space),
+                    current_pane_id: None,
+                    ..*runtime
+                };
+                if active_spaces.contains(&space) {
+                    let kind = if change.removed {
+                        "pane_closed"
+                    } else {
+                        "pane_exited"
+                    };
+                    if let Err(error) = self.operation(
+                        "event.pane-lifecycle",
+                        json!({"type":kind,"pane_id":pane,"workspace_id":space}),
+                        &scoped,
+                    ) {
+                        self.unavailable.insert(pane.clone(), error.clone());
+                        errors.push(error);
+                        continue;
+                    }
+                }
+                if change.removed {
+                    self.spaces.remove(pane);
+                }
+            }
+        }
+        for (pane, change) in &dirty {
+            if self.unavailable.contains_key(pane) {
+                continue;
+            }
             if let Some(mut terminal) = self.terminals.get(pane).cloned() {
                 affected.insert(terminal.workspace().to_owned());
                 if let Some(space) = self.spaces.get(pane) {
@@ -665,33 +707,6 @@ impl Subscriber {
                     && let Err(error) = self.reconcile_name(&terminal, &scoped)
                 {
                     errors.push(error);
-                }
-            }
-            if change.unavailable
-                && let Some(space) = self.spaces.get(pane).cloned()
-            {
-                let scoped = LifecycleRuntime {
-                    workspace_id: Some(&space),
-                    current_pane_id: None,
-                    ..*runtime
-                };
-                if active_spaces.contains(&space) {
-                    let kind = if change.removed {
-                        "pane_closed"
-                    } else {
-                        "pane_exited"
-                    };
-                    if let Err(error) = self.operation(
-                        "event.pane-lifecycle",
-                        json!({"type":kind,"pane_id":pane,"workspace_id":space}),
-                        &scoped,
-                    ) {
-                        errors.push(error);
-                        continue;
-                    }
-                }
-                if change.removed {
-                    self.spaces.remove(pane);
                 }
             }
         }
