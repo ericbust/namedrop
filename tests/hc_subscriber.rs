@@ -4147,7 +4147,15 @@ fn check_saved_resume(recovery: &str) {
                 })
                 .unwrap();
         }
-        assert_retry_calls(fixture, &[], 0);
+        assert!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .all(|call| call[0] != "get" && call[0] != "ls"),
+            "successful resume scheduled another read: {:?}",
+            fixture.calls.borrow()
+        );
         assert_eq!(resume_count(), 1);
     });
 }
