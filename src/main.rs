@@ -1023,106 +1023,178 @@ fn run_agent_status_worker() -> ExitCode {
     run_agent_status_worker_queue(&directory, lock, None, pending_agent_status_reconciliations)
 }
 
+enum ReconciliationWork {
+    Marker(PathBuf),
+    Wake,
+}
+
+impl ReconciliationWork {
+    fn remove_marker(&self) -> io::Result<()> {
+        match self {
+            Self::Marker(marker) => fs::remove_file(marker),
+            Self::Wake => Ok(()),
+        }
+    }
+}
+
+fn permanently_unreadable_marker(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::InvalidData | io::ErrorKind::IsADirectory
+    ) || matches!(error.raw_os_error(), Some(libc::ENOTDIR | libc::ELOOP))
+}
+
+const REJECTED_MARKER_RETENTION: usize = 8;
+
+fn prune_rejected_markers(directory: &Path) -> io::Result<()> {
+    let mut rejected = Vec::new();
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_name().to_string_lossy().starts_with("rejected-") {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())?;
+        rejected.push((metadata.modified()?, entry.path(), metadata.is_dir()));
+    }
+    rejected.sort_by(|left, right| right.cmp(left));
+    for (_, path, is_directory) in rejected.into_iter().skip(REJECTED_MARKER_RETENTION) {
+        let result = if is_directory {
+            fs::remove_dir_all(&path)
+        } else {
+            fs::remove_file(&path)
+        };
+        if let Err(error) = result {
+            eprintln!(
+                "could not remove rejected reconciliation {}: {error}",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn run_agent_status_worker_queue(
     directory: &Path,
     lock: fs::File,
     deadline_ms: Option<u64>,
     scan: impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
 ) -> ExitCode {
-    run_agent_status_worker_queue_with_enqueue(
+    run_agent_status_worker_queue_with_io(
         directory,
         lock,
         deadline_ms,
         scan,
-        queue_agent_status_reconciliation,
+        |path| fs::read(path),
+        |input| {
+            if input == serde_json::json!({"operation":"mailbox-wake"}) {
+                with_runtime_options(&RuntimeOptions::default(), |runtime| {
+                    namedrop::drain_mailboxes(runtime).and_then(|report| {
+                        serde_json::to_value(report).map_err(|error| error.to_string())
+                    })
+                })
+            } else {
+                run_lifecycle(
+                    "event.agent-status-changed",
+                    input,
+                    &RuntimeOptions::default(),
+                )
+            }
+        },
     )
 }
 
-fn run_agent_status_worker_queue_with_enqueue(
+fn run_agent_status_worker_queue_with_io(
     directory: &Path,
     lock: fs::File,
     mut deadline_ms: Option<u64>,
     mut scan: impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
-    mut enqueue: impl FnMut(&Path, &serde_json::Value) -> io::Result<()>,
+    mut read: impl FnMut(&Path) -> io::Result<Vec<u8>>,
+    mut reconcile: impl FnMut(serde_json::Value) -> Result<serde_json::Value, String>,
 ) -> ExitCode {
     let mut failures = 0_usize;
+    let mut blocked = std::collections::HashSet::new();
+    if let Err(error) = prune_rejected_markers(directory) {
+        eprintln!("could not prune rejected reconciliations: {error}");
+    }
     loop {
-        let Ok(pending) =
-            pending_agent_status_reconciliations_with_retry(directory, &mut failures, &mut scan)
-        else {
+        let mut scan_available = |directory: &Path| {
+            scan(directory).map(|mut pending| {
+                pending.retain(|marker| !blocked.contains(marker));
+                pending
+            })
+        };
+        let Ok(pending) = pending_agent_status_reconciliations_with_retry(
+            directory,
+            &mut failures,
+            &mut scan_available,
+        ) else {
             return ExitCode::SUCCESS;
         };
-        let Some(marker) = pending.first() else {
-            if let Some(due) = deadline_ms {
-                if SystemClock.now_unix_ms() < due {
-                    wait_for_marker_or_deadline(directory, due, &mut scan);
-                    continue;
-                }
-                match enqueue(directory, &serde_json::json!({"operation":"mailbox-wake"})) {
-                    Ok(()) => deadline_ms = None,
-                    Err(error)
-                        if retryable_queue_scan(&error)
-                            || matches!(
-                                error.raw_os_error(),
-                                Some(libc::ENOSPC | libc::EDQUOT)
-                            ) =>
-                    {
-                        wait_for_reconciliation_retry(&mut failures, false);
-                    }
-                    Err(_) => return ExitCode::SUCCESS,
-                }
+        let work = if let Some(marker) = pending.into_iter().next() {
+            ReconciliationWork::Marker(marker)
+        } else if let Some(due) = deadline_ms {
+            if SystemClock.now_unix_ms() < due {
+                wait_for_marker_or_deadline(directory, due, &mut scan_available);
                 continue;
             }
+            deadline_ms = None;
+            ReconciliationWork::Wake
+        } else {
             let _ = lock.unlock();
-            // A producer can queue after our empty scan, then lose try_lock
-            // while we still own it. Recheck only after releasing ownership:
-            // either we reclaim the queued work or its new worker owns it.
-            if pending_agent_status_reconciliations_with_retry(directory, &mut failures, &mut scan)
-                .is_ok_and(|pending| !pending.is_empty())
+            // Recheck after unlocking so a producer that lost try_lock cannot strand work.
+            if pending_agent_status_reconciliations_with_retry(
+                directory,
+                &mut failures,
+                &mut scan_available,
+            )
+            .is_ok_and(|pending| !pending.is_empty())
                 && lock.try_lock().is_ok()
             {
                 continue;
             }
             return ExitCode::SUCCESS;
         };
-        let bytes = match fs::read(marker) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) if retryable_queue_scan(&error) => {
-                wait_for_reconciliation_retry(&mut failures, false);
-                continue;
-            }
-            Err(_) => {
-                let rejected = marker.with_file_name(format!(
-                    "rejected-{}",
-                    marker.file_name().unwrap().to_string_lossy()
-                ));
-                match fs::rename(marker, rejected) {
-                    Ok(()) => continue,
+        let input = match &work {
+            ReconciliationWork::Wake => serde_json::json!({"operation":"mailbox-wake"}),
+            ReconciliationWork::Marker(marker) => {
+                let bytes = match read(marker) {
+                    Ok(bytes) => bytes,
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                    Err(_) => return ExitCode::SUCCESS,
-                }
+                    Err(error) if !permanently_unreadable_marker(&error) => {
+                        wait_for_reconciliation_retry(&mut failures, false);
+                        continue;
+                    }
+                    Err(_) => {
+                        let rejected = marker.with_file_name(format!(
+                            "rejected-{}",
+                            marker.file_name().unwrap().to_string_lossy()
+                        ));
+                        match fs::rename(marker, rejected) {
+                            Ok(()) => {
+                                if let Err(error) = prune_rejected_markers(directory) {
+                                    eprintln!("could not prune rejected reconciliations: {error}");
+                                }
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "could not quarantine reconciliation {}: {error}",
+                                    marker.display()
+                                );
+                                blocked.insert(marker.clone());
+                            }
+                        }
+                        continue;
+                    }
+                };
+                let Ok(input) = serde_json::from_slice(&bytes) else {
+                    let _ = work.remove_marker();
+                    continue;
+                };
+                input
             }
         };
-        let input = serde_json::from_slice(&bytes);
-        let Ok(input) = input else {
-            let _ = fs::remove_file(marker);
-            continue;
-        };
-        let result = if input == serde_json::json!({"operation":"mailbox-wake"}) {
-            with_runtime_options(&RuntimeOptions::default(), |runtime| {
-                namedrop::drain_mailboxes(runtime).and_then(|report| {
-                    serde_json::to_value(report).map_err(|error| error.to_string())
-                })
-            })
-        } else {
-            run_lifecycle(
-                "event.agent-status-changed",
-                input,
-                &RuntimeOptions::default(),
-            )
-        };
-        match result {
+        match reconcile(input) {
             Ok(result) => match drain_report(&result) {
                 Ok(report) => {
                     if !report.awaits_retry()
@@ -1146,20 +1218,25 @@ fn run_agent_status_worker_queue_with_enqueue(
                         .chain(retry_due_ms)
                         .chain(report.next_grace_due_ms())
                         .min();
-                    if fs::remove_file(marker).is_err() {
+                    if work.remove_marker().is_err() {
                         wait_for_reconciliation_retry(&mut failures, false);
                     }
                 }
                 Err(_) => {
-                    let _ = fs::remove_file(marker);
+                    let _ = work.remove_marker();
                     failures = 0;
                 }
             },
             Err(error) if !retryable_agent_status_reconciliation(&error) => {
-                let _ = fs::remove_file(marker);
+                let _ = work.remove_marker();
                 failures = 0;
             }
-            Err(_) => wait_for_reconciliation_retry(&mut failures, false),
+            Err(_) => {
+                if matches!(work, ReconciliationWork::Wake) {
+                    deadline_ms = Some(SystemClock.now_unix_ms());
+                }
+                wait_for_reconciliation_retry(&mut failures, false);
+            }
         }
     }
 }
@@ -1321,38 +1398,169 @@ mod worker_shutdown_tests {
     }
 
     #[test]
-    fn a_permanent_mailbox_wake_write_error_stops_the_worker_and_releases_ownership() {
-        for (name, errno) in [("removed", libc::ENOENT), ("file", libc::ENOTDIR)] {
-            let queue = QueueFixture::new(&format!("wake-write-{name}"));
-            let directory = queue.0.join("queue");
-            if errno == libc::ENOTDIR {
-                fs::write(&directory, b"replaced queue").unwrap();
-            }
-            assert_eq!(
-                queue_agent_status_reconciliation(
-                    &directory,
-                    &serde_json::json!({"operation":"mailbox-wake"}),
-                )
-                .unwrap_err()
-                .raw_os_error(),
-                Some(errno),
-                "enqueue must preserve the filesystem error"
-            );
+    fn deadline_drains_without_marker_writes_and_keeps_report_deadlines() {
+        for mode in ["complete", "retry", "grace", "error"] {
+            let queue = QueueFixture::new(&format!("deadline-{mode}"));
+            let lock = queue.lock();
+            fs::set_permissions(&queue.0, fs::Permissions::from_mode(0o500)).unwrap();
+            let mut drains = 0;
             let mut scans = 0;
-            assert_eq!(
-                run_agent_status_worker_queue(&directory, queue.lock(), Some(0), |_| {
+            let result = run_agent_status_worker_queue_with_io(
+                &queue.0,
+                lock,
+                Some(0),
+                |directory| {
                     scans += 1;
-                    if scans <= 2 {
-                        Ok(Vec::new())
-                    } else {
-                        Err(io::Error::from_raw_os_error(libc::EIO))
+                    assert!(scans < 30, "deadline drain did not finish");
+                    assert_eq!(
+                        fs::read_dir(directory)?.count(),
+                        1,
+                        "deadline wrote a marker"
+                    );
+                    pending_agent_status_reconciliations(directory)
+                },
+                |_| panic!("deadline must not read a marker"),
+                |input| {
+                    assert_eq!(input, serde_json::json!({"operation":"mailbox-wake"}));
+                    drains += 1;
+                    assert!(drains <= 2);
+                    let mut report = namedrop::DrainReport::default();
+                    if drains == 1 {
+                        match mode {
+                            "retry" => report
+                                .requeued
+                                .push(namedrop::DeliveryAttemptId::new("retry")),
+                            "grace" => report.pending_grace.push(namedrop::GraceDeadline {
+                                attempt_id: namedrop::DeliveryAttemptId::new("grace"),
+                                due_at_ms: SystemClock.now_unix_ms() + 10,
+                            }),
+                            "error" => return Err("temporary storage failure".to_owned()),
+                            _ => {}
+                        }
                     }
-                }),
-                ExitCode::SUCCESS
+                    Ok(serde_json::to_value(report).unwrap())
+                },
             );
-            assert_eq!(scans, 1, "permanent wake-write errno={errno} was retried");
+            fs::set_permissions(&queue.0, fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(result, ExitCode::SUCCESS);
+            assert_eq!(drains, if mode == "complete" { 1 } else { 2 });
             queue.lock();
         }
+    }
+
+    #[test]
+    fn transient_marker_reads_retry_without_quarantining_work() {
+        for errno in [libc::EIO, libc::ESTALE, libc::ETIMEDOUT, libc::EMFILE] {
+            let queue = QueueFixture::new(&format!("marker-transient-{errno}"));
+            let marker = queue.0.join("pending-work");
+            fs::write(&marker, b"{}").unwrap();
+            let mut reads = 0;
+            let mut reconciled = 0;
+            let started = std::time::Instant::now();
+            assert_eq!(
+                run_agent_status_worker_queue_with_io(
+                    &queue.0,
+                    queue.lock(),
+                    None,
+                    pending_agent_status_reconciliations,
+                    |path| {
+                        reads += 1;
+                        if reads == 1 {
+                            Err(io::Error::from_raw_os_error(errno))
+                        } else {
+                            fs::read(path)
+                        }
+                    },
+                    |_| {
+                        reconciled += 1;
+                        Ok(serde_json::to_value(namedrop::DrainReport::default()).unwrap())
+                    },
+                ),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(reconciled, 1, "errno={errno} lost work");
+            assert_eq!(reads, 2);
+            assert!(started.elapsed() >= Duration::from_millis(100));
+            assert!(!queue.0.join("rejected-pending-work").exists());
+            queue.lock();
+        }
+    }
+
+    #[test]
+    fn failed_quarantine_skips_marker_serves_later_work_and_releases_lock() {
+        let queue = QueueFixture::new("blocked-quarantine");
+        let marker = queue.0.join("pending-0-poisoned");
+        fs::create_dir(&marker).unwrap();
+        let rejected = queue.0.join("rejected-pending-0-poisoned");
+        fs::create_dir(&rejected).unwrap();
+        fs::write(rejected.join("evidence"), b"keep").unwrap();
+        let later = queue.0.join("pending-1-later");
+        fs::write(&later, b"{}").unwrap();
+        let mut scans = 0;
+        let mut reconciled = 0;
+        assert_eq!(
+            run_agent_status_worker_queue_with_io(
+                &queue.0,
+                queue.lock(),
+                None,
+                |directory| {
+                    scans += 1;
+                    assert!(scans < 10, "blocked marker caused a busy loop");
+                    pending_agent_status_reconciliations(directory)
+                },
+                |path| fs::read(path),
+                |_| {
+                    reconciled += 1;
+                    Ok(serde_json::to_value(namedrop::DrainReport::default()).unwrap())
+                },
+            ),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(reconciled, 1, "failed quarantine stranded later work");
+        assert!(marker.is_dir());
+        assert!(!later.exists());
+        assert_eq!(fs::read(rejected.join("evidence")).unwrap(), b"keep");
+        queue.lock();
+    }
+
+    #[test]
+    fn idle_worker_retains_only_newest_rejections_without_following_symlinks() {
+        let queue = QueueFixture::new("rejected-retention");
+        let evidence = queue.0.join("external-evidence");
+        fs::create_dir(&evidence).unwrap();
+        fs::write(evidence.join("keep"), b"keep").unwrap();
+        let old = queue.0.join("rejected-old-directory");
+        fs::create_dir(&old).unwrap();
+        std::os::unix::fs::symlink(&evidence, old.join("linked-evidence")).unwrap();
+        let old_link = queue.0.join("rejected-old-link");
+        std::os::unix::fs::symlink(&evidence, &old_link).unwrap();
+        for index in 0..REJECTED_MARKER_RETENTION {
+            let path = queue.0.join(format!("rejected-new-{index}"));
+            let file = fs::File::create(path).unwrap();
+            file.set_modified(SystemTime::now() + Duration::from_secs(10 + index as u64))
+                .unwrap();
+        }
+        let queued = queue.0.join("queued-untouched");
+        fs::write(&queued, b"keep").unwrap();
+        assert_eq!(
+            run_agent_status_worker_queue_with_io(
+                &queue.0,
+                queue.lock(),
+                None,
+                pending_agent_status_reconciliations,
+                |_| panic!("idle queue has no markers"),
+                |_| panic!("idle queue has no work"),
+            ),
+            ExitCode::SUCCESS
+        );
+        assert!(!old.exists());
+        assert!(fs::symlink_metadata(&old_link).is_err());
+        assert_eq!(fs::read(evidence.join("keep")).unwrap(), b"keep");
+        assert!(queued.exists());
+        for index in 0..REJECTED_MARKER_RETENTION {
+            assert!(queue.0.join(format!("rejected-new-{index}")).exists());
+        }
+        queue.lock();
     }
 
     #[test]
@@ -1394,53 +1602,6 @@ mod worker_shutdown_tests {
                     );
                 }
             }
-            queue.lock();
-        }
-    }
-
-    #[test]
-    fn full_disk_wake_writes_retry_and_consume_the_queued_wake() {
-        for errno in [libc::ENOSPC, libc::EDQUOT] {
-            let queue = QueueFixture::new(&format!("wake-full-{errno}"));
-            let mut writes = 0;
-            let mut consumed = false;
-            assert_eq!(
-                run_agent_status_worker_queue_with_enqueue(
-                    &queue.0,
-                    queue.lock(),
-                    Some(0),
-                    |directory| {
-                        let pending = pending_agent_status_reconciliations(directory)?;
-                        for marker in &pending {
-                            assert_eq!(
-                                serde_json::from_slice::<serde_json::Value>(&fs::read(marker)?)?,
-                                serde_json::json!({"operation":"mailbox-wake"})
-                            );
-                            // Avoid the host runtime while exercising marker consumption.
-                            fs::write(marker, b"invalid marker")?;
-                            consumed = true;
-                        }
-                        Ok(pending)
-                    },
-                    |directory, input| {
-                        writes += 1;
-                        assert!(writes <= 2, "wake write did not recover");
-                        if writes == 1 {
-                            Err(io::Error::from_raw_os_error(errno))
-                        } else {
-                            queue_agent_status_reconciliation(directory, input)
-                        }
-                    },
-                ),
-                ExitCode::SUCCESS
-            );
-            assert_eq!(writes, 2, "errno={errno} stopped the wake worker");
-            assert!(consumed, "recovered wake was not consumed");
-            assert!(
-                pending_agent_status_reconciliations(&queue.0)
-                    .unwrap()
-                    .is_empty()
-            );
             queue.lock();
         }
     }
