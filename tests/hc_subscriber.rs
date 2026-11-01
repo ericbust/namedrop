@@ -115,6 +115,35 @@ fn ensure_inactive_states_never_launch_a_subscriber() {
 }
 
 #[test]
+fn ensure_rejects_interrupted_activation() {
+    let root = std::env::temp_dir().join(format!("namedrop-ensure-migration-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let home = root.join("home");
+    let state = root.join("state");
+    std::fs::create_dir_all(state.join("runtime")).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(state.join("runtime/migration.json"), "{}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .isolated_home(&home)
+        .env("HC_SOCKET", root.join("absent.sock"))
+        .env("HC_BIN_PATH", "/bin/false")
+        .args(["--host", "hc", "--plugin-state"])
+        .arg(&state)
+        .args(["events", "--ensure"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(69), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("activation was interrupted"),
+        "{output:?}"
+    );
+    assert!(!state.join("hc-subscribers").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn ensure_starts_once_then_reports_the_same_running_pid() {
     let fixture = EnsureFixture::new();
     fixture.activate(&format!("hc:{ENSURE_CORE}"), false);
