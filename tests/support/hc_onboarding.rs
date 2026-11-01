@@ -132,7 +132,7 @@ fn exercise(mode: &str) {
         drop(agent);
     }
     if mode == "invoked" {
-        issue_registration_challenge(&address, AgentRuntime::ClaudeCode, &runtime).unwrap();
+        onboard_settled_integrations(&runtime, &observed).unwrap();
         StateStore::open(&state)
             .unwrap()
             .transaction(|tx| {
