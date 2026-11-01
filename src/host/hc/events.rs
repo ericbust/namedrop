@@ -282,6 +282,20 @@ impl Subscriber {
         Ok(())
     }
 
+    fn schedule_read_retry(&mut self, pane: &str, now: u64) {
+        let delay_ms = self
+            .read_retries
+            .get(pane)
+            .map_or(500, |retry| retry.delay_ms.saturating_mul(2).min(30_000));
+        self.read_retries.insert(
+            pane.to_owned(),
+            ReadRetry {
+                due_ms: now.saturating_add(delay_ms),
+                delay_ms,
+            },
+        );
+    }
+
     fn remember_drain(&mut self, value: &Value, now: u64) {
         if let Ok(report) = serde_json::from_value::<crate::DrainReport>(value.clone()) {
             let due = if report.awaits_retry() {
@@ -320,7 +334,7 @@ impl Subscriber {
         for (pane, watch) in &mut self.owner_watches {
             if watch.due_ms <= now {
                 watch.due_ms = now.saturating_add(500);
-                if !self.unavailable.contains_key(pane)
+                if !self.read_retries.contains_key(pane)
                     && self
                         .terminals
                         .get(pane)
@@ -497,6 +511,9 @@ impl Subscriber {
                     warnings: vec![],
                 }
             };
+            for warning in &discovery.warnings {
+                self.schedule_read_retry(&warning.terminal, runtime.clock.now_unix_ms());
+            }
             self.unavailable = discovery
                 .warnings
                 .into_iter()
@@ -592,12 +609,7 @@ impl Subscriber {
                     }
                     Err(error) => {
                         self.unavailable.insert(pane.clone(), error.to_string());
-                        let retry = self.read_retries.entry(pane.clone()).or_insert(ReadRetry {
-                            due_ms: 0,
-                            delay_ms: 250,
-                        });
-                        retry.delay_ms = retry.delay_ms.saturating_mul(2).min(30_000);
-                        retry.due_ms = runtime.clock.now_unix_ms().saturating_add(retry.delay_ms);
+                        self.schedule_read_retry(pane, runtime.clock.now_unix_ms());
                     }
                 }
             }
@@ -728,12 +740,6 @@ impl Subscriber {
         }
         self.read_retries
             .retain(|pane, _| self.unavailable.contains_key(pane));
-        for pane in self.unavailable.keys() {
-            self.read_retries.entry(pane.clone()).or_insert(ReadRetry {
-                due_ms: runtime.clock.now_unix_ms().saturating_add(500),
-                delay_ms: 500,
-            });
-        }
         if errors.is_empty() {
             Ok(())
         } else {
