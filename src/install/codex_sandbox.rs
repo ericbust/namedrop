@@ -333,6 +333,91 @@ mod tests {
     }
 
     #[test]
+    fn linked_parent_grants_physical_root_and_supports_owned_lifecycle() {
+        let f = Fixture::new();
+        let physical = f.0.canonicalize().unwrap();
+        let alias = f.0.join("alias");
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+        let home = alias.join("custom-codex");
+        let state = alias.join("missing/state");
+        assert!(inspect(&home, &state).unwrap_err().contains("missing"));
+        assert!(!home.exists());
+        assert!(!state.exists());
+        f.write("model = 'keep'\n");
+        fs::set_permissions(home.join("config.toml"), fs::Permissions::from_mode(0o640)).unwrap();
+        activate(&home, &state).unwrap();
+        let expected = physical.join("missing/state");
+        let config = Config::read(&home.join("config.toml")).unwrap();
+        let roots = config.document["sandbox_workspace_write"]["writable_roots"]
+            .as_array()
+            .unwrap();
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots.get(0).unwrap().as_str(), expected.to_str());
+        let first = f.text();
+        inspect(&home, &state).unwrap();
+        inspect(&physical.join("custom-codex"), &expected).unwrap();
+        activate(&physical.join("custom-codex"), &expected).unwrap();
+        assert_eq!(f.text(), first);
+        assert_eq!(
+            fs::metadata(home.join("config.toml"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        assert_eq!(remove(&state).unwrap(), 1);
+        assert_eq!(remove(&state).unwrap(), 0);
+        assert!(f.text().contains("model = 'keep'"));
+        assert!(
+            !Config::read(&home.join("config.toml"))
+                .unwrap()
+                .contains(expected.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn sandbox_file_symlinks_are_refused_under_linked_parents() {
+        for leaf in [
+            "config.toml",
+            RECORD,
+            "codex-sandbox.lock",
+            ".namedrop-sandbox.lock",
+        ] {
+            let f = Fixture::new();
+            let alias = f.0.join("alias");
+            std::os::unix::fs::symlink(f.0.canonicalize().unwrap(), &alias).unwrap();
+            let home = alias.join("custom-codex");
+            let state = alias.join("state");
+            fs::create_dir_all(&home).unwrap();
+            fs::create_dir_all(&state).unwrap();
+            let target = f.0.join("untouched");
+            fs::write(&target, "").unwrap();
+            let path = if leaf == RECORD || leaf == "codex-sandbox.lock" {
+                state.join(leaf)
+            } else {
+                home.join(leaf)
+            };
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            let error = activate(&home, &state).unwrap_err();
+            assert!(
+                error.contains(&path.file_name().unwrap().to_string_lossy().to_string()),
+                "{error}"
+            );
+            assert!(error.contains("symbolic link"), "{error}");
+            assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
+            assert_eq!(fs::read_to_string(&target).unwrap(), "");
+            if leaf == RECORD || leaf == "config.toml" {
+                assert!(
+                    inspect(&home, &state)
+                        .unwrap_err()
+                        .contains("symbolic link")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn activation_grants_exact_state_preserves_settings_mode_and_is_idempotent() {
         use std::os::unix::fs::MetadataExt;
         let f = Fixture::new();
