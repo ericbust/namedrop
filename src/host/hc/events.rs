@@ -737,6 +737,9 @@ impl Subscriber {
         if errors.is_empty() {
             Ok(())
         } else {
+            pending.full = false;
+            pending.snapshot = None;
+            pending.dirty = dirty;
             Err(errors.join("; "))
         }
     }
