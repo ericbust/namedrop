@@ -601,6 +601,26 @@ def check_seeds():
     return "seeds: merge into Claude's files and Codex's config, keep every other key, idempotent"
 
 
+def check_pane_exit(scratch):
+    # A slow printf holds .exit open empty, which is when the poll used to read it.
+    profile = object.__new__(testbed.Profile)
+    profile.dir = scratch / "pane-exit"
+    (profile.dir / "logs").mkdir(parents=True)
+    started = []
+
+    def run(command):
+        slow = 'printf() { sleep 0.3; command printf "$@"; }; '
+        started.append(subprocess.Popen(["bash", "-c", slow + command[-1]]))
+
+    profile.run = run
+    try:
+        assert profile.in_pane("w:p", "echo out; (exit 3)", "probe", timeout=10) == (3, "out\n")
+    finally:
+        for process in started:
+            process.wait()
+    return "pane exit: .exit appears only with the exit code in it"
+
+
 def check_checklist_prompts(kit):
     checklist = (kit / "CHECKLIST.md").read_text()
     for prompt in [mention.prompt for mention in live.MENTIONS] + [live.TERMINAL_PROMPT]:
@@ -629,6 +649,7 @@ def run(kit):
                   ("plan and gates", check_plan_and_gates),
                   ("report", check_report),
                   ("seeds", check_seeds),
+                  ("pane exit", lambda: check_pane_exit(base)),
                   ("CHECKLIST prompts", lambda: check_checklist_prompts(kit))]
         for label, check in checks:
             try:
