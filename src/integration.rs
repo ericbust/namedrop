@@ -445,7 +445,13 @@ where
         else {
             continue;
         };
-        onboard_settled_integration(&binding.address_id, pane, runtime, &installation)?;
+        onboard_settled_integration(
+            &binding.address_id,
+            pane,
+            runtime,
+            &installation,
+            &namespace,
+        )?;
     }
     Ok(installation)
 }
@@ -455,6 +461,7 @@ fn onboard_settled_integration<H, C, I>(
     pane: &DiscoveredPane,
     runtime: &LifecycleRuntime<'_, H, C, I>,
     installation: &crate::IntegrationPackageInstallation,
+    observed_namespace: &StateNamespace,
 ) -> Result<(), String>
 where
     H: crate::Host,
@@ -476,8 +483,11 @@ where
     } else {
         None
     };
-    let discovered = integration_discovery(runtime)?;
-    let namespace = discovered.namespace(runtime.session_socket_id);
+    let namespace = if runtime.is_hc() {
+        observed_namespace.clone()
+    } else {
+        integration_discovery(runtime)?.namespace(runtime.session_socket_id)
+    };
     if runtime.is_hc()
         && StateStore::open(runtime.state_directory)
             .map_err(|error| error.to_string())?
