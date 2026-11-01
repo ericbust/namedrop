@@ -619,6 +619,21 @@ fn exercise_burst(burst: bool, remote: RemoteSeat) {
         }
     };
     coordination_snapshot();
+    let origin_reconciliation = || {
+        rusqlite::Connection::open_with_flags(
+            state.join("namedrop.sqlite3"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT epoch, completed FROM reconciliation_epochs
+             WHERE session_socket_id='hc:burst-private' AND worktree_id='origin-space'",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .unwrap()
+    };
+    let origin_epoch_before = remote_seat.then(|| origin_reconciliation().0);
     let before = snapshot();
     let socket = root.join("core.sock");
     let core = Core::start(&socket, world.clone());
@@ -654,15 +669,12 @@ fn exercise_burst(burst: bool, remote: RemoteSeat) {
     assert_eq!(snapshot(), before);
     coordination_snapshot();
     if remote_seat {
+        let (origin_epoch, completed) = origin_reconciliation();
         assert!(
-            world
-                .lock()
-                .unwrap()
-                .requests
-                .iter()
-                .any(|r| r["method"] == "terminal.get" && r["params"]["terminal"] == "remote"),
-            "subscriber never observed the remote origin actor"
+            origin_epoch > origin_epoch_before.unwrap(),
+            "subscriber never reconciled the remote origin space"
         );
+        assert_eq!(completed, 1);
         StateStore::open(&state)
             .unwrap()
             .transaction(|tx| {
