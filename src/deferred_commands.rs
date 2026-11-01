@@ -759,3 +759,6 @@ fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
         Operation::AddressList => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod caller_race_tests;
