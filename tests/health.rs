@@ -691,14 +691,6 @@ fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
         clock: &Time,
         ids: &f.ids,
     };
-    fs::write(
-        home.join(".codex/config.toml"),
-        format!(
-            "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
-            f.root.to_str().unwrap()
-        ),
-    )
-    .unwrap();
     let report = diagnose_collaboration(&runtime);
     let hook = report
         .issues
