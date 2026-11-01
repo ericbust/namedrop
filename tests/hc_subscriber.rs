@@ -17,7 +17,7 @@ fn ensure_without_core_is_inactive_and_does_not_create_state() {
     std::fs::create_dir(&home).unwrap();
     let state = home.join("state");
     let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
-        .env("HOME", &home)
+        .isolated_env(&home)
         .env("HC_SOCKET", home.join("absent.sock"))
         .env("NAMEDROP_STATE_DIR", &state)
         .args(["--host", "hc", "events", "--ensure"])
@@ -71,7 +71,7 @@ impl EnsureFixture {
 
     fn ensure(&self) -> Value {
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
-            .isolated_home(self.root.join("home"))
+            .isolated_env(self.root.join("home"))
             .env("HC_SOCKET", self.root.join("core.sock"))
             .env("HC_BIN_PATH", "/bin/false")
             .args(["--host", "hc", "--plugin-state"])
@@ -116,7 +116,8 @@ fn ensure_inactive_states_never_launch_a_subscriber() {
 
 #[test]
 fn ensure_rejects_interrupted_activation() {
-    let root = std::env::temp_dir().join(format!("namedrop-ensure-migration-{}", std::process::id()));
+    let root =
+        std::env::temp_dir().join(format!("namedrop-ensure-migration-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let home = root.join("home");
     let state = root.join("state");
@@ -125,7 +126,7 @@ fn ensure_rejects_interrupted_activation() {
     std::fs::write(state.join("runtime/migration.json"), "{}").unwrap();
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
-        .isolated_home(&home)
+        .isolated_env(&home)
         .env("HC_SOCKET", root.join("absent.sock"))
         .env("HC_BIN_PATH", "/bin/false")
         .args(["--host", "hc", "--plugin-state"])
@@ -147,6 +148,7 @@ fn ensure_rejects_interrupted_activation() {
 fn ensure_starts_once_then_reports_the_same_running_pid() {
     let fixture = EnsureFixture::new();
     fixture.activate(&format!("hc:{ENSURE_CORE}"), false);
+    std::fs::create_dir_all(fixture.state().join("runtime")).unwrap();
     let first = fixture.ensure();
     assert_eq!(first["status"], "started", "{first}");
     let pid = first["pid"].as_u64().unwrap();
@@ -154,6 +156,8 @@ fn ensure_starts_once_then_reports_the_same_running_pid() {
     let second = fixture.ensure();
     assert_eq!(second, json!({"status":"running","pid":pid}));
     assert_eq!(hc_socket::subscriptions(&fixture.root), 1);
+    assert!(!fixture.root.join("home/.claude").exists());
+    assert!(!fixture.root.join("home/.codex").exists());
 }
 
 struct Fixture {

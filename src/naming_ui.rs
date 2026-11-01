@@ -163,10 +163,10 @@ fn run_prompt(options: &RuntimeOptions, mode: UiMode) -> Result<(), String> {
             })?
             .unwrap_or_default();
         match mode {
-            UiMode::Name => name_prompt(&targeted, &terminal, &options.environment).map(drop),
-            UiMode::Manage => manage_prompt(&targeted, &terminal, options),
-            UiMode::Doctor => doctor_prompt(&targeted, &terminal, &session, &options.environment),
-            UiMode::Tour => tour_prompt(&targeted, &terminal, &options.environment),
+            UiMode::Name => name_prompt(&targeted, terminal, &options.environment).map(drop),
+            UiMode::Manage => manage_prompt(&targeted, terminal, options),
+            UiMode::Doctor => doctor_prompt(&targeted, terminal, &session, &options.environment),
+            UiMode::Tour => tour_prompt(&targeted, terminal, &options.environment),
             UiMode::Status => unreachable!("status UI is dispatched before interactive prompts"),
         }
     })

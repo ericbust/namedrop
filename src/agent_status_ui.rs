@@ -101,7 +101,7 @@ fn run_popup(options: &RuntimeOptions) -> Result<(), String> {
         })?;
         let session = session.filter(|value| !value.is_empty());
         let collect = |cancelled: &AtomicBool| {
-            namedrop::collect_agent_status(&targeted, &terminal, session.as_deref(), cancelled)
+            namedrop::collect_agent_status(&targeted, terminal, session.as_deref(), cancelled)
         };
         let environment = &options.environment;
         let summarize = |snapshot: &Value, cancelled: &AtomicBool| {
@@ -110,9 +110,9 @@ fn run_popup(options: &RuntimeOptions) -> Result<(), String> {
         let recheck = |cancelled: &AtomicBool| {
             latest_identity(
                 &targeted,
-                &workspace,
-                &pane,
-                &terminal,
+                workspace,
+                pane,
+                terminal,
                 session.as_deref(),
                 cancelled,
             )
