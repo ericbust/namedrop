@@ -199,7 +199,7 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec![directory.path().to_str().unwrap()]
+        vec![directory.path().join("deferred-commands").to_str().unwrap()]
     );
     assert!(!directory.home().join(".codex/config.toml").exists());
     fs::write(&config_path, "model = 'user-model'\n").unwrap();

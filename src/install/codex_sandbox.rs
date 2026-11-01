@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::{
     fs,
     io::ErrorKind,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 use toml_edit::{DocumentMut, Item};
@@ -69,7 +69,7 @@ fn record(state: &Path) -> Result<Option<Grant>, String> {
     if let Some(grant) = &grant
         && (!grant.config.is_absolute()
             || grant.config.file_name().is_none_or(|n| n != "config.toml")
-            || grant.root != root(state)?)
+            || (grant.root != root(state)? && grant.root != physical_state(state)?))
     {
         return Err("invalid Codex sandbox ownership record".into());
     }
@@ -105,7 +105,7 @@ fn resolve_directory(path: &Path) -> Result<PathBuf, String> {
     Err(conflict(path, "has no existing directory ancestor"))
 }
 
-fn root(state: &Path) -> Result<String, String> {
+fn physical_state(state: &Path) -> Result<String, String> {
     if !state.is_absolute()
         || state
             .components()
@@ -127,6 +127,23 @@ fn root(state: &Path) -> Result<String, String> {
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| "Namedrop state directory must be UTF-8".into())
+}
+
+fn root(state: &Path) -> Result<String, String> {
+    let spool = PathBuf::from(physical_state(state)?).join("deferred-commands");
+    match fs::symlink_metadata(&spool) {
+        Ok(metadata) if metadata.is_symlink() => {
+            return Err(conflict(&spool, "is a symbolic link"));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(conflict(&spool, "is not a directory"));
+        }
+        Err(error) if error.kind() != ErrorKind::NotFound => {
+            return Err(conflict(&spool, &error.to_string()));
+        }
+        _ => {}
+    }
+    Ok(spool.to_str().expect("UTF-8 state path").to_owned())
 }
 
 struct Config {
@@ -173,6 +190,28 @@ impl Config {
             .and_then(|t| t.get("writable_roots"))
             .and_then(Item::as_array)
             .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(root)))
+    }
+    fn reject_broad_roots(&self, state: &Path) -> Result<(), String> {
+        if let Some(roots) = self
+            .document
+            .get("sandbox_workspace_write")
+            .and_then(Item::as_table_like)
+            .and_then(|table| table.get("writable_roots"))
+            .and_then(Item::as_array)
+        {
+            for root in roots.iter().filter_map(|value| value.as_str()) {
+                let path = Path::new(root);
+                if path.is_absolute() && state.starts_with(resolve_directory(path)?) {
+                    return Err(conflict(
+                        &self.path,
+                        &format!(
+                            "unsafe user-owned writable root {root:?} covers trusted Namedrop state; remove that broad root manually, then activate Namedrop again and start a new Codex session"
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
     fn add(&mut self, root: &str) {
         if self.document.get("sandbox_workspace_write").is_none() {
@@ -263,7 +302,7 @@ pub(crate) fn activate(directory: &Path, state: &Path) -> Result<(), String> {
     let path = directory.join("config.toml");
     let _state_guard = lock(&state.join("codex-sandbox.lock"))?;
     Config::read(&path)?;
-    if record(state)?.is_some_and(|g| g.config != path) {
+    if record(state)?.is_some_and(|g| g.config != path || g.root != root) {
         remove_owned(state)?;
     }
     let _config_guard = lock(&directory.join(".namedrop-sandbox.lock"))?;
@@ -271,6 +310,12 @@ pub(crate) fn activate(directory: &Path, state: &Path) -> Result<(), String> {
     if let Some(grant) = record(state)? {
         recover(state, grant, &config)?;
     }
+    config.reject_broad_roots(Path::new(&physical_state(state)?))?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .recursive(true)
+        .create(&root)
+        .map_err(|error| conflict(Path::new(&root), &error.to_string()))?;
     if config.contains(&root) {
         return Ok(());
     }
@@ -313,16 +358,18 @@ pub(super) fn inspect(directory: &Path, state: &Path) -> Result<(), String> {
     let directory = resolve_directory(directory)?;
     let path = directory.join("config.toml");
     let grant = record(state)?;
-    if grant.is_some_and(|g| g.config != path || g.pending.is_some()) {
+    if grant.is_some_and(|g| g.config != path || g.root != root || g.pending.is_some()) {
         return Err(conflict(
             &path,
             "has a stale or pending Codex sandbox grant; activate Namedrop again to repair it",
         ));
     }
-    if !Config::read(&path)?.contains(&root) {
+    let config = Config::read(&path)?;
+    config.reject_broad_roots(Path::new(&physical_state(state)?))?;
+    if !config.contains(&root) {
         return Err(conflict(
             &path,
-            "is missing the Namedrop state writable root; activate Namedrop again, then start a new Codex session. Explicit Codex permission profiles require their own state-directory grant",
+            "is missing the Namedrop deferred-commands writable root; activate Namedrop again, then start a new Codex session. Explicit Codex permission profiles require their own deferred-commands-directory grant",
         ));
     }
     Ok(())
@@ -431,6 +478,89 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_legacy_removal_recovers_without_regranting_state() {
+        let f = Fixture::new();
+        legacy_grant(&f);
+        super::super::FAIL_DIRECTORY_SYNC
+            .with(|fault| *fault.borrow_mut() = Some(f.home().join("config.toml")));
+        assert!(activate(&f.home(), &f.state()).is_err());
+        super::super::FAIL_DIRECTORY_SYNC.with(|fault| *fault.borrow_mut() = None);
+        assert!(
+            !Config::read(&f.home().join("config.toml"))
+                .unwrap()
+                .contains(f.state().to_str().unwrap())
+        );
+        activate(&f.home(), &f.state()).unwrap();
+        inspect(&f.home(), &f.state()).unwrap();
+        assert_eq!(remove(&f.state()).unwrap(), 1);
+    }
+
+    #[test]
+    fn pending_legacy_publication_recovers_before_migration() {
+        for published in [false, true] {
+            let f = Fixture::new();
+            legacy_grant(&f);
+            let after = f.text();
+            let before = "model = 'keep'\n";
+            save(
+                &f.state(),
+                Some(&Grant {
+                    config: f.home().join("config.toml"),
+                    root: f.state().to_str().unwrap().into(),
+                    pending: Some(Pending {
+                        before: Some(hash(before)),
+                        after: hash(&after),
+                    }),
+                }),
+            )
+            .unwrap();
+            if !published {
+                f.write(before);
+            }
+            activate(&f.home(), &f.state()).unwrap();
+            inspect(&f.home(), &f.state()).unwrap();
+            assert!(
+                !Config::read(&f.home().join("config.toml"))
+                    .unwrap()
+                    .contains(f.state().to_str().unwrap())
+            );
+            assert_eq!(remove(&f.state()).unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn legacy_migration_preserves_existing_user_spool_grant() {
+        let f = Fixture::new();
+        legacy_grant(&f);
+        let mut config = Config::read(&f.home().join("config.toml")).unwrap();
+        config.add(f.state().join("deferred-commands").to_str().unwrap());
+        config.publish().unwrap();
+        activate(&f.home(), &f.state()).unwrap();
+        inspect(&f.home(), &f.state()).unwrap();
+        assert!(record(&f.state()).unwrap().is_none());
+        assert_eq!(remove(&f.state()).unwrap(), 0);
+    }
+
+    #[test]
+    fn legacy_migration_removes_owned_state_before_refusing_user_ancestor() {
+        let f = Fixture::new();
+        legacy_grant(&f);
+        let mut config = Config::read(&f.home().join("config.toml")).unwrap();
+        config.add(f.0.to_str().unwrap());
+        config.publish().unwrap();
+        assert!(
+            activate(&f.home(), &f.state())
+                .unwrap_err()
+                .contains("unsafe")
+        );
+        let config = Config::read(&f.home().join("config.toml")).unwrap();
+        assert!(!config.contains(f.state().to_str().unwrap()));
+        assert!(config.contains(f.0.to_str().unwrap()));
+        assert!(!config.contains(f.state().join("deferred-commands").to_str().unwrap()));
+        assert_eq!(remove(&f.state()).unwrap(), 0);
+    }
+
+    #[test]
     fn unowned_broad_grant_is_preserved_but_reported_unsafe() {
         for ancestor in [false, true] {
             let f = Fixture::new();
@@ -439,11 +569,17 @@ mod tests {
                 "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
                 broad.to_str().unwrap()
             ));
-            activate(&f.home(), &f.state()).unwrap();
+            let before = f.text();
+            assert!(
+                activate(&f.home(), &f.state())
+                    .unwrap_err()
+                    .contains("unsafe")
+            );
             let error = inspect(&f.home(), &f.state()).unwrap_err();
             assert!(error.contains("unsafe"), "{error}");
             assert!(error.contains("remove"), "{error}");
-            assert_eq!(remove(&f.state()).unwrap(), 1);
+            assert_eq!(remove(&f.state()).unwrap(), 0);
+            assert_eq!(f.text(), before);
             assert!(
                 Config::read(&f.home().join("config.toml"))
                     .unwrap()
@@ -536,7 +672,8 @@ mod tests {
         f.write("model = 'keep'\n");
         fs::set_permissions(home.join("config.toml"), fs::Permissions::from_mode(0o640)).unwrap();
         activate(&home, &state).unwrap();
-        let expected = physical.join("missing/state");
+        let expected_state = physical.join("missing/state");
+        let expected = expected_state.join("deferred-commands");
         let config = Config::read(&home.join("config.toml")).unwrap();
         let roots = config.document["sandbox_workspace_write"]["writable_roots"]
             .as_array()
@@ -545,8 +682,8 @@ mod tests {
         assert_eq!(roots.get(0).unwrap().as_str(), expected.to_str());
         let first = f.text();
         inspect(&home, &state).unwrap();
-        inspect(&physical.join("custom-codex"), &expected).unwrap();
-        activate(&physical.join("custom-codex"), &expected).unwrap();
+        inspect(&physical.join("custom-codex"), &expected_state).unwrap();
+        activate(&physical.join("custom-codex"), &expected_state).unwrap();
         assert_eq!(f.text(), first);
         assert_eq!(
             fs::metadata(home.join("config.toml"))
@@ -623,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn activation_grants_exact_state_preserves_settings_mode_and_is_idempotent() {
+    fn activation_grants_exact_spool_preserves_settings_mode_and_is_idempotent() {
         use std::os::unix::fs::MetadataExt;
         let f = Fixture::new();
         f.write("# keep this\nmodel = 'example'\napproval_policy = 'on-request'\n[sandbox_workspace_write]\nwritable_roots = ['/user/root']\nnetwork_access = false\n");
@@ -639,7 +776,7 @@ mod tests {
         assert!(first.contains("approval_policy = 'on-request'"));
         assert!(first.contains("network_access = false"));
         let config = Config::read(&f.home().join("config.toml")).unwrap();
-        assert!(config.contains(f.state().to_str().unwrap()));
+        assert!(config.contains(f.state().join("deferred-commands").to_str().unwrap()));
         assert!(config.contains("/user/root"));
         assert!(!config.contains(f.0.to_str().unwrap()));
         let metadata = fs::metadata(f.home().join("config.toml")).unwrap();
@@ -655,7 +792,7 @@ mod tests {
         assert!(
             !Config::read(&f.home().join("config.toml"))
                 .unwrap()
-                .contains(f.state().to_str().unwrap())
+                .contains(f.state().join("deferred-commands").to_str().unwrap())
         );
     }
 
@@ -664,7 +801,7 @@ mod tests {
         let f = Fixture::new();
         f.write(&format!(
             "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
-            f.state().to_str().unwrap()
+            f.state().join("deferred-commands").to_str().unwrap()
         ));
         let before = f.text();
         activate(&f.home(), &f.state()).unwrap();
@@ -692,7 +829,7 @@ mod tests {
         assert!(
             !Config::read(&f.home().join("config.toml"))
                 .unwrap()
-                .contains(f.state().to_str().unwrap())
+                .contains(f.state().join("deferred-commands").to_str().unwrap())
         );
         inspect(&next, &f.state()).unwrap();
         fs::write(next.join("config.toml"), "model = 'user edit'\n").unwrap();

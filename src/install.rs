@@ -119,7 +119,7 @@ pub fn disclosed_user_package_targets(
     let claude_settings = claude_permissions::settings_path(&config.claude(home_directory))
         .unwrap_or_else(|_| home_directory.join(".claude/settings.json"));
     format!(
-        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, Codex state writable root in {}, shell command: {}, PATH entries in zsh/bash startup files",
+        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, Codex deferred-command writable root in {}, shell command: {}, PATH entries in zsh/bash startup files",
         claude_settings.display(),
         codex_home.join("rules/namedrop.rules").display(),
         codex_home.join("config.toml").display(),
@@ -637,7 +637,7 @@ fn installed_instructions(
     );
     if runtime != AgentRuntime::ClaudeCode {
         return Ok(format!(
-            "{frontmatter}\n---\n{body}\nCodex: Activation adds only Namedrop's state directory to the writable roots. Use normal sandbox execution for send, reply, ack, complete, and the current-workspace address list. If the sandbox blocks Herdr, Namedrop queues these commands for its outside worker. A pending result has unknown commit status. Retry the exact command to recover its result. Start a new Codex session after activation to load the grant.\n"
+            "{frontmatter}\n---\n{body}\nCodex: Activation adds only Namedrop's deferred-commands directory to the writable roots; its runtime and database remain outside that grant. Use normal sandbox execution for send, reply, ack, complete, and the current-workspace address list. If the sandbox blocks Herdr, Namedrop queues these commands for its outside worker. A pending result has unknown commit status. Retry the exact command to recover its result. Start a new Codex session after activation to load the grant.\n"
         ));
     }
     Ok(format!(

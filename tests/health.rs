@@ -695,7 +695,7 @@ fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
         home.join(".codex/config.toml"),
         format!(
             "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
-            f.root.to_str().unwrap()
+            f.root.join("deferred-commands").to_str().unwrap()
         ),
     )
     .unwrap();
