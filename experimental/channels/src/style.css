@@ -741,6 +741,10 @@ button.member:not(.more):hover {
   row-gap: 2px;
   padding: 10px 14px;
 }
+/* Only a short window lays the hint and the actions out together. */
+.attention-next {
+  display: contents;
+}
 .attention-item + .attention-item,
 .attention-more {
   border-top: 1px solid var(--attention-line);
@@ -787,10 +791,17 @@ button.member:not(.more):hover {
 }
 .attention-actions .text-button {
   flex: none;
-  max-width: 100%;
+  padding-inline: 5px;
+  margin-inline: -5px;
+  max-width: calc(100% + 10px);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* The card scrolls, so it clips anything outside it. Inside the 7px hit
+   area, the ring hugs the label and stays in view. */
+.attention-actions .text-button:focus-visible {
+  outline-offset: -4px;
 }
 .attention-confirm {
   font-size: var(--text-sm);
@@ -2116,6 +2127,18 @@ code.inline {
   .attention-item {
     row-gap: 0;
     padding-block: 6px;
+  }
+  /* The actions follow the hint on its row when both fit, so a wide, short
+     window keeps the whole card in view. */
+  .attention-next {
+    grid-column: 2 / 4;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: var(--space-3);
+  }
+  .attention-next .attention-actions {
+    margin-top: 0;
   }
   .timeline {
     min-height: 48px;

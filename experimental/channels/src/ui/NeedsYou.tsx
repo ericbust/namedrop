@@ -77,27 +77,29 @@ function Item({
       >
         {relativeAge(item.openedAt, now)}
       </time>
-      <p className="attention-hint" title={copy.hintTitle ?? undefined}>
-        {copy.hint}
-      </p>
-      <AttentionActions
-        item={item}
-        channel={channel}
-        absent={absent}
-        onFocus={onFocus}
-        onControl={onControl}
-      >
-        {copy.details !== null && (
-          <button
-            type="button"
-            className="text-button"
-            aria-expanded={open}
-            onClick={() => setOpen(!open)}
-          >
-            {open ? "Hide details" : "Details"}
-          </button>
-        )}
-      </AttentionActions>
+      <div className="attention-next">
+        <p className="attention-hint" title={copy.hintTitle ?? undefined}>
+          {copy.hint}
+        </p>
+        <AttentionActions
+          item={item}
+          channel={channel}
+          absent={absent}
+          onFocus={onFocus}
+          onControl={onControl}
+        >
+          {copy.details !== null && (
+            <button
+              type="button"
+              className="text-button"
+              aria-expanded={open}
+              onClick={() => setOpen(!open)}
+            >
+              {open ? "Hide details" : "Details"}
+            </button>
+          )}
+        </AttentionActions>
+      </div>
       {copy.details !== null && open && (
         <p className="attention-details">{copy.details}</p>
       )}
