@@ -170,7 +170,7 @@ fn register(tx: &mut crate::StateTransaction<'_>, id: &str) -> Result<(), StoreE
         AgentRuntime::Codex,
         "collab/v1",
         id,
-        &crate::complete_capability_profile(),
+        crate::complete_capability_profile(),
         &attribution(),
     )?;
     Ok(())
