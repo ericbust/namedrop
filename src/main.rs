@@ -31,6 +31,38 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let arguments: Vec<_> = env::args_os().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|arg| arg == "--deferred-worker" || arg == "--deferred-execute")
+    {
+        let result = match arguments.as_slice() {
+            [mode, state, socket] if mode == "--deferred-worker" => {
+                namedrop::deferred_commands::run_worker(Path::new(state), &socket.to_string_lossy())
+            }
+            [mode, state, socket, key] if mode == "--deferred-execute" => {
+                namedrop::deferred_commands::execute_queued(
+                    Path::new(state),
+                    &socket.to_string_lossy(),
+                    &key.to_string_lossy(),
+                    |result, options| {
+                        if needs_mailbox_watcher(result)
+                            && let Err(error) = wake_mailboxes(options)
+                        {
+                            eprintln!("Command queued; could not start shell watcher: {error}");
+                        }
+                    },
+                )
+            }
+            _ => Err("invalid deferred command arguments".into()),
+        };
+        return match result {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(65)
+            }
+        };
+    }
     // Activation invokes this only behind the exclusive runtime command gate.
     // It performs the existing atomic migration without host or package actions.
     if arguments.len() == 2 && arguments[0] == "--migrate-runtime-state" {
@@ -302,6 +334,10 @@ fn main() -> ExitCode {
         return write_result(&CommandResult::invalid_request(input_error(error)), 64);
     }
 
+    if let Some(result) = namedrop::deferred_commands::try_defer(operation, &input, &cli.runtime) {
+        return finish(operation, result);
+    }
+
     let result = if matches!(
         operation,
         "handoff.begin"
@@ -569,14 +605,31 @@ fn run_operation(
     kind: OperationKind,
     options: &RuntimeOptions,
 ) -> Result<serde_json::Value, String> {
-    with_runtime_options(options, |runtime| match kind {
-        OperationKind::Handoff => execute_handoff_operation(operation, input, runtime),
-        OperationKind::Group => execute_group_operation(operation, input, runtime),
-        OperationKind::Context => execute_context_operation(operation, input, runtime),
-        OperationKind::Control => execute_control_operation(operation, input, runtime),
-        OperationKind::Lifecycle => execute_lifecycle_operation(operation, input, runtime),
-        OperationKind::Message => execute_message_operation(operation, input, runtime),
-        OperationKind::Integration => execute_integration_operation(operation, input, runtime),
+    with_runtime_options(options, |runtime| {
+        let result = match kind {
+            OperationKind::Handoff => execute_handoff_operation(operation, input, runtime),
+            OperationKind::Group => execute_group_operation(operation, input, runtime),
+            OperationKind::Context => execute_context_operation(operation, input, runtime),
+            OperationKind::Control => execute_control_operation(operation, input, runtime),
+            OperationKind::Lifecycle => execute_lifecycle_operation(operation, input, runtime),
+            OperationKind::Message => execute_message_operation(operation, input, runtime),
+            OperationKind::Integration => execute_integration_operation(operation, input, runtime),
+        };
+        if matches!(
+            operation,
+            "activate"
+                | "name"
+                | "register"
+                | "reconcile"
+                | "event.pane-lifecycle"
+                | "event.agent-status-changed"
+        ) {
+            let _ = namedrop::deferred_commands::ensure_worker(
+                runtime.state_directory,
+                runtime.session_socket_id,
+            );
+        }
+        result
     })
 }
 
@@ -689,9 +742,15 @@ fn run_context_hook(
         return ExitCode::SUCCESS;
     }
     let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
-        with_runtime_at(state_directory, |runtime| Ok(execute(&input, runtime)))
-            .ok()
-            .flatten()
+        with_runtime_at(state_directory, |runtime| {
+            let _ = namedrop::deferred_commands::ensure_worker(
+                runtime.state_directory,
+                runtime.session_socket_id,
+            );
+            Ok(execute(&input, runtime))
+        })
+        .ok()
+        .flatten()
     });
     if serde_json::from_str::<serde_json::Value>(&input)
         .is_ok_and(|input| input["hook_event_name"] == "SessionStart")

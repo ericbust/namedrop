@@ -7,6 +7,8 @@ mod codex_app_server;
 mod context;
 mod controls;
 mod coordination;
+#[doc(hidden)]
+pub mod deferred_commands;
 mod delivery;
 mod domain;
 mod groups;

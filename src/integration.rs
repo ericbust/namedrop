@@ -952,7 +952,7 @@ where
         return execute_delivery_inbox(input, runtime);
     }
     if operation != "register" {
-        return execute_attempt_operation(operation, input, runtime);
+        return execute_attempt_operation(operation, input, runtime, None);
     }
     let nonce = input
         .get("nonce")
@@ -1068,10 +1068,11 @@ where
         .map_err(|store_error| store_error.to_string())
 }
 
-fn execute_attempt_operation<E, C, I>(
+pub(crate) fn execute_attempt_operation<E, C, I>(
     operation: &str,
     input: Value,
     runtime: &LifecycleRuntime<'_, E, C, I>,
+    caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<Value, String>
 where
     E: crate::HerdrCommandExecutor,
@@ -1094,6 +1095,9 @@ where
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let mut result = store
         .transaction(|transaction| {
+            if let Some(caller) = caller {
+                caller.check(transaction, &namespace)?;
+            }
             let (_, agent_session_id) =
                 authorized_delivery_session(transaction, &namespace, &discovered, pane_id)?;
             let attribution = MutationAttribution::new(
