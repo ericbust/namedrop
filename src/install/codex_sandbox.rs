@@ -27,14 +27,12 @@ struct Pending {
 }
 
 fn read(path: &Path) -> Result<Option<String>, String> {
-    for ancestor in path.ancestors() {
-        match fs::symlink_metadata(ancestor) {
-            Ok(metadata) if metadata.is_symlink() => {
-                return Err(conflict(ancestor, "is a symbolic link"));
-            }
-            Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.to_string()),
-            _ => {}
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_symlink() => {
+            return Err(conflict(path, "is a symbolic link"));
         }
+        Err(error) if error.kind() != ErrorKind::NotFound => return Err(error.to_string()),
+        _ => {}
     }
     match fs::read_to_string(path) {
         Ok(text) => Ok(Some(text)),
@@ -86,6 +84,27 @@ fn save(state: &Path, grant: Option<&Grant>) -> Result<(), String> {
     )
 }
 
+fn resolve_directory(path: &Path) -> Result<PathBuf, String> {
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(_) => {
+                return fs::canonicalize(ancestor)
+                    .map(|mut physical| {
+                        let suffix = path.strip_prefix(ancestor).expect("ancestor");
+                        if !suffix.as_os_str().is_empty() {
+                            physical.push(suffix);
+                        }
+                        physical
+                    })
+                    .map_err(|error| conflict(ancestor, &error.to_string()));
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(conflict(ancestor, &error.to_string())),
+        }
+    }
+    Err(conflict(path, "has no existing directory ancestor"))
+}
+
 fn root(state: &Path) -> Result<String, String> {
     if !state.is_absolute()
         || state
@@ -94,7 +113,7 @@ fn root(state: &Path) -> Result<String, String> {
     {
         return Err("Namedrop state directory must be absolute without parent components".into());
     }
-    state
+    resolve_directory(state)?
         .to_str()
         .map(str::to_owned)
         .ok_or_else(|| "Namedrop state directory must be UTF-8".into())
@@ -230,6 +249,7 @@ pub(crate) fn activate(directory: &Path, state: &Path) -> Result<(), String> {
         return Err("CODEX_HOME must be absolute".into());
     }
     let root = root(state)?;
+    let directory = resolve_directory(directory)?;
     let path = directory.join("config.toml");
     let _state_guard = lock(&state.join("codex-sandbox.lock"))?;
     Config::read(&path)?;
@@ -278,6 +298,7 @@ pub(crate) fn remove(state: &Path) -> Result<usize, String> {
 }
 
 pub(super) fn inspect(directory: &Path, state: &Path) -> Result<(), String> {
+    let directory = resolve_directory(directory)?;
     let path = directory.join("config.toml");
     let grant = record(state)?;
     if grant.is_some_and(|g| g.config != path || g.pending.is_some()) {
@@ -310,7 +331,7 @@ mod tests {
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
             fs::create_dir_all(&path).unwrap();
-            Self(path)
+            Self(path.canonicalize().unwrap())
         }
         fn home(&self) -> PathBuf {
             self.0.join("custom-codex")
@@ -340,7 +361,8 @@ mod tests {
         std::os::unix::fs::symlink(&physical, &alias).unwrap();
         let home = alias.join("custom-codex");
         let state = alias.join("missing/state");
-        assert!(inspect(&home, &state).unwrap_err().contains("missing"));
+        let error = inspect(&home, &state).unwrap_err();
+        assert!(error.contains("missing"), "{error}");
         assert!(!home.exists());
         assert!(!state.exists());
         f.write("model = 'keep'\n");
@@ -374,6 +396,21 @@ mod tests {
                 .unwrap()
                 .contains(expected.to_str().unwrap())
         );
+    }
+
+    #[test]
+    fn dangling_directory_links_are_not_treated_as_missing_directories() {
+        let f = Fixture::new();
+        let alias = f.0.join("dangling");
+        let missing = f.0.join("absent");
+        std::os::unix::fs::symlink(&missing, &alias).unwrap();
+        assert!(activate(&alias, &f.state()).is_err());
+        assert!(activate(&f.home(), &alias.join("state")).is_err());
+        assert!(inspect(&alias, &f.state()).is_err());
+        assert!(inspect(&f.home(), &alias.join("state")).is_err());
+        assert!(!missing.exists());
+        assert!(!f.home().exists());
+        assert!(!f.state().exists());
     }
 
     #[test]
