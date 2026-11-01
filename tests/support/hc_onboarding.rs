@@ -96,13 +96,15 @@ fn exercise(mode: &str) {
                     id: address.clone(),
                     role_id: crate::PaneRoleId::new("role"),
                     role_name: "Worker".into(),
-                    role_description:
-                        if matches!(mode, "automatic" | "automatic_session_changed") {
-                            "Native collaborator addressed as @worker"
-                        } else {
-                            "Manual worker"
-                        }
-                        .into(),
+                    role_description: if matches!(
+                        mode,
+                        "automatic" | "automatic_session_changed" | "registered"
+                    ) {
+                        "Native collaborator addressed as @worker"
+                    } else {
+                        "Manual worker"
+                    }
+                    .into(),
                     alias: "worker".into(),
                 },
                 &attribution,
@@ -144,23 +146,33 @@ fn exercise(mode: &str) {
             })
             .unwrap();
     }
+    if mode == "registered" {
+        onboard_settled_integrations(&runtime, &observed).unwrap();
+        let registration = StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| tx.active_integration_registration(&namespace, &address, &session))
+            .unwrap();
+        assert!(registration.is_some(), "fixture must start registered");
+    }
     core.requests.lock().unwrap().clear();
     let result = if mode == "public" {
         issue_registration_challenge(&address, AgentRuntime::ClaudeCode, &runtime).map(|_| ())
     } else {
         onboard_settled_integrations(&runtime, &observed).map(|_| ())
     };
-    if mode == "mismatch" {
+    if matches!(mode, "mismatch" | "dead") {
         assert!(result.is_err());
     } else if mode != "dead" && !mode.ends_with("session_changed") {
         result.as_ref().unwrap();
     }
     let requests = core.requests.lock().unwrap();
+    let sends = requests.iter().filter(|args| args[0] == "send").count();
+    assert_eq!(
+        sends,
+        usize::from(matches!(mode, "manual" | "failure")),
+        "{mode}: {requests:?}"
+    );
     if mode.ends_with("session_changed") {
-        assert!(
-            !requests.iter().any(|args| args[0] == "send"),
-            "stale session A challenge sent to current session B: {requests:?}"
-        );
         let registration = StateStore::open(&state)
             .unwrap()
             .transaction(|tx| tx.active_integration_registration(&namespace, &address, &session))
@@ -170,24 +182,33 @@ fn exercise(mode: &str) {
             "stale session A was registered while core owns session B: {registration:?}"
         );
         assert!(result.is_err(), "stale session must be rejected");
-        return;
     }
-    assert_eq!(
-        requests.iter().filter(|args| args[0] == "ls").count(),
-        usize::from(mode == "public"),
-        "{mode}: {requests:?}"
-    );
-    let sends = requests.iter().filter(|args| args[0] == "send").count();
-    assert_eq!(
-        sends,
-        usize::from(matches!(mode, "manual" | "failure")),
-        "{mode}: {requests:?}"
-    );
+    let validations = match mode {
+        "registered" => 0,
+        "manual" | "working" | "invoked" => 2,
+        "failure" => 3,
+        "automatic"
+        | "public"
+        | "mismatch"
+        | "dead"
+        | "manual_session_changed"
+        | "automatic_session_changed" => 1,
+        other => panic!("unknown onboarding mode {other}"),
+    };
+    let lists = requests.iter().filter(|args| args[0] == "ls").count();
+    let gets = requests.iter().filter(|args| args[0] == "get").count();
+    eprintln!("onboarding {mode}: LS={lists} GET={gets} SEND={sends} result={result:?}");
+    // Each validation discovers the single live terminal. Host::prompt adds a targeted get.
+    assert_eq!(lists, validations, "{mode}: {requests:?}");
+    assert_eq!(gets, validations + sends, "{mode}: {requests:?}");
     let registration = StateStore::open(&state)
         .unwrap()
         .transaction(|tx| tx.active_integration_registration(&namespace, &address, &session))
         .unwrap();
-    assert_eq!(registration.is_some(), mode == "automatic");
+    assert_eq!(
+        registration.is_some(),
+        matches!(mode, "automatic" | "registered")
+    );
     let (attention, deferred) = StateStore::open(&state)
         .unwrap()
         .transaction(|tx| {
@@ -202,25 +223,19 @@ fn exercise(mode: &str) {
         usize::from(matches!(mode, "failure" | "invoked")),
         "{mode}: {attention:?}"
     );
-    assert_eq!(deferred, mode == "working");
-    if matches!(mode, "manual" | "failure" | "working" | "dead") {
-        assert!(
-            requests.iter().any(|args| args[0] == "get"),
-            "prompt must read current PID/status"
-        );
-    }
+    assert!(!deferred, "{mode}: pre-prompt validation does not defer");
 }
 
 #[test]
-fn manual_challenge_uses_batch() {
+fn manual_challenge_bounds_fresh_validation_cost() {
     exercise("manual");
 }
 #[test]
-fn automatic_registration_uses_batch() {
+fn automatic_registration_bounds_fresh_validation_cost() {
     exercise("automatic");
 }
 #[test]
-fn failed_prompt_uses_batch() {
+fn failed_prompt_bounds_fresh_validation_cost() {
     exercise("failure");
 }
 #[test]
@@ -237,7 +252,7 @@ fn dead_owner_is_not_prompted() {
 }
 
 #[test]
-fn invoked_challenge_failure_uses_batch() {
+fn invoked_challenge_failure_bounds_fresh_validation_cost() {
     exercise("invoked");
 }
 #[test]
@@ -252,4 +267,9 @@ fn manual_session_changed_before_batch_is_not_prompted() {
 #[test]
 fn automatic_session_changed_before_batch_is_not_registered() {
     exercise("automatic_session_changed");
+}
+
+#[test]
+fn registered_settled_batch_needs_no_validation() {
+    exercise("registered");
 }
