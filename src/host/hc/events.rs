@@ -168,9 +168,24 @@ struct OwnerWatch {
     due_ms: u64,
 }
 
-struct ReadRetry {
+struct RetryDeadline {
     due_ms: u64,
     delay_ms: u64,
+}
+
+impl RetryDeadline {
+    fn failed(previous: Option<&Self>, now: u64) -> Self {
+        let delay_ms = previous.map_or(500, |retry| retry.delay_ms.saturating_mul(2).min(30_000));
+        Self {
+            due_ms: now.saturating_add(delay_ms),
+            delay_ms,
+        }
+    }
+}
+
+struct PaneRetry {
+    change: DirtyTerminal,
+    deadline: RetryDeadline,
 }
 
 #[derive(Default)]
@@ -178,7 +193,10 @@ pub struct Subscriber {
     spaces: BTreeMap<String, String>,
     terminals: BTreeMap<String, Terminal>,
     unavailable: BTreeMap<String, String>,
-    read_retries: BTreeMap<String, ReadRetry>,
+    read_retries: BTreeMap<String, RetryDeadline>,
+    pane_retries: BTreeMap<String, PaneRetry>,
+    space_retries: BTreeMap<String, RetryDeadline>,
+    pending_retry: Option<RetryDeadline>,
     pending: Pending,
     initialized: bool,
     next_wake_ms: Option<u64>,
@@ -205,7 +223,9 @@ impl Subscriber {
                 errors.push(error);
             }
         }
-        if let Err(error) = self.reconcile_pending(runtime) {
+        if self.pending_retry.is_none()
+            && let Err(error) = self.reconcile_pending(BTreeSet::new(), runtime)
+        {
             errors.push(error);
         }
         if errors.is_empty() {
@@ -283,17 +303,8 @@ impl Subscriber {
     }
 
     fn schedule_read_retry(&mut self, pane: &str, now: u64) {
-        let delay_ms = self
-            .read_retries
-            .get(pane)
-            .map_or(500, |retry| retry.delay_ms.saturating_mul(2).min(30_000));
-        self.read_retries.insert(
-            pane.to_owned(),
-            ReadRetry {
-                due_ms: now.saturating_add(delay_ms),
-                delay_ms,
-            },
-        );
+        let deadline = RetryDeadline::failed(self.read_retries.get(pane), now);
+        self.read_retries.insert(pane.to_owned(), deadline);
     }
 
     fn remember_drain(&mut self, value: &Value, now: u64) {
@@ -319,8 +330,9 @@ impl Subscriber {
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
         let result = self.tick_due(runtime);
-        if result.is_err() {
-            self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
+        let now = runtime.clock.now_unix_ms();
+        if result.is_err() && self.next_wake_ms.is_some_and(|due| due <= now) {
+            self.next_wake_ms = Some(now.saturating_add(500));
         }
         result
     }
@@ -335,6 +347,7 @@ impl Subscriber {
             if watch.due_ms <= now {
                 watch.due_ms = now.saturating_add(500);
                 if !self.read_retries.contains_key(pane)
+                    && !self.pane_retries.contains_key(pane)
                     && self
                         .terminals
                         .get(pane)
@@ -352,30 +365,63 @@ impl Subscriber {
                 self.pending.dirty.entry(pane.clone()).or_default().resume = true;
             }
         }
-        if owner_due || read_due || self.next_wake_ms.is_some_and(|due| due <= now) {
-            self.reconcile_pending(runtime)?;
+        let mut pane_due = false;
+        for (pane, retry) in &self.pane_retries {
+            if retry.deadline.due_ms <= now && !self.read_retries.contains_key(pane) {
+                pane_due = true;
+                self.pending
+                    .dirty
+                    .entry(pane.clone())
+                    .or_insert_with(|| retry.change.clone());
+            }
+        }
+        let due_spaces: BTreeSet<_> = self
+            .space_retries
+            .iter()
+            .filter(|(_, retry)| retry.due_ms <= now)
+            .map(|(space, _)| space.clone())
+            .collect();
+        if owner_due
+            || read_due
+            || pane_due
+            || !due_spaces.is_empty()
+            || self
+                .pending_retry
+                .as_ref()
+                .is_some_and(|retry| retry.due_ms <= now)
+        {
+            self.reconcile_pending(due_spaces, runtime)?;
         }
         if self
             .next_wake_ms
             .is_some_and(|due| due <= runtime.clock.now_unix_ms())
         {
-            self.next_wake_ms = None;
             let observed_spaces = if self.initialized {
                 Some(self.snapshots(runtime)?)
             } else {
                 None
             };
+            let spaces = active_spaces(runtime)?;
+            self.next_wake_ms = None;
             let mut errors = Vec::new();
-            for space in active_spaces(runtime)? {
+            for space in spaces {
                 let scoped = LifecycleRuntime {
                     workspace_id: Some(&space),
                     current_pane_id: None,
                     ..*runtime
                 };
                 let discovered = if self.initialized {
-                    HcHost::<E>::space_from_discovery(scoped.space_locator(), self.discovery())?
+                    HcHost::<E>::space_from_discovery(scoped.space_locator(), self.discovery())
                 } else {
-                    runtime.host.space(scoped.space_locator(), None)?
+                    runtime.host.space(scoped.space_locator(), None)
+                };
+                let discovered = match discovered {
+                    Ok(discovered) => discovered,
+                    Err(error) => {
+                        self.next_wake_ms = Some(now.saturating_add(500));
+                        errors.push(error.to_string());
+                        continue;
+                    }
                 };
                 match crate::delivery::drain_mailboxes_with_discovery(
                     &scoped,
@@ -387,9 +433,16 @@ impl Subscriber {
                         &serde_json::to_value(report).map_err(|error| error.to_string())?,
                         runtime.clock.now_unix_ms(),
                     ),
-                    Err(error) => errors.push(error),
+                    Err(error) => {
+                        self.next_wake_ms = Some(now.saturating_add(500));
+                        errors.push(error);
+                    }
                 }
-                if let Err(error) = self.publish_counters(&scoped) {
+                if !self.space_retries.contains_key(&space)
+                    && let Err(error) = self.publish_counters(&scoped)
+                {
+                    self.space_retries
+                        .insert(space, RetryDeadline::failed(None, now));
                     errors.push(error);
                 }
             }
@@ -402,9 +455,17 @@ impl Subscriber {
 
     fn reconcile_pending<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
         &mut self,
+        due_spaces: BTreeSet<String>,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
-        if self.pending.is_empty() {
+        if self
+            .pending_retry
+            .as_ref()
+            .is_some_and(|retry| retry.due_ms > runtime.clock.now_unix_ms())
+        {
+            return Ok(());
+        }
+        if self.pending.is_empty() && due_spaces.is_empty() {
             return Ok(());
         }
         let mut pending = std::mem::take(&mut self.pending);
@@ -412,28 +473,39 @@ impl Subscriber {
         if !self.initialized && pending.snapshot.is_none() {
             pending.full = true;
         }
-        let result = self
-            .reconcile_batch(&mut pending, runtime)
-            .and_then(|()| self.schedule_owner_watches(&pending, runtime));
+        let result = self.reconcile_batch(&mut pending, &due_spaces, runtime);
         if result.is_err() {
-            pending
-                .dirty
-                .retain(|pane, _| !self.read_retries.contains_key(pane));
+            let now = runtime.clock.now_unix_ms();
+            for space in due_spaces {
+                if let Some(retry) = self.space_retries.get_mut(&space)
+                    && retry.due_ms <= now
+                {
+                    *retry = RetryDeadline::failed(Some(retry), now);
+                }
+            }
+        }
+        if !pending.is_empty() {
             self.pending = pending;
-            self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
+            self.pending_retry = Some(RetryDeadline::failed(
+                self.pending_retry.as_ref(),
+                runtime.clock.now_unix_ms(),
+            ));
+        } else {
+            self.pending_retry = None;
         }
         result
     }
 
-    fn schedule_owner_watches<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
+    fn schedule_owner_watches(
         &mut self,
-        pending: &Pending,
-        runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
-    ) -> Result<(), String> {
-        let active: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
+        dirty: &BTreeMap<String, DirtyTerminal>,
+        full: bool,
+        active: &BTreeSet<String>,
+        now: u64,
+    ) {
         let mut panes: BTreeSet<_> = BTreeSet::new();
-        panes.extend(pending.dirty.keys().cloned());
-        if pending.full || pending.snapshot.is_some() {
+        panes.extend(dirty.keys().cloned());
+        if full {
             panes.extend(self.terminals.keys().cloned());
             panes.extend(self.owner_watches.keys().cloned());
         }
@@ -468,7 +540,7 @@ impl Subscriber {
                             pane,
                             OwnerWatch {
                                 generation,
-                                due_ms: runtime.clock.now_unix_ms().saturating_add(500),
+                                due_ms: now.saturating_add(500),
                             },
                         );
                     }
@@ -478,18 +550,19 @@ impl Subscriber {
                 }
             }
         }
-        Ok(())
     }
 
     fn reconcile_batch<E: HerdrCommandExecutor + Copy, C: Clock, I: IdGenerator>(
         &mut self,
         pending: &mut Pending,
+        due_spaces: &BTreeSet<String>,
         runtime: &LifecycleRuntime<'_, HcHost<E>, C, I>,
     ) -> Result<(), String> {
         let _lock = label_lock(runtime.state_directory)?;
         let full = pending.full || pending.snapshot.is_some();
         let mut errors = Vec::new();
-        let mut affected = BTreeSet::new();
+        let mut affected = due_spaces.clone();
+        let mut failed_panes = BTreeSet::new();
         let active_spaces: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
         let mut store =
             StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
@@ -586,7 +659,14 @@ impl Subscriber {
                     runtime.session_socket_id,
                     terminal.workspace(),
                 );
-                let stored = committed_alias(runtime.state_directory, &namespace, pane)?;
+                let stored = match committed_alias(runtime.state_directory, &namespace, pane) {
+                    Ok(stored) => stored,
+                    Err(error) => {
+                        failed_panes.insert(pane.clone());
+                        errors.push(error);
+                        continue;
+                    }
+                };
                 HcHost::<E>::session_needs_reconciliation(terminal)
                     || stored.as_deref().unwrap_or("")
                         != terminal
@@ -645,6 +725,7 @@ impl Subscriber {
                 )
             {
                 self.unavailable.insert(pane.clone(), error.to_string());
+                failed_panes.insert(pane.clone());
                 errors.push(error.to_string());
             }
         }
@@ -679,6 +760,7 @@ impl Subscriber {
                         &scoped,
                     ) {
                         self.unavailable.insert(pane.clone(), error.clone());
+                        failed_panes.insert(pane.clone());
                         errors.push(error);
                         continue;
                     }
@@ -698,6 +780,7 @@ impl Subscriber {
                     affected.insert(space.clone());
                 }
                 if let Err(error) = self.reconcile_move(&mut terminal, runtime) {
+                    failed_panes.insert(pane.clone());
                     errors.push(error);
                     continue;
                 }
@@ -710,12 +793,14 @@ impl Subscriber {
                 if change.resume
                     && let Err(error) = resume_settled_recipient(&terminal, &scoped)
                 {
+                    failed_panes.insert(pane.clone());
                     errors.push(error);
                 }
                 if terminal.state == "live"
                     && active_spaces.contains(terminal.workspace())
                     && let Err(error) = self.reconcile_name(&terminal, &scoped)
                 {
+                    failed_panes.insert(pane.clone());
                     errors.push(error);
                 }
             }
@@ -727,6 +812,10 @@ impl Subscriber {
         );
         let unavailable_panes = self.unavailable.keys().cloned().collect();
         for space in affected {
+            if self.space_retries.contains_key(&space) && !due_spaces.contains(&space) {
+                continue;
+            }
+            let errors_before = errors.len();
             let scoped = LifecycleRuntime {
                 workspace_id: Some(&space),
                 current_pane_id: None,
@@ -753,24 +842,45 @@ impl Subscriber {
             }) {
                 errors.push(error.to_string());
             }
-            if !active_spaces.contains(&space) {
-                continue;
+            if active_spaces.contains(&space) {
+                if let Err(error) = self.operation("event.reconcile", json!({}), &scoped) {
+                    errors.push(error);
+                }
+                if let Err(error) = self.publish_counters(&scoped) {
+                    errors.push(error);
+                }
             }
-            if let Err(error) = self.operation("event.reconcile", json!({}), &scoped) {
-                errors.push(error);
-            }
-            if let Err(error) = self.publish_counters(&scoped) {
-                errors.push(error);
+            if errors.len() > errors_before {
+                let deadline = RetryDeadline::failed(
+                    self.space_retries.get(&space),
+                    runtime.clock.now_unix_ms(),
+                );
+                self.space_retries.insert(space, deadline);
+            } else {
+                self.space_retries.remove(&space);
             }
         }
+        self.schedule_owner_watches(&dirty, full, &active_spaces, runtime.clock.now_unix_ms());
+        for (pane, change) in dirty {
+            if failed_panes.contains(&pane) && !self.read_retries.contains_key(&pane) {
+                let deadline = RetryDeadline::failed(
+                    self.pane_retries.get(&pane).map(|retry| &retry.deadline),
+                    runtime.clock.now_unix_ms(),
+                );
+                self.pane_retries
+                    .insert(pane, PaneRetry { change, deadline });
+            } else {
+                self.pane_retries.remove(&pane);
+            }
+        }
+        pending.full = false;
+        pending.snapshot = None;
+        pending.dirty.clear();
         self.read_retries
             .retain(|pane, _| self.unavailable.contains_key(pane));
         if errors.is_empty() {
             Ok(())
         } else {
-            pending.full = false;
-            pending.snapshot = None;
-            pending.dirty = dirty;
             Err(errors.join("; "))
         }
     }
@@ -977,7 +1087,7 @@ impl Subscriber {
                     .map_err(|publish| {
                         format!("{error}; could not publish name rejection: {publish}")
                     })?;
-                Err(error)
+                Ok(())
             }
             Ok(_) => {
                 runtime
