@@ -428,31 +428,33 @@ fn detached_subscriber_child() {
         }
     }
     let _cleanup = Cleanup(state.clone());
-    let child_environment = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
-    for token in [
-        b"HC_SCOPE=".as_slice(),
-        b"HC_RUNTIME=",
-        b"HC_TERMINAL_",
-        b"HERDR_",
-    ] {
-        assert!(
-            !child_environment
-                .split(|byte| *byte == 0)
-                .any(|entry| entry.starts_with(token))
-        );
-    }
-    for (key, value) in [
-        ("HC_SOCKET", root.join("core.sock")),
-        ("HOME", root.join("home")),
-        ("CODEX_HOME", root.join("codex")),
-    ] {
-        let expected = format!("{key}={}", value.display());
-        assert!(
-            child_environment
-                .split(|byte| *byte == 0)
-                .any(|entry| entry == expected.as_bytes()),
-            "missing {expected}"
-        );
+    if cfg!(target_os = "linux") {
+        let child_environment = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
+        for token in [
+            b"HC_SCOPE=".as_slice(),
+            b"HC_RUNTIME=",
+            b"HC_TERMINAL_",
+            b"HERDR_",
+        ] {
+            assert!(
+                !child_environment
+                    .split(|byte| *byte == 0)
+                    .any(|entry| entry.starts_with(token))
+            );
+        }
+        for (key, value) in [
+            ("HC_SOCKET", root.join("core.sock")),
+            ("HOME", root.join("home")),
+            ("CODEX_HOME", root.join("codex")),
+        ] {
+            let expected = format!("{key}={}", value.display());
+            assert!(
+                child_environment
+                    .split(|byte| *byte == 0)
+                    .any(|entry| entry == expected.as_bytes()),
+                "missing {expected}"
+            );
+        }
     }
 
     std::fs::create_dir_all(state.join("runtime")).unwrap();
