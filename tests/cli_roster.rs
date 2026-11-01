@@ -8,39 +8,52 @@ use std::{
     os::unix::{fs::PermissionsExt, net::UnixListener},
     path::Path,
     process::Command,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 fn run_core(home: &Path, response: Value) -> (std::process::Output, Value) {
     let socket = home.join("core.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let worker_stopped = Arc::clone(&stopped);
     let worker = std::thread::spawn(move || {
-        let stream = (0..100).find_map(|_| match listener.accept() {
-            Ok((stream, _)) => Some(stream),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                None
-            }
-            Err(error) => panic!("fake core accept: {error}"),
-        });
-        let Some(stream) = stream else {
-            return Value::Null;
-        };
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
-        let request: Value = serde_json::from_str(&line).unwrap();
-        let mut stream = reader.into_inner();
-        writeln!(
-            stream,
-            "{}",
-            json!({"jsonrpc":"2.0","id":request["id"],"result":response})
-        )
-        .unwrap();
-        request
+        let mut requests = Vec::new();
+        loop {
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if worker_stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(error) => panic!("fake core accept: {error}"),
+            };
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let request: Value = serde_json::from_str(&line).unwrap();
+            let mut stream = reader.into_inner();
+            writeln!(
+                stream,
+                "{}",
+                json!({"jsonrpc":"2.0","id":request["id"],"result":response})
+            )
+            .unwrap();
+            requests.push(request);
+        }
+        requests
     });
     let output = run(home, &socket, "hc");
-    (output, worker.join().unwrap())
+    stopped.store(true, Ordering::Relaxed);
+    let requests = worker.join().unwrap();
+    assert_eq!(requests.len(), 1, "fake core requests: {requests:?}");
+    (output, requests.into_iter().next().unwrap())
 }
 
 fn seed_address(state: &Path, core: &str, space: &str, alias: &str, session: Option<&str>) {
