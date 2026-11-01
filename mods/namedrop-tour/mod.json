@@ -1,1 +1,1 @@
-{"place":"none","overlay":{"kind":"window","width":720,"height":500}}
+{"place":"none","overlay":{"kind":"window","key":"namedrop-tour","width":720,"height":500,"props":{"popup":"tour"}}}
