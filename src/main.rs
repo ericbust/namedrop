@@ -3,14 +3,17 @@ mod agent_status_ui;
 mod naming_ui;
 mod popup_input;
 use namedrop::{
-    Clock, CommandResult, Host, LifecycleRuntime, ProcessHerdr, ProcessIds, SystemClock, TuiHost,
+    Clock, CommandResult, Host, LifecycleRuntime, ProcessHerdr, ProcessIds, RuntimeHost,
+    SystemClock,
     cli::{Cli, RuntimeOptions},
     describe_operations, diagnose_collaboration, execute_context_operation,
     execute_control_operation, execute_group_operation, execute_handoff_operation,
     execute_integration_operation, execute_lifecycle_operation, execute_message_operation,
     execute_session_start_hook, execute_user_prompt_submit_hook, is_context_operation,
     is_control_operation, is_integration_operation, is_lifecycle_operation, is_message_operation,
-    render_command_result_to_text, validate_message_input,
+    render_command_result_to_text,
+    runtime::HostKind,
+    validate_message_input,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -24,7 +27,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-type TuiRuntime<'a> = LifecycleRuntime<'a, TuiHost<&'a ProcessHerdr>, SystemClock, ProcessIds>;
+type ProcessRuntime<'a> =
+    LifecycleRuntime<'a, RuntimeHost<&'a ProcessHerdr>, SystemClock, ProcessIds>;
 
 fn main() -> ExitCode {
     if env::args_os().skip(1).eq(["--runtime-info"]) {
@@ -32,6 +36,20 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let arguments: Vec<_> = env::args_os().skip(1).collect();
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--hc-exec-child")
+    {
+        if arguments.get(1).is_none_or(|argument| argument != "--") || arguments.len() < 3 {
+            eprintln!("hc child requires -- followed by an executable");
+            return ExitCode::from(64);
+        }
+        eprintln!(
+            "could not execute hc child: {}",
+            namedrop::runtime::exec_hc_child(&arguments[2..])
+        );
+        return ExitCode::from(65);
+    }
     // Activation invokes this only behind the exclusive runtime command gate.
     // It performs the existing atomic migration without host or package actions.
     if arguments.len() == 2 && arguments[0] == "--migrate-runtime-state" {
@@ -106,23 +124,61 @@ fn main() -> ExitCode {
             );
         }
     };
-    let selected_state = cli
-        .runtime
-        .plugin_state
-        .clone()
-        .or_else(|| {
-            cli.user_prompt_submit_hook_state_directory()
-                .map(Path::to_path_buf)
+    if arguments
+        .iter()
+        .take_while(|argument| *argument != "--")
+        .filter(|argument| {
+            *argument == "--plugin-state"
+                || argument.as_encoded_bytes().starts_with(b"--plugin-state=")
         })
-        .or_else(|| {
-            cli.mailbox_wake_hook_state_directory()
-                .map(Path::to_path_buf)
-        })
-        .or_else(|| {
-            cli.session_start_hook_state_directory()
-                .map(Path::to_path_buf)
-        })
-        .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from));
+        .count()
+        > 1
+    {
+        return write_result(
+            &CommandResult::invalid_request(
+                "--plugin-state cannot be supplied more than once".to_owned(),
+            ),
+            64,
+            cli.human_output(io::stdout().is_terminal()),
+        );
+    }
+    let explicit_host = match cli.runtime.explicit_host_kind() {
+        Ok(host) => host,
+        Err(error) => {
+            return write_result(
+                &CommandResult::invalid_request(error),
+                64,
+                cli.human_output(io::stdout().is_terminal()),
+            );
+        }
+    };
+    let hook_state = cli
+        .user_prompt_submit_hook_state_directory()
+        .or_else(|| cli.mailbox_wake_hook_state_directory())
+        .or_else(|| cli.session_start_hook_state_directory())
+        .or_else(|| cli.session_end_hook_state_directory());
+    let selected_state = if let Some(hook_state) = hook_state {
+        let host = explicit_host.unwrap_or_else(|| cli.runtime.ambient_host_kind());
+        if explicit_host.is_none() && cli.runtime.hc_hook != (host == HostKind::Hc) {
+            return ExitCode::SUCCESS;
+        }
+        match host {
+            HostKind::Hc => {
+                let Ok(state) = cli.runtime.state_directory() else {
+                    return ExitCode::SUCCESS;
+                };
+                Some(state)
+            }
+            HostKind::Tui => Some(
+                cli.runtime
+                    .plugin_state
+                    .clone()
+                    .unwrap_or_else(|| hook_state.to_path_buf()),
+            ),
+        }
+    } else {
+        cli.runtime.state_directory().ok()
+    };
     // A dashboard successor started mid-update waits a bounded time rather
     // than parking forever behind a stuck migration.
     let gate_wait = cli.is_dashboard_server().then_some(Duration::from_secs(60));
@@ -146,11 +202,38 @@ fn main() -> ExitCode {
             let running = env::current_exe().and_then(fs::canonicalize);
             if selected.as_ref().ok() != running.as_ref().ok() || selected.is_err() {
                 use std::os::unix::process::CommandExt;
-                let error = Command::new(launcher).args(env::args_os().skip(1)).exec();
+                let error = cli
+                    .runtime
+                    .environment
+                    .command(launcher)
+                    .args(env::args_os().skip(1))
+                    .exec();
                 eprintln!("Could not run the selected Namedrop runtime: {error}");
                 return ExitCode::from(69);
             }
         }
+    }
+    if cli.operation() == "events" {
+        if cli.runtime.host_kind() != Ok(HostKind::Hc) {
+            return write_result(
+                &CommandResult::invalid_request("events requires --host hc"),
+                64,
+                cli.human_output(io::stdout().is_terminal()),
+            );
+        }
+        drop(command_guard.take());
+        let result = cli.runtime.host_kind().and_then(|_| {
+            let state = cli.runtime.state_directory()?;
+            namedrop::host::hc::events::run_with_environment(&state, &cli.runtime.environment)
+        });
+        if let Err(error) = result {
+            return write_result(
+                &CommandResult::rejected("events", "operation_failed", error),
+                65,
+                cli.human_output(io::stdout().is_terminal()),
+            );
+        }
+        return ExitCode::SUCCESS;
     }
     if cli.is_dashboard_server() {
         let Some(state) = selected_state else {
@@ -175,28 +258,46 @@ fn main() -> ExitCode {
     };
 
     if let Some(state_directory) = cli.user_prompt_submit_hook_state_directory() {
-        return run_context_hook(state_directory, |input, runtime| {
-            execute_user_prompt_submit_hook(input, runtime)
-        });
+        return run_context_hook(
+            selected_state.as_deref().unwrap_or(state_directory),
+            &cli.runtime,
+            |input, runtime: &ProcessRuntime<'_>| execute_user_prompt_submit_hook(input, runtime),
+        );
+    }
+    if let Some(state_directory) = cli.session_end_hook_state_directory() {
+        return run_context_hook(
+            selected_state.as_deref().unwrap_or(state_directory),
+            &cli.runtime,
+            |_, _| None,
+        );
     }
     if let Some(state_directory) = cli.session_start_hook_state_directory() {
-        return run_context_hook(state_directory, |input, runtime| {
-            execute_session_start_hook(input, runtime)
-        });
+        return run_context_hook(
+            selected_state.as_deref().unwrap_or(state_directory),
+            &cli.runtime,
+            |input, runtime: &ProcessRuntime<'_>| execute_session_start_hook(input, runtime),
+        );
     }
     if let Some(state_directory) = cli.mailbox_wake_hook_state_directory() {
-        return run_mailbox_wake_hook(state_directory);
+        return run_mailbox_wake_hook(
+            selected_state.as_deref().unwrap_or(state_directory),
+            &cli.runtime,
+        );
     }
     if cli.is_agent_status_changed_hook() {
-        return run_agent_status_changed_hook();
+        return run_agent_status_changed_hook(&cli.runtime);
     }
     if cli.is_agent_status_worker_hook() {
-        return run_agent_status_worker();
+        return run_agent_status_worker(&cli.runtime);
     }
     if matches!(cli.operation(), "reconcile" | "event.pane-lifecycle")
         && let Some(state) = selected_state.as_deref()
     {
-        namedrop::update_check::start(state, SystemClock.now_unix_ms());
+        namedrop::update_check::start_with_environment(
+            state,
+            SystemClock.now_unix_ms(),
+            &cli.runtime.environment,
+        );
     }
     if let Some(attempt) = cli.terminal_attempt() {
         let result = with_runtime_options(&cli.runtime, |runtime| {
@@ -224,7 +325,10 @@ fn main() -> ExitCode {
         );
     }
     if let Some(config) = cli.shortcuts_config() {
-        return finish("ui.install-shortcuts", naming_ui::install_shortcuts(config));
+        return finish(
+            "ui.install-shortcuts",
+            naming_ui::install_shortcuts(config, &cli.runtime.environment),
+        );
     }
     if cli.is_reset_tour() {
         return finish("ui.reset-tour", naming_ui::reset_tour(&cli.runtime));
@@ -295,8 +399,7 @@ fn main() -> ExitCode {
             );
         }
         let report =
-            match with_runtime_options(&cli.runtime, |runtime| Ok(diagnose_collaboration(runtime)))
-            {
+            match with_runtime_options(&cli.runtime, |runtime| Ok(diagnose_runtime(runtime))) {
                 Ok(report) => report,
                 Err(error) => {
                     return write_result(
@@ -359,7 +462,7 @@ fn main() -> ExitCode {
 }
 
 fn wake_mailboxes(options: &RuntimeOptions) -> Result<(), String> {
-    with_runtime_options(options, wake_runtime_mailboxes)
+    with_runtime_options(options, |runtime| wake_runtime_mailboxes(runtime, options))
 }
 
 fn drain_report(result: &serde_json::Value) -> Result<namedrop::DrainReport, String> {
@@ -402,9 +505,25 @@ mod drain_report_tests {
         assert!(drain_report(&result).unwrap().awaits_retry());
         assert!(!needs_mailbox_watcher(&result));
     }
+
+    #[test]
+    fn a_live_lease_does_not_start_an_acknowledgement_grace_watcher() {
+        let lease = DrainReport {
+            next_lease_due_ms: Some(31_000),
+            ..DrainReport::default()
+        };
+        let result = json!({"drain": lease});
+        let report = drain_report(&result).unwrap();
+        assert_eq!(report.next_lease_due_ms, Some(31_000));
+        assert_eq!(report.next_grace_due_ms(), None);
+        assert!(!needs_mailbox_watcher(&result));
+    }
 }
 
-fn wake_runtime_mailboxes(runtime: &TuiRuntime<'_>) -> Result<(), String> {
+fn wake_runtime_mailboxes(
+    runtime: &ProcessRuntime<'_>,
+    options: &RuntimeOptions,
+) -> Result<(), String> {
     let here = match runtime.workspace_id {
         Some(id) => id.to_owned(),
         None => {
@@ -423,12 +542,14 @@ fn wake_runtime_mailboxes(runtime: &TuiRuntime<'_>) -> Result<(), String> {
             &directory,
             &serde_json::json!({"operation":"mailbox-wake"}),
         )?;
-        status_worker_command()?
-            .env("HERDR_PLUGIN_STATE_DIR", runtime.state_directory)
-            .env("HERDR_SOCKET_PATH", runtime.session_socket_id)
-            .env("HERDR_WORKSPACE_ID", space)
-            .spawn()
-            .map_err(|e| e.to_string())?;
+        status_worker_command(&worker_options(
+            options,
+            runtime.state_directory,
+            runtime.session_socket_id,
+            &space,
+        ))?
+        .spawn()
+        .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -437,7 +558,7 @@ fn choose_name_type(cli: &Cli) -> Result<Option<namedrop::PaneType>, String> {
     if cli.name_pane_type().is_some() || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Ok(cli.name_pane_type());
     }
-    let default = with_runtime_options(&cli.runtime, |runtime: &TuiRuntime<'_>| {
+    let default = with_runtime_options(&cli.runtime, |runtime: &ProcessRuntime<'_>| {
         namedrop::default_pane_type(runtime)
     })?;
     loop {
@@ -558,6 +679,74 @@ fn parse_plugin_event_input(
 #[cfg(test)]
 mod session_event_tests {
     #[test]
+    fn hc_status_worker_carries_explicit_host_with_state() {
+        let options = super::worker_options(
+            &super::RuntimeOptions {
+                host: Some(super::HostKind::Hc),
+                ..Default::default()
+            },
+            std::path::Path::new("/state"),
+            "hc:session",
+            "space",
+        );
+        let command = super::status_worker_command(&options).unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--plugin-state", "/state"])
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--host", "hc"]));
+        assert!(!args.iter().any(|arg| arg.starts_with("--herdr-")));
+    }
+    #[test]
+    fn hook_runtime_state_keeps_cached_hc_selection() {
+        use {crate::test_environment::CommandHome, std::os::unix::fs::PermissionsExt};
+        let root = crate::hc_socket_fixture::fixture::short_socket_root();
+        let socket = crate::hc_socket_fixture::HcSocket::bind(&root.join("hc.sock")).unwrap();
+        let host = root.join("host");
+        std::fs::write(&host, "#!/bin/sh\n[ \"$*\" = 'server status --json' ] || exit 97\nprintf '%s\\n' '{\"core\":{\"id\":\"selection-test\"}}'\n").unwrap();
+        std::fs::set_permissions(&host, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "session_event_tests::cached_hc_hook_runtime_child",
+            ])
+            .isolated_env(&root)
+            .env("HC_SOCKET", root.join("hc.sock"))
+            .env("HC_BIN_PATH", &host)
+            .env("HERDR_BIN_PATH", &host)
+            .output()
+            .unwrap();
+        drop(socket);
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn cached_hc_hook_runtime_child() {
+        let options = super::RuntimeOptions {
+            ambient_host: std::cell::OnceCell::from(super::HostKind::Hc),
+            ..Default::default()
+        };
+        super::with_runtime_at(std::path::Path::new("/hook-state"), &options, |runtime| {
+            assert!(matches!(runtime.host, super::RuntimeHost::Hc(_)));
+            assert_eq!(runtime.state_directory, std::path::Path::new("/hook-state"));
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn agent_detection_events_reuse_registration_worker() {
         let data = serde_json::json!({"type":"pane_agent_detected", "pane_id":"w1:p1",
             "workspace_id":"w1", "agent":"codex", "released":false});
@@ -602,20 +791,50 @@ fn run_operation(
         OperationKind::Group => execute_group_operation(operation, input, runtime),
         OperationKind::Context => execute_context_operation(operation, input, runtime),
         OperationKind::Control => execute_control_operation(operation, input, runtime),
-        OperationKind::Lifecycle => execute_lifecycle_operation(operation, input, runtime),
+        OperationKind::Lifecycle => {
+            let mut result = execute_lifecycle_operation(operation, input, runtime)?;
+            if matches!(operation, "activate" | "name")
+                && let RuntimeHost::Hc(host) = runtime.host
+            {
+                namedrop::host::hc::events::start_with_environment(
+                    &host,
+                    &namedrop::runtime_executable()?,
+                    runtime.state_directory,
+                    &options.environment,
+                )?;
+                result["mod_install"] = serde_json::json!(
+                    "Install the Namedrop mod in herdr-app, then open it from the app's mod commands."
+                );
+            }
+            Ok(result)
+        }
         OperationKind::Message => execute_message_operation(operation, input, runtime),
         OperationKind::Integration => execute_integration_operation(operation, input, runtime),
     })
 }
 
+fn diagnose_runtime(runtime: &ProcessRuntime<'_>) -> namedrop::HealthReport {
+    let mut report = diagnose_collaboration(runtime);
+    if let RuntimeHost::Hc(host) = runtime.host {
+        report.host_version = host.version().ok();
+        namedrop::append_hc_diagnostics(&mut report, runtime, &host);
+    }
+    report
+}
+
 fn with_runtime_at<T>(
     state_directory: &Path,
-    action: impl FnOnce(&TuiRuntime<'_>) -> Result<T, String>,
+    options: &RuntimeOptions,
+    action: impl FnOnce(&ProcessRuntime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
     with_runtime_options(
         &RuntimeOptions {
-            plugin_state: Some(state_directory.to_path_buf()),
-            ..Default::default()
+            host: Some(options.host_kind()?),
+            plugin_state: options
+                .plugin_state
+                .clone()
+                .or_else(|| Some(state_directory.to_path_buf())),
+            ..options.clone()
         },
         action,
     )
@@ -623,46 +842,59 @@ fn with_runtime_at<T>(
 
 fn with_runtime_options<T>(
     options: &RuntimeOptions,
-    action: impl FnOnce(&TuiRuntime<'_>) -> Result<T, String>,
+    action: impl FnOnce(&ProcessRuntime<'_>) -> Result<T, String>,
 ) -> Result<T, String> {
-    let state_directory = options
-        .plugin_state
-        .clone()
-        .or_else(|| env::var_os("HERDR_PLUGIN_STATE_DIR").map(PathBuf::from))
-        .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())?;
-    let home_directory = env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute());
-    let claude_config = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from);
-    let codex_config = env::var_os("CODEX_HOME").map(PathBuf::from);
+    let kind = options.host_kind()?;
+    let state_directory = options.state_directory()?;
+    let environment = &options.environment;
+    let home_directory = environment.home().filter(|path| path.is_absolute());
     let cwd = env::current_dir().map_err(|error| error.to_string())?;
-    let transport = ProcessHerdr::default().with_socket(options.herdr_socket.clone());
-    let host = TuiHost::new(&transport);
+    let transport = ProcessHerdr::from_snapshot(kind, &options.environment)
+        .with_socket(if kind == HostKind::Tui {
+            options.herdr_socket.clone()
+        } else {
+            None
+        })
+        .with_state_directory(state_directory.to_owned());
+    let host = RuntimeHost::new(kind, &transport);
+    let hc_socket_id = match host {
+        RuntimeHost::Hc(host) => Some(host.core_identity()?),
+        RuntimeHost::Tui(_) => None,
+    };
     let identity = host.caller_identity(&namedrop::CallerClaim {
-        workspace: options
-            .herdr_workspace
-            .clone()
-            .or_else(|| env::var("HERDR_WORKSPACE_ID").ok()),
-        pane: options.herdr_pane.clone(),
-        inherited_pane: env::var("HERDR_PANE_ID").ok(),
+        workspace: match kind {
+            HostKind::Tui => options
+                .herdr_workspace
+                .clone()
+                .or_else(|| options.environment.var("HERDR_WORKSPACE_ID")),
+            HostKind::Hc => options
+                .hc_space
+                .clone()
+                .or_else(|| options.environment.var("NAMEDROP_HC_SPACE")),
+        },
+        pane: match kind {
+            HostKind::Tui => options.herdr_pane.clone(),
+            HostKind::Hc => options.hc_terminal.clone(),
+        },
+        inherited_pane: options.environment.var(match kind {
+            HostKind::Tui => "HERDR_PANE_ID",
+            HostKind::Hc => "HC_TERMINAL_ID",
+        }),
         agent_sessions: ["CODEX_SESSION_ID", "CLAUDE_CODE_SESSION_ID"]
             .into_iter()
-            .filter_map(|key| env::var(key).ok())
+            .filter_map(|key| options.environment.var(key))
             .filter(|session| !session.is_empty())
             .collect(),
     })?;
     let workspace_id = identity.workspace;
     let pane_id = identity.pane;
-    let socket_id = session_socket_id(options.herdr_socket.clone(), &host);
+    let socket_id = hc_socket_id.unwrap_or_else(|| session_socket_id(options, &host));
     let clock = SystemClock;
     let ids = ProcessIds::default();
     action(&LifecycleRuntime {
         state_directory: &state_directory,
-        home_directory: home_directory.as_deref(),
-        agent_config: namedrop::AgentConfigDirectories {
-            claude: claude_config.as_deref(),
-            codex: codex_config.as_deref(),
-        },
+        home_directory,
+        agent_config: environment.agent_config(),
         cwd: &cwd,
         workspace_id: workspace_id.as_deref(),
         current_pane_id: pane_id.as_deref(),
@@ -678,25 +910,82 @@ fn with_runtime_options<T>(
 /// cannot run must not interrupt the person's turn.
 fn run_context_hook(
     state_directory: &Path,
-    execute: fn(&str, &TuiRuntime<'_>) -> Option<serde_json::Value>,
+    options: &RuntimeOptions,
+    execute: fn(&str, &ProcessRuntime<'_>) -> Option<serde_json::Value>,
 ) -> ExitCode {
     let mut input = String::new();
     if io::stdin().read_to_string(&mut input).is_err() {
         return ExitCode::SUCCESS;
     }
-    let mut output = namedrop::execute_codex_app_server_hook(&input).or_else(|| {
-        with_runtime_at(state_directory, |runtime| Ok(execute(&input, runtime)))
+    let hc = options.host_kind() == Ok(HostKind::Hc);
+    let mut output = (!hc)
+        .then(|| namedrop::execute_codex_app_server_hook(&input))
+        .flatten()
+        .or_else(|| {
+            with_runtime_at(state_directory, options, |runtime| {
+                if let RuntimeHost::Hc(host) = runtime.host {
+                    let Some(space) = runtime.workspace_id else {
+                        return Ok(None);
+                    };
+                    let namespace =
+                        namedrop::StateNamespace::for_space(runtime.session_socket_id, space);
+                    let active = namedrop::StateStore::open(runtime.state_directory)
+                        .map_err(|error| error.to_string())?
+                        .transaction(|transaction| transaction.worktree_state(&namespace))
+                        .map_err(|error| error.to_string())?
+                        .is_some_and(|state| state.activated && !state.deactivated);
+                    if !active {
+                        return Ok(None);
+                    }
+                    if let Some(notice) = namedrop::execute_codex_app_server_hook(&input) {
+                        return Ok(Some(notice));
+                    }
+                    let event: serde_json::Value =
+                        serde_json::from_str(&input).map_err(|error| error.to_string())?;
+                    if event["hook_event_name"] == "SessionEnd" {
+                        if let Some(session) = event["session_id"]
+                            .as_str()
+                            .filter(|session| !session.is_empty())
+                            && let Some(pane) = runtime.current_pane_id
+                        {
+                            host.end_session(runtime.state_directory, pane, session)?;
+                        }
+                        return Ok(None);
+                    }
+                    if event["hook_event_name"] == "SessionStart"
+                        && let Some(session) = event["session_id"]
+                            .as_str()
+                            .filter(|session| !session.is_empty())
+                        && let Some(pane) = runtime.current_pane_id
+                    {
+                        host.publish_session(runtime.state_directory, pane, session)?;
+                        namedrop::host::hc::events::start_with_environment(
+                            &host,
+                            &namedrop::runtime_executable()?,
+                            runtime.state_directory,
+                            &options.environment,
+                        )?;
+                    }
+                }
+                Ok(execute(&input, runtime))
+            })
             .ok()
             .flatten()
-    });
-    if serde_json::from_str::<serde_json::Value>(&input)
-        .is_ok_and(|input| input["hook_event_name"] == "SessionStart")
+        });
+    if !hc
+        && serde_json::from_str::<serde_json::Value>(&input)
+            .is_ok_and(|input| input["hook_event_name"] == "SessionStart")
     {
-        output = namedrop::update_check::session_notice(
+        output = namedrop::update_check::session_notice_at(
             &input,
             state_directory,
             SystemClock.now_unix_ms(),
             output,
+            options
+                .environment
+                .agent_config()
+                .update_settings(options.environment.home())
+                .as_deref(),
         );
     }
     if let Some(output) = output {
@@ -707,9 +996,11 @@ fn run_context_hook(
 
 /// The socket that scopes this session's state: the caller's, the pane's, or
 /// the one the running Herdr server reports.
-fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
-    explicit
-        .or_else(|| env::var("HERDR_SOCKET_PATH").ok())
+fn session_socket_id(options: &RuntimeOptions, host: &impl Host) -> String {
+    options
+        .herdr_socket
+        .clone()
+        .or_else(|| options.environment.var("HERDR_SOCKET_PATH"))
         .or_else(|| host.socket_id())
         .unwrap_or_else(|| "default".to_owned())
 }
@@ -718,14 +1009,41 @@ fn session_socket_id(explicit: Option<String>, host: &impl Host) -> String {
 /// sent. Its hook shell has exited by the time it runs, so it is nobody's
 /// pane: it reconciles the whole space and takes no identity from the
 /// HERDR_PANE_ID it inherited, which no session ID vouches for under Codex.
-fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
+fn run_mailbox_wake_hook(state_directory: &Path, options: &RuntimeOptions) -> ExitCode {
     let wake = || -> Result<(), String> {
-        let transport = ProcessHerdr::default();
-        let host = TuiHost::new(&transport);
-        let socket_id = session_socket_id(None, &host);
-        let space_id = match env::var("HERDR_WORKSPACE_ID") {
-            Ok(space_id) => space_id,
-            Err(_) => {
+        let kind = options.host_kind()?;
+        let transport = ProcessHerdr::from_snapshot(kind, &options.environment)
+            .with_socket(options.herdr_socket.clone())
+            .with_state_directory(state_directory.to_owned());
+        let host = RuntimeHost::new(kind, &transport);
+        let socket_id = match host {
+            RuntimeHost::Hc(host) => host.core_identity()?,
+            RuntimeHost::Tui(_) => session_socket_id(options, &host),
+        };
+        let workspace = match kind {
+            HostKind::Tui => options
+                .herdr_workspace
+                .clone()
+                .or_else(|| options.environment.var("HERDR_WORKSPACE_ID")),
+            HostKind::Hc => options
+                .hc_space
+                .clone()
+                .or_else(|| options.environment.var("NAMEDROP_HC_SPACE"))
+                .or_else(|| {
+                    let pane = options
+                        .hc_terminal
+                        .clone()
+                        .or_else(|| options.environment.var("HC_TERMINAL_ID"))?;
+                    host.panes(namedrop::PaneScope::All)
+                        .ok()?
+                        .into_iter()
+                        .find(|candidate| candidate.pane_id == pane)
+                        .map(|pane| pane.workspace_id)
+                }),
+        };
+        let space_id = match workspace {
+            Some(space_id) => space_id,
+            None => {
                 let cwd = env::current_dir().map_err(|error| error.to_string())?;
                 host.space(namedrop::SpaceLocator::Checkout(&cwd), None)?
                     .workspace_id
@@ -740,12 +1058,14 @@ fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
                     &directory,
                     &serde_json::json!({"operation":"mailbox-wake"}),
                 )?;
-                status_worker_command()?
-                    .env("HERDR_PLUGIN_STATE_DIR", state_directory)
-                    .env("HERDR_SOCKET_PATH", &socket_id)
-                    .env("HERDR_WORKSPACE_ID", &space_id)
-                    .status()
-                    .map_err(|error| error.to_string())?;
+                status_worker_command(&worker_options(
+                    options,
+                    state_directory,
+                    &socket_id,
+                    &space_id,
+                ))?
+                .status()
+                .map_err(|error| error.to_string())?;
                 Ok(())
             })();
             if let Err(error) = woken {
@@ -767,7 +1087,7 @@ fn run_mailbox_wake_hook(state_directory: &Path) -> ExitCode {
     }
 }
 
-fn run_agent_status_changed_hook() -> ExitCode {
+fn run_agent_status_changed_hook(options: &RuntimeOptions) -> ExitCode {
     let input = match env::var("HERDR_PLUGIN_EVENT_JSON")
         .map_err(|_| "HERDR_PLUGIN_EVENT_JSON is required for an event hook".to_owned())
         .and_then(|event| plugin_event_input("event.agent-status-changed", &event))
@@ -778,7 +1098,7 @@ fn run_agent_status_changed_hook() -> ExitCode {
             return ExitCode::from(65);
         }
     };
-    let directory = match agent_status_reconciliation_directory() {
+    let directory = match agent_status_reconciliation_directory(options) {
         Ok(directory) => directory,
         Err(error) => {
             eprintln!("could not queue Namedrop reconciliation: {error}");
@@ -789,7 +1109,7 @@ fn run_agent_status_changed_hook() -> ExitCode {
         eprintln!("could not queue Namedrop reconciliation: {error}");
         return ExitCode::from(65);
     }
-    match status_worker_command()
+    match status_worker_command(options)
         .and_then(|mut command| command.spawn().map_err(|error| error.to_string()))
     {
         Ok(_) => ExitCode::SUCCESS,
@@ -800,9 +1120,51 @@ fn run_agent_status_changed_hook() -> ExitCode {
     }
 }
 
-fn status_worker_command() -> Result<Command, String> {
+fn worker_options(
+    options: &RuntimeOptions,
+    state: &Path,
+    namespace: &str,
+    space: &str,
+) -> RuntimeOptions {
+    let hc = options
+        .host_kind()
+        .expect("worker host was selected before queuing")
+        == HostKind::Hc;
+    RuntimeOptions {
+        plugin_state: Some(state.to_path_buf()),
+        host: Some(if hc { HostKind::Hc } else { HostKind::Tui }),
+        hc_space: hc.then(|| space.to_owned()),
+        herdr_socket: (!hc).then(|| namespace.to_owned()),
+        herdr_workspace: (!hc).then(|| space.to_owned()),
+        herdr_pane: None,
+        hc_terminal: None,
+        ..options.clone()
+    }
+}
+
+fn status_worker_command(options: &RuntimeOptions) -> Result<Command, String> {
     use std::os::unix::process::CommandExt;
-    let mut command = Command::new(namedrop::runtime_executable()?);
+    let executable = namedrop::runtime_executable()?;
+    let mut command = if options.host_kind()? == HostKind::Hc {
+        options.environment.hc_command(executable)
+    } else {
+        options.environment.command(executable)
+    };
+    if let Some(state) = &options.plugin_state {
+        command.arg("--plugin-state").arg(state);
+    }
+    if let Some(host) = options.host {
+        command.args(["--host", if host == HostKind::Hc { "hc" } else { "tui" }]);
+    }
+    for (flag, value) in [
+        ("--hc-space", &options.hc_space),
+        ("--herdr-socket", &options.herdr_socket),
+        ("--herdr-workspace", &options.herdr_workspace),
+    ] {
+        if let Some(value) = value {
+            command.args([flag, value]);
+        }
+    }
     command
         .args(["hook", "agent-status-worker"])
         .process_group(0)
@@ -810,6 +1172,10 @@ fn status_worker_command() -> Result<Command, String> {
         // started it, so it is nobody's pane; the hook's pane must not become
         // its identity.
         .env_remove("HERDR_PANE_ID")
+        .env_remove("HC_TERMINAL_ID")
+        .env_remove("HC_TERMINAL_SOCKET")
+        .env_remove("CODEX_SESSION_ID")
+        .env_remove("CLAUDE_CODE_SESSION_ID")
         .env("NAMEDROP_HERDR_TIMEOUT_MS", "10000")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -817,14 +1183,38 @@ fn status_worker_command() -> Result<Command, String> {
     Ok(command)
 }
 
-fn agent_status_reconciliation_directory() -> Result<PathBuf, String> {
-    let state_directory = env::var_os("HERDR_PLUGIN_STATE_DIR")
-        .map(PathBuf::from)
-        .ok_or_else(|| "HERDR_PLUGIN_STATE_DIR is required".to_owned())?;
-    let socket_id =
-        env::var("HERDR_SOCKET_PATH").map_err(|_| "HERDR_SOCKET_PATH is required".to_owned())?;
-    let space_id =
-        env::var("HERDR_WORKSPACE_ID").map_err(|_| "HERDR_WORKSPACE_ID is required".to_owned())?;
+fn agent_status_reconciliation_directory(options: &RuntimeOptions) -> Result<PathBuf, String> {
+    if options.host_kind()? == HostKind::Hc {
+        return with_runtime_options(options, |runtime| {
+            reconciliation_directory(
+                runtime.state_directory,
+                runtime.session_socket_id,
+                runtime
+                    .workspace_id
+                    .ok_or("--hc-space is required for a status worker")?,
+            )
+        });
+    }
+    let state_directory = options
+        .plugin_state
+        .clone()
+        .or_else(|| {
+            options
+                .environment
+                .var_os("HERDR_PLUGIN_STATE_DIR")
+                .map(PathBuf::from)
+        })
+        .ok_or("HERDR_PLUGIN_STATE_DIR is required")?;
+    let socket_id = options
+        .herdr_socket
+        .clone()
+        .or_else(|| options.environment.var("HERDR_SOCKET_PATH"))
+        .ok_or("HERDR_SOCKET_PATH is required")?;
+    let space_id = options
+        .herdr_workspace
+        .clone()
+        .or_else(|| options.environment.var("HERDR_WORKSPACE_ID"))
+        .ok_or("HERDR_WORKSPACE_ID is required")?;
     reconciliation_directory(&state_directory, &socket_id, &space_id)
 }
 
@@ -891,8 +1281,8 @@ fn pending_agent_status_reconciliations(directory: &Path) -> Result<Vec<PathBuf>
     Ok(markers)
 }
 
-fn run_agent_status_worker() -> ExitCode {
-    let directory = match agent_status_reconciliation_directory() {
+fn run_agent_status_worker(options: &RuntimeOptions) -> ExitCode {
+    let directory = match agent_status_reconciliation_directory(options) {
         Ok(directory) => directory,
         Err(_) => return ExitCode::SUCCESS,
     };
@@ -922,11 +1312,11 @@ fn run_agent_status_worker() -> ExitCode {
                     wait_for_marker_or_deadline(&directory, due);
                     continue;
                 }
-                deadline_ms = with_runtime_options(&RuntimeOptions::default(), |runtime| {
-                    namedrop::drain_mailboxes(runtime)
+                deadline_ms = with_runtime_options(options, |runtime| {
+                    namedrop::drain_mailboxes(runtime).map(|report| report.next_grace_due_ms())
                 })
                 .ok()
-                .and_then(|report| report.next_grace_due_ms());
+                .flatten();
                 continue;
             }
             let _ = lock.unlock();
@@ -954,17 +1344,13 @@ fn run_agent_status_worker() -> ExitCode {
             continue;
         };
         let result = if input == serde_json::json!({"operation":"mailbox-wake"}) {
-            with_runtime_options(&RuntimeOptions::default(), |runtime| {
+            with_runtime_options(options, |runtime| {
                 namedrop::drain_mailboxes(runtime).and_then(|report| {
                     serde_json::to_value(report).map_err(|error| error.to_string())
                 })
             })
         } else {
-            run_lifecycle(
-                "event.agent-status-changed",
-                input,
-                &RuntimeOptions::default(),
-            )
+            run_lifecycle("event.agent-status-changed", input, options)
         };
         match result {
             Ok(result) => match drain_report(&result) {
@@ -1063,3 +1449,82 @@ fn write_result(result: &CommandResult, exit_code: u8, human: bool) -> ExitCode 
     }
     ExitCode::from(exit_code)
 }
+
+#[cfg(test)]
+mod selected_worker_host_tests {
+    #[test]
+    fn socket_id_spelling_does_not_select_the_worker_host() {
+        let options = super::RuntimeOptions {
+            host: Some(super::HostKind::Tui),
+            ..Default::default()
+        };
+        let selected = super::worker_options(
+            &options,
+            std::path::Path::new("/state"),
+            "hc:/fake/herdr.sock",
+            "space",
+        );
+        assert_eq!(selected.host, Some(super::HostKind::Tui));
+        assert_eq!(
+            selected.herdr_socket.as_deref(),
+            Some("hc:/fake/herdr.sock")
+        );
+        let options = super::RuntimeOptions {
+            host: Some(super::HostKind::Hc),
+            ..Default::default()
+        };
+        let selected = super::worker_options(
+            &options,
+            std::path::Path::new("/state"),
+            "opaque-core-id",
+            "space",
+        );
+        assert_eq!(selected.host, Some(super::HostKind::Hc));
+        assert_eq!(selected.hc_space.as_deref(), Some("space"));
+    }
+}
+
+#[cfg(test)]
+mod status_worker_lifetime_tests {
+    #[test]
+    fn hc_reconciliation_worker_has_no_terminal_lifetime_identity() {
+        let options = super::RuntimeOptions {
+            host: Some(super::HostKind::Hc),
+            environment: namedrop::environment::EnvironmentSnapshot::from_variables([
+                ("HC_SCOPE".into(), "terminal-scope".into()),
+                ("HC_RUNTIME".into(), "terminal-runtime".into()),
+                ("HC_TERMINAL_CUSTOM".into(), "terminal-custom".into()),
+                ("HERDR_CUSTOM".into(), "tui-custom".into()),
+                ("HC_SOCKET".into(), "/private/core.sock".into()),
+                ("HC_SESSION".into(), "private-session".into()),
+            ]),
+            ..Default::default()
+        };
+        let command = super::status_worker_command(&options).unwrap();
+        let values: std::collections::BTreeMap<_, _> = command.get_envs().collect();
+        for key in [
+            "HC_SCOPE",
+            "HC_RUNTIME",
+            "HC_TERMINAL_CUSTOM",
+            "HERDR_CUSTOM",
+        ] {
+            assert_eq!(values.get(std::ffi::OsStr::new(key)), Some(&None), "{key}");
+        }
+        assert_eq!(
+            values.get(std::ffi::OsStr::new("HC_SESSION")),
+            Some(&Some(std::ffi::OsStr::new("private-session")))
+        );
+        assert_eq!(
+            values.get(std::ffi::OsStr::new("HC_SOCKET")),
+            Some(&Some(std::ffi::OsStr::new("/private/core.sock")))
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/support/environment.rs"]
+mod test_environment;
+
+#[cfg(test)]
+#[path = "../tests/support/hc_socket.rs"]
+mod hc_socket_fixture;

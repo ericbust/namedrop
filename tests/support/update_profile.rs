@@ -1,3 +1,5 @@
+use crate::environment::CommandHome;
+
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -18,7 +20,7 @@ pub fn isolate(root: &Path, home: &Path) -> bool {
     let output = Command::new(env::current_exe().unwrap())
         .args(["--exact", thread.name().unwrap(), "--nocapture"])
         .env(ROOT, root)
-        .env("HOME", home)
+        .isolated_home(home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("CODEX_HOME", home.join(".codex"))
         .env("CLAUDE_CONFIG_DIR", home.join(".claude"))

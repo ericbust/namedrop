@@ -1,9 +1,7 @@
 use super::*;
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 
-#[path = "../tests/support/bash_rules.rs"]
-mod bash_rules;
-use bash_rules::bash_rule_matches;
+use crate::bash_rules::bash_rule_matches;
 
 #[test]
 fn claude_delivery_guidance_matches_managed_rules_for_every_automatic_operation() {

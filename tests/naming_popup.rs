@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use serde_json::Value;
@@ -120,7 +124,7 @@ else printf '%s\n' '{}'; fi
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         cmd.env("HERDR_BIN_PATH", self.0.join("herdr"))
             .env("HERDR_PLUGIN_STATE_DIR", self.0.join("state"))
-            .env("HOME", self.0.join("home"))
+            .isolated_home(self.0.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.0.join("home").join(".claude"))
             .env("CODEX_HOME", self.0.join("home").join(".codex"))
             .env_remove("XDG_CONFIG_HOME")
@@ -1358,6 +1362,7 @@ fn the_persona_editor_stays_live_while_a_suggestion_runs_in_a_real_terminal() {
     fs::write(f.0.join("delay-4"), "8").unwrap();
     let command = f.command();
     let out = Command::new("/usr/bin/python3")
+        .isolated_home(f.0.join("home"))
         .envs(command.get_envs().filter_map(|(key, value)| value.map(|v| (key, v))))
         .env("TEST_AGENT", "1")
         .env("TEST_HOST", "claude")
@@ -1456,6 +1461,7 @@ fn management_single_keys_and_escape_work_in_a_real_terminal() {
     assert!(f.manage("\nxy\n").status.success());
     let command = f.command();
     let out = Command::new("/usr/bin/python3")
+        .isolated_home(f.0.join("home"))
         .envs(command.get_envs().filter_map(|(key, value)| value.map(|v| (key, v))))
         // Colour splits a hint into runs; this test reads words, not colour.
         .env("NO_COLOR", "1")

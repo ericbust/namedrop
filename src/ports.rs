@@ -14,6 +14,8 @@ pub enum PromptFailureKind {
     /// refusal may pass. Nothing reached the recipient, so returning the
     /// delivery to the queue cannot duplicate an invocation.
     TemporaryPreInvocation,
+    /// No input was sent; only a newer settled observation permits another attempt.
+    DeferredUntilSettle { observed_status_ms: Option<u64> },
     /// The host rejected the call itself — an identical retry cannot succeed.
     DefinitiveNonRetryable,
     /// It cannot be established that the input never arrived. The conservative
@@ -24,6 +26,18 @@ pub enum PromptFailureKind {
 
 pub trait HerdrCommandExecutor {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String>;
+
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        None
+    }
+
+    fn state_directory(&self) -> Option<&std::path::Path> {
+        None
+    }
+
+    fn open_hc_popup(&self, _args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        Err("HC popups are unavailable with this executor".to_owned())
+    }
 
     /// A bounded read for latency-sensitive UI. Process-backed executors must
     /// enforce the deadline and cancellation while their child is running.
@@ -52,6 +66,18 @@ pub trait HerdrCommandExecutor {
 impl<T: HerdrCommandExecutor + ?Sized> HerdrCommandExecutor for &T {
     fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
         (**self).execute(args)
+    }
+
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        (**self).environment_snapshot()
+    }
+
+    fn state_directory(&self) -> Option<&std::path::Path> {
+        (**self).state_directory()
+    }
+
+    fn open_hc_popup(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+        (**self).open_hc_popup(args)
     }
 
     fn execute_bounded(

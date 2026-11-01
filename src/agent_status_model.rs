@@ -321,20 +321,25 @@ fn digest(input: &WorkerInput, model: &str) -> String {
 
 /// Resolves the worker binary, allowing tests to substitute a fake CLI the same
 /// way `HERDR_BIN_PATH` substitutes the Herdr binary.
-fn claude_binary() -> String {
-    env::var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_owned())
+fn claude_binary(environment: &crate::environment::EnvironmentSnapshot) -> String {
+    environment
+        .var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN")
+        .unwrap_or_else(|| "claude".to_owned())
 }
 
-fn codex_binary() -> String {
-    env::var("NAMEDROP_AGENT_STATUS_CODEX_BIN").unwrap_or_else(|_| "codex".to_owned())
+fn codex_binary(environment: &crate::environment::EnvironmentSnapshot) -> String {
+    environment
+        .var("NAMEDROP_AGENT_STATUS_CODEX_BIN")
+        .unwrap_or_else(|| "codex".to_owned())
 }
 
 /// The containment wrapper. Tests substitute a recorder to assert the exact
 /// profile and argv; only the real wrapper actually enforces anything.
 #[cfg(target_os = "macos")]
-fn sandbox_binary() -> String {
-    env::var("NAMEDROP_AGENT_STATUS_SANDBOX_BIN")
-        .unwrap_or_else(|_| "/usr/bin/sandbox-exec".to_owned())
+fn sandbox_binary(environment: &crate::environment::EnvironmentSnapshot) -> String {
+    environment
+        .var("NAMEDROP_AGENT_STATUS_SANDBOX_BIN")
+        .unwrap_or_else(|| "/usr/bin/sandbox-exec".to_owned())
 }
 
 /// A directory with no project configuration, so the worker cannot pick up
@@ -490,19 +495,18 @@ fn oversized(file: &fs::File) -> bool {
 
 /// Resolves a CLI on `PATH` to a real path, which the sandbox profile needs in
 /// order to permit exactly one executable.
-fn resolve_executable(name: &str) -> Result<PathBuf, String> {
+fn resolve_executable(name: &str, path: Option<std::ffi::OsString>) -> Result<PathBuf, String> {
     let candidate = PathBuf::from(name);
     let found = if candidate.is_absolute() {
         candidate
     } else {
-        env::var_os("PATH")
-            .map(|path| {
-                env::split_paths(&path)
-                    .map(|directory| directory.join(name))
-                    .find(|entry| entry.is_file())
-            })
-            .unwrap_or_default()
-            .ok_or_else(|| format!("{name} is not installed"))?
+        path.map(|path| {
+            env::split_paths(&path)
+                .map(|directory| directory.join(name))
+                .find(|entry| entry.is_file())
+        })
+        .unwrap_or_default()
+        .ok_or_else(|| format!("{name} is not installed"))?
     };
     found
         .canonicalize()
@@ -552,21 +556,28 @@ const CODEX_HOME_READS: [&str; 5] = [
     "installation_id",
 ];
 
-fn codex_home() -> Result<PathBuf, String> {
-    env::var_os("CODEX_HOME")
+fn codex_home(environment: &crate::environment::EnvironmentSnapshot) -> Result<PathBuf, String> {
+    environment
+        .var_os("CODEX_HOME")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        .or_else(|| environment.home().map(|home| home.join(".codex")))
         .ok_or_else(|| "Codex is unavailable: its credential home cannot be located".to_owned())
 }
 
 #[cfg(target_os = "linux")]
 pub(crate) fn codex_worker_support() -> Result<(), String> {
     crate::linux_sandbox::check_support()?;
-    crate::linux_sandbox::native_codex(&resolve_executable(&codex_binary())?).map(|_| ())
+    let binary = env::var("NAMEDROP_AGENT_STATUS_CODEX_BIN").unwrap_or_else(|_| "codex".to_owned());
+    crate::linux_sandbox::native_codex(&resolve_executable(&binary, env::var_os("PATH"))?)
+        .map(|_| ())
 }
 
 #[cfg(target_os = "macos")]
-fn deny_exec_profile(allowed: &Path, directory: &WorkerDirectory) -> Result<String, String> {
+fn deny_exec_profile(
+    allowed: &Path,
+    directory: &WorkerDirectory,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<String, String> {
     let executable = sandbox_literal(allowed)?;
 
     let mut readable: Vec<String> = PLATFORM_READS
@@ -580,10 +591,10 @@ fn deny_exec_profile(allowed: &Path, directory: &WorkerDirectory) -> Result<Stri
     // This worker's private directory, which is also its working directory.
     readable.push(sandbox_literal(&directory.0)?.to_owned());
 
-    let home = env::var_os("HOME").map(PathBuf::from);
+    let home = environment.home();
     // Fail closed: without a credential home the worker cannot be contained
     // and authenticated at the same time, so it is not run at all.
-    let codex_home = codex_home()?;
+    let codex_home = codex_home(environment)?;
     for entry in CODEX_HOME_READS {
         readable.push(sandbox_literal(&codex_home.join(entry))?.to_owned());
     }
@@ -657,8 +668,22 @@ impl WorkerPlan {
     }
 }
 
-fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String> {
-    let binary = resolve_executable(&codex_binary())?;
+#[cfg(any(target_os = "macos", test))]
+fn macos_codex_command(
+    program: impl AsRef<std::ffi::OsStr>,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<Command, String> {
+    let mut command = environment.command(program);
+    command.env("CODEX_HOME", codex_home(environment)?);
+    Ok(command)
+}
+
+fn codex_plan(
+    prompt: &WorkerPrompt,
+    payload: &str,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<WorkerPlan, String> {
+    let binary = resolve_executable(&codex_binary(environment), environment.var_os("PATH"))?;
 
     let directory = reserve_worker_directory()?;
     let schema_path = reserve_scratch(&directory, "schema.json")?;
@@ -667,14 +692,16 @@ fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String
     let output_path = reserve_scratch(&directory, "message.txt")?;
     #[cfg(target_os = "macos")]
     let mut command = {
-        let mut command = Command::new(sandbox_binary());
+        let mut command = macos_codex_command(sandbox_binary(environment), environment)?;
         command
-            .args(["-p", &deny_exec_profile(&binary, &directory)?])
+            .args(["-p", &deny_exec_profile(&binary, &directory, environment)?])
             .arg(&binary);
         command
     };
     #[cfg(target_os = "linux")]
-    let mut command = crate::linux_sandbox::command(&binary, &directory.0, &codex_home()?)?;
+    let mut command =
+        crate::linux_sandbox::command(&binary, &directory.0, &codex_home(environment)?)?;
+    environment.apply_roots(&mut command);
     command
         .arg("exec")
         // No user config, no project rules, no persisted session.
@@ -709,9 +736,13 @@ fn codex_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String
     })
 }
 
-fn claude_plan(prompt: &WorkerPrompt, payload: &str) -> Result<WorkerPlan, String> {
+fn claude_plan(
+    prompt: &WorkerPrompt,
+    payload: &str,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<WorkerPlan, String> {
     let directory = reserve_worker_directory()?;
-    let mut command = Command::new(claude_binary());
+    let mut command = environment.command(claude_binary(environment));
     command
         .args(["--print", "--model", CLAUDE_MODEL])
         // Verified against the real outbound request: an empty tool list.
@@ -751,10 +782,11 @@ fn run_worker(
     prompt: &WorkerPrompt,
     payload: &str,
     cancelled: &AtomicBool,
+    environment: &crate::environment::EnvironmentSnapshot,
 ) -> Result<String, String> {
     let mut plan = match host {
-        "codex" => codex_plan(prompt, payload)?,
-        _ => claude_plan(prompt, payload)?,
+        "codex" => codex_plan(prompt, payload, environment)?,
+        _ => claude_plan(prompt, payload, environment)?,
     };
     let worker_directory = plan.directory.0.clone();
     let command = &mut plan.command;
@@ -964,7 +996,11 @@ fn validate_summary(response: &Value, input: &WorkerInput, model: &str) -> Resul
 /// Returns the summary described by the agent status contract. Any failure is
 /// an `Err` carrying a short reason: callers render the snapshot's facts
 /// without descriptions rather than showing invented prose.
-pub fn summarize_agent_status(snapshot: &Value, cancelled: &AtomicBool) -> Result<Value, String> {
+pub fn summarize_agent_status_with_environment(
+    snapshot: &Value,
+    cancelled: &AtomicBool,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<Value, String> {
     if cancelled.load(Ordering::Relaxed) {
         return Err("agent status summary cancelled".to_owned());
     }
@@ -1018,6 +1054,7 @@ pub fn summarize_agent_status(snapshot: &Value, cancelled: &AtomicBool) -> Resul
         },
         &input.payload,
         cancelled,
+        environment,
     )?;
     let response = extract_response(&raw, "origin_description")?;
     let summary = validate_summary(&response, &input, model)?;
@@ -1060,11 +1097,12 @@ fn validate_suggestion(response: &Value) -> Result<String, String> {
 /// no context or Herdr identifier. The result is draft text for the user to
 /// accept or discard, so nothing is stored and nothing is cached; a failure is
 /// an `Err` carrying a short reason and is not retried.
-pub fn suggest_agent_persona(
+pub fn suggest_agent_persona_with_environment(
     alias: &str,
     description: &str,
     host: &str,
     cancelled: &AtomicBool,
+    environment: &crate::environment::EnvironmentSnapshot,
 ) -> Result<String, String> {
     if cancelled.load(Ordering::Relaxed) {
         return Err("persona suggestion cancelled".to_owned());
@@ -1087,6 +1125,7 @@ pub fn suggest_agent_persona(
         },
         &payload,
         cancelled,
+        environment,
     )?;
     // A status answer carries no persona description, so it is rejected rather
     // than rendered as one; personas stay out of the summary cache too.
@@ -1117,4 +1156,86 @@ fn store(key: String, summary: &Value) {
             stored_at: Instant::now(),
         },
     );
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use crate::{environment::EnvironmentSnapshot, test_environment::CommandHome};
+
+    #[test]
+    fn macos_codex_command_keeps_captured_credential_home() {
+        const MARKER: &str = "NAMEDROP_MACOS_SNAPSHOT_TEST_CHILD";
+        if env::var_os(MARKER).is_none() {
+            let home =
+                env::temp_dir().join(format!("namedrop-macos-snapshot-{}", std::process::id()));
+            let output = Command::new(env::current_exe().unwrap())
+                .args(["--exact", "agent_status_model::snapshot_tests::macos_codex_command_keeps_captured_credential_home", "--nocapture"])
+                .isolated_home(&home)
+                .env(MARKER, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let home = PathBuf::from(env::var_os("HOME").unwrap());
+        let mut failures = Vec::new();
+        for captured in [
+            Some(home.join("credentials").into_os_string()),
+            None,
+            Some("".into()),
+        ] {
+            // This process runs only this test, with no concurrent environment readers.
+            unsafe {
+                match &captured {
+                    Some(value) => env::set_var("CODEX_HOME", value),
+                    None => env::remove_var("CODEX_HOME"),
+                }
+            }
+            let environment = EnvironmentSnapshot::capture();
+            unsafe {
+                env::set_var("CODEX_HOME", home.join("late"));
+            }
+            let expected = captured
+                .as_ref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join(".codex"));
+            let output = macos_codex_command("/bin/sh", &environment)
+                .unwrap()
+                .args(["-c", "printf '%s' \"$CODEX_HOME\""])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let actual = String::from_utf8(output.stdout).unwrap();
+            if actual != expected.to_str().unwrap() {
+                failures.push(format!(
+                    "captured={captured:?}: got {actual:?}, expected {expected:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn claude_plan_uses_captured_binary_override() {
+        let environment = EnvironmentSnapshot::from_variables([(
+            "NAMEDROP_AGENT_STATUS_CLAUDE_BIN".into(),
+            "/snapshot/claude".into(),
+        )]);
+        let plan = claude_plan(
+            &WorkerPrompt {
+                instructions: "",
+                schema: "{}".into(),
+            },
+            "",
+            &environment,
+        )
+        .unwrap();
+        assert_eq!(plan.command.get_program(), "/snapshot/claude");
+    }
 }

@@ -219,11 +219,35 @@ pub fn describe_operations(token: Option<&str>) -> Result<Value, String> {
 /// registered session addresses the Worktree, socket, and pane the plugin
 /// resolved rather than whatever its own shell holds.
 pub(crate) fn tool_environment(
+    host: &impl crate::Host,
     state_directory: &Path,
     session_socket_id: &str,
     workspace_id: &str,
     pane_id: &str,
 ) -> BTreeMap<String, String> {
+    if host.kind() == crate::runtime::HostKind::Hc {
+        let mut environment = BTreeMap::from([
+            ("NAMEDROP_HOST".to_owned(), "hc".to_owned()),
+            (
+                "NAMEDROP_STATE_DIR".to_owned(),
+                state_directory.to_string_lossy().into_owned(),
+            ),
+            ("HC_TERMINAL_ID".to_owned(), pane_id.to_owned()),
+            ("NAMEDROP_HC_SPACE".to_owned(), workspace_id.to_owned()),
+        ]);
+        if let Some(captured) = host.environment_snapshot() {
+            if let Some(session) = captured.var("HC_SESSION") {
+                environment.insert("HC_SESSION".to_owned(), session);
+            }
+            if let Ok(endpoint) = captured.hc_endpoint() {
+                environment.insert(
+                    "HC_SOCKET".to_owned(),
+                    endpoint.to_string_lossy().into_owned(),
+                );
+            }
+        }
+        return environment;
+    }
     BTreeMap::from([
         (
             "HERDR_PLUGIN_STATE_DIR".to_owned(),
@@ -392,9 +416,11 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    // Both shared user-level packages are refreshed before any challenge is
-    // issued, so a session started after this event loads the installed skill.
-    let installation = crate::refresh_user_integration_packages(runtime, discovered)?;
+    let installation = if runtime.is_hc() {
+        crate::install::inspect_user_integration_packages(runtime, discovered)?
+    } else {
+        crate::refresh_user_integration_packages(runtime, discovered)?
+    };
     let namespace = discovered.namespace(runtime.session_socket_id);
     let bindings = StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
@@ -419,7 +445,13 @@ where
         else {
             continue;
         };
-        onboard_settled_integration(&binding.address_id, pane, runtime, &installation)?;
+        onboard_settled_integration(
+            &binding.address_id,
+            pane,
+            runtime,
+            &installation,
+            &namespace,
+        )?;
     }
     Ok(installation)
 }
@@ -429,6 +461,7 @@ fn onboard_settled_integration<H, C, I>(
     pane: &DiscoveredPane,
     runtime: &LifecycleRuntime<'_, H, C, I>,
     installation: &crate::IntegrationPackageInstallation,
+    observed_namespace: &StateNamespace,
 ) -> Result<(), String>
 where
     H: crate::Host,
@@ -441,8 +474,31 @@ where
     let Some(agent_session_id) = pane.agent_session_id.as_ref() else {
         return Ok(());
     };
-    let discovered = integration_discovery(runtime)?;
-    let namespace = discovered.namespace(runtime.session_socket_id);
+    let _prompt_guard = if runtime.is_hc() {
+        Some(crate::host::hc::prompt_lock(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            &pane.pane_id,
+        )?)
+    } else {
+        None
+    };
+    let namespace = if runtime.is_hc() {
+        observed_namespace.clone()
+    } else {
+        integration_discovery(runtime)?.namespace(runtime.session_socket_id)
+    };
+    if runtime.is_hc()
+        && StateStore::open(runtime.state_directory)
+            .map_err(|error| error.to_string())?
+            .transaction(|transaction| {
+                transaction.prompt_is_deferred(&namespace, &pane.pane_id, agent_session_id)
+            })
+            .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+
     if StateStore::open(runtime.state_directory)
         .map_err(|error| error.to_string())?
         .transaction(|transaction| {
@@ -575,8 +631,9 @@ where
         );
     }
 
-    let executable = collaboration_executable()?;
+    let executable = tool_executable(runtime.home_directory, runtime.is_hc())?;
     let prompt = registration_prompt(
+        runtime.host.kind(),
         runtime.state_directory,
         runtime.session_socket_id,
         &current.workspace_id,
@@ -593,6 +650,29 @@ where
             TransitionKind::Submitted,
             &attribution,
         ),
+        Err(crate::PromptFailure {
+            kind: PromptFailureKind::DeferredUntilSettle { observed_status_ms },
+            ..
+        }) => {
+            let attribution = MutationAttribution::new(
+                crate::ActorKind::Plugin,
+                "namedrop-onboarding",
+                runtime.clock.now_unix_ms(),
+            );
+            StateStore::open(runtime.state_directory)
+                .map_err(|error| error.to_string())?
+                .transaction(|transaction| {
+                    transaction.defer_integration_challenge_prompt(
+                        &namespace,
+                        &challenge.registration_id,
+                        &pane.pane_id,
+                        agent_session_id,
+                        observed_status_ms,
+                        &attribution,
+                    )
+                })
+                .map_err(|error| error.to_string())
+        }
         Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {
             finish_challenge_prompt(
                 runtime,
@@ -801,7 +881,9 @@ fn concurrent_native_registration_completes_one_profile() {
 
 /// An agent-authored registration challenge used when automatic registration
 /// cannot complete without one visible model turn.
-pub fn registration_prompt(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn registration_prompt(
+    host: crate::runtime::HostKind,
     state_directory: &Path,
     session_socket_id: &str,
     workspace_id: &str,
@@ -811,6 +893,7 @@ pub fn registration_prompt(
     nonce: &str,
 ) -> Result<String, String> {
     let command = registration_command(
+        host,
         state_directory,
         session_socket_id,
         workspace_id,
@@ -838,7 +921,9 @@ pub fn registration_prompt(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn registration_command(
+    host: crate::runtime::HostKind,
     state_directory: &Path,
     session_socket_id: &str,
     workspace_id: &str,
@@ -867,14 +952,35 @@ pub(crate) fn registration_command(
         "nonce": nonce,
         "capabilities": complete_capability_profile(),
     });
+    let location = if host == crate::runtime::HostKind::Hc {
+        format!(
+            "--host hc --hc-space {} --hc-terminal {}",
+            shell_single_quote(workspace_id),
+            shell_single_quote(pane_id)
+        )
+    } else {
+        format!(
+            "--herdr-socket {} --herdr-workspace {} --herdr-pane {}",
+            shell_single_quote(session_socket_id),
+            shell_single_quote(workspace_id),
+            shell_single_quote(pane_id)
+        )
+    };
+    let prefix = if host == crate::runtime::HostKind::Hc {
+        "register --plugin-state"
+    } else {
+        "--plugin-state"
+    };
+    let suffix = if host == crate::runtime::HostKind::Hc {
+        ""
+    } else {
+        " register"
+    };
     Ok(format!(
-        "{} --plugin-state {} register --herdr-socket {} --herdr-workspace {} --herdr-pane {} --input-json {}",
+        "{} {prefix} {}{suffix} {location} --input-json {}",
         shell_single_quote(&executable.to_string_lossy()),
         shell_single_quote(&state_directory.to_string_lossy()),
-        shell_single_quote(session_socket_id),
-        shell_single_quote(workspace_id),
-        shell_single_quote(pane_id),
-        shell_single_quote(&input.to_string()),
+        shell_single_quote(&input.to_string())
     ))
 }
 
@@ -972,7 +1078,7 @@ where
     let pane_id = runtime
         .current_pane_id
         .ok_or_else(|| "the current Herdr pane is required for registration".to_owned())?;
-    let executable = collaboration_executable()?;
+    let executable = tool_executable(runtime.home_directory, runtime.is_hc())?;
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let registration = match store.transaction(|transaction| {
         let address = transaction.routing_author_for_pane(&namespace, pane_id)?;
@@ -1021,6 +1127,7 @@ where
     response["tool"] = serde_json::to_value(IntegrationToolInvocation::new(
         executable,
         tool_environment(
+            &runtime.host,
             runtime.state_directory,
             runtime.session_socket_id,
             &discovered.workspace_id,
@@ -1195,8 +1302,9 @@ where
         .current_pane_id
         .ok_or_else(|| "the current Herdr pane is required for delivery.inbox".to_owned())?;
     let tool = IntegrationToolInvocation::new(
-        collaboration_executable()?,
+        tool_executable(runtime.home_directory, runtime.is_hc())?,
         tool_environment(
+            &runtime.host,
             runtime.state_directory,
             runtime.session_socket_id,
             &discovered.workspace_id,
@@ -1349,13 +1457,6 @@ const COMMAND_GUIDANCE: &str = "Namedrop commands: the operations this delivery 
 /// This never travels inside the envelope. A delivery authenticates by exact
 /// equality against that reconstruction, so a field added to the envelope would
 /// stop a prompt dispatched before an upgrade from ever matching again.
-///
-/// The order is not cosmetic. The installed Codex approval rule is a prefix over
-/// `[executable, "--plugin-state", state, ...argv]`, so anything placed between
-/// the state directory and the operation's own argv leaves the command outside
-/// that rule: it is then refused by the sandbox rather than by Namedrop, which
-/// is exactly how one live handoff stalled. Location flags therefore follow the
-/// argv, and the input flag is last.
 pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
     let executable = tool.get("executable")?.as_str()?;
     let environment = tool.get("environment")?.as_object()?;
@@ -1366,17 +1467,30 @@ pub(crate) fn delivery_command_guidance(tool: &Value) -> Option<String> {
         let token = operation.get("token")?.as_str()?;
         let input = operation.get("input")?;
         let mut command = shell_single_quote(executable);
-        if let Some(state_directory) = located("HERDR_PLUGIN_STATE_DIR") {
-            command.push_str(&format!(
-                " --plugin-state {}",
-                shell_single_quote(state_directory)
-            ));
+        let state_key = if located("NAMEDROP_HOST") == Some("hc") {
+            "NAMEDROP_STATE_DIR"
+        } else {
+            "HERDR_PLUGIN_STATE_DIR"
+        };
+        let state_argument = located(state_key)
+            .map(|state_directory| {
+                format!(" --plugin-state {}", shell_single_quote(state_directory))
+            })
+            .unwrap_or_default();
+        if located("NAMEDROP_HOST") != Some("hc") {
+            command.push_str(&state_argument);
         }
         for argument in operation.get("argv")?.as_array()? {
             command.push(' ');
             command.push_str(&shell_argument(argument.as_str()?));
         }
+        if located("NAMEDROP_HOST") == Some("hc") {
+            command.push_str(&state_argument);
+        }
         for (flag, key) in [
+            ("--host", "NAMEDROP_HOST"),
+            ("--hc-terminal", "HC_TERMINAL_ID"),
+            ("--hc-space", "NAMEDROP_HC_SPACE"),
             ("--herdr-socket", "HERDR_SOCKET_PATH"),
             ("--herdr-workspace", "HERDR_WORKSPACE_ID"),
             ("--herdr-pane", "HERDR_PANE_ID"),
@@ -1534,8 +1648,19 @@ fn delivery_inputs(
     Ok(inputs)
 }
 
-/// Installed snapshots advertise their stable launcher; source invocations use
-/// the actual executable. Neither path is guessed from the working directory.
+pub(crate) fn tool_executable(home: Option<&Path>, hc: bool) -> Result<String, String> {
+    if hc {
+        home.filter(|home| home.is_absolute())
+            .ok_or_else(|| "HC collaboration requires an absolute HOME".to_owned())?
+            .join(".local/bin/namedrop-app")
+            .into_os_string()
+            .into_string()
+            .map_err(|_| "HC collaboration command path is not UTF-8".to_owned())
+    } else {
+        collaboration_executable()
+    }
+}
+
 pub(crate) fn collaboration_executable() -> Result<String, String> {
     crate::installed_runtime::executable()
         .map_err(|error| {
@@ -1821,3 +1946,25 @@ impl DeliveryEnvelope {
 #[cfg(test)]
 #[path = "integration_tests.rs"]
 mod command_guidance_tests;
+
+#[cfg(test)]
+mod guidance_state_tests {
+    #[test]
+    fn tui_delivery_guidance_ignores_hc_state() {
+        let tool = serde_json::json!({
+            "executable":"/namedrop", "input_flag":"--input-json",
+            "environment":{"HERDR_PLUGIN_STATE_DIR":"/tui-state", "NAMEDROP_STATE_DIR":"/hc-state", "HERDR_PANE_ID":"p1"},
+            "operations":[{"token":"address.list", "argv":["address", "list"], "input":{}}]
+        });
+        let guidance = super::delivery_command_guidance(&tool).unwrap();
+        assert!(
+            guidance.contains("--plugin-state '/tui-state'"),
+            "{guidance}"
+        );
+        assert!(!guidance.contains("/hc-state"), "{guidance}");
+    }
+}
+
+#[cfg(test)]
+#[path = "../tests/support/hc_onboarding.rs"]
+mod hc_onboarding;

@@ -1,8 +1,9 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use serde_json::Value;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Args)]
 #[command(name = "namedrop", version, about)]
 pub struct Cli {
     /// Print the complete JSON response, including when running in a terminal.
@@ -34,11 +35,131 @@ pub struct Cli {
     command: Command,
 }
 
+impl CommandFactory for Cli {
+    fn command() -> clap::Command {
+        Self::augment_args(clap::Command::new("namedrop"))
+    }
+
+    fn command_for_update() -> clap::Command {
+        Self::augment_args_for_update(clap::Command::new("namedrop"))
+    }
+}
+
+impl Parser for Cli {
+    fn parse() -> Self {
+        Self::try_parse().unwrap_or_else(|error| error.exit())
+    }
+
+    fn parse_from<I, T>(arguments: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        Self::try_parse_from(arguments).unwrap_or_else(|error| error.exit())
+    }
+
+    fn try_parse() -> Result<Self, clap::Error> {
+        Self::try_parse_from(std::env::args_os())
+    }
+
+    fn try_parse_from<I, T>(arguments: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<OsString> + Clone,
+    {
+        let arguments: Vec<OsString> = arguments.into_iter().map(Into::into).collect();
+        let command = Self::command();
+        let help = match command.clone().try_get_matches_from(&arguments) {
+            Ok(matches) => return Self::from_arg_matches(&matches),
+            Err(error) => error,
+        };
+        let tui_command = command.clone().mut_subcommand("hook", |hook| {
+            clap::Command::new("hook")
+                .about(hook.get_about().unwrap().clone())
+                .hide(true)
+                .subcommand_required(true)
+                .arg_required_else_help(true)
+                .subcommands(
+                    hook.get_subcommands()
+                        .filter(|child| child.get_name() != "session-end")
+                        .cloned(),
+                )
+        });
+        let tui_help = match tui_command.try_get_matches_from(&arguments) {
+            Ok(matches) => return Self::from_arg_matches(&matches),
+            Err(error) => error,
+        };
+        if tui_help.to_string() == help.to_string() {
+            return Err(help);
+        }
+        let mut runtime_arguments = vec![OsString::from("namedrop")];
+        let mut arguments_iter = arguments.iter().skip(1);
+        while let Some(argument) = arguments_iter.next() {
+            if argument == "--" {
+                break;
+            }
+            let Some(long) = argument.to_str().and_then(|value| value.strip_prefix("--")) else {
+                continue;
+            };
+            let (name, inline_value) = long
+                .split_once('=')
+                .map_or((long, None), |(name, value)| (name, Some(value)));
+            let Some(flag) = command
+                .get_arguments()
+                .find(|flag| flag.get_long() == Some(name))
+            else {
+                continue;
+            };
+            let value = (inline_value.is_none() && flag.get_action().takes_values())
+                .then(|| arguments_iter.next())
+                .flatten();
+            if matches!(
+                name,
+                "host"
+                    | "hc-terminal"
+                    | "hc-space"
+                    | "plugin-state"
+                    | "herdr-socket"
+                    | "herdr-workspace"
+                    | "herdr-pane"
+            ) {
+                runtime_arguments.push(argument.clone());
+                if let Some(value) = value {
+                    runtime_arguments.push(value.clone());
+                }
+            }
+        }
+        let runtime = match RuntimeOptions::augment_args(clap::Command::new("namedrop"))
+            .try_get_matches_from(runtime_arguments)
+            .and_then(|matches| RuntimeOptions::from_arg_matches(&matches))
+        {
+            Ok(runtime) => runtime,
+            Err(error) if help.kind() == clap::error::ErrorKind::DisplayHelp => return Err(error),
+            Err(_) => return Err(help),
+        };
+        if runtime.host_kind() != Ok(crate::runtime::HostKind::Tui) {
+            return Err(help);
+        }
+        Err(tui_help)
+    }
+}
+
 /// Explicit transport context for permission-matchable direct invocations.
-/// Omitted values retain the existing Herdr environment behavior.
-#[derive(Debug, Default, Args)]
+#[derive(Clone, Debug, Default, Args)]
 pub struct RuntimeOptions {
-    #[arg(long, value_name = "PATH")]
+    #[arg(skip)]
+    pub environment: crate::environment::EnvironmentSnapshot,
+    #[arg(skip)]
+    pub ambient_host: std::cell::OnceCell<crate::runtime::HostKind>,
+    #[arg(long, global = true, hide = true)]
+    pub hc_hook: bool,
+    #[arg(long, global = true, value_enum)]
+    pub host: Option<crate::runtime::HostKind>,
+    #[arg(long, global = true, value_name = "TERMINAL")]
+    pub hc_terminal: Option<String>,
+    #[arg(long, global = true, value_name = "SPACE")]
+    pub hc_space: Option<String>,
+    #[arg(long, global = true, value_name = "PATH")]
     pub plugin_state: Option<PathBuf>,
     #[arg(long, global = true, value_name = "SOCKET")]
     pub herdr_socket: Option<String>,
@@ -46,6 +167,71 @@ pub struct RuntimeOptions {
     pub herdr_workspace: Option<String>,
     #[arg(long, global = true, value_name = "PANE")]
     pub herdr_pane: Option<String>,
+}
+
+impl RuntimeOptions {
+    pub fn explicit_host_kind(&self) -> Result<Option<crate::runtime::HostKind>, String> {
+        crate::runtime::HostSignals {
+            host: self.host,
+            tui_transport: self.herdr_socket.is_some()
+                || self.herdr_workspace.is_some()
+                || self.herdr_pane.is_some(),
+            hc_transport: self.hc_terminal.is_some() || self.hc_space.is_some(),
+            plugin_state: self.plugin_state.is_some(),
+        }
+        .explicit_selection()
+        .map_err(|_| {
+            let flags = [
+                ("--herdr-socket", self.herdr_socket.is_some()),
+                ("--herdr-workspace", self.herdr_workspace.is_some()),
+                ("--herdr-pane", self.herdr_pane.is_some()),
+                ("--plugin-state", self.plugin_state.is_some()),
+                ("--hc-terminal", self.hc_terminal.is_some()),
+                ("--hc-space", self.hc_space.is_some()),
+            ]
+            .into_iter()
+            .filter_map(|(flag, present)| present.then_some(flag))
+            .collect::<Vec<_>>();
+            format!(
+                "Host flags conflict: {}. Select --host tui or --host hc.",
+                flags.join(", ")
+            )
+        })
+    }
+
+    pub fn host_kind(&self) -> Result<crate::runtime::HostKind, String> {
+        Ok(self
+            .explicit_host_kind()?
+            .unwrap_or_else(|| self.ambient_host_kind()))
+    }
+
+    pub fn ambient_host_kind(&self) -> crate::runtime::HostKind {
+        *self.ambient_host.get_or_init(|| {
+            crate::runtime::HostKind::from_snapshot(None, &self.environment)
+                .unwrap_or(crate::runtime::HostKind::Tui)
+        })
+    }
+
+    pub fn state_directory(&self) -> Result<PathBuf, String> {
+        let host = self.host_kind()?;
+        self.plugin_state
+            .clone()
+            .or_else(|| {
+                self.environment
+                    .var_os(match host {
+                        crate::runtime::HostKind::Tui => "HERDR_PLUGIN_STATE_DIR",
+                        crate::runtime::HostKind::Hc => "NAMEDROP_STATE_DIR",
+                    })
+                    .map(PathBuf::from)
+            })
+            .map(Ok)
+            .unwrap_or_else(|| match host {
+                crate::runtime::HostKind::Hc => self.environment.hc_state_directory(),
+                crate::runtime::HostKind::Tui => {
+                    Err("HERDR_PLUGIN_STATE_DIR or --plugin-state is required".to_owned())
+                }
+            })
+    }
 }
 
 impl Cli {
@@ -125,6 +311,15 @@ impl Cli {
         match &self.command {
             Command::Hook {
                 command: HookCommand::SessionStart(args),
+            } => Some(&args.state_directory),
+            _ => None,
+        }
+    }
+
+    pub fn session_end_hook_state_directory(&self) -> Option<&Path> {
+        match &self.command {
+            Command::Hook {
+                command: HookCommand::SessionEnd(args),
             } => Some(&args.state_directory),
             _ => None,
         }
@@ -295,6 +490,9 @@ enum Command {
     },
     /// Recover after a plugin restart; ambiguous in-flight delivery attempts are held.
     Reconcile,
+    /// Subscribe to hc lifecycle and status events.
+    #[command(hide = true)]
+    Events,
     /// Handle one Herdr lifecycle event.
     Event {
         #[command(subcommand)]
@@ -352,6 +550,7 @@ impl Command {
             Self::Thread { command } => command.operation(),
             Self::Space { command } => command.operation(),
             Self::Reconcile => "reconcile",
+            Self::Events => "events",
             Self::Event { command } => command.operation(),
             Self::Dashboard(_) => "dashboard",
             Self::DashboardServer => "dashboard.server",
@@ -625,6 +824,7 @@ enum HookCommand {
     AgentStatusWorker,
     MailboxWake(HookArgs),
     SessionStart(HookArgs),
+    SessionEnd(HookArgs),
     UserPromptSubmit(HookArgs),
 }
 
@@ -634,6 +834,7 @@ impl HookCommand {
             Self::AgentStatusChanged => "hook.agent-status-changed",
             Self::AgentStatusWorker => "hook.agent-status-worker",
             Self::MailboxWake(_) => "hook.mailbox-wake",
+            Self::SessionEnd(_) => "hook.session-end",
             Self::SessionStart(_) => "hook.session-start",
             Self::UserPromptSubmit(_) => "hook.user-prompt-submit",
         }

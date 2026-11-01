@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
-    env, fs,
+    fs,
     io::{Read, Write},
     os::unix::{fs::OpenOptionsExt, process::CommandExt},
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
+    path::Path,
+    process::Stdio,
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -24,15 +24,6 @@ fn enabled() -> bool {
     true
 }
 
-pub(crate) fn settings_path() -> Result<PathBuf, String> {
-    let directory = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .ok_or("Namedrop cannot locate its update settings without HOME or XDG_CONFIG_HOME")?;
-    Ok(directory.join("herdr/plugins/config/namedrop/settings.json"))
-}
-
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     let file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut data = Vec::new();
@@ -45,12 +36,13 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     serde_json::from_slice(&data).map_err(|error| error.to_string())
 }
 
-pub(crate) fn settings() -> Result<bool, String> {
-    let path = settings_path()?;
+pub(crate) fn settings(path: Option<&Path>) -> Result<bool, String> {
+    let path =
+        path.ok_or("Namedrop cannot locate its update settings without HOME or XDG_CONFIG_HOME")?;
     if !path.try_exists().map_err(|error| error.to_string())? {
         return Ok(true);
     }
-    read_json::<Settings>(&path).map(|settings| settings.check_for_updates)
+    read_json::<Settings>(path).map(|settings| settings.check_for_updates)
 }
 
 fn version(value: &str) -> Option<[u64; 3]> {
@@ -91,8 +83,8 @@ pub(crate) struct AvailableUpdate {
     pub last_error: Option<String>,
 }
 
-pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
-    settings().ok().filter(|enabled| *enabled)?;
+pub(crate) fn available(state: &Path, settings_path: Option<&Path>) -> Option<AvailableUpdate> {
+    settings(settings_path).ok().filter(|enabled| *enabled)?;
     let cache = cache(state)?;
     let remote = cache.remote_version?;
     (version(&remote)? > version(env!("CARGO_PKG_VERSION"))?).then_some(AvailableUpdate {
@@ -106,17 +98,25 @@ pub(crate) fn available(state: &Path) -> Option<AvailableUpdate> {
 /// Called only by startup reconciliation and pane lifecycle events. The child
 /// owns the lock and all subprocess/network work, so pane handling never waits.
 #[doc(hidden)]
-pub fn start(state: &Path, now: u64) {
-    let Ok(path) = settings_path() else {
+pub fn start_with_environment(
+    state: &Path,
+    now: u64,
+    environment: &crate::environment::EnvironmentSnapshot,
+) {
+    let settings_path = environment
+        .agent_config()
+        .update_settings(environment.home());
+    let Some(path) = settings_path.as_deref() else {
         return;
     };
-    if settings() != Ok(true)
+    if settings(Some(path)) != Ok(true)
         || cache(state)
             .is_some_and(|cache| now >= cache.checked_at && now - cache.checked_at < DAY_MS)
     {
         return;
     }
-    let _ = Command::new("python3")
+    let _ = environment
+        .command("python3")
         .args(["-c", include_str!("../scripts/check-update.py")])
         .arg(state)
         .arg(path)
@@ -162,7 +162,21 @@ pub fn session_notice(
     input: &str,
     state: &Path,
     now: u64,
+    output: Option<Value>,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Option<Value> {
+    let path = environment
+        .agent_config()
+        .update_settings(environment.home());
+    session_notice_at(input, state, now, output, path.as_deref())
+}
+
+pub fn session_notice_at(
+    input: &str,
+    state: &Path,
+    now: u64,
     mut output: Option<Value>,
+    settings_path: Option<&Path>,
 ) -> Option<Value> {
     let input: Value = serde_json::from_str(input).ok()?;
     if input["hook_event_name"] != "SessionStart"
@@ -170,7 +184,7 @@ pub fn session_notice(
     {
         return output;
     }
-    let Some(update) = available(state) else {
+    let Some(update) = available(state, settings_path) else {
         return output;
     };
     if read_json::<Notice>(&state.join("update-notice.json")).is_ok_and(|notice| {

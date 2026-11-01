@@ -13,12 +13,14 @@ import sys
 import tempfile
 import time
 
+from support.environment import isolated_home
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / 'scripts'))
 from runtime import LAUNCHER
 SCHEMA_VERSION = int(re.search(r'const SCHEMA_VERSION: u32 = (\d+);', (REPO/'src/store.rs').read_text())[1])
 assert int(re.search(r'^SCHEMA_VERSION = (\d+)$', (REPO/'scripts/update.py').read_text(), re.M)[1]) == SCHEMA_VERSION, 'Updater preflight must be reviewed when the store schema changes'
-HOST = r'''#!/usr/bin/env python3
+HOST = r'''#!/usr/bin/python3
 import json, os, pathlib, shutil, sqlite3, sys
 base = pathlib.Path(os.environ['FIXTURE'])
 args = sys.argv[1:]
@@ -112,7 +114,7 @@ else:
     sys.exit('unexpected: '+repr(args))
 '''
 
-GIT = r'''#!/usr/bin/env python3
+GIT = r'''#!/usr/bin/python3
 import json, os, pathlib, sys
 args = sys.argv[1:]
 if args[:1] == ['-C']: args = args[2:]
@@ -294,10 +296,11 @@ def case(mode, answer=b'yes\n', ref='main', subdir=None, interactive=True, choic
         (base/'registry').write_text(json.dumps({'result': {'type':'plugin_list', 'plugins':[
             {'plugin_id':'namedrop', 'plugin_root':str(old), 'source':source}]}}))
         env = {k:v for k,v in os.environ.items() if not k.startswith(('HERDR_', 'CODEX_'))}
+        env.update(isolated_home(base / 'home'))
         env['PYTHONPATH'] = str(base)
         env.update(PATH=str(base/'bin')+os.pathsep+os.environ['PATH'], FIXTURE=str(base), CASE=mode,
                    TEST_REPO=str(REPO), LIVE='1' if live else '0', INCOMPATIBLE='1' if incompatible else '',
-                   HOME=str(base/'home'), CLAUDE_CONFIG_DIR=str(base/'home/.claude'), CODEX_HOME=str(base/'home/.codex'), HERDR_SOCKET_PATH='socket', HERDR_WORKSPACE_ID='w',
+                   CLAUDE_CONFIG_DIR=str(base/'home/.claude'), CODEX_HOME=str(base/'home/.codex'), HERDR_SOCKET_PATH='socket', HERDR_WORKSPACE_ID='w',
                    HERDR_PANE_ID='w:p', HERDR_PLUGIN_STATE_DIR=str(state))
         command = ['sh', str(old/'scripts/update.sh')]
         if mode == 'open': command.append('--open')

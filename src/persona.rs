@@ -332,3 +332,23 @@ fn readiness(address: &PaneAddressRecord, registered: bool, paused: bool) -> &'s
         }
     }
 }
+
+#[cfg(test)]
+mod hc_status_tests {
+    #[test]
+    fn hc_status_words_control_persona_availability() {
+        for word in crate::host::hc::testing::WORDS {
+            let address = crate::host::hc::testing::address(word);
+            assert_eq!(
+                super::selection_note(&address, true, false) == "available now",
+                matches!(word, Some("idle" | "done")),
+                "{word:?}"
+            );
+            assert_ne!(
+                super::selection_note(&address, false, false),
+                "available now"
+            );
+            assert_ne!(super::selection_note(&address, true, true), "available now");
+        }
+    }
+}

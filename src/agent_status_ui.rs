@@ -97,8 +97,9 @@ fn run_popup(options: &RuntimeOptions) -> Result<(), String> {
         let collect = |cancelled: &AtomicBool| {
             namedrop::collect_agent_status(&targeted, &terminal, session.as_deref(), cancelled)
         };
+        let environment = &options.environment;
         let summarize = |snapshot: &Value, cancelled: &AtomicBool| {
-            namedrop::summarize_agent_status(snapshot, cancelled)
+            namedrop::summarize_agent_status_with_environment(snapshot, cancelled, environment)
         };
         let recheck = |cancelled: &AtomicBool| {
             latest_identity(

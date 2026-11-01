@@ -19,6 +19,8 @@ import sys
 import tempfile
 import time
 
+from support.environment import isolated_home
+
 from seamless_native import FIXTURE_ROOT, compile_agent, fixture_shell
 
 REPO = Path(__file__).resolve().parent.parent
@@ -41,7 +43,8 @@ while True:
 
 def isolated_env(base):
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR') if k in os.environ}
-    env.update(HOME=str(base/'home'), XDG_CONFIG_HOME=str(base/'config'), XDG_STATE_HOME=str(base/'state'),
+    env.update(isolated_home(base / 'home'))
+    env.update(XDG_CONFIG_HOME=str(base/'config'), XDG_STATE_HOME=str(base/'state'),
                XDG_DATA_HOME=str(base/'data'), XDG_RUNTIME_DIR=str(base/'run'),
                CODEX_HOME=str(base/'home/.codex'), CLAUDE_CONFIG_DIR=str(base/'home/.claude'),
                GIT_CONFIG_GLOBAL=str(base/'home/.gitconfig'), GIT_CONFIG_NOSYSTEM='1',

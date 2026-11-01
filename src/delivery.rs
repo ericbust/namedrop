@@ -3,7 +3,7 @@ use crate::{
     ActorKind, Clock, DeliveryAttemptId, DeliveryState, DiscoveredPane, DispatchCandidate, Host,
     IdGenerator, InflightDeliveryAttempt, IntegrationToolInvocation, LeaseDraft, LifecycleRuntime,
     MutationAttribution, PromptFailureKind, StateNamespace, StateStore, StateTransaction,
-    StoreError, collaboration_executable, tool_environment,
+    StoreError, tool_environment,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -25,6 +25,7 @@ pub struct DrainReport {
     pub held: Vec<DeliveryAttemptId>,
     pub expired: Vec<crate::DeliveryId>,
     pub pending_grace: Vec<GraceDeadline>,
+    pub next_lease_due_ms: Option<u64>,
 }
 
 /// An idle submitted or acknowledged attempt still inside the acknowledgement
@@ -48,6 +49,7 @@ impl Default for DrainReport {
             held: Vec::new(),
             expired: Vec::new(),
             pending_grace: Vec::new(),
+            next_lease_due_ms: None,
         }
     }
 }
@@ -124,11 +126,13 @@ pub(crate) struct DeliveryReconciliationReport {
     pub settled: Vec<DeliveryAttemptId>,
     pub held: Vec<DeliveryAttemptId>,
     pub pending_grace: Vec<GraceDeadline>,
+    pub next_lease_due_ms: Option<u64>,
 }
 
 pub(crate) fn reconcile_delivery_state(
     transaction: &mut StateTransaction<'_>,
     namespace: &StateNamespace,
+    unavailable_panes: &[String],
     panes: &[DiscoveredPane],
     restart: bool,
     attribution: &MutationAttribution,
@@ -150,6 +154,9 @@ pub(crate) fn reconcile_delivery_state(
                     attribution,
                 )?;
                 report.settled.push(attempt.attempt_id);
+                continue;
+            }
+            if attempt.binding_active && unavailable_panes.contains(&attempt.pane_id) {
                 continue;
             }
             let same = attempt.binding_active
@@ -177,6 +184,9 @@ pub(crate) fn reconcile_delivery_state(
             // claimed runner can persist an exit status and settle this work.
             continue;
         }
+        if attempt.binding_active && unavailable_panes.contains(&attempt.pane_id) {
+            continue;
+        }
         match observe_agent_attempt(&attempt, pane, restart, attribution.occurred_at_ms) {
             Observation::Hold => {
                 transaction.transition_delivery_attempt(
@@ -195,6 +205,13 @@ pub(crate) fn reconcile_delivery_state(
                 attempt_id: attempt.attempt_id,
                 due_at_ms,
             }),
+            Observation::PendingLease { due_at_ms } => {
+                report.next_lease_due_ms = Some(
+                    report
+                        .next_lease_due_ms
+                        .map_or(due_at_ms, |previous| previous.min(due_at_ms)),
+                );
+            }
             Observation::Unchanged => {}
         }
     }
@@ -206,6 +223,7 @@ enum Observation {
     Hold,
     Settle,
     PendingGrace { due_at_ms: u64 },
+    PendingLease { due_at_ms: u64 },
     Unchanged,
 }
 
@@ -230,6 +248,11 @@ fn observe_agent_attempt(
     match attempt.state {
         _ if !same_session => Observation::Hold,
         DeliveryState::Dispatching if restart || lease_expired => Observation::Hold,
+        DeliveryState::Dispatching => Observation::PendingLease {
+            due_at_ms: attempt
+                .lease_expires_at_ms
+                .expect("unexpired lease checked"),
+        },
         DeliveryState::Submitted if restart || idle_past_grace => Observation::Hold,
         DeliveryState::Acknowledged if idle_past_grace => Observation::Settle,
         DeliveryState::Submitted | DeliveryState::Acknowledged if session_is_settled => {
@@ -273,7 +296,9 @@ where
                 .find(|address| !address.retired && address.id == binding.address_id)
             {
                 let label = PaneLabel::for_pane(pane, served.as_ref());
-                if label.replaces(&address.alias, pane.idle_state_label.as_deref()) {
+                if !runtime.is_hc()
+                    && label.replaces(&address.alias, pane.idle_state_label.as_deref())
+                {
                     crate::lifecycle::publish_pane_address_metadata(
                         runtime,
                         &binding.pane_id,
@@ -302,7 +327,20 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let first_discovery = discover(runtime)?;
+    drain_mailboxes_with_discovery(runtime, discover(runtime)?, true, None)
+}
+
+pub(crate) fn drain_mailboxes_with_discovery<H, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    first_discovery: crate::DiscoveredWorktree,
+    publish_metadata: bool,
+    observed_spaces: Option<&std::collections::BTreeMap<String, crate::DiscoveredWorktree>>,
+) -> Result<DrainReport, String>
+where
+    H: Host,
+    C: Clock,
+    I: IdGenerator,
+{
     let namespace = first_discovery.namespace(runtime.session_socket_id);
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
     let reconciliation_completed = store
@@ -318,6 +356,9 @@ where
         .transaction(|tx| tx.inflight_delivery_attempts(&namespace))
         .map_err(|e| e.to_string())?;
     for attempt in inflight {
+        if first_discovery.unavailable_panes.contains(&attempt.pane_id) {
+            continue;
+        }
         let terminal = store
             .transaction(|tx| tx.terminal_execution(&namespace, &attempt.attempt_id))
             .map_err(|e| e.to_string())?;
@@ -345,6 +386,7 @@ where
             reconcile_delivery_state(
                 transaction,
                 &namespace,
+                &first_discovery.unavailable_panes,
                 &first_discovery.panes,
                 false,
                 &MutationAttribution::new(ActorKind::Plugin, "namedrop-dispatch", now),
@@ -364,8 +406,14 @@ where
     let remote_seats = store
         .transaction(|transaction| transaction.remote_seat_spaces(&namespace))
         .map_err(|error| error.to_string())?;
-    let live =
-        crate::spaces::LiveSpaces::load(&runtime.host, first_discovery.clone(), &remote_seats);
+    let live = match (runtime.is_hc(), observed_spaces) {
+        (true, Some(snapshot)) => crate::spaces::LiveSpaces::from_snapshot(
+            first_discovery.clone(),
+            &remote_seats,
+            snapshot,
+        ),
+        _ => crate::spaces::LiveSpaces::load(&runtime.host, first_discovery.clone(), &remote_seats),
+    };
     store
         .transaction(|transaction| {
             transaction.complete_ready_result_sets(
@@ -388,12 +436,19 @@ where
         held: reconciled.held,
         expired,
         pending_grace: reconciled.pending_grace,
+        next_lease_due_ms: reconciled.next_lease_due_ms,
         ..DrainReport::default()
     };
 
     for address_id in addresses {
         let first = store
-            .transaction(|transaction| transaction.dispatch_candidate(&namespace, &address_id))
+            .transaction(|transaction| {
+                transaction.dispatch_candidate_for_host(
+                    &namespace,
+                    &address_id,
+                    runtime.host.kind(),
+                )
+            })
             .map_err(|error| error.to_string())?;
         let Some(first) = first else {
             continue;
@@ -409,12 +464,27 @@ where
         }
 
         runtime.clock.wait_ms(first.settled_delay_ms);
+        let _prompt_guard = if runtime.is_hc() && first.pane_type == crate::PaneType::Agent {
+            Some(crate::host::hc::prompt_lock(
+                runtime.state_directory,
+                runtime.session_socket_id,
+                &first.pane_id,
+            )?)
+        } else {
+            None
+        };
         let second_discovery = discover(runtime)?;
         if second_discovery.workspace_id != namespace.space_id.as_str() {
             continue;
         }
         let second = store
-            .transaction(|transaction| transaction.dispatch_candidate(&namespace, &address_id))
+            .transaction(|transaction| {
+                transaction.dispatch_candidate_for_host(
+                    &namespace,
+                    &address_id,
+                    runtime.host.kind(),
+                )
+            })
             .map_err(|error| error.to_string())?;
         let Some(second) = second else {
             continue;
@@ -444,8 +514,9 @@ where
         let attribution = MutationAttribution::new(ActorKind::Plugin, "namedrop-dispatch", now);
         let attempt_id = DeliveryAttemptId::new(runtime.ids.next_id("delivery-attempt"));
         let tool = IntegrationToolInvocation::new(
-            collaboration_executable()?,
+            crate::integration::tool_executable(runtime.home_directory, runtime.is_hc())?,
             tool_environment(
+                &runtime.host,
                 runtime.state_directory,
                 runtime.session_socket_id,
                 &second_discovery.workspace_id,
@@ -461,7 +532,7 @@ where
                 )? {
                     return Ok(None);
                 }
-                let leased = transaction.lease_mailbox_head(
+                let leased = transaction.lease_mailbox_head_for_host(
                     &namespace,
                     &address_id,
                     &LeaseDraft {
@@ -473,6 +544,7 @@ where
                         acquired_at_ms: now,
                         expires_at_ms: now.saturating_add(LEASE_DURATION_MS),
                     },
+                    runtime.host.kind(),
                     &attribution,
                 )?;
                 leased
@@ -578,12 +650,28 @@ where
                     .map_err(|error| error.to_string())?;
                 report.submitted.push(leased.attempt_id);
             }
+            Err(crate::PromptFailure {
+                kind: PromptFailureKind::DeferredUntilSettle { observed_status_ms },
+                ..
+            }) => {
+                store
+                    .transaction(|transaction| {
+                        transaction.return_delivery_attempt_to_queue(
+                            &namespace,
+                            &leased.attempt_id,
+                            crate::DeliveryReturnReason::DeferredUntilSettle { observed_status_ms },
+                            &attribution,
+                        )
+                    })
+                    .map_err(|error| error.to_string())?;
+            }
             Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {
                 store
                     .transaction(|transaction| {
                         transaction.return_delivery_attempt_to_queue(
                             &namespace,
                             &leased.attempt_id,
+                            crate::DeliveryReturnReason::TemporaryPreInvocation,
                             &attribution,
                         )
                     })
@@ -633,7 +721,9 @@ where
                 .collect::<Result<Vec<_>, StoreError>>()
         })
         .map_err(|e| e.to_string())?;
-    publish_status_metadata(runtime, &first_discovery)?;
+    if publish_metadata {
+        publish_status_metadata(runtime, &first_discovery)?;
+    }
     Ok(report)
 }
 
@@ -700,7 +790,53 @@ mod observation_tests {
             agent: None,
             occupant_label: None,
             agent_status: Some(status.to_owned()),
+            status_reported: None,
             idle_state_label: None,
+        }
+    }
+
+    #[test]
+    fn hc_status_words_gate_observation_and_dispatch() {
+        for word in crate::host::hc::testing::WORDS {
+            let pane = crate::host::hc::testing::pane(word);
+            let settled = matches!(word, Some("idle" | "done"));
+            let mut attempt = attempt(DeliveryState::Acknowledged);
+            attempt.pane_id = pane.pane_id.clone();
+            attempt.agent_session_id = pane.agent_session_id.clone().unwrap();
+            assert_eq!(
+                observe_agent_attempt(&attempt, Some(&pane), false, 40_000),
+                if settled {
+                    Observation::Settle
+                } else {
+                    Observation::Unchanged
+                },
+                "{word:?}"
+            );
+            let candidate = DispatchCandidate {
+                pane_type: crate::PaneType::Agent,
+                address_id: attempt.address_id.clone(),
+                binding_id: attempt.binding_id.clone(),
+                pane_id: pane.pane_id.clone(),
+                agent_session_id: attempt.agent_session_id.clone(),
+                registration_id: "registration".into(),
+                message_id: crate::MessageId::new("message"),
+                retry_of_attempt_id: None,
+                settled_delay_ms: 500,
+            };
+            let discovered = crate::DiscoveredWorktree {
+                unavailable_panes: vec![],
+                worktree_id: crate::WorktreeId::new("hc-space:fixture-space"),
+                workspace_id: "fixture-space".into(),
+                worktree_attached: false,
+                label: None,
+                branch: None,
+                panes: vec![pane],
+            };
+            assert_eq!(
+                live_candidate_matches(&candidate, &discovered),
+                settled,
+                "{word:?}"
+            );
         }
     }
 

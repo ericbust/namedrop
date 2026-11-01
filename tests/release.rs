@@ -72,7 +72,7 @@ esac
                 r#"#!/bin/sh
 if [ "${{1:-}}" = --version ]; then printf 'namedrop {version}\n'; exit 0; fi
 printf '%s\n' "$*" >> "${{NAMEDROP_TEST_ENTRYPOINT_LOG:-/dev/null}}"
-"#
+"#,
             ),
         )
     }

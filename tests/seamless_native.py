@@ -17,6 +17,8 @@ import sys
 import tempfile
 import time
 
+from support.environment import isolated_home
+
 REPO = Path(__file__).resolve().parent.parent
 # A short, canonical root keeps the fixture socket path within Unix limits.
 FIXTURE_ROOT = os.path.realpath('/tmp')
@@ -62,7 +64,8 @@ def main():
     env['PATH'] = os.pathsep.join(d for d in env['PATH'].split(os.pathsep) if not os.access(os.path.join(d, 'codex'), os.X_OK))
     for name in ('home', 'config', 'state', 'data', 'run', 'workspace', 'remote', 'evidence'):
         (base / name).mkdir()
-    env.update(HOME=str(base/'home'), XDG_CONFIG_HOME=str(base/'config'), XDG_STATE_HOME=str(base/'state'),
+    env.update(isolated_home(base / 'home'))
+    env.update(XDG_CONFIG_HOME=str(base/'config'), XDG_STATE_HOME=str(base/'state'),
                XDG_DATA_HOME=str(base/'data'), XDG_RUNTIME_DIR=str(base/'run'),
                CODEX_HOME=str(base/'home/.codex'), CLAUDE_CONFIG_DIR=str(base/'home/.claude'),
                GIT_CONFIG_GLOBAL=str(base/'home/.gitconfig'), HERDR_SOCKET_PATH=str(base/'run/herdr.sock'),

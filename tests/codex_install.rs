@@ -1,3 +1,6 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
 use namedrop::{AgentRuntime, install_integration_package, operation_catalog};
 use std::{
     fs,
@@ -287,5 +290,109 @@ fn codex_policy_checker_accepts_only_installed_collaboration_commands() {
     assert_ne!(
         check(vec!["sh".into(), "-c".into(), "echo bad".into()])["decision"],
         "allow"
+    );
+}
+
+#[test]
+fn global_state_binding_rejects_duplicates_across_command_levels_for_both_hosts() {
+    let cases = [
+        vec![
+            "--plugin-state",
+            "/first",
+            "--plugin-state=/second",
+            "describe",
+        ],
+        vec![
+            "--plugin-state=/first",
+            "describe",
+            "--plugin-state",
+            "/second",
+        ],
+        vec![
+            "describe",
+            "--plugin-state",
+            "/first",
+            "--plugin-state=/second",
+        ],
+        vec![
+            "--plugin-state",
+            "/first",
+            "handoff",
+            "--plugin-state=/second",
+            "status",
+        ],
+        vec![
+            "handoff",
+            "--plugin-state=/first",
+            "status",
+            "--plugin-state",
+            "/second",
+        ],
+    ];
+    let mut failures = Vec::new();
+    for host in ["tui", "hc"] {
+        for arguments in &cases {
+            let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+                .isolated_env(
+                    std::env::temp_dir().join(format!("nd-codex-home-{}", std::process::id())),
+                )
+                .args(["--host", host, "--json"])
+                .args(arguments)
+                .output()
+                .unwrap();
+            println!("{host} {arguments:?} => {:?}", output.status.code());
+            if output.status.code() != Some(64) {
+                failures.push(format!("{host} {arguments:?}"));
+            }
+        }
+        let root = std::env::temp_dir().join(format!(
+            "namedrop-state-binding-{}-{host}",
+            std::process::id()
+        ));
+        let state = root.to_str().unwrap();
+        for arguments in [
+            vec![
+                "--plugin-state".to_owned(),
+                state.to_owned(),
+                "describe".to_owned(),
+            ],
+            vec!["describe".to_owned(), format!("--plugin-state={state}")],
+            vec![
+                "describe".to_owned(),
+                "--plugin-state".to_owned(),
+                state.to_owned(),
+                "--".to_owned(),
+                "--plugin-state=literal-operation".to_owned(),
+            ],
+        ] {
+            let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+                .isolated_env(root.join("home"))
+                .args(["--host", host, "--json"])
+                .args(&arguments)
+                .output()
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(body["protocol_version"], "collab/v1");
+            if arguments
+                .last()
+                .is_some_and(|arg| arg == "--plugin-state=literal-operation")
+            {
+                assert_eq!(output.status.code(), Some(65));
+                assert!(
+                    !body["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("supplied more than once")
+                );
+            } else {
+                assert!(output.status.success(), "{host} {arguments:?}: {output:?}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+    assert!(
+        failures.is_empty(),
+        "duplicate state bindings accepted: {}",
+        failures.join("; ")
     );
 }

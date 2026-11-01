@@ -1,6 +1,10 @@
 //! What the installed hook actually hands a native session at a prompt or task
 //! boundary: the current workspace persona roster, without changing how explicit
 //! Mentions route or how a Delivery Envelope authenticates.
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use namedrop::{
@@ -1518,7 +1522,7 @@ fn app_server_notice(directory: &TestDirectory) -> String {
         )
         .args(["hook", "session-start", "--state-directory"])
         .arg(&directory.state)
-        .env("HOME", &directory.home)
+        .isolated_home(&directory.home)
         .env("CODEX_HOME", directory.home.join(".codex"))
         .env("CLAUDE_CONFIG_DIR", directory.home.join(".claude"))
         .env("HERDR_BIN_PATH", directory.root.join("no-herdr"))

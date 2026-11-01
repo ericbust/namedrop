@@ -2,6 +2,10 @@
 //! command Herdr runs before it registers the plugin, and the setup helper that
 //! links a local checkout or activates an already registered installation.
 //! Every fixture path contains a space so quoting is exercised throughout.
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 use std::{
@@ -197,7 +201,7 @@ chmod 755 "$directory/$target/release/namedrop"
         command
             .arg(checkout.join("scripts/build.sh"))
             .env("PATH", &self.tools)
-            .env("HOME", self.root.join("home"))
+            .isolated_home(self.root.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.root.join("home").join(".claude"))
             .env("CODEX_HOME", self.root.join("home").join(".codex"))
             .env_remove("XDG_CONFIG_HOME")
@@ -220,7 +224,7 @@ chmod 755 "$directory/$target/release/namedrop"
         command
             .env("PATH", format!("{}:/usr/bin:/bin", self.tools.display()))
             .env("PYTHONPATH", &self.tools)
-            .env("HOME", self.root.join("home"))
+            .isolated_home(self.root.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.root.join("home").join(".claude"))
             .env("CODEX_HOME", self.root.join("home").join(".codex"))
             .env_remove("XDG_CONFIG_HOME")
@@ -997,5 +1001,80 @@ fn activation_shows_the_shared_app_server_advice_on_the_update_and_first_install
                 );
             }
         }
+    }
+}
+
+#[test]
+fn run_script_forwards_tui_pane_and_arguments_without_host_prepass() {
+    let fixture = Fixture::new();
+    let checkout = fixture.checkout();
+    fs::create_dir_all(checkout.join("bin")).unwrap();
+    let fake = fixture.stub("namedrop", "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
+    fs::copy(fake, checkout.join("bin/namedrop")).unwrap();
+    for flags in [
+        vec![],
+        vec!["--host", "tui"],
+        vec!["--host=tui"],
+        vec!["--host", "hc"],
+        vec!["--host=hc"],
+        vec!["--hc-space", "space"],
+        vec!["--hc-terminal=t1"],
+        vec!["--herdr-socket", "socket"],
+        vec!["--herdr-workspace=space"],
+        vec!["--herdr-pane", "pane"],
+    ] {
+        for tui_env in [false, true] {
+            for hc_env in [false, true] {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .arg(checkout.join("scripts/run.sh"))
+                    .args(&flags)
+                    .arg("reconcile")
+                    .isolated_env(fixture.root.join("home"))
+                    .env("PATH", &fixture.tools);
+                let mut expected = Vec::new();
+                if tui_env {
+                    command
+                        .env("HERDR_PANE_ID", "tui-pane")
+                        .env("HERDR_SOCKET_PATH", "tui-socket");
+                    expected.extend(["--herdr-pane", "tui-pane"]);
+                }
+                if hc_env {
+                    command
+                        .env("HC_TERMINAL_ID", "hc-terminal")
+                        .env("NAMEDROP_HOST", "hc");
+                }
+                expected.extend(flags.iter().copied());
+                expected.push("reconcile");
+                let output = command.output().unwrap();
+                assert_eq!(
+                    succeeded(&output).lines().collect::<Vec<_>>(),
+                    expected,
+                    "flags={flags:?}, tui_env={tui_env}, hc_env={hc_env}"
+                );
+            }
+        }
+    }
+    fs::copy(
+        env!("CARGO_BIN_EXE_namedrop"),
+        checkout.join("bin/namedrop"),
+    )
+    .unwrap();
+    for flags in [
+        vec!["--herdr-socket", "tui", "--hc-space", "hc"],
+        vec!["--hc-terminal=terminal", "--herdr-pane=pane"],
+    ] {
+        let output = Command::new("/bin/sh")
+            .arg(checkout.join("scripts/run.sh"))
+            .args(flags)
+            .args(["--json", "doctor"])
+            .isolated_env(fixture.root.join("home"))
+            .env("PATH", &fixture.tools)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(64));
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert!(response.to_string().contains("invalid_request"));
+        assert!(response.to_string().contains("conflict"));
     }
 }

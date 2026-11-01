@@ -1,3 +1,8 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+use namedrop::environment::EnvironmentSnapshot;
+
 use namedrop::{AgentRuntime, install_integration_package};
 #[path = "support/update_profile.rs"]
 mod update_profile;
@@ -52,6 +57,7 @@ impl Fixture {
             &self.state,
             now,
             None,
+            &EnvironmentSnapshot::capture(),
         )
     }
 
@@ -69,7 +75,7 @@ impl Fixture {
             .args(["--plugin-state"])
             .arg(&self.state)
             .args(args)
-            .env("HOME", &self.home)
+            .isolated_home(&self.home)
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("CODEX_HOME", self.home.join(".codex"))
             .env("CLAUDE_CONFIG_DIR", self.home.join(".claude"))
@@ -210,7 +216,8 @@ fn rebuilt_sessions_do_not_claim_the_notice_and_existing_banner_is_combined() {
                 &input.to_string(),
                 &f.state,
                 1000,
-                Some(banner.clone())
+                Some(banner.clone()),
+                &EnvironmentSnapshot::capture()
             ),
             Some(banner.clone())
         );
@@ -221,6 +228,7 @@ fn rebuilt_sessions_do_not_claim_the_notice_and_existing_banner_is_combined() {
         &f.state,
         1000,
         Some(banner.clone()),
+        &EnvironmentSnapshot::capture(),
     )
     .unwrap();
     assert!(

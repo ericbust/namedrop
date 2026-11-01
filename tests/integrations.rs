@@ -1,3 +1,7 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+
 #[path = "support/bash_rules.rs"]
 mod bash_rules;
 use bash_rules::bash_rule_matches;
@@ -4460,4 +4464,170 @@ fn managed_claude_rules_reject_environment_injection() {
             "managed rule permits LD_PRELOAD injection: {rule}"
         );
     }
+}
+
+#[test]
+fn tui_hook_rendering_keeps_baked_context_even_in_hc_environment() {
+    let directory = TestDirectory::new();
+    let executable = directory.path().join("hook-result");
+    let log = directory.path().join("hook-argv");
+    fs::write(
+        &executable,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let package = install_integration_package(
+        directory.home(),
+        AgentRuntime::ClaudeCode,
+        &executable,
+        directory.path(),
+    )
+    .unwrap();
+    let wrapper = package.join("scripts/session-start");
+    let run = |state: Option<&str>| {
+        let mut command = Command::new(&wrapper);
+        command
+            .isolated_home(directory.home())
+            .env("XDG_STATE_HOME", directory.path().join("xdg"))
+            .env("HC_SESSION", "second-core")
+            .env("HC_TERMINAL_ID", "t3")
+            .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("NAMEDROP_HOST");
+        if let Some(state) = state {
+            command.env("NAMEDROP_STATE_DIR", state);
+        } else {
+            command.env_remove("NAMEDROP_STATE_DIR");
+        }
+        assert!(command.status().unwrap().success());
+        fs::read_to_string(&log).unwrap()
+    };
+    let argv = run(None);
+    assert_eq!(
+        argv,
+        format!(
+            "hook\nsession-start\n--state-directory\n{}\n",
+            directory.path().display()
+        )
+    );
+    assert_eq!(run(Some("/explicit-state")), argv);
+}
+
+fn package_snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, (Vec<u8>, u32)> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        result: &mut std::collections::BTreeMap<PathBuf, (Vec<u8>, u32)>,
+    ) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(root, &path, result);
+            } else {
+                result.insert(
+                    path.strip_prefix(root).unwrap().to_owned(),
+                    (
+                        fs::read(&path).unwrap(),
+                        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    ),
+                );
+            }
+        }
+    }
+    let mut result = std::collections::BTreeMap::new();
+    visit(root, root, &mut result);
+    result
+}
+
+#[test]
+#[ignore = "requires BASE_NAMEDROP_PACKAGE_GENERATOR built from 17d6335"]
+fn tui_package_bytes_modes_and_cache_version_equal_base() {
+    let directory = TestDirectory::new();
+    let executable = directory.path().join("runtime/namedrop");
+    let state = directory.path().join("state");
+    fs::create_dir_all(&state).unwrap();
+    let generator = std::env::var_os("BASE_NAMEDROP_PACKAGE_GENERATOR").unwrap();
+    assert!(
+        Command::new(generator)
+            .args([directory.home(), &executable, &state])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let before = package_snapshot(directory.home());
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        install_integration_package(directory.home(), runtime, &executable, &state).unwrap();
+    }
+    let after = package_snapshot(directory.home());
+    for (path, expected) in &before {
+        assert_eq!(
+            after.get(path),
+            Some(expected),
+            "base differs at {}",
+            path.display()
+        );
+    }
+    assert_eq!(before.len(), after.len());
+}
+
+#[test]
+fn tui_hooks_use_baked_executable_and_state_despite_global_launcher() {
+    let directory = TestDirectory::new();
+    let executable = directory.path().join("baked");
+    let log = directory.path().join("argv");
+    fs::write(
+        &executable,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{}'\n", log.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    let launcher = directory.home().join(".local/bin/namedrop");
+    fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+    fs::write(&launcher, "#!/bin/sh\nexit 99\n").unwrap();
+    fs::set_permissions(&launcher, fs::Permissions::from_mode(0o700)).unwrap();
+    for runtime in [AgentRuntime::ClaudeCode, AgentRuntime::Codex] {
+        let package =
+            install_integration_package(directory.home(), runtime, &executable, directory.path())
+                .unwrap();
+        for script in ["session-start", "user-prompt-submit"] {
+            let output = Command::new(package.join("scripts").join(script))
+                .env_remove("HC_TERMINAL_ID")
+                .env_remove("NAMEDROP_HOST")
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let argv = fs::read_to_string(&log).expect("baked executable must run");
+            assert!(
+                argv.contains(&format!(
+                    "--state-directory\n{}\n",
+                    directory.path().display()
+                )),
+                "{argv}"
+            );
+        }
+    }
+}
+
+#[test]
+fn tui_socket_prefix_does_not_select_the_app_package_or_registration() {
+    let directory = TestDirectory::new();
+    let ids = SequenceIds(AtomicU64::new(1));
+    let mut runtime = runtime(&directory, &ids);
+    runtime.session_socket_id = "hc:/fake/herdr.sock";
+    let result =
+        execute_lifecycle_operation("activate", serde_json::json!({"confirmed":true}), &runtime)
+            .unwrap();
+    assert!(
+        directory.home().join(".claude/skills/namedrop").is_dir(),
+        "TUI activation chose the wrong package: {result}"
+    );
+    assert!(
+        !directory
+            .home()
+            .join(".claude/skills/namedrop-app")
+            .exists()
+    );
+    assert!(directory.home().join(".local/bin/namedrop").exists());
+    assert!(!directory.home().join(".local/bin/namedrop-app").exists());
 }

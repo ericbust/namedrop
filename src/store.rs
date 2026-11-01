@@ -25,6 +25,9 @@ use std::{
 const DATABASE_FILE_NAME: &str = "namedrop.sqlite3";
 pub(crate) const SCHEMA_VERSION: u32 = 6;
 
+const TRANSITION_ENTITY_INDEX: &str = "CREATE INDEX IF NOT EXISTS transition_facts_by_entity
+    ON transition_facts (session_socket_id, worktree_id, entity_kind, entity_id, worktree_order DESC);";
+
 /// Personas live on the Pane Address, which survives renaming and rebinding,
 /// rather than on the role record the native naming path overwrites. Upgrading
 /// keeps a meaningful description a human wrote; an auto-registered native name
@@ -41,6 +44,9 @@ UPDATE pane_addresses SET persona = (
 );
 "#;
 
+#[cfg(test)]
+mod mailbox_tests;
+
 mod bridge;
 pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
 pub(crate) use groups::addressed_recipients;
@@ -54,6 +60,16 @@ pub(crate) use coordination_ownership::CoordinationRole;
 mod groups;
 mod handoff;
 mod terminal;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeliveryReturnReason {
+    TemporaryPreInvocation,
+    DeferredUntilSettle { observed_status_ms: Option<u64> },
+}
+
+fn prompt_recipient_key(pane: &str, session: &crate::AgentSessionId) -> String {
+    serde_json::to_string(&(pane, session.as_str())).expect("string pair serializes")
+}
 
 pub struct StateStore {
     connection: Connection,
@@ -1066,9 +1082,9 @@ impl StateTransaction<'_> {
         pane_id: &str,
         tab_id: &str,
     ) -> Result<(), StoreError> {
-        if pane_id.is_empty() || tab_id.is_empty() {
+        if pane_id.is_empty() {
             return Err(StoreError::invalid_input(
-                "pane and tab identities are required for a binding location",
+                "pane identity is required for a binding location",
             ));
         }
         let changed = self.transaction.execute(
@@ -1080,7 +1096,7 @@ impl StateTransaction<'_> {
                 namespace.space_id.as_str(),
                 address_id.as_str(),
                 pane_id,
-                tab_id,
+                (!tab_id.is_empty()).then_some(tab_id),
             ],
         )?;
         if changed != 1 {
@@ -1637,6 +1653,31 @@ impl StateTransaction<'_> {
             )?;
         }
         Ok(())
+    }
+
+    pub(crate) fn defer_integration_challenge_prompt(
+        &mut self,
+        namespace: &StateNamespace,
+        registration_id: &str,
+        pane: &str,
+        session: &crate::AgentSessionId,
+        observed_status_ms: Option<u64>,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let current = self.integration_challenge_transition(namespace, registration_id)?;
+        if matches!(
+            current,
+            TransitionKind::Dispatching | TransitionKind::Invoked
+        ) {
+            self.append_transition(
+                namespace,
+                TransitionEntityKind::IntegrationRegistration,
+                registration_id,
+                TransitionKind::Challenged,
+                attribution,
+            )?;
+        }
+        self.defer_prompt_until_settle(namespace, pane, session, observed_status_ms, attribution)
     }
 
     pub(crate) fn finish_integration_challenge_prompt(
@@ -3236,9 +3277,6 @@ impl StateTransaction<'_> {
         namespace: &StateNamespace,
         delivery_id: &crate::DeliveryId,
     ) -> Result<(), StoreError> {
-        // A Failed state alone cannot prove the host was never invoked. The
-        // immutable Failed -> Queued fact pair is written only by the explicit
-        // pre-invocation requeue path; require it for every historical attempt.
         let unsent = self.transaction.query_row(
             "SELECT EXISTS (
                  SELECT 1 FROM mailbox_deliveries d
@@ -3249,25 +3287,43 @@ impl StateTransaction<'_> {
                        LEFT JOIN delivery_attempt_state s USING (session_socket_id, worktree_id, attempt_id, address_id)
                        WHERE a.session_socket_id = d.session_socket_id
                          AND a.worktree_id = d.worktree_id AND a.delivery_id = d.delivery_id
-                         AND (s.state IS NOT 'failed' OR NOT EXISTS (
-                             SELECT 1 FROM transition_facts failed
-                             JOIN transition_facts queued ON queued.session_socket_id = failed.session_socket_id
-                               AND queued.worktree_id = failed.worktree_id
-                               AND queued.worktree_order = failed.worktree_order + 1
-                             WHERE failed.session_socket_id = a.session_socket_id
-                               AND failed.worktree_id = a.worktree_id
-                               AND failed.entity_kind = 'delivery_attempt' AND failed.entity_id = a.attempt_id
-                               AND failed.transition_kind = 'failed'
+                         AND NOT EXISTS (
+                             SELECT 1 FROM transition_facts unused
+                             JOIN transition_facts queued ON queued.session_socket_id = unused.session_socket_id
+                               AND queued.worktree_id = unused.worktree_id
+                               AND queued.worktree_order = unused.worktree_order + 1
+                             WHERE unused.session_socket_id = a.session_socket_id
+                               AND unused.worktree_id = a.worktree_id
+                               AND unused.entity_kind = 'delivery_attempt' AND unused.entity_id = a.attempt_id
                                AND queued.entity_kind = 'mailbox_delivery' AND queued.entity_id = d.delivery_id
                                AND queued.transition_kind = 'queued'
-                         ))
+                               AND ((s.state = 'failed' AND unused.transition_kind = 'failed') OR (
+                                   s.state = 'cancelled' AND s.active = 0 AND unused.transition_kind = 'cancelled'
+                                   AND NOT EXISTS (
+                                       SELECT 1 FROM transition_facts sent
+                                       WHERE sent.session_socket_id = a.session_socket_id AND sent.worktree_id = a.worktree_id
+                                         AND sent.entity_kind = 'delivery_attempt' AND sent.entity_id = a.attempt_id
+                                         AND sent.transition_kind IN ('submitted','invoked','acknowledged','settled','held','failed')
+                                   )
+                                   AND EXISTS (
+                                       SELECT 1 FROM transition_facts paused
+                                       LEFT JOIN transition_facts observed ON observed.session_socket_id = paused.session_socket_id
+                                         AND observed.worktree_id = paused.worktree_id
+                                         AND observed.worktree_order = paused.worktree_order - 1
+                                         AND observed.entity_kind = paused.entity_kind AND observed.entity_id = paused.entity_id
+                                         AND observed.transition_kind = 'observed'
+                                       WHERE paused.session_socket_id = a.session_socket_id AND paused.worktree_id = a.worktree_id
+                                         AND paused.entity_kind = 'mailbox_delivery'
+                                         AND paused.entity_id = d.delivery_id
+                                         AND paused.transition_kind = 'paused'
+                                         AND paused.worktree_order = queued.worktree_order + 2
+                                         AND observed.worktree_order = queued.worktree_order + 1
+                                   )
+                               ))
+                         )
                    )
              )",
-            params![
-                namespace.session_socket_id,
-                namespace.space_id.as_str(),
-                delivery_id.as_str()
-            ],
+            params![namespace.session_socket_id, namespace.space_id.as_str(), delivery_id.as_str()],
             |row| row.get::<_, bool>(0),
         )?;
         if !unsent {
@@ -4336,10 +4392,236 @@ impl StateTransaction<'_> {
             .map_err(StoreError::from)
     }
 
+    fn mailbox_settle_watermark(
+        &self,
+        namespace: &StateNamespace,
+        delivery_id: &str,
+        pane: &str,
+        session: &crate::AgentSessionId,
+    ) -> Result<Option<u64>, StoreError> {
+        let latest = self.transaction.query_row(
+            "SELECT gate.transition_kind, observed.occurred_at_ms,
+                    EXISTS (
+                        SELECT 1 FROM transition_facts cancelled
+                        JOIN delivery_attempts a ON a.session_socket_id = cancelled.session_socket_id
+                          AND a.worktree_id = cancelled.worktree_id AND a.attempt_id = cancelled.entity_id
+                        JOIN delivery_attempt_state s USING (session_socket_id, worktree_id, attempt_id, address_id)
+                        JOIN pane_bindings b USING (session_socket_id, worktree_id, binding_id, address_id)
+                        WHERE cancelled.session_socket_id = gate.session_socket_id
+                          AND cancelled.worktree_id = gate.worktree_id
+                          AND cancelled.worktree_order = gate.worktree_order - 3
+                          AND cancelled.entity_kind = 'delivery_attempt' AND cancelled.transition_kind = 'cancelled'
+                          AND a.delivery_id = gate.entity_id AND a.agent_session_id = ?5
+                          AND b.pane_id = ?4 AND s.state = 'cancelled' AND s.active = 0
+                    )
+             FROM transition_facts gate
+             LEFT JOIN transition_facts observed
+               ON observed.session_socket_id = gate.session_socket_id AND observed.worktree_id = gate.worktree_id
+               AND observed.worktree_order = gate.worktree_order - 1
+               AND observed.entity_kind = gate.entity_kind AND observed.entity_id = gate.entity_id
+               AND observed.transition_kind = 'observed'
+             WHERE gate.session_socket_id = ?1 AND gate.worktree_id = ?2
+               AND gate.entity_kind = 'mailbox_delivery' AND gate.entity_id = ?3
+               AND gate.transition_kind IN ('paused', 'resumed')
+             ORDER BY gate.worktree_order DESC LIMIT 1",
+            params![namespace.session_socket_id, namespace.space_id.as_str(), delivery_id, pane, session.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, bool>(2)?)),
+        ).optional()?;
+        match latest {
+            Some((kind, Some(time), true)) if kind == "paused" => Ok(Some(from_i64(time)?)),
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn resume_mailbox_after_settle(
+        &mut self,
+        namespace: &StateNamespace,
+        pane: &str,
+        session: &crate::AgentSessionId,
+        status_ms: u64,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let delivery = self.transaction.query_row(
+            "SELECT d.delivery_id FROM pane_bindings b
+             JOIN mailbox_deliveries d USING (session_socket_id, worktree_id, address_id)
+             WHERE b.session_socket_id = ?1 AND b.worktree_id = ?2 AND b.pane_id = ?3 AND b.active = 1
+               AND d.state NOT IN ('settled', 'failed', 'cancelled')
+             ORDER BY d.mailbox_order LIMIT 1",
+            params![namespace.session_socket_id, namespace.space_id.as_str(), pane],
+            |row| row.get::<_, String>(0),
+        ).optional()?;
+        let Some(delivery) = delivery else {
+            return Ok(());
+        };
+        if self
+            .mailbox_settle_watermark(namespace, &delivery, pane, session)?
+            .is_some_and(|watermark| status_ms > watermark)
+        {
+            self.append_transition(
+                namespace,
+                TransitionEntityKind::MailboxDelivery,
+                &delivery,
+                TransitionKind::Resumed,
+                attribution,
+            )?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reconcile_prompt_recipients(
+        &mut self,
+        namespace: &StateNamespace,
+        live_recipients: &[(String, crate::AgentSessionId)],
+        unavailable_panes: &std::collections::BTreeSet<String>,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let paused = {
+            let mut statement = self.transaction.prepare(
+                "SELECT entity_id FROM transition_facts paused
+                 WHERE session_socket_id = ?1 AND worktree_id = ?2
+                   AND entity_kind = 'prompt_recipient' AND transition_kind = 'paused'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM transition_facts newer
+                       WHERE newer.session_socket_id = paused.session_socket_id AND newer.worktree_id = paused.worktree_id
+                         AND newer.entity_kind = paused.entity_kind AND newer.entity_id = paused.entity_id
+                         AND newer.transition_kind IN ('paused', 'resumed') AND newer.worktree_order > paused.worktree_order
+                   )",
+            )?;
+            statement
+                .query_map(namespace_params(namespace), |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let live: std::collections::HashSet<_> = live_recipients
+            .iter()
+            .map(|(pane, session)| prompt_recipient_key(pane, session))
+            .collect();
+        for recipient in paused {
+            let (pane, _): (String, String) = serde_json::from_str(&recipient)
+                .map_err(|error| StoreError::invalid_input(error.to_string()))?;
+            if !unavailable_panes.contains(&pane) && !live.contains(&recipient) {
+                self.append_transition(
+                    namespace,
+                    TransitionEntityKind::PromptRecipient,
+                    &recipient,
+                    TransitionKind::Resumed,
+                    attribution,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn prompt_settle_watermark(
+        &self,
+        namespace: &StateNamespace,
+        pane: &str,
+        session: &crate::AgentSessionId,
+    ) -> Result<Option<u64>, StoreError> {
+        let latest = self
+            .transaction
+            .query_row(
+                "SELECT gate.transition_kind, COALESCE(observed.occurred_at_ms, 0)
+             FROM transition_facts gate
+             LEFT JOIN transition_facts observed
+               ON observed.session_socket_id = gate.session_socket_id
+               AND observed.worktree_id = gate.worktree_id
+               AND observed.worktree_order = gate.worktree_order - 1
+               AND observed.entity_kind = gate.entity_kind
+               AND observed.entity_id = gate.entity_id
+               AND observed.transition_kind = 'observed'
+             WHERE gate.session_socket_id = ?1 AND gate.worktree_id = ?2
+               AND gate.entity_kind = 'prompt_recipient' AND gate.entity_id = ?3
+               AND gate.transition_kind IN ('paused', 'resumed')
+             ORDER BY gate.worktree_order DESC LIMIT 1",
+                params![
+                    namespace.session_socket_id,
+                    namespace.space_id.as_str(),
+                    prompt_recipient_key(pane, session)
+                ],
+                |row| Ok((row.get::<_, String>(0)?, from_i64(row.get(1)?)?)),
+            )
+            .optional()?;
+        Ok(latest.and_then(|(kind, time)| (kind == "paused").then_some(time)))
+    }
+
+    pub(crate) fn prompt_is_deferred(
+        &self,
+        namespace: &StateNamespace,
+        pane: &str,
+        session: &crate::AgentSessionId,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .prompt_settle_watermark(namespace, pane, session)?
+            .is_some())
+    }
+
+    pub(crate) fn defer_prompt_until_settle(
+        &mut self,
+        namespace: &StateNamespace,
+        pane: &str,
+        session: &crate::AgentSessionId,
+        observed_status_ms: Option<u64>,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        let recipient = prompt_recipient_key(pane, session);
+        // Missing HC timestamps have an unknown lower bound, not the later refusal clock.
+        let observed = MutationAttribution::new(
+            attribution.actor_kind,
+            &attribution.actor_id,
+            observed_status_ms.unwrap_or(0),
+        );
+        self.append_transition(
+            namespace,
+            TransitionEntityKind::PromptRecipient,
+            &recipient,
+            TransitionKind::Observed,
+            &observed,
+        )?;
+        self.append_transition(
+            namespace,
+            TransitionEntityKind::PromptRecipient,
+            &recipient,
+            TransitionKind::Paused,
+            attribution,
+        )
+    }
+
+    pub(crate) fn resume_prompt_after_settle(
+        &mut self,
+        namespace: &StateNamespace,
+        pane: &str,
+        session: &crate::AgentSessionId,
+        status_ms: u64,
+        attribution: &MutationAttribution,
+    ) -> Result<(), StoreError> {
+        if self
+            .prompt_settle_watermark(namespace, pane, session)?
+            .is_some_and(|deferred| status_ms > deferred)
+        {
+            self.append_transition(
+                namespace,
+                TransitionEntityKind::PromptRecipient,
+                &prompt_recipient_key(pane, session),
+                TransitionKind::Resumed,
+                attribution,
+            )?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn dispatch_candidate(
         &self,
         namespace: &StateNamespace,
         address_id: &PaneAddressId,
+    ) -> Result<Option<DispatchCandidate>, StoreError> {
+        self.dispatch_candidate_for_host(namespace, address_id, crate::runtime::HostKind::Tui)
+    }
+
+    pub(crate) fn dispatch_candidate_for_host(
+        &self,
+        namespace: &StateNamespace,
+        address_id: &PaneAddressId,
+        host_kind: crate::runtime::HostKind,
     ) -> Result<Option<DispatchCandidate>, StoreError> {
         let state = self.worktree_state(namespace)?;
         if !state.is_some_and(|state| state.activated && !state.paused && !state.deactivated) {
@@ -4443,6 +4725,18 @@ impl StateTransaction<'_> {
         let Some(head_delivery_id) = head_delivery_id else {
             return Ok(None);
         };
+        if host_kind == crate::runtime::HostKind::Hc
+            && self
+                .mailbox_settle_watermark(
+                    namespace,
+                    &head_delivery_id,
+                    &pane_id,
+                    &agent_session_id,
+                )?
+                .is_some()
+        {
+            return Ok(None);
+        }
         let head_message = self.transaction.query_row("SELECT message_id FROM mailbox_deliveries WHERE session_socket_id=?1 AND worktree_id=?2 AND delivery_id=?3",params![namespace.session_socket_id,namespace.space_id.as_str(),head_delivery_id],|r|r.get::<_,String>(0).map(MessageId::new))?;
         if !self.coordination_delivery_allowed(
             namespace,
@@ -4498,10 +4792,27 @@ impl StateTransaction<'_> {
         lease: &LeaseDraft,
         attribution: &MutationAttribution,
     ) -> Result<Option<LeasedDelivery>, StoreError> {
-        let binding_is_active = self
+        self.lease_mailbox_head_for_host(
+            namespace,
+            address_id,
+            lease,
+            crate::runtime::HostKind::Tui,
+            attribution,
+        )
+    }
+
+    pub fn lease_mailbox_head_for_host(
+        &mut self,
+        namespace: &StateNamespace,
+        address_id: &PaneAddressId,
+        lease: &LeaseDraft,
+        host_kind: crate::runtime::HostKind,
+        attribution: &MutationAttribution,
+    ) -> Result<Option<LeasedDelivery>, StoreError> {
+        let pane_id = self
             .transaction
             .query_row(
-                "SELECT 1 FROM pane_bindings
+                "SELECT pane_id FROM pane_bindings
                  WHERE session_socket_id = ?1 AND worktree_id = ?2
                    AND binding_id = ?3 AND address_id = ?4 AND active = 1",
                 params![
@@ -4510,15 +4821,14 @@ impl StateTransaction<'_> {
                     lease.binding_id.as_str(),
                     address_id.as_str()
                 ],
-                |_| Ok(()),
+                |row| row.get::<_, String>(0),
             )
-            .optional()?
-            .is_some();
-        if !binding_is_active {
+            .optional()?;
+        let Some(pane_id) = pane_id else {
             return Err(StoreError::invalid_input(
                 "delivery attempt requires the address's active pane binding",
             ));
-        }
+        };
         let active_attempt = self
             .transaction
             .query_row(
@@ -4566,6 +4876,18 @@ impl StateTransaction<'_> {
         let Some(mut delivery) = delivery else {
             return Ok(None);
         };
+        if host_kind == crate::runtime::HostKind::Hc
+            && self
+                .mailbox_settle_watermark(
+                    namespace,
+                    delivery.delivery_id.as_str(),
+                    &pane_id,
+                    &lease.agent_session_id,
+                )?
+                .is_some()
+        {
+            return Ok(None);
+        }
         if !self.coordination_delivery_allowed(
             namespace,
             &delivery.message_id,
@@ -5308,6 +5630,7 @@ impl StateTransaction<'_> {
         &mut self,
         namespace: &StateNamespace,
         attempt_id: &crate::DeliveryAttemptId,
+        reason: DeliveryReturnReason,
         attribution: &MutationAttribution,
     ) -> Result<(), StoreError> {
         let (delivery_id, state) = self.transaction.query_row(
@@ -5329,18 +5652,23 @@ impl StateTransaction<'_> {
                 ))
             },
         )?;
-        if !state.can_attempt_transition_to(DeliveryState::Failed) {
+        if state != DeliveryState::Dispatching {
             return Err(StoreError::invalid_input(
                 "only a dispatching pre-invocation attempt can return to queued",
             ));
         }
+        let outcome = match reason {
+            DeliveryReturnReason::TemporaryPreInvocation => TransitionKind::Failed,
+            DeliveryReturnReason::DeferredUntilSettle { .. } => TransitionKind::Cancelled,
+        };
         self.transaction.execute(
-            "UPDATE delivery_attempt_state SET state = 'failed', active = 0
+            "UPDATE delivery_attempt_state SET state = ?4, active = 0
              WHERE session_socket_id = ?1 AND worktree_id = ?2 AND attempt_id = ?3",
             params![
                 namespace.session_socket_id,
                 namespace.space_id.as_str(),
-                attempt_id.as_str()
+                attempt_id.as_str(),
+                outcome.as_str()
             ],
         )?;
         self.transaction.execute(
@@ -5365,7 +5693,7 @@ impl StateTransaction<'_> {
             namespace,
             TransitionEntityKind::DeliveryAttempt,
             attempt_id.as_str(),
-            TransitionKind::Failed,
+            outcome,
             attribution,
         )?;
         self.append_transition(
@@ -5375,13 +5703,34 @@ impl StateTransaction<'_> {
             TransitionKind::Queued,
             attribution,
         )?;
-        self.open_delivery_attempt_attention(
-            namespace,
-            attempt_id,
-            "Delivery attempt failed before invocation and the mailbox item was requeued.",
-            attribution,
-        )?;
-        Ok(())
+        match reason {
+            DeliveryReturnReason::TemporaryPreInvocation => self.open_delivery_attempt_attention(
+                namespace,
+                attempt_id,
+                "Delivery attempt failed before invocation and the mailbox item was requeued.",
+                attribution,
+            ),
+            DeliveryReturnReason::DeferredUntilSettle { observed_status_ms } => {
+                self.append_transition(
+                    namespace,
+                    TransitionEntityKind::MailboxDelivery,
+                    &delivery_id,
+                    TransitionKind::Observed,
+                    &MutationAttribution::new(
+                        attribution.actor_kind,
+                        &attribution.actor_id,
+                        observed_status_ms.unwrap_or(0),
+                    ),
+                )?;
+                self.append_transition(
+                    namespace,
+                    TransitionEntityKind::MailboxDelivery,
+                    &delivery_id,
+                    TransitionKind::Paused,
+                    attribution,
+                )
+            }
+        }
     }
 
     pub fn delivery_attempt_state(
@@ -6939,6 +7288,7 @@ fn parse_transition_entity_kind(value: String) -> rusqlite::Result<TransitionEnt
         "agent_disposition" => Ok(TransitionEntityKind::AgentDisposition),
         "attention_item" => Ok(TransitionEntityKind::AttentionItem),
         "coordination_ownership" => Ok(TransitionEntityKind::CoordinationOwnership),
+        "prompt_recipient" => Ok(TransitionEntityKind::PromptRecipient),
         _ => Err(invalid_text("transition entity kind", value)),
     }
 }
@@ -6951,6 +7301,7 @@ fn parse_transition_kind(value: String) -> rusqlite::Result<TransitionKind> {
         "bound" => Ok(TransitionKind::Bound),
         "unbound" => Ok(TransitionKind::Unbound),
         "occupied" => Ok(TransitionKind::Occupied),
+        "observed" => Ok(TransitionKind::Observed),
         "empty" => Ok(TransitionKind::Empty),
         "renamed" => Ok(TransitionKind::Renamed),
         "released" => Ok(TransitionKind::Released),
@@ -7085,6 +7436,7 @@ fn initialize_schema(
             transaction.execute_batch(gap.ddl)?;
         }
     }
+    transaction.execute_batch(TRANSITION_ENTITY_INDEX)?;
     if version < SCHEMA_VERSION {
         transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
@@ -7753,10 +8105,10 @@ mod tests {
 
     static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(1);
 
-    struct TestDirectory(PathBuf);
+    pub(super) struct TestDirectory(pub(super) PathBuf);
 
     impl TestDirectory {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let path = std::env::temp_dir().join(format!(
                 "namedrop-store-test-{}-{}",
                 std::process::id(),
@@ -7771,6 +8123,145 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn prompt_deferral_survives_reopen_and_only_newer_exact_recipient_settle_resumes_it() {
+        let directory = TestDirectory::new();
+        let namespace = StateNamespace::for_space("hc:one", "space");
+        let other_namespace = StateNamespace::for_space("hc:two", "space");
+        let session = crate::AgentSessionId::new("session");
+        let replacement = crate::AgentSessionId::new("replacement");
+        let at = |time| MutationAttribution::new(ActorKind::Plugin, "test", time);
+        let mut store = StateStore::open(&directory.0).unwrap();
+        store
+            .transaction(|tx| {
+                tx.activate_worktree(&namespace, &at(1))?;
+                tx.activate_worktree(&other_namespace, &at(1))?;
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, Some(100), &at(120))
+            })
+            .unwrap();
+        drop(store);
+        let mut store = StateStore::open(&directory.0).unwrap();
+        store
+            .transaction(|tx| {
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                assert!(!tx.prompt_is_deferred(&namespace, "t2", &session)?);
+                assert!(!tx.prompt_is_deferred(&namespace, "t1", &replacement)?);
+                assert!(!tx.prompt_is_deferred(&other_namespace, "t1", &session)?);
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 100, &at(200))?;
+                tx.resume_prompt_after_settle(&namespace, "t2", &session, 101, &at(200))?;
+                tx.resume_prompt_after_settle(&namespace, "t1", &replacement, 101, &at(200))?;
+                tx.resume_prompt_after_settle(&other_namespace, "t1", &session, 101, &at(200))?;
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 101, &at(200))?;
+                assert!(!tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, Some(150), &at(150))?;
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn prompt_deferral_uses_only_adjacent_observation_and_unknown_lower_bound() {
+        let directory = TestDirectory::new();
+        let namespace = StateNamespace::for_space("hc:one", "space");
+        let session = crate::AgentSessionId::new("session");
+        let at = |time| MutationAttribution::new(ActorKind::Plugin, "test", time);
+        StateStore::open(&directory.0)
+            .unwrap()
+            .transaction(|tx| {
+                tx.activate_worktree(&namespace, &at(1))?;
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, Some(100), &at(120))?;
+                let recipient = serde_json::to_string(&("t1", "session")).unwrap();
+                tx.append_transition(
+                    &namespace,
+                    TransitionEntityKind::PromptRecipient,
+                    &recipient,
+                    TransitionKind::Observed,
+                    &at(90),
+                )?;
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 95, &at(130))?;
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 110, &at(130))?;
+                assert!(!tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.defer_prompt_until_settle(&namespace, "t1", &session, None, &at(140))?;
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 0, &at(150))?;
+                assert!(tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                tx.resume_prompt_after_settle(&namespace, "t1", &session, 1, &at(150))?;
+                assert!(!tx.prompt_is_deferred(&namespace, "t1", &session)?);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn no_input_challenge_deferral_preserves_terminal_outcomes_and_tui_invoked_guard() {
+        let directory = TestDirectory::new();
+        let namespace = StateNamespace::for_space("hc:one", "space");
+        let session = crate::AgentSessionId::new("session");
+        let at = MutationAttribution::new(ActorKind::Plugin, "test", 120);
+        StateStore::open(&directory.0)
+            .unwrap()
+            .transaction(|tx| {
+                tx.activate_worktree(&namespace, &at)?;
+                for current in [
+                    TransitionKind::Dispatching,
+                    TransitionKind::Invoked,
+                    TransitionKind::Registered,
+                    TransitionKind::Failed,
+                    TransitionKind::Expired,
+                ] {
+                    let registration = current.as_str();
+                    tx.append_transition(
+                        &namespace,
+                        TransitionEntityKind::IntegrationRegistration,
+                        registration,
+                        current,
+                        &at,
+                    )?;
+                    tx.defer_integration_challenge_prompt(
+                        &namespace,
+                        registration,
+                        "t1",
+                        &session,
+                        Some(100),
+                        &at,
+                    )?;
+                    let expected = if matches!(
+                        current,
+                        TransitionKind::Dispatching | TransitionKind::Invoked
+                    ) {
+                        TransitionKind::Challenged
+                    } else {
+                        current
+                    };
+                    assert_eq!(
+                        tx.integration_challenge_transition(&namespace, registration)?,
+                        expected
+                    );
+                }
+                tx.append_transition(
+                    &namespace,
+                    TransitionEntityKind::IntegrationRegistration,
+                    "tui",
+                    TransitionKind::Invoked,
+                    &at,
+                )?;
+                tx.finish_integration_challenge_prompt(
+                    &namespace,
+                    "tui",
+                    TransitionKind::Challenged,
+                    &at,
+                )?;
+                assert_eq!(
+                    tx.integration_challenge_transition(&namespace, "tui")?,
+                    TransitionKind::Invoked
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]
@@ -7870,6 +8361,12 @@ mod tests {
         let directory = TestDirectory::new();
         let store = StateStore::open(&directory.0).unwrap();
         let shape = schema_shape(&store.connection);
+        let additive_index = "index transition_facts_by_entity: CREATE INDEX transition_facts_by_entity ON transition_facts (session_socket_id, worktree_id, entity_kind, entity_id, worktree_order DESC)\n";
+        assert!(
+            shape.contains(additive_index),
+            "missing or changed additive index"
+        );
+        let shape = shape.replacen(additive_index, "", 1);
         let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join(format!("src/store/schema-v{SCHEMA_VERSION}.txt"));
         if std::env::var_os("NAMEDROP_WRITE_SCHEMA_GOLDEN").is_some() {

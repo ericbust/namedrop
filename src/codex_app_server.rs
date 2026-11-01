@@ -445,11 +445,13 @@ mod tests {
         let config = AgentConfigDirectories {
             claude: None,
             codex: Some(relative),
+            ..AgentConfigDirectories::default()
         };
         assert_eq!(observe(Some(&root.0), config), CodexAppServer::InProcess);
         let empty = AgentConfigDirectories {
             claude: None,
             codex: Some(Path::new("")),
+            ..AgentConfigDirectories::default()
         };
         assert_eq!(observe(Some(&root.0), empty), CodexAppServer::InProcess);
     }
@@ -552,6 +554,7 @@ mod tests {
             agent: Some(agent.to_owned()),
             occupant_label: None,
             agent_status: None,
+            status_reported: None,
             idle_state_label: None,
         }
     }

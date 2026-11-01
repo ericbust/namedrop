@@ -1,3 +1,6 @@
+mod process_identity;
+pub(crate) use process_identity::process_start;
+
 use crate::{ActorKind, Clock, DeliveryAttemptId, IdGenerator, MutationAttribution, StateStore};
 use crate::{Host, LifecycleRuntime, PaneType};
 use std::{
@@ -6,30 +9,43 @@ use std::{
     thread,
 };
 
-pub(crate) fn runner_command<H, C, I>(
+pub(crate) fn runner_command<H: Host, C, I>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
     workspace: &str,
     pane: &str,
     attempt: &DeliveryAttemptId,
 ) -> Result<String, String> {
     let quote = |s: &str| format!("'{}'", s.replace('\'', "'\"'\"'"));
-    Ok([
+    let mut args = vec![
         crate::collaboration_executable()?,
         "--plugin-state".to_owned(),
         runtime.state_directory.display().to_string(),
-        "--herdr-socket".to_owned(),
-        runtime.session_socket_id.to_owned(),
-        "--herdr-workspace".to_owned(),
-        workspace.to_owned(),
-        "--herdr-pane".to_owned(),
-        pane.to_owned(),
-        "terminal-execute".to_owned(),
-        attempt.as_str().to_owned(),
-    ]
-    .iter()
-    .map(|s| quote(s))
-    .collect::<Vec<_>>()
-    .join(" "))
+    ];
+    if runtime.is_hc() {
+        args.extend([
+            "--host".to_owned(),
+            "hc".to_owned(),
+            "--hc-space".to_owned(),
+            workspace.to_owned(),
+            "--hc-terminal".to_owned(),
+            pane.to_owned(),
+        ]);
+    } else {
+        args.extend([
+            "--herdr-socket".to_owned(),
+            runtime.session_socket_id.to_owned(),
+            "--herdr-workspace".to_owned(),
+            workspace.to_owned(),
+            "--herdr-pane".to_owned(),
+            pane.to_owned(),
+        ]);
+    }
+    args.extend(["terminal-execute".to_owned(), attempt.as_str().to_owned()]);
+    Ok(args
+        .iter()
+        .map(|arg| quote(arg))
+        .collect::<Vec<_>>()
+        .join(" "))
 }
 
 /// Runs inside the target terminal. The atomic claim rejects replay and binds
@@ -48,11 +64,12 @@ pub fn execute_terminal<H: Host, C: Clock, I: IdGenerator>(
     if pane.agent.is_some() || pane.agent_session_id.is_some() {
         return Err("terminal pane now contains an agent; command was not executed".to_owned());
     }
-    if !runtime.host.process_info(&pane.pane_id).is_some_and(|p| {
-        p.foreground_processes
-            .iter()
-            .any(|p| p.pid == std::process::id())
-    }) {
+    if !runner_in_foreground(
+        &runtime.host,
+        &pane.pane_id,
+        runtime.is_hc(),
+        std::time::Duration::from_secs(2),
+    ) {
         return Err(
             "terminal runner must be running in the target pane's foreground process group"
                 .to_owned(),
@@ -143,15 +160,92 @@ fn copy_output(mut reader: impl Read, mut writer: impl Write) -> Result<String, 
     Ok(text)
 }
 
+enum ForegroundIdentity {
+    Process(u32),
+    Group(u32),
+}
+
+impl ForegroundIdentity {
+    fn current(hc: bool) -> Option<Self> {
+        if hc {
+            // SAFETY: getpgid(0) reads the calling process's group without pointers.
+            u32::try_from(unsafe { libc::getpgid(0) })
+                .ok()
+                .filter(|group| *group > 0)
+                .map(Self::Group)
+        } else {
+            Some(Self::Process(std::process::id()))
+        }
+    }
+
+    fn matches(&self, info: &crate::host::ProcessInfo) -> bool {
+        match self {
+            Self::Group(group) => info.foreground_process_group_id == u64::from(*group),
+            Self::Process(pid) => info
+                .foreground_processes
+                .iter()
+                .any(|process| process.pid == *pid),
+        }
+    }
+}
+
+fn runner_in_foreground(
+    host: &impl Host,
+    pane: &str,
+    hc: bool,
+    budget: std::time::Duration,
+) -> bool {
+    let Some(identity) = ForegroundIdentity::current(hc) else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if host
+            .process_info(pane)
+            .is_some_and(|info| identity.matches(&info))
+        {
+            return true;
+        }
+        if !hc || std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 pub(crate) fn shell_is_available(herdr: &impl Host, pane_id: &str) -> bool {
     herdr
         .process_info(pane_id)
         .is_some_and(|p| p.shell_pid > 0 && p.shell_pid == p.foreground_process_group_id)
 }
 
-/// The ancestors of `pid`, nearest first, at most 1024 of them.
+pub(crate) fn process_is_shell(pid: u32) -> bool {
+    let Some(executable) = process_executable(pid) else {
+        return false;
+    };
+    process_arguments(pid).is_some()
+        && matches!(
+            executable.file_name().and_then(|name| name.to_str()),
+            Some(
+                "sh" | "bash"
+                    | "zsh"
+                    | "fish"
+                    | "dash"
+                    | "ksh"
+                    | "mksh"
+                    | "ash"
+                    | "nu"
+                    | "csh"
+                    | "tcsh"
+            )
+        )
+}
+
 pub(crate) fn ancestor_pids(pid: u32) -> impl Iterator<Item = u32> {
-    std::iter::successors(parent_pid(pid), |pid| parent_pid(*pid)).take(1024)
+    std::iter::successors(parent_pid(pid).filter(|pid| *pid != 0), |pid| {
+        parent_pid(*pid).filter(|pid| *pid != 0)
+    })
+    .take(1024)
 }
 
 /// The pids Herdr reports in a pane's foreground process group, or `None` when
@@ -265,26 +359,26 @@ pub(crate) fn process_executable(pid: u32) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn parent_pid(pid: u32) -> Option<u32> {
+pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
     // `/proc/<pid>/stat` is `pid (comm) state ppid ...`; comm may hold spaces
     // and parentheses, so the fields start after the last `)`.
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (_, after_comm) = stat.rsplit_once(')')?;
     let parent = after_comm.split_whitespace().nth(1)?.parse::<u32>().ok()?;
-    (parent != 0).then_some(parent)
+    Some(parent)
 }
 
 #[cfg(target_os = "macos")]
-fn parent_pid(pid: u32) -> Option<u32> {
+pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
     let pid = libc::pid_t::try_from(pid).ok()?;
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
-    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;
     // SAFETY: proc_pidinfo writes at most `size` bytes into `info`, and only a
     // return value equal to `size` means the whole struct was filled.
     let written = unsafe {
         libc::proc_pidinfo(
             pid,
-            libc::PROC_PIDTBSDINFO,
+            libc::PROC_PIDT_SHORTBSDINFO,
             0,
             info.as_mut_ptr().cast(),
             size,
@@ -294,8 +388,7 @@ fn parent_pid(pid: u32) -> Option<u32> {
         return None;
     }
     // SAFETY: the call above filled every byte of the struct.
-    let info = unsafe { info.assume_init() };
-    (info.pbi_ppid != 0).then_some(info.pbi_ppid)
+    Some(unsafe { info.assume_init() }.pbsi_ppid)
 }
 
 /// Detection never infers a terminal merely from a missing native session ID.
@@ -311,15 +404,16 @@ pub fn detect_pane_type<H: Host, C, I>(
     if pane.agent.is_some() || pane.agent_session_id.is_some() {
         return Ok(Some(PaneType::Agent));
     }
+    let identity = ForegroundIdentity::current(runtime.is_hc());
     Ok(runtime
         .host
         .process_info(&pane.pane_id)
         .is_some_and(|p| {
             p.shell_pid > 0
                 && (p.shell_pid == p.foreground_process_group_id
-                    || p.foreground_processes
-                        .iter()
-                        .any(|p| p.pid == std::process::id()))
+                    || identity
+                        .as_ref()
+                        .is_some_and(|identity| identity.matches(&p)))
         })
         .then_some(PaneType::Terminal))
 }
@@ -345,4 +439,134 @@ pub fn default_pane_type<H: Host, C, I>(
         return Ok(Some(kind));
     }
     detect_pane_type(runtime)
+}
+
+#[cfg(test)]
+mod foreground_transition_tests {
+    use super::*;
+    use std::{cell::Cell, time::Duration};
+
+    struct DelayedSample(Cell<usize>);
+    impl crate::HerdrCommandExecutor for DelayedSample {
+        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
+            assert_eq!(args, ["pane", "process-info", "--pane", "pane"]);
+            let sample = self.0.get();
+            self.0.set(sample + 1);
+            let pid = if sample == 0 { 1 } else { std::process::id() };
+            Ok(crate::HerdrCommandOutput {
+                stdout: serde_json::json!({"result":{"process_info":{
+                    "shell_pid":1,
+                    "foreground_process_group_id":2,
+                    "foreground_processes":[{"pid":pid}]
+                }}})
+                .to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn tui_runner_requires_one_positive_foreground_sample() {
+        let samples = DelayedSample(Cell::new(0));
+        assert!(!runner_in_foreground(
+            &crate::TuiHost::new(&samples),
+            "pane",
+            false,
+            Duration::from_millis(300)
+        ));
+        assert_eq!(samples.0.get(), 1);
+        samples.0.set(0);
+        assert!(!runner_in_foreground(
+            &crate::TuiHost::new(&samples),
+            "pane",
+            false,
+            Duration::ZERO
+        ));
+        assert_eq!(samples.0.get(), 1);
+        assert!(runner_in_foreground(
+            &crate::TuiHost::new(&samples),
+            "pane",
+            false,
+            Duration::ZERO
+        ));
+        assert_eq!(samples.0.get(), 2);
+    }
+    fn run_in_group_member(test_name: &str) -> bool {
+        if std::env::var("NAMEDROP_FOREGROUND_TEST_CHILD").as_deref() == Ok(test_name) {
+            return false;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env("NAMEDROP_FOREGROUND_TEST_CHILD", test_name)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        true
+    }
+
+    #[allow(dead_code)]
+    mod process {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/hc/process.rs"
+        ));
+    }
+
+    struct HcSamples(Cell<usize>, process::AgentProcess);
+    impl crate::HerdrCommandExecutor for HcSamples {
+        fn execute(&self, args: &[&str]) -> Result<crate::HerdrCommandOutput, String> {
+            assert_eq!(args, ["get", "t1", "--json"]);
+            let sample = self.0.get();
+            self.0.set(sample + 1);
+            let mut terminal: serde_json::Value =
+                serde_json::from_str(include_str!("../tests/fixtures/hc/get-labeled.stdout"))
+                    .unwrap();
+            terminal["pid"] = serde_json::json!(self.1.pid());
+            let group = unsafe { libc::getpgid(0) };
+            assert_ne!(group as u32, std::process::id());
+            terminal["foreground"]["pid"] =
+                serde_json::json!(if sample == 0 { group + 1 } else { group });
+            Ok(crate::HerdrCommandOutput {
+                stdout: terminal.to_string(),
+            })
+        }
+    }
+
+    #[test]
+    fn hc_runner_retries_lagging_group_sample_without_member_enumeration() {
+        if run_in_group_member(
+            "terminal::foreground_transition_tests::hc_runner_retries_lagging_group_sample_without_member_enumeration",
+        ) {
+            return;
+        }
+        let samples = HcSamples(Cell::new(0), process::AgentProcess::shell());
+        assert!(runner_in_foreground(
+            &crate::HcHost::new(&samples),
+            "t1",
+            true,
+            Duration::from_millis(300)
+        ));
+        assert_eq!(samples.0.get(), 2);
+    }
+
+    #[test]
+    fn hc_runner_rejects_another_group_at_deadline() {
+        if run_in_group_member(
+            "terminal::foreground_transition_tests::hc_runner_rejects_another_group_at_deadline",
+        ) {
+            return;
+        }
+        let samples = HcSamples(Cell::new(0), process::AgentProcess::shell());
+        assert!(!runner_in_foreground(
+            &crate::HcHost::new(&samples),
+            "t1",
+            true,
+            Duration::ZERO
+        ));
+        assert_eq!(samples.0.get(), 1);
+    }
 }

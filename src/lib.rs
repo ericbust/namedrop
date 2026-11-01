@@ -2,7 +2,9 @@ mod agent_status;
 mod agent_status_model;
 pub mod cli;
 pub use agent_status::collect_agent_status;
-pub use agent_status_model::{suggest_agent_persona, summarize_agent_status};
+pub use agent_status_model::{
+    suggest_agent_persona_with_environment, summarize_agent_status_with_environment,
+};
 mod codex_app_server;
 mod context;
 mod controls;
@@ -10,13 +12,14 @@ mod coordination;
 pub mod dashboard;
 mod delivery;
 mod domain;
+pub mod environment;
 mod groups;
 mod handoff;
 mod health;
 pub mod host;
 pub use host::{
-    Budget, CallerClaim, CallerIdentity, Host, HostError, ListedWorkspace, PaneMetadata, PaneScope,
-    Popup, Process, ProcessInfo, PromptFailure, SpaceLocator, TuiHost,
+    Budget, CallerClaim, CallerIdentity, HcHost, Host, HostError, ListedWorkspace, PaneMetadata,
+    PaneScope, Popup, Process, ProcessInfo, PromptFailure, RuntimeHost, SpaceLocator, TuiHost,
 };
 mod hook;
 mod install;
@@ -29,12 +32,12 @@ pub mod linux_sandbox;
 mod message;
 mod persona;
 mod ports;
-mod runtime;
+pub mod runtime;
 mod shortcuts;
 mod spaces;
 mod store;
 #[doc(hidden)]
-pub use shortcuts::install_shortcuts;
+pub use shortcuts::{install_shortcuts, install_shortcuts_at};
 mod terminal;
 pub mod tour;
 #[doc(hidden)]
@@ -52,16 +55,21 @@ pub use groups::execute_group_operation;
 pub use handoff::execute_handoff_operation;
 pub use health::{
     HealthIssue, HealthRepair, HealthRepairKind, HealthReport, HealthSeverity, HealthStatus,
-    diagnose_collaboration, render_health_report_to_text, request_doctor_assistance,
+    append_hc_diagnostics, diagnose_collaboration, render_health_report_to_text,
+    request_doctor_assistance,
 };
 pub use hook::{
     execute_codex_app_server_hook, execute_session_start_hook, execute_user_prompt_submit_hook,
 };
+
+#[cfg(test)]
+pub(crate) use install::user_hook_activation_guidance;
+
+#[doc(hidden)]
 pub use install::{AgentConfigDirectories, install_integration_package, package_directory};
 pub(crate) use install::{
-    IntegrationPackageInstallation, disclosed_user_package_targets,
-    integration_package_attention_source, refresh_user_integration_packages,
-    user_hook_activation_guidance,
+    IntegrationPackageInstallation, integration_package_attention_source,
+    refresh_user_integration_packages,
 };
 #[doc(hidden)]
 pub use installed_runtime::command_guard as runtime_command_guard;
@@ -96,8 +104,8 @@ pub use spaces::{SpaceScope, WorkspaceLabel};
 mod output;
 pub use output::render_command_result_to_text;
 pub use store::{
-    StateStore, StateTransaction, StoreError, StoreErrorKind, WorktreePurgeResult,
-    WorktreePurgeSummary,
+    DeliveryReturnReason, StateStore, StateTransaction, StoreError, StoreErrorKind,
+    WorktreePurgeResult, WorktreePurgeSummary,
 };
 
 #[derive(Debug, PartialEq, Serialize)]
@@ -244,3 +252,11 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/bash_rules.rs"]
+mod bash_rules;
+
+#[cfg(test)]
+#[path = "../tests/support/environment.rs"]
+mod test_environment;

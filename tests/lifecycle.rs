@@ -280,7 +280,17 @@ fn name_leaves_a_tab_shared_by_two_agents_unchanged() {
 
 #[test]
 fn name_succeeds_with_a_warning_when_the_cosmetic_tab_label_cannot_be_applied() {
+    check_tab_label_warning(false);
+}
+
+#[test]
+fn name_warns_when_the_tab_label_cannot_be_read() {
+    check_tab_label_warning(true);
+}
+
+fn check_tab_label_warning(read_fails: bool) {
     struct RenameFailureHerdr {
+        read_fails: bool,
         database_path: PathBuf,
         saw_durable_intent: Mutex<bool>,
     }
@@ -298,6 +308,9 @@ fn name_succeeds_with_a_warning_when_the_cosmetic_tab_label_cannot_be_applied() 
                     r#"{"result":{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"workspace-1","agent":"codex","agent_session":{"value":"session-1"},"agent_status":"idle"}]}}"#
                 }
                 ["pane", "report-metadata", "pane-1", ..] => "{}",
+                ["tab", "get", "tab-1"] if self.read_fails => {
+                    return Err("tab lookup failed".into());
+                }
                 ["tab", "get", "tab-1"] => r#"{"result":{"label":"Main"}}"#,
                 ["tab", "rename", "tab-1", "@reviewer"] => {
                     *self.saw_durable_intent.lock().unwrap() =
@@ -336,6 +349,7 @@ fn name_succeeds_with_a_warning_when_the_cosmetic_tab_label_cannot_be_applied() 
 
     let directory = TestDirectory::new();
     let herdr = RenameFailureHerdr {
+        read_fails,
         database_path: directory.path().join("namedrop.sqlite3"),
         saw_durable_intent: Mutex::new(false),
     };
@@ -358,9 +372,10 @@ fn name_succeeds_with_a_warning_when_the_cosmetic_tab_label_cannot_be_applied() 
             .expect("durable naming must not fail because a cosmetic host label failed");
 
     assert_eq!(result["alias"], "@reviewer");
-    assert!(
+    assert_eq!(
         *herdr.saw_durable_intent.lock().unwrap(),
-        "the recoverable label intent must commit before the host mutation"
+        !read_fails,
+        "a rename must be preceded by a durable label intent"
     );
     assert_eq!(result["tab_label"]["status"], "warning");
     assert_eq!(
@@ -1246,6 +1261,7 @@ fn herdr_discovery_and_restart_reconciliation_fail_closed() {
             reconcile_discovered_panes(
                 transaction,
                 &scope,
+                &[],
                 &discovered.panes,
                 &SequenceIds,
                 &attribution(6),
@@ -1287,6 +1303,7 @@ fn herdr_discovery_and_restart_reconciliation_fail_closed() {
             reconcile_discovered_panes(
                 transaction,
                 &scope,
+                &[],
                 &[duplicate.clone(), duplicate],
                 &SequenceIds,
                 &attribution(8),

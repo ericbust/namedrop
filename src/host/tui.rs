@@ -32,6 +32,16 @@ impl<E: HerdrCommandExecutor> TuiHost<E> {
             message,
         })
     }
+    pub(crate) fn shell_pid(&self, pane: &str, budget: &dyn Budget) -> Option<u32> {
+        let output = self
+            .execute(&["pane", "process-info", "--pane", pane], Some(budget))
+            .ok()?;
+        let response: Value = serde_json::from_str(&output.stdout).ok()?;
+        u32::try_from(response["result"]["process_info"]["shell_pid"].as_u64()?)
+            .ok()
+            .filter(|pid| *pid > 0)
+    }
+
     fn discover_worktree(
         &self,
         cwd: &Path,
@@ -267,6 +277,7 @@ impl<E: HerdrCommandExecutor> TuiHost<E> {
             serde_json::from_str(&pane_output.stdout).map_err(|error| error.to_string())?;
         let panes = Self::map_panes(panes);
         Ok(DiscoveredWorktree {
+            unavailable_panes: vec![],
             worktree_id: WorktreeId::new(worktree_path),
             workspace_id,
             worktree_attached,
@@ -294,6 +305,7 @@ impl<E: HerdrCommandExecutor> TuiHost<E> {
                 agent: pane.agent.clone(),
                 occupant_label: pane.display_agent.or(pane.agent),
                 agent_status: pane.agent_status,
+                status_reported: None,
                 idle_state_label: pane
                     .state_labels
                     .and_then(|mut labels| labels.remove("idle")),
@@ -455,6 +467,10 @@ struct AgentSessionEntry {
     value: String,
 }
 impl<E: HerdrCommandExecutor> Host for TuiHost<E> {
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        self.transport.environment_snapshot()
+    }
+
     fn space(
         &self,
         at: SpaceLocator<'_>,

@@ -5,7 +5,11 @@ use std::{
     time::Duration,
 };
 
+pub mod hc;
+pub mod runtime;
 pub mod tui;
+pub use hc::HcHost;
+pub use runtime::RuntimeHost;
 pub use tui::TuiHost;
 
 #[derive(Debug)]
@@ -121,6 +125,12 @@ pub struct Process {
 }
 
 pub trait Host {
+    fn kind(&self) -> crate::runtime::HostKind {
+        crate::runtime::HostKind::Tui
+    }
+    fn environment_snapshot(&self) -> Option<&crate::environment::EnvironmentSnapshot> {
+        None
+    }
     fn space(
         &self,
         at: SpaceLocator<'_>,
@@ -140,6 +150,9 @@ pub trait Host {
     fn interrupt(&self, pane: &str) -> Result<(), HostError>;
     fn report_metadata(&self, pane: &str, metadata: &PaneMetadata) -> Result<(), HostError>;
     fn notify(&self, title: &str, body: &str, sound: bool) -> Result<(), HostError>;
+    fn supports_tab_labels(&self) -> bool {
+        true
+    }
     fn tab_label(&self, tab: &str) -> Option<String>;
     fn rename_tab(&self, tab: &str, label: &str) -> Result<(), HostError>;
     fn open_popup(&self, popup: &Popup<'_>) -> Result<serde_json::Value, HostError>;

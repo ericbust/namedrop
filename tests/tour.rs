@@ -333,12 +333,14 @@ fn pane(id: &str, agent: Option<&str>) -> DiscoveredPane {
         agent: agent.map(str::to_owned),
         occupant_label: None,
         agent_status: agent.map(|_| "idle".to_owned()),
+        status_reported: None,
         idle_state_label: None,
     }
 }
 
 fn worktree(panes: Vec<DiscoveredPane>) -> DiscoveredWorktree {
     DiscoveredWorktree {
+        unavailable_panes: vec![],
         worktree_id: WorktreeId::new("worktree-1"),
         workspace_id: "workspace-1".to_owned(),
         worktree_attached: true,

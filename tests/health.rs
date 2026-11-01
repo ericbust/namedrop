@@ -1,3 +1,6 @@
+#[path = "support/environment.rs"]
+mod environment;
+
 #[path = "support/codex_app_server.rs"]
 mod codex_app_server;
 #[path = "support/update_profile.rs"]
@@ -1362,4 +1365,42 @@ fn doctor_assistance_names_the_shared_app_server_for_a_pane_without_a_session() 
         "{refused}"
     );
     assert!(f.host.prompts.borrow().is_empty());
+}
+
+#[test]
+fn doctor_reads_update_settings_from_the_owned_config_snapshot() {
+    let f = Fixture::new();
+    if update_profile::isolate(&f.root, &f.home) {
+        return;
+    }
+    f.register();
+    let config = f.root.join("captured-config");
+    let snapshot = namedrop::environment::EnvironmentSnapshot::from_variables([
+        ("HOME".into(), f.home.as_os_str().to_owned()),
+        ("XDG_CONFIG_HOME".into(), config.as_os_str().to_owned()),
+    ]);
+    let settings = snapshot
+        .agent_config()
+        .update_settings(snapshot.home())
+        .unwrap();
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(&settings, "invalid settings").unwrap();
+    let runtime = LifecycleRuntime {
+        agent_config: snapshot.agent_config(),
+        ..f.runtime()
+    };
+    let report = diagnose_collaboration(&runtime);
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| issue.code == "ND-UPDATE-002")
+        .unwrap();
+    assert_eq!(issue.diagnostic["path"], settings.to_str().unwrap());
+    fs::write(&settings, r#"{"check_for_updates":false}"#).unwrap();
+    assert!(
+        !diagnose_collaboration(&runtime)
+            .issues
+            .iter()
+            .any(|issue| issue.code.starts_with("ND-UPDATE-"))
+    );
 }

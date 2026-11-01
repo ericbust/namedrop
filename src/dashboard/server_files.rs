@@ -228,6 +228,7 @@ impl ServerFiles {
             .open(self.dir.join("server.log"))
             .map_err(|e| e.to_string())?;
         Command::new(crate::runtime_executable()?)
+            .args(["--host", "tui"])
             .arg("--plugin-state")
             .arg(&self.state)
             .arg("dashboard-server")

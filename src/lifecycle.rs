@@ -17,6 +17,9 @@ pub struct DiscoveredWorktree {
     pub label: Option<String>,
     pub branch: Option<String>,
     pub panes: Vec<DiscoveredPane>,
+    /// Pane IDs whose absence from this space does not authorize clearing their bindings.
+    /// Includes unreadable terminals and terminals observed live in another space.
+    pub unavailable_panes: Vec<String>,
 }
 
 impl DiscoveredWorktree {
@@ -37,6 +40,7 @@ pub struct DiscoveredPane {
     pub agent: Option<String>,
     pub occupant_label: Option<String>,
     pub agent_status: Option<String>,
+    pub status_reported: Option<bool>,
     /// The label Herdr currently shows for this pane while it is idle.
     pub idle_state_label: Option<String>,
 }
@@ -57,6 +61,12 @@ pub struct LifecycleRuntime<'a, H, C, I> {
     pub host: H,
     pub clock: &'a C,
     pub ids: &'a I,
+}
+
+impl<H: Host, C, I> LifecycleRuntime<'_, H, C, I> {
+    pub fn is_hc(&self) -> bool {
+        self.host.kind() == crate::runtime::HostKind::Hc
+    }
 }
 
 impl<H, C, I> LifecycleRuntime<'_, H, C, I> {
@@ -245,7 +255,47 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    let discovered = runtime.host.space(runtime.space_locator(), None)?;
+    let _label_lock = if runtime.is_hc() && operation != "address.list" {
+        Some(crate::host::hc::label_lock(runtime.state_directory)?)
+    } else {
+        None
+    };
+    execute_lifecycle_operation_locked(operation, input, runtime)
+}
+
+pub(crate) fn execute_lifecycle_operation_locked<H, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+) -> Result<Value, String>
+where
+    H: Host + Copy,
+    C: Clock,
+    I: IdGenerator,
+{
+    execute_lifecycle_operation_with_discovery(operation, input, runtime, None)
+}
+
+pub(crate) fn execute_lifecycle_operation_with_discovery<H, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    snapshot: Option<&std::collections::BTreeMap<String, DiscoveredWorktree>>,
+) -> Result<Value, String>
+where
+    H: Host + Copy,
+    C: Clock,
+    I: IdGenerator,
+{
+    let discover = |at: crate::SpaceLocator<'_>| {
+        if let (Some(snapshot), crate::SpaceLocator::Workspace(space)) = (snapshot, &at) {
+            return snapshot.get(*space).cloned().ok_or_else(|| {
+                crate::host::HostError::from(format!("Missing subscriber snapshot for {space}"))
+            });
+        }
+        runtime.host.space(at, None)
+    };
+    let discovered = discover(runtime.space_locator())?;
     let namespace = discovered.namespace(runtime.session_socket_id);
     let (actor_kind, actor_id) = if operation.starts_with("event.") || operation == "reconcile" {
         (ActorKind::Plugin, "herdr")
@@ -255,8 +305,72 @@ where
     let attribution = MutationAttribution::new(actor_kind, actor_id, runtime.clock.now_unix_ms());
     let mut store = StateStore::open(runtime.state_directory).map_err(|error| error.to_string())?;
 
-    match operation {
-        "name" => {
+    let compensation_panes = if runtime.is_hc()
+        && matches!(
+            operation,
+            "name"
+                | "event.name"
+                | "address.create"
+                | "address.bind"
+                | "address.unbind"
+                | "address.rename"
+                | "address.release-alias"
+                | "address.remove"
+                | "address.retire"
+        ) {
+        let mut panes = std::collections::BTreeSet::new();
+        match operation {
+            "name" | "event.name" => {
+                panes.extend(runtime.current_pane_id.map(str::to_owned));
+            }
+            "address.create" => {
+                panes.extend(
+                    input
+                        .get("pane_id")
+                        .and_then(Value::as_str)
+                        .or(runtime.current_pane_id)
+                        .map(str::to_owned),
+                );
+            }
+            _ => {
+                let addresses = store
+                    .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+                    .map_err(|error| error.to_string())?;
+                for address in addresses {
+                    if input.get("address_id").and_then(Value::as_str) == Some(address.id.as_str())
+                        || (operation == "address.release-alias"
+                            && input.get("alias").and_then(Value::as_str) == Some(&address.alias))
+                    {
+                        panes.extend(address.pane_id);
+                    }
+                }
+                if operation == "address.bind" {
+                    panes.extend(
+                        input
+                            .get("pane_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                    );
+                }
+                if operation == "address.release-alias"
+                    && let Some(alias) = input.get("alias").and_then(Value::as_str)
+                {
+                    panes.extend(
+                        discovered
+                            .panes
+                            .iter()
+                            .filter(|pane| pane.pane_label.as_deref() == Some(&format!("@{alias}")))
+                            .map(|pane| pane.pane_id.clone()),
+                    );
+                }
+            }
+        }
+        panes
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    let result = (|| match operation {
+        "name" | "event.name" => {
             let input: NameInput = parse_input(input)?;
             let supplied_alias = required_nonempty(input.alias, "alias")?;
             let alias = supplied_alias
@@ -355,6 +469,8 @@ where
                             runtime.ids,
                             &attribution,
                         )?;
+                        publish_hc_name(runtime, Some(pane_id), &alias)
+                            .map_err(StoreError::invalid_input)?;
                         return Ok(binding.address_id);
                     }
 
@@ -390,9 +506,14 @@ where
                         runtime.ids,
                         &attribution,
                     )?;
+                    publish_hc_name(runtime, Some(pane_id), &alias)
+                        .map_err(StoreError::invalid_input)?;
                     Ok(address_id)
                 })
                 .map_err(|error| error.to_string())?;
+            if runtime.is_hc() && operation == "name" {
+                crate::refresh_user_integration_packages(runtime, &discovered)?;
+            }
             let reconciliation = reconcile_worktree(
                 &mut store,
                 &namespace,
@@ -400,15 +521,18 @@ where
                 runtime,
                 &attribution,
                 false,
+                snapshot,
             )?;
             let served =
                 crate::codex_app_server::served_codex_panes(runtime, std::slice::from_ref(pane));
-            publish_pane_address_metadata(
-                runtime,
-                pane_id,
-                &alias,
-                PaneLabel::for_pane(pane, served.as_ref()),
-            )?;
+            if !runtime.is_hc() {
+                publish_pane_address_metadata(
+                    runtime,
+                    pane_id,
+                    &alias,
+                    PaneLabel::for_pane(pane, served.as_ref()),
+                )?;
+            }
             let addresses = store
                 .transaction(|transaction| transaction.list_pane_addresses(&namespace))
                 .map_err(|error| error.to_string())?;
@@ -445,13 +569,16 @@ where
             } else {
                 false
             };
+            if runtime.is_hc() && operation == "event.name" && snapshot.is_some() {
+                return Ok(json!({"drain": reconciliation.drain}));
+            }
             Ok(json!({
                 "alias": format!("@{alias}"),
                 "pane_type": pane_type,
                 "type_override": "name <alias> --type terminal|agent",
                 "pane_id": pane_id,
                 "agent_session_id": agent_session_id,
-                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none() && served.is_none()).map(crate::install::native_session_setup),
+                "native_session_setup": agent_runtime.filter(|_| agent_session_id.is_none() && served.is_none()).map(|agent| crate::install::native_session_setup(agent, runtime.is_hc())),
                 "codex_app_server": served.as_ref().map(crate::codex_app_server::ServedPanes::advice),
                 "runtime": agent_runtime,
                 "activated": true,
@@ -472,31 +599,43 @@ where
         "activate" => {
             let input: ActivateInput = parse_input(input)?;
             if !input.confirmed {
-                let hook_activation = crate::user_hook_activation_guidance(
-                    runtime.home_directory,
+                let package_context = runtime
+                    .home_directory
+                    .map(|home| crate::install::PackageContext::new(home, runtime.is_hc()));
+                let hook_activation = crate::install::hook_activation_guidance(
+                    package_context.as_ref(),
                     runtime.agent_config,
                 );
                 return Err(format!(
                     "activation requires confirmation: Space={}, state_directory={}, shared_agent_integration_packages={{{}}} created or refreshed on activation and shared by every space on this machine, agent_integration_hook_activation={}, safe_defaults={{settled_delay_ms:500, ordinary_panes_auto_registered:false, routing_scope:space}}",
                     discovered.workspace_id,
                     runtime.state_directory.display(),
-                    crate::disclosed_user_package_targets(
-                        runtime.home_directory,
+                    crate::install::disclosed_package_targets(
+                        package_context.as_ref(),
                         runtime.agent_config
                     ),
                     hook_activation
                 ));
             }
-            let shell_command = crate::install::install_shell_command(
-                runtime
-                    .home_directory
-                    .ok_or("no HOME is available for shell command installation")?,
-                Path::new(&crate::collaboration_executable()?),
-                runtime.state_directory,
-            )?;
+            let home = runtime
+                .home_directory
+                .ok_or("no HOME is available for shell command installation")?;
+            let shell_command = if runtime.is_hc() {
+                json!({"path": home.join(".local/bin/namedrop-app"), "shell_startup_files": [], "path_configured": false})
+            } else {
+                crate::install::install_shell_command(
+                    home,
+                    Path::new(&crate::collaboration_executable()?),
+                    runtime.state_directory,
+                    false,
+                )?
+            };
             store
                 .transaction(|transaction| transaction.activate_worktree(&namespace, &attribution))
                 .map_err(|error| error.to_string())?;
+            if runtime.is_hc() {
+                crate::refresh_user_integration_packages(runtime, &discovered)?;
+            }
             let reconciliation = reconcile_worktree(
                 &mut store,
                 &namespace,
@@ -504,9 +643,19 @@ where
                 runtime,
                 &attribution,
                 false,
+                snapshot,
             )?;
-            let shortcuts =
-                crate::shortcuts::activate_shortcuts(runtime.home_directory, &runtime.host);
+            let shortcuts = if runtime.is_hc() {
+                json!({"status":"app_managed", "next_step":"Install the Namedrop mod in herdr-app to enable its commands and shortcuts."})
+            } else {
+                crate::shortcuts::activate_shortcuts(
+                    runtime
+                        .agent_config
+                        .shortcut_config(runtime.home_directory)
+                        .as_deref(),
+                    &runtime.host,
+                )
+            };
             // After the shortcuts, so the tour's reopen shortcut already works
             // when the popup mentions it. It reports instead of failing.
             let tour = crate::tour::show_for_first_agent(runtime, &discovered, None);
@@ -626,6 +775,8 @@ where
                         .ok_or_else(|| {
                             StoreError::invalid_input("created Pane Address is not visible")
                         })?;
+                    publish_hc_name(runtime, Some(&pane_id), &draft.alias)
+                        .map_err(StoreError::invalid_input)?;
                     Ok(enrich_record(record, &discovered.panes))
                 })
                 .map_err(|error| error.to_string())?;
@@ -659,6 +810,11 @@ where
                 &address_id,
                 &discovered.panes,
                 |transaction| {
+                    let previous = transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .ok_or_else(|| StoreError::invalid_input("Pane Address is not active"))?;
                     transaction.rebind_pane(
                         &namespace,
                         &binding_id,
@@ -673,7 +829,20 @@ where
                         pane,
                         runtime.ids,
                         &attribution,
-                    )
+                    )?;
+                    let old_pane = previous.pane_id.as_deref().filter(|old| *old != pane_id);
+                    clear_hc_name(runtime, old_pane).map_err(StoreError::invalid_input)?;
+                    if let Err(error) = publish_hc_name(runtime, Some(&pane_id), &previous.alias) {
+                        if let Err(restore_error) =
+                            publish_hc_name(runtime, old_pane, &previous.alias)
+                        {
+                            return Err(StoreError::invalid_input(format!(
+                                "{error}; restoring the previous pane name also failed: {restore_error}"
+                            )));
+                        }
+                        return Err(StoreError::invalid_input(error));
+                    }
+                    Ok(())
                 },
             )?;
             onboard_settled_integrations(runtime, &discovered)?;
@@ -689,7 +858,15 @@ where
                 &namespace,
                 &address_id,
                 &discovered.panes,
-                |transaction| transaction.unbind_pane(&namespace, &address_id, &attribution),
+                |transaction| {
+                    let pane = transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .and_then(|address| address.pane_id);
+                    transaction.unbind_pane(&namespace, &address_id, &attribution)?;
+                    clear_hc_name(runtime, pane.as_deref()).map_err(StoreError::invalid_input)
+                },
             )?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
             Ok(record)
@@ -705,7 +882,14 @@ where
                 &address_id,
                 &discovered.panes,
                 |transaction| {
-                    transaction.replace_alias(&namespace, &address_id, &alias, &attribution)
+                    transaction.replace_alias(&namespace, &address_id, &alias, &attribution)?;
+                    let pane = transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .and_then(|address| address.pane_id);
+                    publish_hc_name(runtime, pane.as_deref(), &alias)
+                        .map_err(StoreError::invalid_input)
                 },
             )?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
@@ -736,9 +920,26 @@ where
             let input: ReleaseAliasInput = parse_input(input)?;
             require_activated(&mut store, &namespace)?;
             let alias = required_nonempty(input.alias, "alias")?;
+            let pane = store
+                .transaction(|transaction| {
+                    Ok(transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.alias == alias)
+                        .and_then(|address| address.pane_id))
+                })
+                .map_err(|error| error.to_string())?;
+            let pane = pane.or_else(|| {
+                discovered
+                    .panes
+                    .iter()
+                    .find(|pane| pane.pane_label.as_deref() == Some(&format!("@{alias}")))
+                    .map(|pane| pane.pane_id.clone())
+            });
             store
                 .transaction(|transaction| {
-                    transaction.release_alias(&namespace, &alias, &attribution)
+                    transaction.release_alias(&namespace, &alias, &attribution)?;
+                    clear_hc_name(runtime, pane.as_deref()).map_err(StoreError::invalid_input)
                 })
                 .map_err(|error| error.to_string())?;
             Ok(json!({"alias": alias, "released": true}))
@@ -747,9 +948,21 @@ where
             let input: AddressInput = parse_input(input)?;
             require_activated(&mut store, &namespace)?;
             let address_id = PaneAddressId::new(required_nonempty(input.address_id, "address_id")?);
+            let pane = store
+                .transaction(|transaction| {
+                    Ok(transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .and_then(|address| address.pane_id))
+                })
+                .map_err(|error| error.to_string())?;
             let released_aliases = store
                 .transaction(|transaction| {
-                    transaction.remove_pane_address(&namespace, &address_id, &attribution)
+                    let aliases =
+                        transaction.remove_pane_address(&namespace, &address_id, &attribution)?;
+                    clear_hc_name(runtime, pane.as_deref()).map_err(StoreError::invalid_input)?;
+                    Ok(aliases)
                 })
                 .map_err(|error| error.to_string())?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
@@ -765,13 +978,19 @@ where
             let address_id = PaneAddressId::new(required_nonempty(input.address_id, "address_id")?);
             store
                 .transaction(|transaction| {
-                    transaction.retire_pane_address(&namespace, &address_id, &attribution)
+                    let pane = transaction
+                        .list_pane_addresses(&namespace)?
+                        .into_iter()
+                        .find(|address| address.id == address_id)
+                        .and_then(|address| address.pane_id);
+                    transaction.retire_pane_address(&namespace, &address_id, &attribution)?;
+                    clear_hc_name(runtime, pane.as_deref()).map_err(StoreError::invalid_input)
                 })
                 .map_err(|error| error.to_string())?;
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
             Ok(json!({"address_id": address_id, "lifecycle": "retired"}))
         }
-        "reconcile" => {
+        "reconcile" | "event.reconcile" => {
             parse_input::<EmptyInput>(input)?;
             require_activated(&mut store, &namespace)?;
             let reconciliation = reconcile_worktree(
@@ -780,7 +999,8 @@ where
                 &discovered,
                 runtime,
                 &attribution,
-                true,
+                operation == "reconcile",
+                snapshot,
             )?;
             Ok(json!({
                 "space_id": discovered.workspace_id,
@@ -793,9 +1013,8 @@ where
             let event: PaneLifecycleEvent = parse_input(input)?;
             match event {
                 PaneLifecycleEvent::Created { pane } => {
-                    if let Ok(event_worktree) = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&pane.workspace_id), None)
+                    if let Ok(event_worktree) =
+                        discover(crate::SpaceLocator::Workspace(&pane.workspace_id))
                     {
                         let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                         let event_runtime = LifecycleRuntime {
@@ -819,9 +1038,7 @@ where
                     pane_id,
                     workspace_id,
                 } => {
-                    let event_worktree = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
+                    let event_worktree = discover(crate::SpaceLocator::Workspace(&workspace_id))?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &event_namespace)?;
                     let removed_address_id = store
@@ -831,6 +1048,14 @@ where
                                 .into_iter()
                                 .find(|binding| binding.pane_id == pane_id);
                             if let Some(binding) = binding {
+                                if runtime.is_hc()
+                                    && event_worktree
+                                        .panes
+                                        .iter()
+                                        .any(|pane| pane.pane_id == pane_id)
+                                {
+                                    return Ok(None);
+                                }
                                 transaction.cancel_and_remove_pane_address(
                                     &event_namespace,
                                     &binding.address_id,
@@ -845,9 +1070,7 @@ where
                         workspace_id: Some(&workspace_id),
                         ..*runtime
                     };
-                    let refreshed = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
+                    let refreshed = discover(crate::SpaceLocator::Workspace(&workspace_id))?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &event_namespace,
@@ -859,6 +1082,7 @@ where
                             reconcile_delivery_state(
                                 transaction,
                                 &event_namespace,
+                                &refreshed.unavailable_panes,
                                 &refreshed.panes,
                                 false,
                                 &attribution,
@@ -866,7 +1090,16 @@ where
                             Ok(())
                         })
                         .map_err(|error| error.to_string())?;
-                    let drain = crate::drain_mailboxes(&event_runtime)?;
+                    let drain = if snapshot.is_some() {
+                        crate::delivery::drain_mailboxes_with_discovery(
+                            &event_runtime,
+                            discover(event_runtime.space_locator())?,
+                            false,
+                            snapshot,
+                        )?
+                    } else {
+                        crate::drain_mailboxes(&event_runtime)?
+                    };
                     Ok(json!({
                         "type": "pane_unavailable",
                         "handled": true,
@@ -878,9 +1111,7 @@ where
                     tab_id,
                     workspace_id,
                 } => {
-                    let event_worktree = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
+                    let event_worktree = discover(crate::SpaceLocator::Workspace(&workspace_id))?;
                     let event_namespace = event_worktree.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &event_namespace)?;
                     let removed_bindings = store
@@ -900,7 +1131,11 @@ where
                                         })
                                 });
                                 if binding.tab_id.as_deref() == Some(tab_id.as_str())
-                                    || (binding.tab_id.is_none() && !exact_pane_is_live)
+                                    || (binding.tab_id.is_none()
+                                        && !event_worktree
+                                            .unavailable_panes
+                                            .contains(&binding.pane_id)
+                                        && !exact_pane_is_live)
                                 {
                                     transaction.cancel_and_remove_pane_address(
                                         &event_namespace,
@@ -917,16 +1152,23 @@ where
                         workspace_id: Some(&workspace_id),
                         ..*runtime
                     };
-                    let refreshed = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&workspace_id), None)?;
+                    let refreshed = discover(crate::SpaceLocator::Workspace(&workspace_id))?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &event_namespace,
                         &refreshed,
                         &event_runtime,
                     );
-                    let drain = crate::drain_mailboxes(&event_runtime)?;
+                    let drain = if snapshot.is_some() {
+                        crate::delivery::drain_mailboxes_with_discovery(
+                            &event_runtime,
+                            discover(event_runtime.space_locator())?,
+                            false,
+                            snapshot,
+                        )?
+                    } else {
+                        crate::drain_mailboxes(&event_runtime)?
+                    };
                     Ok(json!({
                         "type": "tab_unavailable",
                         "handled": true,
@@ -954,14 +1196,10 @@ where
                         closed_tab_id,
                         closed_workspace_id,
                     );
-                    let source = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&previous_workspace_id), None)?;
+                    let source = discover(crate::SpaceLocator::Workspace(&previous_workspace_id))?;
                     let source_namespace = source.namespace(runtime.session_socket_id);
                     require_activated(&mut store, &source_namespace)?;
-                    let destination = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&pane.workspace_id), None)?;
+                    let destination = discover(crate::SpaceLocator::Workspace(&pane.workspace_id))?;
                     store
                         .transaction(|transaction| {
                             apply_pane_move(
@@ -977,6 +1215,7 @@ where
                                 reconcile_compacted_pane_bindings(
                                     transaction,
                                     &source_namespace,
+                                    &destination.unavailable_panes,
                                     &destination.panes,
                                     &attribution,
                                 )?;
@@ -988,9 +1227,8 @@ where
                         workspace_id: Some(&previous_workspace_id),
                         ..*runtime
                     };
-                    let refreshed = runtime
-                        .host
-                        .space(crate::SpaceLocator::Workspace(&previous_workspace_id), None)?;
+                    let refreshed =
+                        discover(crate::SpaceLocator::Workspace(&previous_workspace_id))?;
                     let _ = reconcile_managed_tab_labels(
                         &mut store,
                         &source_namespace,
@@ -1002,6 +1240,7 @@ where
                             reconcile_delivery_state(
                                 transaction,
                                 &source_namespace,
+                                &refreshed.unavailable_panes,
                                 &refreshed.panes,
                                 false,
                                 &attribution,
@@ -1009,7 +1248,16 @@ where
                             Ok(())
                         })
                         .map_err(|error| error.to_string())?;
-                    let drain = crate::drain_mailboxes(&event_runtime)?;
+                    let drain = if snapshot.is_some() {
+                        crate::delivery::drain_mailboxes_with_discovery(
+                            &event_runtime,
+                            discover(event_runtime.space_locator())?,
+                            false,
+                            snapshot,
+                        )?
+                    } else {
+                        crate::drain_mailboxes(&event_runtime)?
+                    };
                     Ok(json!({
                         "type": "pane_moved",
                         "handled": true,
@@ -1029,9 +1277,7 @@ where
                 event.title,
                 event.state_labels,
             );
-            let event_worktree = runtime
-                .host
-                .space(crate::SpaceLocator::Workspace(&event.workspace_id), None)?;
+            let event_worktree = discover(crate::SpaceLocator::Workspace(&event.workspace_id))?;
             let event_namespace = event_worktree.namespace(runtime.session_socket_id);
             require_activated(&mut store, &event_namespace)?;
             if !event_worktree
@@ -1048,6 +1294,7 @@ where
                     reconcile_discovered_panes(
                         transaction,
                         &event_namespace,
+                        &event_worktree.unavailable_panes,
                         &event_worktree.panes,
                         runtime.ids,
                         &attribution,
@@ -1055,6 +1302,7 @@ where
                     reconcile_delivery_state(
                         transaction,
                         &event_namespace,
+                        &event_worktree.unavailable_panes,
                         &event_worktree.panes,
                         false,
                         &attribution,
@@ -1077,7 +1325,16 @@ where
                 )),
                 AgentStatusEventType::Changed => None,
             };
-            let drain = crate::drain_mailboxes(&event_runtime)?;
+            let drain = if snapshot.is_some() {
+                crate::delivery::drain_mailboxes_with_discovery(
+                    &event_runtime,
+                    discover(event_runtime.space_locator())?,
+                    false,
+                    snapshot,
+                )?
+            } else {
+                crate::drain_mailboxes(&event_runtime)?
+            };
             Ok(json!({
                 "type": "pane_agent_status_changed",
                 "handled": true,
@@ -1086,7 +1343,37 @@ where
             }))
         }
         _ => Err(format!("{operation} is not a lifecycle operation")),
+    })();
+    if let Err(error) = result.as_ref()
+        && !compensation_panes.is_empty()
+    {
+        let committed = store
+            .transaction(|transaction| transaction.list_pane_addresses(&namespace))
+            .map_err(|read| format!("{error}; could not read committed names: {read}"))?;
+        let mut failures = Vec::new();
+        for pane in &compensation_panes {
+            let alias = committed
+                .iter()
+                .find(|address| {
+                    !address.retired && address.pane_id.as_deref() == Some(pane.as_str())
+                })
+                .map(|address| address.alias.as_str());
+            let restored = match alias {
+                Some(alias) => publish_hc_name(runtime, Some(pane.as_str()), alias),
+                None => clear_hc_name(runtime, Some(pane.as_str())),
+            };
+            if let Err(restore) = restored {
+                failures.push(restore);
+            }
+        }
+        if !failures.is_empty() {
+            return Err(format!(
+                "{error}; restoring committed names failed: {}",
+                failures.join("; ")
+            ));
+        }
     }
+    result
 }
 
 /// What a named pane's idle label tells the human.
@@ -1182,23 +1469,27 @@ fn reconcile_worktree<H, C, I>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
     attribution: &MutationAttribution,
     after_restart: bool,
+    observed_spaces: Option<&std::collections::BTreeMap<String, DiscoveredWorktree>>,
 ) -> Result<WorktreeReconciliation, String>
 where
     H: Host,
     C: Clock,
     I: IdGenerator,
 {
+    let publish_metadata = observed_spaces.is_none();
     store
         .transaction(|transaction| {
             reconcile_compacted_pane_bindings(
                 transaction,
                 namespace,
+                &discovered.unavailable_panes,
                 &discovered.panes,
                 attribution,
             )?;
             reconcile_discovered_panes(
                 transaction,
                 namespace,
+                &discovered.unavailable_panes,
                 &discovered.panes,
                 runtime.ids,
                 attribution,
@@ -1206,6 +1497,7 @@ where
             reconcile_delivery_state(
                 transaction,
                 namespace,
+                &discovered.unavailable_panes,
                 &discovered.panes,
                 after_restart,
                 attribution,
@@ -1213,13 +1505,24 @@ where
             Ok(())
         })
         .map_err(|error| error.to_string())?;
-    publish_status_metadata(runtime, discovered)?;
+    if publish_metadata {
+        publish_status_metadata(runtime, discovered)?;
+    }
     reconcile_managed_tab_labels(store, namespace, discovered, runtime)?;
     let epoch = store
         .transaction(|transaction| transaction.complete_reconciliation(namespace))
         .map_err(|error| error.to_string())?;
     let installation = onboard_settled_integrations(runtime, discovered)?;
-    let drain = crate::drain_mailboxes(runtime)?;
+    let drain = if publish_metadata {
+        crate::drain_mailboxes(runtime)?
+    } else {
+        crate::delivery::drain_mailboxes_with_discovery(
+            runtime,
+            discovered.clone(),
+            false,
+            observed_spaces,
+        )?
+    };
     Ok(WorktreeReconciliation {
         epoch,
         drain,
@@ -1241,6 +1544,9 @@ fn apply_managed_tab_label(
             "message": "Pane named, but its tab label could not be updated.",
         })
     };
+    if !herdr.supports_tab_labels() {
+        return json!({"status": "unchanged"});
+    }
     let Some(current_label) = herdr.tab_label(tab_id) else {
         return warning();
     };
@@ -1330,6 +1636,9 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    if !runtime.host.supports_tab_labels() {
+        return Ok(());
+    }
     let managed = store
         .transaction(|transaction| transaction.managed_tab_labels(namespace))
         .map_err(|error| error.to_string())?;
@@ -1347,6 +1656,15 @@ where
         })
         .map_err(|error| error.to_string())?;
     for mut label in managed {
+        let address = addresses
+            .iter()
+            .find(|address| !address.retired && address.id == label.address_id);
+        if address
+            .and_then(|address| address.pane_id.as_ref())
+            .is_some_and(|pane| discovered.unavailable_panes.contains(pane))
+        {
+            continue;
+        }
         let panes = discovered
             .panes
             .iter()
@@ -1360,9 +1678,6 @@ where
                 .map_err(|error| error.to_string())?;
             continue;
         }
-        let address = addresses
-            .iter()
-            .find(|address| !address.retired && address.id == label.address_id);
         let bound_pane = address.and_then(|address| address.pane_id.as_deref());
         // While the named pane stays in this tab, keep the record so its alias
         // returns once the tab again holds no other agent.
@@ -1688,6 +2003,7 @@ pub fn pane_workspace(host: &impl crate::Host, pane_id: &str) -> Result<String, 
 /// The current space state used by the read-only health check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CollaborationSetup {
+    pub unavailable_panes: Vec<String>,
     pub worktree_state: Option<WorktreeState>,
     pub panes: Vec<DiscoveredPane>,
     pub addresses: Vec<PaneAddressRecord>,
@@ -1733,6 +2049,7 @@ pub(crate) fn load_collaboration_setup_from_store(
         })
         .map_err(|error| error.to_string())?;
     Ok(CollaborationSetup {
+        unavailable_panes: discovered.unavailable_panes.clone(),
         worktree_state,
         panes: discovered.panes.clone(),
         addresses,
@@ -1756,11 +2073,15 @@ pub(crate) fn terminal_safe_text(value: &str) -> String {
 pub fn reconcile_discovered_panes(
     transaction: &mut StateTransaction<'_>,
     namespace: &StateNamespace,
+    unavailable_panes: &[String],
     panes: &[DiscoveredPane],
     ids: &impl IdGenerator,
     attribution: &MutationAttribution,
 ) -> Result<(), StoreError> {
     for binding in transaction.active_pane_bindings(namespace)? {
+        if unavailable_panes.contains(&binding.pane_id) {
+            continue;
+        }
         let mut matches = panes.iter().filter(|pane| pane.pane_id == binding.pane_id);
         let first = matches.next();
         if first.is_none() {
@@ -1892,6 +2213,7 @@ fn apply_pane_move(
 fn reconcile_compacted_pane_bindings(
     transaction: &mut StateTransaction<'_>,
     namespace: &StateNamespace,
+    unavailable_panes: &[String],
     panes: &[DiscoveredPane],
     attribution: &MutationAttribution,
 ) -> Result<(), StoreError> {
@@ -1903,10 +2225,10 @@ fn reconcile_compacted_pane_bindings(
         .map(|binding| binding.pane_id.clone())
         .collect::<std::collections::BTreeSet<_>>();
 
-    for binding in bindings
-        .iter()
-        .filter(|binding| !panes.iter().any(|pane| pane.pane_id == binding.pane_id))
-    {
+    for binding in bindings.iter().filter(|binding| {
+        !unavailable_panes.contains(&binding.pane_id)
+            && !panes.iter().any(|pane| pane.pane_id == binding.pane_id)
+    }) {
         let Some(expected_session) = addresses
             .iter()
             .find(|address| address.id == binding.address_id)
@@ -1946,4 +2268,42 @@ fn reconcile_compacted_pane_bindings(
 struct PaneEventSession {
     #[serde(rename = "value")]
     _value: String,
+}
+
+fn publish_hc_name<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    pane: Option<&str>,
+    alias: &str,
+) -> Result<(), String> {
+    if runtime.is_hc()
+        && let Some(pane) = pane
+    {
+        publish_pane_address_metadata(runtime, pane, alias, PaneLabel::Ready)?;
+    }
+    Ok(())
+}
+
+fn clear_hc_name<H: Host, C, I>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    pane: Option<&str>,
+) -> Result<(), String> {
+    if runtime.is_hc()
+        && let Some(pane) = pane
+    {
+        match runtime.host.report_metadata(
+            pane,
+            &crate::PaneMetadata::Identity {
+                title: String::new(),
+                ready: String::new(),
+                working: String::new(),
+                blocked: String::new(),
+                unknown: String::new(),
+            },
+        ) {
+            Ok(()) => (),
+            Err(error) if matches!(error.code.as_deref(), Some("not_found" | "finished")) => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }

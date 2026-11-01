@@ -1,3 +1,8 @@
+#[path = "support/environment.rs"]
+mod environment;
+use environment::CommandHome;
+use namedrop::environment::EnvironmentSnapshot;
+
 use namedrop::{
     ActorKind, AgentSessionId, DeliveryAttemptId, DeliveryId, DeliveryState, LeaseDraft,
     MessageDraft, MessageId, MessageRecipientDraft, MutationAttribution, PaneAddressDraft,
@@ -59,7 +64,7 @@ impl Fixture {
             .env("TEST_SHELL_PID", std::process::id().to_string())
             .env("HERDR_BIN_PATH", self.root.join("herdr"))
             .env("NAMEDROP_TEST_FIXTURE", &self.root)
-            .env("HOME", self.root.join("home"))
+            .isolated_home(self.root.join("home"))
             .env("CLAUDE_CONFIG_DIR", self.root.join("home").join(".claude"))
             .env("CODEX_HOME", self.root.join("home").join(".codex"))
             .env_remove("XDG_CONFIG_HOME")
@@ -577,7 +582,10 @@ fn timeout_overrides_are_bounded_and_cannot_disable_command_execution() {
 #[test]
 fn timeout_and_unknown_prompt_results_never_authorize_an_automatic_resend() {
     use namedrop::{HerdrCommandExecutor, ProcessHerdr, PromptFailureKind};
-    let herdr = ProcessHerdr::default();
+    let herdr = ProcessHerdr::from_snapshot(
+        namedrop::runtime::HostKind::Tui,
+        &EnvironmentSnapshot::capture(),
+    );
     for error in [
         "Herdr command timed out after 10000 ms",
         "connection closed after writing prompt",
@@ -806,7 +814,12 @@ fn terminal_recovery_resolves_superseded_warnings_and_preserves_current_failure(
         StateStore::open(fixture.state())
             .unwrap()
             .transaction(|tx| {
-                tx.return_delivery_attempt_to_queue(&namespace, &rejected, &attribution)?;
+                tx.return_delivery_attempt_to_queue(
+                    &namespace,
+                    &rejected,
+                    namedrop::DeliveryReturnReason::TemporaryPreInvocation,
+                    &attribution,
+                )?;
                 assert!(
                     tx.lease_mailbox_head(
                         &namespace,

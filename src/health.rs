@@ -58,6 +58,10 @@ pub struct HealthIssue {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HealthReport {
+    #[serde(default)]
+    pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_version: Option<String>,
     pub status: HealthStatus,
     pub available_agents: u64,
     #[serde(default)]
@@ -74,6 +78,109 @@ where
     C: Clock,
     I: IdGenerator,
 {
+    let mut report = diagnose_host(runtime);
+    report.host = if runtime.is_hc() { "herdr-core" } else { "tui" }.to_owned();
+    report
+}
+
+pub fn append_hc_diagnostics<H: Host, C: Clock, I: IdGenerator, E: crate::HerdrCommandExecutor>(
+    report: &mut HealthReport,
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+    host: &crate::HcHost<E>,
+) {
+    match host.discovery_warnings() {
+        Ok(warnings) => {
+            for warning in warnings {
+                let mut note = issue(
+                    "ND-HC-DISCOVERY-001",
+                    HealthSeverity::Notice,
+                    "An HC terminal could not be inspected.",
+                    &warning.message,
+                    HealthRepairKind::HumanDecision,
+                    "Check this terminal in Herdr, then run doctor again.",
+                );
+                note.diagnostic =
+                    serde_json::json!({"terminal":warning.terminal,"message":warning.message});
+                report.issues.push(note);
+                report.status = HealthStatus::NeedsAttention;
+            }
+        }
+        Err(error) => {
+            report.issues.push(issue(
+                "ND-HC-DISCOVERY-001",
+                HealthSeverity::Notice,
+                "HC terminal discovery failed.",
+                &error.to_string(),
+                HealthRepairKind::HumanDecision,
+                "Check the HC core, then run doctor again.",
+            ));
+            report.status = HealthStatus::NeedsAttention;
+        }
+    }
+    let active = StateStore::open_read_only(runtime.state_directory)
+        .map_err(|error| error.to_string())
+        .and_then(|store| {
+            let Some(mut store) = store else {
+                return Ok(false);
+            };
+            store
+                .dashboard_spaces()
+                .map(|spaces| {
+                    spaces.iter().any(|space| {
+                        space.namespace.session_socket_id == runtime.session_socket_id
+                            && space.state.activated
+                            && !space.state.deactivated
+                    })
+                })
+                .map_err(|error| error.to_string())
+        });
+    if matches!(active, Ok(false)) {
+        return;
+    }
+    let subscriber = active.and_then(|_| {
+        crate::host::hc::events::status(runtime.state_directory, runtime.session_socket_id).or_else(
+            |_| {
+                let environment = host
+                    .environment_snapshot()
+                    .ok_or("HC subscriber restart requires the captured environment")?;
+                let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+                crate::host::hc::events::start_with_environment(
+                    host,
+                    &executable,
+                    runtime.state_directory,
+                    environment,
+                )
+                .map_err(|error| error.to_string())
+            },
+        )
+    });
+    if let Err(error) = subscriber {
+        let mut note = issue(
+            "ND-HC-SUBSCRIBER-001",
+            HealthSeverity::Broken,
+            "HC event delivery is not running with the current Namedrop binary.",
+            &error,
+            HealthRepairKind::ProductAction,
+            "Activate Namedrop to restart event delivery.",
+        );
+        if let Ok(space) = runtime.host.space(runtime.space_locator(), None) {
+            add_operation(
+                &mut note,
+                runtime,
+                &space.workspace_id,
+                "activate",
+                serde_json::json!({"confirmed":true}),
+                None,
+            );
+        }
+        report.issues.push(note);
+        report.status = HealthStatus::NeedsAttention;
+    }
+}
+
+fn diagnose_host<H: Host, C: Clock, I: IdGenerator>(
+    runtime: &LifecycleRuntime<'_, H, C, I>,
+) -> HealthReport {
     let HealthSnapshot {
         setup,
         waiting_messages,
@@ -105,6 +212,8 @@ where
             None,
         );
         return HealthReport {
+            host: String::new(),
+            host_version: None,
             status: HealthStatus::NeedsAttention,
             available_agents: 0,
             available_terminals: 0,
@@ -115,6 +224,24 @@ where
     }
 
     let mut issues = Vec::new();
+    if runtime.is_hc() {
+        issues.push(issue("ND-HC-SPACE-001", HealthSeverity::Info, "Space names come from the app's where label.", "Names containing ` / ` are displayed only up to that delimiter. Use --hc-space with the exact space ID when a display name is ambiguous.", HealthRepairKind::HumanDecision, "Use an exact hc space ID when needed."));
+        for pane in setup.panes.iter().filter(|pane| {
+            pane_agent_runtime(pane) == Some(crate::AgentRuntime::Codex)
+                && pane.status_reported == Some(false)
+        }) {
+            let mut note = issue(
+                "ND-HC-CODEX-001",
+                HealthSeverity::Notice,
+                "This Codex terminal has not reported agent status.",
+                "Namedrop cannot observe when this terminal settles, so agent deliveries remain queued. Run Codex with --no-daemon and use a version that reports OSC 7501 status.",
+                HealthRepairKind::HumanDecision,
+                "Start Codex with --no-daemon, then check its status again.",
+            );
+            note.diagnostic = serde_json::json!({"pane_id":pane.pane_id,"reported":false});
+            issues.push(note);
+        }
+    }
     #[cfg(target_os = "linux")]
     if setup
         .panes
@@ -151,6 +278,7 @@ where
             agent_runtime,
             runtime.state_directory,
             runtime.agent_config,
+            runtime.is_hc(),
         ) {
             failed_packages.push(agent_runtime);
             let mut package_issue = issue(
@@ -167,7 +295,7 @@ where
             package_issue.diagnostic = serde_json::json!({
                 "source_id": crate::integration_package_attention_source(agent_runtime),
                 "runtime": agent_runtime,
-                "path": runtime.home_directory.map(|home| crate::package_directory(home, agent_runtime)),
+                "path": runtime.home_directory.map(|home| crate::install::PackageContext::new(home, runtime.is_hc()).directory(agent_runtime)),
             });
             add_operation(
                 &mut package_issue,
@@ -180,7 +308,10 @@ where
             issues.push(package_issue);
         } else if agent_runtime == crate::AgentRuntime::Codex
             && runtime.home_directory.is_some_and(|home| {
-                !crate::install::codex_configuration_current(home, runtime.agent_config)
+                !crate::install::codex_configuration_current(
+                    &crate::install::PackageContext::new(home, runtime.is_hc()),
+                    runtime.agent_config,
+                )
             })
         {
             let mut hook_issue = issue(
@@ -191,10 +322,14 @@ where
                 HealthRepairKind::ProductAction,
                 "Follow the reported Codex plugin setup steps.",
             );
-            hook_issue.diagnostic =
-                crate::user_hook_activation_guidance(runtime.home_directory, runtime.agent_config)
-                    ["codex"]
-                    .clone();
+            hook_issue.diagnostic = crate::install::hook_activation_guidance(
+                runtime
+                    .home_directory
+                    .map(|home| crate::install::PackageContext::new(home, runtime.is_hc()))
+                    .as_ref(),
+                runtime.agent_config,
+            )["codex"]
+                .clone();
             issues.push(hook_issue);
         }
     }
@@ -226,9 +361,10 @@ where
     }) {
         issues.push(stale_runtime_issue(&stale));
     }
-    match crate::update_check::settings() {
+    let settings_path = runtime.agent_config.update_settings(runtime.home_directory);
+    match crate::update_check::settings(settings_path.as_deref()) {
         Err(error) => {
-            let path = crate::update_check::settings_path().ok();
+            let path = &settings_path;
             let mut setting = issue(
                 "ND-UPDATE-002",
                 HealthSeverity::Info,
@@ -241,7 +377,9 @@ where
             issues.push(setting);
         }
         Ok(_) => {
-            if let Some(update) = crate::update_check::available(runtime.state_directory) {
+            if let Some(update) =
+                crate::update_check::available(runtime.state_directory, settings_path.as_deref())
+            {
                 let mut update_issue = issue(
                     "ND-UPDATE-001",
                     HealthSeverity::Info,
@@ -296,7 +434,7 @@ where
     {
         if pane.agent_session_id.is_none() && !served_pane(Some(&pane.pane_id)) {
             let agent_runtime = pane_agent_runtime(pane).expect("supported panes were filtered");
-            let setup = crate::install::native_session_setup(agent_runtime);
+            let setup = crate::install::native_session_setup(agent_runtime, runtime.is_hc());
             let mut native = issue(
                 "ND-SESSION-002",
                 HealthSeverity::Blocked,
@@ -308,9 +446,21 @@ where
                 "Install the Herdr native integration if needed, then restart this agent.",
             );
             native.diagnostic = serde_json::json!({"pane_id":pane.pane_id,"runtime":agent_runtime,"workspace_id":space_id});
-            native.repair.operation = Some("herdr.integration.install".to_owned());
-            native.repair.input = Some(serde_json::json!({"runtime":setup["command"][3]}));
-            native.repair.command = serde_json::from_value(setup["command"].clone()).ok();
+            if runtime.is_hc() {
+                native.repair.prompt = "Activate Namedrop to refresh its hooks, then restart this agent. Start Codex with --no-daemon.".to_owned();
+                add_operation(
+                    &mut native,
+                    runtime,
+                    &space_id,
+                    "activate",
+                    serde_json::json!({"confirmed":true}),
+                    Some(&pane.pane_id),
+                );
+            } else {
+                native.repair.operation = Some("herdr.integration.install".to_owned());
+                native.repair.input = Some(serde_json::json!({"runtime":setup["command"][3]}));
+                native.repair.command = serde_json::from_value(setup["command"].clone()).ok();
+            }
             issues.push(native);
         }
         if setup
@@ -335,6 +485,14 @@ where
     let mut available_agents = 0;
     let mut available_terminals = 0;
     for address in setup.addresses.iter().filter(|address| !address.retired) {
+        if !address.collaboration_disabled
+            && address
+                .pane_id
+                .as_ref()
+                .is_some_and(|pane| setup.unavailable_panes.contains(pane))
+        {
+            continue;
+        }
         if address.collaboration_disabled {
             let mut disabled = issue(
                 "ND-ADDRESS-001",
@@ -429,6 +587,17 @@ where
             .addresses
             .iter()
             .any(|a| a.pane_type == crate::PaneType::Terminal)
+        && (setup.unavailable_panes.is_empty()
+            || (runtime.is_hc()
+                && runtime
+                    .host
+                    .panes(crate::PaneScope::All)
+                    .is_ok_and(|observed| {
+                        setup
+                            .unavailable_panes
+                            .iter()
+                            .all(|pane| observed.iter().any(|known| known.pane_id == *pane))
+                    })))
     {
         issues.push(issue(
             "ND-SETUP-003",
@@ -526,6 +695,8 @@ where
     }
 
     HealthReport {
+        host: String::new(),
+        host_version: None,
         status: if issues
             .iter()
             .all(|issue| issue.severity == HealthSeverity::Info)
@@ -598,13 +769,56 @@ where
     // Immediately before dispatch: the pane must still hold the exact Agent
     // Session the popup was opened for, so a replacement session can never
     // receive the session-bound diagnostics of the one it replaced.
+    let _prompt_guard = if runtime.is_hc() {
+        Some(crate::host::hc::prompt_lock(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            pane_id,
+        )?)
+    } else {
+        None
+    };
     let live = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
     }
+    let namespace = crate::StateNamespace::for_space(runtime.session_socket_id, space_id);
+    if runtime.is_hc()
+        && StateStore::open(runtime.state_directory)
+            .map_err(|error| error.to_string())?
+            .transaction(|transaction| transaction.prompt_is_deferred(&namespace, pane_id, &live))
+            .map_err(|error| error.to_string())?
+    {
+        return Err("Not sent; waiting for the agent's next settled status.".to_owned());
+    }
     let prompt = doctor_assistance_prompt(&report, pane_id, &live);
     match runtime.host.prompt(pane_id, &prompt) {
         Ok(_) => Ok(()),
+        Err(crate::PromptFailure {
+            kind: PromptFailureKind::DeferredUntilSettle { observed_status_ms },
+            message,
+        }) => {
+            let attribution = crate::MutationAttribution::new(
+                crate::ActorKind::Plugin,
+                "namedrop-doctor",
+                runtime.clock.now_unix_ms(),
+            );
+            StateStore::open(runtime.state_directory)
+                .map_err(|error| error.to_string())?
+                .transaction(|transaction| {
+                    transaction.defer_prompt_until_settle(
+                        &namespace,
+                        pane_id,
+                        &live,
+                        observed_status_ms,
+                        &attribution,
+                    )
+                })
+                .map_err(|error| error.to_string())?;
+            Err(format!(
+                "Not sent; waiting for the agent's next settled status: {message}"
+            ))
+        }
         Err(error) if error.kind == PromptFailureKind::TemporaryPreInvocation => {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }
@@ -701,6 +915,7 @@ where
     else {
         return Ok(HealthSnapshot {
             setup: CollaborationSetup {
+                unavailable_panes: discovered.unavailable_panes,
                 worktree_state: None,
                 panes: discovered.panes,
                 addresses: Vec::new(),
@@ -733,6 +948,8 @@ where
 
 fn unavailable_report(error: &str) -> HealthReport {
     HealthReport {
+        host: String::new(),
+        host_version: None,
         status: HealthStatus::Unavailable,
         available_agents: 0,
         available_terminals: 0,
@@ -881,7 +1098,7 @@ fn issue(
     }
 }
 
-fn add_operation<H, C, I>(
+fn add_operation<H: crate::Host, C, I>(
     issue: &mut HealthIssue,
     runtime: &LifecycleRuntime<'_, H, C, I>,
     space_id: &str,
@@ -907,14 +1124,26 @@ fn add_operation<H, C, I>(
         } else {
             command.extend(["--input-json".into(), input.to_string()]);
         }
-        command.extend([
-            "--herdr-socket".into(),
-            runtime.session_socket_id.to_owned(),
-            "--herdr-workspace".into(),
-            space_id.to_owned(),
-        ]);
-        if let Some(pane_id) = pane_id {
-            command.extend(["--herdr-pane".into(), pane_id.to_owned()]);
+        if runtime.is_hc() {
+            command.extend([
+                "--host".into(),
+                "hc".into(),
+                "--hc-space".into(),
+                space_id.to_owned(),
+            ]);
+            if let Some(pane_id) = pane_id {
+                command.extend(["--hc-terminal".into(), pane_id.to_owned()]);
+            }
+        } else {
+            command.extend([
+                "--herdr-socket".into(),
+                runtime.session_socket_id.to_owned(),
+                "--herdr-workspace".into(),
+                space_id.to_owned(),
+            ]);
+            if let Some(pane_id) = pane_id {
+                command.extend(["--herdr-pane".into(), pane_id.to_owned()]);
+            }
         }
         issue.repair.command = Some(command);
     }
@@ -936,14 +1165,25 @@ pub fn render_health_report_to_text(report: &HealthReport) -> String {
         "Namedrop checks passed; runtime hooks remain unverified.\n{} {agents} available.{terminals} {} messages await progress.",
         report.available_agents, report.waiting_messages,
     );
-    if report.issues.is_empty() {
-        return passed;
-    }
-    let mut rendered = match report.status {
-        HealthStatus::Unavailable => "Namedrop could not complete its health check.\n".to_owned(),
-        HealthStatus::NeedsAttention => "Namedrop needs attention.\n".to_owned(),
-        HealthStatus::Healthy => passed + "\n",
+    let host = if report.host.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "host: {}\n",
+            terminal_safe_text(report.host_version.as_deref().unwrap_or(&report.host))
+        )
     };
+    if report.issues.is_empty() {
+        return host + &passed;
+    }
+    let mut rendered = host
+        + &match report.status {
+            HealthStatus::Unavailable => {
+                "Namedrop could not complete its health check.\n".to_owned()
+            }
+            HealthStatus::NeedsAttention => "Namedrop needs attention.\n".to_owned(),
+            HealthStatus::Healthy => passed + "\n",
+        };
     for issue in &report.issues {
         rendered.push('\n');
         rendered.push_str(&terminal_safe_text(&issue.summary));
@@ -1007,6 +1247,8 @@ mod tests {
     #[test]
     fn human_report_escapes_control_characters() {
         let report = HealthReport {
+            host: String::new(),
+            host_version: None,
             status: HealthStatus::NeedsAttention,
             available_agents: 0,
             available_terminals: 0,
