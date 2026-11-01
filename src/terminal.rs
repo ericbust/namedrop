@@ -1,6 +1,4 @@
 mod process_identity;
-#[cfg(target_os = "macos")]
-use process_identity::process_bsd_info;
 pub(crate) use process_identity::process_start;
 
 use crate::{ActorKind, Clock, DeliveryAttemptId, IdGenerator, MutationAttribution, StateStore};
