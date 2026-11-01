@@ -9,7 +9,7 @@ export function roster(terminals, panes, spaces, snapshot = null) {
   ]));
 
   return terminals
-    .filter((terminal) => terminal.state === "live" && terminal.labels?.["namedrop.name"])
+    .filter((terminal) => terminal.state === "live" && (terminal.labels?.["namedrop.name"] || stored.has(terminal.address)))
     .map((terminal) => {
       const space = terminal.labels["herdr.space"];
       const tab = terminal.labels["herdr.tab"];
@@ -18,7 +18,7 @@ export function roster(terminals, panes, spaces, snapshot = null) {
         : "";
       const saved = stored.get(terminal.address);
       return {
-        alias: terminal.labels["namedrop.name"],
+        alias: saved?.alias ?? terminal.labels["namedrop.name"],
         address: terminal.address,
         status: terminal.status === "error" ? "blocked" : terminal.status ?? null,
         program: terminal.program ?? null,

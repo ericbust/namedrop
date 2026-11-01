@@ -36,6 +36,7 @@ function drain(model, now, effects) {
 function collect(model, snapshot) {
   const next = { ...model.seen };
   for (const row of snapshot.rows) {
+    if (!row.terminal) continue;
     const key = JSON.stringify([snapshot.core, row.space, row.terminal]);
     const prior = next[key];
     const replies = row.recent_replies ?? [];
