@@ -136,6 +136,7 @@ export function Composer({
   label,
   rule,
   notice = null,
+  closed = null,
   onEdit,
   onSend,
 }: {
@@ -147,6 +148,8 @@ export function Composer({
   label: string;
   rule: SendRule;
   notice?: ReactNode;
+  // Why nothing can be sent from here, such as a workspace with no agents.
+  closed?: string | null;
   onEdit: (text: string) => void;
   onSend: (source: string, startedAt: number) => void;
 }) {
@@ -341,6 +344,7 @@ export function Composer({
           placeholder={placeholder}
           value={text}
           readOnly={sending}
+          disabled={closed !== null}
           onChange={onChange}
           onKeyDown={onKeyDown}
           onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
@@ -354,7 +358,7 @@ export function Composer({
           type="button"
           className="send"
           aria-label={composerCopy.send}
-          disabled={sending || source === null}
+          disabled={closed !== null || sending || source === null}
           onMouseDown={(event) => event.preventDefault()}
           onClick={(event) => submit(event.timeStamp)}
         >
@@ -362,7 +366,9 @@ export function Composer({
         </button>
       </div>
       <div className="composer-status">
-        {failure !== null ? (
+        {closed !== null ? (
+          <p>{closed}</p>
+        ) : failure !== null ? (
           <p className="composer-error" role="alert">
             <Icon name="alert" className="icon-14" />
             {sendErrorCopy(failure)}

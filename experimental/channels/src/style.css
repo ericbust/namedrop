@@ -1852,6 +1852,14 @@ code.inline {
 .composer-box textarea[readonly] {
   cursor: wait;
 }
+/* A workspace with no agents can't take posts; the box reads as inert. */
+.composer-box:has(textarea:disabled) {
+  border-color: var(--line);
+  background: var(--bg-raised);
+}
+.composer-box textarea:disabled {
+  cursor: not-allowed;
+}
 .composer-to {
   flex: none;
   align-self: flex-start;

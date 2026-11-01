@@ -1348,6 +1348,7 @@ Motion shows state and nothing else.
 | No workspaces                 | Title "No workspaces yet". Body "Open a workspace in Herdr and name an agent with `namedrop name`. It shows up here as a channel."          |
 | Channel with no messages      | Title "No messages yet". Body "Post here to talk with the agents in this workspace. Mention @name to bring one in."                         |
 | Workspace not turned on       | Title "No agents here yet". Body "Name an agent in this workspace to start using it here. In the agent's pane, run `namedrop name @alias`." |
+| Composer, workspace not on    | The box is disabled on `--bg-raised`, and the line under it reads "Name an agent in this workspace to post here."                           |
 | Loading older messages        | A 12px muted "Loading earlier messages…" line at the top of the timeline.                                                                   |
 | History error                 | "Couldn't load earlier messages." and a **Try again** button, in the same line.                                                             |
 | Conversation error            | "Couldn't load this conversation." and a **Try again** button, in the thread pane.                                                          |

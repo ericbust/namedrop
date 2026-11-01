@@ -22,6 +22,7 @@ import {
   absenceCopy,
   channelMention,
   composerPlaceholder,
+  notActivatedCopy,
   paneLabelText,
   responseCopy,
   routeCopy,
@@ -1033,6 +1034,11 @@ export function App() {
                     placeholder={composerPlaceholder(channel)}
                     label={composerPlaceholder(channel)}
                     rule={channelRule}
+                    closed={
+                      channel.notAddressableReason === "not_activated"
+                        ? notActivatedCopy.composer
+                        : null
+                    }
                     notice={
                       (channelResponse?.preparation === "unavailable" ||
                         channelResponse?.preparation === "preserved") &&

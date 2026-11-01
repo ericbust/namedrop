@@ -576,6 +576,7 @@ export const notActivatedCopy = {
   title: "No agents here yet",
   body: "Name an agent in this workspace to start using it here. In the agent's pane, run",
   command: "namedrop name @alias",
+  composer: "Name an agent in this workspace to post here.",
 };
 
 export const SHOWN_RECIPIENTS = 2;

@@ -2894,6 +2894,50 @@ test("UNACTIVATED: a workspace Namedrop never turned on says how to start, then 
   assert.equal(ui.connections.length, 1);
 });
 
+test("UNACTIVATED 2: the composer in a workspace Namedrop never turned on says why it can't send, then opens once it is on", async (t) => {
+  const off = frame(1, "gamma");
+  off.frame.space = {
+    ...off.frame.space,
+    addressable_label: null,
+    not_addressable_reason: "not_activated",
+    state: "unknown",
+  };
+  off.frame.messages = [];
+  const ui = await open(t, (client) => client.send("space", off));
+  await ui.live();
+  await ui.row(1).click();
+  const box = ui.page.getByRole("combobox", { name: "Message gamma" });
+  const send = ui.page.getByRole("button", { name: "Send", exact: true });
+  const status = ui.page.locator(".composer-status");
+  await status
+    .getByText("Name an agent in this workspace to post here.", {
+      exact: true,
+    })
+    .waitFor();
+  assert.equal(await box.isDisabled(), true);
+  assert.equal(await send.isDisabled(), true);
+  assert.equal(
+    await ui.page.getByText("Mention @name to bring someone in").count(),
+    0,
+  );
+  assert.equal(ui.posts.attempts.length, 0);
+  const on = frame(1, "gamma");
+  on.frame.messages = [];
+  ui.connections[0].send("space", on);
+  await ui.page
+    .getByRole("combobox", { name: "Message #gamma" })
+    .and(ui.page.locator(":enabled"))
+    .waitFor();
+  assert.equal(
+    await status
+      .getByText("Name an agent in this workspace to post here.", {
+        exact: true,
+      })
+      .count(),
+    0,
+  );
+});
+
 test("design-b: Needs you shows titles, hints and ages three at a time and announces new items", async (t) => {
   const value = frame(1, "alpha", "needs_you");
   const opened = Date.now() - 4 * 60_000 - 5_000;
