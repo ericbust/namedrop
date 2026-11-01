@@ -1487,6 +1487,108 @@ mod worker_shutdown_tests {
     }
 
     #[test]
+    fn persistent_marker_read_errors_preserve_work_and_release_later_markers() {
+        let queue = QueueFixture::new("persistent-marker-read");
+        let marker = queue.0.join("pending-0-stuck");
+        let later = queue.0.join("pending-1-later");
+        fs::write(&marker, br#"{"marker":"stuck"}"#).unwrap();
+        fs::write(&later, br#"{"marker":"later"}"#).unwrap();
+        let reads = std::cell::Cell::new(0);
+        let mut reconciled = Vec::new();
+        assert_eq!(
+            run_agent_status_worker_queue_with_io(
+                &queue.0,
+                queue.lock(),
+                None,
+                pending_agent_status_reconciliations,
+                |path| {
+                    if path == marker {
+                        reads.set(reads.get() + 1);
+                        assert!(reads.get() <= 5, "persistent EIO starved the later marker");
+                        Err(io::Error::from_raw_os_error(libc::EIO))
+                    } else {
+                        fs::read(path)
+                    }
+                },
+                |input| {
+                    assert!(reads.get() <= 5);
+                    reconciled.push(input);
+                    Ok(serde_json::to_value(namedrop::DrainReport::default()).unwrap())
+                },
+            ),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(reconciled, vec![serde_json::json!({"marker":"later"})]);
+        assert_eq!(reads.get(), 5);
+        assert_eq!(fs::read(&marker).unwrap(), br#"{"marker":"stuck"}"#);
+        assert!(!later.exists());
+        assert_eq!(
+            run_agent_status_worker_queue_with_io(
+                &queue.0,
+                queue.lock(),
+                None,
+                pending_agent_status_reconciliations,
+                |path| fs::read(path),
+                |input| {
+                    reconciled.push(input);
+                    Ok(serde_json::to_value(namedrop::DrainReport::default()).unwrap())
+                },
+            ),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(
+            reconciled,
+            vec![
+                serde_json::json!({"marker":"later"}),
+                serde_json::json!({"marker":"stuck"})
+            ]
+        );
+        assert!(!marker.exists());
+        queue.lock();
+    }
+
+    #[test]
+    fn marker_read_retry_budgets_are_independent() {
+        let queue = QueueFixture::new("independent-marker-reads");
+        for name in ["pending-0", "pending-1"] {
+            fs::write(queue.0.join(name), b"{}").unwrap();
+        }
+        let mut reads = std::collections::HashMap::new();
+        let mut reconciled = 0;
+        assert_eq!(
+            run_agent_status_worker_queue_with_io(
+                &queue.0,
+                queue.lock(),
+                None,
+                pending_agent_status_reconciliations,
+                |path| {
+                    let count = reads.entry(path.to_path_buf()).or_insert(0);
+                    *count += 1;
+                    if *count <= 3 {
+                        Err(io::Error::from_raw_os_error(libc::EIO))
+                    } else {
+                        fs::read(path)
+                    }
+                },
+                |_| {
+                    reconciled += 1;
+                    Ok(serde_json::to_value(namedrop::DrainReport::default()).unwrap())
+                },
+            ),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(reconciled, 2);
+        assert_eq!(reads.len(), 2);
+        assert!(reads.values().all(|count| *count == 4));
+        assert!(
+            pending_agent_status_reconciliations(&queue.0)
+                .unwrap()
+                .is_empty()
+        );
+        queue.lock();
+    }
+
+    #[test]
     fn failed_quarantine_skips_marker_serves_later_work_and_releases_lock() {
         let queue = QueueFixture::new("blocked-quarantine");
         let marker = queue.0.join("pending-0-poisoned");
