@@ -1,21 +1,83 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, Button } from "gpui-base";
-import { terminals, panes, spaces, placement, theme, run, exec, props, closeOverlay } from "herdr";
+import { terminals, panes, spaces, placement, theme, run, exec, home, watchFolder, props, closeOverlay } from "herdr";
 import { roster } from "./roster.js";
+import { initialModel, transition, watchedStoreFile } from "./model.js";
 
 const releases = "https://github.com/ericbust/namedrop/releases";
 
 export default class Namedrop extends View {
   init(_props, cx) {
     this.install = "checking";
+    this.model = initialModel();
+    this.watchGeneration = 0;
+    cx.spawn(async (cx) => {
+      const candidates = [home() + "/.local/bin/namedrop-app", "namedrop"];
+      for (const candidate of candidates) {
+        try {
+          const probe = await exec(candidate, ["--version"]);
+          if (probe.code !== 0) throw new Error(probe.stderr || `Namedrop version check failed with exit code ${probe.code}.`);
+          this.binary = candidate;
+          this.install = "available";
+          cx.spawn(async () => { await exec(candidate, ["--host", "hc", "events", "--ensure"]); });
+          this.dispatch({ type: "wake", now: Date.now() }, cx);
+          cx.notify();
+          return;
+        } catch (error) {
+          if (!/^`herdr\.exec`: cannot run .+: .*No such file or directory \(os error 2\)/.test(String(error?.message ?? error))) {
+            this.install = "error";
+            this.dispatch({ type: "readError", error: String(error?.message ?? error), now: Date.now() }, cx);
+            cx.notify();
+            return;
+          }
+        }
+      }
+      this.install = "missing";
+      cx.notify();
+    });
+  }
+
+  dispatch(event, cx) {
+    const next = transition(this.model, event);
+    this.model = next.model;
+    for (const effect of next.effects) {
+      if (effect.type === "timer") {
+        const at = this.model.timerAt;
+        cx.timer.after(effect.delay, (cx) => this.dispatch({ type: "timer", at, now: Date.now() }, cx));
+      } else if (effect.type === "read") {
+        cx.spawn(async (cx) => {
+          try {
+            const result = await exec(this.binary, ["--host", "hc", "roster", "--json"]);
+            if (result.code !== 0) throw new Error(result.stderr || `Roster failed with exit code ${result.code}.`);
+            const snapshot = JSON.parse(result.stdout);
+            if (!Array.isArray(snapshot.rows) || typeof snapshot.state_directory !== "string") throw new Error("Invalid roster response.");
+            this.dispatch({ type: "readOk", snapshot, now: Date.now() }, cx);
+            this.watch(snapshot.state_directory, cx);
+          } catch (error) {
+            this.dispatch({ type: "readError", error: String(error?.message ?? error), now: Date.now() }, cx);
+          }
+          cx.notify();
+        });
+      } else if (effect.type === "ensure" && this.binary) {
+        cx.spawn(async () => { await exec(this.binary, ["--host", "hc", "events", "--ensure"]); });
+      }
+    }
+  }
+
+  watch(directory, cx) {
+    if (this.watchDirectory === directory) return;
+    this.watchDirectory = directory;
+    const generation = ++this.watchGeneration;
     cx.spawn(async (cx) => {
       try {
-        await exec("namedrop", ["--version"]);
-        this.install = "available";
+        while (generation === this.watchGeneration) {
+          const paths = await watchFolder(directory);
+          if (generation !== this.watchGeneration) return;
+          if (paths.some(watchedStoreFile)) this.dispatch({ type: "wake", now: Date.now() }, cx);
+        }
       } catch {
-        this.install = "missing";
+        if (generation === this.watchGeneration) this.watchDirectory = null;
       }
-      cx.notify();
     });
   }
 
@@ -48,7 +110,7 @@ export default class Namedrop extends View {
 
   render() {
     const t = theme();
-    const rows = roster(terminals(), panes(), spaces());
+    const rows = roster(terminals(), panes(), spaces(), this.model.snapshot);
     const edge = placement()?.edge ?? "right";
     return v_flex().w_full().min_w(280).p(8).gap(4).text_color(t.foreground)
       .child(h_flex().px(10).py(6).items_center().gap(8)
@@ -62,6 +124,9 @@ export default class Namedrop extends View {
         .child("No named terminals. Focus a terminal and press Alt+N to name it.")))
       .child(v_flex().id("roster").max_h(420).overflow_y_scrollbar()
         .children(rows.map((row) => this.row(row, edge, t))))
+      .when(Boolean(this.model.error), (el) => el.child(h_flex().gap(8)
+        .child(div().child(this.model.error))
+        .child(Button.new("retry-roster").on_click((_e, cx) => this.dispatch({ type: "retry", now: Date.now() }, cx)).child("Retry"))))
       .when(this.install === "missing", (el) => el.child(v_flex().px(10).pt(10).pb(4).gap(6)
         .child(div().text_size(12).text_color(t.muted).child("Install the Namedrop binary to send mentions"))
         .child(div().text_size(10).text_color(t.muted).child(releases))
