@@ -1058,17 +1058,11 @@ fn prune_rejected_markers(directory: &Path) -> io::Result<()> {
     }
     rejected.sort_by(|left, right| right.cmp(left));
     for (_, path, is_directory) in rejected.into_iter().skip(REJECTED_MARKER_RETENTION) {
-        let result = if is_directory {
+        let _ = if is_directory {
             fs::remove_dir_all(&path)
         } else {
             fs::remove_file(&path)
         };
-        if let Err(error) = result {
-            eprintln!(
-                "could not remove rejected reconciliation {}: {error}",
-                path.display()
-            );
-        }
     }
     Ok(())
 }
@@ -1113,9 +1107,8 @@ fn run_agent_status_worker_queue_with_io(
 ) -> ExitCode {
     let mut failures = 0_usize;
     let mut blocked = std::collections::HashSet::new();
-    if let Err(error) = prune_rejected_markers(directory) {
-        eprintln!("could not prune rejected reconciliations: {error}");
-    }
+    let mut read_failures = std::collections::HashMap::<PathBuf, usize>::new();
+    let _ = prune_rejected_markers(directory);
     loop {
         let mut scan_available = |directory: &Path| {
             scan(directory).map(|mut pending| {
@@ -1158,10 +1151,19 @@ fn run_agent_status_worker_queue_with_io(
             ReconciliationWork::Wake => serde_json::json!({"operation":"mailbox-wake"}),
             ReconciliationWork::Marker(marker) => {
                 let bytes = match read(marker) {
-                    Ok(bytes) => bytes,
+                    Ok(bytes) => {
+                        read_failures.remove(marker);
+                        bytes
+                    }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                     Err(error) if !permanently_unreadable_marker(&error) => {
-                        wait_for_reconciliation_retry(&mut failures, false);
+                        let count = read_failures.entry(marker.clone()).or_default();
+                        *count += 1;
+                        if *count >= 5 {
+                            blocked.insert(marker.clone());
+                        } else {
+                            wait_for_reconciliation_retry(&mut failures, false);
+                        }
                         continue;
                     }
                     Err(_) => {
@@ -1171,16 +1173,10 @@ fn run_agent_status_worker_queue_with_io(
                         ));
                         match fs::rename(marker, rejected) {
                             Ok(()) => {
-                                if let Err(error) = prune_rejected_markers(directory) {
-                                    eprintln!("could not prune rejected reconciliations: {error}");
-                                }
+                                let _ = prune_rejected_markers(directory);
                             }
                             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                            Err(error) => {
-                                eprintln!(
-                                    "could not quarantine reconciliation {}: {error}",
-                                    marker.display()
-                                );
+                            Err(_) => {
                                 blocked.insert(marker.clone());
                             }
                         }
