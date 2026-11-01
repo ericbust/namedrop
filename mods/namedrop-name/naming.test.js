@@ -67,6 +67,13 @@ test("nonzero version and operational failures never write labels", async () => 
   assert.equal(result.error, "already owned");
 });
 
+test("exit 64 displays the binary stderr with the run failure prefix", async () => {
+  const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1")], home: () => "/h",
+    exec: async (_cmd, args) => args[0] === "--version" ? { code: 0 } : { code: 64, stderr: "bad invocation" },
+    hc: async () => assert.fail("hc fallback") });
+  assert.deepEqual(result, { error: "Namedrop could not run: bad invocation" });
+});
+
 test("submit checks the fresh selected target", async () => {
   const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1", { state: "finished" })], home: () => "/h",
     exec: async () => assert.fail("exec"), hc: async () => assert.fail("hc") });
