@@ -241,6 +241,12 @@ where
         Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
         None => discover_worktree(runtime.herdr, runtime.cwd)?,
     };
+    if discovered.worktree_attached && matches!(operation, "activate" | "name") {
+        crate::install::codex_sandbox::check_worktree(
+            runtime.state_directory,
+            Path::new(discovered.worktree_id.as_str()),
+        )?;
+    }
     let namespace = discovered.namespace(runtime.session_socket_id);
     let (actor_kind, actor_id) = if operation.starts_with("event.") || operation == "reconcile" {
         (ActorKind::Plugin, "herdr")
@@ -544,7 +550,7 @@ where
                 "shortcuts": shortcuts,
                 "activated": true,
                 "shell_command": shell_command,
-                "codex_sandbox": {"writable_root": runtime.state_directory, "guidance": "Start a new Codex session to load the state writable root. Explicit permission profiles require their own state-directory grant."},
+                "codex_sandbox": {"writable_root": crate::install::codex_sandbox::root(runtime.state_directory)?, "guidance": "Start a new Codex session to load the deferred-commands spool writable root. Explicit permission profiles require their own spool-directory grant."},
                 "integration_packages": reconciliation.installation.report(runtime.home_directory, runtime.state_directory, runtime.agent_config),
                 "settled_delay_ms": 500,
                 "agent_integration_hook_activation":

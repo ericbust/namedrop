@@ -3520,13 +3520,30 @@ fn trusted_state_worktrees_are_refused_by_activation_naming_and_doctor() {
             format!("{kind}-{}", self.0.fetch_add(1, Ordering::Relaxed))
         }
     }
-    for variant in ["state", "ancestor", "linked-ancestor"] {
+    for variant in [
+        "state",
+        "ancestor",
+        "linked-ancestor",
+        "outside",
+        "linked-outside",
+    ] {
         let directory = TestDirectory::new();
         let state = directory.path().join("state");
         fs::create_dir(&state).unwrap();
         let root = match variant {
             "state" => state.clone(),
             "ancestor" => directory.path().to_path_buf(),
+            "outside" | "linked-outside" => {
+                let outside = directory.path().join("repo");
+                fs::create_dir(&outside).unwrap();
+                if variant == "linked-outside" {
+                    let link = directory.path().join("repo-alias");
+                    std::os::unix::fs::symlink(&outside, &link).unwrap();
+                    link
+                } else {
+                    outside
+                }
+            }
             _ => {
                 let link = directory.path().join("linked-root");
                 std::os::unix::fs::symlink(directory.path(), &link).unwrap();
@@ -3534,6 +3551,13 @@ fn trusted_state_worktrees_are_refused_by_activation_naming_and_doctor() {
             }
         };
         let herdr = RootHerdr(root);
+        let state = if variant == "linked-outside" {
+            let alias = directory.path().join("state-parent-alias");
+            std::os::unix::fs::symlink(directory.path(), &alias).unwrap();
+            alias.join("state")
+        } else {
+            state
+        };
         let ids = Ids(AtomicU64::new(1));
         let runtime = LifecycleRuntime {
             state_directory: &state,
@@ -3547,6 +3571,31 @@ fn trusted_state_worktrees_are_refused_by_activation_naming_and_doctor() {
             clock: &FixedClock,
             ids: &ids,
         };
+        if variant.ends_with("outside") {
+            let result = execute_lifecycle_operation(
+                "activate",
+                serde_json::json!({"confirmed":true}),
+                &runtime,
+            )
+            .unwrap();
+            assert_eq!(
+                result["codex_sandbox"]["writable_root"],
+                state
+                    .canonicalize()
+                    .unwrap()
+                    .join("deferred-commands")
+                    .to_str()
+                    .unwrap()
+            );
+            let report = namedrop::diagnose_collaboration(&runtime);
+            assert!(
+                !report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.explanation.contains("trusted Namedrop state"))
+            );
+            continue;
+        }
         for (operation, input) in [
             ("activate", serde_json::json!({"confirmed":true})),
             ("name", serde_json::json!({"alias":"reviewer"})),
@@ -3558,6 +3607,14 @@ fn trusted_state_worktrees_are_refused_by_activation_naming_and_doctor() {
             );
             assert!(!directory.home().join(".codex/config.toml").exists());
         }
+        let inactive_report = namedrop::diagnose_collaboration(&runtime);
+        assert!(
+            inactive_report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-INTEGRATION-001"
+                    && issue.explanation.contains("trusted Namedrop state"))
+        );
         StateStore::open(&state)
             .unwrap()
             .transaction(|transaction| {

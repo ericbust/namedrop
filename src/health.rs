@@ -80,10 +80,31 @@ where
         waiting_messages,
         held_deliveries,
         space_id,
+        worktree,
     } = match load_health_snapshot(runtime) {
         Ok(snapshot) => snapshot,
         Err(error) => return unavailable_report(&error),
     };
+    if let Some(worktree) = worktree.as_deref()
+        && let Err(error) =
+            crate::install::codex_sandbox::check_worktree(runtime.state_directory, worktree)
+    {
+        return HealthReport {
+            status: HealthStatus::NeedsAttention,
+            available_agents: 0,
+            available_terminals: 0,
+            waiting_messages,
+            hook_verification: "unverified".to_owned(),
+            issues: vec![issue(
+                "ND-INTEGRATION-001",
+                HealthSeverity::Broken,
+                "The Space worktree exposes trusted Namedrop state to Codex.",
+                &error,
+                HealthRepairKind::HumanDecision,
+                "Move the worktree or Namedrop state as instructed, then activate Namedrop again.",
+            )],
+        };
+    }
     if setup
         .worktree_state
         .as_ref()
@@ -152,6 +173,7 @@ where
             agent_runtime,
             runtime.state_directory,
             runtime.agent_config,
+            worktree.as_deref(),
         ) {
             failed_packages.push(agent_runtime);
             let mut package_issue = issue(
@@ -683,6 +705,7 @@ fn doctor_assistance_prompt(
 }
 
 struct HealthSnapshot {
+    worktree: Option<std::path::PathBuf>,
     setup: CollaborationSetup,
     waiting_messages: u64,
     held_deliveries: Vec<crate::store::HeldDelivery>,
@@ -716,6 +739,9 @@ where
             waiting_messages: 0,
             held_deliveries: Vec::new(),
             space_id: discovered.workspace_id,
+            worktree: discovered
+                .worktree_attached
+                .then(|| std::path::PathBuf::from(discovered.worktree_id.as_str())),
         });
     };
     let setup = crate::lifecycle::load_collaboration_setup_from_store(
@@ -734,6 +760,9 @@ where
         waiting_messages: waiting,
         held_deliveries,
         space_id: discovered.workspace_id,
+        worktree: discovered
+            .worktree_attached
+            .then(|| std::path::PathBuf::from(discovered.worktree_id.as_str())),
     })
 }
 

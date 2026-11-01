@@ -464,7 +464,13 @@ pub(crate) fn inspect_integration_package(
     runtime: AgentRuntime,
     state: &Path,
     config: AgentConfigDirectories<'_>,
+    worktree: Option<&Path>,
 ) -> Result<(), String> {
+    if runtime == AgentRuntime::Codex
+        && let Some(worktree) = worktree
+    {
+        codex_sandbox::check_worktree(state, worktree)?;
+    }
     let home = home.ok_or("no absolute user home directory is available")?;
     let executable = PathBuf::from(crate::collaboration_executable()?);
     let prepared = prepare_integration_package(home, runtime, &executable, state, config)?;

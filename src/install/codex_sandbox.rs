@@ -129,7 +129,7 @@ fn physical_state(state: &Path) -> Result<String, String> {
         .ok_or_else(|| "Namedrop state directory must be UTF-8".into())
 }
 
-fn root(state: &Path) -> Result<String, String> {
+pub(crate) fn root(state: &Path) -> Result<String, String> {
     let spool = PathBuf::from(physical_state(state)?).join("deferred-commands");
     match fs::symlink_metadata(&spool) {
         Ok(metadata) if metadata.is_symlink() => {
@@ -144,6 +144,23 @@ fn root(state: &Path) -> Result<String, String> {
         _ => {}
     }
     Ok(spool.to_str().expect("UTF-8 state path").to_owned())
+}
+
+fn exposes_trusted_state(state: &Path, writable: &Path) -> bool {
+    state.starts_with(writable)
+        || (writable.starts_with(state) && !writable.starts_with(state.join("deferred-commands")))
+}
+
+pub(crate) fn check_worktree(state: &Path, worktree: &Path) -> Result<(), String> {
+    let state = physical_state(state)?;
+    let physical_worktree = resolve_directory(worktree)?;
+    if exposes_trusted_state(Path::new(&state), &physical_worktree) {
+        return Err(format!(
+            "unsafe Space worktree {} exposes trusted Namedrop state through Codex's implicit workspace write access; move the Space worktree outside the Namedrop state directory and its ancestors, or relocate Namedrop state outside the worktree, then activate Namedrop again and start a new Codex session",
+            worktree.display()
+        ));
+    }
+    Ok(())
 }
 
 struct Config {
@@ -201,7 +218,7 @@ impl Config {
         {
             for root in roots.iter().filter_map(|value| value.as_str()) {
                 let path = Path::new(root);
-                if path.is_absolute() && state.starts_with(resolve_directory(path)?) {
+                if path.is_absolute() && exposes_trusted_state(state, &resolve_directory(path)?) {
                     return Err(conflict(
                         &self.path,
                         &format!(
@@ -565,6 +582,8 @@ mod tests {
         for suffix in ["", "..", "runtime", "namedrop.sqlite3", "runtime/new"] {
             let f = Fixture::new();
             let broad = f.state().join(suffix);
+            fs::create_dir_all(f.state().join("runtime")).unwrap();
+            crate::StateStore::open(&f.state()).unwrap();
             f.write(&format!(
                 "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
                 broad.to_str().unwrap()
