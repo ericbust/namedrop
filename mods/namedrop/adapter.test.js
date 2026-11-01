@@ -99,31 +99,22 @@ test("missing and recreated watch directories recover through bounded scheduled 
   let pending = deferred();
   const h = harness({ watching: async () => { if (!exists) throw new Error("missing directory"); return pending.promise; } });
   await h.start();
-  assert.equal(h.watches.length, 1);
-  assert.equal(h.timers.length, 1);
-  const first = h.timers[0];
-  assert.ok(first.at >= 500 && first.at <= 30000);
-  await h.fire(first, 60000);
-  assert.equal(h.watches.length, 2, "a delayed retry must not catch up in a loop");
-  assert.equal(h.timers.length, 1);
+  await h.fire(h.timers[0], 60000);
+  assert.deepEqual(h.watchTimes, [0, 60000], "a delayed retry must not catch up in a loop");
   exists = true;
-  await h.fire(h.timers[0]);
-  assert.equal(h.watches.length, 3);
-  assert.equal(h.timers.length, 0);
-  const reads = h.calls.filter((call) => call.args.includes("roster")).length;
-  h.setTime(62500);
-  pending.resolve(["/state/namedrop.sqlite3-wal"]);
-  pending = deferred();
-  await h.settle();
-  assert.equal(h.calls.filter((call) => call.args.includes("roster")).length, reads + 1);
+  await advance(h, 62000);
+  assert.deepEqual(h.watchTimes, [0, 60000, 62000]);
+  await advance(h, 62500);
+  assert.equal(rosterReads(h).length, 2);
   exists = false;
   pending.reject(new Error("directory removed"));
   await h.settle();
-  assert.equal(h.timers.length, 1);
   exists = true;
   pending = deferred();
-  await h.fire(h.timers[0]);
-  assert.equal(h.timers.length, 0);
+  await advance(h, 63500);
+  assert.equal(h.watchTimes.at(-1), 63500);
+  await advance(h, 64000);
+  assert.equal(rosterReads(h).length, 3);
 });
 
 test("a stale watch retry cannot revive a replaced directory", async () => {
@@ -170,39 +161,43 @@ test("sixty seconds of watch rejections perform at most three roster execs", asy
   assert.ok(rosterReads(h).length <= 3, `${rosterReads(h).length} roster execs`);
 });
 
-test("watch retries back off at 1, 2, 4, 8, 16 and 30 seconds without roster wakes", async () => {
-  const h = harness({ watching: async () => { throw new Error("missing directory"); } });
-  await h.start();
-  let now = 0;
-  for (const delay of [1000, 2000, 4000, 8000, 16000, 30000, 30000]) {
-    assert.equal(h.timers.length, 1);
-    assert.equal(h.timers[0].at, now + delay);
-    now += delay;
-    await h.fire(h.timers[0]);
-    assert.equal(rosterReads(h).length, 1, "retry must not wake roster");
-  }
-});
+for (const mode of ["throw", "reject"]) {
+  test(`watch ${mode} retries back off at 1, 2, 4, 8, 16 and 30 seconds without roster wakes`, async () => {
+    const h = harness({ watching: () => {
+      if (mode === "throw") throw new Error("missing directory");
+      return Promise.reject(new Error("missing directory"));
+    } });
+    await h.start();
+    let now = 0;
+    const expected = [0];
+    for (const delay of [1000, 2000, 4000, 8000, 16000, 30000, 30000]) {
+      await advance(h, now + delay - 1);
+      assert.deepEqual(h.watchTimes, expected);
+      now += delay;
+      await advance(h, now);
+      expected.push(now);
+      assert.deepEqual(h.watchTimes, expected);
+      assert.equal(rosterReads(h).length, 1, "retry must not wake roster");
+    }
+  });
+}
 
-test("a recovered watch waits for its first change then refreshes once even for irrelevant paths", async () => {
+test("early watch fulfillment consumes recovery before grace without a duplicate read", async () => {
   let pending;
   const h = harness({ watching: () => pending ? pending.promise : Promise.reject(new Error("missing")) });
   await h.start();
-  await h.fire(h.timers[0]);
   pending = deferred();
-  await h.fire(h.timers[0]);
-  assert.equal(rosterReads(h).length, 1, "pending watch is not an attachment acknowledgment");
+  await advance(h, 1000);
+  await advance(h, 1499);
   const first = pending; pending = deferred();
   first.resolve(["/state/unrelated"]);
   await h.settle();
   assert.equal(rosterReads(h).length, 2, "first fulfillment recovers despite basename filter");
-  h.setTime(10000);
+  await advance(h, 3000);
+  assert.equal(rosterReads(h).length, 2);
   const next = pending; pending = deferred(); next.resolve(["/state/unrelated"]);
   await h.settle();
   assert.equal(rosterReads(h).length, 2, "later unrelated changes do not refresh");
-  pending.reject(new Error("removed again"));
-  await h.settle();
-  assert.equal(h.timers.length, 1);
-  assert.equal(h.timers[0].at, 11000, "success resets watch backoff");
 });
 
 for (const outcome of ["resolve", "reject"]) {
@@ -345,4 +340,109 @@ test("a pending retry refreshes backoff writes exactly once after 500ms without 
   assert.equal(h.watchTimes.at(-1), 70000);
   await advance(h, 71000);
   assert.equal(h.watchTimes.at(-1), 71000, "grace recovery resets backoff to one second");
+});
+
+test("a retry rejected at 499ms stays on backoff and its stale grace cannot read", async () => {
+  let pending;
+  const h = harness({ watching: () => pending ? pending.promise : Promise.reject(new Error("missing")) });
+  await h.start();
+  pending = deferred();
+  await advance(h, 1000);
+  await advance(h, 1499);
+  pending.reject(new Error("not attached"));
+  await h.settle();
+  pending = deferred();
+  await advance(h, 3498);
+  assert.deepEqual(h.watchTimes, [0, 1000]);
+  assert.equal(rosterReads(h).length, 1);
+  await advance(h, 3499);
+  assert.deepEqual(h.watchTimes, [0, 1000, 3499]);
+  await advance(h, 3998);
+  assert.equal(rosterReads(h).length, 1);
+  await advance(h, 3999);
+  assert.equal(rosterReads(h).length, 2);
+});
+
+for (const outcome of ["resolve", "reject"]) {
+  test(`replaced retry grace and late ${outcome} cannot refresh or revive the old directory`, async () => {
+    let pending;
+    const h = harness({ watching: (directory) => directory !== "/state" ? new Promise(() => {}) : pending ? pending.promise : Promise.reject(new Error("missing")) });
+    await h.start();
+    pending = deferred();
+    await advance(h, 1000);
+    await advance(h, 1200);
+    h.view.watch("/new-state", h.cx);
+    await h.settle();
+    await advance(h, 1500);
+    if (outcome === "resolve") pending.resolve(["/state/namedrop.sqlite3"]);
+    else pending.reject(new Error("old failure"));
+    await h.settle();
+    await advance(h, 60000);
+    assert.deepEqual(h.watches, ["/state", "/state", "/new-state"]);
+    assert.equal(rosterReads(h).length, 1);
+  });
+}
+
+test("a healthy initial pending watch adds no grace timer or roster read", async () => {
+  const h = harness();
+  await h.start();
+  assert.equal(h.timers.length, 0);
+  await advance(h, 60000);
+  assert.deepEqual(h.watchTimes, [0]);
+  assert.equal(rosterReads(h).length, 1);
+});
+
+test("grace alone resets backoff before a late failure", async () => {
+  let pending;
+  const h = harness({ watching: () => pending ? pending.promise : Promise.reject(new Error("missing")) });
+  await h.start();
+  await advance(h, 3000);
+  pending = deferred();
+  await advance(h, 7500);
+  assert.equal(rosterReads(h).length, 2);
+  await advance(h, 8000);
+  pending.reject(new Error("late failure"));
+  await h.settle();
+  pending = deferred();
+  await advance(h, 8999);
+  assert.deepEqual(h.watchTimes, [0, 1000, 3000, 7000]);
+  await advance(h, 9000);
+  assert.equal(h.watchTimes.at(-1), 9000);
+});
+
+test("recovery and relevant changes retain 500ms debounce and single flight", async () => {
+  let pending;
+  const read = deferred();
+  let reads = 0;
+  const h = harness({
+    watching: () => pending ? pending.promise : Promise.reject(new Error("missing")),
+    execute: async (_command, args) => {
+      if (!args.includes("roster")) return { code: 0 };
+      return ++reads === 2 ? read.promise : ok;
+    },
+  });
+  await h.start();
+  pending = deferred();
+  await advance(h, 1500);
+  assert.deepEqual(rosterReads(h).map((call) => call.now), [0, 1500]);
+  for (const time of [1600, 1700, 1999]) {
+    await advance(h, time);
+    const previous = pending; pending = deferred();
+    previous.resolve(["/state/namedrop.sqlite3-wal"]);
+    await h.settle();
+    assert.equal(rosterReads(h).length, 2, "recovery read stays single flight");
+  }
+  read.resolve(ok);
+  await h.settle();
+  assert.equal(rosterReads(h).length, 2);
+  await advance(h, 2000);
+  assert.deepEqual(rosterReads(h).map((call) => call.now), [0, 1500, 2000]);
+  await advance(h, 2100);
+  const previous = pending; pending = deferred();
+  previous.resolve(["/state/namedrop.sqlite3"]);
+  await h.settle();
+  await advance(h, 2499);
+  assert.equal(rosterReads(h).length, 3);
+  await advance(h, 2500);
+  assert.deepEqual(rosterReads(h).map((call) => call.now), [0, 1500, 2000, 2500]);
 });
