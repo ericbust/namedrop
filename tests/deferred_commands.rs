@@ -549,3 +549,82 @@ fn a_replaced_registration_cannot_execute_an_older_queued_command() {
     );
     assert_eq!(fixture.message_count(), 0);
 }
+
+#[test]
+fn malformed_receipt_is_quarantined_and_committed_command_is_recovered() {
+    let fixture = Fixture::new();
+    let input = send("corrupt-receipt", "original");
+    let pending = response(fixture.sandbox_command(&["send"], input.clone()));
+    let key = pending["data"]["operation_id"].as_str().unwrap();
+    let receipt = PathBuf::from(pending["data"]["receipt"].as_str().unwrap());
+    let request = fixture.spool().join(format!("{key}.request.json"));
+    let original = fs::read(&request).unwrap();
+    let worker = fixture.worker();
+    wait_for(|| receipt.exists());
+    let committed: Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    drop(worker);
+    fs::write(&receipt, "not json").unwrap();
+    fs::write(
+        fixture.spool().join("pending").join(format!("{key}.json")),
+        "{}",
+    )
+    .unwrap();
+    let mut worker = fixture.worker();
+    wait_for(|| {
+        assert!(
+            worker.0.try_wait().unwrap().is_none(),
+            "malformed receipt killed worker"
+        );
+        fs::read(&receipt)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some()
+    });
+    let recovered: Value = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
+    assert_eq!(
+        recovered["result"]["Ok"]["message_id"],
+        committed["result"]["Ok"]["message_id"]
+    );
+    assert_eq!(fs::read(request).unwrap(), original);
+    assert!(
+        fs::read_dir(fixture.spool().join("rejected"))
+            .unwrap()
+            .any(|entry| fs::read(entry.unwrap().path()).unwrap() == b"not json")
+    );
+    let next = response(fixture.sandbox_command(&["send"], send("after-corrupt-receipt", "next")));
+    assert!(next["data"]["message_id"].is_string(), "{next}");
+    assert_eq!(fixture.message_count(), 2);
+}
+
+#[test]
+fn tampered_request_is_quarantined_without_retrying_or_blocking_valid_commands() {
+    let fixture = Fixture::new();
+    let pending =
+        response(fixture.sandbox_command(&["send"], send("tampered-request", "original")));
+    let key = pending["data"]["operation_id"].as_str().unwrap();
+    let request = fixture.spool().join(format!("{key}.request.json"));
+    let marker = fixture.spool().join("pending").join(format!("{key}.json"));
+    let mut tampered: Value = serde_json::from_slice(&fs::read(&request).unwrap()).unwrap();
+    tampered["input"]["source"] = json!("@reviewer tampered");
+    let bytes = serde_json::to_vec(&tampered).unwrap();
+    fs::write(&request, &bytes).unwrap();
+    let mut worker = fixture.worker();
+    wait_for(|| {
+        assert!(
+            worker.0.try_wait().unwrap().is_none(),
+            "invalid request killed worker"
+        );
+        !marker.exists()
+    });
+    assert!(!request.exists());
+    assert!(!Path::new(pending["data"]["receipt"].as_str().unwrap()).exists());
+    assert_eq!(fixture.message_count(), 0);
+    assert!(
+        fs::read_dir(fixture.spool().join("rejected"))
+            .unwrap()
+            .any(|entry| fs::read(entry.unwrap().path()).unwrap() == bytes)
+    );
+    let next = response(fixture.sandbox_command(&["send"], send("after-tampered-request", "next")));
+    assert!(next["data"]["message_id"].is_string(), "{next}");
+    assert_eq!(fixture.message_count(), 1);
+}
