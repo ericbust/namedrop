@@ -60,7 +60,6 @@ enum Kind {
 #[derive(Clone, Default)]
 struct DirtyTerminal {
     seq: Option<u64>,
-    watch: bool,
     resume: bool,
     unavailable: bool,
     removed: bool,
@@ -125,7 +124,6 @@ impl Pending {
                     }
                     let dirty = self.dirty.entry(pane).or_default();
                     dirty.seq = dirty.seq.max(event.seq);
-                    dirty.watch |= matches!(event.kind, Kind::Foreground | Kind::Status);
                     dirty.resume |=
                         matches!(event.kind, Kind::Status | Kind::Turn | Kind::Foreground);
                     dirty.unavailable |=
@@ -410,13 +408,7 @@ impl Subscriber {
     ) -> Result<(), String> {
         let active: BTreeSet<_> = active_spaces(runtime)?.into_iter().collect();
         let mut panes: BTreeSet<_> = BTreeSet::new();
-        panes.extend(
-            pending
-                .dirty
-                .iter()
-                .filter(|(pane, change)| change.watch || self.owner_watches.contains_key(*pane))
-                .map(|(pane, _)| pane.clone()),
-        );
+        panes.extend(pending.dirty.keys().cloned());
         if pending.full || pending.snapshot.is_some() {
             panes.extend(self.terminals.keys().cloned());
             panes.extend(self.owner_watches.keys().cloned());
