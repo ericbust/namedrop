@@ -2373,7 +2373,7 @@ fn unavailable_neighbor_does_not_block_healthy_mail() {
 }
 
 #[test]
-fn due_mailbox_tick_does_not_retry_an_unavailable_dead_owner() {
+fn due_mailbox_tick_retries_unavailable_owner_and_settles_healthy_mail() {
     use namedrop::*;
     check("unavailable-due-tick", |fixture, runtime| {
         let dead_owner = process::AgentProcess::new();
@@ -2488,8 +2488,8 @@ fn due_mailbox_tick_does_not_retry_an_unavailable_dead_owner() {
                 .iter()
                 .filter(|call| call[0] == "get" && call[1] == "t1")
                 .count(),
-            0,
-            "due tick retried unavailable pane: {:?}",
+            2,
+            "one due refresh plus existing delivery freshness read: {:?}",
             fixture.calls.borrow()
         );
         result.unwrap();
@@ -2750,9 +2750,8 @@ fn failed_get_recovers_and_delivers_on_due_tick_without_event() {
             "recovered pane's mail remained stranded: {calls:?}"
         );
         assert!(
-            calls
-                .iter()
-                .all(|call| call[0] != "ls" && (call[0] != "get" || call[1] == "t1"))
+            calls.iter().all(|call| call[0] != "get" || call[1] == "t1"),
+            "unexpected recovery calls: {calls:?}"
         );
     });
 }
@@ -2760,6 +2759,8 @@ fn failed_get_recovers_and_delivers_on_due_tick_without_event() {
 #[test]
 fn failed_get_retries_back_off_to_thirty_seconds_without_heartbeat_work() {
     check("failed-get-backoff", |fixture, runtime| {
+        let owner = process::AgentProcess::new();
+        queued_agent(fixture, runtime, owner.pid());
         let runtime = namedrop::LifecycleRuntime {
             clock: &RetryClock(10_000),
             state_directory: runtime.state_directory,
@@ -2778,6 +2779,7 @@ fn failed_get_retries_back_off_to_thirty_seconds_without_heartbeat_work() {
             .unwrap();
         *fixture.get_failure.borrow_mut() = Some("t1".into());
         subscriber.handle_line(&labels(), &runtime).unwrap();
+        drop(owner);
         for due in [
             10_500, 11_500, 13_500, 17_500, 25_500, 41_500, 71_500, 101_500,
         ] {

@@ -170,11 +170,17 @@ struct OwnerWatch {
     due_ms: u64,
 }
 
+struct ReadRetry {
+    due_ms: u64,
+    delay_ms: u64,
+}
+
 #[derive(Default)]
 pub struct Subscriber {
     spaces: BTreeMap<String, String>,
     terminals: BTreeMap<String, Terminal>,
     unavailable: BTreeMap<String, String>,
+    read_retries: BTreeMap<String, ReadRetry>,
     pending: Pending,
     initialized: bool,
     next_wake_ms: Option<u64>,
@@ -316,17 +322,25 @@ impl Subscriber {
         for (pane, watch) in &mut self.owner_watches {
             if watch.due_ms <= now {
                 watch.due_ms = now.saturating_add(500);
-                if self
-                    .terminals
-                    .get(pane)
-                    .is_some_and(|terminal| terminal.session_owner().is_none())
+                if !self.unavailable.contains_key(pane)
+                    && self
+                        .terminals
+                        .get(pane)
+                        .is_some_and(|terminal| terminal.session_owner().is_none())
                 {
                     owner_due = true;
                     self.pending.dirty.entry(pane.clone()).or_default();
                 }
             }
         }
-        if owner_due || self.next_wake_ms.is_some_and(|due| due <= now) {
+        let mut read_due = false;
+        for (pane, retry) in &self.read_retries {
+            if retry.due_ms <= now {
+                read_due = true;
+                self.pending.dirty.entry(pane.clone()).or_default().resume = true;
+            }
+        }
+        if owner_due || read_due || self.next_wake_ms.is_some_and(|due| due <= now) {
             self.reconcile_pending(runtime)?;
         }
         if self
@@ -380,6 +394,9 @@ impl Subscriber {
             .reconcile_batch(&mut pending, runtime)
             .and_then(|()| self.schedule_owner_watches(&pending, runtime));
         if result.is_err() {
+            pending
+                .dirty
+                .retain(|pane, _| !self.read_retries.contains_key(pane));
             self.pending = pending;
             self.next_wake_ms = Some(runtime.clock.now_unix_ms().saturating_add(500));
         }
@@ -567,6 +584,7 @@ impl Subscriber {
                     Ok(terminal) => {
                         self.terminals.insert(pane.clone(), terminal);
                         self.unavailable.remove(pane);
+                        self.read_retries.remove(pane);
                     }
                     Err(error)
                         if change.removed
@@ -578,9 +596,16 @@ impl Subscriber {
                     {
                         self.terminals.remove(pane);
                         self.unavailable.remove(pane);
+                        self.read_retries.remove(pane);
                     }
                     Err(error) => {
                         self.unavailable.insert(pane.clone(), error.to_string());
+                        let retry = self.read_retries.entry(pane.clone()).or_insert(ReadRetry {
+                            due_ms: 0,
+                            delay_ms: 250,
+                        });
+                        retry.delay_ms = retry.delay_ms.saturating_mul(2).min(30_000);
+                        retry.due_ms = runtime.clock.now_unix_ms().saturating_add(retry.delay_ms);
                     }
                 }
             }
@@ -708,6 +733,14 @@ impl Subscriber {
             if let Err(error) = self.publish_counters(&scoped) {
                 errors.push(error);
             }
+        }
+        self.read_retries
+            .retain(|pane, _| self.unavailable.contains_key(pane));
+        for pane in self.unavailable.keys() {
+            self.read_retries.entry(pane.clone()).or_insert(ReadRetry {
+                due_ms: runtime.clock.now_unix_ms().saturating_add(500),
+                delay_ms: 500,
+            });
         }
         if errors.is_empty() {
             Ok(())
