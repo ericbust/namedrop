@@ -890,17 +890,18 @@ impl Subscriber {
         }
         pending.full = false;
         pending.snapshot = None;
-        pending.dirty.clear();
         if full {
             let retained = |pane: &String| {
                 self.terminals.contains_key(pane)
                     || bound_spaces.contains_key(pane)
                     || observed_unavailable.contains(pane)
+                    || pending.dirty.contains_key(pane)
             };
             self.pane_retries.retain(|pane, _| retained(pane));
             self.read_retries.retain(|pane, _| retained(pane));
             self.unavailable.retain(|pane, _| retained(pane));
         }
+        pending.dirty.clear();
         if errors.is_empty() {
             Ok(())
         } else {
