@@ -3675,3 +3675,171 @@ fn partial_batch_error_still_arms_new_session_generation_watch() {
         );
     });
 }
+
+#[test]
+fn fresh_foreground_settle_delivers_while_counters_retry() {
+    check("fresh-settle-counter-retry", |fixture, runtime| {
+        let owner = process::AgentProcess::new();
+        queued_agent(fixture, runtime, owner.pid());
+        let foreground = fixture.terminals.borrow()[0]["foreground"].clone();
+        let runtime = namedrop::LifecycleRuntime {
+            clock: &RetryClock(10_000),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            host: runtime.host,
+            ids: runtime.ids,
+        };
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.awaiting"] = json!("-1");
+        *fixture.counter_failure.borrow_mut() = true;
+        assert!(
+            subscriber
+                .handle_line(&labels(), &runtime)
+                .unwrap_err()
+                .contains("counter publication failed")
+        );
+        fixture.terminals.borrow_mut()[0]["foreground"] =
+            json!({"pid":fixture._shell.pid(),"name":"bash","argv":["bash"]});
+        let _ = subscriber.handle_line(&session_event("foreground", fixture), &runtime);
+        fixture.terminals.borrow_mut()[0]["foreground"] = foreground;
+        fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"done"});
+        fixture.calls.borrow_mut().clear();
+        let result = subscriber.handle_line(
+            &session_event("foreground", fixture),
+            &namedrop::LifecycleRuntime {
+                clock: &RetryClock(10_100),
+                ..runtime
+            },
+        );
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "send" && call[1] == "t1")
+                .count(),
+            1,
+            "fresh settle must deliver before the counter retry: {result:?}"
+        );
+    });
+}
+
+#[test]
+fn fresh_space_work_preserves_counter_retry_schedule() {
+    for kind in ["labels", "snapshot", "missed"] {
+        check(&format!("fresh-space-{kind}"), |fixture, runtime| {
+            let runtime = namedrop::LifecycleRuntime {
+                clock: &RetryClock(10_000),
+                state_directory: runtime.state_directory,
+                home_directory: runtime.home_directory,
+                agent_config: runtime.agent_config,
+                cwd: runtime.cwd,
+                workspace_id: runtime.workspace_id,
+                current_pane_id: runtime.current_pane_id,
+                session_socket_id: runtime.session_socket_id,
+                host: runtime.host,
+                ids: runtime.ids,
+            };
+            let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+            subscriber
+                .handle_line(&session_event("snapshot", fixture), &runtime)
+                .unwrap();
+            fixture.terminals.borrow_mut()[0]["labels"]["namedrop.awaiting"] = json!("-1");
+            *fixture.counter_failure.borrow_mut() = true;
+            subscriber.handle_line(&labels(), &runtime).unwrap_err();
+            for now in [10_100, 10_200, 10_499] {
+                fixture.calls.borrow_mut().clear();
+                let result = subscriber.handle_line(
+                    &session_event(kind, fixture),
+                    &namedrop::LifecycleRuntime {
+                        clock: &RetryClock(now),
+                        ..runtime
+                    },
+                );
+                assert!(
+                    result.is_err(),
+                    "fresh {kind} at {now} skipped the failing counter: {result:?}"
+                );
+                assert_eq!(
+                    fixture
+                        .calls
+                        .borrow()
+                        .iter()
+                        .filter(|call| call[0] == "label")
+                        .count(),
+                    1
+                );
+            }
+            for (now, fails) in [
+                (10_500, true),
+                (11_000, false),
+                (11_499, false),
+                (11_500, true),
+            ] {
+                fixture.calls.borrow_mut().clear();
+                let result = subscriber.tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(now),
+                    ..runtime
+                });
+                assert_eq!(
+                    result.is_err(),
+                    fails,
+                    "counter schedule at {now}: {result:?}"
+                );
+                assert_retry_calls(fixture, &[], usize::from(fails));
+            }
+            *fixture.counter_failure.borrow_mut() = false;
+            subscriber
+                .handle_line(
+                    &session_event(kind, fixture),
+                    &namedrop::LifecycleRuntime {
+                        clock: &RetryClock(11_600),
+                        ..runtime
+                    },
+                )
+                .unwrap();
+            fixture.calls.borrow_mut().clear();
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(13_500),
+                    ..runtime
+                })
+                .unwrap();
+            assert_retry_calls(fixture, &[], 0);
+            fixture.terminals.borrow_mut()[0]["labels"]["namedrop.awaiting"] = json!("-1");
+            *fixture.counter_failure.borrow_mut() = true;
+            subscriber
+                .handle_line(
+                    &labels(),
+                    &namedrop::LifecycleRuntime {
+                        clock: &RetryClock(14_000),
+                        ..runtime
+                    },
+                )
+                .unwrap_err();
+            fixture.calls.borrow_mut().clear();
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(14_499),
+                    ..runtime
+                })
+                .unwrap();
+            assert_retry_calls(fixture, &[], 0);
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(14_500),
+                    ..runtime
+                })
+                .unwrap_err();
+            assert_retry_calls(fixture, &[], 1);
+        });
+    }
+}
