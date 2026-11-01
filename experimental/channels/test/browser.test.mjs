@@ -725,13 +725,12 @@ test("fix2 item 6: gone during replay removes both committed and pending channel
   await ui.row(1).waitFor();
 });
 
-test("fix3 item 2: slow first discovery stays loading at 2.4s until data arrives at 3s", async (t) => {
+test("fix3 item 2: slow first discovery stays loading past the replay timeout until data arrives", async (t) => {
   const ui = await open(t, () => {});
-  await new Promise((resolve) => setTimeout(resolve, 2400));
-  assert.ok(
-    (await ui.page.evaluate(
-      () => performance.getEntriesByName("namedrop:frame-apply").length,
-    )) > 0,
+  // The server sends nothing, so the only frame the page measures is its own
+  // replay timeout, two seconds after the stream opens.
+  await ui.page.waitForFunction(
+    () => performance.getEntriesByName("namedrop:frame-apply").length > 0,
   );
   assert.equal(
     await ui.page.getByRole("heading", { level: 1 }).textContent(),
@@ -745,7 +744,6 @@ test("fix3 item 2: slow first discovery stays loading at 2.4s until data arrives
     await ui.page.getByText("No workspaces yet", { exact: true }).count(),
     0,
   );
-  await new Promise((resolve) => setTimeout(resolve, 600));
   ui.connections[0].send("space", frame(2, "beta"));
   ui.connections[0].send("space", frame(1, "alpha"));
   ui.connections[0].send("ready", { keys: [key(1), key(2)] });
