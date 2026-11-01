@@ -1635,3 +1635,28 @@ fn resume_settled_recipient<E: HerdrCommandExecutor, C: Clock, I>(
         })
         .map_err(|error| error.to_string())
 }
+
+pub(crate) fn roster_core_identity(
+    state: &Path,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<Option<String>, String> {
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let rpc = rpc::SubscriberRpc::new(environment, state, &cancelled)?;
+    let response = match rpc.execute(&["server", "status", "--json"]) {
+        Ok(response) => response.stdout,
+        Err(error)
+            if [libc::ENOENT, libc::ECONNREFUSED]
+                .into_iter()
+                .any(|code| error == std::io::Error::from_raw_os_error(code).to_string()) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let value: Value = serde_json::from_str(&response).map_err(|error| error.to_string())?;
+    let id = value["core"]["id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("server.status omitted core.id")?;
+    Ok(Some(id.to_owned()))
+}

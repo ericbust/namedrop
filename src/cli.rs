@@ -73,18 +73,30 @@ impl Parser for Cli {
             Ok(matches) => return Self::from_arg_matches(&matches),
             Err(error) => error,
         };
-        let tui_command = command.clone().mut_subcommand("hook", |hook| {
-            clap::Command::new("hook")
-                .about(hook.get_about().unwrap().clone())
-                .hide(true)
-                .subcommand_required(true)
-                .arg_required_else_help(true)
-                .subcommands(
-                    hook.get_subcommands()
-                        .filter(|child| child.get_name() != "session-end")
-                        .cloned(),
-                )
-        });
+        let tui_command = clap::Command::new("namedrop")
+            .version(env!("CARGO_PKG_VERSION"))
+            .about(env!("CARGO_PKG_DESCRIPTION"))
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .args(command.get_arguments().cloned())
+            .subcommands(
+                command
+                    .get_subcommands()
+                    .filter(|child| child.get_name() != "roster")
+                    .cloned(),
+            )
+            .mut_subcommand("hook", |hook| {
+                clap::Command::new("hook")
+                    .about(hook.get_about().unwrap().clone())
+                    .hide(true)
+                    .subcommand_required(true)
+                    .arg_required_else_help(true)
+                    .subcommands(
+                        hook.get_subcommands()
+                            .filter(|child| child.get_name() != "session-end")
+                            .cloned(),
+                    )
+            });
         let tui_help = match tui_command.try_get_matches_from(&arguments) {
             Ok(matches) => return Self::from_arg_matches(&matches),
             Err(error) => error,
@@ -266,6 +278,22 @@ impl Cli {
 
     pub fn operation(&self) -> &'static str {
         self.command.operation()
+    }
+
+    pub fn roster_json(&self) -> Result<String, String> {
+        let state = self.runtime.state_directory()?;
+        let state = if state.is_absolute() {
+            state
+        } else {
+            std::env::current_dir()
+                .map_err(|error| error.to_string())?
+                .join(state)
+        };
+        let core =
+            crate::host::hc::events::roster_core_identity(&state, &self.runtime.environment)?;
+        let snapshot = crate::StateStore::roster_snapshot(&state, core.as_deref())
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&snapshot).map_err(|error| error.to_string())
     }
 
     pub fn input_is_file(&self) -> bool {
@@ -493,6 +521,9 @@ enum Command {
     /// Subscribe to hc lifecycle and status events.
     #[command(hide = true)]
     Events,
+    /// Read the current hc collaboration roster.
+    #[command(hide = true)]
+    Roster,
     /// Handle one Herdr lifecycle event.
     Event {
         #[command(subcommand)]
@@ -551,6 +582,7 @@ impl Command {
             Self::Space { command } => command.operation(),
             Self::Reconcile => "reconcile",
             Self::Events => "events",
+            Self::Roster => "roster",
             Self::Event { command } => command.operation(),
             Self::Dashboard(_) => "dashboard",
             Self::DashboardServer => "dashboard.server",
