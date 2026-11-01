@@ -12,7 +12,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 
 function harness({ execute = async () => ok, watching = () => new Promise(() => {}) } = {}) {
   let now = 0;
-  const calls = [], notices = [], timers = [], watches = [], errors = [], buttons = new Map();
+  const calls = [], notices = [], timers = [], watches = [], watchTimes = [], errors = [], buttons = new Map();
   const make = (id) => {
     const proxy = new Proxy({}, { get(_target, key) {
       if (key === "when") return (condition, fn) => { if (condition) fn(proxy); return proxy; };
@@ -24,7 +24,7 @@ function harness({ execute = async () => ok, watching = () => new Promise(() => 
   const dependencies = {
     View: class {}, initialModel, transition, watchedStoreFile,
     exec: async (command, args) => { calls.push({ command, args, now }); return execute(command, args); },
-    home: () => "/private", watchFolder: (directory) => { watches.push(directory); return watching(directory); },
+    home: () => "/private", watchFolder: (directory) => { watches.push(directory); watchTimes.push(now); return watching(directory); },
     notify: (notice) => notices.push(notice), Date: { now: () => now },
     div: make, v_flex: make, h_flex: make, Button: { new: make },
     theme: () => ({}), terminals: () => [], panes: () => [], spaces: () => [], roster: () => [], placement: () => null, props: () => ({}),
@@ -35,7 +35,7 @@ function harness({ execute = async () => ok, watching = () => new Promise(() => 
   const view = new Namedrop();
   const settle = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); assert.deepEqual(errors, []); };
   const fire = async (timer, time = timer.at) => { timers.splice(timers.indexOf(timer), 1); now = time; timer.fn(cx); await settle(); };
-  return { view, cx, calls, notices, timers, watches, buttons, settle, fire, setTime(time) { now = time; },
+  return { view, cx, calls, notices, timers, watches, watchTimes, buttons, settle, fire, setTime(time) { now = time; },
     ensures: () => calls.filter((call) => call.args.includes("--ensure")),
     async start() { view.init({}, cx); await settle(); },
     async retry(time) { now = time; view.render(); buttons.get("retry-roster")({}, cx); await settle(); },
@@ -308,4 +308,41 @@ test("a slow initial failure consumes successful ensure without reserving anothe
   assert.equal(reads, 2);
   assert.equal(h.ensures().length, 1);
   assert.equal(h.view.model.error, null);
+});
+
+
+test("a pending retry refreshes backoff writes exactly once after 500ms without a change", async () => {
+  let exists = false;
+  let current = snapshot;
+  let pending = deferred();
+  const h = harness({
+    watching: () => exists ? pending.promise : Promise.reject(new Error("missing")),
+    execute: async (_command, args) => args.includes("roster") ? { code: 0, stdout: JSON.stringify(current) } : { code: 0 },
+  });
+  await h.start();
+  await advance(h, 60000);
+  assert.ok(rosterReads(h).length <= 3);
+  const reads = rosterReads(h).length;
+  current = { ...snapshot, rows: [{ alias: "written-during-backoff" }] };
+  exists = true;
+  await advance(h, 61000);
+  assert.equal(h.watchTimes.at(-1), 61000);
+  await advance(h, 61499);
+  assert.equal(rosterReads(h).length, reads);
+  await advance(h, 61500);
+  assert.equal(rosterReads(h).length, reads + 1, "pending retry must refresh at the grace boundary");
+  assert.deepEqual(h.view.model.snapshot, current);
+  await advance(h, 70000);
+  assert.equal(rosterReads(h).length, reads + 1);
+  const attached = pending; pending = deferred();
+  attached.resolve(["/state/unrelated"]);
+  await h.settle();
+  assert.equal(rosterReads(h).length, reads + 1, "irrelevant fulfillment cannot repeat recovery");
+  pending.reject(new Error("removed again"));
+  await h.settle();
+  pending = deferred();
+  await advance(h, 70999);
+  assert.equal(h.watchTimes.at(-1), 70000);
+  await advance(h, 71000);
+  assert.equal(h.watchTimes.at(-1), 71000, "grace recovery resets backoff to one second");
 });
