@@ -45,6 +45,10 @@ impl Clock for Time {
 fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
     let root = std::env::temp_dir().join(format!("namedrop-terminal-name-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
+    if std::env::var_os("NAMEDROP_TERMINAL_CLEANUP_CHILD").is_some() {
+        std::fs::write(root.join("pane-effects-retries.log"), "terminal cleanup record\n")
+            .unwrap();
+    }
     let host = Host {
         agent: Mutex::new(None),
         shell_ready: Mutex::new(true),
@@ -84,4 +88,21 @@ fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
     let listed: Value = execute_lifecycle_operation("address.list", json!({}), &runtime).unwrap();
     assert!(listed.to_string().contains("\"pane_type\":\"agent\""));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn terminal_state_cleanup_preserves_retry_records() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "naming_detects_terminal_preserves_type_on_rename_and_allows_override",
+        ])
+        .env("NAMEDROP_TERMINAL_CLEANUP_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "terminal cleanup record\n"
+    );
 }
