@@ -11,33 +11,47 @@ export default class Namedrop extends View {
     this.install = "checking";
     this.model = initialModel();
     this.watchGeneration = 0;
+    this.discover(cx);
+  }
+
+  discover(cx) {
+    if (this.discovering) return;
+    this.discovering = true;
+    this.install = "checking";
     cx.spawn(async (cx) => {
-      const candidates = [home() + "/.local/bin/namedrop-app", "namedrop"];
-      for (const candidate of candidates) {
-        try {
-          const probe = await exec(candidate, ["--version"]);
-          if (probe.code !== 0) throw new Error(probe.stderr || `Namedrop version check failed with exit code ${probe.code}.`);
-          this.binary = candidate;
-          this.install = "available";
-          cx.spawn(async () => { await exec(candidate, ["--host", "hc", "events", "--ensure"]); });
-          this.dispatch({ type: "wake", now: Date.now() }, cx);
-          cx.notify();
-          return;
-        } catch (error) {
-          if (!/^`herdr\.exec`: cannot run .+: .*No such file or directory \(os error 2\)/.test(String(error?.message ?? error))) {
-            this.install = "error";
-            this.dispatch({ type: "readError", error: String(error?.message ?? error), now: Date.now() }, cx);
+      try {
+        const candidates = [home() + "/.local/bin/namedrop-app", "namedrop"];
+        for (const candidate of candidates) {
+          try {
+            const probe = await exec(candidate, ["--version"]);
+            if (probe.code !== 0) throw new Error(probe.stderr || `Namedrop version check failed with exit code ${probe.code}.`);
+            this.binary = candidate;
+            this.install = "available";
+            this.dispatch({ type: "start", now: Date.now() }, cx);
             cx.notify();
             return;
+          } catch (error) {
+            if (!/^`herdr\.exec`: cannot run .+: .*No such file or directory \(os error 2\)/.test(String(error?.message ?? error))) {
+              this.install = "error";
+              this.dispatch({ type: "discoveryError", error: String(error?.message ?? error), now: Date.now() }, cx);
+              cx.notify();
+              return;
+            }
           }
         }
+        this.install = "missing";
+        cx.notify();
+      } finally {
+        this.discovering = false;
       }
-      this.install = "missing";
-      cx.notify();
     });
   }
 
   dispatch(event, cx) {
+    if (event.type === "retry" && !this.binary) {
+      this.discover(cx);
+      return;
+    }
     const next = transition(this.model, event);
     this.model = next.model;
     for (const effect of next.effects) {
@@ -48,12 +62,16 @@ export default class Namedrop extends View {
         const at = this.model.toastAt;
         cx.timer.after(effect.delay, (cx) => this.dispatch({ type: "toastTick", at, now: Date.now() }, cx));
       } else if (effect.type === "toast") {
-        notify({ title: effect.message, action: effect.action });
+        notify({ title: effect.message, action: effect.action, ...(effect.level ? { level: effect.level } : {}) });
       } else if (effect.type === "read") {
         cx.spawn(async (cx) => {
           try {
             const result = await exec(this.binary, ["--host", "hc", "roster", "--json"]);
-            if (result.code !== 0) throw new Error(result.stderr || `Roster failed with exit code ${result.code}.`);
+            if (result.code !== 0) {
+              let message;
+              try { message = JSON.parse(result.stdout)?.error?.message; } catch {}
+              throw new Error(typeof message === "string" ? message : result.stderr || `Roster failed with exit code ${result.code}.`);
+            }
             const snapshot = JSON.parse(result.stdout);
             if (!Array.isArray(snapshot.rows) || typeof snapshot.state_directory !== "string") throw new Error("Invalid roster response.");
             this.dispatch({ type: "readOk", snapshot, now: Date.now() }, cx);
@@ -64,7 +82,10 @@ export default class Namedrop extends View {
           cx.notify();
         });
       } else if (effect.type === "ensure" && this.binary) {
-        cx.spawn(async () => { await exec(this.binary, ["--host", "hc", "events", "--ensure"]); });
+        cx.spawn(async (cx) => {
+          try { await exec(this.binary, ["--host", "hc", "events", "--ensure"]); }
+          catch {} finally { this.dispatch({ type: "ensureDone", now: Date.now() }, cx); }
+        });
       }
     }
   }
@@ -81,7 +102,13 @@ export default class Namedrop extends View {
           if (paths.some(watchedStoreFile)) this.dispatch({ type: "wake", now: Date.now() }, cx);
         }
       } catch {
-        if (generation === this.watchGeneration) this.watchDirectory = null;
+        if (generation !== this.watchGeneration) return;
+        cx.timer.after(1000, (cx) => {
+          if (generation !== this.watchGeneration) return;
+          this.watchDirectory = null;
+          this.watch(directory, cx);
+          this.dispatch({ type: "wake", now: Date.now() }, cx);
+        });
       }
     });
   }

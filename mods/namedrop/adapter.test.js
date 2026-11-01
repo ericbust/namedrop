@@ -111,6 +111,7 @@ test("missing and recreated watch directories recover through bounded scheduled 
   assert.equal(h.watches.length, 3);
   assert.equal(h.timers.length, 0);
   const reads = h.calls.filter((call) => call.args.includes("roster")).length;
+  h.setTime(61500);
   pending.resolve(["/state/namedrop.sqlite3-wal"]);
   pending = deferred();
   await h.settle();

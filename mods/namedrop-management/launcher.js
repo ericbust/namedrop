@@ -2,7 +2,7 @@ const popup = "management";
 const entries = { management: "manage", "agent-status": "status", doctor: "doctor", tour: "tour" };
 
 function errorMessage(result) {
-  try { return JSON.parse(result.stdout)?.error ?? null; } catch { return null; }
+  try { return JSON.parse(result.stderr)?.error ?? null; } catch { return null; }
 }
 
 export async function launchPopup({ home, focused, terminals, exec, hc, openOverlay, props = {} }) {
