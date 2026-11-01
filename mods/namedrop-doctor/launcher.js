@@ -42,7 +42,7 @@ export async function launchPopup({ home, focused, terminals, exec, hc, openOver
   }
   if (typeof address !== "string") return { error: "Launcher did not return a terminal address." };
   openOverlay({ kind: "window", key: name, width: 720, height: 500, layout: { type: "column", children: [
-    { type: "block", size: { px: 28 }, content: { mod: name, props: { part: "bar" } } },
+    { type: "block", size: { px: 28 }, content: { mod: name, props: { part: "bar", terminal: address } } },
     { type: "block", content: { terminal: address } },
   ] } });
   return { ok: true };
