@@ -364,6 +364,81 @@ fn previous_session_messages_do_not_enter_current_row() {
 }
 
 #[test]
+fn unbound_waits_use_latest_attempt_and_keep_attention_recipients() {
+    let home = PrivateHome::new();
+    let state = home.path().join("state");
+    seed_address(&state, "hc:current", "space", "alpha", None);
+    let connection = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+    connection.execute_batch(
+        "INSERT INTO pane_addresses (session_socket_id,worktree_id,address_id,role_id,retired,collaboration_disabled,created_at_ms)
+           VALUES ('hc:current','space','other','role',0,0,1);
+         INSERT INTO pane_bindings VALUES ('hc:current','space','binding','address','%1',1,NULL,1,NULL);
+         INSERT INTO collaboration_threads VALUES ('hc:current','space','thread','',1);",
+    ).unwrap();
+    for (index, state, disposition) in [
+        (1, "held", "reply"),
+        (2, "failed", "no_reply"),
+        (3, "queued", "reply"),
+    ] {
+        let message = format!("request-{index}");
+        let delivery = format!("delivery-{index}");
+        connection.execute(
+            "INSERT INTO collaboration_messages (session_socket_id,worktree_id,message_id,thread_id,thread_order,in_reply_to,author_address_id,author_alias_snapshot,author_kind,author_session_snapshot,request_id,authored_source,body,grammar_version,created_at_ms)
+               VALUES ('hc:current','space',?1,'thread',?2,NULL,'address','alpha','agent_session',NULL,?1,'test','private','mention/v1',?2)",
+            rusqlite::params![message, index],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO message_recipients VALUES ('hc:current','space',?1,1,'address','alpha',NULL)",
+            [&message],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO message_recipients VALUES ('hc:current','space',?1,2,'other','beta',NULL)",
+            [&message],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO mailbox_deliveries VALUES ('hc:current','space',?1,'address',?2,?3,?4,?2)",
+            rusqlite::params![delivery, index, message, state],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO mailbox_deliveries VALUES ('hc:current','space',?1,'other',?2,?3,'queued',?2)",
+            rusqlite::params![format!("other-{index}"), index, message],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO delivery_attempts VALUES ('hc:current','space',?1,?2,'address','binding','session',NULL,?3)",
+            rusqlite::params![format!("attempt-{index}-old"), delivery, index],
+        ).unwrap();
+        connection.execute(
+            "INSERT INTO delivery_dispositions VALUES ('hc:current','space',?1,?2,?3,?4)",
+            rusqlite::params![format!("disposition-{index}"), format!("attempt-{index}-old"), disposition, index],
+        ).unwrap();
+        if index == 3 {
+            connection.execute(
+                "INSERT INTO delivery_attempts VALUES ('hc:current','space','attempt-3-new','delivery-3','address','binding','session','attempt-3-old',4)",
+                [],
+            ).unwrap();
+        }
+    }
+    connection.execute_batch(
+        "INSERT INTO collaboration_messages (session_socket_id,worktree_id,message_id,thread_id,thread_order,in_reply_to,author_address_id,author_alias_snapshot,author_kind,author_session_snapshot,request_id,authored_source,body,grammar_version,created_at_ms)
+           VALUES ('hc:current','space','queued-reply','thread',4,'request-3','other','beta','agent_session',NULL,'reply','test','private','mention/v1',5);
+         INSERT INTO message_recipients VALUES ('hc:current','space','queued-reply',1,'address','alpha',NULL);
+         INSERT INTO mailbox_deliveries VALUES ('hc:current','space','queued-return','address',4,'queued-reply','queued',5);",
+    ).unwrap();
+    let (output, _) = run_core(home.path(), json!({"core":{"id":"current"}}));
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["rows"][0]["waiting_on"], json!([
+        {"alias":"alpha","message_id":"request-3"},
+        {"alias":"beta","message_id":"request-3"},
+        {"alias":"alpha","message_id":"request-2"},
+        {"alias":"beta","message_id":"request-2"},
+        {"alias":"alpha","message_id":"request-1"},
+        {"alias":"beta","message_id":"request-1"}
+    ]));
+    assert_eq!(body["rows"][0]["recent_replies"], json!([]));
+}
+
+#[test]
 fn tui_roster_uses_hidden_command_rejection() {
     let home = PrivateHome::new();
     let output = run(home.path(), &home.path().join("absent.sock"), "tui");
