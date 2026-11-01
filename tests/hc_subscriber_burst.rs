@@ -16,6 +16,7 @@ use std::{
     os::unix::{
         fs::PermissionsExt,
         net::{UnixListener, UnixStream},
+        process::CommandExt,
     },
     path::Path,
     process::{Child, Command, Stdio},
@@ -32,6 +33,7 @@ struct World {
     terminals: Vec<Value>,
     requests: Vec<Value>,
     events: Vec<Value>,
+    fail_remote_read: bool,
 }
 struct Setup(Arc<Mutex<World>>);
 impl HerdrCommandExecutor for Setup {
@@ -142,6 +144,14 @@ fn serve(mut stream: UnixStream, world: Arc<Mutex<World>>, stop: Arc<AtomicBool>
         let method = request["method"].as_str().unwrap();
         let mut state = world.lock().unwrap();
         state.requests.push(request.clone());
+        if method == "terminal.get"
+            && request["params"]["terminal"] == "remote"
+            && state.fail_remote_read
+        {
+            drop(state);
+            if writeln!(stream, "{}", json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32000,"message":"private remote read unavailable","data":{"kind":"unavailable"}}})).is_err() { return; }
+            continue;
+        }
         let result = match method {
             "server.status" => json!({"core":{"id":"burst-private"}}),
             "events.subscribe" => json!({"channel":null,"seq":0,"terminals":state.terminals}),
@@ -256,31 +266,93 @@ fn quiet(world: &Arc<Mutex<World>>, subscriber: &mut Subscriber) {
 
 #[test]
 fn registered_agents_do_not_rescan_during_split_shell_burst() {
-    exercise_burst(true);
+    exercise_burst(true, RemoteSeat::Absent);
 }
 
 #[test]
 fn registered_agents_and_settled_mailbox_are_quiet_without_burst() {
-    exercise_burst(false);
+    exercise_burst(false, RemoteSeat::Absent);
 }
 
-fn exercise_burst(burst: bool) {
+#[test]
+fn open_cross_space_coordination_does_not_rescan_during_split_shell_burst() {
+    exercise_burst(true, RemoteSeat::Present);
+}
+
+#[test]
+fn remote_coordination_read_error_does_not_wake_for_a_missing_worker() {
+    exercise_burst(false, RemoteSeat::ReadError);
+}
+
+#[derive(Clone, Copy)]
+enum RemoteSeat {
+    Absent,
+    Present,
+    ReadError,
+}
+
+fn exercise_burst(burst: bool, remote: RemoteSeat) {
+    let remote_seat = !matches!(remote, RemoteSeat::Absent);
     let root = socket_fixture::short_socket_root();
     let _root_guard = FixtureRoot(root.clone());
     let state = root.join("state");
     let home = root.join("home");
     std::fs::create_dir_all(&home).unwrap();
-    let agents: Vec<_> = (0..3)
-        .map(|_| process::AgentProcess::with_program("claude"))
+    let agents: Vec<_> = (0..if remote_seat { 4 } else { 3 })
+        .map(|_| {
+            let child = Subscriber(
+                Command::new("/bin/sleep")
+                    .arg0("claude")
+                    .arg("600")
+                    .isolated_env(&home)
+                    .spawn()
+                    .unwrap(),
+            );
+            #[cfg(target_os = "linux")]
+            {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                while !std::fs::read(format!("/proc/{}/cmdline", child.0.id()))
+                    .is_ok_and(|args| args.starts_with(b"claude\0"))
+                {
+                    assert!(Instant::now() < deadline, "stand-in did not exec");
+                    thread::sleep(Duration::from_millis(1));
+                }
+            }
+            child
+        })
         .collect();
-    let shell = process::AgentProcess::shell();
+    let mut shell = Subscriber(
+        Command::new("/bin/bash")
+            .args([
+                "--noprofile",
+                "--norc",
+                "-c",
+                "printf 'ready\\n'; read -r _",
+            ])
+            .isolated_env(&home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let mut ready = String::new();
+    BufReader::new(shell.0.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n");
     let world = Arc::new(Mutex::new(World::default()));
     for (index, alias) in ["alpha", "bravo", "charlie"].iter().enumerate() {
         world.lock().unwrap().terminals.push(terminal(
             &format!("t{}", index + 1),
-            agents[index].pid(),
+            agents[index].0.id(),
             Some(alias),
         ));
+    }
+    if remote_seat {
+        let mut origin = terminal("remote", agents[3].0.id(), Some("delta"));
+        origin["labels"]["herdr.space"] = json!("origin-space");
+        origin["status"]["state"] = json!("working");
+        world.lock().unwrap().terminals.push(origin);
     }
     let setup = Setup(world.clone());
     let ids = ProcessIds::default();
@@ -302,6 +374,26 @@ fn exercise_burst(burst: bool) {
         };
         execute_lifecycle_operation("name", json!({"alias":alias,"pane_type":"agent"}), &runtime)
             .unwrap();
+    }
+    if remote_seat {
+        let runtime = LifecycleRuntime {
+            state_directory: &state,
+            home_directory: Some(&home),
+            agent_config: AgentConfigDirectories::default(),
+            cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+            workspace_id: Some("origin-space"),
+            current_pane_id: Some("remote"),
+            session_socket_id: "hc:burst-private",
+            host: HcHost::new(&setup),
+            clock: &clock,
+            ids: &ids,
+        };
+        execute_lifecycle_operation(
+            "name",
+            json!({"alias":"delta","pane_type":"agent"}),
+            &runtime,
+        )
+        .unwrap();
     }
     let attribution = MutationAttribution::new(ActorKind::Human, "burst-mail", clock.now_unix_ms());
     StateStore::open(&state)
@@ -379,11 +471,95 @@ fn exercise_burst(burst: bool) {
             Ok(())
         })
         .unwrap();
+    if remote_seat {
+        let runtime = LifecycleRuntime {
+            state_directory: &state,
+            home_directory: Some(&home),
+            agent_config: AgentConfigDirectories::default(),
+            cwd: Path::new(env!("CARGO_MANIFEST_DIR")),
+            workspace_id: Some("fixture-space"),
+            current_pane_id: Some("t1"),
+            session_socket_id: "hc:burst-private",
+            host: HcHost::new(&setup),
+            clock: &clock,
+            ids: &ids,
+        };
+        let coordination = execute_handoff_operation(
+            "handoff.begin",
+            json!({"request_id":"cross-seat-begin","deliverable":"Review the remote work"}),
+            &runtime,
+        )
+        .unwrap();
+        execute_message_operation(
+            "send",
+            json!({"request_id":"cross-seat-assign",
+            "source":"#origin-space @delta Review the remote work.", "author_kind":"agent_session",
+            "coordination_id":coordination["coordination_id"]}),
+            &runtime,
+        )
+        .unwrap();
+        let origin = StateNamespace::for_space("hc:burst-private", "origin-space");
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                let binding = tx
+                    .active_pane_bindings(&origin)?
+                    .into_iter()
+                    .next()
+                    .unwrap();
+                let address = tx
+                    .list_pane_addresses(&origin)?
+                    .into_iter()
+                    .find(|a| a.id == binding.address_id)
+                    .unwrap();
+                let session = address.agent_session_id.unwrap();
+                let attempt = DeliveryAttemptId::new("remote-attempt");
+                tx.lease_mailbox_head(
+                    &origin,
+                    &address.id,
+                    &LeaseDraft {
+                        attempt_id: attempt.clone(),
+                        binding_id: binding.id,
+                        agent_session_id: session.clone(),
+                        retry_of_attempt_id: None,
+                        owner: "burst-setup".into(),
+                        acquired_at_ms: clock.now_unix_ms(),
+                        expires_at_ms: clock.now_unix_ms() + 60_000,
+                    },
+                    &attribution,
+                )?;
+                tx.transition_delivery_attempt(
+                    &origin,
+                    &attempt,
+                    DeliveryState::Submitted,
+                    &attribution,
+                )?;
+                tx.acknowledge_delivery_attempt(
+                    &origin,
+                    &attempt,
+                    "remote-ack",
+                    &session,
+                    &attribution,
+                )?;
+                tx.transition_delivery_attempt(
+                    &origin,
+                    &attempt,
+                    DeliveryState::Settled,
+                    &attribution,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+    }
     let snapshot = || {
         StateStore::open(&state)
             .unwrap()
             .transaction(|tx| {
-                let addresses = tx.list_pane_addresses(&namespace)?;
+                let addresses: Vec<_> = tx
+                    .list_pane_addresses(&namespace)?
+                    .into_iter()
+                    .filter(|a| a.pane_id.is_some())
+                    .collect();
                 assert_eq!(addresses.len(), 3);
                 for address in &addresses {
                     assert!(address.pane_id.is_some());
@@ -410,6 +586,39 @@ fn exercise_burst(burst: bool) {
             })
             .unwrap()
     };
+    let coordination_snapshot = || {
+        let db = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+        let queued: i64 = db
+            .query_row(
+                "SELECT count(*) FROM mailbox_deliveries WHERE state='queued'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            queued, 0,
+            "fixture must have no queued deliveries in either space"
+        );
+        if remote_seat {
+            let rows: (String, String, String, String) = db.query_row(
+                "SELECT c.outcome,e.origin_space_id,a.work_outcome,s.progress FROM coordinations c
+                 JOIN coordination_assignments a USING(session_socket_id,worktree_id,coordination_id)
+                 JOIN space_envoys e ON e.session_socket_id=a.session_socket_id AND e.worktree_id=a.worktree_id AND e.address_id=a.recipient_address_id
+                 JOIN mailbox_deliveries d ON d.session_socket_id=a.session_socket_id AND d.worktree_id=a.worktree_id AND d.message_id=a.current_message_id AND d.address_id=a.recipient_address_id
+                 JOIN delivery_seats s ON s.session_socket_id=d.session_socket_id AND s.worktree_id=d.worktree_id AND s.delivery_id=d.delivery_id",
+                [], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+            assert_eq!(
+                rows,
+                (
+                    "open".into(),
+                    "origin-space".into(),
+                    "pending".into(),
+                    "settled".into()
+                )
+            );
+        }
+    };
+    coordination_snapshot();
     let before = snapshot();
     let socket = root.join("core.sock");
     let core = Core::start(&socket, world.clone());
@@ -443,6 +652,38 @@ fn exercise_burst(burst: bool) {
     );
     quiet(&world, &mut subscriber);
     assert_eq!(snapshot(), before);
+    coordination_snapshot();
+    if remote_seat {
+        assert!(
+            world
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .any(|r| r["method"] == "terminal.get" && r["params"]["terminal"] == "remote"),
+            "subscriber never observed the remote origin actor"
+        );
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|tx| {
+                let origin = StateNamespace::for_space("hc:burst-private", "origin-space");
+                let address = tx
+                    .list_pane_addresses(&origin)?
+                    .into_iter()
+                    .find(|a| a.pane_id.as_deref() == Some("remote"))
+                    .unwrap();
+                assert!(
+                    tx.active_integration_registration(
+                        &origin,
+                        &address.id,
+                        address.agent_session_id.as_ref().unwrap()
+                    )?
+                    .is_some()
+                );
+                Ok(())
+            })
+            .unwrap();
+    }
     assert!(
         world
             .lock()
@@ -451,6 +692,57 @@ fn exercise_burst(burst: bool) {
             .iter()
             .any(|r| r["method"] == "events.subscribe")
     );
+    if matches!(remote, RemoteSeat::ReadError) {
+        {
+            let mut w = world.lock().unwrap();
+            w.requests.clear();
+            w.fail_remote_read = true;
+            w.terminals
+                .push(terminal("control-shell", shell.0.id(), None));
+            for (kind, pane) in [("status", "remote"), ("created", "control-shell")] {
+                let seq = w.events.len() + 1;
+                w.events.push(json!({"jsonrpc":"2.0","method":"event","params":{"seq":seq,"type":kind,"terminal":pane}}));
+            }
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            assert!(
+                subscriber.0.try_wait().unwrap().is_none(),
+                "subscriber exited on remote read error"
+            );
+            if world
+                .lock()
+                .unwrap()
+                .requests
+                .iter()
+                .any(|r| r["method"] == "terminal.get" && r["params"]["terminal"] == "remote")
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "remote read error was never exercised"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        thread::sleep(Duration::from_millis(400));
+        assert!(subscriber.0.try_wait().unwrap().is_none());
+        coordination_snapshot();
+        assert_eq!(snapshot(), before);
+        assert!(!root.join("cli-calls").exists());
+        let db = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+        let wakes: i64 = db.query_row("SELECT count(*) FROM collaboration_messages WHERE grammar_version='coordination-nudge/v1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(
+            wakes, 0,
+            "an unread remote worker must remain unknown, never missing"
+        );
+        eprintln!(
+            "remote read error exercised; coordination open/pending, remote seat settled, zero queued deliveries, zero coordination nudges"
+        );
+        drop(subscriber);
+        drop(core);
+        return;
+    }
     if !burst {
         let count = world.lock().unwrap().requests.len();
         thread::sleep(Duration::from_millis(800));
@@ -481,7 +773,7 @@ fn exercise_burst(burst: bool) {
             format!("sh{index}")
         };
         let mut w = world.lock().unwrap();
-        w.terminals.push(terminal(&pane, shell.pid(), None));
+        w.terminals.push(terminal(&pane, shell.0.id(), None));
         let seq = w.events.len() + 1;
         w.events.push(json!({"jsonrpc":"2.0","method":"event","params":{"seq":seq,"type":"created","terminal":pane}}));
         if index == 5 {
@@ -495,6 +787,7 @@ fn exercise_burst(burst: bool) {
     eprintln!("11 creation waves emitted over {:?}", started.elapsed());
     quiet(&world, &mut subscriber);
     assert_eq!(snapshot(), before, "burst changed registered addresses");
+    coordination_snapshot();
     assert!(
         !root.join("cli-calls").exists(),
         "subscriber used CLI fallback"
