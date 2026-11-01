@@ -1341,19 +1341,20 @@ Motion shows state and nothing else.
 
 ## States
 
-| State                         | What shows                                                                                                                         |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| First connection, under 400ms | Nothing new. Keep the shell blank to avoid a flash.                                                                                |
-| First connection, over 400ms  | Three skeleton sidebar rows and three skeleton messages, in `--bg-hover`, with no shimmer.                                         |
-| No workspaces                 | Title "No workspaces yet". Body "Open a workspace in Herdr and name an agent with `namedrop name`. It shows up here as a channel." |
-| Channel with no messages      | Title "No messages yet". Body "Post here to talk with the agents in this workspace. Mention @name to bring one in."                |
-| Loading older messages        | A 12px muted "Loading earlier messages…" line at the top of the timeline.                                                          |
-| History error                 | "Couldn't load earlier messages." and a **Try again** button, in the same line.                                                    |
-| Conversation error            | "Couldn't load this conversation." and a **Try again** button, in the thread pane.                                                 |
-| Missing range                 | A hairline divider with "Some messages are missing here" and a **Load them** button.                                               |
-| Reconnecting                  | A 36px bar over the channel and any pane in `--warning-bg` and `--warning-text`: "Reconnecting… Showing updates up to 10:42 PM."   |
-| Server-shortened text         | A 12px muted line "Shortened by Namedrop."                                                                                         |
-| All activity, nothing active  | The pulse icon, title "Every agent is idle", body "Agents show up here while they work, wait on each other, or need you."          |
+| State                         | What shows                                                                                                                                  |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| First connection, under 400ms | Nothing new. Keep the shell blank to avoid a flash.                                                                                         |
+| First connection, over 400ms  | Three skeleton sidebar rows and three skeleton messages, in `--bg-hover`, with no shimmer.                                                  |
+| No workspaces                 | Title "No workspaces yet". Body "Open a workspace in Herdr and name an agent with `namedrop name`. It shows up here as a channel."          |
+| Channel with no messages      | Title "No messages yet". Body "Post here to talk with the agents in this workspace. Mention @name to bring one in."                         |
+| Workspace not turned on       | Title "No agents here yet". Body "Name an agent in this workspace to start using it here. In the agent's pane, run `namedrop name @alias`." |
+| Loading older messages        | A 12px muted "Loading earlier messages…" line at the top of the timeline.                                                                   |
+| History error                 | "Couldn't load earlier messages." and a **Try again** button, in the same line.                                                             |
+| Conversation error            | "Couldn't load this conversation." and a **Try again** button, in the thread pane.                                                          |
+| Missing range                 | A hairline divider with "Some messages are missing here" and a **Load them** button.                                                        |
+| Reconnecting                  | A 36px bar over the channel and any pane in `--warning-bg` and `--warning-text`: "Reconnecting… Showing updates up to 10:42 PM."            |
+| Server-shortened text         | A 12px muted line "Shortened by Namedrop."                                                                                                  |
+| All activity, nothing active  | The pulse icon, title "Every agent is idle", body "Agents show up here while they work, wait on each other, or need you."                   |
 
 The conversation error line is 12px muted with `role="alert"`, like the history
 error. Its tooltip is the status, such as "HTTP 503", or "Couldn't reach

@@ -2850,6 +2850,50 @@ test("design-b: loading, empty channel and history errors use the design copy", 
     .waitFor();
 });
 
+test("UNACTIVATED: a workspace Namedrop never turned on says how to start, then reads as a normal channel once it is on", async (t) => {
+  const off = frame(1, "gamma");
+  // The live server's shape for a workspace with no Namedrop record yet.
+  off.frame.space = {
+    ...off.frame.space,
+    addressable_label: null,
+    not_addressable_reason: "not_activated",
+    state: "unknown",
+  };
+  off.frame.messages = [];
+  const ui = await open(t, (client) => client.send("space", off));
+  await ui.live();
+  await ui.row(1).click();
+  const main = ui.page.getByRole("main");
+  await main
+    .getByRole("heading", { name: "No agents here yet", exact: true })
+    .waitFor();
+  assert.equal(
+    await main.locator(".empty p").textContent(),
+    "Name an agent in this workspace to start using it here. In the agent's pane, run namedrop name @alias.",
+  );
+  assert.equal(
+    await main.locator(".empty code").textContent(),
+    "namedrop name @alias",
+  );
+  assert.equal(
+    await main
+      .getByText("Mention @name to bring one in.", { exact: false })
+      .count(),
+    0,
+  );
+  const on = frame(1, "gamma");
+  on.frame.messages = [];
+  ui.connections[0].send("space", on);
+  await main
+    .getByRole("heading", { name: "No messages yet", exact: true })
+    .waitFor();
+  assert.equal(
+    await main.getByText("No agents here yet", { exact: true }).count(),
+    0,
+  );
+  assert.equal(ui.connections.length, 1);
+});
+
 test("design-b: Needs you shows titles, hints and ages three at a time and announces new items", async (t) => {
   const value = frame(1, "alpha", "needs_you");
   const opened = Date.now() - 4 * 60_000 - 5_000;
