@@ -4033,6 +4033,11 @@ fn saved_resume_recovers_on_read_retry() {
     check_saved_resume("failed-get-tick");
 }
 
+#[test]
+fn saved_resume_recovers_on_full_snapshot() {
+    check_saved_resume("failed-get-snapshot");
+}
+
 fn check_saved_resume(recovery: &str) {
     check(&format!("saved-resume-{recovery}"), |fixture, runtime| {
         let owner = process::AgentProcess::new();
@@ -4123,7 +4128,14 @@ fn check_saved_resume(recovery: &str) {
         } else {
             subscriber
                 .handle_line(
-                    &labels(),
+                    &session_event(
+                        if recovery == "failed-get-snapshot" {
+                            "snapshot"
+                        } else {
+                            "labels"
+                        },
+                        fixture,
+                    ),
                     &namedrop::LifecycleRuntime {
                         clock: &RetryClock(if recovery == "labels" { 10_001 } else { 10_501 }),
                         ..runtime
