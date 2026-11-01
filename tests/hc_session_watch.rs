@@ -83,10 +83,9 @@ impl HerdrCommandExecutor for Fixture {
                 if labels
                     .iter()
                     .any(|label| label.starts_with("namedrop.awaiting="))
+                    && let Some(callback) = self.on_counter_labels.borrow_mut().take()
                 {
-                    if let Some(callback) = self.on_counter_labels.borrow_mut().take() {
-                        callback();
-                    }
+                    callback();
                 }
                 "{}".into()
             }
