@@ -43,7 +43,7 @@ test("management launches exact background command and 28px titlebar layout", as
   await launchPopup(deps);
   assert.deepEqual(calls[1], ["hc", ["run", "--bg", "--json", "--rm", "--name", "namedrop-management", "--cwd", "/h", "--", "/h/.local/bin/namedrop-app", "--host", "hc", "--hc-terminal", "t1", "--hc-space", "s", "ui", "run", "manage"]]);
   assert.equal(overlays[0].key, "namedrop-management");
-  assert.deepEqual(overlays[0].layout.children.map((child) => child.content), [{ mod: "namedrop-management", props: { part: "bar" } }, { terminal: "t9" }]);
+  assert.deepEqual(overlays[0].layout.children.map((child) => child.content), [{ mod: "namedrop-management", props: { part: "bar", terminal: "t9" } }, { terminal: "t9" }]);
   assert.deepEqual(overlays[0].layout.children[0].size, { px: 28 });
 });
 
@@ -58,4 +58,44 @@ test("structured name_taken reopens only a live named terminal", async () => {
   const other = { ...deps, hc: async () => ({ code: 65, stderr: '{"error":{"code":"other","message":"bad"}}' }) };
   assert.deepEqual(await launchPopup(other), { error: "bad" });
   assert.equal(overlays.length, 1);
+});
+
+
+test("popup titlebar closes its launched terminal without relaunching or hiding it", async () => {
+  const overlays = [];
+  await launchPopup({ home: () => "/h", focused: () => ({ terminal: "t1" }),
+    terminals: () => [{ address: "t1", state: "live", labels: {} }],
+    exec: async () => ({ code: 0 }), hc: async () => ({ code: 0, stdout: '{"address":"t9"}' }),
+    openOverlay: (spec) => overlays.push(spec) });
+  const barProps = { ...overlays[0].layout.children[0].content.props, terminal: "t9", overlay: "window-id" };
+  for (const folder of folders) {
+    const source = readFileSync(new URL(`../namedrop-${folder}/main.js`, import.meta.url), "utf8")
+      .replace(/^import .*;\n/gm, "").replace("export default class PopupLauncher", "class PopupLauncher");
+    const buttons = new Map(), calls = [], closed = [];
+    const make = (id) => {
+      const button = {};
+      if (id) buttons.set(id, button);
+      const proxy = new Proxy({}, { get(_target, key) {
+        if (key === "on_click") return (fn) => { button.click = fn; return proxy; };
+        if (key === "on_mouse_down") return (which, fn) => { button.mouse = { which, fn }; return proxy; };
+        return () => proxy;
+      } });
+      return proxy;
+    };
+    const dependencies = { View: class {}, div: make, h_flex: make, Button: { new: make },
+      props: () => barProps, theme: () => ({}), run: (name, args) => calls.push({ name, args }),
+      closeOverlay: (id) => closed.push(id) };
+    const PopupLauncher = new Function(...Object.keys(dependencies), source + "\nreturn PopupLauncher;")(...Object.values(dependencies));
+    const view = new PopupLauncher();
+    view.init({}, { spawn() { assert.fail("title bar must not launch another process"); } });
+    view.render();
+    const close = buttons.get("close");
+    close.click();
+    assert.deepEqual(calls, [{ name: "terminal.kill", args: { terminal: "t9" } }]);
+    assert.deepEqual(closed, []);
+    assert.equal(close.mouse?.which, "left");
+    let stopped = false;
+    close.mouse.fn({}, { stop_propagation() { stopped = true; } });
+    assert.equal(stopped, true);
+  }
 });
