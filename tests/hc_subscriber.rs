@@ -3016,3 +3016,117 @@ fn foreground_return_delivers_queued_mail_without_status_event() {
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
     });
 }
+
+#[test]
+fn restart_releases_confirmed_closed_alias_before_replacement_names() {
+    for observation in [
+        "finished",
+        "omitted-finished",
+        "not-found",
+        "full-finished",
+        "full-not-found",
+    ] {
+        for label in [false, true] {
+            for replacement_id in ["t0", "t2"] {
+                check(
+                    &format!("restart-{observation}-{label}-{replacement_id}"),
+                    |fixture, runtime| {
+                        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+                        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                        subscriber
+                            .handle_line(&session_event("snapshot", fixture), runtime)
+                            .unwrap();
+                        let mut replacement = fixture.terminals.borrow()[0].clone();
+                        replacement["address"] = json!(replacement_id);
+                        replacement["labels"]["namedrop.name"] =
+                            json!(if label { "alice" } else { "" });
+                        fixture.terminals.borrow_mut()[0]["state"] = json!("finished");
+                        fixture.terminals.borrow_mut()[0]["reason"] = json!("server_stop");
+                        if observation.ends_with("not-found") {
+                            fixture.terminals.borrow_mut().clear();
+                        }
+                        fixture.terminals.borrow_mut().push(replacement.clone());
+                        let reconnect = if observation.starts_with("full-") {
+                            session_event("missed", fixture)
+                        } else if observation == "finished" {
+                            session_event("snapshot", fixture)
+                        } else {
+                            json!({"terminals":[replacement]}).to_string()
+                        };
+                        let result = subscriber.handle_line(&reconnect, runtime);
+                        assert!(
+                            result.is_ok(),
+                            "{observation}/{label}/{replacement_id}: {result:?}"
+                        );
+                        if !label {
+                            let replacement_runtime = namedrop::LifecycleRuntime {
+                                current_pane_id: Some(replacement_id),
+                                ..*runtime
+                            };
+                            let result = namedrop::execute_lifecycle_operation(
+                                "name",
+                                json!({"alias":"alice", "pane_type":"terminal"}),
+                                &replacement_runtime,
+                            );
+                            assert!(
+                                result.is_ok(),
+                                "ordinary name after {observation}: {result:?}"
+                            );
+                        }
+                        let namespace =
+                            namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+                        let addresses = namedrop::StateStore::open(runtime.state_directory)
+                            .unwrap()
+                            .transaction(|tx| tx.list_pane_addresses(&namespace))
+                            .unwrap();
+                        let alice = addresses
+                            .iter()
+                            .find(|address| address.alias == "alice")
+                            .unwrap();
+                        assert_eq!(
+                            alice.pane_id.as_deref(),
+                            Some(replacement_id),
+                            "replacement must own the released alias"
+                        );
+                        let terminals = fixture.terminals.borrow();
+                        let replacement = terminals
+                            .iter()
+                            .find(|terminal| terminal["address"] == replacement_id)
+                            .unwrap();
+                        assert_eq!(replacement["labels"]["namedrop.name"], "alice");
+                        assert!(
+                            replacement["labels"]["namedrop.name.error"]
+                                .as_str()
+                                .is_none_or(str::is_empty)
+                        );
+                    },
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn restart_unknown_terminal_does_not_release_alias() {
+    check("restart-unknown", |fixture, runtime| {
+        fixture.terminals.borrow_mut()[0]["labels"]["namedrop.session"] = json!("");
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), runtime)
+            .unwrap();
+        *fixture.get_failure.borrow_mut() = Some("t1".into());
+        subscriber
+            .handle_line(r#"{"terminals":[]}"#, runtime)
+            .unwrap();
+        let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+        let addresses = namedrop::StateStore::open(runtime.state_directory)
+            .unwrap()
+            .transaction(|tx| tx.list_pane_addresses(&namespace))
+            .unwrap();
+        let alice = addresses
+            .iter()
+            .find(|address| address.alias == "alice")
+            .unwrap();
+        assert_eq!(alice.pane_id.as_deref(), Some("t1"));
+    });
+}
