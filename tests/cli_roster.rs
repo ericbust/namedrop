@@ -253,6 +253,57 @@ fn tui_nested_roster_help_is_not_exposed() {
 }
 
 #[test]
+fn one_request_with_many_recipients_emits_only_fifty_stable_waits() {
+    let home = PrivateHome::new();
+    let state = home.path().join("state");
+    seed_address(&state, "hc:current", "space", "alpha", Some("session"));
+    let connection = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+    connection.execute_batch(
+        "INSERT INTO collaboration_threads VALUES ('hc:current','space','thread','',1);
+         INSERT INTO collaboration_messages (session_socket_id,worktree_id,message_id,thread_id,thread_order,in_reply_to,author_address_id,author_alias_snapshot,author_kind,author_session_snapshot,request_id,authored_source,body,grammar_version,created_at_ms)
+           VALUES ('hc:current','space','request','thread',1,NULL,'address','alpha','agent_session','session','req','test','private','mention/v1',2);",
+    ).unwrap();
+    for index in (0..52).rev() {
+        let address = format!("recipient-{index:03}");
+        let alias = format!("agent-{index:03}");
+        connection.execute("INSERT INTO pane_addresses (session_socket_id,worktree_id,address_id,role_id,retired,collaboration_disabled,created_at_ms) VALUES ('hc:current','space',?1,'role',0,0,1)", [&address]).unwrap();
+        connection.execute("INSERT INTO message_recipients VALUES ('hc:current','space','request',?1,?2,?3,NULL)", rusqlite::params![53-index, address, alias]).unwrap();
+        connection.execute("INSERT INTO mailbox_deliveries VALUES ('hc:current','space',?1,?2,?3,'request','queued',2)", rusqlite::params![format!("delivery-{index:03}"), address, index+1]).unwrap();
+    }
+    let (output, _) = run_core(home.path(), json!({"core":{"id":"current"}}));
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let waits = body["rows"][0]["waiting_on"].as_array().unwrap();
+    assert_eq!(waits.len(), 50);
+    assert_eq!(waits[0], json!({"alias":"agent-000","message_id":"request"}));
+    assert_eq!(waits[49], json!({"alias":"agent-049","message_id":"request"}));
+}
+
+#[test]
+fn previous_session_messages_do_not_enter_current_row() {
+    let home = PrivateHome::new();
+    let state = home.path().join("state");
+    seed_address(&state, "hc:current", "space", "alpha", Some("current-session"));
+    let connection = rusqlite::Connection::open(state.join("namedrop.sqlite3")).unwrap();
+    connection.execute_batch(
+        "INSERT INTO collaboration_threads VALUES ('hc:current','space','thread','',1);
+         INSERT INTO collaboration_messages (session_socket_id,worktree_id,message_id,thread_id,thread_order,in_reply_to,author_address_id,author_alias_snapshot,author_kind,author_session_snapshot,request_id,authored_source,body,grammar_version,created_at_ms)
+           VALUES ('hc:current','space','old-request','thread',1,NULL,'address','alpha','agent_session','old-session','old','test','private','mention/v1',2);
+         INSERT INTO message_recipients VALUES ('hc:current','space','old-request',1,'address','alpha','old-session');
+         INSERT INTO mailbox_deliveries VALUES ('hc:current','space','old-delivery','address',1,'old-request','queued',2);
+         INSERT INTO collaboration_messages (session_socket_id,worktree_id,message_id,thread_id,thread_order,in_reply_to,author_address_id,author_alias_snapshot,author_kind,author_session_snapshot,request_id,authored_source,body,grammar_version,created_at_ms)
+           VALUES ('hc:current','space','old-reply','thread',2,'old-request','address','beta','agent_session','old-session','old-reply-req','test','private','mention/v1',3);
+         INSERT INTO message_recipients VALUES ('hc:current','space','old-reply',1,'address','alpha','old-session');
+         INSERT INTO mailbox_deliveries VALUES ('hc:current','space','old-return','address',2,'old-reply','settled',3);",
+    ).unwrap();
+    let (output, _) = run_core(home.path(), json!({"core":{"id":"current"}}));
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let body: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["rows"][0]["waiting_on"], json!([]));
+    assert_eq!(body["rows"][0]["recent_replies"], json!([]));
+}
+
+#[test]
 fn tui_roster_uses_hidden_command_rejection() {
     let home = PrivateHome::new();
     let output = run(home.path(), &home.path().join("absent.sock"), "tui");
