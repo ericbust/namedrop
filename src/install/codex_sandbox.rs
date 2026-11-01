@@ -608,8 +608,14 @@ mod tests {
     }
 
     #[test]
-    fn user_spool_descendants_are_allowed_and_linked_trusted_roots_are_refused() {
-        for suffix in ["deferred-commands", "deferred-commands/nested", "runtime"] {
+    fn only_exact_user_spool_is_allowed_and_unsafe_roots_are_refused() {
+        for suffix in [
+            "deferred-commands",
+            "deferred-commands/nested",
+            "deferred-commands/missing/../../runtime",
+            "../outside",
+            "runtime",
+        ] {
             let f = Fixture::new();
             fs::create_dir_all(f.state()).unwrap();
             let alias = f.0.join("alias");
@@ -619,7 +625,7 @@ mod tests {
                 "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
                 user_root.to_str().unwrap()
             ));
-            if suffix == "runtime" {
+            if suffix != "deferred-commands" {
                 let before = f.text();
                 assert!(
                     activate(&f.home(), &f.state())
