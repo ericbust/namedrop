@@ -301,3 +301,40 @@ fn hook_typo_with_malformed_runtime_flags_preserves_original_error() {
     }
     assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
+
+#[test]
+fn hook_help_with_malformed_runtime_flags_preserves_runtime_error() {
+    let missing_host = br#"{"protocol_version":"collab/v1","status":"rejected","operation":null,"error":{"code":"invalid_request","message":"error: a value is required for '--host <HOST>' but none was supplied\n  [possible values: tui, hc]\n\nFor more information, try '--help'.\n"}}
+"#.as_slice();
+    let invalid_host = br#"{"protocol_version":"collab/v1","status":"rejected","operation":null,"error":{"code":"invalid_request","message":"error: invalid value 'bogus' for '--host <HOST>'\n  [possible values: tui, hc]\n\nFor more information, try '--help'.\n"}}
+"#.as_slice();
+    let missing_pane = br#"{"protocol_version":"collab/v1","status":"rejected","operation":null,"error":{"code":"invalid_request","message":"error: a value is required for '--herdr-pane <PANE>' but none was supplied\n\nFor more information, try '--help'.\n"}}
+"#.as_slice();
+    let missing_plugin_state = br#"{"protocol_version":"collab/v1","status":"rejected","operation":null,"error":{"code":"invalid_request","message":"error: a value is required for '--plugin-state <PATH>' but none was supplied\n\nFor more information, try '--help'.\n"}}
+"#.as_slice();
+    let mut mismatches = Vec::new();
+    for (host, variables) in [
+        ("tui", vec![("HERDR_PANE_ID", "inherited-pane")]),
+        ("hc", vec![("HC_TERMINAL_ID", "inherited-terminal")]),
+    ] {
+        for (arguments, expected) in [
+            (vec!["hook", "--help", "--host"], missing_host),
+            (vec!["hook", "--help", "--host", "bogus"], invalid_host),
+            (vec!["--host", "bogus", "hook", "--help"], invalid_host),
+            (vec!["hook", "-h", "--herdr-pane"], missing_pane),
+            (
+                vec!["hook", "session-end", "--help", "--plugin-state"],
+                missing_plugin_state,
+            ),
+        ] {
+            let output = run_with_environment(&arguments, &variables);
+            if output.status.code() != Some(64)
+                || !output.stderr.is_empty()
+                || output.stdout != expected
+            {
+                mismatches.push(format!("{host}: {arguments:?}: {output:?}"));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
