@@ -562,11 +562,14 @@ def judge_terminal(runs, claude_tx):
     checks = [fields("terminal", [("runs", len(runs), 1), ("completed", run.completed, True),
                                   ("exit", run.exit_code, 0),
                                   ("hello in output", "hello" in (run.output or ""), True)])]
+    return checks + [judge_terminal_answer(claude_tx)]
+
+
+def judge_terminal_answer(claude_tx):
     answer = last_answer(claude_tx)
     ok = has_word("hello", answer) and has_word("0", answer)
-    checks.append(Check("claude's answer", ok, 'claude answered "{}"'.format(
-        " ".join(answer.split())[:120]) + ("" if ok else " (expected hello and 0)")))
-    return checks
+    return Check("claude's answer", ok, 'claude answered "{}"'.format(
+        " ".join(answer.split())[:120]) + ("" if ok else " (expected hello and 0)"))
 
 
 def judge_settled(backlog, doctor, panes):
@@ -1181,8 +1184,8 @@ def step_terminal(r):
                        value[1] == Backlog(0, 0, 0), TIMEOUTS.terminal)
     r.save("terminal.json", [run._asdict() for run in runs])
     claude = r.settle(lambda: r.transcript("claude"),
-                      lambda transcript: has_word("hello", last_answer(transcript)) and
-                      has_word("0", last_answer(transcript)), TIMEOUTS.idle, watch=())
+                      lambda transcript: judge_terminal_answer(transcript).ok,
+                      TIMEOUTS.idle, watch=("claude",))
     return judge_terminal(runs, claude)
 
 

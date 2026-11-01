@@ -1,3 +1,8 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
+mod support;
+
 use namedrop::{
     Clock, HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime, ProcessIds,
     execute_lifecycle_operation,
@@ -43,15 +48,22 @@ impl Clock for Time {
 
 #[test]
 fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
-    let root = std::env::temp_dir().join(format!("namedrop-terminal-name-{}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
+    let directory = support::TestDirectory::new();
+    let root = directory.path();
+    if std::env::var_os("NAMEDROP_TERMINAL_CLEANUP_CHILD").is_some() {
+        std::fs::write(
+            root.join("pane-effects-retries.log"),
+            "terminal cleanup record\n",
+        )
+        .unwrap();
+    }
     let host = Host {
         agent: Mutex::new(None),
         shell_ready: Mutex::new(true),
     };
     let ids = ProcessIds::default();
     let runtime = LifecycleRuntime {
-        state_directory: &root,
+        state_directory: root,
         home_directory: None,
         agent_config: namedrop::AgentConfigDirectories::default(),
         cwd: std::path::Path::new("/repo"),
@@ -83,5 +95,22 @@ fn naming_detects_terminal_preserves_type_on_rename_and_allows_override() {
     );
     let listed: Value = execute_lifecycle_operation("address.list", json!({}), &runtime).unwrap();
     assert!(listed.to_string().contains("\"pane_type\":\"agent\""));
-    std::fs::remove_dir_all(root).unwrap();
+    drop(directory);
+}
+
+#[test]
+fn terminal_state_cleanup_preserves_retry_records() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "naming_detects_terminal_preserves_type_on_rename_and_allows_override",
+        ])
+        .env("NAMEDROP_TERMINAL_CLEANUP_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "terminal cleanup record\n"
+    );
 }
