@@ -540,11 +540,16 @@ fn spool_symlinks_never_read_or_overwrite_their_targets() {
 #[test]
 fn worker_exits_after_the_last_active_space_is_deactivated() {
     let fixture = Fixture::new();
+    let spool_root = fixture.directory.path().join("deferred-commands");
+    fs::create_dir(&spool_root).unwrap();
+    let worker_started = || {
+        fs::read_dir(&spool_root).is_ok_and(|mut entries| {
+            entries.any(|entry| entry.is_ok_and(|entry| entry.path().join("worker.json").exists()))
+        })
+    };
+    assert!(!worker_started());
     let mut worker = fixture.worker();
-    wait_for(|| {
-        fixture.directory.path().join("deferred-commands").exists()
-            && fixture.spool().join("worker.json").exists()
-    });
+    wait_for(worker_started);
     StateStore::open(fixture.directory.path())
         .unwrap()
         .transaction(|tx| {
