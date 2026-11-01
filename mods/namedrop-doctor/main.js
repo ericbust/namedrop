@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { h_flex, Button } from "gpui-base";
-import { home, focused, terminals, exec, openOverlay, closeOverlay, props, theme } from "herdr";
+import { home, focused, terminals, exec, hc, openOverlay, closeOverlay, props, theme } from "herdr";
 import { launchPopup } from "./launcher.js";
 
 const popup = "doctor";
@@ -10,7 +10,7 @@ export default class PopupLauncher extends View {
     if (props()?.part === "bar") return;
     this.error = null;
     cx.spawn(async (cx) => {
-      const result = await launchPopup({ home, focused, terminals, exec, openOverlay, props: props() ?? {} });
+      const result = await launchPopup({ home, focused, terminals, exec, hc, openOverlay, props: props() ?? {} });
       if (result.error) {
         this.error = result.error;
         cx.notify();

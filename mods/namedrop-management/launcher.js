@@ -5,7 +5,7 @@ function errorMessage(result) {
   try { return JSON.parse(result.stdout)?.error ?? null; } catch { return null; }
 }
 
-export async function launchPopup({ home, focused, terminals, exec, openOverlay, props = {} }) {
+export async function launchPopup({ home, focused, terminals, exec, hc, openOverlay, props = {} }) {
   const target = props.terminal ?? focused()?.terminal;
   const selected = terminals().find((terminal) => terminal.address === target && terminal.state === "live");
   if (!selected) return { error: "Focus a live terminal first." };
@@ -25,10 +25,10 @@ export async function launchPopup({ home, focused, terminals, exec, openOverlay,
   }
   if (!binary) return { error: "Install the Namedrop binary to open this window." };
   const name = "namedrop-" + popup;
-  const args = ["--host", "hc", "run", "--bg", "--json", "--rm", "--name", name, "--cwd", home(), "--", binary,
+  const args = ["run", "--bg", "--json", "--rm", "--name", name, "--cwd", home(), "--", binary,
     "--host", "hc", "--hc-terminal", target, "--hc-space", selected.labels?.["herdr.space"] ?? "headless", "ui", "run", entries[popup]];
   let result;
-  try { result = await exec(binary, args); }
+  try { result = await hc(args); }
   catch (error) { return { error: String(error?.message ?? error) }; }
   const failure = errorMessage(result);
   let address;
