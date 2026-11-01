@@ -2705,3 +2705,118 @@ fn first_name_uses_the_dirty_terminal_observation() {
         );
     });
 }
+
+#[test]
+fn failed_get_recovers_and_delivers_on_due_tick_without_event() {
+    check("failed-get-recovery", |fixture, runtime| {
+        let owner = process::AgentProcess::new();
+        queued_agent(fixture, runtime, owner.pid());
+        let runtime = namedrop::LifecycleRuntime {
+            clock: &RetryClock(10_000),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            host: runtime.host,
+            ids: runtime.ids,
+        };
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        fixture.terminals.borrow_mut()[0]["status"] = json!({"state":"done"});
+        *fixture.get_failure.borrow_mut() = Some("t1".into());
+        subscriber
+            .handle_line(&session_event("status", fixture), &runtime)
+            .unwrap();
+        *fixture.get_failure.borrow_mut() = None;
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .tick(&namedrop::LifecycleRuntime {
+                clock: &RetryClock(10_500),
+                ..runtime
+            })
+            .unwrap();
+        let calls = fixture.calls.borrow();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| call[0] == "send" && call[1] == "t1")
+                .count(),
+            1,
+            "recovered pane's mail remained stranded: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|call| call[0] != "ls" && (call[0] != "get" || call[1] == "t1"))
+        );
+    });
+}
+
+#[test]
+fn failed_get_retries_back_off_to_thirty_seconds_without_heartbeat_work() {
+    check("failed-get-backoff", |fixture, runtime| {
+        let runtime = namedrop::LifecycleRuntime {
+            clock: &RetryClock(10_000),
+            state_directory: runtime.state_directory,
+            home_directory: runtime.home_directory,
+            agent_config: runtime.agent_config,
+            cwd: runtime.cwd,
+            workspace_id: runtime.workspace_id,
+            current_pane_id: runtime.current_pane_id,
+            session_socket_id: runtime.session_socket_id,
+            host: runtime.host,
+            ids: runtime.ids,
+        };
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        *fixture.get_failure.borrow_mut() = Some("t1".into());
+        subscriber.handle_line(&labels(), &runtime).unwrap();
+        for due in [
+            10_500, 11_500, 13_500, 17_500, 25_500, 41_500, 71_500, 101_500,
+        ] {
+            fixture.calls.borrow_mut().clear();
+            subscriber
+                .handle_line(
+                    r#"{"method":"heartbeat","params":{}}"#,
+                    &namedrop::LifecycleRuntime {
+                        clock: &RetryClock(due),
+                        ..runtime
+                    },
+                )
+                .unwrap();
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(due - 1),
+                    ..runtime
+                })
+                .unwrap();
+            assert!(
+                fixture.calls.borrow().is_empty(),
+                "retry before deadline or on heartbeat"
+            );
+            subscriber
+                .tick(&namedrop::LifecycleRuntime {
+                    clock: &RetryClock(due),
+                    ..runtime
+                })
+                .unwrap();
+            assert_eq!(
+                fixture
+                    .calls
+                    .borrow()
+                    .iter()
+                    .filter(|call| call[0] == "get" && call[1] == "t1")
+                    .count(),
+                1,
+                "missing retry at {due}"
+            );
+        }
+    });
+}
