@@ -360,6 +360,11 @@ impl Subscriber {
             .is_some_and(|due| due <= runtime.clock.now_unix_ms())
         {
             self.next_wake_ms = None;
+            let observed_spaces = if self.initialized {
+                Some(self.snapshots(runtime)?)
+            } else {
+                None
+            };
             let mut errors = Vec::new();
             for space in active_spaces(runtime)? {
                 let scoped = LifecycleRuntime {
@@ -372,7 +377,12 @@ impl Subscriber {
                 } else {
                     runtime.host.space(scoped.space_locator(), None)?
                 };
-                match crate::delivery::drain_mailboxes_with_discovery(&scoped, discovered, false) {
+                match crate::delivery::drain_mailboxes_with_discovery(
+                    &scoped,
+                    discovered,
+                    false,
+                    observed_spaces.as_ref(),
+                ) {
                     Ok(report) => self.remember_drain(
                         &serde_json::to_value(report).map_err(|error| error.to_string())?,
                         runtime.clock.now_unix_ms(),

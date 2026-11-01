@@ -343,6 +343,19 @@ impl LiveSpaces {
         Self { here, others }
     }
 
+    pub(crate) fn from_snapshot(
+        here: crate::DiscoveredWorktree,
+        spaces: &[SpaceId],
+        snapshot: &std::collections::BTreeMap<String, crate::DiscoveredWorktree>,
+    ) -> Self {
+        let others = spaces
+            .iter()
+            .filter(|space| space.as_str() != here.workspace_id)
+            .map(|space| (space.clone(), snapshot.get(space.as_str()).cloned()))
+            .collect();
+        Self { here, others }
+    }
+
     pub(crate) fn with_here(&self, here: crate::DiscoveredWorktree) -> Self {
         Self {
             here,

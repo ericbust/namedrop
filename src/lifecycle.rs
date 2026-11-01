@@ -521,7 +521,7 @@ where
                 runtime,
                 &attribution,
                 false,
-                snapshot.is_none(),
+                snapshot,
             )?;
             let served =
                 crate::codex_app_server::served_codex_panes(runtime, std::slice::from_ref(pane));
@@ -643,7 +643,7 @@ where
                 runtime,
                 &attribution,
                 false,
-                snapshot.is_none(),
+                snapshot,
             )?;
             let shortcuts = if runtime.is_hc() {
                 json!({"status":"app_managed", "next_step":"Install the Namedrop mod in herdr-app to enable its commands and shortcuts."})
@@ -1000,7 +1000,7 @@ where
                 runtime,
                 &attribution,
                 operation == "reconcile",
-                snapshot.is_none(),
+                snapshot,
             )?;
             Ok(json!({
                 "space_id": discovered.workspace_id,
@@ -1095,6 +1095,7 @@ where
                             &event_runtime,
                             discover(event_runtime.space_locator())?,
                             false,
+                            snapshot,
                         )?
                     } else {
                         crate::drain_mailboxes(&event_runtime)?
@@ -1163,6 +1164,7 @@ where
                             &event_runtime,
                             discover(event_runtime.space_locator())?,
                             false,
+                            snapshot,
                         )?
                     } else {
                         crate::drain_mailboxes(&event_runtime)?
@@ -1251,6 +1253,7 @@ where
                             &event_runtime,
                             discover(event_runtime.space_locator())?,
                             false,
+                            snapshot,
                         )?
                     } else {
                         crate::drain_mailboxes(&event_runtime)?
@@ -1327,6 +1330,7 @@ where
                     &event_runtime,
                     discover(event_runtime.space_locator())?,
                     false,
+                    snapshot,
                 )?
             } else {
                 crate::drain_mailboxes(&event_runtime)?
@@ -1465,13 +1469,14 @@ fn reconcile_worktree<H, C, I>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
     attribution: &MutationAttribution,
     after_restart: bool,
-    publish_metadata: bool,
+    observed_spaces: Option<&std::collections::BTreeMap<String, DiscoveredWorktree>>,
 ) -> Result<WorktreeReconciliation, String>
 where
     H: Host,
     C: Clock,
     I: IdGenerator,
 {
+    let publish_metadata = observed_spaces.is_none();
     store
         .transaction(|transaction| {
             reconcile_compacted_pane_bindings(
@@ -1511,7 +1516,12 @@ where
     let drain = if publish_metadata {
         crate::drain_mailboxes(runtime)?
     } else {
-        crate::delivery::drain_mailboxes_with_discovery(runtime, discovered.clone(), false)?
+        crate::delivery::drain_mailboxes_with_discovery(
+            runtime,
+            discovered.clone(),
+            false,
+            observed_spaces,
+        )?
     };
     Ok(WorktreeReconciliation {
         epoch,

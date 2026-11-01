@@ -327,13 +327,14 @@ where
     C: Clock,
     I: IdGenerator,
 {
-    drain_mailboxes_with_discovery(runtime, discover(runtime)?, true)
+    drain_mailboxes_with_discovery(runtime, discover(runtime)?, true, None)
 }
 
 pub(crate) fn drain_mailboxes_with_discovery<H, C, I>(
     runtime: &LifecycleRuntime<'_, H, C, I>,
     first_discovery: crate::DiscoveredWorktree,
     publish_metadata: bool,
+    observed_spaces: Option<&std::collections::BTreeMap<String, crate::DiscoveredWorktree>>,
 ) -> Result<DrainReport, String>
 where
     H: Host,
@@ -405,8 +406,14 @@ where
     let remote_seats = store
         .transaction(|transaction| transaction.remote_seat_spaces(&namespace))
         .map_err(|error| error.to_string())?;
-    let live =
-        crate::spaces::LiveSpaces::load(&runtime.host, first_discovery.clone(), &remote_seats);
+    let live = match (runtime.is_hc(), observed_spaces) {
+        (true, Some(snapshot)) => crate::spaces::LiveSpaces::from_snapshot(
+            first_discovery.clone(),
+            &remote_seats,
+            snapshot,
+        ),
+        _ => crate::spaces::LiveSpaces::load(&runtime.host, first_discovery.clone(), &remote_seats),
+    };
     store
         .transaction(|transaction| {
             transaction.complete_ready_result_sets(
