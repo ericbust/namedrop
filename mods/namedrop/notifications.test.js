@@ -26,13 +26,24 @@ test("continuing row receives blocked and reply toast with exact focus", () => {
   assert.equal(result.effects.some((effect) => effect.type === "toast"), false);
 });
 
-test("four pending updates collapse and delayed tick emits only one", () => {
+test("four updates collapse completely and later updates cannot postpone the aggregate", () => {
   let { model } = read(initialModel(), 0, snap(row("working")));
-  ({ model } = read(model, 1, snap(row("blocked", [reply("r1"), reply("r2"), reply("r3"), reply("r4")]))));
-  assert.ok(model.pending.length <= 3);
-  assert.ok(model.overflow >= 2);
-  const result = transition(model, { type: "toastTick", now: 5000, at: model.toastAt });
-  assert.equal(result.effects.filter((effect) => effect.type === "toast").length, 1);
+  let result = read(model, 1, snap(row("blocked")));
+  model = result.model;
+  result = read(model, 2, snap(row("blocked", [1, 2, 3, 4].map((id) => reply(`r${id}`, id)))));
+  assert.equal(result.model.pending.length, 0);
+  assert.equal(result.model.overflow, 4);
+  result = read(result.model, 900, snap(row("blocked", [1, 2, 3, 4, 5].map((id) => reply(`r${id}`, id)))));
+  assert.equal(result.model.pending.length, 0);
+  assert.equal(result.model.overflow, 5);
+  assert.equal(result.model.toastAt, 1001);
+  result = transition(result.model, { type: "toastTick", now: 5000, at: 1001 });
+  assert.deepEqual(result.effects.filter((effect) => effect.type === "toast"), [{
+    type: "toast", message: "5 more updates", action: { name: "mod.open", args: { name: "namedrop" } },
+  }]);
+  assert.equal(result.model.overflow, 0);
+  result = transition(result.model, { type: "toastTick", now: 5000, at: 1001 });
+  assert.equal(result.effects.length, 0);
 });
 
 test("distinct read errors share notification gate", () => {
@@ -46,4 +57,40 @@ test("unbound stored rows never create a focus notification", () => {
   let { model } = read(initialModel(), 0, snap(row("working", [], null)));
   const result = read(model, 1, snap(row("blocked", [reply("r1")], null)));
   assert.equal(result.effects.some((effect) => effect.type === "toast"), false);
+});
+
+for (const change of ["disappearance", "core replacement"]) {
+  test(`${change} prunes histories and returning rows seed again`, () => {
+    let { model } = read(initialModel(), 0, snap(row("working", [reply("old", 100)])));
+    const absent = change === "disappearance" ? snap() : { ...snap(row("working")), core: "other" };
+    ({ model } = read(model, 1, absent));
+    assert.equal(Object.keys(model.seen).length, absent.rows.length);
+    const result = read(model, 2, snap(row("blocked", [reply("new", 101)])));
+    assert.equal(result.effects.some((effect) => effect.type === "toast"), false);
+  });
+}
+
+test("all 300 continuing addresses retain their notification histories", () => {
+  const rows = Array.from({ length: 300 }, (_, i) => row("working", [], `t${i}`));
+  let { model } = read(initialModel(), 0, snap(...rows));
+  assert.equal(Object.keys(model.seen).length, 300);
+  rows[0] = row("blocked", [], "t0");
+  const result = read(model, 1, snap(...rows));
+  assert.equal(result.effects.find((effect) => effect.type === "toast")?.action.args.terminal, "t0");
+});
+
+test("restoring an older timeline seeds it and accepts the next reply", () => {
+  let { model } = read(initialModel(), 0, snap(row("working", [reply("future", 100)])));
+  let result = read(model, 1, snap(row("working", [reply("restored", 10)])));
+  assert.equal(result.effects.some((effect) => effect.type === "toast"), false);
+  result = read(result.model, 2, snap(row("working", [reply("fresh", 11), reply("restored", 10)])));
+  assert.equal(result.effects.filter((effect) => effect.type === "toast").length, 1);
+});
+
+test("four immediately eligible updates emit only one aggregate", () => {
+  const first = read(initialModel(), 0, snap(row("working")));
+  const result = read(first.model, 1, snap(row("working", [1, 2, 3, 4].map((id) => reply(`r${id}`, id)))));
+  assert.deepEqual(result.effects, [{ type: "toast", message: "4 more updates", action: { name: "mod.open", args: { name: "namedrop" } } }]);
+  assert.deepEqual(result.model.pending, []);
+  assert.equal(result.model.overflow, 0);
 });

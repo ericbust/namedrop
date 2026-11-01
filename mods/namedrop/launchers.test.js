@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-const { launchPopup } = await import("../namedrop-management/launcher.js").catch(() => ({}));
-const operation = launchPopup ? test : test.skip;
+import { launchPopup } from "../namedrop-management/launcher.js";
 
 test("roster Agent status opens the selected row target", () => {
   const source = readFileSync(new URL("./main.js", import.meta.url), "utf8")
@@ -29,14 +28,14 @@ test("roster Agent status opens the selected row target", () => {
 });
 
 const folders = ["management", "doctor", "agent-status", "tour"];
-operation("launcher source copies differ only by popup identifier", () => {
+test("launcher source copies differ only by popup identifier", () => {
   for (const file of ["main.js", "launcher.js"]) {
     const copies = folders.map((folder) => readFileSync(new URL(`../namedrop-${folder}/${file}`, import.meta.url), "utf8").replace(/const popup = "[^"]+"/, 'const popup = "POPUP"'));
     for (const copy of copies) assert.equal(copy, copies[0]);
   }
 });
 
-operation("management launches exact background command and 28px titlebar layout", async () => {
+test("management launches exact background command and 28px titlebar layout", async () => {
   const calls = [], overlays = [];
   const deps = { home: () => "/h", focused: () => ({ terminal: "t1" }), terminals: () => [{ address: "t1", state: "live", labels: { "herdr.space": "s" } }],
     exec: async (command, args) => { calls.push([command, args]); return { code: 0 }; },
@@ -48,15 +47,15 @@ operation("management launches exact background command and 28px titlebar layout
   assert.deepEqual(overlays[0].layout.children[0].size, { px: 28 });
 });
 
-operation("structured name_taken reopens only a live named terminal", async () => {
+test("structured name_taken reopens only a live named terminal", async () => {
   const overlays = [];
   const deps = { home: () => "/h", focused: () => ({ terminal: "t1" }), terminals: () => [
     { address: "t1", state: "live", labels: {} }, { address: "t9", name: "namedrop-management", state: "live" }],
-    exec: async () => ({ code: 0 }), hc: async () => ({ code: 65, stdout: '{"error":{"kind":"name_taken","message":"taken"}}' }),
+    exec: async () => ({ code: 0 }), hc: async () => ({ code: 65, stderr: '{"error":{"kind":"name_taken","message":"taken"}}' }),
     openOverlay: (spec) => overlays.push(spec) };
   await launchPopup(deps);
   assert.equal(overlays[0].layout.children[1].content.terminal, "t9");
-  const other = { ...deps, hc: async () => ({ code: 65, stdout: '{"error":{"code":"other","message":"bad"}}' }) };
+  const other = { ...deps, hc: async () => ({ code: 65, stderr: '{"error":{"code":"other","message":"bad"}}' }) };
   assert.deepEqual(await launchPopup(other), { error: "bad" });
   assert.equal(overlays.length, 1);
 });

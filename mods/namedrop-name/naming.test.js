@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-const { chooseTarget, saveName } = await import("./naming.js").catch(() => ({}));
-const operation = saveName ? test : test.skip;
+import { chooseTarget, saveName } from "./naming.js";
 import { normalizeAlias, aliasTaken, formatHcError } from "./alias.js";
 import { readFileSync } from "node:fs";
 
@@ -28,7 +27,7 @@ test("native dialog submits through the selected binary", async () => {
 const live = (address, extra = {}) => ({ address, state: "live", labels: { "herdr.space": "work" }, ...extra });
 const missing = (command) => new Error("`herdr.exec`: cannot run " + command + ": No such file or directory (os error 2)");
 
-operation("props target wins and binary receives exact agent arguments", async () => {
+test("props target wins and binary receives exact agent arguments", async () => {
   const calls = [];
   const rows = [live("t1"), live("t2", { status: "working" })];
   assert.equal(chooseTarget({ terminal: "t2" }, { terminal: "t1" }), "t2");
@@ -41,7 +40,7 @@ operation("props target wins and binary receives exact agent arguments", async (
   ]);
 });
 
-operation("missing stable launcher uses PATH and shell type", async () => {
+test("missing stable launcher uses PATH and shell type", async () => {
   const calls = [];
   const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1", { labels: {}, program: { name: "shell" } })], home: () => "/h",
     exec: async (cmd, args) => { calls.push([cmd, args]); if (cmd.startsWith("/")) throw missing(cmd); return { code: 0 }; }, hc: async () => assert.fail("hc fallback") });
@@ -49,7 +48,7 @@ operation("missing stable launcher uses PATH and shell type", async () => {
   assert.deepEqual(calls[2], ["namedrop", ["--host", "hc", "--hc-terminal", "t1", "--hc-space", "headless", "name", "writer", "--type", "terminal"]]);
 });
 
-operation("both missing candidates alone enable label fallback", async () => {
+test("both missing candidates alone enable label fallback", async () => {
   const calls = [];
   const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1")], home: () => "/h",
     exec: async (cmd) => { throw missing(cmd); }, hc: async (args) => { calls.push(args); return { code: 0 }; } });
@@ -57,7 +56,7 @@ operation("both missing candidates alone enable label fallback", async () => {
   assert.deepEqual(calls, [["label", "t1", "namedrop.name=writer"]]);
 });
 
-operation("nonzero version and operational failures never write labels", async () => {
+test("nonzero version and operational failures never write labels", async () => {
   for (const code of [1, 65]) {
     const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1")], home: () => "/h",
       exec: async () => ({ code, stderr: "bad version" }), hc: async () => assert.fail("hc fallback") });
@@ -68,7 +67,7 @@ operation("nonzero version and operational failures never write labels", async (
   assert.equal(result.error, "already owned");
 });
 
-operation("submit checks the fresh selected target", async () => {
+test("submit checks the fresh selected target", async () => {
   const result = await saveName({ target: "t1", alias: "writer", terminals: () => [live("t1", { state: "finished" })], home: () => "/h",
     exec: async () => assert.fail("exec"), hc: async () => assert.fail("hc") });
   assert.match(result.error, /no longer live/);
