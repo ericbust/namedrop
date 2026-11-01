@@ -88,12 +88,17 @@ impl Server {
         configure(f, json!({"stdout": "ready\n"}));
         let shim = f.root.join("herdr");
         fs::write(&shim, r#"#!/usr/bin/python3
-import json, os, subprocess, sys, time
+import json, os, subprocess, sys, tempfile, time
 root = os.path.dirname(__file__)
 args = sys.argv[1:]
 if args[:2] == ['pane', 'read']:
     with open(os.path.join(root, 'screen.json')) as source:
         config = json.load(source)
+    if config.get('leave_temp'):
+        descriptor, scratch = tempfile.mkstemp(prefix='.namedrop-fixture-', dir=os.environ.get('TMPDIR', '/tmp'))
+        os.close(descriptor)
+        with open(os.path.join(root, 'scratch-path'), 'w') as output:
+            output.write(scratch)
     socket = os.environ.get('HERDR_SOCKET_PATH')
     config = config.get('targets', {}).get(socket + '|' + args[2], config)
     record = json.dumps({'args': args, 'socket': socket, 'pid': os.getpid()}) + '\n'
@@ -895,4 +900,21 @@ fn a_recently_retired_member_stays_in_the_roster_and_peek_reports_closed() {
     let server = Server::start(&f);
     assert_eq!(server.get(&path("socket-a", "w1", "lead")).status, 410);
     assert!(invocations(&f).is_empty());
+}
+
+#[test]
+fn fixture_removes_hidden_child_scratch_after_server_is_killed() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    configure(&f, json!({"stdout": "ready", "leave_temp": true}));
+    assert_eq!(server.get(&path("socket-a", "w1", "lead")).status, 200);
+    let scratch = std::path::PathBuf::from(fs::read_to_string(f.root.join("scratch-path")).unwrap());
+    assert!(scratch.exists());
+    drop(server);
+    drop(f);
+    let leaked = scratch.exists();
+    if leaked {
+        fs::remove_file(&scratch).unwrap();
+    }
+    assert!(!leaked, "fixture left hidden child scratch behind: {}", scratch.display());
 }
