@@ -1507,3 +1507,32 @@ fn a_request_with_nothing_to_describe_never_spawns_a_worker() {
         "got {error:?}"
     );
 }
+
+#[test]
+fn fixture_cleanup_survives_thread_exit_and_panic() {
+    const CHILD: &str = "NAMEDROP_FIXTURE_CLEANUP_CHILD";
+    if let Ok(mode) = env::var(CHILD) {
+        let root = fixture();
+        fs::write(root.join("pane-effects-retries.log"), "fixture retry evidence\n").unwrap();
+        assert_ne!(mode, "panic", "intentional fixture panic");
+        return;
+    }
+    for mode in ["return", "panic"] {
+        let mut child = std::process::Command::new(env::current_exe().unwrap())
+            .args(["--exact", "fixture_cleanup_survives_thread_exit_and_panic", "--nocapture"])
+            .env(CHILD, mode)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let root = env::temp_dir().join(format!("namedrop-agent-status-model-{}", child.id()));
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.success(), mode == "return");
+        let leaked = root.exists();
+        if leaked {
+            fs::remove_dir_all(&root).unwrap();
+        }
+        assert!(!leaked, "{mode} left fixture behind: {}", root.display());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("fixture retry evidence"));
+    }
+}
