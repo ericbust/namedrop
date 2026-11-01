@@ -8,8 +8,8 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 - Sandboxed Codex agents can send, reply, acknowledge and complete deliveries, and read the current workspace's roster when the sandbox blocks Herdr's socket. Commands pass through Namedrop's state directory to a worker outside the sandbox, without broader network permissions.
 - Activation grants Codex write access to the exact Namedrop state directory and preserves existing user grants. Deactivation removes only the grant Namedrop added. Start fresh Codex sessions after activation to load the grant.
-- A corrupt queued command or result no longer stops the worker from processing other commands. Namedrop isolates the invalid record and reports the failure.
-- Activation refuses symlinked parent directories when updating Codex sandbox settings, so it cannot change a configuration through an unexpected path.
+- A corrupt queued command or result no longer stops the worker from processing other commands. Namedrop isolates the invalid record and keeps processing the queue.
+- Codex sandbox setup works through linked parent directories, including macOS's `/var` path. Linked configuration, ownership-record and lock files are still refused.
 
 ## [1.4.2] - 2026-10-28
 
