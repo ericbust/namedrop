@@ -782,10 +782,18 @@ fn events_reconcile_names_preserve_lost_aliases_and_clear_sessions() {
         json!({"jsonrpc":"2.0", "method":"event", "params":{"type":kind,"terminal":"t1", "data":{}}}).to_string()
     };
     fixture.terminals.borrow_mut()[0]["labels"]["namedrop.name"] = json!("bad name");
+    subscriber.handle_line(&event("labels"), &runtime).unwrap();
+    let rejection: Value = serde_json::from_str(
+        fixture.terminals.borrow()[0]["labels"]["namedrop.name.error"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(rejection["requested"], "bad name");
     assert!(
-        subscriber
-            .handle_line(&event("labels"), &runtime)
-            .unwrap_err()
+        rejection["message"]
+            .as_str()
+            .unwrap()
             .contains("alias must")
     );
     assert_eq!(
