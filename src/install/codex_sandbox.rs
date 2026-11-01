@@ -583,7 +583,7 @@ mod tests {
             let f = Fixture::new();
             let broad = f.state().join(suffix);
             fs::create_dir_all(f.state().join("runtime")).unwrap();
-            crate::StateStore::open(&f.state()).unwrap();
+            crate::StateStore::open(f.state()).unwrap();
             f.write(&format!(
                 "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
                 broad.to_str().unwrap()
