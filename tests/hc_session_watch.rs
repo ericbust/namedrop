@@ -244,7 +244,7 @@ fn delayed_sigint_exit_clears_without_another_event() {
 }
 
 #[test]
-fn background_watch_repeats_then_disarms_on_foreground_return() {
+fn background_watch_is_local_then_resumes_on_foreground_return() {
     check("return", |fixture, runtime, _| {
         let mut subscriber = namedrop::host::hc::events::Subscriber::default();
         subscriber
@@ -274,7 +274,7 @@ fn background_watch_repeats_then_disarms_on_foreground_return() {
             .iter()
             .filter(|c| c[0] == "get")
             .count();
-        assert_eq!(gets, 5, "each due check must fetch only its target once");
+        assert_eq!(gets, 0, "live owners must not cause core reads");
         assert!(
             fixture
                 .calls
@@ -417,4 +417,55 @@ fn unactivated_workspace_has_no_owner_watch() {
             "original"
         );
     });
+}
+
+#[test]
+fn live_owner_has_no_core_or_store_work_for_sixty_seconds() {
+    for background in [false, true] {
+        check(
+            if background {
+                "idle-background"
+            } else {
+                "idle-statusless"
+            },
+            |fixture, runtime, _| {
+                fixture.terminals.borrow_mut()[0]["status"] = Value::Null;
+                if background {
+                    fixture.terminals.borrow_mut()[0]["foreground"] =
+                        json!({"pid":0,"name":"bash","argv":["bash"]});
+                }
+                let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                subscriber
+                    .handle_line(
+                        &json!({"terminals": *fixture.terminals.borrow()}).to_string(),
+                        runtime,
+                    )
+                    .unwrap();
+                let epoch = || {
+                    rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3"))
+                        .unwrap()
+                        .query_row("SELECT epoch FROM reconciliation_epochs", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .unwrap()
+                };
+                let before = epoch();
+                fixture.calls.borrow_mut().clear();
+                for elapsed in (500..=60_000).step_by(500) {
+                    subscriber
+                        .tick(&LifecycleRuntime {
+                            clock: &TestClock(10_000 + elapsed),
+                            ..*runtime
+                        })
+                        .unwrap();
+                }
+                assert!(
+                    fixture.calls.borrow().is_empty(),
+                    "live owner caused {} core calls",
+                    fixture.calls.borrow().len()
+                );
+                assert_eq!(epoch(), before, "live owner changed reconciliation epoch");
+            },
+        );
+    }
 }
