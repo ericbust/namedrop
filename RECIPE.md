@@ -1,96 +1,73 @@
-# Namedrop
+# Namedrop in Herdr app
 
-Namedrop adds a roster of named terminals and a dialog for naming the terminal you are using. Press Alt+N to name a terminal and Alt+Shift+S to open the roster. Each row shows an alias, its program icon, and its space and tab when known. A status dot shows what the program reports.
+Namedrop shows named terminals in a roster, with the agent each one is waiting on. Press Alt+N to name a terminal and Alt+Shift+S to open the roster. A reply or new blocked status posts a notification. Select it to focus the affected terminal.
 
 ![Namedrop](preview.png)
 
 ## What you see
 
-The roster opens in a 300 px window over the current layout. A Namedrop heading and a Close button sit above a vertical list. Rows use 13 px text for the alias and 11 px muted text for the space and tab. Program icons are 18 px. Status dots are 7 px. The list scrolls after 420 px. The app supplies the frame, and the active theme supplies every color.
+The roster is a 300 px window over the current layout. Rows show the alias, program icon, and space or tab when known. An open request replaces the location line with `waiting on @name`. A status dot shows the program's status. An empty roster prompts you to name a terminal. A read failure shows its message and a **Retry** button.
 
-An empty roster explains how to name a terminal. If the Namedrop binary cannot start, a footer shows "Install the Namedrop binary to send mentions", the releases URL, and an Open releases button.
-
-The 360 px Name dialog has a terminal address, an alias input, a normalization hint, and Cancel and Save name buttons. A failed save leaves the dialog open with its error. Without a focused terminal, the dialog explains how to select one and shows a Close button.
+The 360 px native Name dialog captures the selected terminal when it opens. Saving calls the Namedrop binary with that terminal and its `herdr.space` label, or `headless` when the label is absent. It shows the binary's error message if naming fails. Only when both binary locations are missing does it use the old core label path.
 
 ## How it behaves
 
-The roster includes live terminals with a nonempty `namedrop.name` label. It reads raw OSC 7501 status words from the terminal, including terminals without a pane.
+The roster merges live terminals with `namedrop --host hc roster --json`. The binary reads the message store without changing it and supplies each agent's `waiting_on`, attention count, and five most recent delivered replies. The mod watches the state directory returned by the binary for `namedrop.sqlite3*` changes. It reads at most twice per second during a burst. If the watcher fails, it retries. The first read seeds notification history, so existing replies do not trigger notifications.
 
-| Program status | Appearance | Sort group |
-| --- | --- | --- |
-| `blocked` | A dot in the theme's `blocked` color. | First. |
-| `error` | Shown as `blocked`, with the same dot. | First. |
-| `working` | A dot in the theme's `working` color. | Second. |
-| `done` | A dot in the theme's `done` color. | Third, together with idle. |
-| `idle` | A dot in the theme's `idle` color. | Third, together with done. |
-| No report | No dot. | Last. |
+The mod probes `${home()}/.local/bin/namedrop-app` with `--version`, then tries `namedrop` on the app session's `PATH` if the launcher is absent. Activation owns `namedrop-app`. Do not put a release binary at that path before activation. A desktop-launched app may have a different `PATH` from your shell.
 
-Aliases sort alphabetically inside each group. A `done` report stays done until the program changes it. Shells and programs that never report a status, including Codex in the intended setup, still appear when named. Finished terminals disappear.
+The mod uses `exec` for the binary, `watchFolder` for store changes, `notify` for replies and errors, and `hc run` for terminal-backed popups. The binary's hidden `events --ensure` starts the existing subscriber when a space is activated. It returns inactive without starting anything for an unactivated space. The mod tries ensure at startup and after read failures, no more often than once every 30 seconds.
 
-Click a row to focus its terminal when it has a pane, including a pane in another tab. A terminal without a pane opens in a peek dialog. Hover highlights the row. Native buttons support keyboard activation. The roster uses live app data without polling.
+| Program status | Appearance |
+| --- | --- |
+| `blocked` or `error` | Blocked-color dot. |
+| `working` | Working-color dot. |
+| `done` or `idle` | The corresponding theme dot. |
+| No report | No dot. |
 
-Alt+Shift+S opens the roster on any layout. Opening it again replaces the window with the same key and preserves its position. Drag its heading or unused space to move it. The window stays open until closed and reopens with the layout where you opened it, including after restart. Opening it on a different layout keeps a roster for that layout too. Close removes that layout's kept window.
-
-Alt+N opens the Name dialog on any layout. It captures the focused terminal when it opens, so a later focus change does not retarget a save. Enter and Save name use the same action. While saving, the input becomes a static display of the submitted alias. `Code Reviewer`, `@code-reviewer`, and `@Code Reviewer` become `code-reviewer`. Surrounding whitespace is trimmed, then one leading `@` is optional. `@@x` is rejected. ASCII letters and digits are accepted. ASCII spaces, tabs, line breaks, form feeds, carriage returns, hyphens, and underscores become single separators. Leading and trailing separators disappear. Empty names and other characters show the Rust alias error text.
-
-Another live terminal with that alias in the same space on the same machine prevents saving. Two terminals without a space label share that duplicate check only on the same machine. Other machines, other spaces, and finished terminals do not reserve the alias. Saving writes `namedrop.name=<alias>` through core. A nonzero result shows the error message and hint from core's JSON stderr, or trimmed plain stderr when the JSON shape is unrecognized. Empty stderr shows the exit-code message. A successful save closes the dialog. Cancel closes without starting a save. The app's Escape binding also closes the dialog. An already started core command can still finish after the dialog closes.
+Click a row to focus a terminal with a pane. A terminal without a pane opens in a peek dialog. The roster window stays open until closed. The app keeps its position per layout.
 
 ## Built from
 
-This build targets Herdr app **0.1.9** at `c235143` and herdr-core **0.1.14**. It has two independent mods.
+This build targets Herdr app **0.1.9** and herdr-core **0.1.14**. Copy these six source folders into your app home's `mods/` directory:
 
-- `mods/namedrop/mod.json` sets `place` to `none` and requests a `window` overlay with key `namedrop-roster`, `keep: true`, and width 300.
-- `mods/namedrop/roster.js` exports `roster(terminals, panes, spaces)`. It returns `{ alias, address, status, program, shown, where }` rows, joins pane visibility and space and tab names, and sorts by status and alias. Remote terminal addresses qualify the machine-local space and tab labels for the name lookup.
-- `mods/namedrop/main.js` renders those rows with `View`, `div`, `Button`, `h_flex`, and `v_flex`. Icons come from each program's `icon` and `tint` fields through `svg` or `image`. A floating copy puts its status dot on the edge named by `placement()?.edge`.
-- `mods/namedrop-name/mod.json` sets `place` to `none` and requests a `dialog` overlay of width 360.
-- `mods/namedrop-name/alias.js` exports `normalizeAlias(input)`, `aliasTaken(terminals, alias, address)`, and `formatHcError(stderr)`. Normalization trims and strips one leading `@`, as the TUI naming path does, before applying `normalize_alias` and `validate_alias` from Namedrop's `src/domain.rs`. Duplicate scope includes both machine and space. The formatter turns core's JSON error into a message and optional hint. Both pure modules import nothing.
-- `mods/namedrop-name/main.js` captures `focused()?.terminal` in `init`, owns an `InputState`, and renders `Input` and native buttons. The app supplies the dialog frame's focus and Escape binding. The mod focuses its input immediately and again after a failed save. It checks a fresh terminal snapshot before saving. Its editing and saving states prevent duplicate submission while a save is pending.
-- `keys.json` binds `alt-n` to `mod.open:namedrop-name` and `alt-shift-s` to `mod.open:namedrop` in `global`.
-- `.github/workflows/mod.yml` runs `node --test mods/*/*.test.js` on Node 22 for pushes and pull requests that change `mods/**` or the workflow.
+- `mods/namedrop/` is the roster window.
+- `mods/namedrop-name/` is the native Name dialog.
+- `mods/namedrop-management/`, `mods/namedrop-doctor/`, `mods/namedrop-agent-status/`, and `mods/namedrop-tour/` are four identical terminal launchers apart from their popup identifier.
 
-The roster calls `terminals()`, `panes()`, `spaces()`, `theme()`, `placement()`, and `props()`. It runs `pane.focus` or `terminal.peek` through `run`. The Name dialog calls `focused()`, `terminals()`, `props()`, `hc()`, and `closeOverlay()`. The roster's Close button also calls `closeOverlay()`. Each copy probes `exec("namedrop", ["--version"])` once in `init`. The releases button calls `cx.open_url("https://github.com/ericbust/namedrop/releases")`. The only core label either mod writes is `namedrop.name`, with `hc(["label", address, "namedrop.name=" + alias])`. There are no bundled icons or shipped mods to copy.
+The launcher for `management` calls `ui run manage`; `agent-status` calls `ui run status`. Doctor and tour use `ui run doctor` and `ui run tour`. Each launcher runs `hc run --bg --json --rm` for its selected terminal and opens the returned terminal in an app window. A taken name reopens the existing window. The native Name dialog does not launch a terminal.
+
+Merge these `keys.json` entries into the existing `global` object. Keep unrelated bindings:
+
+| Linux chord | Action |
+| --- | --- |
+| `alt-n` | `mod.open:namedrop-name` |
+| `alt-shift-s` | `mod.open:namedrop` |
+| `alt-shift-m` | `mod.open:namedrop-management` |
+| `alt-shift-d` | `mod.open:namedrop-doctor` |
+| `alt-shift-o` | `mod.open:namedrop-tour` |
+
+On macOS, Option plus a letter can type a character or start an accent. Option+N starts tilde composition on common layouts. If you need those input chords, rebind Name and roster to unused Command chords, and use `cmd-alt-m`, `cmd-alt-d`, and `cmd-alt-o` for management, Doctor, and tour. Check each chord against your existing bindings and the app's `option_as_alt` setting before editing `keys.json`.
 
 ## Watch out
 
-Copy both mod folders into your app home's `mods/` folder, normally `~/.config/herdr-app/mods/`. Merge the two global bindings into your existing `keys.json`. Check an existing binding before replacing it.
+The binary release archive contains no mods or keys. Obtain the matching source archive or checkout for those files. Keep the extracted release directory in a stable location; activation's launcher points to its binary. The app's installation and activation steps are in [README.md](README.md#install-in-herdr-app).
 
-Option plus a letter types a character or starts an accent on many Mac keyboards. Binding `alt-n` can take Option+N away from typing, including tilde composition on layouts that use it. The app's `option_as_alt` setting and keyboard layout affect whether Option reaches the shortcut. To preserve Option input, remove `alt-n` from your app home's `keys.json` and bind an unused chord such as `cmd-shift-n` to `mod.open:namedrop-name`. Check that chord against your existing bindings first. The same consideration applies to the roster's Option shortcut.
+The roster's kept window and optional layout float belong to the app. To add a float, clone a layout with `herdr-app do layout.clone '{"name":"main","as":"namedrop-layout"}'`, then add a `floating` entry whose content is `{ "mod": "namedrop" }` to the cloned layout. The float has no Close button; remove that entry to remove it.
 
-A desktop-launched app on Linux sees the desktop session's PATH. A `namedrop` installed in `~/.cargo/bin` can therefore read as missing even when it works in your interactive shell. Add that directory to the session PATH and restart the app. The version probe runs once per mod copy, so reopen or reload the roster after changing the installation.
-
-The roster window is kept per layout. It does not become a peek drawer. For an optional persistent layout float, clone a shipped layout first:
-
-```sh
-herdr-app do layout.clone '{"name":"main","as":"namedrop-layout"}'
-```
-
-In your app home's `layouts/namedrop-layout.json`, append this entry to the root's `floating` list. Create that list if absent. Preserve the layout's other fields and existing floating entries:
-
-```json
-{
-  "id": "namedrop-roster",
-  "content": { "mod": "namedrop" },
-  "edge": "right",
-  "align": "center",
-  "peek": 36
-}
-```
-
-Close the roster window if you want only the float. Side edges support `peek`; hover reveals the whole roster and leaving it tucks it back. The status dot sits on the edge that peeks. Dragging the float changes its edge and alignment. A floating copy has no Close button. Remove its layout entry to remove it.
-
-This shell assigns core labels and shows status. Sending mentions still requires the Namedrop binary's app-host integration. Core labels do not enforce alias uniqueness atomically, so simultaneous Name dialogs can race. This cross-dialog duplicate-alias race remains a known limit until a later Namedrop release routes naming through the binary. No terminal text, Namedrop database, or other mod state is changed by these mods. App-owned window persistence belongs to Herdr.
-
-`herdr-app check` passed for both mods on app 0.1.9 with core 0.1.14. The live lanes still wait for Weston. Live rendering, focus retention when opening Name, remote interaction, hot reload, and performance await those lanes. `preview.png` is intentionally absent until a real screenshot can be captured. The repository ignores the app-generated `gpui-kit.d.ts` and `jsconfig.json` files in each mod folder.
+The hc host's own notification method remains a no-op. The app mod provides the reply and blocked-status notifications. The heavier per-pane Host read and the subscriber's existing scope remain tracked as #94 and #97.
 
 ## Done when
 
-Run these checks on the target app and core versions:
+Run `node --test mods/*/*.test.js` and check all six folders on the target app version:
 
-1. `node --test mods/*/*.test.js` passes. Both `main.js` files pass `node --check`.
-2. `herdr-app check mods/namedrop` and `herdr-app check mods/namedrop-name` pass. `herdr-app status` lists no errors for shown copies.
-3. On a shipped layout, Alt+Shift+S opens the roster and Alt+N opens Name for the focused terminal. Save `coder` with Enter. `hc ls --json` shows its label, and the roster updates within two seconds. Missing focus, duplicate names, and core failures show an explanation without a successful save.
-4. Label a Claude terminal and a `cat` terminal. The roster lists both aliases. The Claude row shows its reported status color, and `cat` shows no dot. Clicking a terminal with a pane focuses it. Clicking a terminal without a pane peeks at it.
-5. Reopen the roster, drag it, switch layouts, and restart. Its position and kept state match the behavior above. In the optional layout float, move it between edges and confirm that the status dot stays on the peeking edge.
-6. Start without `namedrop` on the app's PATH. The install text and releases URL appear, and Open releases opens that page. Break `main.js` during the reload lane. Status reports the error while the last good roster remains visible.
-7. Measure the app's idle CPU with four labelled terminals against the same app without the mod, interleaving two 60-second runs each. The increase is at most one percentage point. The longest roster render in the sandbox log is at most 20 milliseconds.
-8. Save a real running-app screenshot as `preview.png`. Capture the roster and Name dialog screenshots and a 30 to 60 second review video for the operator's review before merge.
+```sh
+herdr-app check mods/namedrop
+herdr-app check mods/namedrop-name
+herdr-app check mods/namedrop-management
+herdr-app check mods/namedrop-doctor
+herdr-app check mods/namedrop-agent-status
+herdr-app check mods/namedrop-tour
+```
+
+The final compositor checks should name two agent terminals, show a waiting line during a request, deliver one reply notification, open each terminal-backed popup, and save a name through the native dialog. The program's final verification lane owns those app and live checks.

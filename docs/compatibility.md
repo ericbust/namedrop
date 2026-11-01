@@ -27,6 +27,14 @@ Nobody has tried musl (Alpine), NixOS or other Linux setups.
 
 Herdr 0.7.5 was only checked for loading the plugin and parsing commands. The full runs above used 0.8.2 and 0.9.1.
 
+## Herdr app target
+
+| Integration | Tested-version target | Verification status |
+| --- | --- | --- |
+| Herdr app host | Herdr app 0.1.9 and herdr-core 0.1.14 | HA-4 target. App `check` and live compositor checks remain in the program's final verification lane. |
+
+The six mod folders are `namedrop`, `namedrop-name`, `namedrop-management`, `namedrop-doctor`, `namedrop-agent-status`, and `namedrop-tour`. This documentation change does not claim that the app or live checks ran here.
+
 ## Codex 0.162 and later: the shared app-server
 
 Codex runs its sessions through its shared app-server, so Herdr cannot tell which pane each Codex session is in.

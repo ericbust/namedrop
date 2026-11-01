@@ -97,6 +97,40 @@ Herdr shows an install preview, then builds the executable and manages the check
 
 If you already use a local Namedrop checkout, follow the [migration steps](docs/operations.md#migrate-a-local-link-to-a-managed-installation) first. Herdr won't install over a local link.
 
+### Install in Herdr app
+
+Install the TUI plugin above first if you use Herdr workspaces. Herdr app uses a separate `hc` host and its own state. Use the binary release for your platform. Download `namedrop-<version>-<target>.tar.gz` and its `.sha256` file from the same [release](https://github.com/ericbust/namedrop/releases). On Linux, verify and extract them with:
+
+```sh
+sha256sum -c namedrop-<version>-<target>.tar.gz.sha256
+tar -xzf namedrop-<version>-<target>.tar.gz
+```
+
+On macOS, replace `sha256sum` with `shasum -a 256`. Keep the extracted directory at a stable absolute path. In the commands below, `/absolute/path/namedrop-<version>-<target>` means that extracted directory. Run its executable before changing app configuration:
+
+```sh
+/absolute/path/namedrop-<version>-<target>/bin/namedrop --version
+```
+
+From an app terminal in the space you want to activate, run the executable with explicit confirmation:
+
+```sh
+/absolute/path/namedrop-<version>-<target>/bin/namedrop --host hc activate --input-json '{"confirmed":true}'
+```
+
+Activation creates `~/.local/bin/namedrop-app`, the launcher that the app mods try first. Leave that path for activation to own; placing the release binary there beforehand makes activation reject the unrelated file. The mods fall back to `namedrop` on the app session's `PATH` when the launcher is absent. The extracted release directory must stay in place because the launcher points to its executable.
+
+The binary archive contains no `mods/` folders or `keys.json`. Download the **matching version's source archive** from the same release, or check out that version's tag. From that source tree, copy all six folders into the app home's `mods/` directory, usually `~/.config/herdr-app/mods/`: `namedrop`, `namedrop-name`, `namedrop-management`, `namedrop-doctor`, `namedrop-agent-status`, and `namedrop-tour`. Merge the five entries under `global` in the source `keys.json` into your app home's `keys.json`; preserve your existing bindings and resolve conflicts before replacing a key. See [RECIPE.md](RECIPE.md) for the keys and macOS rebinds.
+
+Focus one agent terminal, press **Alt+N**, and name it `@reviewer`. Focus another, press **Alt+N**, and name it `@tester`. The equivalent binary command for a focused agent terminal is:
+
+```sh
+/absolute/path/namedrop-<version>-<target>/bin/namedrop --host hc name @reviewer --type agent
+/absolute/path/namedrop-<version>-<target>/bin/namedrop --host hc roster --json
+```
+
+Ask `@reviewer` to send a short request to `@tester`. The roster shows `waiting on @tester` while the request is open. The reply returns to `@reviewer`, and the app posts a reply notification. Select the notification to focus that terminal. The first roster read establishes the notification baseline, so old replies do not produce a burst.
+
 ### Install from a release archive
 
 Each [release](https://github.com/ericbust/namedrop/releases) has an archive with a prebuilt executable for each platform, so you don't need Git, Rust or a compiler. Download the `.tar.gz` and its `.sha256` file for your platform, then check and extract the archive. On macOS, use `shasum -a 256 -c` instead of `sha256sum -c`.

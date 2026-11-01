@@ -2,6 +2,15 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## Unreleased
+
+### Added
+
+- A separate hc host connects naming, messages, handoffs, and agent sessions to herdr-core for Herdr app. The TUI host keeps its existing integration package.
+- The hc host supports a read-only `roster --json` snapshot and a hidden `events --ensure` command for the app. The latter starts the existing subscriber only when a space is activated.
+- Herdr app's roster shows per-agent waiting names and posts bounded reply and blocked-status notifications. Four terminal-backed popups open management, Doctor, agent status, and tour. Naming stays in a native dialog and uses the binary to save the name.
+- Global app shortcuts open management, Doctor, and tour with Alt+Shift+M, Alt+Shift+D, and Alt+Shift+O.
+
 ## [1.4.1] - 2026-10-26
 
 ### Fixed
