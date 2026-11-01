@@ -746,7 +746,10 @@ fn producer_reads_existing_state_without_writes_or_directory_creation() {
     assert_eq!(result["data"]["state"], "pending");
     assert_eq!(db_mode, 0o400);
     assert_eq!(state_mode, 0o500);
-    assert_eq!(fs::metadata(command_lock).unwrap().permissions().mode() & 0o777, 0o400);
+    assert_eq!(
+        fs::metadata(command_lock).unwrap().permissions().mode() & 0o777,
+        0o400
+    );
     assert_eq!(fs::read(&database).unwrap(), before);
     let mut entries_after: Vec<_> = fs::read_dir(fixture.directory.path())
         .unwrap()

@@ -14,13 +14,30 @@ pub fn command_guard(state: &std::path::Path) -> Result<Option<fs::File>, String
         return Err("runtime command lock is not a regular file".into());
     }
     let guard = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
         .read(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+        .or_else(|error| {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(error);
+            }
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                .open(&path)
+        })
         .map_err(|error| error.to_string())?;
+    if !guard
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("runtime command lock is not a regular file".into());
+    }
     guard.lock_shared().map_err(|error| error.to_string())?;
     if fs::symlink_metadata(runtime.join("migration.json")).is_ok() {
         return Err("Namedrop activation was interrupted. Reopen Update Namedrop to finish; this command made no changes.".into());
