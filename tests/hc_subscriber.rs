@@ -2894,66 +2894,92 @@ fn nonshell_terminal_first_name_agrees_with_public_detection() {
 
 #[test]
 fn unrelated_batch_error_cannot_bypass_failed_get_backoff() {
-    check("failed-get-batch-error", |fixture, runtime| {
-        let runtime = namedrop::LifecycleRuntime {
-            clock: &RetryClock(10_000),
-            state_directory: runtime.state_directory,
-            home_directory: runtime.home_directory,
-            agent_config: runtime.agent_config,
-            cwd: runtime.cwd,
-            workspace_id: runtime.workspace_id,
-            current_pane_id: runtime.current_pane_id,
-            session_socket_id: runtime.session_socket_id,
-            host: runtime.host,
-            ids: runtime.ids,
-        };
-        let mut other = fixture.terminals.borrow()[0].clone();
-        other["address"] = json!("t2");
-        other["labels"]["namedrop.name"] = json!("bob");
-        fixture.terminals.borrow_mut().push(other);
-        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
-        subscriber
-            .handle_line(&session_event("snapshot", fixture), &runtime)
-            .unwrap();
-        *fixture.get_failure.borrow_mut() = Some("t1".into());
-        subscriber.handle_line(&labels(), &runtime).unwrap();
-        subscriber
-            .tick(&namedrop::LifecycleRuntime {
-                clock: &RetryClock(10_500),
-                ..runtime
-            })
-            .unwrap();
-        fixture.terminals.borrow_mut()[1]["labels"]["namedrop.name"] = json!("");
-        *fixture.name_write_failure.borrow_mut() = Some(false);
-        subscriber
-            .handle_lines(
-                [
-                    labels().as_str(),
-                    r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#,
-                ],
-                &namedrop::LifecycleRuntime {
-                    clock: &RetryClock(10_500),
-                    ..runtime
-                },
-            )
-            .unwrap_err();
-        fixture.calls.borrow_mut().clear();
-        subscriber
-            .tick(&namedrop::LifecycleRuntime {
-                clock: &RetryClock(11_000),
-                ..runtime
-            })
-            .unwrap();
-        assert!(
-            fixture
-                .calls
-                .borrow()
-                .iter()
-                .all(|call| call[0] != "get" || call[1] != "t1"),
-            "unrelated error bypassed failed pane backoff: {:?}",
-            fixture.calls.borrow()
+    for carried in [false, true] {
+        check(
+            &format!("failed-get-batch-error-{carried}"),
+            |fixture, runtime| {
+                let runtime = namedrop::LifecycleRuntime {
+                    clock: &RetryClock(10_000),
+                    state_directory: runtime.state_directory,
+                    home_directory: runtime.home_directory,
+                    agent_config: runtime.agent_config,
+                    cwd: runtime.cwd,
+                    workspace_id: runtime.workspace_id,
+                    current_pane_id: runtime.current_pane_id,
+                    session_socket_id: runtime.session_socket_id,
+                    host: runtime.host,
+                    ids: runtime.ids,
+                };
+                let mut other = fixture.terminals.borrow()[0].clone();
+                other["address"] = json!("t2");
+                other["labels"]["namedrop.name"] = json!("bob");
+                fixture.terminals.borrow_mut().push(other);
+                let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+                subscriber
+                    .handle_line(&session_event("snapshot", fixture), &runtime)
+                    .unwrap();
+                *fixture.get_failure.borrow_mut() = Some("t1".into());
+                subscriber.handle_line(&labels(), &runtime).unwrap();
+                subscriber
+                    .tick(&namedrop::LifecycleRuntime {
+                        clock: &RetryClock(10_500),
+                        ..runtime
+                    })
+                    .unwrap();
+                fixture.terminals.borrow_mut()[1]["labels"]["namedrop.name"] = json!("");
+                *fixture.name_write_failure.borrow_mut() = Some(false);
+                let mut lines = vec![
+                    labels(),
+                    r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#.to_owned(),
+                ];
+                if carried {
+                    lines.insert(0, session_event("snapshot", fixture));
+                }
+                subscriber
+                    .handle_lines(
+                        lines.iter().map(String::as_str),
+                        &namedrop::LifecycleRuntime {
+                            clock: &RetryClock(10_500),
+                            ..runtime
+                        },
+                    )
+                    .unwrap_err();
+                fixture.calls.borrow_mut().clear();
+                subscriber
+                    .tick(&namedrop::LifecycleRuntime {
+                        clock: &RetryClock(11_000),
+                        ..runtime
+                    })
+                    .unwrap();
+                assert!(
+                    fixture
+                        .calls
+                        .borrow()
+                        .iter()
+                        .all(|call| call[0] != "get" || call[1] != "t1"),
+                    "unrelated error bypassed failed pane backoff: {:?}",
+                    fixture.calls.borrow()
+                );
+                fixture.calls.borrow_mut().clear();
+                subscriber
+                    .tick(&namedrop::LifecycleRuntime {
+                        clock: &RetryClock(12_500),
+                        ..runtime
+                    })
+                    .unwrap();
+                assert_eq!(
+                    fixture
+                        .calls
+                        .borrow()
+                        .iter()
+                        .filter(|call| call[0] == "get" && call[1] == "t1")
+                        .count(),
+                    1,
+                    "batch retry discarded failed pane readiness"
+                );
+            },
         );
-    });
+    }
 }
 
 #[test]
