@@ -9,6 +9,157 @@ use namedrop::{HcHost, HerdrCommandExecutor, HerdrCommandOutput};
 use serde_json::{Value, json};
 use std::{cell::RefCell, path::Path};
 
+#[test]
+fn ensure_without_core_is_inactive_and_does_not_create_state() {
+    use std::process::Command;
+    let home = std::env::temp_dir().join(format!("namedrop-ensure-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir(&home).unwrap();
+    let state = home.join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .isolated_env(&home)
+        .env("HC_SOCKET", home.join("absent.sock"))
+        .env("NAMEDROP_STATE_DIR", &state)
+        .args(["--host", "hc", "events", "--ensure"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"status":"inactive","pid":null})
+    );
+    assert!(!state.exists());
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+const ENSURE_CORE: &str = "628bcf8129aa037b1fa5aad3504926a6";
+
+struct EnsureFixture {
+    root: std::path::PathBuf,
+    socket: Option<hc_socket::HcSocket>,
+}
+
+impl EnsureFixture {
+    fn new() -> Self {
+        let root = hc_socket::fixture::short_socket_root();
+        std::fs::create_dir(root.join("home")).unwrap();
+        let socket = hc_socket::HcSocket::rpc(&root.join("core.sock"), ENSURE_CORE).unwrap();
+        Self {
+            root,
+            socket: Some(socket),
+        }
+    }
+
+    fn state(&self) -> std::path::PathBuf {
+        self.root.join("state")
+    }
+
+    fn activate(&self, core: &str, deactivated: bool) {
+        let mut store = namedrop::StateStore::open(self.state()).unwrap();
+        let namespace = namedrop::StateNamespace::for_space(core, "fixture");
+        let actor = namedrop::MutationAttribution::new(namedrop::ActorKind::Human, "fixture", 0);
+        store
+            .transaction(|tx| {
+                tx.activate_worktree(&namespace, &actor)?;
+                if deactivated {
+                    tx.deactivate_worktree(&namespace, &actor)?;
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn ensure(&self) -> Value {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+            .isolated_env(self.root.join("home"))
+            .env("HC_SOCKET", self.root.join("core.sock"))
+            .env("HC_BIN_PATH", "/bin/false")
+            .args(["--host", "hc", "--plugin-state"])
+            .arg(self.state())
+            .args(["events", "--ensure"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+}
+
+impl Drop for EnsureFixture {
+    fn drop(&mut self) {
+        let _ = namedrop::host::hc::events::stop(&self.state(), &format!("hc:{ENSURE_CORE}"));
+        self.socket.take();
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[test]
+fn ensure_inactive_states_never_launch_a_subscriber() {
+    for kind in ["absent-store", "empty-store", "deactivated", "other-core"] {
+        let fixture = EnsureFixture::new();
+        match kind {
+            "empty-store" => {
+                namedrop::StateStore::open(fixture.state()).unwrap();
+            }
+            "deactivated" => fixture.activate(&format!("hc:{ENSURE_CORE}"), true),
+            "other-core" => fixture.activate("hc:other", false),
+            _ => (),
+        }
+        assert_eq!(
+            fixture.ensure(),
+            json!({"status":"inactive","pid":null}),
+            "{kind}"
+        );
+        assert!(!fixture.state().join("hc-subscribers").exists(), "{kind}");
+        assert_eq!(hc_socket::subscriptions(&fixture.root), 0, "{kind}");
+    }
+}
+
+#[test]
+fn ensure_rejects_interrupted_activation() {
+    let root =
+        std::env::temp_dir().join(format!("namedrop-ensure-migration-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let home = root.join("home");
+    let state = root.join("state");
+    std::fs::create_dir_all(state.join("runtime")).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    std::fs::write(state.join("runtime/migration.json"), "{}").unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .isolated_env(&home)
+        .env("HC_SOCKET", root.join("absent.sock"))
+        .env("HC_BIN_PATH", "/bin/false")
+        .args(["--host", "hc", "--plugin-state"])
+        .arg(&state)
+        .args(["events", "--ensure"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(69), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("activation was interrupted"),
+        "{output:?}"
+    );
+    assert!(!state.join("hc-subscribers").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ensure_starts_once_then_reports_the_same_running_pid() {
+    let fixture = EnsureFixture::new();
+    fixture.activate(&format!("hc:{ENSURE_CORE}"), false);
+    std::fs::create_dir_all(fixture.state().join("runtime")).unwrap();
+    let first = fixture.ensure();
+    assert_eq!(first["status"], "started", "{first}");
+    let pid = first["pid"].as_u64().unwrap();
+    assert!(pid > 0);
+    let second = fixture.ensure();
+    assert_eq!(second, json!({"status":"running","pid":pid}));
+    assert_eq!(hc_socket::subscriptions(&fixture.root), 1);
+    assert!(!fixture.root.join("home/.claude").exists());
+    assert!(!fixture.root.join("home/.codex").exists());
+}
+
 struct Fixture {
     _shell: process::AgentProcess,
     terminals: RefCell<Vec<Value>>,

@@ -3,6 +3,152 @@ mod environment;
 use environment::CommandHome;
 use std::process::Command;
 
+#[test]
+fn popup_target_claim_uses_hc_flags_only_without_target_environment() {
+    const CHILD: &str = "NAMEDROP_POPUP_CLAIM_CHILD";
+    const FIELDS: [&str; 4] = [
+        "NAMEDROP_TARGET_WORKSPACE",
+        "NAMEDROP_TARGET_PANE",
+        "NAMEDROP_TARGET_TERMINAL",
+        "NAMEDROP_TARGET_SESSION",
+    ];
+    if std::env::var_os(CHILD).is_none() {
+        for mode in [
+            "flags",
+            "tui",
+            "complete",
+            "workspace",
+            "pane",
+            "terminal",
+            "session",
+            "missing-pane",
+            "missing-terminal",
+        ] {
+            let home = std::env::temp_dir().join(format!(
+                "namedrop-popup-claim-{}-{mode}",
+                std::process::id()
+            ));
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "popup_target_claim_uses_hc_flags_only_without_target_environment",
+                ])
+                .isolated_env(&home)
+                .env(CHILD, mode);
+            for field in FIELDS {
+                command.env_remove(field);
+            }
+            if matches!(
+                mode,
+                "complete" | "workspace" | "missing-pane" | "missing-terminal"
+            ) {
+                command.env(FIELDS[0], "environment-space");
+            }
+            if matches!(mode, "complete" | "pane" | "missing-terminal") {
+                command.env(FIELDS[1], "environment-pane");
+            }
+            if matches!(mode, "complete" | "terminal") {
+                command.env(FIELDS[2], "environment-terminal");
+            }
+            if matches!(mode, "complete" | "session") {
+                command.env(FIELDS[3], "");
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{mode}: {output:?}");
+            let _ = std::fs::remove_dir_all(home);
+        }
+        return;
+    }
+    let mode = std::env::var(CHILD).unwrap();
+    let options = namedrop::cli::RuntimeOptions {
+        host: Some(if mode == "tui" {
+            namedrop::runtime::HostKind::Tui
+        } else {
+            namedrop::runtime::HostKind::Hc
+        }),
+        hc_space: Some("flag-space".to_owned()),
+        hc_terminal: Some("flag-terminal".to_owned()),
+        ..Default::default()
+    };
+    let missing = match mode.as_str() {
+        "tui" | "pane" | "terminal" | "session" => Some("This popup is missing its invoking space"),
+        "workspace" | "missing-pane" => Some("This popup is missing its invoking pane"),
+        "missing-terminal" => Some("This popup is missing its invoking terminal"),
+        _ => None,
+    };
+    if let Some(error) = missing {
+        assert_eq!(options.popup_target_claim().err().as_deref(), Some(error));
+        return;
+    }
+    let claim = options.popup_target_claim().unwrap();
+    if mode == "complete" {
+        assert_eq!(claim.workspace, "environment-space");
+        assert_eq!(claim.pane, "environment-pane");
+        assert_eq!(claim.terminal, "environment-terminal");
+        assert_eq!(claim.session.as_deref(), Some(""));
+        assert_eq!(
+            claim
+                .resolved_session(true, || panic!("empty session must suppress label lookup"))
+                .unwrap()
+                .as_deref(),
+            Some("")
+        );
+    } else {
+        assert_eq!(claim.workspace, "flag-space");
+        assert_eq!(claim.pane, "flag-terminal");
+        assert_eq!(claim.terminal, "flag-terminal");
+        assert_eq!(claim.session, None);
+        assert_eq!(
+            claim
+                .resolved_session(true, || Ok(Some("label-session".to_owned())))
+                .unwrap()
+                .as_deref(),
+            Some("label-session")
+        );
+        assert_eq!(
+            claim
+                .resolved_session(false, || panic!("TUI must not read HC label"))
+                .unwrap(),
+            None
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_target_environment_suppresses_hc_flag_fallback() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let outcomes = [
+        "NAMEDROP_TARGET_WORKSPACE",
+        "NAMEDROP_TARGET_PANE",
+        "NAMEDROP_TARGET_TERMINAL",
+        "NAMEDROP_TARGET_SESSION",
+    ]
+    .map(|field| {
+        let options = namedrop::cli::RuntimeOptions {
+            environment: namedrop::environment::EnvironmentSnapshot::from_variables([(
+                field.into(),
+                OsString::from_vec(vec![0xff]),
+            )]),
+            host: Some(namedrop::runtime::HostKind::Hc),
+            hc_space: Some("flag-space".to_owned()),
+            hc_terminal: Some("flag-terminal".to_owned()),
+            ..Default::default()
+        };
+        (field, options.popup_target_claim().err())
+    });
+    for (field, error) in &outcomes {
+        assert_eq!(
+            error.as_deref(),
+            Some("This popup is missing its invoking space"),
+            "{field}: {outcomes:?}"
+        );
+    }
+}
+
 fn run(arguments: &[&str]) -> std::process::Output {
     run_with_environment(arguments, &[])
 }
@@ -54,6 +200,33 @@ fn tui_events_rejection_uses_the_standard_json_envelope() {
     assert_eq!(body["protocol_version"], "collab/v1");
     assert_eq!(body["error"]["code"], "invalid_request");
     assert_eq!(body["error"]["message"], "events requires --host hc");
+}
+
+#[test]
+fn ensure_is_hidden_and_rejected_under_tui() {
+    let output = run(&["--host", "tui", "events", "--ensure"]);
+    assert_eq!(output.status.code(), Some(64));
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["error"]["message"], "events requires --host hc");
+
+    for arguments in [vec!["events", "--help"], vec!["help", "events"]] {
+        let output = run(&arguments);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!text.contains("--ensure"), "{arguments:?}: {text}");
+    }
+    let output = run(&["--host", "tui", "events", "--ensure", "--help"]);
+    assert_eq!(output.status.code(), Some(64));
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected argument '--ensure'")
+    );
 }
 
 #[test]

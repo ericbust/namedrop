@@ -141,30 +141,32 @@ pub(super) fn run(options: &RuntimeOptions, mode: UiMode) -> ExitCode {
 }
 
 fn run_prompt(options: &RuntimeOptions, mode: UiMode) -> Result<(), String> {
-    let workspace = env::var("NAMEDROP_TARGET_WORKSPACE")
-        .map_err(|_| "This popup is missing its invoking space")?;
-    let pane =
-        env::var("NAMEDROP_TARGET_PANE").map_err(|_| "This popup is missing its invoking pane")?;
-    let terminal = env::var("NAMEDROP_TARGET_TERMINAL")
-        .map_err(|_| "This popup is missing its invoking terminal")?;
-    // Empty when the pane held no agent session as the popup opened.
-    let session = env::var("NAMEDROP_TARGET_SESSION").unwrap_or_default();
+    let claim = options.popup_target_claim()?;
+    let workspace = &claim.workspace;
+    let pane = &claim.pane;
+    let terminal = &claim.terminal;
     with_runtime_options(options, |runtime| {
         let targeted = LifecycleRuntime {
-            workspace_id: Some(&workspace),
-            current_pane_id: Some(&pane),
+            workspace_id: Some(workspace),
+            current_pane_id: Some(pane),
             ..*runtime
         };
-        if target_terminal(&targeted)? != terminal {
+        let origin = target_pane(&targeted)?;
+        if origin.terminal_id != *terminal {
             return Err(
                 "The invoking pane changed. Close this popup and open it again.".to_owned(),
             );
         }
+        let session = claim
+            .resolved_session(options.host_kind() == Ok(HostKind::Hc), || {
+                Ok(origin.agent_session_id.map(|id| id.as_str().to_owned()))
+            })?
+            .unwrap_or_default();
         match mode {
-            UiMode::Name => name_prompt(&targeted, &terminal, &options.environment).map(drop),
-            UiMode::Manage => manage_prompt(&targeted, &terminal, options),
-            UiMode::Doctor => doctor_prompt(&targeted, &terminal, &session, &options.environment),
-            UiMode::Tour => tour_prompt(&targeted, &terminal, &options.environment),
+            UiMode::Name => name_prompt(&targeted, terminal, &options.environment).map(drop),
+            UiMode::Manage => manage_prompt(&targeted, terminal, options),
+            UiMode::Doctor => doctor_prompt(&targeted, terminal, &session, &options.environment),
+            UiMode::Tour => tour_prompt(&targeted, terminal, &options.environment),
             UiMode::Status => unreachable!("status UI is dispatched before interactive prompts"),
         }
     })

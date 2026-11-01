@@ -3,6 +3,58 @@ use serde_json::Value;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+pub(crate) enum EnsureOutcome {
+    Inactive,
+    Running(u32),
+    Started(u32),
+}
+
+pub struct PopupTargetClaim {
+    pub workspace: String,
+    pub pane: String,
+    pub terminal: String,
+    pub session: Option<String>,
+}
+
+impl PopupTargetClaim {
+    pub fn resolved_session(
+        &self,
+        hc: bool,
+        from_terminal: impl FnOnce() -> Result<Option<String>, String>,
+    ) -> Result<Option<String>, String> {
+        match &self.session {
+            Some(session) => Ok(Some(session.clone())),
+            None if hc => from_terminal(),
+            None => Ok(None),
+        }
+    }
+}
+
+impl serde::Serialize for EnsureOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("EnsureOutcome", 2)?;
+        match self {
+            Self::Inactive => {
+                state.serialize_field("status", "inactive")?;
+                state.serialize_field("pid", &Option::<u32>::None)?;
+            }
+            Self::Running(pid) | Self::Started(pid) => {
+                state.serialize_field(
+                    "status",
+                    if matches!(self, Self::Running(_)) {
+                        "running"
+                    } else {
+                        "started"
+                    },
+                )?;
+                state.serialize_field("pid", pid)?;
+            }
+        }
+        state.end()
+    }
+}
+
 #[derive(Debug, Args)]
 #[command(name = "namedrop", version, about)]
 pub struct Cli {
@@ -73,18 +125,38 @@ impl Parser for Cli {
             Ok(matches) => return Self::from_arg_matches(&matches),
             Err(error) => error,
         };
-        let tui_command = command.clone().mut_subcommand("hook", |hook| {
-            clap::Command::new("hook")
-                .about(hook.get_about().unwrap().clone())
-                .hide(true)
-                .subcommand_required(true)
-                .arg_required_else_help(true)
-                .subcommands(
-                    hook.get_subcommands()
-                        .filter(|child| child.get_name() != "session-end")
-                        .cloned(),
-                )
-        });
+        let tui_command = clap::Command::new("namedrop")
+            .version(env!("CARGO_PKG_VERSION"))
+            .about(env!("CARGO_PKG_DESCRIPTION"))
+            .subcommand_required(true)
+            .arg_required_else_help(true)
+            .args(command.get_arguments().cloned())
+            .subcommands(
+                command
+                    .get_subcommands()
+                    .filter(|child| child.get_name() != "roster")
+                    .map(|child| {
+                        if child.get_name() == "events" {
+                            clap::Command::new("events")
+                                .about(child.get_about().unwrap().clone())
+                                .hide(true)
+                        } else {
+                            child.clone()
+                        }
+                    }),
+            )
+            .mut_subcommand("hook", |hook| {
+                clap::Command::new("hook")
+                    .about(hook.get_about().unwrap().clone())
+                    .hide(true)
+                    .subcommand_required(true)
+                    .arg_required_else_help(true)
+                    .subcommands(
+                        hook.get_subcommands()
+                            .filter(|child| child.get_name() != "session-end")
+                            .cloned(),
+                    )
+            });
         let tui_help = match tui_command.try_get_matches_from(&arguments) {
             Ok(matches) => return Self::from_arg_matches(&matches),
             Err(error) => error,
@@ -170,6 +242,43 @@ pub struct RuntimeOptions {
 }
 
 impl RuntimeOptions {
+    pub fn popup_target_claim(&self) -> Result<PopupTargetClaim, String> {
+        let hc = self.host_kind()? == crate::runtime::HostKind::Hc;
+        let use_flags = hc
+            && [
+                "NAMEDROP_TARGET_WORKSPACE",
+                "NAMEDROP_TARGET_PANE",
+                "NAMEDROP_TARGET_TERMINAL",
+                "NAMEDROP_TARGET_SESSION",
+            ]
+            .iter()
+            .all(|name| self.environment.var_os(name).is_none());
+        let field = |name: &str, fallback: Option<&String>, error: &str| {
+            self.environment
+                .var(name)
+                .or_else(|| if use_flags { fallback.cloned() } else { None })
+                .ok_or_else(|| error.to_owned())
+        };
+        Ok(PopupTargetClaim {
+            workspace: field(
+                "NAMEDROP_TARGET_WORKSPACE",
+                self.hc_space.as_ref(),
+                "This popup is missing its invoking space",
+            )?,
+            pane: field(
+                "NAMEDROP_TARGET_PANE",
+                self.hc_terminal.as_ref(),
+                "This popup is missing its invoking pane",
+            )?,
+            terminal: field(
+                "NAMEDROP_TARGET_TERMINAL",
+                self.hc_terminal.as_ref(),
+                "This popup is missing its invoking terminal",
+            )?,
+            session: self.environment.var("NAMEDROP_TARGET_SESSION"),
+        })
+    }
+
     pub fn explicit_host_kind(&self) -> Result<Option<crate::runtime::HostKind>, String> {
         crate::runtime::HostSignals {
             host: self.host,
@@ -266,6 +375,39 @@ impl Cli {
 
     pub fn operation(&self) -> &'static str {
         self.command.operation()
+    }
+
+    pub fn roster_json(&self) -> Result<String, String> {
+        let state = self.runtime.state_directory()?;
+        let state = if state.is_absolute() {
+            state
+        } else {
+            std::env::current_dir()
+                .map_err(|error| error.to_string())?
+                .join(state)
+        };
+        let core =
+            crate::host::hc::events::roster_core_identity(&state, &self.runtime.environment)?;
+        let snapshot = crate::StateStore::roster_snapshot(&state, core.as_deref())
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&snapshot).map_err(|error| error.to_string())
+    }
+
+    pub fn events_ensure(&self) -> bool {
+        matches!(self.command, Command::Events { ensure: true })
+    }
+
+    pub fn ensure_json(&self) -> Result<String, String> {
+        let state = self.runtime.state_directory()?;
+        let state = if state.is_absolute() {
+            state
+        } else {
+            std::env::current_dir()
+                .map_err(|error| error.to_string())?
+                .join(state)
+        };
+        let outcome = crate::host::hc::events::ensure(&state, &self.runtime.environment)?;
+        serde_json::to_string(&outcome).map_err(|error| error.to_string())
     }
 
     pub fn input_is_file(&self) -> bool {
@@ -492,7 +634,13 @@ enum Command {
     Reconcile,
     /// Subscribe to hc lifecycle and status events.
     #[command(hide = true)]
-    Events,
+    Events {
+        #[arg(long, hide = true)]
+        ensure: bool,
+    },
+    /// Read the current hc collaboration roster.
+    #[command(hide = true)]
+    Roster,
     /// Handle one Herdr lifecycle event.
     Event {
         #[command(subcommand)]
@@ -550,7 +698,8 @@ impl Command {
             Self::Thread { command } => command.operation(),
             Self::Space { command } => command.operation(),
             Self::Reconcile => "reconcile",
-            Self::Events => "events",
+            Self::Events { .. } => "events",
+            Self::Roster => "roster",
             Self::Event { command } => command.operation(),
             Self::Dashboard(_) => "dashboard",
             Self::DashboardServer => "dashboard.server",

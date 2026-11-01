@@ -27,6 +27,18 @@ Nobody has tried musl (Alpine), NixOS or other Linux setups.
 
 Herdr 0.7.5 was only checked for loading the plugin and parsing commands. The full runs above used 0.8.2 and 0.9.1.
 
+## Herdr app target
+
+| Integration | Tested-version target | Verification status |
+| --- | --- | --- |
+| Herdr app host | Herdr app 0.1.11 and herdr-core 0.1.16 | Ran on Linux. The waiting-line and reply lane used real Claude Code agents; the other lanes used named terminals. |
+
+The hc host was built against herdr-core 0.1.14.
+
+The waiting-line and reply lane ran with two real Claude Code agents in the app, on Herdr app 0.1.11 and herdr-core 0.1.16. The popups, fresh-install and perf lanes ran with named terminals as mention senders and recipients, because the credential copy was declined for those lanes. The agent paths themselves (hooks, registration, replies) were proven live in HA-2 on the hc host.
+
+The six mod folders are `namedrop`, `namedrop-name`, `namedrop-management`, `namedrop-doctor`, `namedrop-agent-status`, and `namedrop-tour`.
+
 ## Codex 0.162 and later: the shared app-server
 
 Codex runs its sessions through its shared app-server, so Herdr cannot tell which pane each Codex session is in.

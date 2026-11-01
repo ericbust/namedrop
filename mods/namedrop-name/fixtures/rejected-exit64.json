@@ -1,0 +1,1 @@
+{"protocol_version":"collab/v1","status":"rejected","operation":null,"error":{"code":"invalid_request","message":"error: invalid value 'bogus' for '--type <PANE_TYPE>'\n  [possible values: agent, terminal]\n\nFor more information, try '--help'.\n"}}

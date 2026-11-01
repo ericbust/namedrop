@@ -55,6 +55,7 @@ mod coordination_bridge;
 mod coordination_ownership;
 pub mod dashboard;
 mod missing_disposition;
+mod roster;
 pub(crate) use coordination_bridge::TrackedMessage;
 pub(crate) use coordination_ownership::CoordinationRole;
 mod groups;

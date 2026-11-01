@@ -1,6 +1,9 @@
 {
   "global": {
     "alt-n": "mod.open:namedrop-name",
-    "alt-shift-s": "mod.open:namedrop"
+    "alt-shift-s": "mod.open:namedrop",
+    "alt-shift-m": "mod.open:namedrop-management",
+    "alt-shift-d": "mod.open:namedrop-doctor",
+    "alt-shift-o": "mod.open:namedrop-tour"
   }
 }
