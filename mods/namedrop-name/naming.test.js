@@ -26,7 +26,7 @@ test("native dialog submits through the selected binary", async () => {
 });
 
 const live = (address, extra = {}) => ({ address, state: "live", labels: { "herdr.space": "work" }, ...extra });
-const missing = (command) => new Error(`herdr.exec: cannot run ${command}: No such file or directory (os error 2)`);
+const missing = (command) => new Error("`herdr.exec`: cannot run " + command + ": No such file or directory (os error 2)");
 
 operation("props target wins and binary receives exact agent arguments", async () => {
   const calls = [];

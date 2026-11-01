@@ -1,11 +1,11 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Button } from "gpui-base";
-import { focused, terminals, hc, props, closeOverlay, theme } from "herdr";
-import { normalizeAlias, aliasTaken, formatHcError } from "./alias.js";
+import { focused, terminals, hc, exec, home, props, closeOverlay, theme } from "herdr";
+import { chooseTarget, saveName } from "./naming.js";
 
 export default class NameTerminal extends View {
   init() {
-    this.address = focused()?.terminal ?? null;
+    this.address = chooseTarget(props(), focused());
     this.state = { kind: this.address ? "editing" : "unavailable", error: null };
     if (!this.address) return;
     const name = terminals().find((terminal) => terminal.address === this.address)?.labels?.["namedrop.name"] ?? "";
@@ -27,31 +27,16 @@ export default class NameTerminal extends View {
 
   submit(cx) {
     if (this.state.kind !== "editing") return;
-    const snapshot = terminals();
-    const target = snapshot.find((terminal) => terminal.address === this.address);
-    const result = normalizeAlias(this.input.value());
-    const error = target?.state !== "live" ? "This terminal is no longer live. Close this dialog and focus a live terminal."
-      : result.error ?? (aliasTaken(snapshot, result.alias, this.address) ? "That name is already taken in this space." : null);
-    if (error) {
-      this.state = { kind: "editing", error };
-      cx.notify();
-      return;
-    }
-    this.state = { kind: "saving", alias: result.alias };
+    this.state = { kind: "saving", alias: this.input.value() };
     cx.notify();
     cx.spawn(async (cx) => {
-      try {
-        const saved = await hc(["label", this.address, "namedrop.name=" + result.alias]);
-        if (saved.code !== 0) {
-          this.state = { kind: "editing", error: formatHcError(saved.stderr) || `Naming failed with exit code ${saved.code}.` };
-        } else {
-          this.state = { kind: "closed" };
-          this.dismiss();
-          return;
-        }
-      } catch (error) {
-        this.state = { kind: "editing", error: String(error) };
+      const result = await saveName({ target: this.address, alias: this.input.value(), terminals, home, exec, hc });
+      if (result.ok) {
+        this.state = { kind: "closed" };
+        this.dismiss();
+        return;
       }
+      this.state = { kind: "editing", error: result.error };
       cx.notify();
       this.input.focus();
     });
