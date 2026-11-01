@@ -9,6 +9,29 @@ use namedrop::{HcHost, HerdrCommandExecutor, HerdrCommandOutput};
 use serde_json::{Value, json};
 use std::{cell::RefCell, path::Path};
 
+#[test]
+fn ensure_without_core_is_inactive_and_does_not_create_state() {
+    use std::process::Command;
+    let home = std::env::temp_dir().join(format!("namedrop-ensure-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir(&home).unwrap();
+    let state = home.join("state");
+    let output = Command::new(env!("CARGO_BIN_EXE_namedrop"))
+        .env("HOME", &home)
+        .env("HC_SOCKET", home.join("absent.sock"))
+        .env("NAMEDROP_STATE_DIR", &state)
+        .args(["--host", "hc", "events", "--ensure"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"status":"inactive","pid":null})
+    );
+    assert!(!state.exists());
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 struct Fixture {
     _shell: process::AgentProcess,
     terminals: RefCell<Vec<Value>>,
