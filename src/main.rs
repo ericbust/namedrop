@@ -1026,8 +1026,24 @@ fn run_agent_status_worker() -> ExitCode {
 fn run_agent_status_worker_queue(
     directory: &Path,
     lock: fs::File,
+    deadline_ms: Option<u64>,
+    scan: impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
+) -> ExitCode {
+    run_agent_status_worker_queue_with_enqueue(
+        directory,
+        lock,
+        deadline_ms,
+        scan,
+        queue_agent_status_reconciliation,
+    )
+}
+
+fn run_agent_status_worker_queue_with_enqueue(
+    directory: &Path,
+    lock: fs::File,
     mut deadline_ms: Option<u64>,
     mut scan: impl FnMut(&Path) -> io::Result<Vec<PathBuf>>,
+    mut enqueue: impl FnMut(&Path, &serde_json::Value) -> io::Result<()>,
 ) -> ExitCode {
     let mut failures = 0_usize;
     loop {
@@ -1042,10 +1058,7 @@ fn run_agent_status_worker_queue(
                     wait_for_marker_or_deadline(directory, due, &mut scan);
                     continue;
                 }
-                match queue_agent_status_reconciliation(
-                    directory,
-                    &serde_json::json!({"operation":"mailbox-wake"}),
-                ) {
+                match enqueue(directory, &serde_json::json!({"operation":"mailbox-wake"})) {
                     Ok(()) => deadline_ms = None,
                     Err(error) if !retryable_queue_scan(&error) => return ExitCode::SUCCESS,
                     Err(_) => wait_for_reconciliation_retry(&mut failures, false),
@@ -1239,7 +1252,14 @@ mod worker_shutdown_tests {
 
     #[test]
     fn an_outer_queue_scan_stops_on_permanent_errors_without_retrying() {
-        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+        for errno in [
+            libc::EACCES,
+            libc::ENOTDIR,
+            libc::ENOENT,
+            libc::EIO,
+            libc::ENOSPC,
+            libc::EDQUOT,
+        ] {
             let mut scans = 0;
             let result = pending_agent_status_reconciliations_with_retry(
                 Path::new("unused"),
@@ -1317,33 +1337,105 @@ mod worker_shutdown_tests {
     }
 
     #[test]
-    fn a_permanent_marker_read_error_stops_the_worker_and_releases_ownership() {
-        for name in ["removed", "directory"] {
+    fn unreadable_markers_do_not_block_later_queue_work() {
+        for name in ["mode-zero", "directory", "removed"] {
             let queue = QueueFixture::new(&format!("marker-read-{name}"));
-            let marker = queue.0.join("pending-test");
+            let marker = queue.0.join("pending-0-poisoned");
+            let later = queue.0.join("pending-1-later");
             if name == "directory" {
                 fs::create_dir(&marker).unwrap();
+                fs::write(marker.join("evidence"), b"preserve me").unwrap();
+            } else {
+                fs::write(&marker, b"unreadable").unwrap();
+                fs::set_permissions(&marker, fs::Permissions::from_mode(0o000)).unwrap();
             }
+            fs::write(&later, b"invalid marker").unwrap();
             let mut scans = 0;
             assert_eq!(
-                run_agent_status_worker_queue(&queue.0, queue.lock(), None, |_| {
+                run_agent_status_worker_queue(&queue.0, queue.lock(), None, |directory| {
                     scans += 1;
-                    if scans == 1 {
-                        Ok(vec![marker.clone()])
-                    } else {
-                        Err(io::Error::from_raw_os_error(libc::EIO))
+                    assert!(scans < 10, "poisoned marker caused a rescan loop");
+                    let pending = pending_agent_status_reconciliations(directory)?;
+                    if scans == 1 && name == "removed" {
+                        fs::remove_file(&marker).unwrap();
                     }
+                    Ok(pending)
                 }),
                 ExitCode::SUCCESS
             );
-            assert_eq!(scans, 1, "permanent {name} marker-read error was retried");
+            assert!(!later.exists(), "{name} marker stranded later queue work");
+            assert!(!marker.exists(), "{name} marker remained pending");
+            if name != "removed" {
+                let quarantined = queue.0.join("rejected-pending-0-poisoned");
+                assert!(quarantined.exists(), "{name} marker was not quarantined");
+                if name == "directory" {
+                    assert_eq!(
+                        fs::read(quarantined.join("evidence")).unwrap(),
+                        b"preserve me"
+                    );
+                }
+            }
+            queue.lock();
+        }
+    }
+
+    #[test]
+    fn full_disk_wake_writes_retry_and_consume_the_queued_wake() {
+        for errno in [libc::ENOSPC, libc::EDQUOT] {
+            let queue = QueueFixture::new(&format!("wake-full-{errno}"));
+            let mut writes = 0;
+            let mut consumed = false;
+            assert_eq!(
+                run_agent_status_worker_queue_with_enqueue(
+                    &queue.0,
+                    queue.lock(),
+                    Some(0),
+                    |directory| {
+                        let pending = pending_agent_status_reconciliations(directory)?;
+                        for marker in &pending {
+                            assert_eq!(
+                                serde_json::from_slice::<serde_json::Value>(&fs::read(marker)?)?,
+                                serde_json::json!({"operation":"mailbox-wake"})
+                            );
+                            // Avoid the host runtime while exercising marker consumption.
+                            fs::write(marker, b"invalid marker")?;
+                            consumed = true;
+                        }
+                        Ok(pending)
+                    },
+                    |directory, input| {
+                        writes += 1;
+                        assert!(writes <= 2, "wake write did not recover");
+                        if writes == 1 {
+                            Err(io::Error::from_raw_os_error(errno))
+                        } else {
+                            queue_agent_status_reconciliation(directory, input)
+                        }
+                    },
+                ),
+                ExitCode::SUCCESS
+            );
+            assert_eq!(writes, 2, "errno={errno} stopped the wake worker");
+            assert!(consumed, "recovered wake was not consumed");
+            assert!(
+                pending_agent_status_reconciliations(&queue.0)
+                    .unwrap()
+                    .is_empty()
+            );
             queue.lock();
         }
     }
 
     #[test]
     fn a_permanent_outer_scan_stops_the_worker_and_releases_ownership() {
-        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+        for errno in [
+            libc::EACCES,
+            libc::ENOTDIR,
+            libc::ENOENT,
+            libc::EIO,
+            libc::ENOSPC,
+            libc::EDQUOT,
+        ] {
             let queue = QueueFixture::new(&format!("worker-permanent-{errno}"));
             let lock = queue.lock();
             let mut scans = 0;
@@ -1443,7 +1535,14 @@ mod worker_shutdown_tests {
 
     #[test]
     fn an_unlock_recheck_stops_on_permanent_errors_without_retrying() {
-        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+        for errno in [
+            libc::EACCES,
+            libc::ENOTDIR,
+            libc::ENOENT,
+            libc::EIO,
+            libc::ENOSPC,
+            libc::EDQUOT,
+        ] {
             let queue = QueueFixture::new(&format!("unlock-permanent-{errno}"));
             let lock = queue.lock();
             let mut scans = 0;
@@ -1485,7 +1584,14 @@ mod worker_shutdown_tests {
 
     #[test]
     fn a_permanent_queue_error_stops_a_grace_wait_without_retrying() {
-        for errno in [libc::EACCES, libc::ENOTDIR, libc::ENOENT, libc::EIO] {
+        for errno in [
+            libc::EACCES,
+            libc::ENOTDIR,
+            libc::ENOENT,
+            libc::EIO,
+            libc::ENOSPC,
+            libc::EDQUOT,
+        ] {
             let mut scans = 0;
             wait_for_marker_or_deadline(
                 Path::new("unused"),
