@@ -175,6 +175,29 @@ fn main() -> ExitCode {
             ),
         };
     }
+    if cli.events_ensure() {
+        if cli.runtime.host_kind() != Ok(HostKind::Hc) {
+            return write_result(
+                &CommandResult::invalid_request("events requires --host hc"),
+                64,
+                cli.human_output(io::stdout().is_terminal()),
+            );
+        }
+        return match cli.ensure_json() {
+            Ok(json) => {
+                if writeln!(io::stdout().lock(), "{json}").is_ok() {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(74)
+                }
+            }
+            Err(error) => write_result(
+                &CommandResult::rejected("events", "operation_failed", error),
+                65,
+                cli.human_output(io::stdout().is_terminal()),
+            ),
+        };
+    }
     let hook_state = cli
         .user_prompt_submit_hook_state_directory()
         .or_else(|| cli.mailbox_wake_hook_state_directory())

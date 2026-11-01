@@ -57,6 +57,33 @@ fn tui_events_rejection_uses_the_standard_json_envelope() {
 }
 
 #[test]
+fn ensure_is_hidden_and_rejected_under_tui() {
+    let output = run(&["--host", "tui", "events", "--ensure"]);
+    assert_eq!(output.status.code(), Some(64));
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["error"]["message"], "events requires --host hc");
+
+    for arguments in [vec!["events", "--help"], vec!["help", "events"]] {
+        let output = run(&arguments);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!text.contains("--ensure"), "{arguments:?}: {text}");
+    }
+    let output = run(&["--host", "tui", "events", "--ensure", "--help"]);
+    assert_eq!(output.status.code(), Some(64));
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unexpected argument '--ensure'")
+    );
+}
+
+#[test]
 fn print_host_is_not_a_product_flag() {
     let output = run(&["--json", "--print-host", "describe"]);
     assert_eq!(output.status.code(), Some(64));

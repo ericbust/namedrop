@@ -1660,3 +1660,46 @@ pub(crate) fn roster_core_identity(
         .ok_or("server.status omitted core.id")?;
     Ok(Some(id.to_owned()))
 }
+
+pub(crate) fn ensure(
+    state: &Path,
+    environment: &crate::environment::EnvironmentSnapshot,
+) -> Result<crate::cli::EnsureOutcome, String> {
+    use crate::cli::EnsureOutcome;
+
+    let Some(core) = roster_core_identity(state, environment)? else {
+        return Ok(EnsureOutcome::Inactive);
+    };
+    if !StateStore::has_active_hc_space(state, &core).map_err(|error| error.to_string())? {
+        return Ok(EnsureOutcome::Inactive);
+    }
+
+    let executable = crate::runtime_executable()?;
+    let socket = format!("hc:{core}");
+    let directory = subscriber_directory(state, &socket);
+    let launch_identity = BinaryIdentity::read(&executable)?;
+    let binary = BinaryIdentity::read(&if executable == state.join("runtime/namedrop") {
+        state.join("runtime/current/namedrop")
+    } else {
+        executable.clone()
+    })?;
+    if let Some(record) = read_record(&directory)
+        && record.is_running()
+        && record.is_current(state)
+        && record.binary == binary
+        && record.launch_identity == launch_identity
+        && record.launch_path == executable
+    {
+        return Ok(EnsureOutcome::Running(record.pid));
+    }
+
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let rpc = rpc::SubscriberRpc::new(environment, state, &cancelled)?;
+    let host = HcHost::new(rpc);
+    start_with_environment(&host, &executable, state, environment).map_err(String::from)?;
+    let record = read_record(&directory).ok_or("HC subscriber started without a record")?;
+    if !record.is_running() || !record.is_current(state) {
+        return Err("HC subscriber record is not current".to_owned());
+    }
+    Ok(EnsureOutcome::Started(record.pid))
+}

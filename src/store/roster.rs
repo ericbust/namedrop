@@ -34,6 +34,23 @@ struct RecentReply {
 }
 
 impl StateStore {
+    pub(crate) fn has_active_hc_space(state: &Path, raw_core: &str) -> Result<bool, StoreError> {
+        let database = state.join(DATABASE_FILE_NAME);
+        match fs::metadata(&database) {
+            Ok(_) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+        let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        connection.busy_timeout(Duration::from_millis(250))?;
+        let active: i64 = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM worktrees WHERE session_socket_id = ?1 AND activated != 0 AND deactivated = 0)",
+            [format!("hc:{raw_core}")],
+            |row| row.get(0),
+        )?;
+        Ok(active != 0)
+    }
+
     pub(crate) fn roster_snapshot(
         state: &Path,
         raw_core: Option<&str>,

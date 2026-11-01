@@ -3,6 +3,37 @@ use serde_json::Value;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+pub(crate) enum EnsureOutcome {
+    Inactive,
+    Running(u32),
+    Started(u32),
+}
+
+impl serde::Serialize for EnsureOutcome {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("EnsureOutcome", 2)?;
+        match self {
+            Self::Inactive => {
+                state.serialize_field("status", "inactive")?;
+                state.serialize_field("pid", &Option::<u32>::None)?;
+            }
+            Self::Running(pid) | Self::Started(pid) => {
+                state.serialize_field(
+                    "status",
+                    if matches!(self, Self::Running(_)) {
+                        "running"
+                    } else {
+                        "started"
+                    },
+                )?;
+                state.serialize_field("pid", pid)?;
+            }
+        }
+        state.end()
+    }
+}
+
 #[derive(Debug, Args)]
 #[command(name = "namedrop", version, about)]
 pub struct Cli {
@@ -83,7 +114,15 @@ impl Parser for Cli {
                 command
                     .get_subcommands()
                     .filter(|child| child.get_name() != "roster")
-                    .cloned(),
+                    .map(|child| {
+                        if child.get_name() == "events" {
+                            clap::Command::new("events")
+                                .about(child.get_about().unwrap().clone())
+                                .hide(true)
+                        } else {
+                            child.clone()
+                        }
+                    }),
             )
             .mut_subcommand("hook", |hook| {
                 clap::Command::new("hook")
@@ -294,6 +333,23 @@ impl Cli {
         let snapshot = crate::StateStore::roster_snapshot(&state, core.as_deref())
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&snapshot).map_err(|error| error.to_string())
+    }
+
+    pub fn events_ensure(&self) -> bool {
+        matches!(self.command, Command::Events { ensure: true })
+    }
+
+    pub fn ensure_json(&self) -> Result<String, String> {
+        let state = self.runtime.state_directory()?;
+        let state = if state.is_absolute() {
+            state
+        } else {
+            std::env::current_dir()
+                .map_err(|error| error.to_string())?
+                .join(state)
+        };
+        let outcome = crate::host::hc::events::ensure(&state, &self.runtime.environment)?;
+        serde_json::to_string(&outcome).map_err(|error| error.to_string())
     }
 
     pub fn input_is_file(&self) -> bool {
@@ -520,7 +576,10 @@ enum Command {
     Reconcile,
     /// Subscribe to hc lifecycle and status events.
     #[command(hide = true)]
-    Events,
+    Events {
+        #[arg(long, hide = true)]
+        ensure: bool,
+    },
     /// Read the current hc collaboration roster.
     #[command(hide = true)]
     Roster,
@@ -581,7 +640,7 @@ impl Command {
             Self::Thread { command } => command.operation(),
             Self::Space { command } => command.operation(),
             Self::Reconcile => "reconcile",
-            Self::Events => "events",
+            Self::Events { .. } => "events",
             Self::Roster => "roster",
             Self::Event { command } => command.operation(),
             Self::Dashboard(_) => "dashboard",
