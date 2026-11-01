@@ -372,7 +372,25 @@ pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn parent_pid(pid: u32) -> Option<u32> {
-    Some(process_bsd_info(pid)?.pbi_ppid)
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdshortinfo>::uninit();
+    let size = libc::c_int::try_from(std::mem::size_of::<libc::proc_bsdshortinfo>()).ok()?;
+    // SAFETY: proc_pidinfo writes at most `size` bytes into `info`, and only a
+    // return value equal to `size` means the whole struct was filled.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDT_SHORTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: the call above filled every byte of the struct.
+    Some(unsafe { info.assume_init() }.pbsi_ppid)
 }
 
 /// Detection never infers a terminal merely from a missing native session ID.
