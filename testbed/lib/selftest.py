@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import tempfile
 import urllib.error
+from unittest.mock import patch
 
 import livetest as live
 import source as sources
@@ -455,47 +456,88 @@ def check_judges():
     return "judges: doctor must agree with the daemon oracle; backlog, idle panes and the terminal run are exact"
 
 
+class TerminalRunner:
+    settle = live.Run.settle
+
+    def __init__(self, answers, status="idle"):
+        self.answers = answers
+        self.status = status
+        self.reads = 0
+        self.elapsed = 0
+
+    def prompt(self, *args):
+        pass
+
+    def save(self, *args):
+        pass
+
+    def budget(self, seconds):
+        return seconds
+
+    def sleep(self, seconds):
+        self.elapsed += seconds
+
+    def panes(self):
+        return {alias: live.Pane(alias, "p", alias, self.status, None, None, {})
+                for alias in live.AGENTS}
+
+    def text(self, alias):
+        return "Permission required"
+
+    def transcript(self, alias):
+        answer = self.answers[min(self.reads, len(self.answers) - 1)]
+        self.reads += 1
+        return live.Transcript("claude", "c", "p", (), (
+            live.Turn(live.TERMINAL_PROMPT, (), ("The command is running.",)),
+            live.Turn("terminal result", (), (answer,))), frozenset())
+
+    def run(self):
+        with patch.object(live.time, "monotonic", lambda: self.elapsed), \
+                patch.object(live.time, "sleep", self.sleep):
+            return live.step_terminal(self)
+
+    store = type("Store", (), {
+        "terminal_runs": lambda self, since: (live.TerminalRun("echo hello", 0, "hello\n", True),),
+        "backlog": lambda self: live.Backlog(0, 0, 0)})()
+
+
 def check_terminal_answer_wait():
-    ran = live.TerminalRun("echo hello", 0, "hello\n", True)
-    interim = live.Transcript("claude", "c", "p", (), (
-        live.Turn(live.TERMINAL_PROMPT, (), ("The command is running.",)),
-        live.Turn("terminal result", (), ("The result arrived. I'll report it.",))), frozenset())
-    final = interim._replace(turns=interim.turns[:-1] + (
-        interim.turns[-1]._replace(answers=interim.turns[-1].answers +
-                                   ("stdout: hello; exit code 0.",)),))
-
-    class Runner:
-        def __init__(self):
-            self.reads = 0
-
-        def prompt(self, *args):
-            pass
-
-        def settle(self, read, done, seconds, watch=live.AGENTS):
-            for _ in range(3):
-                value = read()
-                if done(value):
-                    return value
-            return value
-
-        def transcript(self, alias):
-            self.reads += 1
-            return interim if self.reads == 1 else final
-
-        def save(self, *args):
-            pass
-
-        def wait_agent(self, *args):
-            return False
-
-        store = type("Store", (), {"terminal_runs": lambda self, since: (ran,),
-                                    "backlog": lambda self: live.Backlog(0, 0, 0)})()
-
-    runner = Runner()
-    checks = live.step_terminal(runner)
+    runner = TerminalRunner(("The result arrived. I'll report it.", "stdout: hello; exit code 0."))
+    checks = runner.run()
     assert all(check.ok for check in checks), checks
-    assert runner.reads >= 2, "checker judged Claude's interim answer"
-    return "terminal answer: waits for Claude's final reply after the terminal settles"
+    assert runner.reads == 2, "checker judged Claude's interim answer"
+    for answer in ("hello; exit code 1", "goodbye; exit code 0", "hello; exit code 10"):
+        wrong = TerminalRunner((answer,))
+        checks = wrong.run()
+        assert checks[0].ok and not checks[1].ok, checks
+        assert wrong.elapsed == live.TIMEOUTS.idle, "wrong answer stopped the wait early"
+    return "terminal answer: waits for the final reply; wrong answers time out and fail"
+
+
+def check_terminal_answer_blocked():
+    runner = TerminalRunner(("Permission required",), status="blocked")
+    try:
+        runner.run()
+    except live.StepFailed as error:
+        assert error.check.what == "claude blocked", error.check
+        assert "Permission required" in error.check.detail, error.check
+        assert runner.elapsed < live.TIMEOUTS.idle, "blocked pane consumed the answer timeout"
+    else:
+        raise AssertionError("Step 9 did not report Claude's blocked pane")
+    return "terminal answer: Claude blocked fails before the answer timeout"
+
+
+def check_terminal_answer_rule():
+    runner = TerminalRunner(("hello; exit code 0", "new answer rule"))
+    def answer_rule(transcript):
+        return live.Check("claude's answer", live.last_answer(transcript) == "new answer rule", "test rule")
+    with patch.object(live, "judge_terminal_answer", answer_rule):
+        checks = runner.run()
+        assert runner.reads == 2 and all(check.ok for check in checks), checks
+        wrong = TerminalRunner(("hello; exit code 0",))
+        checks = wrong.run()
+        assert wrong.elapsed == live.TIMEOUTS.idle and not checks[-1].ok, checks
+    return "terminal answer: wait and final judgment share the answer rule"
 
 
 def check_plan_and_gates():
@@ -582,6 +624,8 @@ def run(kit):
                   ("exchange", lambda: check_exchange(base)),
                   ("judges", check_judges),
                   ("terminal answer", check_terminal_answer_wait),
+                  ("terminal blocked", check_terminal_answer_blocked),
+                  ("terminal answer rule", check_terminal_answer_rule),
                   ("plan and gates", check_plan_and_gates),
                   ("report", check_report),
                   ("seeds", check_seeds),
