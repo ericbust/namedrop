@@ -29,7 +29,7 @@ Click a row to focus a terminal with a pane. A terminal without a pane opens in 
 
 ## Built from
 
-This build targets Herdr app **0.1.9** and herdr-core **0.1.14**. Copy these six source folders into your app home's `mods/` directory:
+This build targets Herdr app **0.1.11** and herdr-core **0.1.16**. The hc host was built against herdr-core **0.1.14**. Copy these six source folders into your app home's `mods/` directory:
 
 - `mods/namedrop/` is the roster window.
 - `mods/namedrop-name/` is the native Name dialog.
