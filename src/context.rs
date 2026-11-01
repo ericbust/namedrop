@@ -1968,3 +1968,57 @@ fn redact_aws_access_keys(text: &str) -> String {
     output.push_str(&text[cursor..]);
     output
 }
+
+#[cfg(test)]
+mod pin_index_tests {
+    use super::*;
+
+    #[test]
+    fn preexisting_pin_index_and_lock_do_not_affect_capture() {
+        let root = std::env::temp_dir().join(format!("namedrop-pin-test-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        let result = (|| {
+            git_output(&root, &["init", "-q"])?;
+            fs::write(root.join("tracked"), "original").unwrap();
+            git_output(&root, &["add", "."])?;
+            git_output(
+                &root,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "initial",
+                ],
+            )?;
+            let user_index = fs::read(root.join(".git/index")).unwrap();
+            fs::write(root.join("tracked"), "changed").unwrap();
+            let pin_id = "preplanted";
+            let index = std::env::temp_dir().join(format!(
+                "herdr-context-pin-{}-0-{pin_id}.index",
+                std::process::id()
+            ));
+            let lock = index.with_extension("index.lock");
+            fs::write(&index, "foreign index").unwrap();
+            fs::write(&lock, "foreign lock").unwrap();
+            let captured = pin_worktree_tree(&root, pin_id);
+            let index_after = fs::read_to_string(&index);
+            let lock_after = fs::read_to_string(&lock);
+            let _ = fs::remove_file(&index);
+            let _ = fs::remove_file(&lock);
+            let tree = captured?;
+            assert_eq!(index_after.unwrap(), "foreign index");
+            assert_eq!(lock_after.unwrap(), "foreign lock");
+            assert_eq!(fs::read(root.join(".git/index")).unwrap(), user_index);
+            assert_eq!(
+                git_output(&root, &["show", &format!("{tree}:tracked")])?,
+                "changed"
+            );
+            Ok::<_, String>(())
+        })();
+        fs::remove_dir_all(&root).unwrap();
+        result.unwrap();
+    }
+}
