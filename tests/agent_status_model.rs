@@ -4,6 +4,9 @@
 //! environment, working directory and stdin it was given, which is how the
 //! isolation and bounding claims are checked rather than assumed.
 
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{suggest_agent_persona, summarize_agent_status};
 use serde_json::{Value, json};
 use std::{
@@ -11,7 +14,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
     thread,
@@ -196,37 +199,68 @@ fn assert_linux_denials(recorded: &str) {
     }
 }
 
-fn fixture() -> &'static PathBuf {
-    static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
-    FIXTURE.get_or_init(|| {
-        let dir = env::temp_dir().join(format!(
-            "namedrop-agent-status-model-{}",
-            std::process::id()
-        ));
-        fs::create_dir_all(&dir).expect("fixture directory");
-        #[allow(unused_mut)]
-        let mut scripts = vec![("claude", FAKE_CLI)];
-        #[cfg(target_os = "macos")]
-        scripts.extend([("sandbox-exec", FAKE_SANDBOX), ("codex", FAKE_CODEX)]);
-        for (name, body) in scripts {
-            let script = dir.join(name);
-            fs::write(&script, body).expect("fake CLI");
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("fake CLI mode");
+static SHARED_FIXTURE: Mutex<Weak<cleanup::FixtureDirectory>> = Mutex::new(Weak::new());
+
+struct FixtureLease(Option<Arc<cleanup::FixtureDirectory>>);
+
+impl Drop for FixtureLease {
+    fn drop(&mut self) {
+        let _lock = SHARED_FIXTURE.lock().unwrap();
+        self.0.take();
+    }
+}
+
+fn fixture() -> PathBuf {
+    thread_local! {
+        static FIXTURE: FixtureLease = {
+            let mut shared = SHARED_FIXTURE.lock().unwrap();
+            let directory = shared.upgrade().unwrap_or_else(|| {
+                let directory = Arc::new(create_fixture());
+                *shared = Arc::downgrade(&directory);
+                directory
+            });
+            FixtureLease(Some(directory))
+        };
+    }
+    FIXTURE.with(|fixture| fixture.0.as_ref().unwrap().0.clone())
+}
+
+fn create_fixture() -> cleanup::FixtureDirectory {
+    let dir = env::temp_dir().join(format!(
+        "namedrop-agent-status-model-{}",
+        std::process::id()
+    ));
+    let fixture = cleanup::FixtureDirectory(dir.clone());
+    fs::create_dir_all(&dir).expect("fixture directory");
+    #[allow(unused_mut)]
+    let mut scripts = vec![("claude", FAKE_CLI)];
+    #[cfg(target_os = "macos")]
+    scripts.extend([("sandbox-exec", FAKE_SANDBOX), ("codex", FAKE_CODEX)]);
+    for (name, body) in scripts {
+        let script = dir.join(name);
+        fs::write(&script, body).expect("fake CLI");
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("fake CLI mode");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        compile_linux_codex(&dir);
+        fs::create_dir_all(dir.join("codex-home/cache")).expect("fake Codex cache");
+        fs::create_dir_all(dir.join("home")).expect("fake home");
+        for name in [
+            "private-control",
+            "codex-home/history.jsonl",
+            "codex-home/AGENTS.md",
+        ] {
+            fs::write(dir.join(name), "unrelated private data").expect("read-denial canary");
         }
-        #[cfg(target_os = "linux")]
-        {
-            compile_linux_codex(&dir);
-            fs::create_dir_all(dir.join("codex-home/cache")).expect("fake Codex cache");
-            fs::create_dir_all(dir.join("home")).expect("fake home");
-            for name in [
-                "private-control",
-                "codex-home/history.jsonl",
-                "codex-home/AGENTS.md",
-            ] {
-                fs::write(dir.join(name), "unrelated private data").expect("read-denial canary");
-            }
-            // Safety: initialized once before tests start workers, like the CLI overrides.
-            unsafe {
+    }
+    static ENVIRONMENT: OnceLock<()> = OnceLock::new();
+    ENVIRONMENT.get_or_init(|| {
+        // Safety: every test acquires the fixture before starting a worker;
+        // later leases recreate the same paths without mutating the environment.
+        unsafe {
+            #[cfg(target_os = "linux")]
+            {
                 env::set_var("HOME", dir.join("home"));
                 env::set_var("CODEX_HOME", dir.join("codex-home"));
                 env::set_var(
@@ -234,9 +268,6 @@ fn fixture() -> &'static PathBuf {
                     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"),
                 );
             }
-        }
-        // Safety: set once, before any test spawns a worker.
-        unsafe {
             env::set_var("NAMEDROP_AGENT_STATUS_CLAUDE_BIN", dir.join("claude"));
             env::set_var("NAMEDROP_AGENT_STATUS_CODEX_BIN", dir.join("codex"));
             env::set_var(
@@ -244,8 +275,8 @@ fn fixture() -> &'static PathBuf {
                 dir.join("sandbox-exec"),
             );
         }
-        dir
-    })
+    });
+    fixture
 }
 
 /// Queues the JSON the fake CLI will print for this mode.
@@ -1511,15 +1542,23 @@ fn a_request_with_nothing_to_describe_never_spawns_a_worker() {
 #[test]
 fn fixture_cleanup_survives_thread_exit_and_panic() {
     const CHILD: &str = "NAMEDROP_FIXTURE_CLEANUP_CHILD";
+    let root = fixture();
     if let Ok(mode) = env::var(CHILD) {
-        let root = fixture();
-        fs::write(root.join("pane-effects-retries.log"), "fixture retry evidence\n").unwrap();
+        fs::write(
+            root.join("pane-effects-retries.log"),
+            "fixture retry evidence\n",
+        )
+        .unwrap();
         assert_ne!(mode, "panic", "intentional fixture panic");
         return;
     }
     for mode in ["return", "panic"] {
-        let mut child = std::process::Command::new(env::current_exe().unwrap())
-            .args(["--exact", "fixture_cleanup_survives_thread_exit_and_panic", "--nocapture"])
+        let child = std::process::Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "fixture_cleanup_survives_thread_exit_and_panic",
+                "--nocapture",
+            ])
             .env(CHILD, mode)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1530,7 +1569,7 @@ fn fixture_cleanup_survives_thread_exit_and_panic() {
         assert_eq!(output.status.success(), mode == "return");
         let leaked = root.exists();
         if leaked {
-            fs::remove_dir_all(&root).unwrap();
+            cleanup::remove_fixture(&root).unwrap();
         }
         assert!(!leaked, "{mode} left fixture behind: {}", root.display());
         assert!(String::from_utf8_lossy(&output.stderr).contains("fixture retry evidence"));

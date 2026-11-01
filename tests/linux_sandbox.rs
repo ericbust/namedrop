@@ -1,5 +1,8 @@
 #![cfg(target_os = "linux")]
 //! Actual kernel enforcement, with no model/provider calls or recorder wrapper.
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::linux_sandbox;
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
@@ -113,7 +116,17 @@ int main(int argc, char **argv) {
 #[test]
 fn real_policy_allows_worker_auth_and_transport_but_denies_other_reads_and_exec() {
     let root = std::env::temp_dir().join(format!("namedrop-landlock-{}", std::process::id()));
+
+    let _cleanup = cleanup::FixtureDirectory(root.clone());
     fs::create_dir_all(root.join("bin")).unwrap();
+    if std::env::var_os("NAMEDROP_SANDBOX_FIXTURE_PANIC").is_some() {
+        fs::write(
+            root.join("pane-effects-retries.log"),
+            "sandbox retry evidence\n",
+        )
+        .unwrap();
+        panic!("intentional sandbox fixture panic");
+    }
     fs::create_dir_all(root.join("worker")).unwrap();
     fs::create_dir_all(root.join("home/.codex")).unwrap();
     let binary = root.join("bin/codex");
@@ -284,5 +297,37 @@ fn real_policy_allows_worker_auth_and_transport_but_denies_other_reads_and_exec(
     assert!(output.status.success(), "npm manifest: {output:?}");
     assert!(linux_sandbox::native_codex(Path::new("/bin/sh")).is_err());
     assert!(linux_sandbox::command(Path::new("/bin/sh"), &worker, &home).is_err());
-    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sandbox_fixture_cleans_up_after_a_panic() {
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "real_policy_allows_worker_auth_and_transport_but_denies_other_reads_and_exec",
+            "--nocapture",
+        ])
+        .env("NAMEDROP_SANDBOX_FIXTURE_PANIC", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let root = std::env::temp_dir().join(format!("namedrop-landlock-{}", child.id()));
+    let output = child.wait_with_output().unwrap();
+    assert!(!output.status.success());
+    let leaked = root.exists();
+    if leaked {
+        cleanup::remove_fixture(&root).unwrap();
+    }
+    assert!(
+        !leaked,
+        "panic left sandbox fixture behind: {}",
+        root.display()
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("intentional sandbox fixture panic"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("sandbox retry evidence"), "{stderr}");
 }
