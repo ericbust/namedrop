@@ -77,12 +77,16 @@ impl Drop for HcSocket {
 }
 
 fn serve(mut stream: UnixStream, root: &Path, core_id: &str, stopped: &AtomicBool) {
-    stream
-        .set_read_timeout(Some(Duration::from_millis(50)))
-        .unwrap();
-    stream
-        .set_write_timeout(Some(Duration::from_millis(50)))
-        .unwrap();
+    let timeout = Some(Duration::from_millis(50));
+    let result = stream
+        .set_read_timeout(timeout)
+        .and_then(|()| stream.set_write_timeout(timeout));
+    if let Err(error) = result {
+        if error.kind() == io::ErrorKind::InvalidInput {
+            return;
+        }
+        panic!("fake hc timeout failed: {error}");
+    }
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     while !stopped.load(Ordering::Relaxed) {
         let mut line = String::new();
