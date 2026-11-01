@@ -286,7 +286,7 @@ esac
         .output()
         .unwrap();
     assert_eq!(overridden.status.code(), Some(65), "{overridden:?}");
-    assert!(String::from_utf8_lossy(&overridden.stderr).contains("invoking pane changed"));
+    assert!(String::from_utf8_lossy(&overridden.stderr).contains("missing its invoking space"));
     drop(socket);
     fs::remove_dir_all(root).unwrap();
 }
