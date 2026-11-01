@@ -148,7 +148,7 @@ pub(crate) fn root(state: &Path) -> Result<String, String> {
 
 fn exposes_trusted_state(state: &Path, writable: &Path) -> bool {
     state.starts_with(writable)
-        || (writable.starts_with(state) && !writable.starts_with(state.join("deferred-commands")))
+        || (writable.starts_with(state) && writable != state.join("deferred-commands"))
 }
 
 pub(crate) fn check_worktree(state: &Path, worktree: &Path) -> Result<(), String> {
@@ -218,7 +218,12 @@ impl Config {
         {
             for root in roots.iter().filter_map(|value| value.as_str()) {
                 let path = Path::new(root);
-                if path.is_absolute() && exposes_trusted_state(state, &resolve_directory(path)?) {
+                if path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                    || (path.is_absolute()
+                        && exposes_trusted_state(state, &resolve_directory(path)?))
+                {
                     return Err(conflict(
                         &self.path,
                         &format!(
