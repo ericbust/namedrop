@@ -529,6 +529,11 @@ where
             )?;
             routed
                 .map(|routed| {
+                    tx.check_coordination_replay_fields(
+                        namespace,
+                        &routed.receipt.message_id,
+                        &input.tracking.fingerprint(),
+                    )?;
                     if let Some(attempt) = &input.disposition_attempt_id
                         && !tx.deferred_reply_matches_attempt(
                             namespace,

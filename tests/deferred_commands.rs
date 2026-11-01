@@ -332,6 +332,45 @@ fn denied_socket_queues_before_mutation_and_restarts_recover_one_logical_command
 }
 
 #[test]
+fn committed_untracked_send_cannot_gain_coordination_when_first_queued() {
+    let fixture = Fixture::new();
+    let input = send("direct-id", "hello");
+    namedrop::execute_message_operation(
+        "send",
+        input.clone(),
+        &LifecycleRuntime {
+            state_directory: fixture.directory.path(),
+            home_directory: None,
+            agent_config: Default::default(),
+            cwd: Path::new("/repo"),
+            workspace_id: Some("workspace-1"),
+            current_pane_id: Some("pane-author"),
+            session_socket_id: &fixture.socket,
+            herdr: &NativeHerdr,
+            clock: &SystemClock,
+            ids: &ProcessIds::default(),
+        },
+    )
+    .unwrap();
+    assert_eq!(fixture.message_count(), 1);
+    let mut changed = input;
+    changed["coordination_id"] = json!("coordination-added-on-replay");
+    let pending = response(fixture.sandbox_command(&["send"], changed));
+    assert_eq!(pending["data"]["state"], "pending");
+    let receipt = PathBuf::from(pending["data"]["receipt"].as_str().unwrap());
+    let _worker = fixture.worker();
+    wait_for(|| receipt.exists());
+    let result: Value = serde_json::from_slice(&fs::read(receipt).unwrap()).unwrap();
+    assert!(
+        result["result"]["Err"]
+            .as_str()
+            .is_some_and(|error| error.contains("already used for an untracked message")),
+        "{result}"
+    );
+    assert_eq!(fixture.message_count(), 1);
+}
+
+#[test]
 fn worker_checks_native_identity_and_does_not_hold_the_runtime_command_guard() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.directory.path().join("runtime")).unwrap();
