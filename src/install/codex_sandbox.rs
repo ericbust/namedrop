@@ -442,7 +442,7 @@ mod tests {
     fn last_active_space_removes_the_grant() {
         let f = Fixture::new();
         activate(&f.home(), &f.state()).unwrap();
-        let mut store = crate::StateStore::open(&f.state()).unwrap();
+        let mut store = crate::StateStore::open(f.state()).unwrap();
         let first = crate::StateNamespace::for_space("socket", "first");
         let second = crate::StateNamespace::for_space("socket", "second");
         let actor = crate::MutationAttribution::new(crate::ActorKind::Human, "test", 1);
