@@ -64,6 +64,7 @@ struct Request {
     operation: Operation,
     input: Value,
     caller: Caller,
+    // Retained in the wire fingerprint for queued-request compatibility.
     cwd: PathBuf,
     key: String,
     fingerprint: String,
@@ -583,7 +584,7 @@ fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
         state_directory: state,
         home_directory: None,
         agent_config: crate::AgentConfigDirectories::default(),
-        cwd: &request.cwd,
+        cwd: state,
         workspace_id: Some(request.caller.namespace.space_id.as_str()),
         current_pane_id: Some(&request.caller.pane),
         session_socket_id: &request.caller.namespace.session_socket_id,
@@ -594,7 +595,15 @@ fn execute_request(state: &Path, request: &Request) -> Result<Value, String> {
     if let Some(result) = recover_committed(request, &runtime)? {
         return Ok(result);
     }
-    validate_live_caller(state, &request.caller, &herdr)?;
+    let discovered = validate_live_caller(state, &request.caller, &herdr)?;
+    let runtime = LifecycleRuntime {
+        cwd: if discovered.worktree_attached {
+            Path::new(discovered.worktree_id.as_str())
+        } else {
+            state
+        },
+        ..runtime
+    };
     match request.operation {
         Operation::Send | Operation::Reply => {
             crate::message::execute_message_operation_with_caller(
@@ -620,7 +629,7 @@ fn validate_live_caller<E: crate::HerdrCommandExecutor>(
     state: &Path,
     caller: &Caller,
     herdr: &E,
-) -> Result<(), String> {
+) -> Result<crate::DiscoveredWorktree, String> {
     if stored_caller(state, caller.namespace.clone(), caller.pane.clone())? != *caller {
         return Err("deferred command registration or Agent Session is stale".into());
     }
@@ -635,7 +644,7 @@ fn validate_live_caller<E: crate::HerdrCommandExecutor>(
     {
         return Err("deferred command does not match the live native Agent Session".into());
     }
-    Ok(())
+    Ok(discovered)
 }
 
 fn recover_committed<E: crate::HerdrCommandExecutor, C: Clock, I: IdGenerator>(
