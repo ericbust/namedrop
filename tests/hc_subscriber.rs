@@ -2820,3 +2820,72 @@ fn failed_get_retries_back_off_to_thirty_seconds_without_heartbeat_work() {
         }
     });
 }
+
+#[test]
+fn nonshell_terminal_first_name_agrees_with_public_detection() {
+    check("nonshell-first-name", |fixture, runtime| {
+        let program = process::AgentProcess::with_program("python");
+        let mut terminal = fixture.terminals.borrow()[0].clone();
+        terminal["address"] = json!("t2");
+        terminal["pid"] = json!(program.pid());
+        terminal["foreground"] = json!({"pid":program.pid(),"name":"python","argv":["python"]});
+        terminal["status"] = Value::Null;
+        terminal["labels"] = json!({"herdr.space":"fixture-space"});
+        fixture.terminals.borrow_mut().push(terminal);
+        let runtime = namedrop::LifecycleRuntime {
+            current_pane_id: Some("t2"),
+            ..*runtime
+        };
+        let namespace = namedrop::StateNamespace::for_space("hc:fixture", "fixture-space");
+        let addresses = || {
+            namedrop::StateStore::open(runtime.state_directory)
+                .unwrap()
+                .transaction(|tx| tx.list_pane_addresses(&namespace))
+                .unwrap()
+        };
+        assert!(
+            addresses()
+                .iter()
+                .all(|address| address.pane_id.as_deref() != Some("t2"))
+        );
+        assert_eq!(namedrop::detect_pane_type(&runtime).unwrap(), None);
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(&session_event("snapshot", fixture), &runtime)
+            .unwrap();
+        fixture.terminals.borrow_mut()[1]["labels"]["namedrop.name"] = json!("python-pane");
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .handle_line(
+                r#"{"method":"event","params":{"type":"labels","terminal":"t2"}}"#,
+                &runtime,
+            )
+            .expect_err("nonshell naming must require an explicit type");
+        let error: Value = serde_json::from_str(
+            fixture.terminals.borrow()[1]["labels"]["namedrop.name.error"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("pane type is uncertain")
+        );
+        assert!(
+            addresses()
+                .iter()
+                .all(|address| address.pane_id.as_deref() != Some("t2"))
+        );
+        assert_eq!(
+            fixture
+                .calls
+                .borrow()
+                .iter()
+                .filter(|call| call[0] == "get")
+                .count(),
+            1
+        );
+    });
+}
