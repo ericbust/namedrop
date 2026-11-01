@@ -486,9 +486,9 @@ timeline would drop under 112px (48px in a window under 420px tall), and
 scrolls inside. 12px separate it from the
 timeline. In a window under 420px tall each item's padding is 6px top and
 bottom with no gap between its rows, and the actions follow the hint on its
-row when both fit, so a card with one item shows its whole action row, Details included, in a 390 by 460 window at 125
-percent zoom (312 by 368 CSS pixels). A longer card scrolls inside. See App
-shell for each layout.
+row when both fit. So a card with one item shows its whole action row, Details
+included, at 844 by 300 and in a 390 by 460 window at 125 percent zoom (312 by
+368 CSS pixels). A longer card scrolls inside. See App shell for each layout.
 Announce new items through a polite live region.
 
 | `source`                                | Title                                                                                                | Hint                                                            |
