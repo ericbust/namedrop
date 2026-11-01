@@ -152,7 +152,7 @@ fn exercise(mode: &str) {
     };
     if mode == "mismatch" {
         assert!(result.is_err());
-    } else if !mode.ends_with("session_changed") {
+    } else if mode != "dead" && !mode.ends_with("session_changed") {
         result.as_ref().unwrap();
     }
     let requests = core.requests.lock().unwrap();

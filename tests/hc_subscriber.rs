@@ -2488,9 +2488,13 @@ fn due_mailbox_tick_retries_unavailable_owner_and_settles_healthy_mail() {
                 .iter()
                 .filter(|call| call[0] == "get" && call[1] == "t1")
                 .count(),
-            2,
-            "one due refresh plus existing delivery freshness read: {:?}",
+            1,
+            "only the failed pane needs a due refresh: {:?}",
             fixture.calls.borrow()
+        );
+        assert!(
+            fixture.calls.borrow().iter().all(|call| call[0] != "ls"),
+            "onboarding eligibility must not enumerate terminals"
         );
         result.unwrap();
         let state = store
