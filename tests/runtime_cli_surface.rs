@@ -272,3 +272,29 @@ fn hc_hook_missing_command_and_typo_preserve_output() {
 "#
     );
 }
+
+#[test]
+fn hook_typo_with_malformed_runtime_flags_preserves_original_error() {
+    let expected = br#"{"protocol_version":"collab/v1","status":"rejected","operation":null,"error":{"code":"invalid_request","message":"error: unrecognized subcommand 'session-ed'\n\n  tip: some similar subcommands exist: 'session-start', 'session-end'\n\nUsage: namedrop hook [OPTIONS] <COMMAND>\n\nFor more information, try '--help'.\n"}}
+"#;
+    let mut mismatches = Vec::new();
+    for (host, variables) in [
+        ("tui", vec![("HERDR_PANE_ID", "inherited-pane")]),
+        ("hc", vec![("HC_TERMINAL_ID", "inherited-terminal")]),
+    ] {
+        for arguments in [
+            vec!["hook", "session-ed", "--hc-terminal"],
+            vec!["hook", "session-ed", "--host", "bogus"],
+            vec!["hook", "session-ed", "--herdr-pane"],
+            vec!["hook", "session-ed", "--plugin-state"],
+        ] {
+            let output = run_with_environment(&arguments, &variables);
+            assert_eq!(output.status.code(), Some(64), "{host}: {arguments:?}");
+            assert!(output.stderr.is_empty(), "{host}: {arguments:?}: {output:?}");
+            if output.stdout != expected {
+                mismatches.push(format!("{host}: {arguments:?}: {output:?}"));
+            }
+        }
+    }
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+}
