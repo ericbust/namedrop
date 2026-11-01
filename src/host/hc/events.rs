@@ -75,7 +75,7 @@ struct Pending {
 }
 
 impl Pending {
-    fn push(&mut self, line: &str) -> Result<(), String> {
+    fn push(&mut self, line: &str, watches: &BTreeMap<String, OwnerWatch>) -> Result<(), String> {
         match serde_json::from_str::<StreamLine>(line)
             .map_err(|error| format!("Invalid hc event: {error}"))?
         {
@@ -118,13 +118,16 @@ impl Pending {
                 }
                 if !matches!(event.kind, Kind::Ignored) {
                     let pane = event.terminal.ok_or("hc terminal event has no terminal")?;
-                    if pane.contains('/') {
+                    if pane.contains('/')
+                        || (matches!(event.kind, Kind::Foreground) && !watches.contains_key(&pane))
+                    {
                         return Ok(());
                     }
                     let dirty = self.dirty.entry(pane).or_default();
                     dirty.seq = dirty.seq.max(event.seq);
                     dirty.watch |= matches!(event.kind, Kind::Foreground | Kind::Status);
-                    dirty.resume |= matches!(event.kind, Kind::Status | Kind::Turn);
+                    dirty.resume |=
+                        matches!(event.kind, Kind::Status | Kind::Turn | Kind::Foreground);
                     dirty.unavailable |=
                         matches!(event.kind, Kind::Lost | Kind::Finished | Kind::Removed);
                     dirty.removed = matches!(event.kind, Kind::Removed);
@@ -194,7 +197,7 @@ impl Subscriber {
     ) -> Result<(), String> {
         let mut errors = Vec::new();
         for line in lines {
-            if let Err(error) = self.pending.push(line) {
+            if let Err(error) = self.pending.push(line, &self.owner_watches) {
                 errors.push(error);
             }
         }
@@ -312,9 +315,15 @@ impl Subscriber {
         let mut owner_due = false;
         for (pane, watch) in &mut self.owner_watches {
             if watch.due_ms <= now {
-                owner_due = true;
-                self.pending.dirty.entry(pane.clone()).or_default();
                 watch.due_ms = now.saturating_add(500);
+                if self
+                    .terminals
+                    .get(pane)
+                    .is_some_and(|terminal| terminal.session_owner().is_none())
+                {
+                    owner_due = true;
+                    self.pending.dirty.entry(pane.clone()).or_default();
+                }
             }
         }
         if owner_due || self.next_wake_ms.is_some_and(|due| due <= now) {
@@ -406,7 +415,6 @@ impl Subscriber {
                             terminal.occupancy(),
                             Occupancy::Agent {
                                 session: Some(_),
-                                state: AgentState::Background | AgentState::Foreground(None),
                                 ..
                             }
                         )
@@ -417,16 +425,20 @@ impl Subscriber {
                     start: terminal.labels["namedrop.session.start"].clone(),
                 });
             match generation {
-                Some(generation)
+                Some(generation) => {
                     if self
                         .owner_watches
                         .get(&pane)
-                        .is_none_or(|watch| watch.generation == generation) =>
-                {
-                    self.owner_watches.entry(pane).or_insert(OwnerWatch {
-                        generation,
-                        due_ms: runtime.clock.now_unix_ms().saturating_add(500),
-                    });
+                        .is_none_or(|watch| watch.generation != generation)
+                    {
+                        self.owner_watches.insert(
+                            pane,
+                            OwnerWatch {
+                                generation,
+                                due_ms: runtime.clock.now_unix_ms().saturating_add(500),
+                            },
+                        );
+                    }
                 }
                 _ => {
                     self.owner_watches.remove(&pane);

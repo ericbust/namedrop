@@ -469,3 +469,35 @@ fn live_owner_has_no_core_or_store_work_for_sixty_seconds() {
         );
     }
 }
+
+#[test]
+fn foreground_without_owner_watch_has_no_core_or_store_work() {
+    check("unwatched-foreground", |fixture, runtime, _| {
+        let mut subscriber = namedrop::host::hc::events::Subscriber::default();
+        subscriber
+            .handle_line(
+                &json!({"terminals": *fixture.terminals.borrow()}).to_string(),
+                runtime,
+            )
+            .unwrap();
+        let epoch = || {
+            rusqlite::Connection::open(runtime.state_directory.join("namedrop.sqlite3"))
+                .unwrap()
+                .query_row("SELECT epoch FROM reconciliation_epochs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        let before = epoch();
+        fixture.calls.borrow_mut().clear();
+        subscriber
+            .handle_line(
+                &json!({"method":"event","params":{"type":"foreground","terminal":"t2"}})
+                    .to_string(),
+                runtime,
+            )
+            .unwrap();
+        assert!(fixture.calls.borrow().is_empty());
+        assert_eq!(epoch(), before);
+    });
+}
