@@ -66,6 +66,10 @@ case "$1" in
     [ "$#" -eq 2 ] || { usage >&2; exit 64; }
     base=$2
     version=$(release_version)
+    case "${base##*/}:$version" in
+      main:*-exp.*)
+        fail "Experimental version $version cannot be released to main. Choose a stable version for main in Cargo.toml, herdr-plugin.toml and Cargo.lock." ;;
+    esac
     base_toml=$(git -C "$namedrop_root" show "$base:Cargo.toml" 2>/dev/null) ||
       fail "Can't read Cargo.toml at '$base'. Fetch the base branch with full history first."
     base_version=$(printf '%s\n' "$base_toml" | package_version)
