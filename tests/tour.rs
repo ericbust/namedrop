@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::tour::{self, PageAction};
 use namedrop::{
     AgentSessionId, Clock, DiscoveredPane, DiscoveredWorktree, HerdrCommandExecutor,
@@ -33,7 +36,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        cleanup::remove_fixture(&self.0).unwrap();
     }
 }
 

@@ -20,7 +20,11 @@ pub struct DrainReport {
     #[serde(skip_deserializing)]
     pub delivery_notice: &'static str,
     pub submitted: Vec<DeliveryAttemptId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pane_lock_deferred: Vec<crate::PaneAddressId>,
     pub requeued: Vec<DeliveryAttemptId>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retry_without_event: bool,
     pub failed: Vec<DeliveryAttemptId>,
     pub settled: Vec<DeliveryAttemptId>,
     pub held: Vec<DeliveryAttemptId>,
@@ -43,7 +47,9 @@ impl Default for DrainReport {
             terminal_running: Vec::new(),
             delivery_notice: "Best-effort after a Settled Observation; the router records receipt and one terminal disposition is required.",
             submitted: Vec::new(),
+            pane_lock_deferred: Vec::new(),
             requeued: Vec::new(),
+            retry_without_event: false,
             failed: Vec::new(),
             settled: Vec::new(),
             held: Vec::new(),
@@ -55,7 +61,14 @@ impl Default for DrainReport {
 
 impl DrainReport {
     pub fn awaits_retry(&self) -> bool {
-        !self.requeued.is_empty() || self.awaits_terminal()
+        !self.pane_lock_deferred.is_empty() || !self.requeued.is_empty() || self.awaits_terminal()
+    }
+
+    pub fn needs_mailbox_worker(&self) -> bool {
+        !self.pane_lock_deferred.is_empty()
+            || self.retry_without_event
+            || self.awaits_terminal()
+            || self.next_grace_due_ms().is_some()
     }
 
     pub fn awaits_terminal(&self) -> bool {
@@ -68,6 +81,30 @@ impl DrainReport {
             .map(|deadline| deadline.due_at_ms)
             .min()
     }
+}
+
+/// Read drain reports from a bare report or an operation receipt. A report with
+/// no workspace key belongs to the current space; forwarded reports retain the
+/// workspace key used to find their saved copy.
+pub fn drain_reports(result: &Value) -> impl Iterator<Item = (Option<&str>, DrainReport)> {
+    std::iter::once((None, result))
+        .chain(result.get("delivery").map(|value| (None, value)))
+        .chain(
+            result
+                .get("drains")
+                .and_then(Value::as_object)
+                .into_iter()
+                .flat_map(|drains| {
+                    drains
+                        .iter()
+                        .map(|(workspace, value)| (Some(workspace.as_str()), value))
+                }),
+        )
+        .filter_map(|(workspace, value)| {
+            serde_json::from_value(value.get("drain").unwrap_or(value).clone())
+                .ok()
+                .map(|report| (workspace, report))
+        })
 }
 
 /// The spaces one mailbox wake should drain: this one first, then every other
@@ -409,13 +446,24 @@ where
             || (first.pane_type == crate::PaneType::Terminal
                 && !crate::terminal::shell_is_available(runtime.herdr, &first.pane_id))
         {
-            if first.pane_type == crate::PaneType::Terminal {
-                report.terminal_waiting.push(address_id);
-            }
             continue;
         }
 
         runtime.clock.wait_ms(first.settled_delay_ms);
+        let effects = match crate::pane_effects::PaneEffects::acquire(
+            runtime.state_directory,
+            runtime.session_socket_id,
+            &first.pane_id,
+        )
+        .map_err(|error| error.with_alias(Some(&first.alias)))
+        {
+            Ok(effects) => Ok(effects),
+            Err(crate::pane_effects::AcquireError::Fault(error)) => Err(error),
+            Err(crate::pane_effects::AcquireError::Contended) => {
+                report.pane_lock_deferred.push(address_id);
+                continue;
+            }
+        };
         let second_discovery = discover(runtime)?;
         if second_discovery.workspace_id != namespace.space_id.as_str() {
             continue;
@@ -441,15 +489,70 @@ where
                         .map(|p| &p.terminal_id)
                     || !crate::terminal::shell_is_available(runtime.herdr, &second.pane_id)))
         {
-            if second.pane_type == crate::PaneType::Terminal {
-                report.terminal_waiting.push(address_id);
-            }
             continue;
         }
 
         let now = runtime.clock.now_unix_ms();
         let attribution = MutationAttribution::new(ActorKind::Plugin, "namedrop-dispatch", now);
         let attempt_id = DeliveryAttemptId::new(runtime.ids.next_id("delivery-attempt"));
+        let lease = LeaseDraft {
+            attempt_id: attempt_id.clone(),
+            binding_id: second.binding_id.clone(),
+            agent_session_id: second.agent_session_id.clone(),
+            retry_of_attempt_id: second.retry_of_attempt_id.clone(),
+            owner: format!("dispatcher:{}", runtime.session_socket_id),
+            acquired_at_ms: now,
+            expires_at_ms: now.saturating_add(LEASE_DURATION_MS),
+        };
+        let effects = match effects {
+            Ok(effects) => effects,
+            Err(error) => {
+                let summary = format!(
+                    "Could not send to @{}. {error}. Check the state directory permissions and available file descriptors, then review the conversation and send it again, or ask the agent that sent it to send it again.",
+                    second.alias,
+                );
+                let failed = store
+                    .transaction(|transaction| {
+                        if transaction
+                            .dispatch_candidate(&namespace, &address_id)?
+                            .as_ref()
+                            != Some(&second)
+                            || !transaction.coordination_wake_message_eligible(
+                                &namespace,
+                                &second.message_id,
+                                &live.with_here(second_discovery.clone()),
+                            )?
+                        {
+                            return Ok(None);
+                        }
+                        let Some(leased) = transaction.lease_mailbox_head(
+                            &namespace,
+                            &address_id,
+                            &lease,
+                            &attribution,
+                        )?
+                        else {
+                            return Ok(None);
+                        };
+                        transaction.transition_delivery_attempt(
+                            &namespace,
+                            &leased.attempt_id,
+                            DeliveryState::Failed,
+                            &attribution,
+                        )?;
+                        transaction.open_delivery_attempt_attention(
+                            &namespace,
+                            &leased.attempt_id,
+                            &summary,
+                            &attribution,
+                        )?;
+                        Ok(Some(leased.attempt_id))
+                    })
+                    .map_err(|error| error.to_string())?;
+                report.failed.extend(failed);
+                continue;
+            }
+        };
         let tool = IntegrationToolInvocation::new(
             collaboration_executable()?,
             tool_environment(
@@ -471,15 +574,7 @@ where
                 let leased = transaction.lease_mailbox_head(
                     &namespace,
                     &address_id,
-                    &LeaseDraft {
-                        attempt_id: attempt_id.clone(),
-                        binding_id: second.binding_id.clone(),
-                        agent_session_id: second.agent_session_id.clone(),
-                        retry_of_attempt_id: second.retry_of_attempt_id.clone(),
-                        owner: format!("dispatcher:{}", runtime.session_socket_id),
-                        acquired_at_ms: now,
-                        expires_at_ms: now.saturating_add(LEASE_DURATION_MS),
-                    },
+                    &lease,
                     &attribution,
                 )?;
                 leased
@@ -530,14 +625,16 @@ where
             report.failed.push(leased.attempt_id);
             continue;
         };
+        let owner = crate::pane_effects::InputOwner::delivery(
+            &namespace,
+            &leased.attempt_id,
+            &second.binding_id,
+            &leased.agent_session_id,
+        );
         let prompt_result = if second.pane_type == crate::PaneType::Terminal {
-            runtime
-                .herdr
-                .execute(&["pane", "run", &second.pane_id, &prompt])
+            effects.run_terminal(runtime.herdr, &owner, &prompt)
         } else {
-            runtime
-                .herdr
-                .execute(&["agent", "prompt", &second.pane_id, &prompt])
+            effects.prompt(runtime.herdr, &owner, &prompt)
         };
         let attribution = MutationAttribution::new(
             ActorKind::Plugin,
@@ -556,6 +653,8 @@ where
             // A runner's durable claim/result outranks a late transport error.
             continue;
         }
+        let prompt_result =
+            prompt_result.map_err(|error| runtime.herdr.classify_prompt_failure(&error));
         match prompt_result {
             Ok(_) => {
                 store
@@ -589,10 +688,7 @@ where
                     .map_err(|error| error.to_string())?;
                 report.submitted.push(leased.attempt_id);
             }
-            Err(error)
-                if runtime.herdr.classify_prompt_failure(&error)
-                    == PromptFailureKind::TemporaryPreInvocation =>
-            {
+            Err(kind) if kind.is_temporary_pre_invocation() => {
                 store
                     .transaction(|transaction| {
                         transaction.return_delivery_attempt_to_queue(
@@ -603,11 +699,10 @@ where
                     })
                     .map_err(|error| error.to_string())?;
                 report.requeued.push(leased.attempt_id);
+                report.retry_without_event |=
+                    kind == PromptFailureKind::TemporaryPreInvocationWithoutEvent;
             }
-            Err(error)
-                if runtime.herdr.classify_prompt_failure(&error)
-                    == PromptFailureKind::DefinitiveNonRetryable =>
-            {
+            Err(PromptFailureKind::DefinitiveNonRetryable) => {
                 store
                     .transaction(|transaction| {
                         transaction.transition_delivery_attempt(
@@ -636,9 +731,10 @@ where
         }
     }
 
-    report.terminal_running = store
+    (report.terminal_running, report.terminal_waiting) = store
         .transaction(|tx| {
-            tx.inflight_delivery_attempts(&namespace)?
+            let running = tx
+                .inflight_delivery_attempts(&namespace)?
                 .into_iter()
                 .filter_map(|attempt| {
                     match tx.terminal_execution(&namespace, &attempt.attempt_id) {
@@ -647,7 +743,24 @@ where
                         Err(e) => Some(Err(e)),
                     }
                 })
-                .collect::<Result<Vec<_>, StoreError>>()
+                .collect::<Result<Vec<_>, StoreError>>()?;
+            let mut waiting = Vec::new();
+            for address in tx.queued_mailbox_addresses(&namespace)? {
+                let Some(candidate) = tx.dispatch_candidate(&namespace, &address)? else {
+                    continue;
+                };
+                if candidate.pane_type == crate::PaneType::Terminal
+                    && live_candidate_matches(&candidate, &first_discovery)
+                    && tx.coordination_wake_message_eligible(
+                        &namespace,
+                        &candidate.message_id,
+                        &live,
+                    )?
+                {
+                    waiting.push(address);
+                }
+            }
+            Ok((running, waiting))
         })
         .map_err(|e| e.to_string())?;
     publish_status_metadata(runtime, &first_discovery)?;

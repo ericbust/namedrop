@@ -17,9 +17,12 @@ LIMIT = 65_536
 
 
 def version(value):
-    return (isinstance(value, str) and len(value) <= 32
-            and re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', value)
-            and all(int(part) <= 2**64 - 1 for part in value.split('.')))
+    if not isinstance(value, str) or len(value) > 32:
+        return False
+    match = re.fullmatch(
+        r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-exp\.(0|[1-9][0-9]*))?', value)
+    return bool(match and all(int(part) <= 2**64 - 1
+                              for part in match.groups() if part is not None))
 
 
 def read_json(path):
@@ -139,11 +142,11 @@ def remote_version(source, commit):
     if len(data) > LIMIT:
         raise ValueError('Remote manifest exceeds size limit')
     # The manifest starts with scalar plugin metadata before its TOML tables.
-    # Read only a literal numeric version; never evaluate downloaded content.
+    # Read only a literal stable or experimental version; never evaluate downloaded content.
     header = re.split(r'(?m)^\s*\[', data.decode('utf-8'), maxsplit=1)[0]
     matches = re.findall(r'(?m)^version\s*=\s*"([^"\r\n]*)"\s*(?:#.*)?$', header)
     if len(matches) != 1 or not version(matches[0]):
-        raise ValueError('Remote manifest has no numeric MAJOR.MINOR.PATCH version')
+        raise ValueError('Remote manifest has no valid stable or experimental version')
     return matches[0]
 
 

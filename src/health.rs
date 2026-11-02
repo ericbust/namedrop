@@ -3,7 +3,7 @@ use crate::integration::pane_agent_runtime;
 use crate::lifecycle::{CollaborationSetup, terminal_safe_text};
 use crate::{
     AgentSessionId, AttentionSourceKind, Clock, HerdrCommandExecutor, IdGenerator,
-    LifecycleRuntime, PaneAddressLifecycle, PromptFailureKind, StateStore, discover_worktree,
+    LifecycleRuntime, PaneAddressLifecycle, StateStore, discover_worktree,
     discover_worktree_for_workspace,
 };
 use serde::{Deserialize, Serialize};
@@ -80,15 +80,39 @@ where
         waiting_messages,
         held_deliveries,
         space_id,
+        worktree,
     } = match load_health_snapshot(runtime) {
         Ok(snapshot) => snapshot,
         Err(error) => return unavailable_report(&error),
     };
+    let worktree_issue = worktree.as_deref().and_then(|worktree| {
+        crate::install::codex_sandbox::check_worktree(runtime.state_directory, worktree)
+            .err()
+            .map(|error| issue(
+                "ND-INTEGRATION-001",
+                HealthSeverity::Broken,
+                "The Space worktree exposes trusted Namedrop state to Codex.",
+                &error,
+                HealthRepairKind::HumanDecision,
+                "Move the worktree or Namedrop state as instructed, then activate Namedrop again.",
+            ))
+    });
+    let unsafe_worktree = worktree_issue.is_some();
     if setup
         .worktree_state
         .as_ref()
         .is_none_or(|state| !state.activated || state.deactivated)
     {
+        if let Some(worktree_issue) = worktree_issue {
+            return HealthReport {
+                status: HealthStatus::NeedsAttention,
+                available_agents: 0,
+                available_terminals: 0,
+                waiting_messages,
+                hook_verification: "unverified".to_owned(),
+                issues: vec![worktree_issue],
+            };
+        }
         let mut inactive = issue(
             "ND-SETUP-001",
             HealthSeverity::Blocked,
@@ -115,7 +139,7 @@ where
         };
     }
 
-    let mut issues = Vec::new();
+    let mut issues: Vec<_> = worktree_issue.into_iter().collect();
     #[cfg(target_os = "linux")]
     if setup
         .panes
@@ -126,7 +150,7 @@ where
         issues.push(issue(
             "ND-MODEL-001",
             HealthSeverity::Notice,
-            "Codex summaries and persona suggestions are unavailable on this setup.",
+            "Codex summaries, persona suggestions, and channel routing are unavailable on this setup.",
             &error,
             HealthRepairKind::HumanDecision,
             "Resolve the reported Landlock or native Codex installation requirement, then retry the helper. Collaboration messages remain available.",
@@ -147,11 +171,16 @@ where
             continue;
         }
         inspected_packages.push(crate::integration_package_attention_source(agent_runtime));
+        if unsafe_worktree && agent_runtime == crate::AgentRuntime::Codex {
+            failed_packages.push(agent_runtime);
+            continue;
+        }
         if let Err(error) = crate::install::inspect_integration_package(
             runtime.home_directory,
             agent_runtime,
             runtime.state_directory,
             runtime.agent_config,
+            worktree.as_deref(),
         ) {
             failed_packages.push(agent_runtime);
             let mut package_issue = issue(
@@ -502,7 +531,18 @@ where
             continue;
         }
         let mut attention = health_issue_for_attention(item.source_kind);
-        attention.explanation = crate::context::redact_disclosure_text(&item.summary);
+        let cause = if item.source_kind == AttentionSourceKind::ContextGrant {
+            item.summary
+                .strip_prefix("Shared context failed:")
+                .map(str::trim_start)
+                .unwrap_or(&item.summary)
+        } else {
+            &item.summary
+        };
+        let explanation = crate::context::redact_disclosure_text(cause);
+        if explanation != attention.summary {
+            attention.explanation = explanation;
+        }
         attention.diagnostic = serde_json::json!({"attention_id":item.id,"source_kind":item.source_kind,"source_id":item.source_id});
         match item.source_kind {
             AttentionSourceKind::AutomaticReplyLimit => add_operation(
@@ -596,22 +636,45 @@ where
     {
         return Err("No issues remain; nothing was sent.".to_owned());
     }
+    let alias = StateStore::open_read_only(runtime.state_directory)
+        .ok()
+        .flatten()
+        .and_then(|mut store| {
+            store
+                .transaction(|tx| {
+                    tx.routing_author_for_pane(
+                        &crate::StateNamespace::for_space(runtime.session_socket_id, space_id),
+                        pane_id,
+                    )
+                })
+                .ok()
+        })
+        .map(|address| address.alias);
     // Immediately before dispatch: the pane must still hold the exact Agent
     // Session the popup was opened for, so a replacement session can never
     // receive the session-bound diagnostics of the one it replaced.
+    let effects = crate::pane_effects::PaneEffects::acquire(
+        runtime.state_directory,
+        runtime.session_socket_id,
+        pane_id,
+    )
+    .map_err(|error| error.with_alias(alias.as_deref()).to_string())?;
     let live = live_agent_session(runtime, space_id, pane_id)?;
     if live.as_str() != expected_session_id {
         return Err("The pane changed session; nothing was sent.".to_owned());
     }
     let prompt = doctor_assistance_prompt(&report, pane_id, &live);
-    match runtime
-        .herdr
-        .execute(&["agent", "prompt", pane_id, &prompt])
-    {
+    match effects.prompt(
+        runtime.herdr,
+        &crate::pane_effects::InputOwner::Other,
+        &prompt,
+    ) {
         Ok(_) => Ok(()),
         Err(error)
-            if runtime.herdr.classify_prompt_failure(&error)
-                == PromptFailureKind::TemporaryPreInvocation =>
+            if runtime
+                .herdr
+                .classify_prompt_failure(&error)
+                .is_temporary_pre_invocation() =>
         {
             Err(format!("Not sent, the agent did not accept it: {error}"))
         }
@@ -683,6 +746,7 @@ fn doctor_assistance_prompt(
 }
 
 struct HealthSnapshot {
+    worktree: Option<std::path::PathBuf>,
     setup: CollaborationSetup,
     waiting_messages: u64,
     held_deliveries: Vec<crate::store::HeldDelivery>,
@@ -716,6 +780,9 @@ where
             waiting_messages: 0,
             held_deliveries: Vec::new(),
             space_id: discovered.workspace_id,
+            worktree: discovered
+                .worktree_attached
+                .then(|| std::path::PathBuf::from(discovered.worktree_id.as_str())),
         });
     };
     let setup = crate::lifecycle::load_collaboration_setup_from_store(
@@ -734,6 +801,9 @@ where
         waiting_messages: waiting,
         held_deliveries,
         space_id: discovered.workspace_id,
+        worktree: discovered
+            .worktree_attached
+            .then(|| std::path::PathBuf::from(discovered.worktree_id.as_str())),
     })
 }
 
@@ -800,10 +870,10 @@ fn health_issue_for_attention(source: AttentionSourceKind) -> HealthIssue {
         AttentionSourceKind::ContextGrant => issue(
             "ND-CONTEXT-001",
             HealthSeverity::Notice,
-            "Shared context is waiting for a decision.",
-            "Namedrop will not reveal or reuse it without a valid grant.",
+            "Shared context failed.",
+            "The recipient could not use the shared context.",
             HealthRepairKind::HumanDecision,
-            "Review the context request?",
+            "Ask the sender to fix the problem and share the context again.",
         ),
         AttentionSourceKind::Coordination => issue(
             "ND-COORDINATION-001",

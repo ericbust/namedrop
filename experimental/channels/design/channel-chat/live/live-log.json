@@ -1,0 +1,136 @@
+{
+  "profile": "test-ch-2 (testbed test --link . --keep, 10/10 stock checks at f9c79c4)",
+  "agents": "real Claude Code 2.1.310 and Codex 0.164.0",
+  "steps": {
+    "hint": {
+      "heads up: I'm rotating the staging API keys at 3pm today": "Enter posts to the channel \u00b7 Mention @name to bring someone in",
+      "can @claude tell me in one short sentence what this repository is for?": "Enter posts to the channel \u00b7 Namedrop checks if it's for @claude",
+      "can @claude ask the codex agent in this channel to reply with the single word pong? Bring it in by mentioning it.": "Enter posts to the channel \u00b7 Namedrop checks if it's for @claude",
+      "the deploy notes @codex wrote last week were really clear": "Enter posts to the channel \u00b7 Namedrop checks if it's for @codex"
+    },
+    "plain": {
+      "route": null,
+      "legs": null,
+      "claudeAnswered": false,
+      "codexAnswered": false,
+      "pass": true
+    },
+    "mention": {
+      "route": "@claude Post asks @claude to provide information Working on it",
+      "routeAfter": "@claude Post asks @claude to provide information 1 reply",
+      "reply": "C @claude 6:57 PM It is a Namedrop messaging testbed, where agents in Herdr panes test sending, replying to and handling each other\u2019s messages.",
+      "replyRoute": null,
+      "pass": true
+    },
+    "thread": {
+      "label": "To @claude",
+      "sentSource": "thanks. which programming language is it mostly written in? one word please",
+      "inReplyTo": "message-1793314639347422717-3360719-1",
+      "reply": "C @claude 6:57 PM Markdown (it has no code, only AGENTS.md, CLAUDE.md and README.md).",
+      "pass": true
+    },
+    "pullin": {
+      "route": "@claude Post asks @claude to request codex agent reply 2 replies",
+      "claude": "C @claude 6:57 PM sure. @codex please reply in this channel with the single word pong. @codex pulled in",
+      "claudeRoute": "@codex pulled in Working on it",
+      "codex": "C @codex 6:57 PM pong",
+      "codexReference": null,
+      "pass": true
+    },
+    "passing": {
+      "route": "Mentioned @codex, not sent Send anyway",
+      "prefill": "@codex the deploy notes @codex wrote last week were really clear ",
+      "listbox": 0,
+      "reply": "C @codex 6:58 PM Thanks, glad they were clear.",
+      "routeAfter": "@codex",
+      "pass": true
+    },
+    "failed": {
+      "route": "Couldn't check who this is for Send to @claude",
+      "tone": "failed",
+      "title": "Namedrop couldn't reach its router. The post is saved, and no one got it.",
+      "pass": true
+    }
+  },
+  "receipts": [
+    {
+      "status": 200,
+      "source": "heads up: I'm rotating the staging API keys at 3pm today",
+      "in_reply_to": null,
+      "channel": {
+        "mentioned": [],
+        "state": "unrouted",
+        "to": []
+      },
+      "deliveries": 0
+    },
+    {
+      "status": 200,
+      "source": "can @claude tell me in one short sentence what this repository is for?",
+      "in_reply_to": null,
+      "channel": {
+        "mentioned": ["claude"],
+        "reason": "Post asks @claude to provide information",
+        "router": "claude-haiku-4-5",
+        "state": "routed",
+        "to": ["claude"]
+      },
+      "deliveries": 1
+    },
+    {
+      "status": 200,
+      "source": "thanks. which programming language is it mostly written in? one word please",
+      "in_reply_to": "message-1793314639347422717-3360719-1",
+      "channel": null,
+      "deliveries": 1
+    },
+    {
+      "status": 200,
+      "source": "can @claude ask the codex agent in this channel to reply with the single word pong? Bring it in by mentioning it.",
+      "in_reply_to": null,
+      "channel": {
+        "mentioned": ["claude"],
+        "reason": "Post asks @claude to request codex agent reply",
+        "router": "claude-haiku-4-5",
+        "state": "routed",
+        "to": ["claude"]
+      },
+      "deliveries": 1
+    },
+    {
+      "status": 200,
+      "source": "the deploy notes @codex wrote last week were really clear",
+      "in_reply_to": null,
+      "channel": {
+        "mentioned": ["codex"],
+        "reason": "Statement referencing past work, not a request",
+        "router": "claude-haiku-4-5",
+        "state": "unrouted",
+        "to": []
+      },
+      "deliveries": 0
+    },
+    {
+      "status": 200,
+      "source": "@codex the deploy notes @codex wrote last week were really clear",
+      "in_reply_to": "message-1793314671851729085-3358748-2",
+      "channel": null,
+      "deliveries": 1
+    },
+    {
+      "status": 200,
+      "source": "can @claude check whether the release build is green?",
+      "in_reply_to": null,
+      "channel": {
+        "mentioned": ["claude"],
+        "router": "claude-haiku-4-5",
+        "state": "router_failed",
+        "to": []
+      },
+      "deliveries": 0
+    }
+  ],
+  "router_failure_method": "dashboard server restarted with NAMEDROP_AGENT_STATUS_CLAUDE_BIN pointing at a stub that exits 1; the stub logged its call and the server's environment held the variable",
+  "page_errors": [],
+  "page_overflow": 0
+}

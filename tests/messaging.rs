@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 mod support;
 
 use namedrop::{
@@ -8,6 +11,81 @@ use namedrop::{
 };
 use std::{path::Path, sync::atomic::AtomicU64};
 use support::{FakeHerdr, FixedClock, SequenceIds, TestDirectory, setup_addresses};
+
+#[test]
+fn leading_punctuation_routes_mentions_and_preserves_literals() {
+    for (source, aliases, scope, body) in [
+        ("@codex, hi", vec!["codex"], SpaceScope::Unqualified, "hi"),
+        ("@codex: hi", vec!["codex"], SpaceScope::Unqualified, "hi"),
+        (
+            "@claude, @codex, x",
+            vec!["claude", "codex"],
+            SpaceScope::Unqualified,
+            "x",
+        ),
+        (
+            "#ws3 @codex, x",
+            vec!["codex"],
+            SpaceScope::Named(vec![WorkspaceLabel::from_token("ws3").unwrap()]),
+            "x",
+        ),
+        (
+            "#ws3, @codex: x",
+            vec!["codex"],
+            SpaceScope::Named(vec![WorkspaceLabel::from_token("ws3").unwrap()]),
+            "x",
+        ),
+        (
+            "#ws3: @codex, x",
+            vec!["codex"],
+            SpaceScope::Named(vec![WorkspaceLabel::from_token("ws3").unwrap()]),
+            "x",
+        ),
+        ("#all, @codex: x", vec!["codex"], SpaceScope::All, "x"),
+        (
+            "@claude: report \\@codex,",
+            vec!["claude"],
+            SpaceScope::Unqualified,
+            "report \\@codex,",
+        ),
+    ] {
+        let parsed = parse_mentions(source).unwrap_or_else(|error| panic!("{source:?}: {error}"));
+        assert_eq!(parsed.recipients.aliases, aliases, "{source:?}");
+        assert_eq!(parsed.recipients.scope, scope, "{source:?}");
+        assert_eq!(parsed.body, body, "{source:?}");
+        assert!(parsed.context_mentions.is_empty(), "{source:?}");
+        let prompt = parse_prompt_mentions(source).unwrap();
+        assert_eq!(prompt.recipients, parsed.recipients);
+        assert_eq!(prompt.body, source);
+    }
+}
+
+#[test]
+fn leading_punctuation_rejects_extra_marks_and_requires_a_body() {
+    for token in [
+        "@codex,,",
+        "@codex::",
+        "@codex,:",
+        "@codex:,",
+        "@codex;",
+        "@codex,x",
+        "#ws3,, @codex",
+        "#ws3:: @codex",
+        "#ws3; @codex",
+    ] {
+        let source = format!("{token} hi");
+        assert!(parse_mentions(&source).is_err(), "{source:?}");
+        assert!(parse_prompt_mentions(&source).is_err(), "{source:?}");
+    }
+    for source in ["@codex,", "@codex:", "#ws3, @codex:"] {
+        assert_eq!(
+            parse_mentions(source).unwrap_err(),
+            "collaboration message body is required",
+            "{source:?}"
+        );
+        assert!(carries_leading_mentions(source));
+    }
+}
 
 #[test]
 fn mention_parser_separates_recipients_context_and_literals() {
@@ -29,7 +107,7 @@ fn mention_parser_rejects_missing_recipients_and_empty_bodies() {
     for source in [
         "ordinary native text @reviewer",
         "@reviewer",
-        "@reviewer, body",
+        "@reviewer,, body",
         "@TODO the first token is not a recipient",
     ] {
         assert!(parse_mentions(source).is_err(), "{source:?} should fail");
@@ -168,7 +246,7 @@ fn explicit_send_resolves_and_atomically_fans_out_with_a_visible_receipt() {
     };
     let input = serde_json::json!({
         "request_id": "request-1",
-        "source": "@reviewer @planner Please inspect @researcher."
+        "source": "@reviewer, @planner: Please inspect @researcher."
     });
 
     let first = execute_message_operation("send", input.clone(), &runtime).unwrap();
@@ -259,6 +337,64 @@ fn a_held_mailbox_is_reported_on_new_sends_and_idempotent_replays() {
             .unwrap(),
         "held"
     );
+}
+
+#[test]
+fn a_reply_limit_hint_names_the_blocking_thread_on_sends_and_replays() {
+    let directory = TestDirectory::new();
+    setup_addresses(&directory);
+    let ids = SequenceIds(AtomicU64::new(1));
+    let runtime = LifecycleRuntime {
+        state_directory: directory.path(),
+        home_directory: Some(directory.home()),
+        agent_config: namedrop::AgentConfigDirectories::default(),
+        cwd: Path::new("/repo"),
+        workspace_id: None,
+        current_pane_id: Some("pane-author"),
+        session_socket_id: "socket-a",
+        herdr: &FakeHerdr,
+        clock: &FixedClock,
+        ids: &ids,
+    };
+    let first = execute_message_operation(
+        "send",
+        serde_json::json!({
+            "request_id":"paused-head", "source":"@reviewer Original task"
+        }),
+        &runtime,
+    )
+    .unwrap();
+    let connection = rusqlite::Connection::open(directory.path().join("namedrop.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE thread_controls SET paused=1, reply_allowance=0 WHERE thread_id=?1",
+            [first["thread_id"].as_str().unwrap()],
+        )
+        .unwrap();
+    let input =
+        serde_json::json!({"request_id":"behind-pause", "source":"@reviewer @planner New task"});
+    for response in [
+        execute_message_operation("send", input.clone(), &runtime).unwrap(),
+        execute_message_operation("send", input, &runtime).unwrap(),
+    ] {
+        assert_ne!(response["thread_id"], first["thread_id"]);
+        let statement = response["delivery_outlook"][0]["statement"]
+            .as_str()
+            .unwrap();
+        assert!(
+            statement.contains(&format!(
+                "Continue for thread {}",
+                first["thread_id"].as_str().unwrap()
+            )),
+            "{statement}"
+        );
+        assert!(
+            !response["delivery_outlook"][1]["statement"]
+                .as_str()
+                .unwrap()
+                .contains("Continue")
+        );
+    }
 }
 
 #[test]

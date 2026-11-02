@@ -208,65 +208,16 @@ where
                     transaction.stop_thread(&namespace, &thread_id, &attribution)
                 })
                 .map_err(|error| error.to_string())?;
-            let mut interrupted_pane_ids = Vec::new();
-            let mut warnings = Vec::new();
-            let live_discovered = match runtime.workspace_id {
-                Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id),
-                None => discover_worktree(runtime.herdr, runtime.cwd),
-            };
-            let live_discovered = match live_discovered {
-                Ok(live_discovered) => Some(live_discovered),
-                Err(error) => {
-                    warnings.push(format!(
-                        "The thread was stopped, but active responses were not interrupted because live pane state could not be refreshed: {error}"
-                    ));
-                    None
-                }
-            };
-            for response in &stopped.active_responses {
-                let live = live_discovered
-                    .as_ref()
-                    .and_then(|discovered| {
-                        (discovered.workspace_id == namespace.space_id.as_str())
-                            .then_some(discovered)
-                    })
-                    .and_then(|discovered| {
-                        discovered
-                            .panes
-                            .iter()
-                            .find(|pane| pane.pane_id == response.pane_id)
-                    });
-                let proven_running = response.binding_active
-                    && live.is_some_and(|pane| {
-                        pane.agent_session_id.as_ref() == Some(&response.agent_session_id)
-                            && pane
-                                .agent_status
-                                .as_deref()
-                                .is_some_and(|status| status == "working")
-                    });
-                if !proven_running {
-                    warnings.push(format!(
-                        "Did not interrupt {} because the stopped thread could not be proven to own its current response.",
-                        response.pane_id
-                    ));
-                    continue;
-                }
-                match runtime
-                    .herdr
-                    // Herdr key-combo syntax joins a modifier to its key with
-                    // `+`; it answers `ctrl-c` with `invalid_key`.
-                    .execute(&["agent", "send-keys", &response.pane_id, "ctrl+c"])
-                {
-                    Ok(_) => interrupted_pane_ids.push(response.pane_id.clone()),
-                    Err(error) => warnings.push(format!(
-                        "Could not interrupt {} after stopping the thread: {error}",
-                        response.pane_id
-                    )),
-                }
-            }
+            let report = crate::pane_effects::interrupt_if_current(
+                runtime.state_directory,
+                &namespace,
+                &stopped.active_responses,
+                runtime.herdr,
+                runtime.workspace_id.is_none().then_some(runtime.cwd),
+            );
             let mut value = serde_json::to_value(stopped).map_err(|error| error.to_string())?;
-            value["interrupted_pane_ids"] = json!(interrupted_pane_ids);
-            value["warnings"] = json!(warnings);
+            value["interrupted_pane_ids"] = json!(report.interrupted_pane_ids);
+            value["warnings"] = json!(report.warnings);
             value
         }
         "worktree.pause" | "worktree.resume" => {

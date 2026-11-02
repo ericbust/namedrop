@@ -158,15 +158,7 @@ pub fn validate_alias(alias: &str) -> Result<(), String> {
 
 pub const MAX_PERSONA_CHARS: usize = 1_000;
 
-/// Bounds a saved persona. The text is user-authored but is replayed into
-/// prompts, terminal output, and other agents' rosters, so it stays short and
-/// free of control sequences.
-/// Invisible formatting characters that can reorder or hide text on screen:
-/// bidirectional controls, zero-width spaces and word joiners, the byte-order
-/// mark, interlinear annotations and Unicode tag characters. ZWJ and ZWNJ
-/// stay allowed because emoji sequences and several scripts need them.
-// ponytail: an explicit list, not Unicode's whole Cf category; switch to a
-// general-category table if another invisible character needs covering.
+/// Formatting excluded from displayed text and saved personas.
 pub(crate) fn is_invisible_format(character: char) -> bool {
     matches!(
         character,
@@ -185,6 +177,7 @@ pub(crate) fn is_invisible_format(character: char) -> bool {
     )
 }
 
+/// Bounds a saved persona while allowing existing emoji and script formatting.
 pub fn validate_persona(description: &str) -> Result<(), String> {
     if description.chars().any(char::is_control) {
         return Err("persona cannot contain control characters".to_owned());
@@ -244,6 +237,7 @@ pub struct ThreadControlState {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ActiveThreadResponse {
     pub attempt_id: DeliveryAttemptId,
+    pub binding_id: PaneBindingId,
     pub pane_id: String,
     pub agent_session_id: AgentSessionId,
     pub binding_active: bool,
@@ -507,6 +501,7 @@ pub struct MessageReceipt {
 #[serde(rename_all = "snake_case")]
 pub enum DeliveryReplyMode {
     AgentThread,
+    Channel,
     ReturnToSource,
     ReportToHuman,
 }
@@ -515,6 +510,7 @@ impl DeliveryReplyMode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::AgentThread => "agent_thread",
+            Self::Channel => "channel",
             Self::ReturnToSource => "return_to_source",
             Self::ReportToHuman => "report_to_human",
         }
@@ -522,6 +518,7 @@ impl DeliveryReplyMode {
 
     pub(crate) fn for_message_grammar(grammar_version: &str) -> Self {
         match grammar_version {
+            "channel/v1" => Self::Channel,
             "mention-hook/v1" => Self::ReturnToSource,
             "coordination-report/v1"
             | "mention-return/v1"
@@ -548,6 +545,43 @@ pub(crate) struct MessageRoute {
     /// Namedrop wrote the message itself, under the recipient's own address
     /// and the sender name `namedrop`, so its sender is no one to reply to.
     pub from_namedrop: bool,
+    asker: RoutingAddressSnapshot,
+    asked_addresses: Vec<PaneAddressId>,
+}
+
+impl MessageRoute {
+    pub(crate) fn new(
+        thread_id: ThreadId,
+        asker: RoutingAddressSnapshot,
+        recipients: Vec<RoutingAddressSnapshot>,
+        reply_mode: DeliveryReplyMode,
+        from_namedrop: bool,
+        asked_addresses: Vec<PaneAddressId>,
+    ) -> Self {
+        let mut participants = vec![asker.clone()];
+        for recipient in recipients {
+            if !participants
+                .iter()
+                .any(|p| p.address_id == recipient.address_id)
+            {
+                participants.push(recipient);
+            }
+        }
+        Self {
+            thread_id,
+            participants,
+            reply_mode,
+            from_namedrop,
+            asker,
+            asked_addresses,
+        }
+    }
+
+    pub(crate) fn asker_for(&self, replier: &PaneAddressId) -> Option<&RoutingAddressSnapshot> {
+        self.asked_addresses
+            .contains(replier)
+            .then_some(&self.asker)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -694,6 +728,8 @@ pub struct LeasedDelivery {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DispatchCandidate {
+    pub alias: String,
+    pub delivery_id: DeliveryId,
     pub pane_type: PaneType,
     pub address_id: PaneAddressId,
     pub binding_id: PaneBindingId,

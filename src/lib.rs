@@ -8,6 +8,8 @@ mod context;
 mod controls;
 mod coordination;
 pub mod dashboard;
+#[doc(hidden)]
+pub mod deferred_commands;
 mod delivery;
 mod domain;
 mod groups;
@@ -22,6 +24,7 @@ mod lifecycle;
 #[doc(hidden)]
 pub mod linux_sandbox;
 mod message;
+mod pane_effects;
 mod persona;
 mod ports;
 mod runtime;
@@ -40,7 +43,7 @@ pub(crate) const INTEGRATION_PACKAGE_ATTENTION_SOURCE_PREFIX: &str = "integratio
 
 pub use context::{execute_context_operation, execute_human_context_operation};
 pub use controls::execute_control_operation;
-pub use delivery::{DrainReport, GraceDeadline, drain_mailboxes, spaces_to_wake};
+pub use delivery::{DrainReport, GraceDeadline, drain_mailboxes, drain_reports, spaces_to_wake};
 pub(crate) use delivery::{drain_receipt, publish_status_metadata, reconcile_delivery_state};
 pub use domain::*;
 pub use groups::execute_group_operation;
@@ -81,9 +84,9 @@ pub use lifecycle::{
     pane_workspace, reconcile_discovered_panes,
 };
 pub use message::{
-    BodyMention, ParsedMessage, RecipientOutlook, RecipientRun, carries_leading_mentions,
-    execute_message_operation, parse_mentions, parse_prompt_mentions, recipient_outlooks,
-    validate_message_input,
+    BodyMention, OperatorSendError, OperatorSendErrorKind, ParsedMessage, RecipientOutlook,
+    RecipientRun, carries_leading_mentions, execute_message_operation, parse_mentions,
+    parse_prompt_mentions, recipient_outlooks, send_operator_message, validate_message_input,
 };
 pub use ports::{Clock, HerdrCommandExecutor, HerdrCommandOutput, IdGenerator, PromptFailureKind};
 pub use runtime::{ProcessHerdr, ProcessIds, SystemClock};

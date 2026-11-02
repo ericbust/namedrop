@@ -10,12 +10,12 @@ Users open a live, read-only browser view of one workspace's agents, messages, m
 - `dashboard-live` streams `snapshot` frames over `/w/<key>/events` and sends a new frame after each committed change.
 - `dashboard-spaces` lists every stored space with its label and state at `/`, through `/api/spaces`.
 - `dashboard-idle` exits the server after the idle period, and rotates the session so old tabs must reopen through the CLI.
-- `dashboard-board` renders a lane per agent with plain-word statuses and hover descriptions, and a header that counts agents working and messages in flight. Retired agents share one stack at the right edge. Clicking a lane focuses that agent until Esc or "Show everyone". "View reply" opens the reply in the message drawer.
+- `dashboard-channels` serves the embedded Channels app at `/w/<key>` and `/` when no `--ui <dir>` is given. Drive it with the [Channels browser app](../SKILL.md#channels-browser-app) driver.
 
 ## How to get to it (user POV)
 
 - Run `namedrop dashboard` in a workspace. It opens a browser when it can, and always prints the URL. `--no-open` only prints.
-- Run `herdr plugin action invoke dashboard --plugin namedrop`.
+- Run the Herdr workspace action **Open Namedrop Channels**, or `herdr plugin action invoke channels --plugin namedrop`. The action runs `namedrop dashboard` in Herdr's server process, so it opens a browser only when that process has a display.
 - Open the printed `http://127.0.0.1:<port>/w/<key>?n=<nonce>` link. The browser lands on `/w/<key>` with the cookie set.
 
 ## Driving it with control-namedrop
@@ -32,7 +32,7 @@ Preconditions:
 - It creates workspace B and runs `dashboard --no-open` from B's pane. The response must report `server: running`, the same port, and a different space key. Before activation, B's stream reports state `unknown` with B's label and no participants. After `activate` in B, the stream must deliver a frame with B's workspace ID in state `active`. It then requires `/api/spaces` to list both space keys. `dashboard.json` keeps the responses and both space states.
 - The helper sets `NAMEDROP_DASHBOARD_IDLE_MS=10000` for its panes, so the server it starts idles out within the run. After the last stream closes, it waits for the server to exit, requires `dashboard: stopping: idle` in `<state>/dashboard/server.log`, and requires the session file to be gone.
 - If the server is still alive at teardown, the helper stops it by the PID recorded in `server.json`, after checking that its command line names `dashboard-server` and the fixture state. `cleanup.json` records `dashboard_pid` and `dashboard_alive`.
-- The page's rendering is a separate check. Open the printed URL in a browser, or run `python3 scripts/dashboard-preview.py --check` for the fixture snapshots. The helper does not drive `dashboard-board`: lane focus and Esc, the retired stack and its spread, the drawer, the tooltips, and the reconnect notice need a browser. It also does not assert the busy header, a retired agent's lane, or link expiry.
+- The page's rendering is a separate check. Drive the Channels app in a browser as [Channels browser app](../SKILL.md#channels-browser-app) describes. The helper does not drive `dashboard-channels`, and it does not assert link expiry.
 
 ## Gotchas
 

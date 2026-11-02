@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
 
 struct Fixture(PathBuf);
@@ -104,7 +107,7 @@ sys.exit(child.wait(timeout=10))
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        cleanup::remove_fixture(&self.0).unwrap();
     }
 }
 fn success(output: std::process::Output) -> String {

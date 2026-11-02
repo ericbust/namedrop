@@ -1,3 +1,6 @@
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 mod support;
 
 use namedrop::dashboard::snapshot::SpaceKey;
@@ -27,11 +30,47 @@ struct Server {
 
 impl Server {
     fn start(state: &Path, idle_ms: Option<u64>) -> Self {
+        Self::start_with(state, idle_ms, |_| {})
+    }
+
+    fn start_with(
+        state: &Path,
+        idle_ms: Option<u64>,
+        after_publish: impl FnOnce(&mut Child),
+    ) -> Self {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::create_dir_all(state.join("dashboard")).unwrap();
+        let credentials = ["token", "session"].map(|name| {
+            let path = state.join("dashboard").join(name);
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let mut bytes = [0; 32];
+                    fs::File::open("/dev/urandom")
+                        .unwrap()
+                        .read_exact(&mut bytes)
+                        .unwrap();
+                    let secret = namedrop::lower_hex(&bytes);
+                    file.write_all(secret.as_bytes()).unwrap();
+                    secret
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    fs::read_to_string(path).unwrap()
+                }
+                Err(error) => panic!("could not prepare dashboard {name}: {error}"),
+            }
+        });
+        let [token, session] = credentials;
         let mut command = Command::new(env!("CARGO_BIN_EXE_namedrop"));
         command
             .arg("--plugin-state")
             .arg(state)
             .arg("dashboard-server")
+            .env("TMPDIR", state.parent().unwrap())
             .env_remove("HERDR_PANE_ID")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("HERDR_SOCKET_PATH")
@@ -42,7 +81,7 @@ impl Server {
         if let Some(idle) = idle_ms {
             command.env("NAMEDROP_DASHBOARD_IDLE_MS", idle.to_string());
         }
-        let child = command.spawn().unwrap();
+        let mut child = command.spawn().unwrap();
         let info = eventually(Duration::from_secs(10), || {
             let info: serde_json::Value =
                 serde_json::from_slice(&fs::read(state.join("dashboard/server.json")).ok()?)
@@ -50,11 +89,12 @@ impl Server {
             (info["pid"] == child.id()).then_some(info)
         })
         .expect("server.json published by the started server");
+        after_publish(&mut child);
         Self {
             child,
             port: info["port"].as_u64().unwrap() as u16,
-            token: fs::read_to_string(state.join("dashboard/token")).unwrap(),
-            session: fs::read_to_string(state.join("dashboard/session")).unwrap(),
+            token,
+            session,
         }
     }
 
@@ -278,6 +318,41 @@ fn mint_entry(state: &Path) -> String {
 }
 
 #[test]
+fn entry_redemption_keeps_raw_query_parameters_without_nonces() {
+    let directory = TestDirectory::new();
+    let ns = seed(&state(&directory), "w1", &["a"]);
+    let server = Server::start(&state(&directory), None);
+    for page in ["/".to_owned(), format!("/w/{}", SpaceKey::of(&ns).as_str())] {
+        for (query, remaining) in [
+            ("n={nonce}&view=activity", "?view=activity"),
+            ("view=activity&n={nonce}", "?view=activity"),
+            ("n={nonce}&view=activity&n=other", "?view=activity"),
+            ("n={nonce}&n=other", ""),
+            ("n={nonce}&", "?"),
+            ("n={nonce}&&", "?&"),
+            (
+                "q=a%20b&q=a+b&n={nonce}&encoded=%2f%2F&n&%6e=keep&nn=keep",
+                "?q=a%20b&q=a+b&encoded=%2f%2F&n&%6e=keep&nn=keep",
+            ),
+            ("n={nonce}&&view=activity&", "?&view=activity&"),
+        ] {
+            let nonce = mint_entry(&state(&directory));
+            let request = format!("{page}?{}", query.replace("{nonce}", &nonce));
+            let response = server.get(&request, &[]);
+            assert!(response.status.contains("303"), "{}", response.status);
+            assert!(
+                response
+                    .headers
+                    .contains(&format!("Location: {page}{remaining}\r\n")),
+                "{}",
+                response.headers
+            );
+            assert!(server.get(&request, &[]).status.contains("401"));
+        }
+    }
+}
+
+#[test]
 fn pages_require_the_token_and_a_loopback_host() {
     let directory = TestDirectory::new();
     let ns = seed(&state(&directory), "w1", &["a", "b"]);
@@ -342,8 +417,16 @@ fn pages_require_the_token_and_a_loopback_host() {
         assert!(landed.headers.contains(directive), "{}", landed.headers);
     }
     assert!(landed.headers.contains("X-Frame-Options: DENY\r\n"));
-    assert!(landed.body.contains("/assets/app.js"));
-    assert!(server.get("/assets/app.js", &[]).status.contains("200"));
+    let script = landed
+        .body
+        .split("src=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(script.starts_with("/assets/") && script.ends_with(".js"));
+    assert!(server.get(script, &[]).status.contains("200"));
     assert!(server.get("/favicon.ico", &[]).status.contains("204"));
     assert!(
         server
@@ -379,14 +462,14 @@ fn connections_past_the_cap_are_turned_away() {
     let admitted = eventually(Duration::from_secs(5), || {
         // A probe that lands before a slot frees is turned away like the
         // excess one, and its unread request makes that close a reset.
-        let mut stream = server.connect("/assets/app.js", &[]);
+        let mut stream = server.connect("/healthz", &[]);
         let mut raw = String::new();
         let outcome = stream.read_to_string(&mut raw);
         if raw.starts_with("HTTP/1.1 503") {
             return None;
         }
         outcome.unwrap();
-        Response::parse(&raw).status.contains("200").then_some(())
+        Response::parse(&raw).status.contains("401").then_some(())
     });
     assert!(admitted.is_some(), "slots free up once connections close");
 }
@@ -608,7 +691,12 @@ fn an_idle_exit_rotates_the_browser_session() {
     let state = state(&directory);
     let ns = seed(&state, "w1", &["a"]);
     let page = format!("/w/{}", SpaceKey::of(&ns).as_str());
-    let mut first = Server::start(&state, Some(300));
+    let mut first = Server::start_with(&state, Some(300), |child| {
+        assert!(
+            eventually(Duration::from_secs(3), || child.try_wait().unwrap()).is_some(),
+            "startup can be descheduled until after the server's idle exit"
+        );
+    });
     let stale_cookie = first.cookie();
     assert!(first.exits_within(Duration::from_secs(3)));
 

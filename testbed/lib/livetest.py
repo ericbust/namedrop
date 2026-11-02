@@ -165,7 +165,7 @@ def launch_command(alias, mode, environ):
     return codex_command(environ.get("TESTBED_CODEX_CMD") or "codex", mode)
 
 
-Features = namedtuple("Features", "version hook_markers server_warning")
+Features = namedtuple("Features", "version full_version hook_markers server_warning")
 
 
 def features(version_text):
@@ -173,11 +173,11 @@ def features(version_text):
     if not found:
         testbed.fail("cannot read the installed Namedrop version: " + version_text)
     version = tuple(int(part) for part in found.groups())
-    return Features(version, version >= (1, 1, 0), version >= (1, 2, 0))
+    return Features(version, version_text, version >= (1, 1, 0), version >= (1, 2, 0))
 
 
 def version_text(feats):
-    return ".".join(map(str, feats.version))
+    return feats.full_version
 
 
 def choose_mode(requested, feats):
@@ -562,11 +562,14 @@ def judge_terminal(runs, claude_tx):
     checks = [fields("terminal", [("runs", len(runs), 1), ("completed", run.completed, True),
                                   ("exit", run.exit_code, 0),
                                   ("hello in output", "hello" in (run.output or ""), True)])]
+    return checks + [judge_terminal_answer(claude_tx)]
+
+
+def judge_terminal_answer(claude_tx):
     answer = last_answer(claude_tx)
     ok = has_word("hello", answer) and has_word("0", answer)
-    checks.append(Check("claude's answer", ok, 'claude answered "{}"'.format(
-        " ".join(answer.split())[:120]) + ("" if ok else " (expected hello and 0)")))
-    return checks
+    return Check("claude's answer", ok, 'claude answered "{}"'.format(
+        " ".join(answer.split())[:120]) + ("" if ok else " (expected hello and 0)"))
 
 
 def judge_settled(backlog, doctor, panes):
@@ -1180,8 +1183,10 @@ def step_terminal(r):
                        lambda value: any(run.completed for run in value[0]) and
                        value[1] == Backlog(0, 0, 0), TIMEOUTS.terminal)
     r.save("terminal.json", [run._asdict() for run in runs])
-    r.wait_agent("claude", ("idle", "done"), TIMEOUTS.idle)
-    return judge_terminal(runs, r.transcript("claude"))
+    claude = r.settle(lambda: r.transcript("claude"),
+                      lambda transcript: judge_terminal_answer(transcript).ok,
+                      TIMEOUTS.idle, watch=("claude",))
+    return judge_terminal(runs, claude)
 
 
 def step_settled(r):

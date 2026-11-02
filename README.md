@@ -22,9 +22,11 @@
 <p align="center">
   <a href="#install">Install</a> ·
   <a href="#examples">Examples</a> ·
+  <a href="#mention-agents-in-other-workspaces">Other workspaces</a> ·
   <a href="#agent-status">Agent status</a> ·
   <a href="#tour">Tour</a> ·
   <a href="#personas">Personas</a> ·
+  <a href="#channels-experimental">Channels</a> ·
   <a href="#update-namedrop">Update</a> ·
   <a href="#troubleshooting">Troubleshooting</a> ·
   <a href="#uninstall">Uninstall</a> ·
@@ -51,9 +53,19 @@ Your agent delegates the review and keeps working toward your goal. To hand off 
 @reviewer Check the retry logic and report any bugs.
 ```
 
+Mentions also reach agents in your other Herdr workspaces. Put the workspace label before the name, or use `#all` to reach that name in every workspace:
+
+```text
+#checkout-v2 @lead Rebase on main and tell me the new HEAD.
+#all @lead Report back your status in two lines.
+```
+
+The reply comes back to the workspace you sent from. A mention without a label stays in the current workspace. See [mention agents in other workspaces](#mention-agents-in-other-workspaces).
+
 ## What you get
 
 - **Mentions that come back.** A reply returns to the pane that asked. Ask several agents at once and the lead merges their results into one answer.
+- **Mentions across workspaces.** `#label @name` reaches an agent in another Herdr workspace, a repository's name reaches its worktrees, and `#all @name` reaches every workspace. Replies and tracked work come back to you.
 - **Personas.** Describe what each agent is good at, and your agents pick useful collaborators from the roster themselves.
 - **Named terminals.** `@build cargo test` runs in a shell pane without an LLM and returns stdout, stderr, and the exit status.
 - **Groups.** Save `@review-team` once, then mention it like a name.
@@ -157,7 +169,31 @@ To open a popup without a key, run `herdr plugin action invoke <action> --plugin
 
 ## Examples
 
-Names belong to a Herdr workspace; see [other workspaces](#mention-agents-in-other-workspaces). A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
+Names belong to a Herdr workspace, and a `#label` before a mention reaches another one. A name uses lowercase letters and digits, with single hyphens between words, such as `@reviewer`, `@test-runner`, or `@build`. Name each recipient before you mention it.
+
+In the dashboard channel, a top-level post can use plain text. Without a known local agent's embedded `@mention`, the post stays in the channel and no model runs. With embedded mentions, the server asks a separate, tool-free small model which mentioned agents you are addressing. A passing mention such as "nice work by @codex" can stay unrouted. The router prefers Claude Haiku when Claude Code is registered in any workspace, otherwise Codex Luna. It leaves your words unchanged. Set `NAMEDROP_CHANNEL_ROUTER=off` before starting the dashboard to leave plain posts unrouted.
+
+Replies to these channel posts stay visible in the channel. An agent can wake another local agent by mentioning it anywhere in a reply. Escaped mentions, unknown names, terminals, and self-mentions stay text. The thread's existing automatic reply allowance limits agent exchanges. In a thread, your plain follow-up goes to its agent participants without a model call. Embedded mentions of new participants go through the router. Terminals always need an explicit leading mention. Leading mentions keep their existing addressing rules.
+
+### Mention agents in other workspaces
+
+Names are unique per Herdr workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:
+
+```text
+#checkout-v2 @lead Rebase on main and tell me the new HEAD.
+#checkout-v2 #billing @lead Status?
+#all @lead Report back your status in two lines.
+```
+
+Labels match without case, and a space in a label matches a hyphen, so `#my-space` reaches the workspace labelled "My Space". Every workspace also answers to its Herdr id, such as `#w12`. Use the id when a label is empty, can't be typed, is `all`, or matches another workspace's label.
+
+Herdr labels a linked worktree's workspace after the worktree, not the repository. A repository's name also works as a label, so `#namestack @claude` reaches the one `namestack` worktree whose workspace has `@claude`. A workspace labelled `namestack` that has the name still wins. If two of the repository's worktrees have the name, nothing is sent and your agent asks which one you meant.
+
+A workspace label with no mention after it, as in `#catchup-again run the tests`, sends nothing. Your agent lists the named agents there and asks who you meant, even when there is only one. A `#` word that names no workspace or repository, such as `#42`, stays part of your prompt.
+
+A mention without a label never leaves the current workspace. If the name isn't there but another workspace has it, nothing is sent, and your agent tells you which label to type, such as `#beta @lead`. You can also ask in plain words, such as "ask my @lead panes to report back" or "message the lead in beta".
+
+Replies come back to the workspace you sent from. Tracked work crosses too. After `handoff begin`, send to `#label @name` with the `coordination_id`. The worker replies from its own workspace, and the coordination, its results and its report stay with the lead. Context handoffs still stay inside one workspace.
 
 ### Get two perspectives on a change
 
@@ -185,26 +221,6 @@ Then use it like a name:
 ```
 
 A group holds up to 64 agents. If mentions overlap, each agent still gets one delivery. Membership changes apply to future requests. Work already sent keeps its original recipients.
-
-### Mention agents in other workspaces
-
-Names are unique per Herdr workspace, so two workspaces can each have an `@lead`. Put the workspace label before the mention to reach another workspace:
-
-```text
-#exp-dashboard @lead Rebase on main and tell me the new HEAD.
-#exp-dashboard #feature-x @lead Status?
-#all @lead Report back your status in two lines.
-```
-
-Labels match without case, and a space in a label matches a hyphen, so `#my-space` reaches the workspace labelled "My Space". Every workspace also answers to its Herdr id, such as `#w12`. Use the id when a label is empty, can't be typed, is `all`, or matches another workspace's label.
-
-Herdr labels a linked worktree's workspace after the worktree, not the repository. A repository's name also works as a label, so `#namestack @claude` reaches the one `namestack` worktree whose workspace has `@claude`. A workspace labelled `namestack` that has the name still wins. If two of the repository's worktrees have the name, nothing is sent and your agent asks which one you meant.
-
-A workspace label with no mention after it, as in `#catchup-again run the tests`, sends nothing. Your agent lists the named agents there and asks who you meant, even when there is only one. A `#` word that names no workspace or repository, such as `#42`, stays part of your prompt.
-
-A mention without a label never leaves the current workspace. If the name isn't there but another workspace has it, nothing is sent, and your agent tells you which label to type, such as `#beta @lead`. You can also ask in plain words, such as "ask my @lead panes to report back" or "message the lead in beta".
-
-Replies come back to the workspace you sent from. Tracked work crosses too. After `handoff begin`, send to `#label @name` with the `coordination_id`. The worker replies from its own workspace, and the coordination, its results and its report stay with the lead. Context handoffs still stay inside one workspace.
 
 ### Run tests in a shell pane
 
@@ -284,12 +300,6 @@ In a Codex or Claude Code pane, press **Prefix**, then **Shift-S**. The panel sh
 
 Each description comes from a separate background request through the host of the pane you opened the panel from: Haiku for Claude Code, Luna for Codex. The request uses your existing sign-in and usage allowance, and it doesn't prompt or interrupt the active session. Outstanding requests come from Namedrop's delivery records. The model writes only the descriptions. If a summary fails, the panel shows the reason and the pane's recent output. See [panel behavior and limits](docs/operations.md#agent-status-panel).
 
-## Dashboard
-
-To watch a workspace in your browser, run `namedrop dashboard` in any of its panes, or run `herdr plugin action invoke dashboard --plugin namedrop`. The page shows each agent as a column with its state and mailbox, and each message as an arrow between columns. Each arrowhead marks how far that delivery got: queued, delivered, working, replied, held, or failed. Handoffs, coordinations, and recent terminal commands sit beside the conversation. The page updates as agents work.
-
-One local server serves every workspace, and each workspace gets its own page. The dashboard is read-only. It never shows shared context or terminal output, and it redacts secrets from message text. The server stops on its own 10 minutes after the last tab closes. See [dashboard behavior and limits](docs/operations.md#dashboard).
-
 ## Tour
 
 The tour is a short walkthrough of names, mentions, terminals, groups, Agent status, and Doctor, shown in a popup. It opens once per machine, the first time Namedrop sees an agent pane in an activated workspace. To open it again, press **Prefix**, then **Shift-O**, or run `herdr plugin action invoke tour --plugin namedrop`.
@@ -318,6 +328,69 @@ Personas are optional. An agent without one is **Generic**. It has no specialty,
 At the start of each turn, and with each incoming request, every agent receives the workspace roster. The roster lists each named agent, its persona, and whether it can take work right now. Your agent picks collaborators from the roster, tells you who it used, and gives you one answer.
 
 A persona grants no permissions and no tool access. It isn't proof of skill, and it never overrides your request or an explicit `@mention`. Named terminals can't have a persona.
+
+## Channels (experimental)
+
+Channels is a browser page that shows each Herdr workspace as a channel. It shows the workspace's messages, threads, agents, and anything that needs you. You can post to a channel or reply in a thread, and the agents receive your message like an `@mention` from a pane. Channels ships only on the `experimental` branch. It is not part of a `main` release yet.
+
+### Install the experimental branch
+
+For a new installation, follow [Install the plugin](#install-the-plugin) and use the `experimental` ref:
+
+```sh
+herdr plugin install ericbust/namedrop --ref experimental
+herdr plugin pane open --plugin namedrop --entrypoint setup
+```
+
+To switch an existing `main` installation, use the [reinstall steps](#reinstall-an-existing-installation) with the `experimental` ref. Finish active handoffs and exit your Claude Code and Codex sessions first. Your names and message history stay.
+
+```sh
+cd "$HOME"
+namedrop deactivate
+herdr plugin disable namedrop
+herdr plugin uninstall namedrop
+herdr plugin install ericbust/namedrop --ref experimental
+herdr plugin pane open --plugin namedrop --entrypoint setup
+```
+
+Then open a new terminal tab, run `namedrop doctor`, and start fresh agent sessions. **Update Namedrop** follows the ref you installed, so it updates an experimental installation to newer `experimental` commits.
+
+If you already run an older `experimental` build, you get no update notice for this one, because the older update check can't read its `1.5.0-exp` version. Run the update by hand:
+
+```sh
+herdr plugin action invoke update --plugin namedrop
+```
+
+To switch back, run the same commands with `--ref main` in place of `--ref experimental`. Both branches use the same state schema, so your names and history carry over. A local checkout or an archive installation must follow the [migration guide](docs/operations.md#migrate-a-local-link-to-a-managed-installation) first.
+
+### Open Channels
+
+Run the Herdr action **Open Namedrop Channels** in the workspace, or run its command from a shell tab:
+
+```sh
+herdr plugin action invoke channels --plugin namedrop
+namedrop dashboard
+```
+
+Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop dashboard` in a shell tab and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop dashboard --no-open` to print the link only. The link works once. Run the command again for a new link.
+
+### What to try
+
+- Post `@name` and a request in a channel, and watch the reply arrive in the channel.
+- Open a reply's thread and post a follow-up. Agents already in the thread receive it without a new `@mention`.
+- Post without a leading `@mention`. The post stays in the channel and wakes nobody, unless it mentions an agent in its text.
+- Open **Needs you** when an agent waits on an approval or a reply. Each item opens its conversation or the agent's pane.
+- Select an agent's name to **Peek** at its recent pane output.
+- Narrow the window below 600 pixels wide, and switch your system to dark mode.
+
+The [Channels tester checklist](docs/channels-testing.md) lists these checks in order.
+
+### Known limits
+
+- Status for Codex agents is limited compared with Claude Code agents.
+- The page can't yet tell an agent that you named before its session started from an agent that is offline.
+- A workspace where Namedrop was never turned on shows a **No agents here yet** guide. To start, name an agent there with `namedrop name @alias`.
+- The page is a local browser page on `127.0.0.1`. Other machines can't open it. Any process that runs as your user and can open the page can post as you. See [Channels](docs/operations.md#channels) for the server details.
 
 ## Update Namedrop
 

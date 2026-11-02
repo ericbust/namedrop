@@ -2,6 +2,54 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.1] - 2026-11-02
+
+Experimental Channels build for Linux and macOS testers.
+
+### Fixed
+
+- Dashboard entry links keep their query parameters and browser fragments after redemption. Channels use server-provided addressability reasons and alias-free member attention text. Recently closed members remain available for Peek for five minutes, with existing history references retaining them afterward.
+- Queued terminal commands continue after early dashboard responses, including back-to-back posts and bursts, without an unrelated drain. Forwarded mailbox workers start before the source worker is awaited.
+- Dashboard schema checks retry only SQLite Busy or Locked errors for a bounded five-second budget and log contention. Other read failures retain the exit or handoff behavior.
+- Operator dashboard posts return after the message and request ID commit, before agent delivery finishes. Delivery continues in the source and forwarded workspaces even if the client disconnects.
+- Dashboard delivery and unanswered-request warnings follow the recipient's current alias after a rename. Attention links load in one query instead of preparing a query for each warning.
+- Channel routing treats code, quoted instructions, and multi-step operator requests as normal post content. Measured routing policy uses plain JSON for Claude, structured output for Codex, and a 17-second deadline. A separate bounded dashboard journal records routing attempts and available usage, including failed calls.
+- Reopening Peek in the channels app shows the last successful screen and its original read time while a fresh full read runs. Retained screens stay in memory for the current app instance. Missing, closed, and session-ended failures replace earlier screen text with their notice.
+
+### Added
+
+- The Channels app opens from the workspace action **Open Namedrop Channels** or `namedrop dashboard`. Installed builds include the app, so using it does not require Node or npm.
+- Dashboard channels accept plain top-level posts. An isolated small-model router parses embedded mentions and chooses only the members addressed, without changing the text. Posts without known mentions make no model call. Plain operator thread follow-ups reach the thread's agents, while terminals need an explicit leading mention. Channel replies can wake local agents through embedded mentions, with bounded context and the existing reply allowance. Set `NAMEDROP_CHANNEL_ROUTER=off` to keep plain root posts unrouted. Routing explanations use a dashboard sidecar so the ledger stays at schema 6.
+- Channels attention items link to their conversations and offer a prefilled response or a named pane to inspect. Historical conversation links load their target directly, including requests outside the live message window.
+- The dashboard serves sanitized recent pane output at authenticated `GET /w/<key>/participants/<address_id>/screen` for agents and terminals. Concurrent requests for one pane share a bounded Herdr read. Retired or closed panes return 410.
+- Screen reads use unwrapped output and redact keys split by invisible characters or tabs. Oversized screens keep the newest text with an omission marker. Followers stop waiting after four seconds, and a 16-request peek limit reserves capacity for other dashboard routes.
+- Secret redaction preserves emoji and script formatting outside secrets, and keeps ENV values protected when a tab splits the variable name.
+- Message and Peek redaction recognize private-key headers with invisible characters next to spaces, and tokens split by ANSI sequences.
+
+- The dashboard can post as the local operator through authenticated `POST /w/<key>/messages`, with session-bound CSRF protection and optional thread follow-ups. Agent replies settle without an operator pane and appear in one persistent human lane. `GET /api/session` supplies the CSRF token for custom apps.
+
+- Dashboard attention entries include nullable `subject_alias` and `message_id` fields, and terminal runs include the request's nullable `message_id`. Links remain available for requests older than the live frame window.
+
+- The dashboard serves authenticated, paged channel history at `/w/<key>/messages`, including messages older than the live frame window.
+
+- `namedrop dashboard --ui <dir>` serves a custom browser app from a directory under the dashboard's existing security headers. Rebuilt directories are read fresh, large assets stream with bounded memory, dotfiles stay private, and aliases of the app shell require the session cookie. Ancestors need only search permission; the UI directory needs read and search permission. The shared server keeps its UI setting through upgrades, supports handoff to older releases without claim inheritance, falls back to their embedded UI when they lack `--ui` with a logged explanation, and spawns the exact executable it probed. During a handoff, matching UI requests wait up to five seconds for a ready successor and apply its UI setting before returning a URL. Longer startups return restart guidance without a URL, initially different UI requests receive restart guidance immediately, and updates and package refreshes can proceed while the successor starts.
+
+- The dashboard's `/api/events` endpoint streams every live Herdr workspace over one authenticated connection. It sends changed workspaces as `space` events and closed workspaces as `gone` events. Dashboard frames now include a live `display_name` and a nullable `addressable_label` that identifies a workspace only when its label is unique.
+## [1.4.3] - 2026-11-01
+
+### Fixed
+
+- Sandboxed Codex agents can send, reply, acknowledge and complete deliveries, and read the current workspace's roster when the sandbox blocks Herdr's socket. Commands pass through Namedrop's delivery spool to a worker outside the sandbox, without broader network permissions.
+- Activation grants Codex write access only to Namedrop's delivery spool. The runtime and database remain outside the grant. Namedrop replaces its older broad grants and preserves user grants; unsafe broad user grants must be removed before activation. Deactivation removes only the grant Namedrop added. Start fresh Codex sessions after activation to load the grant.
+- A corrupt queued command or result no longer stops the worker from processing other commands. Namedrop removes the invalid record and keeps processing the queue.
+- Codex sandbox setup works through linked parent directories, including macOS's `/var` path. Linked configuration, ownership-record and lock files are still refused.
+
+## [1.4.2] - 2026-10-28
+
+### Removed
+
+- The `namedrop dashboard` command is removed. Namedrop 1.4.0 shipped this browser dashboard without announcing it, because that release was cut from the `experimental` branch. Its code is kept on the `exp/dashboard` branch. The README also described a `herdr plugin action invoke dashboard` action, which no release registered. That text is removed.
+
 ## [1.4.1] - 2026-10-26
 
 ### Fixed

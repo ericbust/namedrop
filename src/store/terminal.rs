@@ -356,6 +356,7 @@ impl StateTransaction<'_> {
         kind: PaneType,
         at: &MutationAttribution,
     ) -> Result<(), StoreError> {
+        operator::refuse_pane_mutation(id)?;
         if self.pane_type(ns, id)? != kind {
             self.clear_remote_commands(ns, id, at)?;
             let pending:bool = self.transaction.query_row("SELECT EXISTS(SELECT 1 FROM mailbox_deliveries WHERE session_socket_id=?1 AND worktree_id=?2 AND address_id=?3 AND state NOT IN ('settled','failed','cancelled'))",
@@ -382,6 +383,7 @@ impl StateTransaction<'_> {
         panes: &[crate::DiscoveredPane],
         at: &MutationAttribution,
     ) -> Result<PaneAddressRecord, StoreError> {
+        operator::refuse_pane_mutation(id)?;
         let invoker_commands:bool = self.transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM pane_bindings b JOIN pane_addresses p USING(session_socket_id,worktree_id,address_id)
                  WHERE b.session_socket_id=?1 AND b.worktree_id=?2 AND b.pane_id=?3 AND b.active=1 AND p.pane_type='terminal')
@@ -432,6 +434,7 @@ impl StateTransaction<'_> {
         id: &PaneAddressId,
         at: &MutationAttribution,
     ) -> Result<PaneAddressRecord, StoreError> {
+        operator::refuse_pane_mutation(id)?;
         self.active_address(ns, id)?;
         self.clear_remote_commands(ns, id, at)?;
         let queued = self

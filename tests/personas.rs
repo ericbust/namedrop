@@ -1,5 +1,8 @@
 //! Persona persistence, lifecycle, and validation, exercised through the public
 //! lifecycle operations and the CLI the user actually types.
+#[path = "support/cleanup.rs"]
+mod cleanup;
+
 use namedrop::{
     Clock, HerdrCommandExecutor, HerdrCommandOutput, LifecycleRuntime, ProcessIds, StateNamespace,
     StateStore, execute_lifecycle_operation,
@@ -32,7 +35,7 @@ impl TestDirectory {
 
 impl Drop for TestDirectory {
     fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.0).unwrap();
+        cleanup::remove_fixture(&self.0).unwrap();
     }
 }
 

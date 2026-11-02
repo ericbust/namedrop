@@ -170,3 +170,221 @@ testbed/testbed destroy --profile test-link-<name> --yes
 
 Where the testbed cannot run, follow `testbed/CHECKLIST.md` by hand and use the manual
 drive notes for the pane mechanics.
+
+## Channels browser app
+
+Use this driver for `experimental/channels` lanes. Run every testbed command from
+this checkout. Set `CHANNELS_OUTPUT_DIR` to your lane's output directory. Its default
+is `/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}/`. Build the app, then boot an
+isolated profile. `TESTBED_HOME` selects the testbed root.
+
+```sh
+export CHANNELS_OUTPUT_DIR="${CHANNELS_OUTPUT_DIR:-/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}}"
+mkdir -p "$CHANNELS_OUTPUT_DIR"
+export CHANNELS_OUTPUT_DIR="$(cd "$CHANNELS_OUTPUT_DIR" && pwd)"
+export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
+(cd experimental/channels && npm ci && npm run build)
+testbed/testbed up --link "$PWD" --fresh --yes
+```
+
+Use `--no-launch` for lanes that do not prompt real agents. Do not use
+`testbed/testbed attach`. The profile is `link-<checkout basename>`.
+Read its generated `env.sh` to build the wrapper below. The socket assertion runs
+before the first Herdr command. Keep all Herdr and Namedrop calls inside `tb`.
+
+```sh
+export CHANNELS_OUTPUT_DIR="${CHANNELS_OUTPUT_DIR:-/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}}"
+mkdir -p "$CHANNELS_OUTPUT_DIR"
+export CHANNELS_OUTPUT_DIR="$(cd "$CHANNELS_OUTPUT_DIR" && pwd)"
+export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
+tb_profile="$TESTBED_HOME/profiles/link-$(basename "$PWD")"
+tb_vars=$(sed -n 's/^ *env -i \(.*\) \/bin\/bash --noprofile.*/\1/p' "$tb_profile/env.sh")
+test -n "$tb_vars" || exit 1
+tb() { eval "env -i $tb_vars \"\$@\""; }
+tb_socket=$(tb printenv HERDR_SOCKET_PATH)
+case "$tb_socket" in /tmp/nd-tb-*) ;; *) echo "Not a testbed socket" >&2; exit 1 ;; esac
+tb herdr pane list
+tb_workspace=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["workspace"])' "$tb_profile/state.json")
+tb_state="$tb_profile/state/herdr/plugins/namedrop"
+tb "$tb_state/runtime/namedrop" --plugin-state "$tb_state" --herdr-workspace "$tb_workspace" dashboard --no-open --json --ui "$PWD/experimental/channels/dist" > "$CHANNELS_OUTPUT_DIR/channels-dashboard.json"
+```
+
+Read `data.url` from `$CHANNELS_OUTPUT_DIR/channels-dashboard.json`. The nonce is single use.
+Navigate once with a fresh browser context. The redirect redeems it for the session
+cookie, which the app's same-origin EventSource uses automatically.
+
+For three channels, create `alpha` and `beta` through the wrapper, each in its own
+profile directory. Use `tb herdr workspace create --cwd <directory> --label alpha
+--no-focus`, then repeat for `beta`. Name a member in each using Namedrop through
+`tb` with that workspace and pane. For real agent coverage, use the existing
+[second workspace helper](scripts/second-workspace.py) and
+[manual drive notes](references/manual-drive.md), with the same socket assertion.
+Use `tb herdr agent prompt <pane> <task>` for presence changes and `tb herdr
+workspace close <workspace>` for removal. Never address the real Herdr socket.
+
+Run the browser block from `experimental/channels`. Run the other shell blocks from
+the repository root. Each block sets its own defaults and works in a fresh shell.
+Use an absolute `CHANNELS_OUTPUT_DIR` to share artifacts between working directories.
+Set `CHROME` to the installed Chrome or Chromium executable if it is absent from `PATH`.
+This browser probe uses only the pinned `playwright-core` package. It saves a screenshot and performance
+entries in `CHANNELS_OUTPUT_DIR`.
+
+```sh
+export CHANNELS_OUTPUT_DIR="${CHANNELS_OUTPUT_DIR:-/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}}"
+mkdir -p "$CHANNELS_OUTPUT_DIR"
+export CHANNELS_OUTPUT_DIR="$(cd "$CHANNELS_OUTPUT_DIR" && pwd)"
+export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
+CHANNELS_URL=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["data"]["url"])' "$CHANNELS_OUTPUT_DIR/channels-dashboard.json")
+export CHANNELS_URL
+export CHROME="${CHROME:-$(command -v chromium || command -v google-chrome || command -v google-chrome-stable)}"
+node --input-type=module <<'JS'
+import assert from 'node:assert/strict';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { chromium } from 'playwright-core';
+const output = process.env.CHANNELS_OUTPUT_DIR;
+assert.ok(output, 'CHANNELS_OUTPUT_DIR must be exported');
+const browser = await chromium.launch({executablePath: process.env.CHROME, headless: true, args: ['--no-sandbox']});
+try {
+  const context = await browser.newContext({viewport: {width: 1024, height: 700}});
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto(process.env.CHANNELS_URL);
+  const channels = page.getByRole('navigation', {name: 'Channels', exact: true});
+  await channels.getByRole('button').first().waitFor();
+  const alpha = channels.getByRole('button').filter({has: page.locator('.row-name', {hasText: /^alpha$/})});
+  await alpha.click();
+  await page.getByRole('heading', {name: 'alpha', exact: true}).waitFor();
+  await alpha.focus();
+  await page.keyboard.press('End');
+  await page.keyboard.press('Home');
+  await page.waitForFunction(() => performance.getEntriesByName('namedrop:load-to-sidebar-paint').length > 0);
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.screenshot({path: join(output, 'ui1-channels.png'), fullPage: true});
+  await page.setViewportSize({width: 1600, height: 1000});
+  await page.emulateMedia({colorScheme: 'dark'});
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  await page.screenshot({path: join(output, 'ui1-dark.png'), fullPage: true});
+  const measures = await page.evaluate(() => performance.getEntriesByType('measure').map(entry => entry.toJSON()));
+  await writeFile(join(output, 'ui1-measures.json'), JSON.stringify(measures, null, 2));
+  assert.deepEqual(errors, []);
+} finally {
+  await browser.close();
+}
+JS
+```
+
+Use these selectors for later live lanes.
+
+For UI-2, send the CHECKLIST Claude-to-Codex mention in the isolated profile before
+opening the app. Wait for its reply in Namedrop's database, then open that channel.
+The parent shows the reply in a preview button named **1 reply from @codex at
+<time>. Open thread**. Click it and confirm the reply appears in
+`getByRole('complementary', {name: 'Thread', exact: true})`. Send another reply
+while the pane is open and confirm its text, the preview, and the reply count
+update without a reload.
+Save `ui2-exchange.png` and `ui2-thread-live.png`. Run the coordination exchange in
+the plan's first lane and save its report card as `ui2-coordination.png`.
+
+Seed 400 rows through the profile's Namedrop commands. Scroll `.timeline`, the
+**Message history** region, to the top to load older history. Before each page, record the first visible
+`article[data-message-id]` and its offset from the scroller's top. After the page,
+require that same row to stay at the same offset within two pixels. Keep scrolling
+until the first seeded row appears. Confirm each message ID appears once and that
+switching channels ten times never mixes their rows. Save `ui2-history.png` and
+`ui2-switch.png`, then repeat with the copied live database for `ui2-real.png`.
+
+Send fenced code, an HTTP URL, a long body, and the literal body
+`<img src=x onerror=alert(1)>`. Confirm code uses a monospace font, the URL has
+`rel="noreferrer"`, **Show more** reveals the available long text, and no image or
+dialog appears. A server-truncated body can reveal only the text the server sent.
+Pause the testbed space with a mention queued and confirm its receipt says
+**Held while paused** and the channel header says **Paused · deliveries held**. Save the format, long-message, hostile-text, and held-receipt screenshots
+named in the plan. Keep all commands inside the `tb` wrapper above.
+
+For UI-3, post through the composer only. Its box is
+`getByRole('combobox', {name: 'Message #alpha'})`, or `Message <display name>` for a
+channel without a mention label. In the thread pane it is named `Reply to @codex`, or
+`Reply to @lead · #alpha` when the agent lives in another workspace, and `.composer-to`
+shows the same recipients after "To". A post that names nobody stays in the box with
+`.composer-guard` under it and never reaches the server.
+Type with `pressSequentially` so each key fires an input event. `#` and `@` open
+`getByRole('listbox', {name: 'Channels'})` or `{name: 'Members'}`. The combobox's
+`aria-activedescendant` names the highlighted option. A disabled option carries
+`aria-disabled="true"` and its reason in `title`. Each post shows as
+`article.pending[data-request-id]` in the timeline, or at the end of the thread pane,
+until its row arrives in a frame. A refused post shows its error as
+`.composer [role="alert"]`. Read each posted row and its `in_reply_to` with
+`sqlite3 -readonly` on the profile's `namedrop.sqlite3`. Two quick Enter presses must
+leave one row with that text.
+
+- `getByRole('navigation', {name: 'Channels', exact: true})` holds every channel.
+  Channel buttons carry `data-channel-key` with the opaque key. `.row-name` holds
+  the display name. Same-name buttons add `.row-suffix` with
+  ` · workspace_id · full-space-key`. Each suffix stays fixed when more same-name
+  channels arrive. The channel header's `.token` holds the `#token` or **No mention
+  label**. The selected channel's URL is `/w/<key>`.
+- `getByRole('navigation', {name: 'Needs you', exact: true})` holds channels with `health.level === "needs_you"`.
+  It is absent when no channel needs you. Each row shows `.row-reason`, and its dot
+  has the accessible name **Needs you**. `getByRole('region', {name: 'Attention
+  needed'})` is the banner in the selected channel.
+- `getByRole('list', {name: 'Members'})` holds member chips. Each `li` carries
+  `data-address-id`, and its `.presence` badge carries `data-activity`. Activity
+  values are `working`, `waiting`, `blocked`, `idle`, `offline`, and `unknown`.
+  Retired members are hidden. The operator chip reads **You** and has no badge.
+- `getByRole('status')` exposes the reconnect banner. Kill and restart only the
+  profile's dashboard, then wait for this banner to disappear and the channel
+  collection to reconcile at `ready` without reloading the page. A server without
+  `ready` resumes live updates after a two-second fallback that keeps old channels.
+  Delay `ready` past that interval and confirm it still removes omitted keys. Before
+  first discovery, an empty fallback keeps the loading state until a channel commits
+  or `ready` confirms the empty view. A first late `ready` applies the landing rule
+  (URL key, first Needs-you channel, latest message) unless you selected a channel
+  during fallback.
+  Select a channel,
+  focus its canonical Channels button, and create unread activity elsewhere before
+  dropping the stream. Delay replay to check that the sidebar stays populated.
+  After `ready`, confirm selection, unread marks, and focus survive for retained
+  keys, then press an arrow key. A selected channel clears its unread mark only
+  after 1.5 seconds on screen. Confirm omitted keys disappear and an empty ready
+  set clears the view. The app opens exactly one `/api/events` EventSource per tab.
+- `performance.getEntriesByName('namedrop:keystroke-to-popup', 'measure')` and
+  `'namedrop:enter-to-sent'` time the composer. `experimental/channels/README.md`
+  documents where each starts and ends. Each keeps at most 200 entries.
+- `performance.getEntriesByName('namedrop:activity-derive', 'measure')` times the
+  All activity derivation on every frame, and `'namedrop:click-to-peek-text'` times
+  a peek from the opening click or key to the frame after its first screen text
+  paints. `experimental/channels/README.md` documents where each starts and ends.
+  Each keeps at most 200 entries.
+- `performance.getEntriesByName('namedrop:frame-apply', 'measure')` measures reducer
+  calls, including replay timeout reconciliation. `namedrop:load-to-sidebar-paint`
+  measures navigation start to the first
+  populated sidebar after two animation frames. The app retains at most 200
+  reducer measures and one load measure per navigation.
+
+For UI-2's performance lane, read
+`performance.getEntriesByName('namedrop:frame-to-message-paint', 'measure')`.
+`experimental/channels/README.md` documents its start and end. Use 20 interleaved trials with UI-1's sidebar
+update as the baseline. Record a five-second scroll trace with 400 loaded rows.
+Frame-to-message-paint p95 must stay below 100 ms, and the scroll trace must contain
+no main-thread task longer than 50 ms. Record the exact app commit and database for
+both measurements. Passing browser tests does not establish these budgets.
+
+Save each lane's screenshots and measurements under `CHANNELS_OUTPUT_DIR`. Record the
+channel count, member presence transition, duplicate-name suffixes, keyboard focus,
+reconnect recovery, and dark surfaces against the plan's lanes. Use a fresh nonce
+and context for each navigation trial. The performance lane reads both measures
+across ten loads of 20 workspaces with 10 members. It compares the old dashboard's
+first participant paint before checking the plan's p95 limits. Do not infer a
+performance pass from the npm checks.
+
+Destroy the profile when the lane finishes.
+
+```sh
+export CHANNELS_OUTPUT_DIR="${CHANNELS_OUTPUT_DIR:-/tmp/swarm-${PR_ID:-ui1}/worker-${WORKER_N:-1}}"
+mkdir -p "$CHANNELS_OUTPUT_DIR"
+export CHANNELS_OUTPUT_DIR="$(cd "$CHANNELS_OUTPUT_DIR" && pwd)"
+export TESTBED_HOME="${TESTBED_HOME:-$HOME/.namedrop-testbed}"
+testbed/testbed destroy --profile "link-$(basename "$PWD")" --yes
+```
