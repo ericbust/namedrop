@@ -37,6 +37,17 @@ fn app_install_examples_parse_as_the_documented_operations() {
         .find(|(_, cli)| cli.operation() == "activate")
         .unwrap();
     assert_eq!(activation.input().unwrap()["confirmed"], true);
+    assert!(commands.iter().any(|(_, cli)| {
+        cli.operation() == "name"
+            && cli.agent_name() == Some("build")
+            && cli.name_pane_type() == Some(namedrop::PaneType::Terminal)
+    }), "README needs a parseable hc plain-terminal naming example");
+    assert!(commands.iter().any(|(_, cli)| {
+        cli.operation() == "send"
+            && cli.input().ok().and_then(|input| input["source"].as_str().map(str::to_owned))
+                == Some("@build printf 'hello from Namedrop'".to_owned())
+    }), "README needs a parseable hc send example with valid JSON and a shell command");
+    assert!(readme.contains("exit status") && readme.contains("output"), "README needs to explain the terminal reply");
 }
 
 #[test]
