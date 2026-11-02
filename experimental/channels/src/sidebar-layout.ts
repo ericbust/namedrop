@@ -86,10 +86,12 @@ function moved<T>(items: readonly T[], item: T, toIndex: number): T[] {
   return [...rest.slice(0, at), item, ...rest.slice(at)];
 }
 // Every move saves the order the operator sees now, so a group or channel that
-// is gone drops out of the saved order on the next write.
+// is gone drops out of the saved order on the next write. A flat list is Other
+// alone, and saving that would rank Other above repo groups that appear later.
 function written(layout: Layout, groups: readonly Group[]): Layout {
+  const keys = groups.map((group) => group.key);
   return {
-    groups: groups.map((group) => group.key),
+    groups: keys.length === 1 && keys[0] === "other" ? [] : keys,
     channels: groups.flatMap((group) =>
       group.channels.map((channel) => channel.key),
     ),

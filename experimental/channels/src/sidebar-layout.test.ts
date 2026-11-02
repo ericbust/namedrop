@@ -166,6 +166,25 @@ test("moves: a group or channel moves to the index asked, clamped, and the write
   assert.equal(moveGroup(start, visible, "repo:nope", 0), start);
 });
 
+test("moves: a move in the flat list keeps channel order but leaves Other last once repos appear", () => {
+  const flat = sorted(
+    channel(1, "alpha", null),
+    channel(2, "beta", null),
+    channel(3, "gamma", null),
+  );
+  const visible = groupChannels(flat, emptyLayout, none);
+  const saved = moveChannel(emptyLayout, visible, key(3), 0);
+  const later = sorted(
+    channel(1, "alpha", namedrop),
+    channel(2, "beta", null),
+    channel(3, "gamma", null),
+  );
+  assert.deepEqual(shape(groupChannels(later, saved, none)), [
+    ["repo:r-nd", "namedrop", ["alpha"]],
+    ["other", "Other", ["gamma", "beta"]],
+  ]);
+});
+
 test("collapse: toggling adds and removes the group and leaves the order alone", () => {
   const layout: Layout = {
     groups: ["repo:r-nd"],
