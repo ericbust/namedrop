@@ -114,6 +114,7 @@ int main(int argc, char **argv) {
 fn real_policy_allows_worker_auth_and_transport_but_denies_other_reads_and_exec() {
     let root = std::env::temp_dir().join(format!("namedrop-landlock-{}", std::process::id()));
     fs::create_dir_all(root.join("bin")).unwrap();
+    let root = fs::canonicalize(root).unwrap();
     fs::create_dir_all(root.join("worker")).unwrap();
     fs::create_dir_all(root.join("home/.codex")).unwrap();
     let binary = root.join("bin/codex");
