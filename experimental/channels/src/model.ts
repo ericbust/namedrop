@@ -169,10 +169,12 @@ export type NotAddressableReason =
   | "not_activated"
   | "not_active"
   | "unavailable";
+export type Repo = { id: string; name: string };
 export type ChannelSnapshot = {
   key: SpaceKey;
   workspaceId: string;
   displayName: string;
+  repo: Repo | null;
   addressableLabel: string | null;
   notAddressableReason: NotAddressableReason | null;
   state: SpaceState;
