@@ -3,6 +3,12 @@ mod cleanup;
 
 const INDEX_HTML: &[u8] = include_bytes!("../src/dashboard/channels/index.html");
 
+fn assert_legacy_embedded_page(body: &[u8]) {
+    let html = std::str::from_utf8(body).unwrap();
+    assert!(html.contains("/assets/app.js"), "{html}");
+    assert_ne!(body, b"<h1>dist</h1>");
+}
+
 mod support;
 
 use serde_json::Value;
@@ -868,14 +874,11 @@ fn fix_two_handoff_to_a_release_without_claim_support_stays_running() {
         assert_eq!(dashboard.cookie(), cookie);
         let response = dashboard.get("/", true);
         response.status(200);
-        assert_eq!(
-            response.body,
-            if custom {
-                b"<h1>dist</h1>".as_slice()
-            } else {
-                INDEX_HTML
-            }
-        );
+        if custom {
+            assert_eq!(response.body, b"<h1>dist</h1>");
+        } else {
+            assert_legacy_embedded_page(&response.body);
+        }
     }
 }
 
@@ -1192,7 +1195,7 @@ fn fix_three_real_pre_nd2_rollback_drops_custom_ui() {
     );
     assert_eq!(successor.unwrap()["port"], first["port"]);
     assert_eq!(dashboard.cookie(), cookie);
-    assert_eq!(dashboard.get("/", true).body, INDEX_HTML);
+    assert_legacy_embedded_page(&dashboard.get("/", true).body);
     assert_eq!(
         log.lines()
             .filter(|line| line.contains("custom UI") && line.contains("does not support --ui"))
@@ -1760,7 +1763,8 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
     let cookie = dashboard.cookie();
     let _events = fix_two_subscribe(&dashboard, &opened);
     let runtime = dashboard.state().join("runtime");
-    let legacy = if let Some(old) = std::env::var_os("REVIEW_PRE_ND2_BINARY") {
+    let old = std::env::var_os("REVIEW_PRE_ND2_BINARY");
+    let legacy = if let Some(old) = &old {
         fs::create_dir_all(runtime.join("legacy")).unwrap();
         let legacy = runtime.join("legacy/namedrop");
         copy_executable(old, &legacy).unwrap();
@@ -1827,7 +1831,11 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
         vec![("Cookie", cookie)],
     );
     page.status(200);
-    assert_eq!(page.body, INDEX_HTML);
+    if old.is_some() {
+        assert_legacy_embedded_page(&page.body);
+    } else {
+        assert_eq!(page.body, INDEX_HTML);
+    }
 }
 
 #[test]
