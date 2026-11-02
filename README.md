@@ -120,7 +120,14 @@ From an app terminal in the space you want to activate, run the executable with 
 
 Activation creates `~/.local/bin/namedrop-app`, the launcher that the app mods try first. Leave that path for activation to own; placing the release binary there beforehand makes activation reject the unrelated file. The mods fall back to `namedrop` on the app session's `PATH` when the launcher is absent. The extracted release directory must stay in place because the launcher points to its executable.
 
-The binary archive contains no `mods/` folders or `keys.json`. Download the **matching version's source archive** from the same release, or check out that version's tag. From that source tree, copy all six folders into the app home's `mods/` directory, usually `~/.config/herdr-app/mods/`: `namedrop`, `namedrop-name`, `namedrop-management`, `namedrop-doctor`, `namedrop-agent-status`, and `namedrop-tour`. Merge the five entries under `global` in the source `keys.json` into your app home's `keys.json`; preserve your existing bindings and resolve conflicts before replacing a key. See [RECIPE.md](RECIPE.md) for the keys and macOS rebinds.
+Download `namedrop-mods-<version>.tar.gz` and its `.sha256` file from the same release as the binary. Verify and extract the archive:
+
+```sh
+sha256sum -c namedrop-mods-<version>.tar.gz.sha256
+tar -xzf namedrop-mods-<version>.tar.gz
+```
+
+On macOS, use `shasum -a 256 -c` for the checksum. Copy all six extracted folders into the app home's `mods/` directory, usually `~/.config/herdr-app/mods/`: `namedrop`, `namedrop-name`, `namedrop-management`, `namedrop-doctor`, `namedrop-agent-status`, and `namedrop-tour`. Merge the five entries under `global` in the extracted `keys.json` into your app home's `keys.json`. Preserve your existing bindings and resolve conflicts before replacing a key. The extracted `RECIPE.md` lists the keys and macOS rebinds.
 
 Focus one agent terminal, press **Alt+N**, and name it `@reviewer`. Focus another, press **Alt+N**, and name it `@tester`. The equivalent binary command for a focused agent terminal is:
 
@@ -130,6 +137,20 @@ Focus one agent terminal, press **Alt+N**, and name it `@reviewer`. Focus anothe
 ```
 
 Ask `@reviewer` to send a short request to `@tester`. The roster shows `waiting on @tester` while the request is open. The reply returns to `@reviewer`, and the app posts a reply notification. Select the notification to focus that terminal. The first roster read establishes the notification baseline, so old replies do not produce a burst.
+
+A plain terminal works the same way. Focus the terminal and press **Alt+N**, or name it with `--type terminal` from that terminal:
+
+```sh
+namedrop --host hc name @build --type terminal
+```
+
+Send a command from a named agent pane in the same space:
+
+```sh
+namedrop --host hc send --input-json '{"source":"@build printf hello-from-Namedrop"}'
+```
+
+The `@build` recipient executes the message text as a shell command. Its reply includes the command output and exit status.
 
 ### Install from a release archive
 

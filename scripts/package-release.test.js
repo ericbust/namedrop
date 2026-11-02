@@ -36,7 +36,11 @@ test('default package ships a verified binary and a clean target-independent mod
     execFileSync('sha256sum', ['-c', `${name}.sha256`], { cwd: output });
   }
   const members = execFileSync('tar', ['-tzf', path.join(output, modsName)], { encoding: 'utf8' }).trim().split('\n').map(member => member.replace(/^\.\//, '').replace(/\/$/, ''));
-  for (const member of ['keys.json', 'RECIPE.md', ...['namedrop', 'namedrop-name', 'namedrop-management', 'namedrop-doctor', 'namedrop-agent-status', 'namedrop-tour'].map(name => `mods/${name}/mod.json`)]) {
+  const folders = ['namedrop', 'namedrop-name', 'namedrop-management', 'namedrop-doctor', 'namedrop-agent-status', 'namedrop-tour'];
+  assert.ok(fs.existsSync(path.join(root, 'mods/namedrop/fixtures')), 'fixture exclusion needs a source sentinel');
+  assert.ok(fs.existsSync(path.join(root, 'mods/namedrop/model.test.js')), 'test exclusion needs a source sentinel');
+  assert.deepEqual(members.filter(member => /^mods\/[^/]+$/.test(member)).sort(), folders.map(name => `mods/${name}`).sort());
+  for (const member of ['keys.json', 'RECIPE.md', ...folders.map(name => `mods/${name}/mod.json`)]) {
     assert.ok(members.includes(member), `missing ${member}`);
   }
   assert.ok(members.includes('mods/namedrop/main.js'), 'missing app payload');
@@ -59,14 +63,17 @@ test('binary-only omits mods and refuses an existing output without publishing a
   assert.deepEqual(fs.readdirSync(output).sort(), [`namedrop-${version}-${target}.tar.gz`, `namedrop-${version}-${target}.tar.gz.sha256`]);
 });
 
-test('preflights the mods destination before publishing the binary', t => {
+test('preflights every selected destination before publishing any file', t => {
   const { dir, binary } = fixture(t);
-  const output = path.join(dir, 'dist');
-  fs.mkdirSync(output);
-  const sentinel = path.join(output, `namedrop-mods-${version}.tar.gz.sha256`);
-  fs.writeFileSync(sentinel, 'keep me');
-  const result = packageRelease(binary, output);
-  assert.equal(result.status, 73, result.stderr);
-  assert.deepEqual(fs.readdirSync(output), [path.basename(sentinel)]);
-  assert.equal(fs.readFileSync(sentinel, 'utf8'), 'keep me');
+  const names = [`namedrop-${version}-${target}.tar.gz`, `namedrop-${version}-${target}.tar.gz.sha256`, `namedrop-mods-${version}.tar.gz`, `namedrop-mods-${version}.tar.gz.sha256`];
+  for (const [index, name] of names.entries()) {
+    const output = path.join(dir, `dist-${index}`);
+    fs.mkdirSync(output);
+    const sentinel = path.join(output, name);
+    fs.writeFileSync(sentinel, 'keep me');
+    const result = packageRelease(binary, output);
+    assert.equal(result.status, 73, `${name}: ${result.stderr}`);
+    assert.deepEqual(fs.readdirSync(output), [name]);
+    assert.equal(fs.readFileSync(sentinel, 'utf8'), 'keep me');
+  }
 });

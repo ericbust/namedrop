@@ -6,6 +6,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Added
 
+- Releases include a checked `namedrop-mods-<version>.tar.gz` archive for Herdr app, with the six mods, `keys.json`, and `RECIPE.md`.
 - A separate hc host connects naming, messages, handoffs, and agent sessions to herdr-core for Herdr app. The TUI host keeps its existing integration package.
 - The hc host supports a read-only `roster --json` snapshot and a hidden `events --ensure` command for the app. The latter starts the existing subscriber only when a space is activated.
 - Herdr app's roster shows per-agent waiting names and posts bounded reply and blocked-status notifications. Four terminal-backed popups open management, Doctor, agent status, and tour. Naming stays in a native dialog and uses the binary to save the name.
