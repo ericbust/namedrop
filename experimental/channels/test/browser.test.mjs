@@ -294,6 +294,7 @@ async function open(
     onContext = null,
     onControl = () => ({ status: 200 }),
     onDeliver = () => ({ status: 200 }),
+    onBody = null,
     observeLanding = false,
   } = {},
 ) {
@@ -302,6 +303,7 @@ async function open(
   const errors = [];
   const historyRequests = [];
   const contextRequests = [];
+  const bodyRequests = [];
   const posts = postRoute(onPost);
   const screens = screenRoute(onScreen);
   const server = createServer(async (req, res) => {
@@ -347,6 +349,16 @@ async function open(
         res.writeHead(404).end();
       }
       return;
+    }
+    const body = /^\/w\/[^/]+\/messages\/([^/]+)\/body$/.exec(url.pathname);
+    if (req.method === "GET" && body !== null) {
+      const csrf = req.headers["x-namedrop-csrf"] ?? null;
+      bodyRequests.push({ id: decodeURIComponent(body[1]), csrf });
+      if (csrf !== posts.session.csrf) return res.writeHead(403).end();
+      const full = onBody === null ? null : await onBody(body[1]);
+      return full === null
+        ? res.writeHead(404).end()
+        : sendJson(res, 200, { message_id: body[1], body: full });
     }
     if (/^\/w\/[^/]+\/messages\/[^/]+\/context$/.test(url.pathname)) {
       contextRequests.push(url);
@@ -434,6 +446,7 @@ async function open(
     live,
     historyRequests,
     contextRequests,
+    bodyRequests,
     posts,
     screens,
   };
@@ -1050,7 +1063,12 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
     message("nudge", "Please continue", { kind: "nudge" }),
     message("hook", "Hook received", { kind: "hook" }),
   ];
-  const ui = await open(t, (client) => replay(client, [value]));
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onBody: () => ({
+      text: `${"Long body ".repeat(90)}END OF BODY`,
+      truncated: true,
+    }),
+  });
   let dialogs = 0;
   ui.page.on("dialog", async (dialog) => {
     dialogs++;
@@ -1079,6 +1097,7 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
     false,
   );
   await long.getByRole("button", { name: "Show more", exact: true }).click();
+  await long.getByRole("button", { name: "Show less", exact: true }).waitFor();
   assert.equal(
     (await long.locator(".body").textContent()).includes("END OF BODY"),
     true,
@@ -1092,6 +1111,180 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
   );
   await ui.page.getByText("Please continue", { exact: true }).waitFor();
   await ui.page.getByText("Hook received", { exact: true }).waitFor();
+});
+
+const CODEX = "pane-address-1793208032928312296-1209682-1";
+test("FULL-THREAD: Show more reads the whole message once, with the session token, and says when it can't", async (t) => {
+  const value = frame(1, "alpha");
+  const whole = `${"Long body ".repeat(1000)}END OF BODY`;
+  value.frame.messages = [
+    message("long", whole.slice(0, 2000), {
+      body: { text: whole.slice(0, 2000), truncated: true },
+    }),
+    message("short-cut", "Cut at 300", {
+      body: { text: "Cut at 300", truncated: true },
+    }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onBody: (id) => (id === "long" ? { text: whole, truncated: false } : null),
+  });
+  await ui.live();
+  const long = ui.page.locator('[data-message-id="long"]');
+  await long.getByRole("button", { name: "Show more", exact: true }).click();
+  await long.getByRole("button", { name: "Show less", exact: true }).waitFor();
+  const shown = await long.locator(".body").textContent();
+  assert.equal(shown.length, whole.length);
+  assert.ok(shown.endsWith("END OF BODY"));
+  assert.equal(await long.locator(".truncation-note").count(), 0);
+  await long.getByRole("button", { name: "Show less", exact: true }).click();
+  await long.getByRole("button", { name: "Show more", exact: true }).click();
+  assert.deepEqual(ui.bodyRequests, [{ id: "long", csrf: "csrf-1" }]);
+  const cut = ui.page.locator('[data-message-id="short-cut"]');
+  await cut.getByRole("button", { name: "Show more", exact: true }).click();
+  await cut
+    .getByText("Couldn't load the rest of this message. Try again.")
+    .waitFor();
+  assert.equal(
+    await cut.getByRole("button", { name: "Show more" }).count(),
+    1,
+    "a failed load can be retried",
+  );
+});
+
+function replyRows() {
+  const value = frame(1, "alpha");
+  value.frame.messages = [
+    message("parent", "@codex please check this", {
+      thread_id: "exchange",
+      legs: [{ to: CODEX, stage: { stage: "replied", reply_id: "answer" } }],
+    }),
+    message("answer", "Checked and ready", {
+      thread_id: "exchange",
+      in_reply_to: "parent",
+      author: CODEX,
+      kind: "reply",
+    }),
+    message("report", "Two tasks completed", {
+      kind: "result_set",
+      author: CODEX,
+      at_ms: 200,
+    }),
+    message("nudge", "Please continue", { kind: "nudge", at_ms: 300 }),
+  ];
+  value.frame.threads = [
+    {
+      thread_id: "exchange",
+      title: { text: "Check", truncated: false },
+      message_count: 2,
+    },
+  ];
+  return value;
+}
+test("FULL-THREAD: every row offers Reply in thread, by keyboard too, and the reply answers that message", async (t) => {
+  const ui = await open(t, (client) => replay(client, [replyRows()]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  for (const id of ["parent", "report", "nudge"])
+    assert.equal(
+      await timeline
+        .locator(`[data-message-id="${id}"]`)
+        .getByRole("button", { name: /^Reply in thread to / })
+        .count(),
+      1,
+      id,
+    );
+  const reply = timeline
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" });
+  await reply.focus();
+  assert.equal(
+    await reply.evaluate((element) => getComputedStyle(element).opacity),
+    "1",
+    "a focused Reply in thread shows",
+  );
+  await ui.page.keyboard.press("Enter");
+  await pane.getByRole("status").getByText("Replying to You").waitFor();
+  const box = pane.getByRole("combobox");
+  assert.equal(
+    await box.evaluate((element) => element === document.activeElement),
+    true,
+  );
+  assert.match(await box.getAttribute("aria-label"), /^Reply to @codex/);
+  await box.fill("About the parent");
+  await ui.page.keyboard.press("Enter");
+  await pane.getByText("About the parent", { exact: true }).first().waitFor();
+  await pane
+    .locator('[data-message-id="answer"]')
+    .getByRole("button", { name: "Reply in thread to @codex" })
+    .click();
+  await pane.getByRole("status").getByText("Replying to @codex").waitFor();
+  await box.fill("About the answer");
+  await ui.page.keyboard.press("Enter");
+  await pane.getByText("About the answer", { exact: true }).first().waitFor();
+  assert.equal(await pane.getByText(/^Replying to/).count(), 0);
+  await pane
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  await pane
+    .getByRole("button", { name: "Reply to the latest message instead" })
+    .click();
+  assert.equal(await pane.getByText(/^Replying to/).count(), 0);
+  await box.fill("Then the latest");
+  await ui.page.keyboard.press("Enter");
+  await pane.getByText("Then the latest", { exact: true }).first().waitFor();
+  const sent = ui.posts.attempts
+    .filter((attempt) => attempt.body !== null)
+    .map(({ body }) => [body.in_reply_to, body.source]);
+  assert.deepEqual(sent, [
+    ["parent", "About the parent"],
+    ["answer", "About the answer"],
+    ["answer", "Then the latest"],
+  ]);
+});
+
+test("FULL-THREAD: a coordination report thread names its agent, a nudge with no agent asks for a mention, and phones show the button", async (t) => {
+  const ui = await open(t, (client) => replay(client, [replyRows()]));
+  await ui.page.setViewportSize({ width: 390, height: 800 });
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const report = timeline
+    .locator('[data-message-id="report"]')
+    .getByRole("button", { name: "Reply in thread to @codex" });
+  assert.equal(
+    await report.evaluate((element) => getComputedStyle(element).opacity),
+    "1",
+    "a phone shows Reply in thread without hover",
+  );
+  await report.click();
+  await pane.getByRole("status").getByText("Replying to @codex").waitFor();
+  const box = pane.getByRole("combobox");
+  assert.match(await box.getAttribute("aria-label"), /^Reply to @codex/);
+  await box.fill("Ship the report");
+  await ui.page.keyboard.press("Enter");
+  await pane.getByText("Ship the report", { exact: true }).first().waitFor();
+  assert.deepEqual(
+    ui.posts.attempts.map(({ body }) => [body.in_reply_to, body.source]),
+    [["report", "Ship the report"]],
+  );
+  await pane.getByRole("button", { name: "Close thread" }).click();
+  await timeline
+    .locator('[data-message-id="nudge"]')
+    .getByRole("button", { name: "Reply in thread to Nudge" })
+    .click();
+  await pane.getByRole("status").getByText("Replying to You").waitFor();
+  assert.equal(
+    await pane.getByRole("combobox").getAttribute("aria-label"),
+    "Start with @name to choose who gets this.",
+  );
 });
 
 test("MD-UI: a formatted agent reply renders lists, code and bold without markup or images", async (t) => {

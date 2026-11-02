@@ -3,12 +3,14 @@ import type {
   DeliverAnswer,
   DeliverFailure,
   DeliverResult,
+  SafeText,
   SendFailure,
   SpaceKey,
   ThreadAction,
 } from "./model.ts";
 import {
   parseDeliverAnswer,
+  parseFullBody,
   parseReceipt,
   parseRefusal,
   parseSessionToken,
@@ -86,9 +88,31 @@ export function createPoster(fetcher: typeof fetch = fetch, bodyWait = 5_000) {
     if (session === used) session = null;
     return attempt(path, body, await token(), signal);
   }
+  function read(path: string, csrf: string | null): Promise<Response> {
+    return fetcher(path, {
+      credentials: "same-origin",
+      headers: csrf === null ? {} : { "X-Namedrop-Csrf": csrf },
+    });
+  }
   return {
     prepare(): void {
       void token();
+    },
+    async fullBody(key: SpaceKey, messageId: string): Promise<SafeText | null> {
+      const path = `/w/${key}/messages/${encodeURIComponent(messageId)}/body`;
+      try {
+        const used = token();
+        let response = await read(path, await used);
+        if (response.status === 403) {
+          if (session === used) session = null;
+          response = await read(path, await token());
+        }
+        return response.ok
+          ? parseFullBody(await response.json(), messageId)
+          : null;
+      } catch {
+        return null;
+      }
     },
     async post(post: Post): Promise<PostResult> {
       try {

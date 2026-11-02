@@ -422,6 +422,15 @@ function shortList(names: readonly string[]): string {
     ? `${shown} ${overflowCopy(names.length - SHOWN_RECIPIENTS)}`
     : shown;
 }
+export const bodyCopy = {
+  shortened: "Shortened by Namedrop.",
+  unavailable: "Couldn't load the rest of this message. Try again.",
+};
+export const replyInThreadCopy = {
+  label: "Reply in thread",
+  replyingTo: (name: string) => `Replying to ${name}`,
+  latest: "Reply to the latest message instead",
+};
 export const composerCopy = {
   hint: "Enter to send · Shift+Enter for a new line",
   toRoom: "Enter posts to the channel · Mention @name to bring someone in",
