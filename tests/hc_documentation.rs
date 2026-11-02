@@ -65,6 +65,10 @@ fn app_install_examples_parse_as_the_documented_operations() {
         readme.contains("Its reply includes the command output and exit status."),
         "README needs to explain the terminal reply"
     );
+    for (_, cli) in commands.iter().filter(|(_, cli)| cli.operation() == "send") {
+        namedrop::validate_message_input("send", cli.input().unwrap())
+            .expect("README send example must pass operation validation");
+    }
 }
 
 #[test]

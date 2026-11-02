@@ -435,18 +435,10 @@ mod tests {
             "activate",
             json!({"space_id":"w1", "mod_install":"Install the Namedrop mod."}),
         );
-        let rendered = render_command_result_to_text(&result);
-        assert!(rendered.contains("Alt+N"), "{rendered}");
-        assert!(
-            rendered.contains("namedrop --host hc name @alias --type agent|terminal"),
-            "{rendered}"
+        assert_eq!(
+            render_command_result_to_text(&result),
+            "Status\n  Namedrop activated in space w1.\n\nNext steps — for the runtimes you use\n  Name this pane with Alt+N or namedrop --host hc name @alias --type agent|terminal.\n  Check setup: namedrop --host hc doctor\n  For installation instructions, see README: Install in Herdr app.\n  Start fresh agent sessions and confirm a request and reply to verify their hooks.\n\nDetails"
         );
-        assert!(rendered.contains("namedrop --host hc doctor"), "{rendered}");
-        assert!(
-            rendered.contains("README: Install in Herdr app"),
-            "{rendered}"
-        );
-        assert!(!rendered.contains("herdr integration"), "{rendered}");
     }
 
     #[test]

@@ -138,16 +138,17 @@ Focus one agent terminal, press **Alt+N**, and name it `@reviewer`. Focus anothe
 
 Ask `@reviewer` to send a short request to `@tester`. The roster shows `waiting on @tester` while the request is open. The reply returns to `@reviewer`, and the app posts a reply notification. Select the notification to focus that terminal. The first roster read establishes the notification baseline, so old replies do not produce a burst.
 
-A plain terminal works the same way. Focus the terminal and press **Alt+N**, or name it with `--type terminal` from that terminal:
+If you have only shells open, name two plain terminals with **Alt+N**. You can also run these commands, each in the terminal it names:
 
 ```sh
-namedrop --host hc name @build --type terminal
+/absolute/path/namedrop-<version>-<target>/bin/namedrop --host hc name @sender --type terminal
+/absolute/path/namedrop-<version>-<target>/bin/namedrop --host hc name @build --type terminal
 ```
 
-Send a command from a named agent pane in the same space:
+Return to `@sender` and send a command to `@build` in the same space:
 
 ```sh
-namedrop --host hc send --input-json '{"source":"@build printf hello-from-Namedrop"}'
+/absolute/path/namedrop-<version>-<target>/bin/namedrop --host hc send --input-json '{"request_id":"readme-terminal-1","source":"@build printf hello-from-Namedrop"}'
 ```
 
 The `@build` recipient executes the message text as a shell command. Its reply includes the command output and exit status.
