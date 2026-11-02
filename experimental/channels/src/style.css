@@ -1079,6 +1079,80 @@ button.member:not(.more):hover {
   align-items: center;
   gap: var(--space-1);
 }
+.body code:not(pre > code),
+.rp-body code {
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  font-size: 0.9em;
+}
+.rp-body code {
+  font-family: var(--font-mono);
+}
+.md-heading {
+  margin-top: 6px;
+  font-weight: 600;
+}
+.md-heading[data-level="1"] {
+  font-size: var(--text-md);
+}
+.md-heading:first-child {
+  margin-top: 0;
+}
+.body ul,
+.body ol {
+  margin: 2px 0;
+  padding-left: 1.4em;
+}
+.body ul {
+  list-style: disc;
+}
+.body li ul {
+  list-style: circle;
+}
+.body li ul,
+.body li ol {
+  margin: 0;
+}
+.body li + li {
+  margin-top: 2px;
+}
+.body li::marker {
+  color: var(--text-muted);
+}
+.body blockquote {
+  margin: 4px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--line-strong);
+  color: var(--text-muted);
+}
+.md-table {
+  max-width: var(--measure);
+  margin: 6px 0;
+  overflow-x: auto;
+}
+.md-table table {
+  border-collapse: collapse;
+  font-size: var(--text-sm);
+  line-height: 19px;
+}
+.md-table th,
+.md-table td {
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.md-table th {
+  font-weight: 600;
+}
+.md-table [data-align="center"] {
+  text-align: center;
+}
+.md-table [data-align="right"] {
+  text-align: right;
+}
 .receipt [data-tone="working"],
 .route-parts [data-tone="working"] {
   --receipt-icon: var(--working);
@@ -1244,7 +1318,7 @@ button.member:not(.more):hover {
   display: inline;
   line-height: inherit;
 }
-.system strong {
+.system p > strong {
   font-weight: 600;
   margin-right: 6px;
 }
