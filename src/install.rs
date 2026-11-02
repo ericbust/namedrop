@@ -14,6 +14,7 @@ use std::{
 use toml_edit::{DocumentMut, Item};
 
 mod claude_permissions;
+pub(crate) mod codex_sandbox;
 mod command;
 pub(crate) use claude_permissions::remove_claude_permissions;
 pub(crate) use command::install_shell_command;
@@ -118,9 +119,10 @@ pub fn disclosed_user_package_targets(
     let claude_settings = claude_permissions::settings_path(&config.claude(home_directory))
         .unwrap_or_else(|_| home_directory.join(".claude/settings.json"));
     format!(
-        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, shell command: {}, PATH entries in zsh/bash startup files",
+        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, Codex deferred-command writable root in {}, shell command: {}, PATH entries in zsh/bash startup files",
         claude_settings.display(),
         codex_home.join("rules/namedrop.rules").display(),
+        codex_home.join("config.toml").display(),
         home_directory.join(".local/bin/namedrop").display()
     )
 }
@@ -462,7 +464,13 @@ pub(crate) fn inspect_integration_package(
     runtime: AgentRuntime,
     state: &Path,
     config: AgentConfigDirectories<'_>,
+    worktree: Option<&Path>,
 ) -> Result<(), String> {
+    if runtime == AgentRuntime::Codex
+        && let Some(worktree) = worktree
+    {
+        codex_sandbox::check_worktree(state, worktree)?;
+    }
     let home = home.ok_or("no absolute user home directory is available")?;
     let executable = PathBuf::from(crate::collaboration_executable()?);
     let prepared = prepare_integration_package(home, runtime, &executable, state, config)?;
@@ -471,6 +479,9 @@ pub(crate) fn inspect_integration_package(
     }
     if let Some((path, contents)) = prepared.codex_policy {
         inspect_installed_file(&path, &contents, Some(0o600))?;
+    }
+    if runtime == AgentRuntime::Codex {
+        codex_sandbox::inspect(&config.codex(home), state)?;
     }
     if runtime == AgentRuntime::ClaudeCode {
         claude_permissions::inspect(&config.claude(home), &executable, state)?;
@@ -632,7 +643,7 @@ fn installed_instructions(
     );
     if runtime != AgentRuntime::ClaudeCode {
         return Ok(format!(
-            "{frontmatter}\n---\n{body}\nCodex: request elevated execution when required because Namedrop writes outside the workspace. Scoped installer rules load in the next session.\n"
+            "{frontmatter}\n---\n{body}\nCodex: Activation adds only Namedrop's deferred-commands directory to the writable roots; its runtime and database remain outside that grant. Use normal sandbox execution for send, reply, ack, complete, and the current-workspace address list. If the sandbox blocks Herdr, Namedrop queues these commands for its outside worker. A pending result has unknown commit status. Retry the exact command to recover its result. Start a new Codex session after activation to load the grant.\n"
         ));
     }
     Ok(format!(

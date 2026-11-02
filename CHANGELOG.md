@@ -32,6 +32,14 @@ Each release is a section here, newest first. The GitHub release for a version u
 - `namedrop dashboard --ui <dir>` serves a custom browser app from a directory under the dashboard's existing security headers. Rebuilt directories are read fresh, large assets stream with bounded memory, dotfiles stay private, and aliases of the app shell require the session cookie. Ancestors need only search permission; the UI directory needs read and search permission. The shared server keeps its UI setting through upgrades, supports handoff to older releases without claim inheritance, falls back to their embedded UI when they lack `--ui` with a logged explanation, and spawns the exact executable it probed. During a handoff, matching UI requests wait up to five seconds for a ready successor and apply its UI setting before returning a URL. Longer startups return restart guidance without a URL, initially different UI requests receive restart guidance immediately, and updates and package refreshes can proceed while the successor starts.
 
 - The dashboard's `/api/events` endpoint streams every live Herdr workspace over one authenticated connection. It sends changed workspaces as `space` events and closed workspaces as `gone` events. Dashboard frames now include a live `display_name` and a nullable `addressable_label` that identifies a workspace only when its label is unique.
+## [1.4.3] - 2026-11-01
+
+### Fixed
+
+- Sandboxed Codex agents can send, reply, acknowledge and complete deliveries, and read the current workspace's roster when the sandbox blocks Herdr's socket. Commands pass through Namedrop's delivery spool to a worker outside the sandbox, without broader network permissions.
+- Activation grants Codex write access only to Namedrop's delivery spool. The runtime and database remain outside the grant. Namedrop replaces its older broad grants and preserves user grants; unsafe broad user grants must be removed before activation. Deactivation removes only the grant Namedrop added. Start fresh Codex sessions after activation to load the grant.
+- A corrupt queued command or result no longer stops the worker from processing other commands. Namedrop removes the invalid record and keeps processing the queue.
+- Codex sandbox setup works through linked parent directories, including macOS's `/var` path. Linked configuration, ownership-record and lock files are still refused.
 
 ## [1.4.2] - 2026-10-28
 

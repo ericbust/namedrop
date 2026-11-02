@@ -8,6 +8,8 @@ mod context;
 mod controls;
 mod coordination;
 pub mod dashboard;
+#[doc(hidden)]
+pub mod deferred_commands;
 mod delivery;
 mod domain;
 mod groups;

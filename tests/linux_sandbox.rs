@@ -127,6 +127,7 @@ fn real_policy_allows_worker_auth_and_transport_but_denies_other_reads_and_exec(
         .unwrap();
         panic!("intentional sandbox fixture panic");
     }
+    let root = fs::canonicalize(root).unwrap();
     fs::create_dir_all(root.join("worker")).unwrap();
     fs::create_dir_all(root.join("home/.codex")).unwrap();
     let binary = root.join("bin/codex");

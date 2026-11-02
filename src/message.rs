@@ -515,6 +515,20 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
+    execute_message_operation_with_caller(operation, input, runtime, None)
+}
+
+pub(crate) fn execute_message_operation_with_caller<E, C, I>(
+    operation: &str,
+    input: Value,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+    caller: Option<&crate::deferred_commands::Caller>,
+) -> Result<Value, String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
     let input = parse_operation_input(operation, input)?;
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
     if operation == "send"
@@ -524,7 +538,7 @@ where
     }
     let input = prepare_source_message(input)?;
     let author = pane_author(runtime)?;
-    dispatch_prepared_message(input, author, runtime, &workspaces, |_| ())
+    dispatch_prepared_message(input, author, runtime, &workspaces, caller, |_| ())
         .map(|(receipt, ())| receipt)
         .map_err(|error| error.to_string())
 }
@@ -587,6 +601,7 @@ where
         Author::Operator,
         runtime,
         &workspaces,
+        None,
         observe_commit,
     )
     .map_err(OperatorSendError::from)
@@ -662,6 +677,7 @@ where
         Author::Operator,
         runtime,
         &workspaces,
+        None,
         observe_commit,
     )
     .map_err(OperatorSendError::from)
@@ -679,6 +695,7 @@ fn dispatch_prepared_message<E, C, I, R>(
     author: Author<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    caller: Option<&crate::deferred_commands::Caller>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), SendError>
 where
@@ -687,7 +704,7 @@ where
     I: crate::IdGenerator,
 {
     let (mut response, forwarded) =
-        persist_prepared_message_operation(input, author, runtime, workspaces)?;
+        persist_prepared_message_operation(input, author, runtime, workspaces, caller)?;
     let observed = observe_commit(&response);
     response["drain"] = crate::drain_receipt(runtime);
     // A copy queued in another workspace drains there now rather than waiting
@@ -709,6 +726,98 @@ where
             .into();
     }
     Ok((response, observed))
+}
+
+pub(crate) fn recover_deferred_message<E, C, I>(
+    operation: &str,
+    input: Value,
+    namespace: &StateNamespace,
+    address: &crate::PaneAddressId,
+    session: &crate::AgentSessionId,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Result<Option<Value>, String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    let input = prepare_source_message(parse_operation_input(operation, input)?)?;
+    let mut store = StateStore::open(runtime.state_directory).map_err(|e| e.to_string())?;
+    let committed = store
+        .transaction(|tx| {
+            if !tx.deferred_message_committed(namespace, address, session, &input.request_id)? {
+                return Ok(None);
+            }
+            let routed = tx.replay_message(
+                namespace,
+                address,
+                &input.request_id,
+                &input.authored_source,
+                input.in_reply_to.as_ref(),
+                input.author_kind,
+            )?;
+            routed
+                .map(|routed| {
+                    tx.check_coordination_replay_fields(
+                        namespace,
+                        &routed.receipt.message_id,
+                        &input.tracking.fingerprint(),
+                    )?;
+                    if let Some(attempt) = &input.disposition_attempt_id
+                        && !tx.deferred_reply_matches_attempt(
+                            namespace,
+                            &routed.receipt.message_id,
+                            attempt,
+                            session,
+                        )?
+                    {
+                        return Err(crate::StoreError::invalid_input(
+                            "reply does not match the committed Delivery Attempt",
+                        ));
+                    }
+                    let outlook = routed_recipient_outlooks(tx, namespace, &routed.recipients)?;
+                    Ok(Committed {
+                        channel: tx.channel_projection(namespace, &routed.receipt.message_id)?,
+                        routed,
+                        outlook,
+                        relay: None,
+                        context_grants: None,
+                        context_request_grant: None,
+                        declined_context_request: None,
+                    })
+                })
+                .transpose()
+        })
+        .map_err(|e| e.to_string())?;
+    let Some(committed) = committed else {
+        return Ok(None);
+    };
+    let (mut response, forwarded) = present_committed(
+        committed,
+        &mut store,
+        namespace,
+        &input.disposition_attempt_id,
+        runtime,
+    )
+    .map_err(|e| e.to_string())?;
+    response["drain"] = crate::drain_receipt(runtime);
+    if !forwarded.is_empty() {
+        response["drains"] = forwarded
+            .iter()
+            .map(|copy| {
+                let there = LifecycleRuntime {
+                    workspace_id: Some(copy.space.as_str()),
+                    ..*runtime
+                };
+                (
+                    copy.workspace.as_str().to_owned(),
+                    crate::drain_receipt(&there),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into();
+    }
+    Ok(Some(response))
 }
 
 pub(crate) enum PromptMentionOutcome {
@@ -809,7 +918,7 @@ where
         tracking: input.tracking,
         preparation: MessagePreparation::MentionHook,
     };
-    persist_prepared_message_operation(prepared, pane_author(runtime)?, runtime, &workspaces)
+    persist_prepared_message_operation(prepared, pane_author(runtime)?, runtime, &workspaces, None)
         .map(|(_, forwarded)| forwarded)
 }
 
@@ -975,6 +1084,7 @@ fn persist_prepared_message_operation<E, C, I>(
     author_source: Author<'_>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
     workspaces: &crate::spaces::HerdrWorkspaces<'_, E>,
+    caller: Option<&crate::deferred_commands::Caller>,
 ) -> Result<PersistedMessage, SendError>
 where
     E: crate::HerdrCommandExecutor,
@@ -1038,6 +1148,9 @@ where
     // A retry returns what the first send committed before anything about the
     // route or its context is read again, so it can never pin or route anew.
     let (author, replayed, tracked_home) = store.transaction(|transaction| {
+        if let Some(caller) = caller {
+            caller.check(transaction, &namespace)?;
+        }
         let (author, _) = sending_author(transaction, &namespace, author_source, &replay, runtime)?;
         let replayed =
             replay.receipt(transaction, &namespace, &author, author_source, &discovered)?;
@@ -1125,6 +1238,7 @@ where
         }
     };
     let routed = store.transaction(|transaction| {
+        if let Some(caller) = caller { caller.check(transaction, &namespace)?; }
         let (author, attribution) =
             sending_author(transaction, &namespace, author_source, &replay, runtime)?;
         // A concurrent retry may have committed since the check above.

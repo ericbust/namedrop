@@ -44,6 +44,7 @@ UPDATE pane_addresses SET persona = (
 
 mod bridge;
 pub(crate) mod channel_routing;
+mod deferred_commands;
 pub(crate) use bridge::{EnvoyOrigin, ForwardedCopy};
 pub(crate) use groups::addressed_recipients;
 mod coordination;
