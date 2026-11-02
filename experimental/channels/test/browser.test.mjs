@@ -33,7 +33,7 @@ function message(message_id, text = message_id, extra = {}) {
     ...extra,
   };
 }
-function frame(n, name, level = "calm") {
+function frame(n, name, level = "calm", repo = undefined) {
   const value = structuredClone(fixture);
   value.key = key(n);
   value.frame.space = {
@@ -43,6 +43,7 @@ function frame(n, name, level = "calm") {
     display_name: name,
     addressable_label: name,
     not_addressable_reason: null,
+    ...(repo === undefined ? {} : { repo }),
   };
   value.frame.health = level === "needs_you" ? { level, items: 1 } : { level };
   return value;
@@ -11162,4 +11163,215 @@ test("UI-R7 2: Details focused from the keyboard shows its whole focus ring insi
       `${size.join("x")}: ring ${ring.top}-${ring.bottom} inside the card ${inner.top}-${inner.bottom}`,
     );
   }
+});
+
+const repoA = { id: "repo-a", name: "aaa" };
+const repoB = { id: "repo-b", name: "bbb" };
+const groupedFrames = () => [
+  frame(1, "alpha", "calm", repoA),
+  frame(2, "beta", "needs_you", repoA),
+  frame(3, "gamma", "calm", repoB),
+];
+const header = (ui, id) =>
+  ui.channels.locator(`button[data-group-key="repo:${id}"]`);
+const sidebarOrder = (ui) =>
+  ui.channels
+    .locator("[data-group-key], [data-channel-key]")
+    .evaluateAll((items) =>
+      items.map((item) => item.dataset.groupKey ?? item.dataset.channelKey),
+    );
+async function said(ui, words) {
+  await ui.page.waitForFunction(
+    (expected) =>
+      [...document.querySelectorAll('.app-shell > [aria-live="polite"]')].some(
+        (region) => region.textContent === expected,
+      ),
+    words,
+  );
+}
+const hasFocus = (locator) =>
+  locator.evaluate((element) => element === document.activeElement);
+
+test("GROUP-UI: a collapsed group stays collapsed across reload and rolls its needs-you dot up to the header", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(3)}`,
+    },
+  );
+  await ui.live();
+  const aaa = header(ui, "repo-a");
+  assert.equal(await aaa.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    await aaa.locator(".dot").count(),
+    0,
+    "an open header has no rollup",
+  );
+  assert.equal(await ui.row(2).isVisible(), true);
+  await aaa.click();
+  for (const view of ["before reload", "after reload"]) {
+    await ui.page.locator(".connection-dot.live").first().waitFor();
+    assert.equal(await aaa.getAttribute("aria-expanded"), "false", view);
+    assert.equal(await ui.row(1).count(), 0, view);
+    assert.equal(await ui.row(2).count(), 0, view);
+    assert.equal(
+      await aaa.locator('.dot-alert[role="img"]').getAttribute("aria-label"),
+      "Needs you",
+      view,
+    );
+    const controlled = await aaa.getAttribute("aria-controls");
+    assert.equal(
+      await ui.page.locator(`[id="${controlled}"]`).count(),
+      1,
+      `${view}: the header controls its list`,
+    );
+    if (view === "before reload") await ui.page.reload();
+  }
+  await aaa.click();
+  assert.equal(await ui.row(2).isVisible(), true);
+  assert.equal(await aaa.locator(".dot").count(), 0);
+});
+
+test("GROUP-UI: a collapsed group still shows the selected channel's row", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(1)}`,
+    },
+  );
+  await ui.live();
+  await header(ui, "repo-a").click();
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+  assert.equal(await ui.row(1).getAttribute("tabindex"), "0");
+  assert.equal(await ui.row(2).count(), 0);
+  await ui.page.goto(ui.page.url().replace(key(1), key(3)));
+  await ui.row(3).waitFor();
+  assert.equal(await ui.row(1).count(), 0, "unselected, it folds away");
+});
+
+test("GROUP-UI: headers join the arrow keys without selecting, and Left and Right fold a group", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(3)}`,
+    },
+  );
+  await ui.live();
+  await ui.row(3).focus();
+  await ui.page.keyboard.press("Home");
+  const aaa = header(ui, "repo-a");
+  assert.equal(await hasFocus(aaa), true);
+  assert.equal(await ui.row(3).getAttribute("aria-current"), "page");
+  await ui.page.keyboard.press("ArrowDown");
+  assert.equal(await hasFocus(ui.row(1)), true);
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+  await ui.page.keyboard.press("ArrowUp");
+  await ui.page.keyboard.press("ArrowLeft");
+  assert.equal(await aaa.getAttribute("aria-expanded"), "false");
+  await ui.page.keyboard.press("ArrowRight");
+  assert.equal(await aaa.getAttribute("aria-expanded"), "true");
+  await ui.page.keyboard.press("Enter");
+  assert.equal(await aaa.getAttribute("aria-expanded"), "false");
+});
+
+test("GROUP-UI: Alt+Arrow moves a channel within its group and a group among groups, announces it, and the order survives reload", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(2)}`,
+    },
+  );
+  await ui.live();
+  assert.deepEqual(await sidebarOrder(ui), [
+    "repo:repo-a",
+    key(1),
+    key(2),
+    "repo:repo-b",
+    key(3),
+  ]);
+  await ui.row(2).focus();
+  await ui.page.keyboard.press("Alt+ArrowUp");
+  await said(ui, "Moved beta to position 1 of 2 in aaa");
+  assert.equal(await hasFocus(ui.row(2)), true);
+  await ui.page.keyboard.press("Alt+ArrowUp");
+  assert.deepEqual(
+    (await sidebarOrder(ui)).slice(1, 3),
+    [key(2), key(1)],
+    "a channel never leaves its group",
+  );
+  const bbb = header(ui, "repo-b");
+  await bbb.focus();
+  await ui.page.keyboard.press("Alt+ArrowUp");
+  await said(ui, "Moved bbb to position 1 of 2");
+  assert.equal(await hasFocus(bbb), true);
+  await ui.row(3).focus();
+  await ui.page.keyboard.press("ArrowDown");
+  await ui.page.keyboard.press("Alt+ArrowUp");
+  await said(ui, "Moved aaa to position 1 of 2");
+  await ui.page.keyboard.press("Alt+ArrowDown");
+  await said(ui, "Moved aaa to position 2 of 2");
+  assert.equal(await hasFocus(header(ui, "repo-a")), true);
+  const expected = ["repo:repo-b", key(3), "repo:repo-a", key(2), key(1)];
+  assert.deepEqual(await sidebarOrder(ui), expected);
+  await ui.page.reload();
+  await ui.page.locator(".connection-dot.live").first().waitFor();
+  assert.deepEqual(await sidebarOrder(ui), expected);
+});
+
+test("GROUP-UI: dragging reorders groups and channels within a group, and refuses a channel dropped on another group", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(3)}`,
+    },
+  );
+  await ui.live();
+  const top = { x: 20, y: 2 };
+  await header(ui, "repo-b").dragTo(header(ui, "repo-a"), {
+    targetPosition: top,
+  });
+  await said(ui, "Moved bbb to position 1 of 2");
+  assert.deepEqual(await sidebarOrder(ui), [
+    "repo:repo-b",
+    key(3),
+    "repo:repo-a",
+    key(1),
+    key(2),
+  ]);
+  await ui.row(2).dragTo(ui.row(1), { targetPosition: top });
+  await said(ui, "Moved beta to position 1 of 2 in aaa");
+  await ui.row(3).dragTo(ui.row(1), { targetPosition: top });
+  const expected = ["repo:repo-b", key(3), "repo:repo-a", key(2), key(1)];
+  assert.deepEqual(await sidebarOrder(ui), expected);
+  assert.equal(
+    await ui.channels.locator(".drop-before, .drop-after").count(),
+    0,
+  );
+  await ui.page.reload();
+  await ui.page.locator(".connection-dot.live").first().waitFor();
+  assert.deepEqual(await sidebarOrder(ui), expected);
+});
+
+test("GROUP-UI: a server without repos keeps the flat list, and a channel still moves by keyboard", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [frame(1, "alpha"), frame(2, "beta"), frame(3, "gamma")]),
+  );
+  await ui.live();
+  assert.equal(await ui.channels.locator("[data-group-key]").count(), 0);
+  assert.deepEqual(await sidebarOrder(ui), [key(1), key(2), key(3)]);
+  await ui.row(1).focus();
+  await ui.page.keyboard.press("Alt+ArrowDown");
+  await said(ui, "Moved alpha to position 2 of 3");
+  assert.equal(await hasFocus(ui.row(1)), true);
+  assert.deepEqual(await sidebarOrder(ui), [key(2), key(1), key(3)]);
 });

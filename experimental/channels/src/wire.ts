@@ -20,6 +20,7 @@ import type {
   MessageContext,
   MessageKind,
   NotAddressableReason,
+  Repo,
   Route,
   Routing,
   SafeText,
@@ -65,6 +66,12 @@ function optionalAlias(value: unknown): Alias | null {
 }
 function nullableText(value: unknown): string | null {
   return value === null ? null : text(value);
+}
+// A server older than repo grouping omits the field.
+function repo(value: unknown): Repo | null {
+  if (value === undefined || value === null) return null;
+  const item = record(value);
+  return { id: identity(item.id), name: identity(item.name) };
 }
 function notAddressableReason(value: unknown): NotAddressableReason | null {
   switch (value) {
@@ -604,6 +611,7 @@ function channel(value: unknown, key: SpaceKey): ChannelSnapshot {
     key,
     workspaceId: identity(space.workspace_id),
     displayName: identity(space.display_name),
+    repo: repo(space.repo),
     addressableLabel: nullableText(space.addressable_label),
     notAddressableReason: notAddressableReason(space.not_addressable_reason),
     state: spaceState(space.state),

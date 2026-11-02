@@ -34,7 +34,7 @@ import type {
 import { samePeek } from "./peek.ts";
 import { ENVOY } from "./wire.ts";
 
-const channelCollator = new Intl.Collator();
+export const channelCollator = new Intl.Collator();
 const noSelection: Selection = { kind: "none", key: null };
 const activitySelection: Selection = { kind: "activity", key: null };
 const closedSlot: Slot = { kind: "closed" };
