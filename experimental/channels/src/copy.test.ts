@@ -8,6 +8,7 @@ import {
   dayBounds,
   dayLabel,
   disabledChannelCopy,
+  handoffCopy,
   healthCopy,
   overflowCopy,
   participantCopy,
@@ -30,9 +31,11 @@ import type {
   AddressId,
   Attention,
   DeliveryStage,
+  HandoffWarning,
   Member,
   MemberKind,
   Participant,
+  WarningCause,
 } from "./model.ts";
 import { parseEvent } from "./wire.ts";
 
@@ -832,4 +835,44 @@ test("channel chat words: the route line, its offers and tooltips, reply counts 
     referenceCopy.earlierLabel,
     "Reply to an earlier message. Open thread",
   );
+});
+
+test("handoff copy names the deliverable, the lead and the recorded reason for every cause", () => {
+  const warning = (cause: WarningCause): HandoffWarning => ({
+    cause,
+    deliverable: { text: "Ship exports", truncated: false },
+    lead: "lead" as AddressId,
+    reason: { text: "Missing key.", truncated: false },
+    report: null,
+    review: null,
+  });
+  const lines = (cause: WarningCause) => {
+    const copy = handoffCopy(warning(cause), "@lead");
+    return [copy.title, copy.what, copy.next];
+  };
+  assert.deepEqual(lines("blocked"), [
+    "“Ship exports” is blocked",
+    "@lead stopped it as blocked. Reason: Missing key.",
+    "Ask @lead to continue it, or to clear it if nothing is left to do.",
+  ]);
+  assert.deepEqual(lines("cancelled"), [
+    "“Ship exports” was cancelled",
+    "@lead cancelled it. Reason: Missing key.",
+    "Ask @lead to confirm nothing is left to do and clear it.",
+  ]);
+  assert.deepEqual(lines("stalled"), [
+    "“Ship exports” is stuck",
+    "@lead's follow-up ended without deciding what happens next.",
+    "Ask @lead to continue it or resolve it.",
+  ]);
+  assert.deepEqual(lines("lead_retired"), [
+    "“Ship exports” lost its lead",
+    "@lead's pane closed while the handoff was still open.",
+    "Pick an agent to review it and clear it.",
+  ]);
+  assert.deepEqual(lines("report"), [
+    "“Ship exports” needs a look",
+    "@lead finished it, but its report is missing or wasn't delivered.",
+    "Ask @lead to review it.",
+  ]);
 });

@@ -39,6 +39,32 @@ export type MessageContext = {
   messages: readonly Message[];
 };
 export type ThreadAction = "continue" | "stop";
+export type WarningCause =
+  | "blocked"
+  | "cancelled"
+  | "stalled"
+  | "lead_retired"
+  | "report";
+export type ReviewRequest = {
+  to: AddressId;
+  requestedAt: number;
+  expiresAt: number;
+};
+// A tracked handoff's warning: what happened and who was asked to review it.
+export type HandoffWarning = {
+  cause: WarningCause;
+  deliverable: SafeText;
+  lead: AddressId;
+  reason: SafeText | null;
+  report: SafeText | null;
+  review: ReviewRequest | null;
+};
+export type ReviewClear = {
+  coordinationId: string;
+  deliverable: SafeText;
+  by: AddressId;
+  at: number;
+};
 export type Attention = {
   rowKey: string;
   sourceId?: string | null;
@@ -62,6 +88,7 @@ export type Attention = {
   messageId: string | null;
   threadId: string | null;
   actions: readonly ThreadAction[];
+  handoff?: HandoffWarning | null;
 };
 export type TerminalRun = {
   terminal: AddressId;
@@ -181,6 +208,7 @@ export type ChannelSnapshot = {
   work: ReadonlyMap<AddressId, MemberWork>;
   messages: ReadonlyMap<string, Message>;
   attention: readonly Attention[];
+  reviewClears: readonly ReviewClear[];
   threads: ReadonlyMap<string, ThreadChip>;
   terminalRuns: readonly TerminalRun[];
 };

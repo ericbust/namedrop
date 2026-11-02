@@ -297,6 +297,10 @@ function mergeSnapshot(
       previous && sameValue(previous.attention, snapshot.attention)
         ? previous.attention
         : snapshot.attention,
+    reviewClears:
+      previous && sameValue(previous.reviewClears, snapshot.reviewClears)
+        ? previous.reviewClears
+        : snapshot.reviewClears,
     terminalRuns: reuseRows(previous?.terminalRuns, snapshot.terminalRuns),
     members: reuseMap(previous?.members, snapshot.members),
     work: reuseMap(previous?.work, snapshot.work),

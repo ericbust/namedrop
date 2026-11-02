@@ -9,6 +9,7 @@ import { exitFor, initialState, reduce, runsByMessage } from "./store.ts";
 import { parseEvent } from "./wire.ts";
 
 const onControl = async () => ({ kind: "done" }) as const;
+const onReview = async () => ({ kind: "sent", messageId: "m" }) as const;
 
 let vite: ViteDevServer;
 before(async () => {
@@ -202,6 +203,7 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
         directory: { members: event.channel.members, homes: new Map() },
         onFocus() {},
         onControl,
+        onReview,
       }),
     );
     const needsYou = level === "needs_you";
@@ -669,6 +671,7 @@ test("a Needs-you item keeps Show message, its response and Details on one actio
           directory: { members: channel.members, homes: new Map() },
           onFocus() {},
           onControl,
+          onReview,
         }),
       ),
     );

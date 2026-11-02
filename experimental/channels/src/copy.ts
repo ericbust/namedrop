@@ -9,6 +9,7 @@ import type {
   AttentionResponse,
   ChannelSnapshot,
   DeliveryStage,
+  HandoffWarning,
   Health,
   Member,
   MemberKind,
@@ -30,6 +31,7 @@ export type IconName =
   | "bell"
   | "cancelled"
   | "check"
+  | "chevron"
   | "clock"
   | "done"
   | "hash"
@@ -686,3 +688,72 @@ export const peekFailureCopy = {
     retry: true,
   }),
 } satisfies Record<ScreenFailure, (who: PeekWho) => PeekNotice>;
+
+// What a handoff warning says. `lead` is the lead's mention name with its @.
+export type HandoffCopy = { title: string; what: string; next: string };
+const quoted = (deliverable: HandoffWarning["deliverable"]) =>
+  `“${deliverable.text.trim()}${deliverable.truncated ? "…" : ""}”`;
+export function handoffCopy(
+  warning: HandoffWarning,
+  lead: string,
+): HandoffCopy {
+  const name = quoted(warning.deliverable);
+  const reason = warning.reason
+    ? ` Reason: ${warning.reason.text.trim().replace(/\.$/, "")}${warning.reason.truncated ? "…" : ""}.`
+    : "";
+  switch (warning.cause) {
+    case "blocked":
+      return {
+        title: `${name} is blocked`,
+        what: `${lead} stopped it as blocked.${reason}`,
+        next: `Ask ${lead} to continue it, or to clear it if nothing is left to do.`,
+      };
+    case "cancelled":
+      return {
+        title: `${name} was cancelled`,
+        what: `${lead} cancelled it.${reason}`,
+        next: `Ask ${lead} to confirm nothing is left to do and clear it.`,
+      };
+    case "stalled":
+      return {
+        title: `${name} is stuck`,
+        what: `${lead}'s follow-up ended without deciding what happens next.`,
+        next: `Ask ${lead} to continue it or resolve it.`,
+      };
+    case "lead_retired":
+      return {
+        title: `${name} lost its lead`,
+        what: `${lead}'s pane closed while the handoff was still open.`,
+        next: "Pick an agent to review it and clear it.",
+      };
+    case "report":
+      return {
+        title: `${name} needs a look`,
+        what: `${lead} finished it, but its report is missing or wasn't delivered.`,
+        next: `Ask ${lead} to review it.`,
+      };
+    default: {
+      const exhaustive: never = warning.cause;
+      return exhaustive;
+    }
+  }
+}
+export const reviewCopy = {
+  ask: (who: string) => `Ask ${who} to review`,
+  askPicked: "Ask to review",
+  all: "Review all",
+  with: "with",
+  pending: "Sending…",
+  sent: (who: string) => `Sent to ${who} for review`,
+  sentAll: (count: number, who: string) =>
+    `Sent ${count} ${count === 1 ? "handoff" : "handoffs"} to ${who} for review`,
+  failed: "Couldn't send the review request. Try again.",
+  pick: "Reviewer",
+  noAgent: "No agent can take a review right now.",
+  group: (count: number) =>
+    `${count} ${count === 1 ? "handoff needs" : "handoffs need"} a decision`,
+  progress: (cleared: number, sent: number) =>
+    sent > 1 ? ` · ${cleared} of ${sent} cleared` : "",
+  cleared: (who: string) => `Cleared by ${who}`,
+  dismiss: "Dismiss",
+};
