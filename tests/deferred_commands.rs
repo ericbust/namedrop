@@ -201,6 +201,13 @@ else: print('{}')
                 if read_only {
                     filter.pop();
                     for syscall in [
+                        #[cfg(not(any(
+                            target_arch = "aarch64",
+                            target_arch = "csky",
+                            target_arch = "loongarch64",
+                            target_arch = "riscv32",
+                            target_arch = "riscv64",
+                        )))]
                         libc::SYS_chmod,
                         libc::SYS_fchmod,
                         libc::SYS_fchmodat,
