@@ -103,7 +103,15 @@ pub fn render_command_result_to_text(result: &CommandResult) -> String {
                 &data["agent_integration_hook_activation"]["codex"]["app_server"],
                 &mut lines,
             );
-            lines.push("  Check native hooks: herdr integration status\n  If setup is needed, choose your runtime:\n    herdr integration install codex\n    herdr integration install claude".into());
+            if data["mod_install"].is_string() {
+                lines.push("  Name this pane with Alt+N or namedrop --host hc name @alias --type agent|terminal.".into());
+                lines.push("  Check setup: namedrop --host hc doctor".into());
+                lines.push(
+                    "  For installation instructions, see README: Install in Herdr app.".into(),
+                );
+            } else {
+                lines.push("  Check native hooks: herdr integration status\n  If setup is needed, choose your runtime:\n    herdr integration install codex\n    herdr integration install claude".into());
+            }
             lines.push("  Start fresh agent sessions and confirm a request and reply to verify their hooks.".into());
             field("Shell", &data["shell_command"]["next_step"], 1, &mut lines);
             field(

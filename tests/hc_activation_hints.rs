@@ -13,7 +13,7 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("hints-{}", std::process::id()));
+        let root = hc_socket::fixture::short_socket_root();
         fs::create_dir_all(root.join("home")).unwrap();
         let socket = Some(
             hc_socket::HcSocket::rpc(&root.join("hc.sock"), "628bcf8129aa037b1fa5aad3504926a6")
