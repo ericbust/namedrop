@@ -19,6 +19,7 @@ const shapes = {
     </>
   ),
   check: <path d="m3.5 8.5 3 3 6-7" />,
+  chevron: <path d="m6 4 4 4-4 4" />,
   clock: (
     <>
       <circle cx="8" cy="8" r="6" />

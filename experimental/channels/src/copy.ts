@@ -30,6 +30,7 @@ export type IconName =
   | "bell"
   | "cancelled"
   | "check"
+  | "chevron"
   | "clock"
   | "done"
   | "hash"
@@ -644,6 +645,20 @@ export const activityCopy = {
   groups: Record<ActivityGroupKind, string>;
   counted: Record<ActivityGroupKind, string>;
   [copy: string]: unknown;
+};
+export const sidebarCopy = {
+  other: "Other",
+  needYou: (count: number) => (count === 1 ? "Needs you" : `${count} need you`),
+  unread: "Unread activity",
+  movedGroup: (name: string, position: number, total: number) =>
+    `Moved ${name} to position ${position} of ${total}`,
+  movedChannel: (
+    name: string,
+    position: number,
+    total: number,
+    group: string | null,
+  ) =>
+    `Moved ${name} to position ${position} of ${total}${group === null ? "" : ` in ${group}`}`,
 };
 export const peekCopy = {
   label: (alias: string) => `Screen of ${alias}`,
