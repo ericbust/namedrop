@@ -2,6 +2,12 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [Unreleased]
+
+### Fixed
+
+- `namedrop name`, `address list` and agent hooks no longer fail with `state_busy: database is locked` on a large state file while other agents' hooks run. Opening the state no longer scans the whole file or takes the write lock when the schema is current, so hooks of live agents cannot hold up a command's write. A damaged file is still reported with backup guidance by the first command that reads it.
+
 ## [1.5.0-exp.2] - 2026-11-02
 
 - Agents receive session guidance for Markdown in reply and send bodies, including file input for formatted JSON. Channels render Markdown in those messages.
