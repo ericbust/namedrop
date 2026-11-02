@@ -480,6 +480,7 @@ struct PreparedMessageOperation {
     decline_context_request: Option<ContextGrantId>,
     tracking: crate::coordination::TrackingInput,
     preparation: MessagePreparation,
+    review_operator: Option<crate::store::coordination_review::OperatorSession>,
 }
 
 #[derive(Clone, Copy)]
@@ -554,7 +555,7 @@ where
     C: crate::Clock,
     I: crate::IdGenerator,
 {
-    send_operator_message_observing_commit(request_id, source, in_reply_to, runtime, |_| ())
+    send_operator_message_observing_commit(request_id, source, in_reply_to, None, runtime, |_| ())
         .map(|(receipt, ())| receipt)
 }
 
@@ -562,6 +563,7 @@ pub(crate) fn send_operator_message_observing_commit<E, C, I, R>(
     request_id: &str,
     source: &str,
     in_reply_to: Option<&MessageId>,
+    review_operator: Option<&crate::store::coordination_review::OperatorSession>,
     runtime: &LifecycleRuntime<'_, E, C, I>,
     observe_commit: impl FnOnce(&Value) -> R,
 ) -> Result<(Value, R), OperatorSendError>
@@ -582,7 +584,7 @@ where
         })
         .into());
     }
-    let input = prepare_source_message(MessageOperationInput {
+    let mut input = prepare_source_message(MessageOperationInput {
         request_id: required_nonempty(request_id.to_owned(), "request_id")
             .map_err(SendError::Input)?,
         source: source.to_owned(),
@@ -595,6 +597,7 @@ where
         tracking: crate::coordination::TrackingInput::default(),
     })
     .map_err(SendError::Input)?;
+    input.review_operator = review_operator.cloned();
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
     dispatch_prepared_message(
         input,
@@ -670,6 +673,7 @@ where
         decline_context_request: None,
         tracking: crate::coordination::TrackingInput::default(),
         preparation: MessagePreparation::OperatorPlain,
+        review_operator: None,
     };
     let workspaces = crate::spaces::HerdrWorkspaces::new(runtime.herdr);
     dispatch_prepared_message(
@@ -917,6 +921,7 @@ where
         decline_context_request: None,
         tracking: input.tracking,
         preparation: MessagePreparation::MentionHook,
+        review_operator: None,
     };
     persist_prepared_message_operation(prepared, pane_author(runtime)?, runtime, &workspaces, None)
         .map(|(_, forwarded)| forwarded)
@@ -1103,6 +1108,7 @@ where
         decline_context_request,
         preparation,
         tracking,
+        review_operator,
     } = input;
     if context.is_some() && author_kind != ActorKind::AgentSession {
         return Err(SendError::Input(
@@ -1427,6 +1433,15 @@ where
         } else {
             transaction.append_message(&namespace, &draft, &attribution)?
         };
+        if let Some(operator) = &review_operator {
+            transaction.bind_coordination_review_message(
+                &namespace,
+                &request_id,
+                &receipt.message_id,
+                operator,
+                runtime.clock.now_unix_ms(),
+            )?;
+        }
         crate::coordination::track_message(transaction, &namespace, &draft, &tracking, disposition_attempt_id.as_ref(), &live, runtime)?;
         if let Some(attempt_id) = &disposition_attempt_id {
             transaction.record_reply_disposition(
@@ -1912,6 +1927,7 @@ fn prepare_source_message(
         decline_context_request: input.decline_context_request,
         tracking: input.tracking,
         preparation: MessagePreparation::Mention,
+        review_operator: None,
     })
 }
 

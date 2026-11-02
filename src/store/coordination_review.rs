@@ -122,7 +122,7 @@ impl StateTransaction<'_> {
         )?)
     }
 
-    /// Bind only after the review message committed, before its first drain.
+    /// Bind in the message's transaction, so no worker can see it unbound.
     pub fn bind_coordination_review_message(
         &mut self,
         ns: &StateNamespace,

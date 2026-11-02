@@ -1414,6 +1414,7 @@ fn send_operator_post(
             &post.request_id,
             &post.source,
             target.as_ref(),
+            None,
             &runtime,
             observe_commit,
         )
@@ -1496,27 +1497,9 @@ fn send_coordination_review(
         &post.request_id,
         &draft.source,
         None,
+        Some(&operator),
         &runtime,
         |receipt: &serde_json::Value| {
-            let bound = receipt["message_id"]
-                .as_str()
-                .ok_or_else(|| {
-                    crate::StoreError::invalid_input("review message has no committed identity")
-                })
-                .and_then(|message_id| {
-                    StateStore::open(front.files.state())?.transaction(|tx| {
-                        tx.bind_coordination_review_message(
-                            namespace,
-                            &post.request_id,
-                            &crate::MessageId::new(message_id),
-                            &operator,
-                            now,
-                        )
-                    })
-                });
-            if bound.is_err() {
-                return respond_status(writer, Status::Unavailable);
-            }
             front.channel_wake.notify();
             let mut receipt = receipt.clone();
             receipt["granted"] = serde_json::json!(granted);
