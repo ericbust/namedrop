@@ -30,6 +30,9 @@ mod channels_bundle;
 /// Caps an operator post and the full body Show more reads, so the page can
 /// always show at least what it could send.
 const BODY_LIMIT: usize = 64 * 1024;
+/// The full-body route redacts before it cuts, so it reads this many
+/// characters past the cut to see whole any secret that spans it.
+const BODY_READ_MARGIN: usize = 4 * 1024;
 const HEADER_LIMIT: u64 = 8 * 1024;
 const PING_EVERY: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 64;
@@ -1282,15 +1285,17 @@ fn serve_connection(
                     .map(|space| space.namespace)
                     .ok_or(Status::NotFound)?;
                 store
-                    .dashboard_message_body(&namespace, &message_id)
+                    .dashboard_message_body(&namespace, &message_id, BODY_LIMIT + BODY_READ_MARGIN)
                     .map_err(|_| Status::Unavailable)?
                     .ok_or(Status::NotFound)
             })();
             match result {
                 Ok(body) => {
+                    let mut safe = snapshot::SafeText::from_untrusted(&body.text, BODY_LIMIT);
+                    safe.truncated |= body.cut;
                     let body = serde_json::to_vec(&serde_json::json!({
                         "message_id": message_id,
-                        "body": snapshot::SafeText::from_untrusted(&body, BODY_LIMIT),
+                        "body": safe,
                     }))
                     .map_err(io::Error::other)?;
                     respond(&mut writer, "200 OK", "application/json", "", &body)

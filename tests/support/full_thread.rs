@@ -264,3 +264,67 @@ fn body_route_is_scoped_to_the_key() {
     assert_eq!(cross.status, 404, "{}", cross.body);
     assert!(!cross.body.contains("secret-in-w2"), "{}", cross.body);
 }
+
+fn send_stored(f: &Fixture, body: &str) -> String {
+    let sent = f.agent_send("w1", "pane-1-lead", "huge", &format!("@planner {body}"));
+    let id = sent["message_id"].as_str().unwrap().to_owned();
+    let stored: String = f
+        .db()
+        .query_row(
+            "SELECT body FROM collaboration_messages WHERE message_id = ?1",
+            [&id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(stored == body, "the store keeps the body after the mention");
+    id
+}
+
+#[test]
+fn full_body_redacts_a_secret_that_spans_the_cut_of_a_huge_message() {
+    let limit = 64 * 1024;
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    let body = format!(
+        "{} {SECRET} {}",
+        "x".repeat(limit - 11),
+        "y".repeat(1024 * 1024)
+    );
+    let id = send_stored(&f, &body);
+    let csrf = server.csrf().to_owned();
+    let full = server.request(
+        "GET",
+        &body_path(&id),
+        &[("Cookie", &server.cookie), ("X-Namedrop-Csrf", &csrf)],
+        "",
+    );
+    assert_eq!(full.status, 200);
+    let full: Value = serde_json::from_str(&full.body).unwrap();
+    assert_eq!(full["body"]["truncated"], true);
+    let text = full["body"]["text"].as_str().unwrap();
+    assert_eq!(text.chars().count(), limit);
+    let tail: String = text.chars().skip(limit - 40).collect();
+    assert!(!text.contains("ghp_"), "{tail}");
+}
+
+#[test]
+fn reading_a_body_reads_only_the_requested_characters() {
+    let f = fixture();
+    let body = "é".repeat(10_000);
+    let id = send_stored(&f, &body);
+    let namespace = StateNamespace::for_space("socket-a", "w1");
+    let mut store = StateStore::open_read_only(&f.state).unwrap().unwrap();
+    let start = store
+        .dashboard_message_body(&namespace, &id, 100)
+        .unwrap()
+        .unwrap();
+    assert_eq!(start.text.chars().count(), 100);
+    assert!(start.text.chars().all(|c| c == 'é'));
+    assert!(start.cut);
+    let whole = store
+        .dashboard_message_body(&namespace, &id, 10_000)
+        .unwrap()
+        .unwrap();
+    assert!(whole.text == body, "the whole body fits");
+    assert!(!whole.cut);
+}

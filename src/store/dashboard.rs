@@ -39,6 +39,12 @@ pub struct ThreadContextRows {
     pub history: HistoryRows,
 }
 
+/// The start of a stored message body, and whether the body goes on past it.
+pub struct BodyPrefix {
+    pub text: String,
+    pub cut: bool,
+}
+
 pub struct ConversationRow {
     pub thread_id: String,
     pub message_id: String,
@@ -226,16 +232,27 @@ impl StateStore {
         &mut self,
         namespace: &StateNamespace,
         message_id: &str,
-    ) -> Result<Option<String>, StoreError> {
+        max_chars: usize,
+    ) -> Result<Option<BodyPrefix>, StoreError> {
         let ns = namespace_params(namespace);
         self.transaction(|transaction| {
             Ok(transaction
                 .transaction
                 .query_row(
-                    "SELECT body FROM collaboration_messages
+                    "SELECT substr(body, 1, ?4), length(body) > ?4 FROM collaboration_messages
                      WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
-                    params![ns[0], ns[1], message_id],
-                    |row| row.get(0),
+                    params![
+                        ns[0],
+                        ns[1],
+                        message_id,
+                        i64::try_from(max_chars).unwrap_or(i64::MAX)
+                    ],
+                    |row| {
+                        Ok(BodyPrefix {
+                            text: row.get(0)?,
+                            cut: row.get(1)?,
+                        })
+                    },
                 )
                 .optional()?)
         })
