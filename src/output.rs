@@ -413,6 +413,35 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn activation_preserves_tui_next_steps_exactly() {
+        let result = CommandResult::success("activate", json!({"space_id":"w1"}));
+        assert_eq!(
+            render_command_result_to_text(&result),
+            "Status\n  Namedrop activated in space w1.\n\nNext steps — for the runtimes you use\n  Check native hooks: herdr integration status\n  If setup is needed, choose your runtime:\n    herdr integration install codex\n    herdr integration install claude\n  Start fresh agent sessions and confirm a request and reply to verify their hooks.\n\nDetails"
+        );
+    }
+
+    #[test]
+    fn activation_uses_hc_next_steps_when_mod_install_is_present() {
+        let result = CommandResult::success(
+            "activate",
+            json!({"space_id":"w1", "mod_install":"Install the Namedrop mod."}),
+        );
+        let rendered = render_command_result_to_text(&result);
+        assert!(rendered.contains("Alt+N"), "{rendered}");
+        assert!(
+            rendered.contains("namedrop --host hc name @alias --type agent|terminal"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("namedrop --host hc doctor"), "{rendered}");
+        assert!(
+            rendered.contains("README: Install in Herdr app"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("herdr integration"), "{rendered}");
+    }
+
+    #[test]
     fn naming_keeps_setup_failures_and_delivery_attention_without_agent_noise_for_a_terminal() {
         let result = CommandResult::success(
             "name",

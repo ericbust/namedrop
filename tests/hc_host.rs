@@ -980,6 +980,32 @@ fn doctor_reports_only_observed_unreported_codex_and_uses_hc_repairs() {
                 .iter()
                 .any(|issue| issue.code == "ND-HC-SPACE-001")
         );
+        let rendered = namedrop::render_health_report_to_text(&report);
+        assert!(!rendered.contains("herdr integration"), "{rendered}");
+        let native = report
+            .issues
+            .iter()
+            .find(|issue| issue.code == "ND-SESSION-002")
+            .unwrap();
+        assert_eq!(native.repair.operation.as_deref(), Some("activate"));
+        assert_eq!(native.repair.input, Some(json!({"confirmed":true})));
+        let command = native.repair.command.as_ref().unwrap();
+        assert_eq!(
+            &command[1..],
+            [
+                "--plugin-state",
+                state.to_str().unwrap(),
+                "activate",
+                "--input-json",
+                "{\"confirmed\":true}",
+                "--host",
+                "hc",
+                "--hc-space",
+                "fixture-space",
+                "--hc-terminal",
+                "t1",
+            ]
+        );
         let mut state_commands = 0;
         for command in report
             .issues
