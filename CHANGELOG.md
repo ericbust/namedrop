@@ -4,7 +4,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ## [1.5.0-exp.1] - 2026-11-02
 
-Experimental build for testers on the `exp/channels-ship` branch. Install from that branch to try Channels before a main release.
+Experimental Channels build for Linux and macOS testers.
 
 ### Fixed
 
