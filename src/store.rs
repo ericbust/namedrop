@@ -50,6 +50,7 @@ pub(crate) use groups::addressed_recipients;
 mod coordination;
 mod coordination_bridge;
 mod coordination_ownership;
+pub(crate) mod coordination_review;
 pub mod dashboard;
 mod missing_disposition;
 mod operator;
@@ -5269,6 +5270,10 @@ impl StateTransaction<'_> {
             }
             None => false,
         };
+        let review_grants = self.review_grants_for_attempt(namespace, attempt_id)?;
+        if !review_grants.is_empty() {
+            permitted_operations.push("handoff.acknowledge-granted".to_owned());
+        }
         let sender_workspace =
             self.bridged_sender_label(namespace, &MessageId::new(message_id.clone()))?;
         let draft = crate::DeliveryControlDraft {
@@ -5286,6 +5291,7 @@ impl StateTransaction<'_> {
             result_set,
             permitted_operations,
             reply_mode,
+            review_grants,
         };
         // The control is finished first; the instruction is chosen from it.
         let mut control = DeliveryControl::new_with_git_state_paths(

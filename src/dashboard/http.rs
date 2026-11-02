@@ -628,6 +628,7 @@ enum Route {
     Page,
     Session,
     Send(SpaceKey),
+    CoordinationReview(SpaceKey),
     Deliver {
         key: SpaceKey,
         message_id: String,
@@ -689,6 +690,10 @@ fn route(
                     return Err(Status::NotFound);
                 }
                 return Ok(Route::Deliver { key, message_id });
+            }
+            if let [key, "coordinations", "review"] = segments.as_slice() {
+                let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
+                return Ok(Route::CoordinationReview(key));
             }
             if let [key, "threads", thread, action] = segments.as_slice() {
                 let action = match *action {
@@ -956,6 +961,34 @@ impl DeliverPost {
     }
 }
 
+fn read_json_body<T: serde::de::DeserializeOwned>(
+    reader: &mut impl Read,
+    request: &Request,
+) -> Result<T, Status> {
+    if request
+        .header("content-type")
+        .map(|value| value.split(';').next().unwrap_or("").trim())
+        != Some("application/json")
+    {
+        return Err(Status::BadRequest);
+    }
+    let length = request.header("content-length").ok_or(Status::BadRequest)?;
+    if length.is_empty() || !length.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(Status::BadRequest);
+    }
+    let length = length
+        .parse::<usize>()
+        .map_err(|_| Status::PayloadTooLarge)?;
+    if length > BODY_LIMIT {
+        return Err(Status::PayloadTooLarge);
+    }
+    let mut bytes = vec![0; length];
+    reader
+        .read_exact(&mut bytes)
+        .map_err(|_| Status::BadRequest)?;
+    serde_json::from_slice(&bytes).map_err(|_| Status::BadRequest)
+}
+
 /// Cookies ignore ports, so the name carries it to keep two servers apart.
 fn cookie_name(port: u16) -> String {
     format!("namedrop_dashboard_{port}")
@@ -1009,6 +1042,13 @@ fn serve_connection(
                 Err(status) => return respond_status(&mut writer, status),
             };
             send_operator_post(&mut writer, front, key, post)
+        }
+        Ok(Route::CoordinationReview(key)) => {
+            let post = match read_json_body(&mut reader, &request) {
+                Ok(post) => post,
+                Err(status) => return respond_status(&mut writer, status),
+            };
+            send_coordination_review(&mut writer, front, &key, &post)
         }
         Ok(Route::Deliver { key, message_id }) => {
             let post = match DeliverPost::read(&mut reader, &request) {
@@ -1336,6 +1376,100 @@ fn send_operator_post(
             if let Err(error) = wake_mailboxes_after_send(front.files.state(), &namespace, &receipt)
             {
                 eprintln!("Message saved; could not wake delivery: {error}");
+            }
+            response
+        }
+        Err(error) => respond(
+            writer,
+            match error.kind() {
+                crate::OperatorSendErrorKind::InvalidInput => "400 Bad Request",
+                crate::OperatorSendErrorKind::Unavailable => "503 Service Unavailable",
+                crate::OperatorSendErrorKind::Internal => "500 Internal Server Error",
+            },
+            "application/json",
+            "",
+            serde_json::json!({"error": error.public_message()})
+                .to_string()
+                .as_bytes(),
+        ),
+    }
+}
+
+fn send_coordination_review(
+    writer: &mut TcpStream,
+    front: &Front,
+    key: &SpaceKey,
+    post: &super::coordination_review::ReviewPost,
+) -> io::Result<()> {
+    use super::coordination_review::{ReviewError, commit};
+    let mut admitted = Some(match front.admit_mutation() {
+        Ok(guard) => guard,
+        Err(status) => return respond_status(writer, status),
+    });
+    writer.set_write_timeout(Some(Duration::from_secs(1)))?;
+    let operator =
+        crate::store::coordination_review::OperatorSession::of_secret(front.session.as_str());
+    let now = crate::Clock::now_unix_ms(&crate::SystemClock);
+    let draft = match commit(front.files.state(), key, post, &operator, now) {
+        Ok(draft) => draft,
+        Err(ReviewError::NotFound) => return respond_status(writer, Status::NotFound),
+        Err(ReviewError::Unavailable) => return respond_status(writer, Status::Unavailable),
+        Err(ReviewError::Refused(message)) => {
+            return respond(
+                writer,
+                "409 Conflict",
+                "application/json",
+                "",
+                serde_json::json!({"error": message}).to_string().as_bytes(),
+            );
+        }
+    };
+    let namespace = &draft.namespace;
+    let herdr =
+        crate::ProcessHerdr::default().with_socket(Some(namespace.session_socket_id.clone()));
+    let ids = crate::ProcessIds::default();
+    let runtime = crate::LifecycleRuntime {
+        state_directory: front.files.state(),
+        home_directory: None,
+        agent_config: crate::AgentConfigDirectories::default(),
+        cwd: Path::new("/"),
+        workspace_id: Some(namespace.space_id.as_str()),
+        current_pane_id: None,
+        session_socket_id: &namespace.session_socket_id,
+        herdr: &herdr,
+        clock: &crate::SystemClock,
+        ids: &ids,
+    };
+    let granted: Vec<_> = draft
+        .granted
+        .iter()
+        .map(|(id, expires)| serde_json::json!({"coordination_id": id, "expires_at_ms": expires}))
+        .collect();
+    let sent = crate::message::send_operator_message_observing_commit(
+        &post.request_id,
+        &draft.source,
+        None,
+        &runtime,
+        |receipt: &serde_json::Value| {
+            front.channel_wake.notify();
+            let mut receipt = receipt.clone();
+            receipt["granted"] = serde_json::json!(granted);
+            let response = respond(
+                writer,
+                "200 OK",
+                "application/json",
+                "",
+                receipt.to_string().as_bytes(),
+            );
+            drop(admitted.take());
+            response
+        },
+    );
+    match sent {
+        Ok((receipt, response)) => {
+            if let Err(error) = wake_mailboxes_after_send(front.files.state(), namespace, &receipt)
+            {
+                eprintln!("Review request saved; could not wake delivery: {error}");
             }
             response
         }

@@ -3637,3 +3637,237 @@ fn a_flagged_unanswered_request_is_not_reopened_or_reworded_by_later_drains() {
         );
     }
 }
+
+fn blocked_with_settled_report(f: &Fixture, key: &str) -> Value {
+    let id = f.handoff(
+        "handoff.begin",
+        json!({"request_id":format!("begin-{key}"),
+        "deliverable":format!("Deliverable {key}")}),
+    )["coordination_id"]
+        .clone();
+    let resolved = f.handoff("handoff.resolve", json!({"request_id":format!("resolve-{key}"),
+        "coordination_id":id, "outcome":"blocked", "report":"Saved report.", "reason":"Waiting on a key."}));
+    f.status("lead", "idle");
+    f.drain();
+    f.complete(&f.attempt(&resolved["report_message_id"], "lead"));
+    id
+}
+
+fn operator_session(f: &Fixture, secret_byte: char) -> OperatorSession {
+    let secret: String = std::iter::repeat_n(secret_byte, 64).collect();
+    fs::create_dir_all(f.state.join("dashboard")).unwrap();
+    fs::write(f.state.join("dashboard/session"), &secret).unwrap();
+    OperatorSession::of_secret(&secret)
+}
+
+fn grant(f: &Fixture, id: &Value, to: &str, operator: &OperatorSession) -> Result<u64, String> {
+    StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.grant_coordination_review(
+                &f.ns(),
+                &CoordinationId::new(id.as_str().unwrap()),
+                &PaneAddressId::new(to),
+                operator,
+                f.now_unix_ms(),
+            )
+        })
+        .map(|(_, expires)| expires)
+        .map_err(|error| error.to_string())
+}
+
+fn granted_ack(f: &Fixture, id: &Value, pane: &str) -> Result<Value, String> {
+    execute_handoff_operation(
+        "handoff.acknowledge-granted",
+        json!({"coordination_id":id}),
+        &f.runtime(pane),
+    )
+}
+
+fn warning_open(f: &Fixture, id: &Value) -> bool {
+    f.unresolved_attention()
+        .iter()
+        .any(|(_, source)| source == id.as_str().unwrap())
+}
+
+#[test]
+fn an_agent_acknowledges_only_with_the_operators_grant_and_only_once() {
+    let f = Fixture::new();
+    let id = blocked_with_settled_report(&f, "a");
+    let operator = operator_session(&f, 'a');
+    let refused = granted_ack(&f, &id, "worker").unwrap_err();
+    assert!(refused.contains("has not asked you"), "{refused}");
+    assert!(warning_open(&f, &id));
+
+    grant(&f, &id, "worker", &operator).unwrap();
+    let cleared = granted_ack(&f, &id, "worker").unwrap();
+    assert_eq!(cleared["acknowledged"], true);
+    assert_eq!(cleared["changed"], true);
+    assert_eq!(cleared["acknowledged_by"], "@worker");
+    assert!(!warning_open(&f, &id));
+    for _ in 0..2 {
+        f.drain();
+        assert!(
+            !warning_open(&f, &id),
+            "reconciliation honors a granted acknowledgement"
+        );
+    }
+    let by: (String, String) = f.db().query_row(
+        "SELECT actor_kind, actor_id FROM transition_facts WHERE entity_kind='attention_item' AND transition_kind='acknowledged'",
+        [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+    assert_eq!(
+        by,
+        ("agent_session".into(), "session-worker".into()),
+        "history names the agent"
+    );
+
+    let reused = granted_ack(&f, &id, "worker").unwrap_err();
+    assert!(reused.contains("already used"), "{reused}");
+}
+
+#[test]
+fn a_grant_is_refused_for_another_coordination_another_agent_after_expiry_and_after_the_operator_session_ends()
+ {
+    let f = Fixture::new();
+    let a = blocked_with_settled_report(&f, "a");
+    let b = blocked_with_settled_report(&f, "b");
+    let operator = operator_session(&f, 'a');
+    grant(&f, &a, "worker", &operator).unwrap();
+
+    let other = granted_ack(&f, &b, "worker").unwrap_err();
+    assert!(other.contains("has not asked you"), "{other}");
+    let stranger = granted_ack(&f, &a, "reviewer").unwrap_err();
+    assert!(stranger.contains("has not asked you"), "{stranger}");
+    assert!(warning_open(&f, &a) && warning_open(&f, &b));
+
+    let issued = f.now_unix_ms();
+    f.now.store(issued + REVIEW_GRANT_TTL_MS, Ordering::Relaxed);
+    let expired = granted_ack(&f, &a, "worker").unwrap_err();
+    assert!(expired.contains("expired"), "{expired}");
+    assert!(warning_open(&f, &a));
+
+    grant(&f, &a, "worker", &operator).unwrap();
+    operator_session(&f, 'b');
+    let ended = granted_ack(&f, &a, "worker").unwrap_err();
+    assert!(ended.contains("operator session"), "{ended}");
+    assert!(warning_open(&f, &a));
+
+    let operator = operator_session(&f, 'c');
+    grant(&f, &a, "worker", &operator).unwrap();
+    f.now
+        .store(issued + 2 * REVIEW_GRANT_TTL_MS - 1, Ordering::Relaxed);
+    assert_eq!(granted_ack(&f, &a, "worker").unwrap()["changed"], true);
+    assert!(
+        warning_open(&f, &b),
+        "a grant for one coordination never clears another"
+    );
+}
+
+#[test]
+fn a_grant_never_widens_what_can_be_acknowledged_and_humans_keep_their_command() {
+    let f = Fixture::new();
+    let id = f.begin();
+    f.send(&id, "open-work", "worker");
+    let operator = operator_session(&f, 'a');
+    let by = MutationAttribution::new(ActorKind::Human, "synthetic", f.now_unix_ms());
+    StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.open_attention_item(
+                &f.ns(),
+                &AttentionItemDraft {
+                    id: AttentionItemId::new(format!(
+                        "coordination-attention:{}",
+                        id.as_str().unwrap()
+                    )),
+                    source_kind: AttentionSourceKind::Coordination,
+                    source_id: id.as_str().unwrap().to_owned(),
+                    summary: "The one continuation ended without a decision.".into(),
+                },
+                &by,
+            )
+            .map(|_| ())
+        })
+        .unwrap();
+    grant(&f, &id, "worker", &operator).unwrap();
+    let open = granted_ack(&f, &id, "worker").unwrap_err();
+    assert!(open.contains("can't be acknowledged"), "{open}");
+    assert_eq!(
+        f.fact_count(
+            "coordination_review_grant",
+            &format!("{}:session-worker", id.as_str().unwrap()),
+            "resolved",
+            "session-worker"
+        ),
+        0,
+        "a refused acknowledgement leaves the grant unused"
+    );
+    let blocked = blocked_with_settled_report(&f, "human");
+    assert!(grant(&f, &json!("no-such-coordination"), "worker", &operator).is_err());
+    let unconfirmed = execute_control_operation(
+        "handoff.acknowledge",
+        json!({"coordination_id":blocked}),
+        &f.runtime("lead"),
+    )
+    .unwrap_err();
+    assert!(unconfirmed.contains("confirmation"), "{unconfirmed}");
+}
+
+#[test]
+fn the_review_message_envelope_binds_one_granted_acknowledgement_per_coordination() {
+    let f = Fixture::new();
+    let a = blocked_with_settled_report(&f, "a");
+    let b = blocked_with_settled_report(&f, "b");
+    let not_granted = blocked_with_settled_report(&f, "c");
+    let operator = operator_session(&f, 'a');
+    grant(&f, &a, "worker", &operator).unwrap();
+    grant(&f, &b, "worker", &operator).unwrap();
+    let mut runtime = f.runtime("lead");
+    runtime.current_pane_id = None;
+    let review = send_operator_message(
+        "review-request",
+        "@worker Please review these.",
+        None,
+        &runtime,
+    )
+    .unwrap();
+    f.now.fetch_add(61_000, Ordering::Relaxed);
+    let later = send_operator_message("later", "@worker Unrelated.", None, &runtime).unwrap();
+    f.status("worker", "idle");
+    f.drain();
+    let envelope = |message: &Value| {
+        f.prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(pane, prompt)| pane == "worker" && prompt["control"]["message_id"] == *message)
+            .map(|(_, prompt)| prompt["control"].clone())
+            .expect("the message reached @worker")
+    };
+    let control = envelope(&review["message_id"]);
+    let bound: Vec<&Value> = control["tool"]["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|operation| operation["token"] == "handoff.acknowledge-granted")
+        .map(|operation| &operation["input"]["coordination_id"])
+        .collect();
+    assert_eq!(bound, vec![&a, &b]);
+    assert!(!bound.contains(&&not_granted));
+    assert!(
+        control["permitted_operations"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("handoff.acknowledge-granted"))
+    );
+    f.complete_for(&f.attempt(&review["message_id"], "worker"), "worker");
+    f.drain();
+    let unrelated = envelope(&later["message_id"]);
+    assert!(
+        !unrelated["permitted_operations"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("handoff.acknowledge-granted")),
+        "a later operator message carries no grant"
+    );
+}

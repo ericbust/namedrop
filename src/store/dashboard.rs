@@ -24,6 +24,9 @@ pub struct DashboardRows {
     pub assignments: Vec<AssignmentRow>,
     pub terminal_runs: Vec<TerminalRunRow>,
     pub attention: Vec<AttentionRow>,
+    pub coordination_warnings: Vec<super::coordination_review::CoordinationWarning>,
+    pub review_grants: Vec<super::coordination_review::OpenReviewGrant>,
+    pub granted_clears: Vec<super::coordination_review::GrantedClear>,
 }
 
 /// A history page and its recipient state from one database snapshot.
@@ -1023,6 +1026,9 @@ impl StateTransaction<'_> {
             assignments,
             terminal_runs,
             attention,
+            coordination_warnings: self.coordination_warnings(namespace)?,
+            review_grants: self.open_review_grants(namespace)?,
+            granted_clears: self.granted_clears(namespace)?,
         };
         Self::normalize_operator_rows(&mut rows, &operators);
         Ok(rows)
