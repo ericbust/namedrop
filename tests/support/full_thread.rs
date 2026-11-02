@@ -244,3 +244,23 @@ fn a_thread_rooted_on_a_coordination_report_with_no_agents_names_who_to_mention(
     assert_eq!(status, 200, "{next}");
     assert_eq!(queued_for(&f, &next), ["planner"]);
 }
+
+#[test]
+fn body_route_is_scoped_to_the_key() {
+    let f = fixture();
+    let server = Server::start(&f, "not json", false);
+    let other = f.agent_send("w2", "pane-2-lead", "other", "@tester secret-in-w2");
+    let csrf = server.csrf().to_owned();
+    let auth = [
+        ("Cookie", server.cookie.as_str()),
+        ("X-Namedrop-Csrf", csrf.as_str()),
+    ];
+    let cross = server.request(
+        "GET",
+        &body_path(other["message_id"].as_str().unwrap()),
+        &auth,
+        "",
+    );
+    assert_eq!(cross.status, 404, "{}", cross.body);
+    assert!(!cross.body.contains("secret-in-w2"), "{}", cross.body);
+}
