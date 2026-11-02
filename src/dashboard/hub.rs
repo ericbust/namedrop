@@ -968,7 +968,7 @@ impl Hub<'_> {
         if let Some(space) = self.live_spaces.get(key) {
             snapshot.space.workspace_id = space.namespace.space_id.as_str().to_owned();
         }
-        snapshot.space.repo = self.repo(key);
+        snapshot.space.repo = self.repo(key, &self.files.repos());
         let workspace_id = snapshot.space.workspace_id.clone();
         snapshot.space.set_live_label(
             &workspace_id,
@@ -1096,10 +1096,13 @@ impl Hub<'_> {
         Some(rows)
     }
 
-    fn repo(&self, key: &SpaceKey) -> Option<RepoRef> {
-        self.live_spaces
-            .get(key)
-            .and_then(|space| space.repo.clone())
+    /// A live space reports its own repository, even none; the CLI's saved
+    /// one stands in only while the space is not live.
+    fn repo(&self, key: &SpaceKey, saved: &HashMap<String, RepoRef>) -> Option<RepoRef> {
+        match self.live_spaces.get(key) {
+            Some(space) => space.repo.clone(),
+            None => saved.get(key.as_str()).cloned(),
+        }
     }
 
     fn spaces_json(&mut self) -> String {
@@ -1107,13 +1110,14 @@ impl Hub<'_> {
             self.open_store();
         }
         let labels = self.files.labels();
+        let repos = self.files.repos();
         let spaces: Vec<SpaceSummary> = self
             .reload_spaces()
             .unwrap_or_default()
             .iter()
             .map(|row| {
                 let key = SpaceKey::of(&row.namespace);
-                let repo = self.repo(&key);
+                let repo = self.repo(&key, &repos);
                 SpaceSummary::of(row, labels.get(key.as_str()).map(String::as_str), repo)
             })
             .collect();

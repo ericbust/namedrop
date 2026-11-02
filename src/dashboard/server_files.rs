@@ -1,3 +1,4 @@
+use super::snapshot::RepoRef;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -362,6 +363,27 @@ impl ServerFiles {
         labels.insert(key.to_owned(), label.to_owned());
         let bytes = serde_json::to_vec(&labels).map_err(|e| e.to_string())?;
         self.write_atomic("labels.json", &bytes)
+    }
+
+    /// Kept apart from `labels.json`, which older servers parse as a map of strings.
+    pub fn repos(&self) -> HashMap<String, RepoRef> {
+        fs::read(self.dir.join("repos.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn record_repo(&self, key: &str, repo: Option<&RepoRef>) -> Result<(), String> {
+        let mut repos = self.repos();
+        if repos.get(key) == repo {
+            return Ok(());
+        }
+        match repo {
+            Some(repo) => repos.insert(key.to_owned(), repo.clone()),
+            None => repos.remove(key),
+        };
+        let bytes = serde_json::to_vec(&repos).map_err(|e| e.to_string())?;
+        self.write_atomic("repos.json", &bytes)
     }
 
     fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<(), String> {

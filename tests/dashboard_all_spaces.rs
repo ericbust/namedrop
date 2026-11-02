@@ -1717,3 +1717,35 @@ fn worktrees_of_one_repository_share_its_id_and_no_path_reaches_the_page() {
     assert_eq!(joined["frame"]["space"]["repo"], repos["other"]);
     assert!(events.next(Duration::from_millis(350)).is_none());
 }
+
+#[test]
+fn a_closed_space_keeps_its_saved_repository_but_a_live_one_reports_its_own() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "closed");
+    activate(&state, "plain");
+    let saved = json!({"id": "0123456789abcdef", "name": "saved"});
+    fs::create_dir_all(state.join("dashboard")).unwrap();
+    fs::write(
+        state.join("dashboard/repos.json"),
+        json!({key("closed"): saved, key("plain"): {"id": "fedcba9876543210", "name": "stale"}})
+            .to_string(),
+    )
+    .unwrap();
+    let server = Server::start(directory.path(), &[("plain", None)]);
+    let (_, closed) = server
+        .events(&format!("/w/{}/events", key("closed")))
+        .next(WAIT)
+        .unwrap();
+    assert_eq!(closed["space"]["repo"], saved);
+
+    let mut events = server.events("/api/events");
+    let plain = events.space();
+    assert_eq!(plain["key"], key("plain"));
+    assert!(plain["frame"]["space"]["repo"].is_null(), "{plain}");
+
+    let summaries: Vec<Value> = serde_json::from_str(&server.spaces()).unwrap();
+    let repos = repos_by_workspace(&summaries);
+    assert_eq!(repos["closed"], saved);
+    assert!(repos["plain"].is_null());
+}

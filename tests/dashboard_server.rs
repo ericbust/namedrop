@@ -572,7 +572,9 @@ fn fake_herdr(root: &Path) -> PathBuf {
     fs::write(
         &herdr,
         "#!/bin/sh\n[ \"$1 $2\" = \"workspace get\" ] || exit 1\n\
-         printf '{\"result\":{\"workspace\":{\"label\":\"label-%s\"}}}' \"$3\"\n",
+         printf '{\"result\":{\"workspace\":{\"label\":\"label-%s\",\
+         \"worktree\":{\"checkout_path\":\"/fake/trees/%s\",\"repo_key\":\"/fake/home/proj/.git\",\
+         \"repo_name\":\"proj\",\"repo_root\":\"/fake/home/proj\"}}}}' \"$3\" \"$3\"\n",
     )
     .unwrap();
     fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
@@ -650,6 +652,13 @@ fn every_workspace_shares_one_server_with_its_own_page() {
         frame.contains(r#""label":{"text":"label-w1","truncated":false}"#),
         "the CLI records the Herdr label for the server: {frame}"
     );
+    assert!(
+        frame.contains(r#""repo":{"id":"#) && frame.contains(r#""name":"proj"}"#),
+        "the CLI records the repository for the server: {frame}"
+    );
+    assert!(!frame.contains("/fake"), "{frame}");
+    let saved = fs::read_to_string(state.join("dashboard/repos.json")).unwrap();
+    assert!(!saved.contains("/fake"), "{saved}");
 }
 
 #[test]
