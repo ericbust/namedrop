@@ -1094,6 +1094,84 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
   await ui.page.getByText("Hook received", { exact: true }).waitFor();
 });
 
+test("MD-UI: a formatted agent reply renders lists, code and bold without markup or images", async (t) => {
+  const fence = "\x60\x60\x60";
+  const formatted = [
+    "## Plan",
+    "The build is **green** and \x60npm test\x60 passes.",
+    "",
+    "1. First",
+    "   - nested *one*",
+    "   - nested two",
+    "2. Second",
+    "",
+    "> quoted <img src=x onerror=alert(1)>",
+    "",
+    "| a | b |",
+    "|---|--:|",
+    "| 1 | 2 |",
+    "",
+    `${fence}js`,
+    "const value = 1;",
+    fence,
+    "![x](javascript:alert(1)) [y](javascript:alert(2)) <script>alert(3)</script>",
+  ].join("\n");
+  const plain =
+    "One line\nnext line\n\n\nAfter two blank lines, 2 * 3 and snake_case.";
+  const value = frame(1, "alpha");
+  value.frame.messages = [
+    message("formatted", formatted, { author: "codex" }),
+    message("plain", plain, { author: "codex", at_ms: 200 }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]));
+  let dialogs = 0;
+  ui.page.on("dialog", async (dialog) => {
+    dialogs++;
+    await dialog.dismiss();
+  });
+  await ui.live();
+  const body = ui.page.locator('[data-message-id="formatted"] .body');
+  await body.locator("li").first().waitFor();
+  assert.equal(await body.locator("ol > li").count(), 2);
+  assert.equal(await body.locator("ol > li ul > li").count(), 2);
+  assert.equal(
+    await body.locator("pre code").textContent(),
+    "const value = 1;\n",
+  );
+  assert.equal(
+    await body.locator("code:not(pre > code)").textContent(),
+    "npm test",
+  );
+  assert.equal(await body.locator("strong").textContent(), "green");
+  assert.equal(await body.locator("em").textContent(), "one");
+  assert.equal(
+    await body.locator("blockquote").textContent(),
+    "quoted <img src=x onerror=alert(1)>",
+  );
+  assert.deepEqual(await body.locator("th, td").allTextContents(), [
+    "a",
+    "b",
+    "1",
+    "2",
+  ]);
+  assert.equal(await body.locator(".md-heading").textContent(), "Plan");
+  assert.equal(await body.locator("a").count(), 0);
+  assert.equal(await ui.page.locator(".msg img, .msg script").count(), 0);
+  await body
+    .getByText("x y <script>alert(3)</script>", { exact: false })
+    .waitFor();
+  const plainBody = ui.page.locator('[data-message-id="plain"] .body');
+  const layout = await plainBody.evaluate((element) => ({
+    text: element.textContent,
+    elements: element.querySelectorAll("*").length,
+    lines:
+      element.getBoundingClientRect().height /
+      Number.parseFloat(getComputedStyle(element).lineHeight),
+  }));
+  assert.deepEqual(layout, { text: plain, elements: 0, lines: 5 });
+  assert.equal(dialogs, 0);
+});
+
 test("UI-2: scrolling to top loads history without shifting the first visible message, including live updates and switching", async (t) => {
   const value = frame(1, "alpha");
   value.frame.messages = Array.from({ length: 100 }, (_, index) =>

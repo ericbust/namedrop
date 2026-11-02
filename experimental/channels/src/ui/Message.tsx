@@ -41,6 +41,7 @@ import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
 import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
+import { Markdown, MarkdownLine, markdownText } from "./Markdown.tsx";
 import { PeekControl, usePeek } from "./PeekContext.tsx";
 
 const PREVIEW = 480;
@@ -91,59 +92,6 @@ function clock(at: number) {
     full: date.toLocaleString(),
   };
 }
-// The server reads "\@name" as a reference that wakes no one, so the reader sees just the name.
-const ESCAPED_MENTION = /\\(?=@[a-z0-9])/g;
-const prose = (text: string) => text.replace(ESCAPED_MENTION, "");
-function linkedText(text: string, limit: number): ReactNode {
-  const parts: ReactNode[] = [];
-  let start = 0;
-  for (const match of text.matchAll(/https?:\/\/[^\s<>"']+/g)) {
-    const at = match.index;
-    if (at >= limit) break;
-    const href = match[0].replace(/[.,;!?)]+$/, "");
-    parts.push(prose(text.slice(start, Math.min(at, limit))));
-    parts.push(
-      <a key={at} href={href} target="_blank" rel="noreferrer">
-        {href.slice(0, limit - at)}
-      </a>,
-    );
-    start = at + href.length;
-  }
-  if (start < limit) parts.push(prose(text.slice(start, limit)));
-  return parts;
-}
-function formattedText(text: string, limit: number): ReactNode {
-  const parts = text.split(/(```[^\n]*\n[\s\S]*?(?:```|$))/g);
-  let offset = 0;
-  return parts.flatMap((part, index) => {
-    const key = offset;
-    offset += part.length;
-    const available = Math.min(part.length, limit - key);
-    if (available <= 0) return [];
-    if (part.startsWith("```"))
-      return (
-        <pre key={key}>
-          <code>
-            {part
-              .slice(0, available)
-              .replace(/^```[^\n]*\n/, "")
-              .replace(/```$/, "")}
-          </code>
-        </pre>
-      );
-    // The pre is a block, so a newline beside a fence would render as an empty line.
-    const start = index > 0 && part.startsWith("\n") ? 1 : 0;
-    const end =
-      index < parts.length - 1 && part.endsWith("\n")
-        ? part.length - 1
-        : part.length;
-    return (
-      <Fragment key={key}>
-        {linkedText(part.slice(start, end), available - start)}
-      </Fragment>
-    );
-  });
-}
 function previewLimit(text: string, length = PREVIEW): number {
   const limit = Math.min(length, text.length);
   const previous = text.charCodeAt(limit - 1);
@@ -185,10 +133,7 @@ function Body({
               {more}
             </span>
           ) : (
-            <>
-              {formattedText(text, limit)}
-              {more}
-            </>
+            <Markdown source={text} limit={limit} tail={more} />
           )}
         </div>
       )}
@@ -314,14 +259,16 @@ function Reference({
   let content: ReactNode = referenceCopy.earlier;
   if (reference.kind === "message") {
     const author = who(directory, reference.parent.author);
-    const [line = ""] = prose(reference.parent.body.text).split("\n", 1);
-    label = referenceCopy.label(author.name, line);
+    const [line = ""] = reference.parent.body.text.split("\n", 1);
+    label = referenceCopy.label(author.name, markdownText(line));
     content = (
       <>
         <span className="reply-ref-author">
           <Name person={author} />:
         </span>
-        <span className="reply-ref-text">{line}</span>
+        <span className="reply-ref-text">
+          <MarkdownLine source={line} />
+        </span>
       </>
     );
   }
@@ -584,7 +531,7 @@ function SystemRow({
         <p>
           <strong>{message.kind === "hook" ? "Hook" : "Nudge"}</strong>
           <span className="body" title={text === raw ? undefined : raw}>
-            {formattedText(text, previewLimit(text))}
+            <MarkdownLine source={text} limit={previewLimit(text)} links />
             {text.length > PREVIEW || truncated ? "…" : null}
           </span>
         </p>
@@ -625,7 +572,7 @@ function ReplyPreview({
     const result = type === "terminal" ? terminalResult(reply.body) : null;
     const text = result
       ? (result.stdout || result.stderr).split("\n", 2).join("\n")
-      : prose(reply.body.text);
+      : reply.body.text;
     label = `${replies}${count === 1 ? "" : ", latest"} from ${name}${time ? ` at ${time.label}` : ""}. Open thread`;
     content = (
       <>
@@ -646,7 +593,11 @@ function ReplyPreview({
             <span className="rp-body no-output">No output</span>
           ) : (
             <span className={`rp-body${type === "terminal" ? " mono" : ""}`}>
-              {text.slice(0, previewLimit(text, 400))}
+              {result ? (
+                text.slice(0, previewLimit(text, 400))
+              ) : (
+                <MarkdownLine source={text} limit={previewLimit(text, 400)} />
+              )}
             </span>
           )}
         </span>
