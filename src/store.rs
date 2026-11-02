@@ -7387,6 +7387,9 @@ fn parse_transition_entity_kind(value: String) -> rusqlite::Result<TransitionEnt
         "agent_disposition" => Ok(TransitionEntityKind::AgentDisposition),
         "attention_item" => Ok(TransitionEntityKind::AttentionItem),
         "coordination_ownership" => Ok(TransitionEntityKind::CoordinationOwnership),
+        "coordination_review_grant" => Ok(TransitionEntityKind::CoordinationReviewGrant),
+        "coordination_review_request" => Ok(TransitionEntityKind::CoordinationReviewRequest),
+        "coordination_review_message" => Ok(TransitionEntityKind::CoordinationReviewMessage),
         _ => Err(invalid_text("transition entity kind", value)),
     }
 }

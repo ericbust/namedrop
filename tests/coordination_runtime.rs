@@ -3669,6 +3669,7 @@ fn grant(f: &Fixture, id: &Value, to: &str, operator: &OperatorSession) -> Resul
                 &CoordinationId::new(id.as_str().unwrap()),
                 &PaneAddressId::new(to),
                 operator,
+                "review-request",
                 f.now_unix_ms(),
             )
         })
@@ -3723,6 +3724,14 @@ fn an_agent_acknowledges_only_with_the_operators_grant_and_only_once() {
 
     let reused = granted_ack(&f, &id, "worker").unwrap_err();
     assert!(reused.contains("already used"), "{reused}");
+    let history = StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| tx.transition_facts(&f.ns()))
+        .unwrap();
+    assert!(history.iter().any(|fact| {
+        fact.entity_kind == TransitionEntityKind::CoordinationReviewGrant
+            && fact.transition_kind == TransitionKind::Resolved
+    }));
 }
 
 #[test]
@@ -3819,6 +3828,7 @@ fn the_review_message_envelope_binds_one_granted_acknowledgement_per_coordinatio
     let a = blocked_with_settled_report(&f, "a");
     let b = blocked_with_settled_report(&f, "b");
     let not_granted = blocked_with_settled_report(&f, "c");
+    f.status("worker", "working");
     let operator = operator_session(&f, 'a');
     grant(&f, &a, "worker", &operator).unwrap();
     grant(&f, &b, "worker", &operator).unwrap();
@@ -3831,7 +3841,19 @@ fn the_review_message_envelope_binds_one_granted_acknowledgement_per_coordinatio
         &runtime,
     )
     .unwrap();
-    f.now.fetch_add(61_000, Ordering::Relaxed);
+    StateStore::open(&f.state)
+        .unwrap()
+        .transaction(|tx| {
+            tx.bind_coordination_review_message(
+                &f.ns(),
+                "review-request",
+                &MessageId::new(review["message_id"].as_str().unwrap()),
+                &operator,
+                f.now_unix_ms(),
+            )
+        })
+        .unwrap();
+    f.now.fetch_add(1, Ordering::Relaxed);
     let later = send_operator_message("later", "@worker Unrelated.", None, &runtime).unwrap();
     f.status("worker", "idle");
     f.drain();

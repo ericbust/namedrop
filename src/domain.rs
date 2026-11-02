@@ -773,6 +773,11 @@ pub enum TransitionEntityKind {
     /// coordination's warning. The entity id is
     /// `{coordination_id}:{agent_session_id}`.
     CoordinationReviewGrant,
+    /// The exact operator request that opened a review grant. Its entity id
+    /// is the JSON pair `[request_id, grant_transition_order]`.
+    CoordinationReviewRequest,
+    /// A committed review message, as the JSON pair `[request_id, message_id]`.
+    CoordinationReviewMessage,
 }
 
 impl TransitionEntityKind {
@@ -789,6 +794,8 @@ impl TransitionEntityKind {
             Self::AttentionItem => "attention_item",
             Self::CoordinationOwnership => "coordination_ownership",
             Self::CoordinationReviewGrant => "coordination_review_grant",
+            Self::CoordinationReviewRequest => "coordination_review_request",
+            Self::CoordinationReviewMessage => "coordination_review_message",
         }
     }
 }

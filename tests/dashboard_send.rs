@@ -2383,6 +2383,81 @@ else:
     }
 
     #[test]
+    fn review_requests_require_browser_authority_and_cannot_renew_grants_on_replay() {
+        let f = Fixture::new();
+        f.register_all();
+        let runtime = f.runtime("w1", "pane-1-lead");
+        let begun = namedrop::execute_handoff_operation(
+            "handoff.begin",
+            json!({"request_id":"review-begin", "deliverable":"Review this handoff"}),
+            &runtime,
+        )
+        .unwrap();
+        let id = &begun["coordination_id"];
+        namedrop::execute_handoff_operation(
+            "handoff.resolve",
+            json!({"request_id":"review-blocked", "coordination_id":id,
+                "outcome":"blocked", "report":"Stopped here.", "reason":"Superseded."}),
+            &runtime,
+        )
+        .unwrap();
+        let server = Server::start(&f, None);
+        let key = SpaceKey::of(&StateNamespace::for_space("socket-a", "w1"));
+        let path = format!("/w/{}/coordinations/review", key.as_str());
+        let body = json!({"request_id":"review-click", "reviewer":xws::address_id("w1", "planner"),
+            "coordination_ids":[id]})
+        .to_string();
+        let grants = || {
+            f.count("SELECT COUNT(*) FROM transition_facts WHERE entity_kind='coordination_review_grant'")
+        };
+        assert_eq!(server.request("POST", &path, &[], &body).status, 401);
+        assert_eq!(
+            server
+                .request("POST", &path, &[("Cookie", &server.cookie)], &body)
+                .status,
+            403
+        );
+        assert_eq!(
+            server
+                .post(&path, &body, &[("Origin", "http://evil.example")])
+                .status,
+            403
+        );
+        assert_eq!(grants(), 0);
+
+        let mut invalid: Value = serde_json::from_str(&body).unwrap();
+        invalid["request_id"] = json!("");
+        assert_eq!(server.post(&path, &invalid.to_string(), &[]).status, 409);
+        invalid["request_id"] = json!("unused");
+        invalid["actor_kind"] = json!("human");
+        assert_eq!(server.post(&path, &invalid.to_string(), &[]).status, 400);
+        let mut operator_runtime = runtime;
+        operator_runtime.current_pane_id = None;
+        send_operator_message(
+            "existing-post",
+            "@planner Unrelated.",
+            None,
+            &operator_runtime,
+        )
+        .unwrap();
+        invalid.as_object_mut().unwrap().remove("actor_kind");
+        invalid["request_id"] = json!("existing-post");
+        assert_eq!(server.post(&path, &invalid.to_string(), &[]).status, 409);
+        assert_eq!(grants(), 0, "invalid or colliding requests grant nothing");
+
+        let first = server.post(&path, &body, &[]);
+        assert_eq!(first.status, 200, "{}", first.body);
+        assert_eq!(grants(), 1);
+        let replay = server.post(&path, &body, &[]);
+        assert_eq!(
+            replay.status, 409,
+            "a replay must not issue another grant: {}",
+            replay.body
+        );
+        assert_eq!(grants(), 1, "a replay cannot renew or restore the grant");
+    }
+
+    #[test]
     fn valid_csrf_post_uses_url_namespace_and_replays_with_bounded_strict_json() {
         let f = Fixture::new();
         f.register_all();

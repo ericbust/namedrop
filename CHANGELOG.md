@@ -4,6 +4,10 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ## [1.5.0-exp.4] - 2026-11-02
 
+### Fixed
+
+- Review grants bind to the exact review request and committed message. Replaying a request cannot renew its grants or attach them to an unrelated operator message.
+
 ### Added
 
 - Handoff warnings in Channels say in plain words what happened and what to do next: blocked, cancelled, stuck, lost its lead, or finished without a delivered report. Details shows the saved report as Markdown.

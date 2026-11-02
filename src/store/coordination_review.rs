@@ -104,6 +104,42 @@ fn grant_entity(id: &CoordinationId, session: &AgentSessionId) -> String {
 }
 
 impl StateTransaction<'_> {
+    pub(crate) fn coordination_review_requested(
+        &self,
+        ns: &StateNamespace,
+        request_id: &str,
+    ) -> Result<bool, StoreError> {
+        Ok(self.transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM transition_facts
+             WHERE session_socket_id=?1 AND worktree_id=?2
+               AND entity_kind='coordination_review_request'
+               AND json_extract(entity_id, '$[0]')=?3)
+             OR EXISTS(SELECT 1 FROM collaboration_messages
+               WHERE session_socket_id=?1 AND worktree_id=?2
+                 AND author_address_id='operator:local' AND request_id=?3)",
+            params![ns.session_socket_id, ns.space_id.as_str(), request_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    /// Bind only after the review message committed, before its first drain.
+    pub fn bind_coordination_review_message(
+        &mut self,
+        ns: &StateNamespace,
+        request_id: &str,
+        message_id: &crate::MessageId,
+        operator: &OperatorSession,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.append_transition(
+            ns,
+            TransitionEntityKind::CoordinationReviewMessage,
+            &serde_json::json!([request_id, message_id.as_str()]).to_string(),
+            TransitionKind::Bound,
+            &MutationAttribution::new(ActorKind::Human, operator.actor_id(), now_ms),
+        )
+    }
+
     /// Every open coordination warning in the space, oldest first.
     pub fn coordination_warnings(
         &self,
@@ -152,6 +188,7 @@ impl StateTransaction<'_> {
         id: &CoordinationId,
         grantee: &PaneAddressId,
         operator: &OperatorSession,
+        request_id: &str,
         now_ms: u64,
     ) -> Result<(String, u64), StoreError> {
         let warned: bool = self.transaction.query_row(
@@ -188,12 +225,27 @@ impl StateTransaction<'_> {
             .ok_or_else(|| {
                 StoreError::invalid_input("the reviewer must be a live, registered agent")
             })?;
+        let entity = grant_entity(id, &session);
+        let by = MutationAttribution::new(ActorKind::Human, operator.actor_id(), now_ms);
         self.append_transition(
             ns,
             TransitionEntityKind::CoordinationReviewGrant,
-            &grant_entity(id, &session),
+            &entity,
             TransitionKind::Opened,
-            &MutationAttribution::new(ActorKind::Human, operator.actor_id(), now_ms),
+            &by,
+        )?;
+        let grant_order: i64 = self.transaction.query_row(
+            "SELECT MAX(worktree_order) FROM transition_facts
+             WHERE session_socket_id=?1 AND worktree_id=?2",
+            params![ns.session_socket_id, ns.space_id.as_str()],
+            |row| row.get(0),
+        )?;
+        self.append_transition(
+            ns,
+            TransitionEntityKind::CoordinationReviewRequest,
+            &serde_json::json!([request_id, grant_order]).to_string(),
+            TransitionKind::Created,
+            &by,
         )?;
         Ok((alias, now_ms + REVIEW_GRANT_TTL_MS))
     }
@@ -257,8 +309,7 @@ impl StateTransaction<'_> {
     }
 
     /// The coordinations whose grants the operator issued for this attempt's
-    /// exact session with the review message it delivers: an operator message
-    /// sent within a minute after the press, still unused, still warning.
+    /// exact session with this operator request, still unused, still warning.
     pub(crate) fn review_grants_for_attempt(
         &self,
         ns: &StateNamespace,
@@ -275,7 +326,16 @@ impl StateTransaction<'_> {
                AND f.entity_kind='coordination_review_grant'
                AND f.entity_id = i.source_id || ':' || a.agent_session_id
                AND f.transition_kind='opened' AND f.actor_kind='human'
-               AND f.occurred_at_ms BETWEEN m.created_at_ms - 60000 AND m.created_at_ms
+             JOIN transition_facts request ON request.session_socket_id=f.session_socket_id
+               AND request.worktree_id=f.worktree_id
+               AND request.entity_kind='coordination_review_request'
+               AND json_extract(request.entity_id, '$[0]')=m.request_id
+               AND json_extract(request.entity_id, '$[1]')=f.worktree_order
+             JOIN transition_facts bound ON bound.session_socket_id=f.session_socket_id
+               AND bound.worktree_id=f.worktree_id
+               AND bound.entity_kind='coordination_review_message'
+               AND json_extract(bound.entity_id, '$[0]')=m.request_id
+               AND json_extract(bound.entity_id, '$[1]')=m.message_id
              WHERE a.session_socket_id=?1 AND a.worktree_id=?2 AND a.attempt_id=?3
                AND m.author_kind='human'
                AND NOT EXISTS(SELECT 1 FROM transition_facts later

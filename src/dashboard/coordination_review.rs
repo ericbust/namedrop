@@ -40,6 +40,9 @@ pub(super) fn commit(
     operator: &OperatorSession,
     now_ms: u64,
 ) -> Result<ReviewDraft, ReviewError> {
+    if post.request_id.trim().is_empty() {
+        return Err(ReviewError::Refused("request_id is required.".to_owned()));
+    }
     if post.coordination_ids.is_empty() || post.coordination_ids.len() > MAX_ITEMS {
         return Err(ReviewError::Refused(format!(
             "Choose 1 to {MAX_ITEMS} handoffs to review."
@@ -59,6 +62,11 @@ pub(super) fn commit(
     let mut store = StateStore::open(state).map_err(|_| ReviewError::Unavailable)?;
     let (alias, items, expires_at_ms) = store
         .transaction(|tx| {
+            if tx.coordination_review_requested(&namespace, &post.request_id)? {
+                return Err(crate::StoreError::invalid_input(
+                    "This review request was already submitted. Press Ask to review again for a new review.",
+                ));
+            }
             let items: Vec<CoordinationWarning> = tx
                 .coordination_warnings(&namespace)?
                 .into_iter()
@@ -80,6 +88,7 @@ pub(super) fn commit(
                     &item.coordination_id,
                     &reviewer,
                     operator,
+                    &post.request_id,
                     now_ms,
                 )?;
             }
