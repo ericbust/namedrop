@@ -49,8 +49,8 @@ function blockShape(block: Block): Shape {
     case "table":
       return [
         `table:${block.align.join(",")}`,
-        block.head.cells.map(inline),
-        block.rows.map((row) => row.cells.map(inline)),
+        block.head.cells.map((cell) => inline(cell.inlines)),
+        block.rows.map((row) => row.cells.map((cell) => inline(cell.inlines))),
       ];
   }
 }
@@ -71,9 +71,30 @@ function texts(blocks: readonly Block[]): Leaf[] {
       for (const item of block.items) out.push(...texts(item.blocks));
     else if (block.kind === "quote") out.push(...texts(block.blocks));
     else if (block.kind === "table")
-      for (const row of [block.head, ...block.rows]) row.cells.forEach(walk);
+      for (const row of [block.head, ...block.rows])
+        for (const cell of row.cells) walk(cell.inlines);
   }
   return out;
+}
+function tables(blocks: readonly Block[]): Extract<Block, { kind: "table" }>[] {
+  return blocks.flatMap((block) =>
+    block.kind === "table"
+      ? [block]
+      : block.kind === "list"
+        ? block.items.flatMap((item) => tables(item.blocks))
+        : block.kind === "quote"
+          ? tables(block.blocks)
+          : [],
+  );
+}
+function cellCount(blocks: readonly Block[]): number {
+  return tables(blocks).reduce(
+    (sum, table) =>
+      sum +
+      table.head.cells.length +
+      table.rows.reduce((count, row) => count + row.cells.length, 0),
+    0,
+  );
 }
 function depth(blocks: readonly Block[]): number {
   let deepest = 0;
@@ -255,7 +276,7 @@ test("tables with alignment, escaped pipes and ragged rows", () => {
         "table:left,right,center",
         ["Name", "Count", "Note"],
         [
-          ["<code>a|b</code>", "<b>2</b>", ""],
+          ["<code>a|b</code>", "<b>2</b>"],
           ["c", "3", "x"],
         ],
       ],
@@ -269,6 +290,77 @@ test("tables with alignment, escaped pipes and ragged rows", () => {
     ["p", "Intro"],
     ["table:,", ["a", "b"], [["1", "2"]]],
   ]);
+  for (const rule of [
+    "|---|---|",
+    "| :-- | --: |",
+    " |-|-| ",
+    "|:-:|:-:|\r",
+    "---|---",
+    "\t-\t|\t-",
+  ])
+    assert.equal(parseMarkdown(`a|b\n${rule}`)[0]?.kind, "table", rule);
+  const rejected: [string, string][] = [
+    ["a", "|"],
+    ["a|b|c", "|---||---|"],
+    ["a|b", "|---|---\\|"],
+    ["a|b", "| : | - |"],
+    ["a|b", "|-- x|--|"],
+    ["a|b", "|---|"],
+  ];
+  for (const [head, rule] of rejected)
+    assert.equal(parseMarkdown(`${head}\n${rule}`)[0]?.kind, "paragraph", rule);
+});
+
+test("a table stops at 64 columns and 16384 cells, and never pads a row", () => {
+  const row = (width: number) => `|${" x |".repeat(width)}`;
+  const rule = (width: number) => `|${"-|".repeat(width)}`;
+  assert.deepEqual(
+    parseMarkdown(`${row(65)}\n${rule(65)}\n${row(65)}`).map((b) => b.kind),
+    ["paragraph"],
+  );
+  const full = parseMarkdown(
+    [row(64), rule(64), ...Array(300).fill(row(64))].join("\n"),
+  );
+  const [table, rest] = full;
+  assert.equal(table?.kind, "table");
+  assert.equal(rest?.kind, "paragraph");
+  if (table?.kind !== "table") return;
+  assert.equal(table.head.cells.length, 64);
+  assert.equal(table.rows.length, 255);
+  assert.equal(cellCount(full), 16_384);
+  assert.deepEqual(md("| a | b | c |\n|-|-|-|\n|\n| 1 |\n| 1 | 2 | 3 | 4 |"), [
+    ["table:,,", ["a", "b", "c"], [[""], ["1"], ["1", "2", "3"]]],
+  ]);
+});
+
+test("the review's slow inputs parse in one bounded batch", () => {
+  const W = 4000;
+  const R = 8000;
+  const bare = `${"|".repeat(W + 1)}\n${"|-".repeat(W)}|\n${"|\n".repeat(R)}`;
+  const full = `|${" x |".repeat(64)}`;
+  const inputs = [
+    bare,
+    [full, `|${"-|".repeat(64)}`, ...Array(R).fill(full)].join("\n"),
+    `a|b\n${" ".repeat(80_000)}|x`,
+    `a|b\n|-${" ".repeat(80_000)}x`,
+    `https://a${".".repeat(80_000)}b`,
+  ];
+  const started = performance.now();
+  const parsed = inputs.map((source) => parseMarkdown(source));
+  const spent = performance.now() - started;
+  assert.ok(spent < 300, `parsing took ${spent}ms`);
+  for (const blocks of parsed) {
+    for (const table of tables(blocks))
+      assert.ok(table.head.cells.length <= 64, "column cap");
+    assert.ok(cellCount(blocks) <= 16_384, "cell budget");
+  }
+  const [url] = parsed[4] ?? [];
+  assert.equal(url?.kind, "paragraph");
+  if (url?.kind !== "paragraph") return;
+  assert.deepEqual(
+    url.inlines.map((node) => node.kind),
+    ["link"],
+  );
 });
 
 test("links follow the http and https rule and never become images", () => {
@@ -335,6 +427,21 @@ test("a 500 by 30 table parses whole", () => {
   assert.equal(table.head.cells.length, 30);
   assert.equal(table.rows.length, 500);
   assert.ok(table.rows.every((cells) => cells.cells.length === 30));
+});
+
+test("bare URLs drop trailing punctuation the same way at any length", () => {
+  assert.deepEqual(md("https://a.test/x.). done"), [
+    ["p", "<a https://a.test/x>https://a.test/x</a>.). done"],
+  ]);
+  assert.deepEqual(md("https://a.test/?q=1_*"), [
+    ["p", "<a https://a.test/?q=1>https://a.test/?q=1</a>_*"],
+  ]);
+  assert.deepEqual(md("see https://a.test/x_, and https://b.test/y!"), [
+    [
+      "p",
+      "see <a https://a.test/x>https://a.test/x</a>_, and <a https://b.test/y>https://b.test/y</a>!",
+    ],
+  ]);
 });
 
 test("cutting at a source offset keeps whole elements", () => {

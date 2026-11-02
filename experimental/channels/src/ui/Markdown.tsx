@@ -5,6 +5,7 @@ import {
   cutBlocks,
   type Inline,
   parseMarkdown,
+  type TableCell,
 } from "../markdown.ts";
 
 // The server reads "\@name" as a reference that wakes no one, so the reader sees just the name.
@@ -114,15 +115,14 @@ function Cells({
   align,
   head = false,
 }: {
-  cells: readonly (readonly Inline[])[];
+  cells: readonly TableCell[];
   align: readonly Align[];
   head?: boolean;
 }) {
   const Cell = head ? "th" : "td";
   return cells.map((cell, column) => (
-    // biome-ignore lint/suspicious/noArrayIndexKey: columns are positional and never reorder.
-    <Cell key={column} data-align={align[column] ?? undefined}>
-      {inlines(cell, true)}
+    <Cell key={cell.from} data-align={align[column] ?? undefined}>
+      {inlines(cell.inlines, true)}
     </Cell>
   ));
 }
@@ -190,7 +190,7 @@ function flatInline(block: Block, links: boolean): ReactNode[] {
         index > 0 ? "\n" : null,
         ...row.cells.flatMap((cell, column) => [
           column > 0 ? " | " : null,
-          ...inlines(cell, links),
+          ...inlines(cell.inlines, links),
         ]),
       ]);
   }

@@ -11,9 +11,8 @@ export type Inline =
     });
 export type CodeLine = Range & { readonly text: string };
 export type ListItem = Range & { readonly blocks: readonly Block[] };
-export type TableRow = Range & {
-  readonly cells: readonly (readonly Inline[])[];
-};
+export type TableCell = Range & { readonly inlines: readonly Inline[] };
+export type TableRow = Range & { readonly cells: readonly TableCell[] };
 export type Align = "left" | "center" | "right" | null;
 export type Block =
   | (Range & {
@@ -56,14 +55,17 @@ type Token = Inline | Delim;
 
 const MAX_DEPTH = 8;
 const MAX_DESTINATION = 1024;
+// A table wider than a timeline can show is text, and one table's cells stop
+// at 64 columns by 256 rows so a message never grows past one screenful of DOM.
+const MAX_COLUMNS = 64;
+const MAX_CELLS = 16_384;
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const QUOTE = /^ {0,3}> ?/;
 const MARKER = /^( {0,3})([-+*]|\d{1,9}[.)])(?=[ \t]|$)/;
-const DELIMITER_ROW =
-  /^[ \t]*\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t\r]*$/;
+const DELIMITER_CELL = /^:?-+:?$/;
 const BLANK = /^[ \t\r]*$/;
 const BARE_URL = /https?:\/\/[^\s<>"']+/y;
-const URL_TRAIL = /[.,;!?)*_]+$/;
+const URL_TRAIL = new Set([".", ",", ";", "!", "?", ")", "*", "_"]);
 const SAFE_HREF = /^https?:\/\//;
 const ESCAPABLE = new Set(["*", "_", "`", "[", "]", "|", "#"]);
 const SPACE = /\s/;
@@ -179,6 +181,10 @@ export function parseMarkdown(source: string): Block[] {
     }
     return out;
   };
+  const delimiterRow = (line: Line) => {
+    const pieces = cells(line);
+    return pieces.every((piece) => DELIMITER_CELL.test(text(piece)));
+  };
   const tableAt = (lines: readonly Line[], at: number) => {
     const head = lines[at];
     const rule = lines[at + 1];
@@ -187,12 +193,14 @@ export function parseMarkdown(source: string): Block[] {
       !rule ||
       !text(head).includes("|") ||
       !text(rule).includes("|") ||
-      !DELIMITER_ROW.test(text(rule))
+      !delimiterRow(rule)
     )
       return null;
     const columns = cells(head);
     const rules = cells(rule);
-    return columns.length === rules.length ? { columns, rules } : null;
+    return columns.length === rules.length && columns.length <= MAX_COLUMNS
+      ? { columns, rules }
+      : null;
   };
   const interrupts = (lines: readonly Line[], at: number, depth: number) => {
     const line = lines[at];
@@ -350,20 +358,25 @@ export function parseMarkdown(source: string): Block[] {
     if (!found) return null;
     const width = found.columns.length;
     const row = (line: Line, pieces: readonly Line[]): TableRow => ({
-      cells: Array.from({ length: width }, (_, column) => {
-        const piece = pieces[column];
-        return piece ? inlines([piece], true) : [];
-      }),
+      cells: pieces.slice(0, width).map((piece) => ({
+        inlines: inlines([piece], true),
+        from: piece.start,
+        to: piece.end,
+      })),
       from: line.start,
       to: line.end,
     });
     const head = lines[at] as Line;
     const rows: TableRow[] = [];
+    let budget = MAX_CELLS - width;
     let next = at + 2;
     for (; next < lines.length; next++) {
       const line = lines[next] as Line;
       if (blank(line) || !text(line).includes("|")) break;
-      rows.push(row(line, cells(line)));
+      const pieces = cells(line).slice(0, width);
+      if (pieces.length > budget) break;
+      budget -= pieces.length;
+      rows.push(row(line, pieces));
     }
     return [
       {
@@ -661,9 +674,10 @@ function parseInlines(
       ) {
         BARE_URL.lastIndex = at;
         const found = BARE_URL.exec(joined);
-        const href = (found?.[0] ?? "")
-          .slice(0, end - at)
-          .replace(URL_TRAIL, "");
+        let length = Math.min(found?.[0].length ?? 0, end - at);
+        while (length > 0 && URL_TRAIL.has(joined[at + length - 1] as string))
+          length--;
+        const href = joined.slice(at, at + length);
         if (href.length === 0) {
           at++;
           continue;
@@ -783,14 +797,14 @@ function cutBlock(block: Block, limit: number): Block | null {
     case "quote":
       return { ...block, blocks: cutBlocks(block.blocks, limit), to: limit };
     case "table": {
+      const cell = (value: TableCell): TableCell =>
+        value.to <= limit
+          ? value
+          : { ...value, inlines: cutInlines(value.inlines, limit), to: limit };
       const row = (value: TableRow): TableRow =>
         value.to <= limit
           ? value
-          : {
-              ...value,
-              cells: value.cells.map((cell) => cutInlines(cell, limit)),
-              to: limit,
-            };
+          : { ...value, cells: value.cells.map(cell), to: limit };
       return {
         ...block,
         head: row(block.head),
