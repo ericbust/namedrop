@@ -189,6 +189,11 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
             .alias,
         "reviewer"
     );
+    let expected_spool = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("deferred-commands");
     let config_path = codex_home.join("config.toml");
     let granted = fs::read_to_string(&config_path).unwrap();
     let config = granted.parse::<toml_edit::DocumentMut>().unwrap();
@@ -199,7 +204,7 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec![directory.path().join("deferred-commands").to_str().unwrap()]
+        vec![expected_spool.to_str().unwrap()]
     );
     assert!(!directory.home().join(".codex/config.toml").exists());
     fs::write(&config_path, "model = 'user-model'\n").unwrap();
@@ -228,7 +233,7 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
             .unwrap();
     assert_eq!(
         repaired["codex_sandbox"]["writable_root"],
-        directory.path().join("deferred-commands").to_str().unwrap()
+        expected_spool.to_str().unwrap()
     );
     assert!(
         repaired["codex_sandbox"]["guidance"]
