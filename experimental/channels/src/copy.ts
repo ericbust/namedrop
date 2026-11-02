@@ -570,6 +570,14 @@ export const emptyChannelCopy = {
   title: "No messages yet",
   body: "Post here to talk with the agents in this workspace. Mention @name to bring one in.",
 };
+// A workspace where Namedrop was never turned on has no agents to post to.
+// Naming one there turns it on, so the empty channel says how.
+export const notActivatedCopy = {
+  title: "No agents here yet",
+  body: "Name an agent in this workspace to start using it here. In the agent's pane, run",
+  command: "namedrop name @alias",
+  composer: "Name an agent in this workspace to post here.",
+};
 
 export const SHOWN_RECIPIENTS = 2;
 export function overflowCopy(hidden: number): string {

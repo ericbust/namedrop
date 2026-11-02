@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { composerCopy, emptyChannelCopy } from "../copy.ts";
+import { composerCopy, emptyChannelCopy, notActivatedCopy } from "../copy.ts";
 import { idle } from "../delivery.ts";
 import type { Channel, Directory, Outgoing, SpaceKey } from "../model.ts";
 import { answered, chatOf } from "../route.ts";
@@ -238,13 +238,23 @@ export function Timeline({
           <span>Beginning of channel</span>
         ) : null}
       </div>
-      {channel.messages.size === 0 && (
-        <div className="empty">
-          <Icon name="inbox" />
-          <h2>{emptyChannelCopy.title}</h2>
-          <p>{emptyChannelCopy.body}</p>
-        </div>
-      )}
+      {channel.messages.size === 0 &&
+        (channel.notAddressableReason === "not_activated" ? (
+          <div className="empty">
+            <Icon name="inbox" />
+            <h2>{notActivatedCopy.title}</h2>
+            <p>
+              {notActivatedCopy.body}{" "}
+              <code className="inline">{notActivatedCopy.command}</code>.
+            </p>
+          </div>
+        ) : (
+          <div className="empty">
+            <Icon name="inbox" />
+            <h2>{emptyChannelCopy.title}</h2>
+            <p>{emptyChannelCopy.body}</p>
+          </div>
+        ))}
       {rows.map((row, index) => {
         switch (row.kind) {
           case "day":
