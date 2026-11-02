@@ -7,6 +7,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 ### Added
 
 - Channels group workspaces by repository in the sidebar. The server sends each space a repository id and name, never a path.
+- Show more loads a shortened message's whole body, up to 64 Ki characters, from the authenticated `GET /w/<key>/messages/<id>/body`, with the same redaction as frames. Every message offers Reply in thread, which answers that message and keeps it as the target until the reply is sent.
 
 ### Fixed
 
