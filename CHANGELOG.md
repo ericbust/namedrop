@@ -2,7 +2,9 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
-## Unreleased
+## [1.5.0-exp.1] - 2026-11-02
+
+Experimental build for testers on the `exp/channels-ship` branch. Install from that branch to try Channels before a main release.
 
 ### Fixed
 
@@ -16,6 +18,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Added
 
+- The Channels app opens from the workspace action **Open Namedrop Channels** or `namedrop dashboard`. Installed builds include the app, so using it does not require Node or npm.
 - Dashboard channels accept plain top-level posts. An isolated small-model router parses embedded mentions and chooses only the members addressed, without changing the text. Posts without known mentions make no model call. Plain operator thread follow-ups reach the thread's agents, while terminals need an explicit leading mention. Channel replies can wake local agents through embedded mentions, with bounded context and the existing reply allowance. Set `NAMEDROP_CHANNEL_ROUTER=off` to keep plain root posts unrouted. Routing explanations use a dashboard sidecar so the ledger stays at schema 6.
 - Channels attention items link to their conversations and offer a prefilled response or a named pane to inspect. Historical conversation links load their target directly, including requests outside the live message window.
 - The dashboard serves sanitized recent pane output at authenticated `GET /w/<key>/participants/<address_id>/screen` for agents and terminals. Concurrent requests for one pane share a bounded Herdr read. Retired or closed panes return 410.
