@@ -1,12 +1,31 @@
 import {
+  type DragEvent,
   type KeyboardEvent,
   type RefObject,
   useEffect,
+  useId,
   useLayoutEffect,
   useRef,
+  useState,
 } from "react";
-import { activityCopy, attentionCopy, composerCopy } from "../copy.ts";
+import {
+  activityCopy,
+  attentionCopy,
+  composerCopy,
+  sidebarCopy,
+} from "../copy.ts";
 import type { Channel, SpaceKey, State } from "../model.ts";
+import {
+  type Group,
+  type GroupKey,
+  groupChannels,
+  type Layout,
+  loadLayout,
+  moveChannel,
+  moveGroup,
+  saveLayout,
+  toggleCollapsed,
+} from "../sidebar-layout.ts";
 import { channelSuffix, connectionStatus, sortedChannels } from "../store.ts";
 import { routePath } from "../wire.ts";
 import { Icon } from "./Icons.tsx";
@@ -41,7 +60,18 @@ type Props = {
   toggleFocusLost: RefObject<boolean>;
   onSelect: (key: SpaceKey) => void;
   onActivity: () => void;
+  onAnnounce: (words: string) => void;
 };
+// Reading the global inside each call keeps a blocked or absent localStorage
+// inside loadLayout's and saveLayout's guards.
+const pageStorage = {
+  getItem: (name: string) => localStorage.getItem(name),
+  setItem: (name: string, value: string) => localStorage.setItem(name, value),
+};
+type Dragging =
+  | { kind: "group"; key: GroupKey }
+  | { kind: "channel"; key: SpaceKey; group: GroupKey };
+type Drop = { kind: Dragging["kind"]; key: string; after: boolean };
 export function Sidebar({
   state,
   busy,
@@ -50,8 +80,13 @@ export function Sidebar({
   toggleFocusLost,
   onSelect,
   onActivity,
+  onAnnounce,
 }: Props) {
   const sidebar = useRef<HTMLElement>(null);
+  const baseId = useId();
+  const [layout, setLayout] = useState(() => loadLayout(pageStorage));
+  const dragging = useRef<Dragging | null>(null);
+  const [drop, setDrop] = useState<Drop | null>(null);
   const focusedRow = useRef<HTMLButtonElement | null>(null);
   const hiddenWithFocus = useRef(false);
   const connection = connectionStatus(state);
@@ -117,7 +152,7 @@ export function Sidebar({
   function move(event: KeyboardEvent<HTMLElement>) {
     const buttons = [
       ...event.currentTarget.querySelectorAll<HTMLButtonElement>(
-        "button[data-channel-key]",
+        "button[data-channel-key], button[data-group-key]",
       ),
     ];
     const active = document.activeElement;
@@ -143,7 +178,8 @@ export function Sidebar({
     event.preventDefault();
     target?.focus();
     // In the drawer, choosing a channel closes it, so arrows only move.
-    if (drawer === null) target?.click();
+    if (drawer === null && target?.hasAttribute("data-channel-key"))
+      target.click();
   }
   function tabKey(items: Channel[]) {
     return items.some((channel) => channel.key === state.selection.key)
@@ -160,7 +196,202 @@ export function Sidebar({
     );
   }
   const needsYouTab = tabKey(needsYou);
-  const channelsTab = tabKey(channels);
+  const groups = groupChannels(channels, layout, state.unread);
+  // A server without repos puts every channel in Other, and then a lone
+  // Other header would only add a click, so the list stays flat.
+  const grouped = groups.some((group) => group.key !== "other");
+  const collapsed = new Set(layout.collapsed);
+  // A collapsed group keeps the selected channel's row, so the current row
+  // stays where focus and aria-current expect it.
+  function shown(group: Group): Channel[] {
+    return grouped && collapsed.has(group.key)
+      ? group.channels.filter((channel) => channel.key === state.selection.key)
+      : group.channels;
+  }
+  const stops = groups.flatMap((group) => [
+    ...(grouped ? [`group:${group.key}`] : []),
+    ...shown(group).map((channel) => `channel:${channel.key}`),
+  ]);
+  const tabStop = stops.includes(`channel:${state.selection.key}`)
+    ? `channel:${state.selection.key}`
+    : stops[0];
+  function arrange(next: Layout) {
+    setLayout(next);
+    saveLayout(pageStorage, next);
+  }
+  function shiftGroup(key: GroupKey, to: number) {
+    const from = groups.findIndex((group) => group.key === key);
+    const group = groups[from];
+    if (group === undefined || to < 0 || to >= groups.length || to === from)
+      return;
+    arrange(moveGroup(layout, groups, key, to));
+    onAnnounce(sidebarCopy.movedGroup(group.name, to + 1, groups.length));
+  }
+  function shiftChannel(key: SpaceKey, to: number) {
+    const group = groups.find((each) =>
+      each.channels.some((channel) => channel.key === key),
+    );
+    if (group === undefined) return;
+    const from = group.channels.findIndex((channel) => channel.key === key);
+    const channel = group.channels[from];
+    if (
+      channel === undefined ||
+      to < 0 ||
+      to >= group.channels.length ||
+      to === from
+    )
+      return;
+    arrange(moveChannel(layout, groups, key, to));
+    onAnnounce(
+      sidebarCopy.movedChannel(
+        channel.displayName,
+        to + 1,
+        group.channels.length,
+        grouped ? group.name : null,
+      ),
+    );
+  }
+  function arrangeKey(event: KeyboardEvent<HTMLElement>): boolean {
+    const target = event.target as HTMLElement;
+    const groupKey = target.dataset.groupKey as GroupKey | undefined;
+    const channelKey = target.dataset.channelKey as SpaceKey | undefined;
+    if (groupKey !== undefined && !event.altKey) {
+      const closed = collapsed.has(groupKey);
+      if (
+        (event.key === "ArrowLeft" && !closed) ||
+        (event.key === "ArrowRight" && closed)
+      )
+        arrange(toggleCollapsed(layout, groupKey));
+      else if (event.key !== "ArrowLeft" && event.key !== "ArrowRight")
+        return false;
+      event.preventDefault();
+      return true;
+    }
+    if (!event.altKey || (event.key !== "ArrowUp" && event.key !== "ArrowDown"))
+      return false;
+    event.preventDefault();
+    const step = event.key === "ArrowUp" ? -1 : 1;
+    if (groupKey !== undefined)
+      shiftGroup(
+        groupKey,
+        groups.findIndex((group) => group.key === groupKey) + step,
+      );
+    else if (channelKey !== undefined) {
+      const group = groups.find((each) =>
+        each.channels.some((channel) => channel.key === channelKey),
+      );
+      const at =
+        group?.channels.findIndex((channel) => channel.key === channelKey) ??
+        -1;
+      shiftChannel(channelKey, at + step);
+    }
+    return true;
+  }
+  function over(
+    event: DragEvent<HTMLElement>,
+    kind: Drop["kind"],
+    key: string,
+  ) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    const box = event.currentTarget.getBoundingClientRect();
+    const after = event.clientY > box.top + box.height / 2;
+    if (drop?.kind !== kind || drop.key !== key || drop.after !== after)
+      setDrop({ kind, key, after });
+  }
+  function dropped() {
+    const from = dragging.current;
+    if (drop !== null && from !== null && drop.kind === from.kind) {
+      const order =
+        from.kind === "group"
+          ? groups.map((group) => group.key as string)
+          : (groups
+              .find((group) => group.key === from.group)
+              ?.channels.map((channel) => channel.key as string) ?? []);
+      const at = order.indexOf(from.key);
+      let to = order.indexOf(drop.key) + (drop.after ? 1 : 0);
+      if (at < to) to -= 1;
+      if (from.kind === "group") shiftGroup(from.key, to);
+      else shiftChannel(from.key, to);
+    }
+    endDrag();
+  }
+  function endDrag() {
+    dragging.current = null;
+    setDrop(null);
+  }
+  function dropClass(kind: Drop["kind"], key: string): string {
+    if (drop?.kind !== kind || drop.key !== key) return "";
+    return drop.after ? " drop-after" : " drop-before";
+  }
+  function row(channel: Channel, group: Group) {
+    const unread = state.unread.has(channel.key);
+    return (
+      <li
+        key={channel.key}
+        className={`channel-row${dropClass("channel", channel.key)}`}
+        draggable
+        onDragStart={(event) => {
+          event.stopPropagation();
+          dragging.current = {
+            kind: "channel",
+            key: channel.key,
+            group: group.key,
+          };
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", channel.displayName);
+        }}
+        onDragOver={(event) => {
+          const from = dragging.current;
+          if (from?.kind !== "channel" || from.group !== group.key) return;
+          event.stopPropagation();
+          over(event, "channel", channel.key);
+        }}
+        onDrop={(event) => {
+          const from = dragging.current;
+          if (from?.kind !== "channel" || from.group !== group.key) return;
+          event.preventDefault();
+          event.stopPropagation();
+          dropped();
+        }}
+        onDragEnd={endDrag}
+      >
+        <button
+          type="button"
+          className={`row${unread ? " unread" : ""}`}
+          data-channel-key={channel.key}
+          aria-current={
+            state.selection.key === channel.key ? "page" : undefined
+          }
+          tabIndex={tabStop === `channel:${channel.key}` ? 0 : -1}
+          onClick={() => onSelect(channel.key)}
+        >
+          <Icon name="hash" className="hash" />
+          {name(channel)}
+          {notSent.has(channel.key) && (
+            <span
+              className="row-failed"
+              role="img"
+              aria-label={composerCopy.postNotSent}
+            >
+              <Icon name="alert" className="icon-14" />
+            </span>
+          )}
+          {channel.health.level === "needs_you" ? (
+            <span className="dot dot-alert" role="img" aria-label="Needs you" />
+          ) : (
+            unread && (
+              <span
+                className="dot dot-unread"
+                role="img"
+                aria-label={sidebarCopy.unread}
+              />
+            )
+          )}
+        </button>
+      </li>
+    );
+  }
   return (
     // biome-ignore lint/a11y/useAriaPropsSupportedByRole: aria-modal is set only while the role is dialog.
     <aside
@@ -258,7 +489,13 @@ export function Sidebar({
         <nav
           aria-label="Channel list"
           className="nav-section channels-navigation"
-          onKeyDown={move}
+          onKeyDown={(event) => {
+            if (!arrangeKey(event)) move(event);
+          }}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node))
+              setDrop(null);
+          }}
         >
           <p className="nav-label">
             Channels<span className="count">{channels.length}</span>
@@ -269,52 +506,76 @@ export function Sidebar({
               <div className="skeleton-row" />
               <div className="skeleton-row" />
             </div>
-          ) : (
-            <ul>
-              {channels.map((channel) => {
-                const unread = state.unread.has(channel.key);
+          ) : grouped ? (
+            <ul className="channel-groups">
+              {groups.map((group, index) => {
+                const closed = collapsed.has(group.key);
+                const list = `${baseId}-group-${index}`;
                 return (
-                  <li key={channel.key}>
+                  <li
+                    key={group.key}
+                    className={`channel-group${dropClass("group", group.key)}`}
+                    draggable
+                    onDragStart={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      dragging.current = { kind: "group", key: group.key };
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", group.name);
+                    }}
+                    onDragOver={(event) => {
+                      if (dragging.current?.kind !== "group") return;
+                      over(event, "group", group.key);
+                    }}
+                    onDrop={(event) => {
+                      if (dragging.current?.kind !== "group") return;
+                      event.preventDefault();
+                      dropped();
+                    }}
+                    onDragEnd={endDrag}
+                  >
                     <button
                       type="button"
-                      className={`row${unread ? " unread" : ""}`}
-                      data-channel-key={channel.key}
-                      aria-current={
-                        state.selection.key === channel.key ? "page" : undefined
+                      className="group-header"
+                      data-group-key={group.key}
+                      aria-expanded={!closed}
+                      aria-controls={list}
+                      tabIndex={tabStop === `group:${group.key}` ? 0 : -1}
+                      onClick={() =>
+                        arrange(toggleCollapsed(layout, group.key))
                       }
-                      tabIndex={channelsTab === channel.key ? 0 : -1}
-                      onClick={() => onSelect(channel.key)}
                     >
-                      <Icon name="hash" className="hash" />
-                      {name(channel)}
-                      {notSent.has(channel.key) && (
-                        <span
-                          className="row-failed"
-                          role="img"
-                          aria-label={composerCopy.postNotSent}
-                        >
-                          <Icon name="alert" className="icon-14" />
-                        </span>
-                      )}
-                      {channel.health.level === "needs_you" ? (
-                        <span
-                          className="dot dot-alert"
-                          role="img"
-                          aria-label="Needs you"
-                        />
-                      ) : (
-                        unread && (
+                      <Icon name="chevron" className="chevron" />
+                      <span className="group-name">{group.name}</span>
+                      {closed &&
+                        (group.needsYou > 0 ? (
                           <span
-                            className="dot dot-unread"
+                            className="dot dot-alert"
                             role="img"
-                            aria-label="Unread activity"
+                            aria-label={sidebarCopy.needYou(group.needsYou)}
                           />
-                        )
-                      )}
+                        ) : (
+                          group.unread && (
+                            <span
+                              className="dot dot-unread"
+                              role="img"
+                              aria-label={sidebarCopy.unread}
+                            />
+                          )
+                        ))}
+                      <span className="count">{group.channels.length}</span>
                     </button>
+                    <ul id={list}>
+                      {shown(group).map((channel) => row(channel, group))}
+                    </ul>
                   </li>
                 );
               })}
+            </ul>
+          ) : (
+            <ul>
+              {groups.flatMap((group) =>
+                group.channels.map((channel) => row(channel, group)),
+              )}
             </ul>
           )}
         </nav>

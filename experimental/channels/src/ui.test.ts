@@ -86,6 +86,7 @@ test("item 1: rendered display names never invent mentions and exact tokens stay
         toggleFocusLost: { current: false },
         onSelect() {},
         onActivity() {},
+        onAnnounce() {},
       }),
     );
     assert.equal(
@@ -137,6 +138,7 @@ test("a channel whose post was refused while the reader was elsewhere shows the 
         toggleFocusLost: { current: false },
         onSelect() {},
         onActivity() {},
+        onAnnounce() {},
       }),
     );
   assert.equal((render(sending).match(marker) ?? []).length, 0);
@@ -187,6 +189,7 @@ test("item 6: paused and inactive channels with attention have no Needs you shor
         toggleFocusLost: { current: false },
         onSelect() {},
         onActivity() {},
+        onAnnounce() {},
       }),
     );
     const header = renderToStaticMarkup(

@@ -115,12 +115,28 @@ function measuredReduce(state: State, event: Event): State {
 // Two polite regions take turns: each new change goes into the empty one and
 // the other is cleared, so a change in the same words as the last, such as
 // "Sent to @codex" for another post, is still a fresh insertion to speak.
-function Announcer({ change }: { change: Change | null }) {
-  const [said, setSaid] = useState({ change, first: true });
-  if (said.change !== change) setSaid({ change, first: !said.first });
-  const words =
-    change &&
-    routeCopy.delivery.announce[change.state.kind](change.offer.alias);
+// A sidebar move is its own object for the same reason.
+function Announcer({
+  change,
+  move,
+}: {
+  change: Change | null;
+  move: { words: string } | null;
+}) {
+  const [said, setSaid] = useState({
+    change,
+    move,
+    words: deliveryWords(change),
+    first: true,
+  });
+  if (said.change !== change || said.move !== move)
+    setSaid({
+      change,
+      move,
+      words: said.move !== move ? (move?.words ?? null) : deliveryWords(change),
+      first: !said.first,
+    });
+  const words = said.words;
   return (
     <>
       <p className="sr-only" aria-live="polite">
@@ -130,6 +146,11 @@ function Announcer({ change }: { change: Change | null }) {
         {said.first ? null : words}
       </p>
     </>
+  );
+}
+function deliveryWords(change: Change | null): string | null {
+  return (
+    change && routeCopy.delivery.announce[change.state.kind](change.offer.alias)
   );
 }
 export function App() {
@@ -744,6 +765,7 @@ export function App() {
     deliveries.subscribe,
     deliveries.latest,
   );
+  const [moveSaid, setMoveSaid] = useState<{ words: string } | null>(null);
   useEffect(
     () => deliveries.settle(state.channels),
     [deliveries, state.channels],
@@ -942,6 +964,7 @@ export function App() {
               showActivity();
               if (drawerOpen) closeDrawer();
             }}
+            onAnnounce={(words) => setMoveSaid({ words })}
           />
           {drawerOpen && (
             <div
@@ -1204,7 +1227,7 @@ export function App() {
               onClose={closePeek}
             />
           )}
-          <Announcer change={deliveryChange} />
+          <Announcer change={deliveryChange} move={moveSaid} />
         </div>
       </DeliveryContext>
     </PeekContext>
