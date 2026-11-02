@@ -30,6 +30,7 @@ export type IconName =
   | "bell"
   | "cancelled"
   | "check"
+  | "chevron"
   | "clock"
   | "done"
   | "hash"
@@ -397,9 +398,13 @@ export const pendingCopy = {
 const couldNotSend = "Namedrop couldn't send this. Try again.";
 const sessionExpired = () =>
   "Your session expired. Reload the page to keep posting.";
+// The server's refusal when a post names no one it can reach.
+const missingRecipients =
+  "message must begin with one or more recipient Mentions";
 function serverSays(message: string): string {
   const text = message.trim();
   if (!text) return couldNotSend;
+  if (text === missingRecipients) return composerCopy.needsRecipient;
   const sentence = `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
   return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
 }
@@ -422,6 +427,15 @@ function shortList(names: readonly string[]): string {
     ? `${shown} ${overflowCopy(names.length - SHOWN_RECIPIENTS)}`
     : shown;
 }
+export const bodyCopy = {
+  shortened: "Shortened by Namedrop.",
+  unavailable: "Couldn't load the rest of this message. Try again.",
+};
+export const replyInThreadCopy = {
+  label: "Reply in thread",
+  replyingTo: (name: string) => `Replying to ${name}`,
+  latest: "Reply to the latest message instead",
+};
 export const composerCopy = {
   hint: "Enter to send · Shift+Enter for a new line",
   toRoom: "Enter posts to the channel · Mention @name to bring someone in",
@@ -644,6 +658,20 @@ export const activityCopy = {
   groups: Record<ActivityGroupKind, string>;
   counted: Record<ActivityGroupKind, string>;
   [copy: string]: unknown;
+};
+export const sidebarCopy = {
+  other: "Other",
+  needYou: (count: number) => (count === 1 ? "Needs you" : `${count} need you`),
+  unread: "Unread activity",
+  movedGroup: (name: string, position: number, total: number) =>
+    `Moved ${name} to position ${position} of ${total}`,
+  movedChannel: (
+    name: string,
+    position: number,
+    total: number,
+    group: string | null,
+  ) =>
+    `Moved ${name} to position ${position} of ${total}${group === null ? "" : ` in ${group}`}`,
 };
 export const peekCopy = {
   label: (alias: string) => `Screen of ${alias}`,

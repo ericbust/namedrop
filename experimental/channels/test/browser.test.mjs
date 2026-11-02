@@ -33,7 +33,7 @@ function message(message_id, text = message_id, extra = {}) {
     ...extra,
   };
 }
-function frame(n, name, level = "calm") {
+function frame(n, name, level = "calm", repo = undefined) {
   const value = structuredClone(fixture);
   value.key = key(n);
   value.frame.space = {
@@ -43,6 +43,7 @@ function frame(n, name, level = "calm") {
     display_name: name,
     addressable_label: name,
     not_addressable_reason: null,
+    ...(repo === undefined ? {} : { repo }),
   };
   value.frame.health = level === "needs_you" ? { level, items: 1 } : { level };
   return value;
@@ -294,6 +295,7 @@ async function open(
     onContext = null,
     onControl = () => ({ status: 200 }),
     onDeliver = () => ({ status: 200 }),
+    onBody = null,
     observeLanding = false,
   } = {},
 ) {
@@ -302,6 +304,7 @@ async function open(
   const errors = [];
   const historyRequests = [];
   const contextRequests = [];
+  const bodyRequests = [];
   const posts = postRoute(onPost);
   const screens = screenRoute(onScreen);
   const server = createServer(async (req, res) => {
@@ -347,6 +350,16 @@ async function open(
         res.writeHead(404).end();
       }
       return;
+    }
+    const body = /^\/w\/[^/]+\/messages\/([^/]+)\/body$/.exec(url.pathname);
+    if (req.method === "GET" && body !== null) {
+      const csrf = req.headers["x-namedrop-csrf"] ?? null;
+      bodyRequests.push({ id: decodeURIComponent(body[1]), csrf });
+      if (csrf !== posts.session.csrf) return res.writeHead(403).end();
+      const full = onBody === null ? null : await onBody(body[1]);
+      return full === null
+        ? res.writeHead(404).end()
+        : sendJson(res, 200, { message_id: body[1], body: full });
     }
     if (/^\/w\/[^/]+\/messages\/[^/]+\/context$/.test(url.pathname)) {
       contextRequests.push(url);
@@ -434,6 +447,7 @@ async function open(
     live,
     historyRequests,
     contextRequests,
+    bodyRequests,
     posts,
     screens,
   };
@@ -1050,7 +1064,12 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
     message("nudge", "Please continue", { kind: "nudge" }),
     message("hook", "Hook received", { kind: "hook" }),
   ];
-  const ui = await open(t, (client) => replay(client, [value]));
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onBody: () => ({
+      text: `${"Long body ".repeat(90)}END OF BODY`,
+      truncated: true,
+    }),
+  });
   let dialogs = 0;
   ui.page.on("dialog", async (dialog) => {
     dialogs++;
@@ -1079,6 +1098,7 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
     false,
   );
   await long.getByRole("button", { name: "Show more", exact: true }).click();
+  await long.getByRole("button", { name: "Show less", exact: true }).waitFor();
   assert.equal(
     (await long.locator(".body").textContent()).includes("END OF BODY"),
     true,
@@ -1092,6 +1112,295 @@ test("UI-2: code, safe links, report cards, long bodies and unknown variants ren
   );
   await ui.page.getByText("Please continue", { exact: true }).waitFor();
   await ui.page.getByText("Hook received", { exact: true }).waitFor();
+});
+
+const CODEX = "pane-address-1793208032928312296-1209682-1";
+test("FULL-THREAD: Show more reads the whole message once, with the session token, and says when it can't", async (t) => {
+  const value = frame(1, "alpha");
+  const whole = `${"Long body ".repeat(1000)}END OF BODY`;
+  value.frame.messages = [
+    message("long", whole.slice(0, 2000), {
+      body: { text: whole.slice(0, 2000), truncated: true },
+    }),
+    message("short-cut", "Cut at 300", {
+      body: { text: "Cut at 300", truncated: true },
+    }),
+  ];
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onBody: (id) => (id === "long" ? { text: whole, truncated: false } : null),
+  });
+  await ui.live();
+  const long = ui.page.locator('[data-message-id="long"]');
+  await long.getByRole("button", { name: "Show more", exact: true }).click();
+  await long.getByRole("button", { name: "Show less", exact: true }).waitFor();
+  const shown = await long.locator(".body").textContent();
+  assert.equal(shown.length, whole.length);
+  assert.ok(shown.endsWith("END OF BODY"));
+  assert.equal(await long.locator(".truncation-note").count(), 0);
+  await long.getByRole("button", { name: "Show less", exact: true }).click();
+  await long.getByRole("button", { name: "Show more", exact: true }).click();
+  assert.deepEqual(ui.bodyRequests, [{ id: "long", csrf: "csrf-1" }]);
+  const cut = ui.page.locator('[data-message-id="short-cut"]');
+  await cut.getByRole("button", { name: "Show more", exact: true }).click();
+  await cut
+    .getByText("Couldn't load the rest of this message. Try again.")
+    .waitFor();
+  assert.equal(
+    await cut.getByRole("button", { name: "Show more" }).count(),
+    1,
+    "a failed load can be retried",
+  );
+});
+
+function replyRows() {
+  const value = frame(1, "alpha");
+  value.frame.messages = [
+    message("parent", "@codex please check this", {
+      thread_id: "exchange",
+      legs: [{ to: CODEX, stage: { stage: "replied", reply_id: "answer" } }],
+    }),
+    message("answer", "Checked and ready", {
+      thread_id: "exchange",
+      in_reply_to: "parent",
+      author: CODEX,
+      kind: "reply",
+    }),
+    message("report", "Two tasks completed", {
+      kind: "result_set",
+      author: CODEX,
+      at_ms: 200,
+    }),
+    message("nudge", "Please continue", { kind: "nudge", at_ms: 300 }),
+  ];
+  value.frame.threads = [
+    {
+      thread_id: "exchange",
+      title: { text: "Check", truncated: false },
+      message_count: 2,
+    },
+  ];
+  return value;
+}
+test("FULL-THREAD: every row offers Reply in thread, by keyboard too, and the reply answers that message", async (t) => {
+  const ui = await open(t, (client) => replay(client, [replyRows()]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  for (const id of ["parent", "report", "nudge"])
+    assert.equal(
+      await timeline
+        .locator(`[data-message-id="${id}"]`)
+        .getByRole("button", { name: /^Reply in thread to / })
+        .count(),
+      1,
+      id,
+    );
+  const reply = timeline
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" });
+  await reply.focus();
+  assert.equal(
+    await reply.evaluate((element) => getComputedStyle(element).opacity),
+    "1",
+    "a focused Reply in thread shows",
+  );
+  await ui.page.keyboard.press("Enter");
+  await pane.getByRole("status").getByText("Replying to You").waitFor();
+  const box = pane.getByRole("combobox");
+  assert.equal(
+    await box.evaluate((element) => element === document.activeElement),
+    true,
+  );
+  assert.match(await box.getAttribute("aria-label"), /^Reply to @codex/);
+  await box.fill("About the parent");
+  await ui.page.keyboard.press("Enter");
+  await pane.getByText("About the parent", { exact: true }).first().waitFor();
+  await pane
+    .locator('[data-message-id="answer"]')
+    .getByRole("button", { name: "Reply in thread to @codex" })
+    .click();
+  await pane.getByRole("status").getByText("Replying to @codex").waitFor();
+  await box.fill("About the answer");
+  await ui.page.keyboard.press("Enter");
+  await pane.getByText("About the answer", { exact: true }).first().waitFor();
+  await pane.getByText(/^Replying to/).waitFor({ state: "detached" });
+  await pane
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  await pane
+    .getByRole("button", { name: "Reply to the latest message instead" })
+    .click();
+  assert.equal(await pane.getByText(/^Replying to/).count(), 0);
+  await box.fill("Then the latest");
+  await ui.page.keyboard.press("Enter");
+  await pane.getByText("Then the latest", { exact: true }).first().waitFor();
+  const sent = ui.posts.attempts
+    .filter((attempt) => attempt.body !== null)
+    .map(({ body }) => [body.in_reply_to, body.source]);
+  assert.deepEqual(sent, [
+    ["parent", "About the parent"],
+    ["answer", "About the answer"],
+    ["answer", "Then the latest"],
+  ]);
+});
+
+test("FULL-THREAD: a coordination report thread names its agent, a nudge with no agent asks for a mention, and phones show the button", async (t) => {
+  const ui = await open(t, (client) => replay(client, [replyRows()]));
+  await ui.page.setViewportSize({ width: 390, height: 800 });
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  const report = timeline
+    .locator('[data-message-id="report"]')
+    .getByRole("button", { name: "Reply in thread to @codex" });
+  assert.equal(
+    await report.evaluate((element) => getComputedStyle(element).opacity),
+    "1",
+    "a phone shows Reply in thread without hover",
+  );
+  await report.click();
+  await pane.getByRole("status").getByText("Replying to @codex").waitFor();
+  const box = pane.getByRole("combobox");
+  assert.match(await box.getAttribute("aria-label"), /^Reply to @codex/);
+  await box.fill("Ship the report");
+  await ui.page.keyboard.press("Enter");
+  await pane.getByText("Ship the report", { exact: true }).first().waitFor();
+  assert.deepEqual(
+    ui.posts.attempts.map(({ body }) => [body.in_reply_to, body.source]),
+    [["report", "Ship the report"]],
+  );
+  await pane.getByRole("button", { name: "Close thread" }).click();
+  await timeline
+    .locator('[data-message-id="nudge"]')
+    .getByRole("button", { name: "Reply in thread to Nudge" })
+    .click();
+  await pane.getByRole("status").getByText("Replying to Nudge").waitFor();
+  assert.equal(
+    await pane.getByRole("combobox").getAttribute("aria-label"),
+    "Start with @name to choose who gets this.",
+  );
+});
+
+test("FULL-THREAD: Reply in thread reads after the author and body, and stays at the row's top right", async (t) => {
+  const ui = await open(t, (client) => replay(client, [replyRows()]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  for (const id of ["parent", "nudge"]) {
+    const row = timeline.locator(`[data-message-id="${id}"]`);
+    const order = await row.evaluate((element) => {
+      const button = element.querySelector(".msg-reply");
+      const content = element.querySelector(".msg-content");
+      const author = element.querySelector(".author, strong");
+      const body = element.querySelector(".body");
+      const after = (node) =>
+        Boolean(
+          node.compareDocumentPosition(button) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        );
+      const box = button.getBoundingClientRect();
+      const area = content.getBoundingClientRect();
+      return {
+        tabIndex: button.tabIndex,
+        afterAuthor: after(author),
+        afterBody: after(body),
+        top: Math.abs(box.top - area.top) <= 8,
+        right: Math.abs(box.right - area.right) <= 1,
+      };
+    });
+    assert.deepEqual(
+      order,
+      {
+        tabIndex: 0,
+        afterAuthor: true,
+        afterBody: true,
+        top: true,
+        right: true,
+      },
+      id,
+    );
+  }
+});
+
+test("FULL-THREAD: a failed Reply in thread keeps its target, and the retry reuses its request id", async (t) => {
+  let calls = 0;
+  const ui = await open(
+    t,
+    (client) => replay(client, [replyRows()]),
+    undefined,
+    {
+      onPost: () =>
+        ++calls === 1 ? { status: 503, error: "Busy." } : { status: 200 },
+    },
+  );
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await timeline
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  const replying = pane.getByRole("status").getByText("Replying to You");
+  await replying.waitFor();
+  const box = pane.getByRole("combobox");
+  await box.fill("About the parent");
+  await ui.page.keyboard.press("Enter");
+  await pane.locator(".composer-error").waitFor();
+  assert.equal(await replying.count(), 1, "a failed send keeps the target");
+  await box.focus();
+  await ui.page.keyboard.press("Enter");
+  await replying.waitFor({ state: "detached" });
+  const sent = ui.posts.attempts
+    .filter((attempt) => attempt.body !== null)
+    .map(({ body }) => [body.request_id, body.in_reply_to]);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(
+    sent.map(([, target]) => target),
+    ["parent", "parent"],
+    "the retry answers the chosen message",
+  );
+  assert.equal(sent[1][0], sent[0][0], "the retry reuses the request id");
+});
+
+test("FULL-THREAD: a reply the server finds no one for asks for a mention, not the server's words", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, [replyRows()]),
+    undefined,
+    {
+      onPost: () => ({
+        status: 400,
+        error: "message must begin with one or more recipient Mentions",
+      }),
+    },
+  );
+  await ui.live();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .locator('[data-message-id="report"]')
+    .getByRole("button", { name: "Reply in thread to @codex" })
+    .click();
+  await pane.getByRole("combobox").fill("Ship the report");
+  await ui.page.keyboard.press("Enter");
+  const alert = pane.getByRole("alert");
+  await alert.waitFor();
+  assert.equal(
+    (await alert.textContent()).trim(),
+    "Start with @name to choose who gets this.",
+  );
 });
 
 test("MD-UI: a formatted agent reply renders lists, code and bold without markup or images", async (t) => {
@@ -11162,4 +11471,215 @@ test("UI-R7 2: Details focused from the keyboard shows its whole focus ring insi
       `${size.join("x")}: ring ${ring.top}-${ring.bottom} inside the card ${inner.top}-${inner.bottom}`,
     );
   }
+});
+
+const repoA = { id: "repo-a", name: "aaa" };
+const repoB = { id: "repo-b", name: "bbb" };
+const groupedFrames = () => [
+  frame(1, "alpha", "calm", repoA),
+  frame(2, "beta", "needs_you", repoA),
+  frame(3, "gamma", "calm", repoB),
+];
+const header = (ui, id) =>
+  ui.channels.locator(`button[data-group-key="repo:${id}"]`);
+const sidebarOrder = (ui) =>
+  ui.channels
+    .locator("[data-group-key], [data-channel-key]")
+    .evaluateAll((items) =>
+      items.map((item) => item.dataset.groupKey ?? item.dataset.channelKey),
+    );
+async function said(ui, words) {
+  await ui.page.waitForFunction(
+    (expected) =>
+      [...document.querySelectorAll('.app-shell > [aria-live="polite"]')].some(
+        (region) => region.textContent === expected,
+      ),
+    words,
+  );
+}
+const hasFocus = (locator) =>
+  locator.evaluate((element) => element === document.activeElement);
+
+test("GROUP-UI: a collapsed group stays collapsed across reload and rolls its needs-you dot up to the header", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(3)}`,
+    },
+  );
+  await ui.live();
+  const aaa = header(ui, "repo-a");
+  assert.equal(await aaa.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    await aaa.locator(".dot").count(),
+    0,
+    "an open header has no rollup",
+  );
+  assert.equal(await ui.row(2).isVisible(), true);
+  await aaa.click();
+  for (const view of ["before reload", "after reload"]) {
+    await ui.page.locator(".connection-dot.live").first().waitFor();
+    assert.equal(await aaa.getAttribute("aria-expanded"), "false", view);
+    assert.equal(await ui.row(1).count(), 0, view);
+    assert.equal(await ui.row(2).count(), 0, view);
+    assert.equal(
+      await aaa.locator('.dot-alert[role="img"]').getAttribute("aria-label"),
+      "Needs you",
+      view,
+    );
+    const controlled = await aaa.getAttribute("aria-controls");
+    assert.equal(
+      await ui.page.locator(`[id="${controlled}"]`).count(),
+      1,
+      `${view}: the header controls its list`,
+    );
+    if (view === "before reload") await ui.page.reload();
+  }
+  await aaa.click();
+  assert.equal(await ui.row(2).isVisible(), true);
+  assert.equal(await aaa.locator(".dot").count(), 0);
+});
+
+test("GROUP-UI: a collapsed group still shows the selected channel's row", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(1)}`,
+    },
+  );
+  await ui.live();
+  await header(ui, "repo-a").click();
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+  assert.equal(await ui.row(1).getAttribute("tabindex"), "0");
+  assert.equal(await ui.row(2).count(), 0);
+  await ui.page.goto(ui.page.url().replace(key(1), key(3)));
+  await ui.row(3).waitFor();
+  assert.equal(await ui.row(1).count(), 0, "unselected, it folds away");
+});
+
+test("GROUP-UI: headers join the arrow keys without selecting, and Left and Right fold a group", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(3)}`,
+    },
+  );
+  await ui.live();
+  await ui.row(3).focus();
+  await ui.page.keyboard.press("Home");
+  const aaa = header(ui, "repo-a");
+  assert.equal(await hasFocus(aaa), true);
+  assert.equal(await ui.row(3).getAttribute("aria-current"), "page");
+  await ui.page.keyboard.press("ArrowDown");
+  assert.equal(await hasFocus(ui.row(1)), true);
+  assert.equal(await ui.row(1).getAttribute("aria-current"), "page");
+  await ui.page.keyboard.press("ArrowUp");
+  await ui.page.keyboard.press("ArrowLeft");
+  assert.equal(await aaa.getAttribute("aria-expanded"), "false");
+  await ui.page.keyboard.press("ArrowRight");
+  assert.equal(await aaa.getAttribute("aria-expanded"), "true");
+  await ui.page.keyboard.press("Enter");
+  assert.equal(await aaa.getAttribute("aria-expanded"), "false");
+});
+
+test("GROUP-UI: Alt+Arrow moves a channel within its group and a group among groups, announces it, and the order survives reload", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(2)}`,
+    },
+  );
+  await ui.live();
+  assert.deepEqual(await sidebarOrder(ui), [
+    "repo:repo-a",
+    key(1),
+    key(2),
+    "repo:repo-b",
+    key(3),
+  ]);
+  await ui.row(2).focus();
+  await ui.page.keyboard.press("Alt+ArrowUp");
+  await said(ui, "Moved beta to position 1 of 2 in aaa");
+  assert.equal(await hasFocus(ui.row(2)), true);
+  await ui.page.keyboard.press("Alt+ArrowUp");
+  assert.deepEqual(
+    (await sidebarOrder(ui)).slice(1, 3),
+    [key(2), key(1)],
+    "a channel never leaves its group",
+  );
+  const bbb = header(ui, "repo-b");
+  await bbb.focus();
+  await ui.page.keyboard.press("Alt+ArrowUp");
+  await said(ui, "Moved bbb to position 1 of 2");
+  assert.equal(await hasFocus(bbb), true);
+  await ui.row(3).focus();
+  await ui.page.keyboard.press("ArrowDown");
+  await ui.page.keyboard.press("Alt+ArrowUp");
+  await said(ui, "Moved aaa to position 1 of 2");
+  await ui.page.keyboard.press("Alt+ArrowDown");
+  await said(ui, "Moved aaa to position 2 of 2");
+  assert.equal(await hasFocus(header(ui, "repo-a")), true);
+  const expected = ["repo:repo-b", key(3), "repo:repo-a", key(2), key(1)];
+  assert.deepEqual(await sidebarOrder(ui), expected);
+  await ui.page.reload();
+  await ui.page.locator(".connection-dot.live").first().waitFor();
+  assert.deepEqual(await sidebarOrder(ui), expected);
+});
+
+test("GROUP-UI: dragging reorders groups and channels within a group, and refuses a channel dropped on another group", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, groupedFrames()),
+    undefined,
+    {
+      path: `/w/${key(3)}`,
+    },
+  );
+  await ui.live();
+  const top = { x: 20, y: 2 };
+  await header(ui, "repo-b").dragTo(header(ui, "repo-a"), {
+    targetPosition: top,
+  });
+  await said(ui, "Moved bbb to position 1 of 2");
+  assert.deepEqual(await sidebarOrder(ui), [
+    "repo:repo-b",
+    key(3),
+    "repo:repo-a",
+    key(1),
+    key(2),
+  ]);
+  await ui.row(2).dragTo(ui.row(1), { targetPosition: top });
+  await said(ui, "Moved beta to position 1 of 2 in aaa");
+  await ui.row(3).dragTo(ui.row(1), { targetPosition: top });
+  const expected = ["repo:repo-b", key(3), "repo:repo-a", key(2), key(1)];
+  assert.deepEqual(await sidebarOrder(ui), expected);
+  assert.equal(
+    await ui.channels.locator(".drop-before, .drop-after").count(),
+    0,
+  );
+  await ui.page.reload();
+  await ui.page.locator(".connection-dot.live").first().waitFor();
+  assert.deepEqual(await sidebarOrder(ui), expected);
+});
+
+test("GROUP-UI: a server without repos keeps the flat list, and a channel still moves by keyboard", async (t) => {
+  const ui = await open(t, (client) =>
+    replay(client, [frame(1, "alpha"), frame(2, "beta"), frame(3, "gamma")]),
+  );
+  await ui.live();
+  assert.equal(await ui.channels.locator("[data-group-key]").count(), 0);
+  assert.deepEqual(await sidebarOrder(ui), [key(1), key(2), key(3)]);
+  await ui.row(1).focus();
+  await ui.page.keyboard.press("Alt+ArrowDown");
+  await said(ui, "Moved alpha to position 2 of 3");
+  assert.equal(await hasFocus(ui.row(1)), true);
+  assert.deepEqual(await sidebarOrder(ui), [key(2), key(1), key(3)]);
 });

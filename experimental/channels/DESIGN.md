@@ -287,6 +287,48 @@ the whole width.
   tabular numerals. They are not headings. Each `nav` carries the section name
   as its `aria-label`, so the channel title is the page's first heading.
 
+### Grouped sidebar
+
+The Channels section groups channels by the repo their workspace came from.
+
+- **Groups.** One group per repo id, titled with the repo name. Workspaces
+  without a repo share one group named "Other", placed last by default. A repo
+  with a single workspace is still a group: the header carries the repo name
+  that the row lacks, and every channel then sits at the same depth.
+- **Flat fallback.** When every channel is in Other, as with a server that sends
+  no repos, no group header shows and the list stays flat. Channels still move
+  by keyboard and drag.
+- **Header.** A 28px button with the section-label type: 12px 600
+  `--text-muted`, a 16px chevron that points right when collapsed and down when
+  open, the repo name with an ellipsis, and the channel count in tabular
+  numerals. Hover gives `--bg-hover` and `--text`. It is quieter than a channel
+  row and is not indented over its rows: the chevron sits in the column of the
+  rows' `#`. Groups are 8px apart. The button carries `aria-expanded` and
+  `aria-controls` for its list.
+- **Collapsed rollup.** A collapsed header shows the red dot when any channel
+  inside needs you ("Needs you", or "N need you"), else the accent dot when any
+  has unread activity. An open header shows no dot, since its rows carry their
+  own.
+- **Selected row stays.** A collapsed group still shows the selected channel's
+  row, so the current row, `aria-current` and focus restoration keep working.
+- **Keyboard.** In the Channel list, Up, Down, Home and End move over headers and
+  rows; landing on a header never selects a channel. On a header, Enter or Space
+  toggles, Left collapses, Right expands. Alt+Up and Alt+Down move a group among
+  groups, or a channel within its group, and focus stays on what moved. Each
+  move is spoken through the polite live region, as "Moved namedrop to position
+  1 of 3" or "Moved exp-ui to position 2 of 4 in namedrop". The Needs you section
+  is not grouped and does not reorder.
+- **Drag.** A group drags by its header and reorders among groups. A channel
+  drags within its own group only; over another group it gets no insertion line
+  and no drop. The insertion line is 2px of `--accent` with a 1px radius,
+  inset 8px, drawn at the top or bottom edge of the item under the pointer.
+- **Persistence.** The arrangement lives in `localStorage` under
+  `namedrop.channels.sidebar.v1` as the group order, one flat channel order and
+  the collapsed groups, keyed by repo id and space key, so renames never move
+  anything. A new repo or workspace joins the end of its list. One that is gone
+  is skipped, and drops out of the saved order at the next move. Corrupt or
+  blocked storage reads as the default order.
+
 ### Channel header
 
 One 56px row: a muted `#` icon, the channel name at 18px 600, then the mention

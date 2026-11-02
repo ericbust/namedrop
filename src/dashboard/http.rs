@@ -27,7 +27,12 @@ use std::{
 
 #[path = "channels_bundle.rs"]
 mod channels_bundle;
+/// Caps an operator post and the full body Show more reads, so the page can
+/// always show at least what it could send.
 const BODY_LIMIT: usize = 64 * 1024;
+/// The full-body route redacts before it cuts, so it reads this many
+/// characters past the cut to see whole any secret that spans it.
+const BODY_READ_MARGIN: usize = 4 * 1024;
 const HEADER_LIMIT: u64 = 8 * 1024;
 const PING_EVERY: Duration = Duration::from_secs(15);
 const MAX_CONNECTIONS: usize = 64;
@@ -651,6 +656,10 @@ enum Route {
         key: SpaceKey,
         message_id: String,
     },
+    MessageBody {
+        key: SpaceKey,
+        message_id: String,
+    },
     AllEvents,
     Spaces,
     Asset(String),
@@ -720,15 +729,23 @@ fn route(
         if segments.get(1) == Some(&"messages") && segments.len() > 2 {
             authenticate_session(request, port, session)?;
             authenticate_provenance(request, host)?;
-            let [key, "messages", message, "context"] = segments.as_slice() else {
+            let [key, "messages", message, kind @ ("context" | "body")] = segments.as_slice()
+            else {
                 return Err(Status::NotFound);
             };
+            if *kind == "body" {
+                authenticate_mutation(request, session, host)?;
+            }
             let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
             let message_id = decode_asset_path(message).ok_or(Status::NotFound)?;
             if message_id.is_empty() {
                 return Err(Status::NotFound);
             }
-            return Ok(Route::MessageContext { key, message_id });
+            return Ok(if *kind == "body" {
+                Route::MessageBody { key, message_id }
+            } else {
+                Route::MessageContext { key, message_id }
+            });
         }
         if segments.get(1) == Some(&"participants") {
             authenticate_session(request, port, session)?;
@@ -1249,6 +1266,36 @@ fn serve_connection(
                         "message_count": context.message_count,
                         "earlier_omitted": context.earlier_omitted,
                         "messages": messages,
+                    }))
+                    .map_err(io::Error::other)?;
+                    respond(&mut writer, "200 OK", "application/json", "", &body)
+                }
+                Err(status) => respond_status(&mut writer, status),
+            }
+        }
+        Ok(Route::MessageBody { key, message_id }) => {
+            let result = (|| {
+                let mut guard = history_store.lock().map_err(|_| Status::Unavailable)?;
+                let store = guard.store(front.files.state())?;
+                let namespace = store
+                    .dashboard_spaces()
+                    .map_err(|_| Status::Unavailable)?
+                    .into_iter()
+                    .find(|space| SpaceKey::of(&space.namespace) == key)
+                    .map(|space| space.namespace)
+                    .ok_or(Status::NotFound)?;
+                store
+                    .dashboard_message_body(&namespace, &message_id, BODY_LIMIT + BODY_READ_MARGIN)
+                    .map_err(|_| Status::Unavailable)?
+                    .ok_or(Status::NotFound)
+            })();
+            match result {
+                Ok(body) => {
+                    let mut safe = snapshot::SafeText::from_untrusted(&body.text, BODY_LIMIT);
+                    safe.truncated |= body.cut;
+                    let body = serde_json::to_vec(&serde_json::json!({
+                        "message_id": message_id,
+                        "body": safe,
                     }))
                     .map_err(io::Error::other)?;
                     respond(&mut writer, "200 OK", "application/json", "", &body)

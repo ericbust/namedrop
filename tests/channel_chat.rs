@@ -13,6 +13,8 @@ mod channel_fix2;
 mod channel_merge;
 #[path = "support/channel_router_attempts.rs"]
 mod channel_router_attempts;
+#[path = "support/full_thread.rs"]
+mod full_thread;
 #[path = "support/channel_chat.rs"]
 mod support;
 #[path = "support/xws.rs"]

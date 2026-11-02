@@ -105,12 +105,15 @@ impl StateStore {
         fs::set_permissions(state_directory, fs::Permissions::from_mode(0o700))?;
 
         let database_path = state_directory.join(DATABASE_FILE_NAME);
-        let mut connection = Connection::open(&database_path)?;
-        fs::set_permissions(&database_path, fs::Permissions::from_mode(0o600))?;
-        connection.busy_timeout(Duration::from_secs(2))?;
-        verify_integrity(&connection, &database_path)?;
-        connection.pragma_update(None, "foreign_keys", true)?;
-        initialize_schema(&mut connection, state_directory)?;
+        let connection = (|| {
+            let mut connection = Connection::open(&database_path)?;
+            fs::set_permissions(&database_path, fs::Permissions::from_mode(0o600))?;
+            connection.busy_timeout(Duration::from_secs(2))?;
+            connection.pragma_update(None, "foreign_keys", true)?;
+            initialize_schema(&mut connection, state_directory)?;
+            Ok(connection)
+        })()
+        .map_err(|error: StoreError| error.in_file(&database_path))?;
 
         Ok(Self {
             connection,
@@ -127,11 +130,14 @@ impl StateStore {
         if !database_path.is_file() {
             return Ok(None);
         }
-        let connection =
-            Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        connection.busy_timeout(Duration::from_secs(2))?;
-        verify_integrity(&connection, &database_path)?;
-        check_read_only_schema(&connection)?;
+        let connection = (|| {
+            let connection =
+                Connection::open_with_flags(&database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            connection.busy_timeout(Duration::from_secs(2))?;
+            check_read_only_schema(&connection)?;
+            Ok(connection)
+        })()
+        .map_err(|error: StoreError| error.in_file(&database_path))?;
         Ok(Some(Self {
             connection,
             state_directory: state_directory.to_path_buf(),
@@ -139,8 +145,8 @@ impl StateStore {
         }))
     }
 
-    /// Keep status reads, including integrity checks and long queries, within
-    /// the popup's remaining collection budget. This never migrates state.
+    /// Keep status reads, including lock waits and long queries, within the
+    /// popup's remaining collection budget. This never migrates state.
     pub(crate) fn with_read_only_timeout<T>(
         state_directory: &Path,
         timeout: Duration,
@@ -185,8 +191,7 @@ impl StateStore {
                 }
             });
             let _finish = Finish(&finished);
-            verify_integrity(&connection, &database_path)?;
-            check_read_only_schema(&connection)?;
+            check_read_only_schema(&connection).map_err(|error| error.in_file(&database_path))?;
             if cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
                 return Err(StoreError::invalid_input(
                     "Status read cancelled or timed out",
@@ -7006,6 +7011,19 @@ impl StoreError {
         }
     }
 
+    /// `From` knows only the file name; an open names the whole path.
+    fn in_file(mut self, database_path: &Path) -> Self {
+        if let Some(error) = self
+            .source
+            .as_deref()
+            .and_then(|source| source.downcast_ref::<rusqlite::Error>())
+            .filter(|error| is_damage(error))
+        {
+            self.message = damaged_message(&database_path.display(), error);
+        }
+        self
+    }
+
     fn integrity_failed(
         database_path: &Path,
         details: impl Into<String>,
@@ -7059,12 +7077,33 @@ impl From<std::io::Error> for StoreError {
     }
 }
 
+fn is_damage(error: &rusqlite::Error) -> bool {
+    matches!(
+        error.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+    )
+}
+
+fn damaged_message(file: &dyn fmt::Display, error: &rusqlite::Error) -> String {
+    format!(
+        "state database {file} is damaged: {error}. Back up the file before replacing or removing \
+         it"
+    )
+}
+
 impl From<rusqlite::Error> for StoreError {
     fn from(error: rusqlite::Error) -> Self {
         let kind = match error.sqlite_error_code() {
             Some(rusqlite::ErrorCode::ConstraintViolation) => StoreErrorKind::Conflict,
             Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked) => {
                 StoreErrorKind::Busy
+            }
+            _ if is_damage(&error) => {
+                return Self {
+                    kind: StoreErrorKind::Storage,
+                    message: damaged_message(&DATABASE_FILE_NAME, &error),
+                    source: Some(Box::new(error)),
+                };
             }
             _ => StoreErrorKind::Storage,
         };
@@ -7459,13 +7498,14 @@ fn initialize_schema(
     connection: &mut Connection,
     _state_directory: &Path,
 ) -> Result<(), StoreError> {
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let version: u32 = transaction.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > SCHEMA_VERSION {
-        return Err(StoreError::unsupported_schema(format!(
-            "database schema {version} is not supported; expected {SCHEMA_VERSION}"
-        )));
+    // Every command and hook opens the store, and most find the schema current.
+    // Only a migration takes the write lock, so an open never queues behind
+    // another process's write.
+    if schema_is_current(connection)? {
+        return Ok(());
     }
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let version = schema_version(&transaction)?;
     // Each step is additive and applies only to the versions that predate it.
     if version == 0 {
         transaction.execute_batch(SCHEMA)?;
@@ -7493,6 +7533,21 @@ fn initialize_schema(
     }
     transaction.commit()?;
     Ok(())
+}
+
+fn schema_version(connection: &Connection) -> Result<u32, StoreError> {
+    let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    if version > SCHEMA_VERSION {
+        return Err(StoreError::unsupported_schema(format!(
+            "database schema {version} is not supported; expected {SCHEMA_VERSION}"
+        )));
+    }
+    Ok(version)
+}
+
+fn schema_is_current(connection: &Connection) -> Result<bool, StoreError> {
+    Ok(schema_version(connection)? == SCHEMA_VERSION
+        && pre_release_schema_6_gaps(connection)?.is_empty())
 }
 
 /// The public `experimental` branch wrote user_version 6 before 1.4.0 added

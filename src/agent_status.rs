@@ -353,9 +353,9 @@ where
             return (Vec::new(), None);
         }
     };
-    // The store read shares the collection budget: integrity checking, lock
-    // waits and a long page of reports are all interruptible here, instead of
-    // running unbounded after the Herdr reads were carefully bounded.
+    // The store read shares the collection budget: lock waits and a long page
+    // of reports are interruptible here, instead of running unbounded after
+    // the Herdr reads were carefully bounded.
     let read = StateStore::with_read_only_timeout(
         runtime.state_directory,
         budget,

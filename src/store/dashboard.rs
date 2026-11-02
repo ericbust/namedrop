@@ -39,6 +39,12 @@ pub struct ThreadContextRows {
     pub history: HistoryRows,
 }
 
+/// The start of a stored message body, and whether the body goes on past it.
+pub struct BodyPrefix {
+    pub text: String,
+    pub cut: bool,
+}
+
 pub struct ConversationRow {
     pub thread_id: String,
     pub message_id: String,
@@ -220,6 +226,36 @@ impl StateStore {
         message_id: &str,
     ) -> Result<Option<ThreadContextRows>, StoreError> {
         self.transaction(|transaction| transaction.dashboard_thread_context(namespace, message_id))
+    }
+
+    pub fn dashboard_message_body(
+        &mut self,
+        namespace: &StateNamespace,
+        message_id: &str,
+        max_chars: usize,
+    ) -> Result<Option<BodyPrefix>, StoreError> {
+        let ns = namespace_params(namespace);
+        self.transaction(|transaction| {
+            Ok(transaction
+                .transaction
+                .query_row(
+                    "SELECT substr(body, 1, ?4), length(body) > ?4 FROM collaboration_messages
+                     WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+                    params![
+                        ns[0],
+                        ns[1],
+                        message_id,
+                        i64::try_from(max_chars).unwrap_or(i64::MAX)
+                    ],
+                    |row| {
+                        Ok(BodyPrefix {
+                            text: row.get(0)?,
+                            cut: row.get(1)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
     }
 
     /// Changes whenever another connection commits; the dashboard's cheap

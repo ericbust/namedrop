@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { Alias, Message } from "./model.ts";
 import {
@@ -472,4 +473,39 @@ test("deliver answer: a 2xx body's channel object parses like a frame's, and any
     '{"channel":{"state":"routed"',
   ])
     assert.equal(channelOf(body), null, body);
+});
+
+const spaceFrame = JSON.parse(
+  readFileSync(new URL("./fixtures/real-frames.jsonl", import.meta.url), "utf8")
+    .trim()
+    .split("\n")[0] ?? "",
+) as { key: string; frame: { space: Record<string, unknown> } };
+function spaceWithRepo(repo: unknown) {
+  const value = structuredClone(spaceFrame);
+  if (repo === undefined) delete value.frame.space.repo;
+  else value.frame.space.repo = repo;
+  const event = parseEvent("space", JSON.stringify(value));
+  return event?.type === "space" ? event.channel.repo : "refused";
+}
+
+test("repo: a space's repo parses, and an older server's absent or null repo reads as none", () => {
+  assert.deepEqual(spaceWithRepo({ id: "r1", name: "namedrop" }), {
+    id: "r1",
+    name: "namedrop",
+  });
+  assert.equal(spaceWithRepo(undefined), null);
+  assert.equal(spaceWithRepo(null), null);
+});
+
+test("repo: a malformed repo refuses the frame like any other malformed field", () => {
+  for (const repo of [
+    "namedrop",
+    [],
+    { id: "r1" },
+    { name: "namedrop" },
+    { id: " ", name: "namedrop" },
+    { id: "r1", name: "" },
+    { id: 7, name: "namedrop" },
+  ])
+    assert.equal(spaceWithRepo(repo), "refused", JSON.stringify(repo));
 });

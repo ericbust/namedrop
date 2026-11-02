@@ -416,6 +416,60 @@ a:hover {
   margin-inline: 1px;
   background: var(--accent);
 }
+.channel-group,
+.channel-row {
+  position: relative;
+}
+.channel-group + .channel-group {
+  margin-top: var(--space-2);
+}
+.group-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  height: 28px;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-md);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  color: var(--text-muted);
+  text-align: left;
+}
+.group-header:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.group-header .chevron {
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+.group-header[aria-expanded="true"] .chevron {
+  transform: rotate(90deg);
+}
+.group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drop-before::before,
+.drop-after::after {
+  content: "";
+  position: absolute;
+  left: var(--space-2);
+  right: var(--space-2);
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.drop-before::before {
+  top: -1px;
+}
+.drop-after::after {
+  bottom: -1px;
+}
 .row.attention-row {
   align-items: flex-start;
   padding-top: 6px;
@@ -953,7 +1007,12 @@ button.member:not(.more):hover {
   color: var(--text-muted);
 }
 .msg-content {
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
+}
+.reply-ref ~ .msg-content {
+  grid-row: 2;
 }
 .msg-head {
   display: flex;
@@ -1064,6 +1123,68 @@ button.member:not(.more):hover {
 }
 .show-more {
   margin-top: 2px;
+}
+/* Only this empty anchor is positioned, so message content never paints over
+   the timeline's focus ring. It follows the body for screen readers and Tab,
+   and shares the content's grid cell to sit at its top right. */
+.msg-actions {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
+  position: relative;
+  height: 0;
+}
+.reply-ref ~ .msg-actions {
+  grid-row: 2;
+}
+.msg-reply {
+  position: absolute;
+  top: -4px;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  opacity: 0;
+}
+.msg:hover .msg-reply,
+.system:hover .msg-reply,
+.msg-reply:focus-visible {
+  opacity: 1;
+}
+.msg-reply:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.thread-replying {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-1) var(--space-4) 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+@media (hover: none), (max-width: 600px) {
+  .msg-actions,
+  .reply-ref ~ .msg-actions {
+    grid-row: auto;
+    justify-self: end;
+    position: static;
+    height: auto;
+  }
+  .msg-reply {
+    position: static;
+    border: 0;
+    padding: 2px 0;
+    background: none;
+    opacity: 1;
+  }
 }
 .receipt {
   display: flex;
@@ -2261,7 +2382,8 @@ code.inline {
     animation: none;
   }
   .sidebar,
-  .drawer-open .sidebar {
+  .drawer-open .sidebar,
+  .group-header .chevron {
     transition: none;
   }
   .located,

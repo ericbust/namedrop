@@ -50,12 +50,16 @@ struct Server {
 
 impl Server {
     fn start(root: &Path, workspaces: &[(&str, Option<&str>)]) -> Self {
-        Self::snapshot(root, workspaces);
+        Self::start_listing(root, &listing(workspaces))
+    }
+
+    fn start_listing(root: &Path, workspaces: &[Value]) -> Self {
+        Self::write_listing(root, workspaces);
         let herdr = root.join("herdr");
         fs::write(
             &herdr,
             r#"#!/bin/sh
-[ "$1 $2" = "api snapshot" ] || exit 1
+[ "$1 $2" = "workspace list" ] || exit 1
 printf '%s\n' "$HERDR_SOCKET_PATH" >> "$ND_TEST_ROOT/calls"
 if [ -f "$ND_TEST_ROOT/block-$HERDR_SOCKET_PATH" ]; then
     printf '%s' "$$" > "$ND_TEST_ROOT/active-$HERDR_SOCKET_PATH"
@@ -125,21 +129,26 @@ fi
         }
     }
 
-    fn snapshot(root: &Path, workspaces: &[(&str, Option<&str>)]) {
-        let workspaces: Vec<_> = workspaces
-            .iter()
-            .map(|(id, label)| json!({"workspace_id": id, "label": label}))
-            .collect();
+    fn write_listing(root: &Path, workspaces: &[Value]) {
         fs::write(
             root.join("snapshot.next"),
-            json!({"result": {"snapshot": {"workspaces": workspaces}}}).to_string(),
+            json!({"result": {"workspaces": workspaces}}).to_string(),
         )
         .unwrap();
         fs::rename(root.join("snapshot.next"), root.join("snapshot.json")).unwrap();
     }
 
     fn set_workspaces(&self, workspaces: &[(&str, Option<&str>)]) {
-        Self::snapshot(&self.root, workspaces);
+        Self::write_listing(&self.root, &listing(workspaces));
+    }
+
+    fn spaces(&self) -> String {
+        let mut stream = self.connect("/api/spaces", &[("Cookie", &self.cookie)]);
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        body.to_owned()
     }
 
     fn connect(&self, path: &str, headers: &[(&str, &str)]) -> TcpStream {
@@ -536,14 +545,17 @@ fn activate_on(state: &Path, socket: &str, id: &str) {
         .unwrap();
 }
 
-fn snapshot_on(root: &Path, socket: &str, spaces: &[(&str, Option<&str>)]) {
-    let spaces: Vec<_> = spaces
+fn listing(workspaces: &[(&str, Option<&str>)]) -> Vec<Value> {
+    workspaces
         .iter()
-        .map(|(id, label)| json!({"workspace_id":id,"label":label}))
-        .collect();
+        .map(|(id, label)| json!({"workspace_id": id, "label": label}))
+        .collect()
+}
+
+fn snapshot_on(root: &Path, socket: &str, spaces: &[(&str, Option<&str>)]) {
     fs::write(
         root.join(format!("snapshot-{socket}.json")),
-        json!({"result":{"snapshot":{"workspaces":spaces}}}).to_string(),
+        json!({"result":{"workspaces":listing(spaces)}}).to_string(),
     )
     .unwrap();
 }
@@ -1629,4 +1641,111 @@ fn secret_like_workspace_labels_never_become_addressable_tokens() {
         frame["frame"]["space"]["not_addressable_reason"],
         "unavailable"
     );
+}
+
+fn worktree(checkout: &str, repo_root: &str, name: &str) -> Value {
+    json!({
+        "checkout_path": checkout,
+        "is_linked_worktree": checkout != repo_root,
+        "repo_key": format!("{repo_root}/.git"),
+        "repo_name": name,
+        "repo_root": repo_root,
+    })
+}
+
+fn repos_by_workspace(frames: &[Value]) -> std::collections::HashMap<String, Value> {
+    frames
+        .iter()
+        .map(|space| {
+            assert!(
+                space.as_object().unwrap().contains_key("repo"),
+                "every space carries a repo key, even when null: {space}"
+            );
+            (
+                space["workspace_id"].as_str().unwrap().to_owned(),
+                space["repo"].clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn worktrees_of_one_repository_share_its_id_and_no_path_reaches_the_page() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    for id in ["main", "feature", "other", "plain"] {
+        activate(&state, id);
+    }
+    let mut listing = vec![
+        json!({"workspace_id": "main", "label": "proj", "worktree": worktree("/fake/home/proj", "/fake/home/proj", "proj")}),
+        json!({"workspace_id": "feature", "label": "feature", "worktree": worktree("/fake/trees/proj-feature", "/fake/home/proj", "proj")}),
+        json!({"workspace_id": "other", "label": "other", "worktree": worktree("/fake/home/other", "/fake/home/other", "other")}),
+        json!({"workspace_id": "plain", "label": "plain"}),
+    ];
+    let server = Server::start_listing(directory.path(), &listing);
+    let mut events = server.events("/api/events");
+    let frames: Vec<Value> = (0..4).map(|_| events.space()).collect();
+    for frame in &frames {
+        assert!(!frame.to_string().contains("/fake"), "{frame}");
+    }
+    let repos = repos_by_workspace(
+        &frames
+            .iter()
+            .map(|data| data["frame"]["space"].clone())
+            .collect::<Vec<_>>(),
+    );
+    let id = repos["main"]["id"].as_str().unwrap();
+    assert_eq!(id.len(), 16);
+    assert!(
+        id.bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    );
+    assert_eq!(repos["main"]["name"], "proj");
+    assert_eq!(repos["feature"], repos["main"]);
+    assert_eq!(repos["other"]["name"], "other");
+    assert_ne!(repos["other"]["id"], repos["main"]["id"]);
+    assert!(repos["plain"].is_null());
+
+    let spaces = server.spaces();
+    assert!(!spaces.contains("/fake"), "{spaces}");
+    let summaries: Vec<Value> = serde_json::from_str(&spaces).unwrap();
+    assert_eq!(repos_by_workspace(&summaries), repos);
+    listing[3]["worktree"] = worktree("/fake/trees/other-plain", "/fake/home/other", "other");
+    Server::write_listing(&server.root, &listing);
+    let joined = events.space();
+    assert_eq!(joined["key"], key("plain"));
+    assert_eq!(joined["frame"]["space"]["repo"], repos["other"]);
+    assert!(events.next(Duration::from_millis(350)).is_none());
+}
+
+#[test]
+fn a_closed_space_keeps_its_saved_repository_but_a_live_one_reports_its_own() {
+    let directory = TestDirectory::new();
+    let state = directory.path().join("state");
+    activate(&state, "closed");
+    activate(&state, "plain");
+    let saved = json!({"id": "0123456789abcdef", "name": "saved"});
+    fs::create_dir_all(state.join("dashboard")).unwrap();
+    fs::write(
+        state.join("dashboard/repos.json"),
+        json!({key("closed"): saved, key("plain"): {"id": "fedcba9876543210", "name": "stale"}})
+            .to_string(),
+    )
+    .unwrap();
+    let server = Server::start(directory.path(), &[("plain", None)]);
+    let (_, closed) = server
+        .events(&format!("/w/{}/events", key("closed")))
+        .next(WAIT)
+        .unwrap();
+    assert_eq!(closed["space"]["repo"], saved);
+
+    let mut events = server.events("/api/events");
+    let plain = events.space();
+    assert_eq!(plain["key"], key("plain"));
+    assert!(plain["frame"]["space"]["repo"].is_null(), "{plain}");
+
+    let summaries: Vec<Value> = serde_json::from_str(&server.spaces()).unwrap();
+    let repos = repos_by_workspace(&summaries);
+    assert_eq!(repos["closed"], saved);
+    assert!(repos["plain"].is_null());
 }

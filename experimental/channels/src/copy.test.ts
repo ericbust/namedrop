@@ -616,7 +616,7 @@ test("send errors show the server's words as a sentence for 400, 404 and 409 and
     [
       400,
       "message must begin with one or more recipient Mentions",
-      "Message must begin with one or more recipient Mentions.",
+      "Start with @name to choose who gets this.",
     ],
     [400, "Unknown recipient @ghost", "Unknown recipient @ghost."],
     [400, "@ghost is not here", "@ghost is not here."],

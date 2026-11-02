@@ -33,6 +33,7 @@ import type {
   Directory,
   Event,
   Home,
+  Message,
   Outgoing,
   PeekTarget,
   Route,
@@ -72,9 +73,10 @@ import { ActivityView } from "./ActivityView.tsx";
 import type { FocusAttention } from "./AttentionActions.tsx";
 import { ChannelHeader } from "./ChannelHeader.tsx";
 import { Composer } from "./Composer.tsx";
-import { type DeliveryAccess, DeliveryContext } from "./DeliveryContext.ts";
+import type { DeliveryAccess } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { MemberStrip } from "./MemberStrip.tsx";
+import { type MessageActions, MessageContexts } from "./MessageActions.tsx";
 import { measure, usePhone } from "./measure.ts";
 import { NeedsYou } from "./NeedsYou.tsx";
 import { type PeekAccess, PeekContext } from "./PeekContext.tsx";
@@ -115,12 +117,28 @@ function measuredReduce(state: State, event: Event): State {
 // Two polite regions take turns: each new change goes into the empty one and
 // the other is cleared, so a change in the same words as the last, such as
 // "Sent to @codex" for another post, is still a fresh insertion to speak.
-function Announcer({ change }: { change: Change | null }) {
-  const [said, setSaid] = useState({ change, first: true });
-  if (said.change !== change) setSaid({ change, first: !said.first });
-  const words =
-    change &&
-    routeCopy.delivery.announce[change.state.kind](change.offer.alias);
+// A sidebar move is its own object for the same reason.
+function Announcer({
+  change,
+  move,
+}: {
+  change: Change | null;
+  move: { words: string } | null;
+}) {
+  const [said, setSaid] = useState({
+    change,
+    move,
+    words: deliveryWords(change),
+    first: true,
+  });
+  if (said.change !== change || said.move !== move)
+    setSaid({
+      change,
+      move,
+      words: said.move !== move ? (move?.words ?? null) : deliveryWords(change),
+      first: !said.first,
+    });
+  const words = said.words;
   return (
     <>
       <p className="sr-only" aria-live="polite">
@@ -130,6 +148,11 @@ function Announcer({ change }: { change: Change | null }) {
         {said.first ? null : words}
       </p>
     </>
+  );
+}
+function deliveryWords(change: Change | null): string | null {
+  return (
+    change && routeCopy.delivery.announce[change.state.kind](change.offer.alias)
   );
 }
 export function App() {
@@ -485,6 +508,10 @@ export function App() {
           if (posted.current.size > POSTED_LIMIT && oldest !== undefined)
             posted.current.delete(oldest);
           dispatch({ type: "sent", requestId, messageId: result.messageId });
+          // A failed send keeps its target, so its retry answers the same message with the same request id.
+          setReplyTarget((target) =>
+            target?.messageId === outgoing.inReplyTo ? null : target,
+          );
           focusEvidence({
             type: "sent",
             key: outgoing.composer.key,
@@ -719,15 +746,51 @@ export function App() {
   } | null>(null);
   const focusPane = useRef(false);
   const [, requestFocus] = useReducer((count: number) => count + 1, 0);
+  const [replyTarget, setReplyTarget] = useState<{
+    threadId: string;
+    messageId: string;
+  } | null>(null);
+  const focusComposer = useRef(false);
   const openThread = useCallback(
     (threadId: string, button: HTMLButtonElement) => {
       focusEvidence({ type: "close" });
+      setReplyTarget(null);
       returnFocus.current = { button, threadId };
       focusPane.current = true;
       requestFocus();
       dispatch({ type: "thread", threadId });
     },
     [],
+  );
+  const shownThread = useRef<string | null>(null);
+  shownThread.current = thread?.id ?? null;
+  const replyInThread = useCallback(
+    (message: Message, button: HTMLButtonElement) => {
+      if (message.threadId !== shownThread.current)
+        openThread(message.threadId, button);
+      setReplyTarget({ threadId: message.threadId, messageId: message.id });
+      focusComposer.current = true;
+      focusPane.current = true;
+      requestFocus();
+    },
+    [openThread],
+  );
+  const chooseReply = useCallback(
+    (message: Message | null) =>
+      setReplyTarget(
+        message && { threadId: message.threadId, messageId: message.id },
+      ),
+    [],
+  );
+  const messageActions = useMemo<MessageActions | null>(
+    () =>
+      current === undefined
+        ? null
+        : {
+            fullBody: (messageId) => poster.fullBody(current, messageId),
+            reply: replyInThread,
+          },
+    [current, poster, replyInThread],
   );
   const [deliveries] = useState(() =>
     createDeliveries(async ({ key, messageId, alias }) => {
@@ -744,6 +807,7 @@ export function App() {
     deliveries.subscribe,
     deliveries.latest,
   );
+  const [moveSaid, setMoveSaid] = useState<{ words: string } | null>(null);
   useEffect(
     () => deliveries.settle(state.channels),
     [deliveries, state.channels],
@@ -845,9 +909,14 @@ export function App() {
     document
       .getElementById(paneId)
       ?.querySelector<HTMLElement>(
-        pane === "thread" ? 'button[aria-label="Close thread"]' : ".peek-text",
+        pane !== "thread"
+          ? ".peek-text"
+          : focusComposer.current
+            ? "textarea"
+            : 'button[aria-label="Close thread"]',
       )
       ?.focus();
+    focusComposer.current = false;
   }, [pane, paneId]);
   useLayoutEffect(() => {
     if (pane !== null && focusPane.current) {
@@ -921,7 +990,7 @@ export function App() {
   const updatedAt = lastUpdate.current;
   return (
     <PeekContext value={peekAccess}>
-      <DeliveryContext value={deliveryAccess}>
+      <MessageContexts deliveries={deliveryAccess} actions={messageActions}>
         <div
           className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}${drawerOpen ? " drawer-open" : ""}`}
         >
@@ -942,6 +1011,7 @@ export function App() {
               showActivity();
               if (drawerOpen) closeDrawer();
             }}
+            onAnnounce={(words) => setMoveSaid({ words })}
           />
           {drawerOpen && (
             <div
@@ -1144,6 +1214,12 @@ export function App() {
                 earlierOmitted={
                   focused?.kind === "ready" && focused.context.earlierOmitted
                 }
+                replyTo={
+                  replyTarget?.threadId === thread.id
+                    ? replyTarget.messageId
+                    : null
+                }
+                onReplyTo={chooseReply}
               />
             )}
           {channel && focused && focused.kind !== "ready" && (
@@ -1204,9 +1280,9 @@ export function App() {
               onClose={closePeek}
             />
           )}
-          <Announcer change={deliveryChange} />
+          <Announcer change={deliveryChange} move={moveSaid} />
         </div>
-      </DeliveryContext>
+      </MessageContexts>
     </PeekContext>
   );
 }
