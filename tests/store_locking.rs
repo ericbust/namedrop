@@ -115,10 +115,17 @@ fn a_damaged_state_file_still_reports_backup_guidance() {
         .expect("damaged file must not open");
 
     assert_eq!(error.kind(), StoreErrorKind::Storage);
-    assert!(
-        error
-            .to_string()
-            .contains("Back up the file before replacing or removing it"),
-        "{error}"
-    );
+    let read_only = StateStore::open_read_only(&fixture.0)
+        .err()
+        .expect("damaged file must not open read-only");
+    for message in [error.to_string(), read_only.to_string()] {
+        assert!(
+            message.contains("Back up the file before replacing or removing it"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&path.display().to_string()),
+            "names the file to back up: {message}"
+        );
+    }
 }

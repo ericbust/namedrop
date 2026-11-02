@@ -981,7 +981,7 @@ class Run:
         return [fields("fix", pairs)]
 
     def doctor(self, label):
-        """Call only at checkpoints: every run integrity-checks the whole store."""
+        """Save and parse `namedrop doctor --json` at a checkpoint."""
         result = self.profile.namedrop("doctor", "--json")
         self.save("doctor-{}.json".format(label), result.stdout)
         return parse_doctor(result.returncode, result.stdout)
