@@ -26,6 +26,7 @@
   <a href="#agent-status">Agent status</a> ·
   <a href="#tour">Tour</a> ·
   <a href="#personas">Personas</a> ·
+  <a href="#channels-experimental">Channels</a> ·
   <a href="#update-namedrop">Update</a> ·
   <a href="#troubleshooting">Troubleshooting</a> ·
   <a href="#uninstall">Uninstall</a> ·
@@ -327,6 +328,69 @@ Personas are optional. An agent without one is **Generic**. It has no specialty,
 At the start of each turn, and with each incoming request, every agent receives the workspace roster. The roster lists each named agent, its persona, and whether it can take work right now. Your agent picks collaborators from the roster, tells you who it used, and gives you one answer.
 
 A persona grants no permissions and no tool access. It isn't proof of skill, and it never overrides your request or an explicit `@mention`. Named terminals can't have a persona.
+
+## Channels (experimental)
+
+Channels is a browser page that shows each Herdr workspace as a channel. It shows the workspace's messages, threads, agents, and anything that needs you. You can post to a channel or reply in a thread, and the agents receive your message like an `@mention` from a pane. Channels ships only on the `experimental` branch. It is not part of a `main` release yet.
+
+### Install the experimental branch
+
+For a new installation, follow [Install the plugin](#install-the-plugin) and use the `experimental` ref:
+
+```sh
+herdr plugin install ericbust/namedrop --ref experimental
+herdr plugin pane open --plugin namedrop --entrypoint setup
+```
+
+To switch an existing `main` installation, use the [reinstall steps](#reinstall-an-existing-installation) with the `experimental` ref. Finish active handoffs and exit your Claude Code and Codex sessions first. Your names and message history stay.
+
+```sh
+cd "$HOME"
+namedrop deactivate
+herdr plugin disable namedrop
+herdr plugin uninstall namedrop
+herdr plugin install ericbust/namedrop --ref experimental
+herdr plugin pane open --plugin namedrop --entrypoint setup
+```
+
+Then open a new terminal tab, run `namedrop doctor`, and start fresh agent sessions. **Update Namedrop** follows the ref you installed, so it updates an experimental installation to newer `experimental` commits.
+
+If you already run an older `experimental` build, you get no update notice for this one, because the older update check can't read its `1.5.0-exp` version. Run the update by hand:
+
+```sh
+herdr plugin action invoke update --plugin namedrop
+```
+
+To switch back, run the same commands with `--ref main` in place of `--ref experimental`. Both branches use the same state schema, so your names and history carry over. A local checkout or an archive installation must follow the [migration guide](docs/operations.md#migrate-a-local-link-to-a-managed-installation) first.
+
+### Open Channels
+
+Run the Herdr action **Open Namedrop Channels** in the workspace, or run its command from a shell tab:
+
+```sh
+herdr plugin action invoke channels --plugin namedrop
+namedrop dashboard
+```
+
+Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop dashboard` in a shell tab and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop dashboard --no-open` to print the link only. The link works once. Run the command again for a new link.
+
+### What to try
+
+- Post `@name` and a request in a channel, and watch the reply arrive in the channel.
+- Open a reply's thread and post a follow-up. Agents already in the thread receive it without a new `@mention`.
+- Post without a leading `@mention`. The post stays in the channel and wakes nobody, unless it mentions an agent in its text.
+- Open **Needs you** when an agent waits on an approval or a reply. Each item opens its conversation or the agent's pane.
+- Select an agent's name to **Peek** at its recent pane output.
+- Narrow the window below 600 pixels wide, and switch your system to dark mode.
+
+The [Channels tester checklist](docs/channels-testing.md) lists these checks in order.
+
+### Known limits
+
+- Status for Codex agents is limited compared with Claude Code agents.
+- The page can't yet tell an agent that you named before its session started from an agent that is offline.
+- A workspace where Namedrop was never turned on shows a **No agents here yet** guide. To start, name an agent there with `namedrop name @alias`.
+- The page is a local browser page on `127.0.0.1`. Other machines can't open it. Any process that runs as your user and can open the page can post as you. See [Channels](docs/operations.md#channels) for the server details.
 
 ## Update Namedrop
 
