@@ -398,9 +398,13 @@ export const pendingCopy = {
 const couldNotSend = "Namedrop couldn't send this. Try again.";
 const sessionExpired = () =>
   "Your session expired. Reload the page to keep posting.";
+// The server's refusal when a post names no one it can reach.
+const missingRecipients =
+  "message must begin with one or more recipient Mentions";
 function serverSays(message: string): string {
   const text = message.trim();
   if (!text) return couldNotSend;
+  if (text === missingRecipients) return composerCopy.needsRecipient;
   const sentence = `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
   return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
 }

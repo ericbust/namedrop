@@ -1371,6 +1371,38 @@ test("FULL-THREAD: a failed Reply in thread keeps its target, and the retry reus
   assert.equal(sent[1][0], sent[0][0], "the retry reuses the request id");
 });
 
+test("FULL-THREAD: a reply the server finds no one for asks for a mention, not the server's words", async (t) => {
+  const ui = await open(
+    t,
+    (client) => replay(client, [replyRows()]),
+    undefined,
+    {
+      onPost: () => ({
+        status: 400,
+        error: "message must begin with one or more recipient Mentions",
+      }),
+    },
+  );
+  await ui.live();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .locator('[data-message-id="report"]')
+    .getByRole("button", { name: "Reply in thread to @codex" })
+    .click();
+  await pane.getByRole("combobox").fill("Ship the report");
+  await ui.page.keyboard.press("Enter");
+  const alert = pane.getByRole("alert");
+  await alert.waitFor();
+  assert.equal(
+    (await alert.textContent()).trim(),
+    "Start with @name to choose who gets this.",
+  );
+});
+
 test("MD-UI: a formatted agent reply renders lists, code and bold without markup or images", async (t) => {
   const fence = "\x60\x60\x60";
   const formatted = [
