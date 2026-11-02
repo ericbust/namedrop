@@ -3,7 +3,7 @@
 //! health, lane order, redaction) lives here so the browser never re-derives.
 use crate::dashboard::rows::{self, DashboardRows};
 use crate::{DeliveryState, PaneType, StateNamespace, WorktreeState};
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -70,6 +70,42 @@ impl SafeText {
     fn optional(raw: Option<&str>, max_chars: usize) -> Option<Self> {
         raw.filter(|raw| !raw.trim().is_empty())
             .map(|raw| Self::from_untrusted(raw, max_chars))
+    }
+}
+
+/// The repository a workspace's checkout belongs to. `id` hashes Herdr's
+/// `repo_key`, the git common dir every worktree of a repository shares, so
+/// the page can group worktrees without ever receiving a path.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RepoRef {
+    id: String,
+    name: String,
+}
+
+impl RepoRef {
+    fn of(repo_key: Option<&str>, repo_name: Option<&str>) -> Option<Self> {
+        let repo_key = repo_key.filter(|key| !key.is_empty())?;
+        let name = SafeText::optional(repo_name, SHORT_CHARS)?.text;
+        Some(Self {
+            id: crate::lower_hex(&Sha256::digest(repo_key))[..16].to_owned(),
+            name,
+        })
+    }
+
+    /// Reads Herdr's `worktree` object and drops its paths at the parse.
+    pub(crate) fn from_herdr_worktree<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Self>, D::Error> {
+        #[derive(Deserialize)]
+        struct Worktree {
+            repo_key: Option<String>,
+            repo_name: Option<String>,
+        }
+        Ok(
+            Option::<Worktree>::deserialize(deserializer)?.and_then(|worktree| {
+                Self::of(worktree.repo_key.as_deref(), worktree.repo_name.as_deref())
+            }),
+        )
     }
 }
 
@@ -420,6 +456,7 @@ pub struct SpaceHeader {
     pub key: SpaceKey,
     pub workspace_id: String,
     pub label: Option<SafeText>,
+    pub repo: Option<RepoRef>,
     pub display_name: String,
     pub addressable_label: Option<String>,
     pub not_addressable_reason: Option<NotAddressableReason>,
@@ -796,15 +833,17 @@ pub struct SpaceSummary {
     pub key: SpaceKey,
     pub workspace_id: String,
     pub label: Option<SafeText>,
+    pub repo: Option<RepoRef>,
     pub state: SpaceState,
 }
 
 impl SpaceSummary {
-    pub fn of(space: &rows::SpaceRow, label: Option<&str>) -> Self {
+    pub fn of(space: &rows::SpaceRow, label: Option<&str>, repo: Option<RepoRef>) -> Self {
         Self {
             key: SpaceKey::of(&space.namespace),
             workspace_id: space.namespace.space_id.as_str().to_owned(),
             label: SafeText::optional(label, SHORT_CHARS),
+            repo,
             state: SpaceState::of(Some(&space.state)),
         }
     }
@@ -819,6 +858,7 @@ impl DashboardSnapshot {
                 key,
                 workspace_id: String::new(),
                 label: SafeText::optional(label, SHORT_CHARS),
+                repo: None,
                 display_name: String::new(),
                 addressable_label: None,
                 not_addressable_reason: Some(NotAddressableReason::Unavailable),
@@ -912,6 +952,7 @@ pub fn build(rows: &DashboardRows, label: Option<&str>, now_ms: i64) -> Dashboar
             key: SpaceKey::of(&rows.namespace),
             workspace_id: rows.namespace.space_id.as_str().to_owned(),
             label: SafeText::optional(label, SHORT_CHARS),
+            repo: None,
             display_name: rows.namespace.space_id.as_str().to_owned(),
             addressable_label: None,
             not_addressable_reason: Some(match state {

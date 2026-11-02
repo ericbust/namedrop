@@ -8,9 +8,10 @@ pub mod snapshot;
 mod thread_controls;
 
 use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, StateNamespace};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use server_files::{ServerFiles, ServerInfo, Token, UiSource};
-use snapshot::SpaceKey;
+use snapshot::{RepoRef, SpaceKey};
 use std::{
     fs::File,
     io::{Read, Write},
@@ -43,10 +44,15 @@ pub fn open(
         &workspace_id,
     ));
     let files = ServerFiles::at(runtime.state_directory)?;
-    if let Some(label) = workspace_label(runtime.herdr, &workspace_id)
-        && let Err(error) = files.record_label(key.as_str(), &label)
-    {
-        eprintln!("Could not save the workspace label: {error}");
+    if let Some(workspace) = herdr_workspace(runtime.herdr, &workspace_id) {
+        if let Some(label) = workspace.label.filter(|label| !label.trim().is_empty())
+            && let Err(error) = files.record_label(key.as_str(), &label)
+        {
+            eprintln!("Could not save the workspace label: {error}");
+        }
+        if let Err(error) = files.record_repo(key.as_str(), workspace.repo.as_ref()) {
+            eprintln!("Could not save the workspace repository: {error}");
+        }
     }
     let (server, info) = ensure(&files, &files.token()?, &ui)?;
     let url = format!(
@@ -171,13 +177,35 @@ fn answers(info: &ServerInfo, token: &Token) -> Option<ServerPhase> {
     })
 }
 
-fn workspace_label(herdr: &impl HerdrCommandExecutor, workspace_id: &str) -> Option<String> {
+#[derive(Deserialize)]
+struct HerdrWorkspaceGet {
+    result: HerdrWorkspaceGetResult,
+}
+
+#[derive(Deserialize)]
+struct HerdrWorkspaceGetResult {
+    workspace: HerdrWorkspace,
+}
+
+#[derive(Deserialize)]
+struct HerdrWorkspace {
+    label: Option<String>,
+    #[serde(
+        default,
+        rename = "worktree",
+        deserialize_with = "RepoRef::from_herdr_worktree"
+    )]
+    repo: Option<RepoRef>,
+}
+
+fn herdr_workspace(
+    herdr: &impl HerdrCommandExecutor,
+    workspace_id: &str,
+) -> Option<HerdrWorkspace> {
     let output = herdr.execute(&["workspace", "get", workspace_id]).ok()?;
-    let value: Value = serde_json::from_str(&output.stdout).ok()?;
-    value["result"]["workspace"]["label"]
-        .as_str()
-        .filter(|label| !label.trim().is_empty())
-        .map(str::to_owned)
+    serde_json::from_str::<HerdrWorkspaceGet>(&output.stdout)
+        .ok()
+        .map(|get| get.result.workspace)
 }
 
 fn launch_browser(url: &str) -> bool {
