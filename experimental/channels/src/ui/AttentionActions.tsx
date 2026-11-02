@@ -78,6 +78,7 @@ export function AttentionActions({
   absent,
   onFocus,
   onControl,
+  reviewable = false,
   children,
 }: {
   item: Attention;
@@ -85,6 +86,9 @@ export function AttentionActions({
   absent: Absence | null;
   onFocus: FocusAttention;
   onControl: ControlThread;
+  // A handoff card's Ask to review messages the reviewer and its Details shows
+  // the report, so Show message and Message @x would only repeat them.
+  reviewable?: boolean;
   children?: ReactNode;
 }) {
   const target = attentionConversation(item, channel);
@@ -155,7 +159,7 @@ export function AttentionActions({
   return (
     <>
       <div className="attention-actions" ref={row}>
-        {navigation !== null && (
+        {navigation !== null && !reviewable && (
           <button
             type="button"
             className="text-button"
@@ -226,6 +230,7 @@ export function AttentionActions({
             </>
           ))}
         {absent === null &&
+          !reviewable &&
           (response?.kind === "reply" ||
             (response?.kind === "message" && target !== null)) && (
             <button

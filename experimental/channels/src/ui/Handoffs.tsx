@@ -199,6 +199,7 @@ function HandoffItem({
           absent={responseAbsence(item, directory)}
           onFocus={onFocus}
           onControl={onControl}
+          reviewable={reviewer !== null}
         >
           {!leadLive && options.length > 0 && (
             <ReviewerSelect

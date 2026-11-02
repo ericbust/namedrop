@@ -11898,3 +11898,36 @@ test("NEEDS-COORD: a retired lead's handoff asks a picked agent, shows who was a
   await results.getByRole("button", { name: "Dismiss" }).click();
   await results.waitFor({ state: "detached" });
 });
+
+test("INTEG-EXP4: the sidebar names the handoff decision count, and a handoff card's Ask to review stands in for Show message and Message", async (t) => {
+  const value = handoffFrame(2);
+  const conversation = { thread_id: "thread-c-0", message_id: "message-c-0" };
+  value.frame.attention[1].conversation = conversation;
+  value.frame.attention[1].response = { kind: "message", address_id: LEAD };
+  const ui = await open(t, (client) => replay(client, [value]));
+  await ui.live();
+  const reason = ui.page
+    .getByRole("navigation", { name: "Needs you" })
+    .locator(".row-reason");
+  assert.equal(
+    await reason.textContent(),
+    "@codex is waiting on an approval or question. · 1 more",
+    "the two handoffs count as one banner row",
+  );
+  const card = ui.page.locator('[data-coordination-id="c-0"]');
+  assert.deepEqual(
+    await card.locator(".attention-actions button").allTextContents(),
+    ["Ask @codex to review", "Details"],
+  );
+  const handoffsOnly = handoffFrame(3);
+  handoffsOnly.frame.attention.shift();
+  const only = await open(t, (client) => replay(client, [handoffsOnly]));
+  await only.live();
+  assert.equal(
+    await only.page
+      .getByRole("navigation", { name: "Needs you" })
+      .locator(".row-reason")
+      .textContent(),
+    "3 handoffs need a decision",
+  );
+});

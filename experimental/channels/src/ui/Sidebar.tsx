@@ -12,6 +12,7 @@ import {
   activityCopy,
   attentionCopy,
   composerCopy,
+  reviewCopy,
   sidebarCopy,
 } from "../copy.ts";
 import type { Channel, SpaceKey, State } from "../model.ts";
@@ -28,13 +29,22 @@ import {
 } from "../sidebar-layout.ts";
 import { channelSuffix, connectionStatus, sortedChannels } from "../store.ts";
 import { routePath } from "../wire.ts";
+import { isHandoff } from "./Handoffs.tsx";
 import { Icon } from "./Icons.tsx";
 
+// One entry per row of the channel's Needs-you banner, where handoffs share one.
 function reason(channel: Channel): string {
-  const [first] = channel.attention;
+  const handoffs = channel.attention.filter(isHandoff).length;
+  const rows = [
+    ...channel.attention
+      .filter((item) => !isHandoff(item))
+      .map((item) => attentionCopy(item).title),
+    ...(handoffs > 0 ? [reviewCopy.group(handoffs)] : []),
+  ];
+  const [first] = rows;
   if (!first) return "Something needs you";
-  const more = channel.attention.length - 1;
-  return `${attentionCopy(first).title}${more > 0 ? ` · ${more} more` : ""}`;
+  const more = rows.length - 1;
+  return `${first}${more > 0 ? ` · ${more} more` : ""}`;
 }
 function needsYouOf(channels: Channel[]): Channel[] {
   return channels.filter((channel) => channel.health.level === "needs_you");
