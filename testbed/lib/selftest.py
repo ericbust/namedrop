@@ -573,6 +573,14 @@ def check_report():
                          (ok,) + tuple(live.StepResult(step, (live.Check("a", True, "fine"),), 1)
                                        for step in steps[1:]), "- **host**, line.", "/ev", "/r.txt")
     assert passed.passed and live.render(passed).splitlines()[-1] == "- **host**, line."
+    for version in ("1.5.0-exp.1", "1.5.0-exp.1+codex.abc123"):
+        report = passed._replace(feats=live.features(version))
+        header = live.render(report).splitlines()[0]
+        assert "Namedrop {},".format(version) in header, header
+        reported = live.report_json(report)["namedrop"]
+        assert reported == version, (reported, version)
+        assert report.feats.version == (1, 5, 0)
+        assert live.choose_mode(None, report.feats) == live.MODES["plain"]
     assert "Mentions went both ways" in live.outcome_sentence(passed.results)
     failed = passed._replace(results=(ok, live.StepResult(steps[1], (live.Check("b", False, "bad"),), 2),
                                       live.StepResult(steps[2], None, 0)), compat=None)

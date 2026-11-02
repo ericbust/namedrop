@@ -42,4 +42,27 @@ git -C "$test_root" add Cargo.toml Cargo.lock herdr-plugin.toml CHANGELOG.md
 git -C "$test_root" -c user.name=Test -c user.email=test@example.com commit -qm stable
 check_fails 1.5.0-exp.11 1.5.0
 check_passes 1.5.1-exp.1
+set_version 1.4.3
+git -C "$test_root" add Cargo.toml Cargo.lock herdr-plugin.toml CHANGELOG.md
+git -C "$test_root" -c user.name=Test -c user.email=test@example.com commit -qm main-base
+for ref in refs/heads/main refs/remotes/public/main refs/remotes/origin/main refs/heads/exp/ui refs/heads/experimental; do
+  git -C "$test_root" update-ref "$ref" HEAD
+done
+for base in main public/main origin/main refs/heads/main refs/remotes/public/main; do
+  set_version 1.5.0-exp.1
+  if sh "$test_root/scripts/release.sh" check "$base" > "$test_root/output" 2>&1; then
+    printf 'release check accepted experimental version 1.5.0-exp.1 for %s\n' "$base" >&2
+    exit 1
+  fi
+  grep -F 'Choose a stable version for main' "$test_root/output" > /dev/null || {
+    cat "$test_root/output" >&2
+    exit 1
+  }
+  set_version 1.5.0
+  sh "$test_root/scripts/release.sh" check "$base" > /dev/null
+done
+set_version 1.5.0-exp.1
+for base in exp/ui experimental; do
+  sh "$test_root/scripts/release.sh" check "$base" > /dev/null
+done
 printf '%s\n' 'release version checks passed'
