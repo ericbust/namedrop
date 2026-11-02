@@ -562,7 +562,6 @@ function SystemRow({
     >
       <Icon name={message.kind === "hook" ? "plug" : "bell"} />
       <div className="msg-content">
-        <ReplyInThread message={message} directory={directory} />
         <p>
           <strong>{message.kind === "hook" ? "Hook" : "Nudge"}</strong>
           <span className="body" title={text === raw ? undefined : raw}>
@@ -574,6 +573,7 @@ function SystemRow({
           <Receipts message={message} directory={directory} paused={paused} />
         )}
       </div>
+      <ReplyInThread message={message} directory={directory} />
     </article>
   );
 }
@@ -754,7 +754,6 @@ export const Message = memo(
           <Avatar alias={author.name} type={author.avatar} />
         )}
         <div className="msg-content">
-          <ReplyInThread message={message} directory={directory} />
           {(!grouped || showRecipients) && (
             <header className="msg-head">
               {!grouped && (
@@ -870,6 +869,7 @@ export const Message = memo(
             />
           )}
         </div>
+        <ReplyInThread message={message} directory={directory} />
       </article>
     );
   },

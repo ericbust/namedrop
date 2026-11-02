@@ -1007,7 +1007,12 @@ button.member:not(.more):hover {
   color: var(--text-muted);
 }
 .msg-content {
+  grid-column: 2;
+  grid-row: 1;
   min-width: 0;
+}
+.reply-ref ~ .msg-content {
+  grid-row: 2;
 }
 .msg-head {
   display: flex;
@@ -1120,10 +1125,17 @@ button.member:not(.more):hover {
   margin-top: 2px;
 }
 /* Only this empty anchor is positioned, so message content never paints over
-   the timeline's focus ring. */
+   the timeline's focus ring. It follows the body for screen readers and Tab,
+   and shares the content's grid cell to sit at its top right. */
 .msg-actions {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: start;
   position: relative;
   height: 0;
+}
+.reply-ref ~ .msg-actions {
+  grid-row: 2;
 }
 .msg-reply {
   position: absolute;
@@ -1159,11 +1171,12 @@ button.member:not(.more):hover {
   color: var(--text-muted);
 }
 @media (hover: none), (max-width: 600px) {
-  .msg-actions {
+  .msg-actions,
+  .reply-ref ~ .msg-actions {
+    grid-row: auto;
+    justify-self: end;
     position: static;
-    float: right;
     height: auto;
-    margin-left: var(--space-2);
   }
   .msg-reply {
     position: static;

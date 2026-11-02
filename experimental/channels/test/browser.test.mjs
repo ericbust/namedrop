@@ -1288,6 +1288,46 @@ test("FULL-THREAD: a coordination report thread names its agent, a nudge with no
   );
 });
 
+test("FULL-THREAD: Reply in thread reads after the author and body, and stays at the row's top right", async (t) => {
+  const ui = await open(t, (client) => replay(client, [replyRows()]));
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  for (const id of ["parent", "nudge"]) {
+    const row = timeline.locator(`[data-message-id="${id}"]`);
+    const order = await row.evaluate((element) => {
+      const button = element.querySelector(".msg-reply");
+      const content = element.querySelector(".msg-content");
+      const author = element.querySelector(".author, strong");
+      const body = element.querySelector(".body");
+      const after = (node) =>
+        Boolean(
+          node.compareDocumentPosition(button) &
+            Node.DOCUMENT_POSITION_FOLLOWING,
+        );
+      const box = button.getBoundingClientRect();
+      const area = content.getBoundingClientRect();
+      return {
+        tabIndex: button.tabIndex,
+        afterAuthor: after(author),
+        afterBody: after(body),
+        top: Math.abs(box.top - area.top) <= 8,
+        right: Math.abs(box.right - area.right) <= 1,
+      };
+    });
+    assert.deepEqual(
+      order,
+      {
+        tabIndex: 0,
+        afterAuthor: true,
+        afterBody: true,
+        top: true,
+        right: true,
+      },
+      id,
+    );
+  }
+});
+
 test("FULL-THREAD: a failed Reply in thread keeps its target, and the retry reuses its request id", async (t) => {
   let calls = 0;
   const ui = await open(
