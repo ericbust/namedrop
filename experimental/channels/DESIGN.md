@@ -391,10 +391,9 @@ click.
 - **Body**: 14px with 21px line height, at most `--measure` wide. Links use
   `--accent-text` with a 3px underline offset. Code blocks use `--bg-raised`, a 1px
   `--line` border, `--radius-md`, 10px by 12px padding, `--font-mono` at 13px, and
-  `white-space: pre` with horizontal scroll. Drop one newline right after a
-  closing fence and right before an opening fence, so no blank line sits next to
-  a code block. Bodies over 480 characters collapse behind a **Show more** text
-  button.
+  `white-space: pre` with horizontal scroll. Bodies render a Markdown subset, as
+  Markdown in messages says. Bodies over 480 characters collapse behind a
+  **Show more** text button.
 - **Receipt line**: one 12px muted line under the body, with a 12px drawn icon per
   recipient. With one recipient, show only the state, because the header already
   names the recipient. With several, show "@codex Done · @shell Working on it".
@@ -421,6 +420,55 @@ click.
 - **Arrival**: a message that arrives live fades in and rises 4px over
   `--duration` with `--ease-out`. History pages and channel switches do not
   animate.
+
+### Markdown in messages
+
+Agents write Markdown, so a body renders a small safe subset: paragraphs and
+line breaks, bold, italic, inline and fenced code, ordered and unordered lists
+(nested too), headings, block quotes, GFM pipe tables, and links. Everything
+else, raw HTML included, shows as the literal text.
+
+- **Plain text looks as it always did**: the body stays `white-space:
+  pre-wrap`, and a paragraph is its own source text in that flow, so single
+  newlines, blank lines and leading spaces show as written. Only lists, quotes,
+  code, headings and tables become elements. The whitespace between one of
+  those and the text around it is dropped, so no blank line sits next to a
+  block; its margin spaces it instead.
+- **Headings** are bold lines at body size, weight 600, 6px above. Level 1
+  steps up to `--text-md`. No rule, no underline, and no heading role, so a
+  message never adds to the page outline.
+- **Lists**: 1.4em indent, 2px between items, 2px above and below, no extra
+  margin for a nested list. Markers are `--text-muted`; nested bullets are
+  circles. An ordered list keeps its start number.
+- **Inline code**: `--font-mono` at 0.9em, 0 4px padding, a 1px `--line`
+  border, `--radius-sm`, `--bg-raised`. Fenced code keeps the code-block look
+  above.
+- **Quotes**: a 2px `--line-strong` left border, 10px padding, `--text-muted`
+  text, 4px above and below.
+- **Tables**: in a container at most `--measure` wide that scrolls sideways.
+  Collapsed 1px `--line` borders, 3px by 8px cell padding, `--text-sm` at 19px,
+  600 header cells. Cells wrap, so a 390px window shows a narrow table whole and
+  a wide one scrolls inside the message. Alignment colons set left, center or
+  right.
+- **Links** keep the old rule: only `http://` and `https://` become links, in
+  a new tab with `rel="noreferrer"`. A link to any other scheme shows its label
+  as text. Bare URLs link as before, and trailing `.,;!?)*_` stay outside the
+  link. Nothing inside code links.
+- **Images never load**: `![alt](src)` shows its alt text, as a link when the
+  source is `http(s)`.
+- **Emphasis** follows the CommonMark flanking rules, so `snake_case_name`,
+  `2 * 3 * 4` and `*.ts` stay literal. A backslash escapes `*`, `_`, `[`, `]`,
+  `|`, `#` and the backtick. `\@name` keeps its own rule and drops the
+  backslash outside code only.
+- **Previews cut on the source text**: the 480-character preview cuts the
+  parsed blocks at that offset. A cut inside a fence shows the code so far, a
+  cut inside a list shows the items so far, a cut link keeps its full address,
+  and the ellipsis lands at the end of the last visible line.
+- **Inline only where blocks cannot go**: hook and nudge rows and the reply
+  preview keep bold, italic and code but drop block markers and keep line
+  breaks. The reply preview is a button, so its links are plain text.
+- **Limits**: lists and quotes nest at most 8 deep and emphasis 8 deep; past
+  that the rest is text.
 
 ### Receipt copy
 
