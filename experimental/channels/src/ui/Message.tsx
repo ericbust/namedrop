@@ -8,6 +8,7 @@ import {
 } from "react";
 import { flushSync } from "react-dom";
 import {
+  bodyCopy,
   overflowCopy,
   type ParticipantCopy,
   participantCopy,
@@ -15,6 +16,7 @@ import {
   receiptCopy,
   referenceCopy,
   repliesCopy,
+  replyInThreadCopy,
   routeCopy,
   SHOWN_RECIPIENTS,
 } from "../copy.ts";
@@ -24,6 +26,7 @@ import type {
   Directory,
   Message as MessageRow,
   Outgoing,
+  SafeText,
   TerminalResult,
   TerminalRun,
 } from "../model.ts";
@@ -42,6 +45,7 @@ import { Avatar } from "./Avatar.tsx";
 import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { Markdown, MarkdownLine, markdownText } from "./Markdown.tsx";
+import { MessageActionsContext } from "./MessageActions.tsx";
 import { PeekControl, usePeek } from "./PeekContext.tsx";
 
 const PREVIEW = 480;
@@ -105,18 +109,40 @@ function previewLimit(text: string, length = PREVIEW): number {
 }
 type Variant = "text" | "command" | "output";
 function Body({
-  text,
-  truncated,
+  text: shortText,
+  truncated: shortTruncated,
   variant,
+  messageId = null,
 }: {
   text: string;
   truncated: boolean;
   variant: Variant;
+  messageId?: string | null;
 }) {
+  const actions = useContext(MessageActionsContext);
   const [expanded, setExpanded] = useState(false);
-  const long = text.length > PREVIEW;
+  const [full, setFull] = useState<SafeText | "loading" | "failed" | null>(
+    null,
+  );
+  const loaded = typeof full === "object" ? full : null;
+  const text = loaded?.text ?? shortText;
+  const truncated = loaded?.truncated ?? shortTruncated;
+  const fetchable = shortTruncated && messageId !== null && actions !== null;
+  const long = text.length > PREVIEW || (fetchable && loaded === null);
   const limit = long && !expanded ? previewLimit(text) : text.length;
   const more = long && !expanded ? "…" : null;
+  const toggle = () => {
+    if (expanded || !fetchable || loaded !== null) {
+      setExpanded(!expanded);
+      return;
+    }
+    if (full === "loading") return;
+    setFull("loading");
+    void actions.fullBody(messageId).then((body) => {
+      setFull(body ?? "failed");
+      if (body !== null) setExpanded(true);
+    });
+  };
   return (
     <>
       {variant === "output" ? (
@@ -142,12 +168,20 @@ function Body({
           className="text-button show-more"
           type="button"
           aria-expanded={expanded}
-          onClick={() => setExpanded(!expanded)}
+          aria-busy={full === "loading" || undefined}
+          onClick={toggle}
         >
           {expanded ? "Show less" : "Show more"}
         </button>
       )}
-      {truncated && <p className="truncation-note">Shortened by Namedrop.</p>}
+      {full === "failed" && (
+        <p className="truncation-note" role="status">
+          {bodyCopy.unavailable}
+        </p>
+      )}
+      {truncated && (!fetchable || loaded !== null) && (
+        <p className="truncation-note">{bodyCopy.shortened}</p>
+      )}
     </>
   );
 }
@@ -170,7 +204,7 @@ function TerminalOutput({
           <Body text={stderr} truncated={false} variant="output" />
         </>
       )}
-      {truncated && <p className="truncation-note">Shortened by Namedrop.</p>}
+      {truncated && <p className="truncation-note">{bodyCopy.shortened}</p>}
     </>
   );
 }
@@ -528,6 +562,10 @@ function SystemRow({
     >
       <Icon name={message.kind === "hook" ? "plug" : "bell"} />
       <div className="msg-content">
+        <ReplyInThread
+          message={message}
+          name={message.kind === "hook" ? "Hook" : "Nudge"}
+        />
         <p>
           <strong>{message.kind === "hook" ? "Hook" : "Nudge"}</strong>
           <span className="body" title={text === raw ? undefined : raw}>
@@ -540,6 +578,30 @@ function SystemRow({
         )}
       </div>
     </article>
+  );
+}
+function ReplyInThread({
+  message,
+  name,
+}: {
+  message: MessageRow;
+  name: string;
+}) {
+  const actions = useContext(MessageActionsContext);
+  if (actions === null) return null;
+  return (
+    <div className="msg-actions">
+      <button
+        type="button"
+        className="msg-reply"
+        aria-label={`${replyInThreadCopy.label} to ${name}`}
+        title={replyInThreadCopy.label}
+        onClick={(event) => actions.reply(message, event.currentTarget)}
+      >
+        <Icon name="reply" className="icon-12" />
+        <span>{replyInThreadCopy.label}</span>
+      </button>
+    </div>
   );
 }
 function ReplyPreview({
@@ -694,6 +756,7 @@ export const Message = memo(
           <Avatar alias={author.name} type={author.avatar} />
         )}
         <div className="msg-content">
+          <ReplyInThread message={message} name={author.name} />
           {(!grouped || showRecipients) && (
             <header className="msg-head">
               {!grouped && (
@@ -749,6 +812,7 @@ export const Message = memo(
                 text={message.body.text}
                 truncated={message.body.truncated}
                 variant="text"
+                messageId={message.id}
               />
             </div>
           ) : result ? (
@@ -761,6 +825,7 @@ export const Message = memo(
               text={message.body.text}
               truncated={message.body.truncated}
               variant={variant}
+              messageId={message.id}
             />
           )}
           {channelChat

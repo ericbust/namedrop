@@ -1119,6 +1119,60 @@ button.member:not(.more):hover {
 .show-more {
   margin-top: 2px;
 }
+/* Only this empty anchor is positioned, so message content never paints over
+   the timeline's focus ring. */
+.msg-actions {
+  position: relative;
+  height: 0;
+}
+.msg-reply {
+  position: absolute;
+  top: -4px;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  opacity: 0;
+}
+.msg:hover .msg-reply,
+.system:hover .msg-reply,
+.msg-reply:focus-visible {
+  opacity: 1;
+}
+.msg-reply:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.thread-replying {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-1) var(--space-4) 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+@media (hover: none), (max-width: 600px) {
+  .msg-actions {
+    position: static;
+    float: right;
+    height: auto;
+    margin-left: var(--space-2);
+  }
+  .msg-reply {
+    position: static;
+    border: 0;
+    padding: 2px 0;
+    background: none;
+    opacity: 1;
+  }
+}
 .receipt {
   display: flex;
   flex-wrap: wrap;

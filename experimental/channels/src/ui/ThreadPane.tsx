@@ -19,7 +19,9 @@ import type { CompletionContext } from "../complete.ts";
 import {
   absenceCopy,
   answerInPane,
+  participantCopy,
   repliesCopy,
+  replyInThreadCopy,
   replyLabel,
   replyPlaceholder,
   responseCopy,
@@ -31,6 +33,7 @@ import type {
   Directory,
   Draft,
   DraftKey,
+  Message as MessageRow,
   Outgoing,
   SendRule,
 } from "../model.ts";
@@ -38,6 +41,7 @@ import { chatOf } from "../route.ts";
 import {
   draftKey,
   exitFor,
+  participant,
   type RunIndex,
   recipients,
   sameComposer,
@@ -61,6 +65,8 @@ export type ThreadResponse =
   | { kind: "pane"; name: string | null; pane: string | null }
   | { kind: "absent"; absence: Absence };
 
+const keepLatest = () => {};
+
 export function ThreadPane({
   channel,
   thread,
@@ -79,6 +85,8 @@ export function ThreadPane({
   response = null,
   target = null,
   earlierOmitted = false,
+  replyTo = null,
+  onReplyTo = keepLatest,
 }: {
   channel: Channel;
   thread: ThreadGroup;
@@ -100,11 +108,19 @@ export function ThreadPane({
   response?: ThreadResponse | null;
   target?: { messageId: string } | null;
   earlierOmitted?: boolean;
+  replyTo?: string | null;
+  onReplyTo?: (message: MessageRow | null) => void;
 }) {
   const replyIntent = response?.kind === "reply" ? response.intent : null;
   const pane = useRef<HTMLElement>(null);
   const body = useRef<HTMLDivElement>(null);
   const deliveries = useContext(DeliveryContext);
+  const replyingTo =
+    replyTo === null
+      ? null
+      : ([...thread.parents, ...thread.replies].find(
+          (message) => message.id === replyTo,
+        ) ?? null);
   const [openedAt] = useState(() => Date.now());
   const latest = thread.replies.at(-1) ?? thread.parents.at(-1);
   const composer = useMemo<ComposerId>(
@@ -221,7 +237,7 @@ export function ThreadPane({
           <Message
             key={message.id}
             message={message}
-            located={message.id === tinted}
+            located={message.id === tinted || message.id === replyingTo?.id}
             directory={directory}
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}
@@ -244,7 +260,7 @@ export function ThreadPane({
           <Message
             key={message.id}
             message={message}
-            located={message.id === tinted}
+            located={message.id === tinted || message.id === replyingTo?.id}
             directory={directory}
             paused={channel.health.level === "paused"}
             recipients={recipients(message)}
@@ -302,6 +318,25 @@ export function ThreadPane({
           )}
         </p>
       )}
+      {replyingTo !== null && activeReply === null && (
+        <p className="thread-replying" role="status">
+          <Icon name="reply" className="icon-12" />
+          <span>
+            {replyInThreadCopy.replyingTo(
+              participantCopy(participant(directory, replyingTo.author)).name,
+            )}
+          </span>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={replyInThreadCopy.latest}
+            title={replyInThreadCopy.latest}
+            onClick={() => onReplyTo(null)}
+          >
+            <Icon name="x" />
+          </button>
+        </p>
+      )}
       {(response === null || response.kind === "reply") &&
         completion &&
         latest &&
@@ -332,10 +367,12 @@ export function ThreadPane({
                 {
                   composer,
                   source,
-                  inReplyTo: activeReply?.messageId ?? latest.id,
+                  inReplyTo:
+                    activeReply?.messageId ?? replyingTo?.id ?? latest.id,
                 },
                 startedAt,
               );
+              onReplyTo(null);
             }}
           />
         )}

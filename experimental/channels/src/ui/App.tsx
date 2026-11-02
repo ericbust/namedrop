@@ -33,6 +33,7 @@ import type {
   Directory,
   Event,
   Home,
+  Message,
   Outgoing,
   PeekTarget,
   Route,
@@ -72,9 +73,10 @@ import { ActivityView } from "./ActivityView.tsx";
 import type { FocusAttention } from "./AttentionActions.tsx";
 import { ChannelHeader } from "./ChannelHeader.tsx";
 import { Composer } from "./Composer.tsx";
-import { type DeliveryAccess, DeliveryContext } from "./DeliveryContext.ts";
+import type { DeliveryAccess } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
 import { MemberStrip } from "./MemberStrip.tsx";
+import { type MessageActions, MessageContexts } from "./MessageActions.tsx";
 import { measure, usePhone } from "./measure.ts";
 import { NeedsYou } from "./NeedsYou.tsx";
 import { type PeekAccess, PeekContext } from "./PeekContext.tsx";
@@ -740,15 +742,51 @@ export function App() {
   } | null>(null);
   const focusPane = useRef(false);
   const [, requestFocus] = useReducer((count: number) => count + 1, 0);
+  const [replyTarget, setReplyTarget] = useState<{
+    threadId: string;
+    messageId: string;
+  } | null>(null);
+  const focusComposer = useRef(false);
   const openThread = useCallback(
     (threadId: string, button: HTMLButtonElement) => {
       focusEvidence({ type: "close" });
+      setReplyTarget(null);
       returnFocus.current = { button, threadId };
       focusPane.current = true;
       requestFocus();
       dispatch({ type: "thread", threadId });
     },
     [],
+  );
+  const shownThread = useRef<string | null>(null);
+  shownThread.current = thread?.id ?? null;
+  const replyInThread = useCallback(
+    (message: Message, button: HTMLButtonElement) => {
+      if (message.threadId !== shownThread.current)
+        openThread(message.threadId, button);
+      setReplyTarget({ threadId: message.threadId, messageId: message.id });
+      focusComposer.current = true;
+      focusPane.current = true;
+      requestFocus();
+    },
+    [openThread],
+  );
+  const chooseReply = useCallback(
+    (message: Message | null) =>
+      setReplyTarget(
+        message && { threadId: message.threadId, messageId: message.id },
+      ),
+    [],
+  );
+  const messageActions = useMemo<MessageActions | null>(
+    () =>
+      current === undefined
+        ? null
+        : {
+            fullBody: (messageId) => poster.fullBody(current, messageId),
+            reply: replyInThread,
+          },
+    [current, poster, replyInThread],
   );
   const [deliveries] = useState(() =>
     createDeliveries(async ({ key, messageId, alias }) => {
@@ -867,9 +905,14 @@ export function App() {
     document
       .getElementById(paneId)
       ?.querySelector<HTMLElement>(
-        pane === "thread" ? 'button[aria-label="Close thread"]' : ".peek-text",
+        pane !== "thread"
+          ? ".peek-text"
+          : focusComposer.current
+            ? "textarea"
+            : 'button[aria-label="Close thread"]',
       )
       ?.focus();
+    focusComposer.current = false;
   }, [pane, paneId]);
   useLayoutEffect(() => {
     if (pane !== null && focusPane.current) {
@@ -943,7 +986,7 @@ export function App() {
   const updatedAt = lastUpdate.current;
   return (
     <PeekContext value={peekAccess}>
-      <DeliveryContext value={deliveryAccess}>
+      <MessageContexts deliveries={deliveryAccess} actions={messageActions}>
         <div
           className={`app-shell${pane === null ? "" : ` has-slot has-${pane}`}${drawerOpen ? " drawer-open" : ""}`}
         >
@@ -1167,6 +1210,12 @@ export function App() {
                 earlierOmitted={
                   focused?.kind === "ready" && focused.context.earlierOmitted
                 }
+                replyTo={
+                  replyTarget?.threadId === thread.id
+                    ? replyTarget.messageId
+                    : null
+                }
+                onReplyTo={chooseReply}
               />
             )}
           {channel && focused && focused.kind !== "ready" && (
@@ -1229,7 +1278,7 @@ export function App() {
           )}
           <Announcer change={deliveryChange} move={moveSaid} />
         </div>
-      </DeliveryContext>
+      </MessageContexts>
     </PeekContext>
   );
 }

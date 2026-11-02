@@ -646,6 +646,12 @@ export function parseEvent(name: string, rawJson: string): WireEvent | null {
 export function parseReceipt(raw: unknown): string {
   return identity(record(raw).message_id);
 }
+export function parseFullBody(raw: unknown, messageId: string): SafeText {
+  const body = record(raw);
+  if (identity(body.message_id) !== messageId)
+    throw new Error("Full body does not match the message");
+  return safeText(body.body);
+}
 export function parseSessionToken(raw: unknown): string {
   return identity(record(raw).csrf_token);
 }

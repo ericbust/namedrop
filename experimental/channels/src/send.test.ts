@@ -406,3 +406,33 @@ test("control: the thread action's request carries the caller's abort signal", a
     ],
   );
 });
+
+test("fullBody: reads one message with the session token, refreshes a stale token once, and refuses a mismatched answer", async () => {
+  let token = "t1";
+  const server = fakeServer(({ url, init }) => {
+    if (url === "/api/session") return json(200, { csrf_token: token });
+    const csrf = new Headers(init?.headers).get("X-Namedrop-Csrf");
+    if (csrf !== "t2") return new Response("Forbidden.\n", { status: 403 });
+    const id = decodeURIComponent(url.split("/")[4] ?? "");
+    return json(200, {
+      message_id: id === "odd" ? "other" : id,
+      body: { text: `all of ${id}`, truncated: false },
+    });
+  });
+  const poster = createPoster(server.fetcher);
+  poster.prepare();
+  token = "t2";
+  assert.deepEqual(await poster.fullBody(key, "m/1"), {
+    text: "all of m/1",
+    truncated: false,
+  });
+  assert.equal(
+    server.seen.find((exchange) => exchange.url.endsWith("/body"))?.url,
+    `/w/${key}/messages/m%2F1/body`,
+  );
+  assert.equal(await poster.fullBody(key, "odd"), null);
+  assert.ok(
+    server.seen.every((exchange) => exchange.init?.method !== "POST"),
+    "reading a body never posts",
+  );
+});
