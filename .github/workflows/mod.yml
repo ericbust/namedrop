@@ -4,10 +4,22 @@ on:
   pull_request:
     paths:
       - "mods/**"
+      - "scripts/package-release.sh"
+      - "scripts/package-release.test.js"
+      - "keys.json"
+      - "RECIPE.md"
+      - "Cargo.toml"
+      - "herdr-plugin.toml"
       - ".github/workflows/mod.yml"
   push:
     paths:
       - "mods/**"
+      - "scripts/package-release.sh"
+      - "scripts/package-release.test.js"
+      - "keys.json"
+      - "RECIPE.md"
+      - "Cargo.toml"
+      - "herdr-plugin.toml"
       - ".github/workflows/mod.yml"
 
 jobs:
@@ -19,3 +31,4 @@ jobs:
         with:
           node-version: 22
       - run: node --test mods/*/*.test.js
+      - run: node --test scripts/package-release.test.js

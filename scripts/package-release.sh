@@ -4,14 +4,16 @@ namedrop_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 output="$namedrop_root/target/dist"
 binary=
 target=
+binary_only=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --binary-only) binary_only=true; shift ;;
     --output|--binary|--target)
       option=$1
       [ "$#" -ge 2 ] || { printf 'Missing value for %s\n' "$option" >&2; exit 64; }
       case "$option" in --output) output=$2;; --binary) binary=$2;; --target) target=$2;; esac
       shift 2 ;;
-    -h|--help) printf '%s\n' 'Usage: sh scripts/package-release.sh [--target TRIPLE] [--output DIRECTORY] [--binary EXECUTABLE]' 'TRIPLE is aarch64-apple-darwin, x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu; it defaults to this machine.' 'Builds in target/release-build by default; an existing binary must match the target and package version, so package on the target machine.'; exit 0 ;;
+    -h|--help) printf '%s\n' 'Usage: sh scripts/package-release.sh [--target TRIPLE] [--output DIRECTORY] [--binary EXECUTABLE] [--binary-only]' 'TRIPLE is aarch64-apple-darwin, x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu; it defaults to this machine.' 'Builds in target/release-build by default; an existing binary must match the target and package version, so package on the target machine.' 'By default, also packages target-independent Herdr app mods. --binary-only omits them.'; exit 0 ;;
     *) printf 'Unknown argument: %s\n' "$1" >&2; exit 64 ;;
   esac
 done
@@ -38,7 +40,9 @@ mkdir -p "$output"
 output=$(CDPATH= cd -- "$output" && pwd -P)
 archive="$output/$name.tar.gz"
 checksum="$archive.sha256"
-if [ -e "$archive" ] || [ -e "$checksum" ]; then
+mods_archive="$output/namedrop-mods-$version.tar.gz"
+mods_checksum="$mods_archive.sha256"
+if [ -e "$archive" ] || [ -e "$checksum" ] || { [ "$binary_only" = false ] && { [ -e "$mods_archive" ] || [ -e "$mods_checksum" ]; }; }; then
   printf '%s\n' 'Release output already exists. Choose a fresh --output directory; published artifacts are never overwritten.' >&2
   exit 73
 fi
@@ -92,7 +96,26 @@ COPYFILE_DISABLE=1 tar -czf "$stage/$name.tar.gz" -C "$stage" "$name"
   cd "$stage"
   sha256 "$name.tar.gz" > "$name.tar.gz.sha256"
 )
+if [ "$binary_only" = false ]; then
+  mkdir "$stage/mods"
+  for mod in namedrop namedrop-name namedrop-management namedrop-doctor namedrop-agent-status namedrop-tour; do
+    cp -R "$namedrop_root/mods/$mod" "$stage/mods/"
+  done
+  find "$stage/mods" -type d -name fixtures -prune -exec rm -rf {} +
+  find "$stage/mods" -type f -name '*.test.js' -delete
+  cp "$namedrop_root/keys.json" "$namedrop_root/RECIPE.md" "$stage/"
+  COPYFILE_DISABLE=1 tar -czf "$stage/namedrop-mods-$version.tar.gz" -C "$stage" mods keys.json RECIPE.md
+  (
+    cd "$stage"
+    sha256 "namedrop-mods-$version.tar.gz" > "namedrop-mods-$version.tar.gz.sha256"
+  )
+fi
 # Hard links publish complete files without clobbering a concurrent build.
 ln "$stage/$name.tar.gz" "$archive"
 ln "$stage/$name.tar.gz.sha256" "$checksum"
 printf '%s\n' "$archive" "$checksum"
+if [ "$binary_only" = false ]; then
+  ln "$stage/namedrop-mods-$version.tar.gz" "$mods_archive"
+  ln "$stage/namedrop-mods-$version.tar.gz.sha256" "$mods_checksum"
+  printf '%s\n' "$mods_archive" "$mods_checksum"
+fi
