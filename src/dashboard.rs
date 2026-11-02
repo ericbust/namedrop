@@ -1,11 +1,14 @@
 pub use crate::store::dashboard as rows;
 mod channel_delivery;
 mod channel_service;
+mod coordination_review;
 mod http;
 mod hub;
 mod server_files;
 pub mod snapshot;
 mod thread_controls;
+
+pub(crate) use server_files::current_operator_session;
 
 use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, StateNamespace};
 use serde::Deserialize;

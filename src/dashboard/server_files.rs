@@ -596,6 +596,16 @@ fn private_file(path: &Path) -> Result<File, String> {
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// The dashboard session current now, without minting one. None once it
+/// rotated away or before any dashboard ran, which voids every review grant.
+pub(crate) fn current_operator_session(
+    state: &Path,
+) -> Option<crate::store::coordination_review::OperatorSession> {
+    let secret = fs::read_to_string(state.join("dashboard").join("session")).ok()?;
+    (secret.len() == 64)
+        .then(|| crate::store::coordination_review::OperatorSession::of_secret(&secret))
+}
+
 pub(crate) fn random_hex(bytes: usize) -> Result<String, String> {
     let mut buffer = vec![0u8; bytes];
     File::open("/dev/urandom")

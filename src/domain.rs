@@ -769,6 +769,10 @@ pub enum TransitionEntityKind {
     /// One session's tenure over one coordination. The entity id is
     /// `{coordination_id}:{owner_session_id}`.
     CoordinationOwnership,
+    /// The operator's permission for one agent session to acknowledge one
+    /// coordination's warning. The entity id is
+    /// `{coordination_id}:{agent_session_id}`.
+    CoordinationReviewGrant,
 }
 
 impl TransitionEntityKind {
@@ -784,6 +788,7 @@ impl TransitionEntityKind {
             Self::AgentDisposition => "agent_disposition",
             Self::AttentionItem => "attention_item",
             Self::CoordinationOwnership => "coordination_ownership",
+            Self::CoordinationReviewGrant => "coordination_review_grant",
         }
     }
 }

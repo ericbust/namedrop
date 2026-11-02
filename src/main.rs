@@ -368,6 +368,7 @@ fn main() -> ExitCode {
         "handoff.begin"
             | "handoff.resolve"
             | "handoff.adopt"
+            | "handoff.acknowledge-granted"
             | "handoff.status"
             | "handoff.results"
             | "handoff.preview"

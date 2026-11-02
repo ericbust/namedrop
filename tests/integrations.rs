@@ -1511,7 +1511,7 @@ fn generated_skill_command_forms_are_covered_by_managed_settings() {
         serde_json::from_value(settings["permissions"]["allow"].clone()).unwrap();
     assert_eq!(
         permissions.len(),
-        18,
+        19,
         "registration uses the same fixed prefix as the other operations"
     );
     for rule in &permissions {
@@ -2212,6 +2212,7 @@ fn delivery_control_draft(
         result_set: None,
         permitted_operations,
         reply_mode: namedrop::DeliveryReplyMode::AgentThread,
+        review_grants: Vec::new(),
     }
 }
 
@@ -2750,7 +2751,10 @@ fn roster_management_descriptor_binds_runnable_cli_without_expanding_registratio
     for management in &operation_catalog().management_operations {
         assert_eq!(
             management.automatic_permission,
-            management.token == "address.list"
+            matches!(
+                management.token.as_str(),
+                "address.list" | "handoff.acknowledge-granted"
+            )
         );
     }
 
@@ -3319,7 +3323,7 @@ fn activation_installs_both_shared_packages_before_challenging_either_runtime() 
             .unwrap();
     assert_eq!(
         settings["permissions"]["allow"].as_array().unwrap().len(),
-        18
+        19
     );
 
     execute_lifecycle_operation(
@@ -3448,7 +3452,7 @@ fn a_previous_version_package_is_replaced_without_touching_unrelated_files() {
     assert_eq!(settings["unrelated"], true);
     assert_eq!(
         settings["permissions"]["allow"].as_array().unwrap().len(),
-        18
+        19
     );
     assert_eq!(installed_names(&skill_root), ["namedrop", "other-skill"]);
 }

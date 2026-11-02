@@ -24,6 +24,12 @@ struct ResultsInput {
     coordination_id: Option<crate::CoordinationId>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GrantedAcknowledgeInput {
+    coordination_id: crate::CoordinationId,
+}
+
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum PreviewMode {
@@ -60,6 +66,9 @@ where
     }
     if operation == "handoff.preview" {
         return preview(input, runtime);
+    }
+    if operation == "handoff.acknowledge-granted" {
+        return acknowledge_granted(input, runtime);
     }
     let mut coordination_id = None;
     let (status, message_id) = match operation {
@@ -202,4 +211,58 @@ where
         Ok(json!({"recipients":recipients,"context_references":references,"authored_source":input.source,"message":parsed.body,"context":context,
             "notice":"Preview only. Nothing was sent or shared; sending resolves recipients and delivery conditions again."}))
     }).map_err(|e|e.to_string())
+}
+
+/// An agent clears a coordination warning with the operator's review grant.
+/// The caller's identity comes from its pane's exact registered session, never
+/// from the input, and the grant is consumed in the acknowledgement's
+/// transaction.
+fn acknowledge_granted<E, C, I>(
+    input: Value,
+    runtime: &LifecycleRuntime<'_, E, C, I>,
+) -> Result<Value, String>
+where
+    E: crate::HerdrCommandExecutor,
+    C: crate::Clock,
+    I: crate::IdGenerator,
+{
+    let input: GrantedAcknowledgeInput =
+        serde_json::from_value(input).map_err(crate::input_schema_error)?;
+    if input.coordination_id.as_str().trim().is_empty() {
+        return Err("coordination_id is required".to_owned());
+    }
+    let discovered = match runtime.workspace_id {
+        Some(workspace) => discover_worktree_for_workspace(runtime.herdr, workspace)?,
+        None => discover_worktree(runtime.herdr, runtime.cwd)?,
+    };
+    let namespace = discovered.namespace(runtime.session_socket_id);
+    let pane = runtime
+        .current_pane_id
+        .ok_or("the current Herdr pane is required")?;
+    let operator = crate::dashboard::current_operator_session(runtime.state_directory);
+    let now = runtime.clock.now_unix_ms();
+    let mut store = StateStore::open(runtime.state_directory).map_err(|e| e.to_string())?;
+    let (alias, changed) = store
+        .transaction(|tx| {
+            let author =
+                crate::context::registered_current_address(tx, &namespace, pane, &discovered)?;
+            let session = author
+                .agent_session_id
+                .as_ref()
+                .expect("a registered current address has a session");
+            let changed = tx.acknowledge_with_review_grant(
+                &namespace,
+                &input.coordination_id,
+                session,
+                operator.as_ref(),
+                now,
+            )?;
+            Ok((author.alias, changed))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(
+        json!({"coordination_id":input.coordination_id, "acknowledged":true, "changed":changed,
+        "acknowledged_by":format!("@{alias}"),
+        "notice":"Warning acknowledged under the operator's review grant. The grant is used up. The outcome and report are unchanged; no work was resumed or delivery cancelled."}),
+    )
 }

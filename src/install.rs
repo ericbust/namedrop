@@ -1304,6 +1304,7 @@ mod permission_tests {
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff resolve *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff adopt *)",
             "Bash('/opt/namedrop' --plugin-state '/opt/state' address list *)",
+            "Bash('/opt/namedrop' --plugin-state '/opt/state' handoff acknowledge-granted *)",
         ];
         assert_eq!(actual, expected);
         for operation in crate::operation_catalog()
