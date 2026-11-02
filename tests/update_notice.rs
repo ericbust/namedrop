@@ -169,6 +169,13 @@ fn versions_compare_numerically_and_invalid_cache_never_produces_a_notice() {
     assert_eq!(f.notice(1001), None);
     f.seed("1.10.0");
     assert!(f.notice(1001).is_some());
+    f.seed("9.10.0-exp.2");
+    assert!(
+        f.notice(1002).unwrap()["systemMessage"]
+            .as_str()
+            .unwrap()
+            .contains("9.10.0-exp.2")
+    );
 }
 
 #[test]
@@ -419,6 +426,18 @@ fn both_wrappers_forward_only_composed_notices_and_reject_hostile_versions() {
             (json!({"systemMessage":update("9.10.0")}), true),
             (json!({"systemMessage":update_for("9.10.0", "1.3.1")}), true),
             (
+                json!({"systemMessage":update_for("1.5.0-exp.2", "1.5.0-exp.1")}),
+                true,
+            ),
+            (
+                json!({"systemMessage":update_for("1.5.0", "1.5.0-exp.1")}),
+                true,
+            ),
+            (
+                json!({"systemMessage":update_for("9.0.0-exp.0", "1.3.1")}),
+                true,
+            ),
+            (
                 json!({"systemMessage":update_for("9.10.0", "1.3.0\nmalice")}),
                 false,
             ),
@@ -456,7 +475,27 @@ fn both_wrappers_forward_only_composed_notices_and_reject_hostile_versions() {
             (json!({"systemMessage":update("\u{1b}[31m9.0.0")}), false),
             (json!({"systemMessage":update(&"9".repeat(10_000))}), false),
             (json!({"systemMessage":update("01.2.3")}), false),
+            (
+                json!({"systemMessage":update("18446744073709551615.0.0")}),
+                true,
+            ),
+            (
+                json!({"systemMessage":update("9.0.0-exp.18446744073709551615")}),
+                true,
+            ),
             (json!({"systemMessage":update("9.0.0.")}), false),
+            (json!({"systemMessage":update("9.0.0-exp.01")}), false),
+            (json!({"systemMessage":update("9.0.0-exp.")}), false),
+            (json!({"systemMessage":update("9.0.0-exp.1.extra")}), false),
+            (json!({"systemMessage":update("9.0.0-exp.$(id)")}), false),
+            (
+                json!({"systemMessage":update("9.0.0-exp.18446744073709551616")}),
+                false,
+            ),
+            (
+                json!({"systemMessage":update("18446744073709551616.0.0")}),
+                false,
+            ),
             (
                 json!({"systemMessage":update("9.0.0"),"unexpected":"payload"}),
                 false,
