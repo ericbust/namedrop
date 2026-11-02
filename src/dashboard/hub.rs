@@ -2,7 +2,7 @@
 //! HTTP threads reach it only through `HubCommand`, so nothing is shared and
 //! no read transaction outlives a single snapshot build.
 use super::server_files::ServerFiles;
-use super::snapshot::{self, DashboardSnapshot, SpaceKey, SpaceSummary};
+use super::snapshot::{self, DashboardSnapshot, RepoRef, SpaceKey, SpaceSummary};
 use crate::{HerdrCommandExecutor, ProcessHerdr, StateNamespace, StateStore, StoreErrorKind};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -63,20 +63,16 @@ pub(crate) enum SpaceEvent {
 struct LiveSpace {
     namespace: StateNamespace,
     label: Option<String>,
+    repo: Option<RepoRef>,
 }
 
 #[derive(Deserialize)]
-struct HerdrSnapshot {
-    result: HerdrSnapshotResult,
+struct HerdrWorkspaceList {
+    result: HerdrWorkspaces,
 }
 
 #[derive(Deserialize)]
-struct HerdrSnapshotResult {
-    snapshot: HerdrSpaces,
-}
-
-#[derive(Deserialize)]
-struct HerdrSpaces {
+struct HerdrWorkspaces {
     workspaces: Vec<HerdrSpace>,
 }
 
@@ -84,6 +80,12 @@ struct HerdrSpaces {
 struct HerdrSpace {
     workspace_id: String,
     label: Option<String>,
+    #[serde(
+        default,
+        rename = "worktree",
+        deserialize_with = "RepoRef::from_herdr_worktree"
+    )]
+    repo: Option<RepoRef>,
 }
 
 struct Discovery {
@@ -207,20 +209,20 @@ impl Discovery {
                 let result = ProcessHerdr::default()
                     .with_socket(Some(socket.clone()))
                     .execute_bounded(
-                        &["api", "snapshot"],
+                        &["workspace", "list"],
                         HERDR_TIMEOUT,
                         &cancel,
                         8 * 1024 * 1024,
                     )
                     .and_then(|output| {
-                        serde_json::from_str::<HerdrSnapshot>(&output.stdout)
+                        serde_json::from_str::<HerdrWorkspaceList>(&output.stdout)
                             .map_err(|error| error.to_string())
                     });
                 if cancel.load(Ordering::Relaxed) {
                     return;
                 }
                 let answer = match result {
-                    Ok(snapshot) => {
+                    Ok(list) => {
                         if !matches!(state, SocketState::Healthy) {
                             eprintln!("dashboard: live workspaces on {socket} recovered");
                         }
@@ -228,7 +230,7 @@ impl Discovery {
                             .lock()
                             .unwrap()
                             .insert(socket.clone(), SocketState::Healthy);
-                        DiscoveryAnswer::Snapshot(snapshot.result.snapshot.workspaces)
+                        DiscoveryAnswer::Snapshot(list.result.workspaces)
                     }
                     Err(error) => {
                         if matches!(state, SocketState::Healthy) {
@@ -889,6 +891,7 @@ impl Hub<'_> {
                     LiveSpace {
                         namespace,
                         label: workspace.label,
+                        repo: workspace.repo,
                     },
                 );
             }
@@ -965,6 +968,7 @@ impl Hub<'_> {
         if let Some(space) = self.live_spaces.get(key) {
             snapshot.space.workspace_id = space.namespace.space_id.as_str().to_owned();
         }
+        snapshot.space.repo = self.repo(key);
         let workspace_id = snapshot.space.workspace_id.clone();
         snapshot.space.set_live_label(
             &workspace_id,
@@ -1092,6 +1096,12 @@ impl Hub<'_> {
         Some(rows)
     }
 
+    fn repo(&self, key: &SpaceKey) -> Option<RepoRef> {
+        self.live_spaces
+            .get(key)
+            .and_then(|space| space.repo.clone())
+    }
+
     fn spaces_json(&mut self) -> String {
         if self.store.is_none() {
             self.open_store();
@@ -1103,7 +1113,8 @@ impl Hub<'_> {
             .iter()
             .map(|row| {
                 let key = SpaceKey::of(&row.namespace);
-                SpaceSummary::of(row, labels.get(key.as_str()).map(String::as_str))
+                let repo = self.repo(&key);
+                SpaceSummary::of(row, labels.get(key.as_str()).map(String::as_str), repo)
             })
             .collect();
         serde_json::to_string(&spaces).unwrap_or_else(|_| "[]".to_owned())
@@ -1187,6 +1198,7 @@ mod tests {
                 LiveSpace {
                     namespace: namespace.clone(),
                     label: label.map(str::to_owned),
+                    repo: None,
                 },
             );
             hub.spaces.insert(
@@ -1709,6 +1721,7 @@ mod tests {
             LiveSpace {
                 namespace,
                 label: None,
+                repo: None,
             },
         );
         hub.unpublished_spaces.insert(key.clone());
@@ -1790,6 +1803,7 @@ mod tests {
             LiveSpace {
                 namespace: namespace.clone(),
                 label: None,
+                repo: None,
             },
         );
         hub.observed_sockets.insert("socket-a".to_owned());
