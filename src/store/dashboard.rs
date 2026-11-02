@@ -222,6 +222,25 @@ impl StateStore {
         self.transaction(|transaction| transaction.dashboard_thread_context(namespace, message_id))
     }
 
+    pub fn dashboard_message_body(
+        &mut self,
+        namespace: &StateNamespace,
+        message_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let ns = namespace_params(namespace);
+        self.transaction(|transaction| {
+            Ok(transaction
+                .transaction
+                .query_row(
+                    "SELECT body FROM collaboration_messages
+                     WHERE session_socket_id = ?1 AND worktree_id = ?2 AND message_id = ?3",
+                    params![ns[0], ns[1], message_id],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+    }
+
     /// Changes whenever another connection commits; the dashboard's cheap
     /// "anything changed" gate.
     pub fn data_version(&self) -> Result<i64, StoreError> {

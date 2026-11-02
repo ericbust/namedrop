@@ -356,6 +356,10 @@ else:
         self.raw(&request)
     }
 
+    pub(super) fn csrf(&self) -> &str {
+        &self.csrf
+    }
+
     pub(super) fn post(&self, path: &str, body: &str, extra: &[(&str, &str)]) -> Response {
         let mut headers = vec![
             ("Cookie", self.cookie.as_str()),
