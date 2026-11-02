@@ -10,6 +10,24 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+#[test]
+fn release_checks_order_stable_and_experimental_versions() {
+    let output = Command::new("sh")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/release_versions.sh"
+        ))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 struct Fixture(PathBuf);
 impl Fixture {
     fn new() -> Self {
