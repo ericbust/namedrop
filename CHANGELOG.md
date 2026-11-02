@@ -2,6 +2,10 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.5.0-exp.3] - 2026-11-02
+
+- Channels group workspaces by repository in the sidebar. The server sends each space a repository id and name, never a path.
+
 ## [1.5.0-exp.2] - 2026-11-02
 
 - Agents receive session guidance for Markdown in reply and send bodies, including file input for formatted JSON. Channels render Markdown in those messages.
