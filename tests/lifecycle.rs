@@ -157,10 +157,14 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
     let directory = TestDirectory::new();
     let herdr = NameHerdr::default();
     let ids = NameIds(AtomicU64::new(1));
+    let codex_home = directory.path().join("custom-codex");
     let runtime = LifecycleRuntime {
         state_directory: directory.path(),
         home_directory: Some(directory.home()),
-        agent_config: namedrop::AgentConfigDirectories::default(),
+        agent_config: namedrop::AgentConfigDirectories {
+            codex: Some(&codex_home),
+            claude: None,
+        },
         cwd: Path::new("/repo"),
         workspace_id: None,
         current_pane_id: Some("pane-1"),
@@ -185,6 +189,71 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
             .alias,
         "reviewer"
     );
+    let expected_spool = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("deferred-commands");
+    let config_path = codex_home.join("config.toml");
+    let granted = fs::read_to_string(&config_path).unwrap();
+    let config = granted.parse::<toml_edit::DocumentMut>().unwrap();
+    assert_eq!(
+        config["sandbox_workspace_write"]["writable_roots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec![expected_spool.to_str().unwrap()]
+    );
+    assert!(!directory.home().join(".codex/config.toml").exists());
+    fs::write(&config_path, "model = 'user-model'\n").unwrap();
+    let report = namedrop::diagnose_collaboration(&runtime);
+    let issue = report
+        .issues
+        .iter()
+        .find(|issue| {
+            issue.code == "ND-INTEGRATION-001" && issue.explanation.contains("writable root")
+        })
+        .unwrap();
+    assert!(issue.explanation.contains("activate Namedrop again"));
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        "model = 'user-model'\n"
+    );
+    execute_lifecycle_operation("name", serde_json::json!({"alias": "@reviewer"}), &runtime)
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(&config_path).unwrap(),
+        "model = 'user-model'\n",
+        "repeated naming must not repair Codex config from inside an agent sandbox"
+    );
+    let repaired =
+        execute_lifecycle_operation("activate", serde_json::json!({"confirmed": true}), &runtime)
+            .unwrap();
+    assert_eq!(
+        repaired["codex_sandbox"]["writable_root"],
+        expected_spool.to_str().unwrap()
+    );
+    assert!(
+        repaired["codex_sandbox"]["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("new Codex session")
+    );
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("writable_roots")
+    );
+    let removed =
+        execute_lifecycle_operation("deactivate", serde_json::json!({}), &runtime).unwrap();
+    assert_eq!(removed["codex_sandbox"]["removed_entries"], 1);
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("model = 'user-model'")
+    );
     let commands = herdr.commands.lock().unwrap();
     assert!(commands.iter().any(|command| {
         command.iter().any(|argument| argument == "@reviewer")
@@ -197,6 +266,22 @@ fn name_activates_binds_registers_and_labels_the_current_native_pane() {
             .iter()
             .any(|command| { command == &["tab", "rename", "tab-1", "@reviewer"] })
     );
+    drop(commands);
+    let no_home = TestDirectory::new();
+    let runtime_without_home = LifecycleRuntime {
+        state_directory: no_home.path(),
+        home_directory: None,
+        agent_config: Default::default(),
+        ..runtime
+    };
+    let named = execute_lifecycle_operation(
+        "name",
+        serde_json::json!({"alias":"@reviewer"}),
+        &runtime_without_home,
+    )
+    .unwrap();
+    assert_eq!(named["alias"], "@reviewer");
+    assert!(!no_home.path().join("codex-sandbox.json").exists());
 }
 
 #[test]
@@ -3404,4 +3489,151 @@ fn naming_a_codex_pane_the_shared_app_server_serves_gives_its_advice_instead_of_
             .unwrap()
             .contains("first prompt")
     );
+}
+
+#[test]
+fn trusted_state_worktrees_are_refused_by_activation_naming_and_doctor() {
+    struct RootHerdr(PathBuf);
+    impl HerdrCommandExecutor for RootHerdr {
+        fn execute(&self, args: &[&str]) -> Result<HerdrCommandOutput, String> {
+            let value = match args {
+                ["workspace", "list"] => {
+                    serde_json::json!({"result":{"workspaces":[{"workspace_id":"workspace-1"}]}})
+                }
+                ["worktree", "list", ..] => {
+                    serde_json::json!({"result":{"worktrees":[{"path":self.0,"open_workspace_id":"workspace-1"}]}})
+                }
+                ["pane", "list", ..] => {
+                    serde_json::json!({"result":{"panes":[{"pane_id":"pane-1","terminal_id":"terminal-1","tab_id":"tab-1","workspace_id":"workspace-1","agent":"codex","agent_session":{"value":"session-1"},"agent_status":"idle"}]}})
+                }
+                _ => serde_json::json!({"result":{}}),
+            };
+            Ok(HerdrCommandOutput {
+                stdout: value.to_string(),
+            })
+        }
+    }
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now_unix_ms(&self) -> u64 {
+            42
+        }
+    }
+    struct Ids(AtomicU64);
+    impl IdGenerator for Ids {
+        fn next_id(&self, kind: &str) -> String {
+            format!("{kind}-{}", self.0.fetch_add(1, Ordering::Relaxed))
+        }
+    }
+    for variant in [
+        "state",
+        "ancestor",
+        "linked-ancestor",
+        "outside",
+        "linked-outside",
+    ] {
+        let directory = TestDirectory::new();
+        let state = directory.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let root = match variant {
+            "state" => state.clone(),
+            "ancestor" => directory.path().to_path_buf(),
+            "outside" | "linked-outside" => {
+                let outside = directory.path().join("repo");
+                fs::create_dir(&outside).unwrap();
+                if variant == "linked-outside" {
+                    let link = directory.path().join("repo-alias");
+                    std::os::unix::fs::symlink(&outside, &link).unwrap();
+                    link
+                } else {
+                    outside
+                }
+            }
+            _ => {
+                let link = directory.path().join("linked-root");
+                std::os::unix::fs::symlink(directory.path(), &link).unwrap();
+                link
+            }
+        };
+        let herdr = RootHerdr(root);
+        let state = if variant == "linked-outside" {
+            let alias = directory.path().join("state-parent-alias");
+            std::os::unix::fs::symlink(directory.path(), &alias).unwrap();
+            alias.join("state")
+        } else {
+            state
+        };
+        let ids = Ids(AtomicU64::new(1));
+        let runtime = LifecycleRuntime {
+            state_directory: &state,
+            home_directory: Some(directory.home()),
+            agent_config: namedrop::AgentConfigDirectories::default(),
+            cwd: Path::new("/untrusted-cwd"),
+            workspace_id: Some("workspace-1"),
+            current_pane_id: Some("pane-1"),
+            session_socket_id: "socket-a",
+            herdr: &herdr,
+            clock: &FixedClock,
+            ids: &ids,
+        };
+        if variant.ends_with("outside") {
+            let result = execute_lifecycle_operation(
+                "activate",
+                serde_json::json!({"confirmed":true}),
+                &runtime,
+            )
+            .unwrap();
+            assert_eq!(
+                result["codex_sandbox"]["writable_root"],
+                state
+                    .canonicalize()
+                    .unwrap()
+                    .join("deferred-commands")
+                    .to_str()
+                    .unwrap()
+            );
+            let report = namedrop::diagnose_collaboration(&runtime);
+            assert!(
+                !report
+                    .issues
+                    .iter()
+                    .any(|issue| issue.explanation.contains("trusted Namedrop state"))
+            );
+            continue;
+        }
+        for (operation, input) in [
+            ("activate", serde_json::json!({"confirmed":true})),
+            ("name", serde_json::json!({"alias":"reviewer"})),
+        ] {
+            let error = execute_lifecycle_operation(operation, input, &runtime).unwrap_err();
+            assert!(
+                error.contains("worktree") && error.contains("trusted Namedrop state"),
+                "{variant} {operation}: {error}"
+            );
+            assert!(!directory.home().join(".codex/config.toml").exists());
+        }
+        let inactive_report = namedrop::diagnose_collaboration(&runtime);
+        assert!(
+            inactive_report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-INTEGRATION-001"
+                    && issue.explanation.contains("trusted Namedrop state"))
+        );
+        StateStore::open(&state)
+            .unwrap()
+            .transaction(|transaction| {
+                transaction.activate_worktree(&namespace(), &attribution(42))
+            })
+            .unwrap();
+        let report = namedrop::diagnose_collaboration(&runtime);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.code == "ND-INTEGRATION-001"
+                    && issue.explanation.contains("trusted Namedrop state")),
+            "{variant}: {report:?}"
+        );
+    }
 }

@@ -241,6 +241,12 @@ where
         Some(workspace_id) => discover_worktree_for_workspace(runtime.herdr, workspace_id)?,
         None => discover_worktree(runtime.herdr, runtime.cwd)?,
     };
+    if discovered.worktree_attached && matches!(operation, "activate" | "name") {
+        crate::install::codex_sandbox::check_worktree(
+            runtime.state_directory,
+            Path::new(discovered.worktree_id.as_str()),
+        )?;
+    }
     let namespace = discovered.namespace(runtime.session_socket_id);
     let (actor_kind, actor_id) = if operation.starts_with("event.") || operation == "reconcile" {
         (ActorKind::Plugin, "herdr")
@@ -299,8 +305,22 @@ where
                 .transaction(|transaction| transaction.worktree_state(&namespace))
                 .map_err(|error| error.to_string())?
                 .is_some_and(|state| state.activated && !state.deactivated);
+            let (_sandbox_package_guard, sandbox_current) =
+                crate::installed_runtime::package_guard()?;
             let address_id = store
                 .transaction(|transaction| {
+                    if sandbox_current
+                        && let Some(home) = runtime.home_directory
+                        && !transaction
+                            .worktree_state(&namespace)?
+                            .is_some_and(|state| state.activated && !state.deactivated)
+                    {
+                        crate::install::codex_sandbox::activate(
+                            &runtime.agent_config.codex(home),
+                            runtime.state_directory,
+                        )
+                        .map_err(StoreError::invalid_input)?;
+                    }
                     transaction.activate_worktree(&namespace, &attribution)?;
                     if let Some(binding) = transaction
                         .active_pane_bindings(&namespace)?
@@ -388,6 +408,7 @@ where
                     Ok(address_id)
                 })
                 .map_err(|error| error.to_string())?;
+            drop(_sandbox_package_guard);
             let reconciliation = reconcile_worktree(
                 &mut store,
                 &namespace,
@@ -489,9 +510,26 @@ where
                 Path::new(&crate::collaboration_executable()?),
                 runtime.state_directory,
             )?;
+            let (_sandbox_package_guard, sandbox_current) =
+                crate::installed_runtime::package_guard()?;
             store
-                .transaction(|transaction| transaction.activate_worktree(&namespace, &attribution))
+                .transaction(|transaction| {
+                    if sandbox_current {
+                        crate::install::codex_sandbox::activate(
+                            &runtime
+                                .agent_config
+                                .codex(runtime.home_directory.ok_or_else(|| {
+                                    StoreError::invalid_input("no HOME is available")
+                                })?),
+                            runtime.state_directory,
+                        )
+                        .map_err(StoreError::invalid_input)?;
+                    }
+                    transaction.activate_worktree(&namespace, &attribution)?;
+                    Ok(())
+                })
                 .map_err(|error| error.to_string())?;
+            drop(_sandbox_package_guard);
             let reconciliation = reconcile_worktree(
                 &mut store,
                 &namespace,
@@ -512,6 +550,7 @@ where
                 "shortcuts": shortcuts,
                 "activated": true,
                 "shell_command": shell_command,
+                "codex_sandbox": {"writable_root": crate::install::codex_sandbox::root(runtime.state_directory)?, "guidance": "Start a new Codex session to load the deferred-commands spool writable root. Explicit permission profiles require their own spool-directory grant."},
                 "integration_packages": reconciliation.installation.report(runtime.home_directory, runtime.state_directory, runtime.agent_config),
                 "settled_delay_ms": 500,
                 "agent_integration_hook_activation":
@@ -531,9 +570,11 @@ where
             let _ = reconcile_managed_tab_labels(&mut store, &namespace, &discovered, runtime);
             let permission_removal =
                 crate::install::remove_claude_permissions(runtime.state_directory);
+            let sandbox_removal = crate::install::codex_sandbox::remove(runtime.state_directory);
             Ok(json!({
                 "space_id": discovered.workspace_id,
                 "worktree_id": discovered.worktree_attached.then_some(discovered.worktree_id),
+                "codex_sandbox": {"removed_entries": sandbox_removal.as_ref().ok(), "error": sandbox_removal.err()},
                 "claude_permissions": {"removed": permission_removal.as_ref().is_ok_and(|count| *count > 0), "removed_entries": permission_removal.as_ref().ok(), "error": permission_removal.err()},
                 "deactivated": true,
                 "state_preserved": true

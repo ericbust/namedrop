@@ -659,10 +659,14 @@ fn doctor_reports_unsupported_codex_without_preparing_its_home() {
 #[test]
 fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
     let f = Fixture::new();
+    let alias = f.root.join("alias");
+    std::os::unix::fs::symlink(fs::canonicalize(&f.root).unwrap(), &alias).unwrap();
+    let state = alias.join("state");
+    fs::create_dir(&state).unwrap();
     let secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789";
-    let home = f.root.join(secret);
+    let home = state.join(secret);
     fs::create_dir(&home).unwrap();
-    StateStore::open(&f.root)
+    StateStore::open(&state)
         .unwrap()
         .transaction(|tx| {
             tx.activate_worktree(
@@ -675,12 +679,12 @@ fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
         &home,
         AgentRuntime::Codex,
         &fs::canonicalize(std::env::current_exe().unwrap()).unwrap(),
-        &f.root,
+        &state,
     )
     .unwrap();
     let host = CodexHost(&f.host);
     let runtime = LifecycleRuntime {
-        state_directory: &f.root,
+        state_directory: &state,
         home_directory: Some(&home),
         agent_config: namedrop::AgentConfigDirectories::default(),
         cwd: Path::new("/repo"),
@@ -691,12 +695,24 @@ fn doctor_keeps_secret_shaped_paths_and_setup_commands_exact() {
         clock: &Time,
         ids: &f.ids,
     };
+    fs::write(
+        home.join(".codex/config.toml"),
+        format!(
+            "[sandbox_workspace_write]\nwritable_roots = [{:?}]\n",
+            fs::canonicalize(&state)
+                .unwrap()
+                .join("deferred-commands")
+                .to_str()
+                .unwrap()
+        ),
+    )
+    .unwrap();
     let report = diagnose_collaboration(&runtime);
     let hook = report
         .issues
         .iter()
         .find(|issue| issue.code == "ND-HOOK-001")
-        .unwrap();
+        .unwrap_or_else(|| panic!("missing hook setup diagnostic: {report:?}"));
     let expected_step = format!(
         "codex plugin marketplace add '{}' --json",
         home.join(".agents/skills/namedrop").display()

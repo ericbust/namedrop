@@ -2,6 +2,15 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
+## [1.4.3] - 2026-11-01
+
+### Fixed
+
+- Sandboxed Codex agents can send, reply, acknowledge and complete deliveries, and read the current workspace's roster when the sandbox blocks Herdr's socket. Commands pass through Namedrop's delivery spool to a worker outside the sandbox, without broader network permissions.
+- Activation grants Codex write access only to Namedrop's delivery spool. The runtime and database remain outside the grant. Namedrop replaces its older broad grants and preserves user grants; unsafe broad user grants must be removed before activation. Deactivation removes only the grant Namedrop added. Start fresh Codex sessions after activation to load the grant.
+- A corrupt queued command or result no longer stops the worker from processing other commands. Namedrop removes the invalid record and keeps processing the queue.
+- Codex sandbox setup works through linked parent directories, including macOS's `/var` path. Linked configuration, ownership-record and lock files are still refused.
+
 ## [1.4.2] - 2026-10-28
 
 ### Removed

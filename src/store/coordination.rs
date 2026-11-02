@@ -961,12 +961,7 @@ impl StateTransaction<'_> {
         input: &Value,
         author: &RoutingAddressSnapshot,
     ) -> Result<(), StoreError> {
-        let stored = match self.tracked_message(ns, message)? {
-            Some(tracked) => Some(self.transaction.query_row("SELECT input_json FROM coordination_links WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 LIMIT 1",
-                params![tracked.home.session_socket_id,tracked.home.space_id.as_str(),tracked.message_id.as_str()],|r|r.get::<_,String>(0))?),
-            None => None,
-        };
-        if let Some(stored) = stored {
+        if self.tracked_message(ns, message)?.is_some() {
             self.require_coordination_capability(ns, author)?;
             let session=self.transaction.query_row("SELECT author_session_snapshot FROM collaboration_messages WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3",params![ns.session_socket_id,ns.space_id.as_str(),message.as_str()],|r|r.get::<_,Option<String>>(0))?;
             if session.as_deref() != author.agent_session_id.as_ref().map(|s| s.as_str()) {
@@ -974,6 +969,22 @@ impl StateTransaction<'_> {
                     "tracked replay requires the original exact author session",
                 ));
             }
+        }
+        self.check_coordination_replay_fields(ns, message, input)
+    }
+
+    pub(crate) fn check_coordination_replay_fields(
+        &self,
+        ns: &StateNamespace,
+        message: &MessageId,
+        input: &Value,
+    ) -> Result<(), StoreError> {
+        let stored = match self.tracked_message(ns, message)? {
+            Some(tracked) => Some(self.transaction.query_row("SELECT input_json FROM coordination_links WHERE session_socket_id=?1 AND worktree_id=?2 AND message_id=?3 LIMIT 1",
+                params![tracked.home.session_socket_id,tracked.home.space_id.as_str(),tracked.message_id.as_str()],|r|r.get::<_,String>(0))?),
+            None => None,
+        };
+        if let Some(stored) = stored {
             let expected = input.to_string();
             if stored != expected {
                 return Err(StoreError::invalid_input(
