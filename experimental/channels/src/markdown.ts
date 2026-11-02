@@ -797,20 +797,25 @@ function cutBlock(block: Block, limit: number): Block | null {
     case "quote":
       return { ...block, blocks: cutBlocks(block.blocks, limit), to: limit };
     case "table": {
-      const cell = (value: TableCell): TableCell =>
-        value.to <= limit
-          ? value
-          : { ...value, inlines: cutInlines(value.inlines, limit), to: limit };
+      const cell = (value: TableCell): TableCell[] => {
+        if (value.from >= limit) return [];
+        if (value.to <= limit) return [value];
+        const inlines = cutInlines(value.inlines, limit);
+        return inlines.length > 0 ? [{ ...value, inlines, to: limit }] : [];
+      };
       const row = (value: TableRow): TableRow =>
         value.to <= limit
           ? value
-          : { ...value, cells: value.cells.map(cell), to: limit };
-      return {
-        ...block,
-        head: row(block.head),
-        rows: block.rows.filter((value) => value.from < limit).map(row),
-        to: limit,
-      };
+          : { ...value, cells: value.cells.flatMap(cell), to: limit };
+      const head = row(block.head);
+      return head.cells.some((value) => value.inlines.length > 0)
+        ? {
+            ...block,
+            head,
+            rows: block.rows.filter((value) => value.from < limit).map(row),
+            to: limit,
+          }
+        : null;
     }
   }
 }
@@ -825,12 +830,10 @@ function cutInlines(nodes: readonly Inline[], limit: number): Inline[] {
         text: node.text.slice(0, limit - node.from),
         to: limit,
       });
-    else
-      out.push({
-        ...node,
-        children: cutInlines(node.children, limit),
-        to: limit,
-      });
+    else {
+      const children = cutInlines(node.children, limit);
+      if (children.length > 0) out.push({ ...node, children, to: limit });
+    }
   }
   return out;
 }

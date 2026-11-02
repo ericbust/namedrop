@@ -937,3 +937,48 @@ test("focused tracked evidence exposes the channel response path without a rejec
   );
   assert.equal(kept.includes("thread-answer"), false);
 });
+
+test("inline code shows an escaped mention as the name while fenced code keeps the backslash", async () => {
+  const { Markdown } = await load<typeof import("./ui/Markdown.tsx")>(
+    "/src/ui/Markdown.tsx",
+  );
+  const markup = renderToStaticMarkup(
+    createElement(Markdown, {
+      source: "run `\\@gamma`\n\n```\n\\@gamma\n```\n",
+    }),
+  );
+  assert.ok(markup.includes("<code>@gamma</code>"), markup);
+  assert.ok(markup.includes("<pre><code>\\@gamma\n</code></pre>"), markup);
+});
+
+test("no preview cut renders an empty strong, em, link, cell or row group", async () => {
+  const { Markdown, MarkdownLine } = await load<
+    typeof import("./ui/Markdown.tsx")
+  >("/src/ui/Markdown.tsx");
+  const source =
+    "# Plan **now**\n\nIntro **bold _both_** and `code` with [a link](https://a.test/x).\n\n- **one**\n  - nested *em*\n- two\n\n> **quoted** text\n\n| a | **b** |\n|---|:-:|\n| c | *d* |\n\n```js\nx()\n```\n";
+  const empty = /<(strong|em|a|th|td|tbody|code)( [^>]*)?><\/\1>/;
+  for (let limit = 0; limit <= source.length; limit++) {
+    const elements = {
+      Markdown: createElement(Markdown, { source, limit }),
+      MarkdownLine: createElement(MarkdownLine, { source, limit, links: true }),
+    };
+    for (const [name, element] of Object.entries(elements)) {
+      const found = empty.exec(renderToStaticMarkup(element));
+      assert.equal(found, null, `${name} at ${limit}: ${found?.[0]}`);
+    }
+  }
+});
+
+test("markdownText is the quoted line as the reader sees it", async () => {
+  const { markdownText } = await load<typeof import("./ui/Markdown.tsx")>(
+    "/src/ui/Markdown.tsx",
+  );
+  assert.equal(
+    markdownText("**Done** with _step_ `\\@gamma` [docs](https://a.test/d)"),
+    "Done with step @gamma docs",
+  );
+  assert.equal(markdownText("- item *one*"), "item one");
+  assert.equal(markdownText("# Head \\@alpha"), "Head @alpha");
+  assert.equal(markdownText("plain \\@alpha text"), "plain @alpha text");
+});

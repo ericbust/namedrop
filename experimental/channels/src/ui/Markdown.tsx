@@ -21,7 +21,7 @@ function inlineNode(node: Inline, links: boolean): ReactNode {
     case "em":
       return <em key={node.from}>{inlines(node.children, links)}</em>;
     case "code":
-      return <code key={node.from}>{node.text}</code>;
+      return <code key={node.from}>{prose(node.text)}</code>;
     case "link":
       return links ? (
         <a key={node.from} href={node.href} target="_blank" rel="noreferrer">
@@ -96,13 +96,15 @@ function blockNode(block: Block, tail: ReactNode): ReactNode {
                   <Cells cells={block.head.cells} align={block.align} head />
                 </tr>
               </thead>
-              <tbody>
-                {block.rows.map((row) => (
-                  <tr key={row.from}>
-                    <Cells cells={row.cells} align={block.align} />
-                  </tr>
-                ))}
-              </tbody>
+              {block.rows.length > 0 && (
+                <tbody>
+                  {block.rows.map((row) => (
+                    <tr key={row.from}>
+                      <Cells cells={row.cells} align={block.align} />
+                    </tr>
+                  ))}
+                </tbody>
+              )}
             </table>
           </div>
           {tail}
@@ -200,6 +202,42 @@ function flat(blocks: readonly Block[], links: boolean): ReactNode[] {
     index > 0 ? "\n" : null,
     ...flatInline(block, links),
   ]);
+}
+
+function inlineText(nodes: readonly Inline[]): string {
+  return nodes
+    .map((node) =>
+      node.kind === "text" || node.kind === "code"
+        ? prose(node.text)
+        : inlineText(node.children),
+    )
+    .join("");
+}
+function blockText(block: Block): string {
+  switch (block.kind) {
+    case "paragraph":
+    case "heading":
+      return inlineText(block.inlines);
+    case "code":
+      return codeText(block).slice(0, -1);
+    case "list":
+      return block.items.map((item) => blocksText(item.blocks)).join("\n");
+    case "quote":
+      return blocksText(block.blocks);
+    case "table":
+      return [block.head, ...block.rows]
+        .map((row) =>
+          row.cells.map((cell) => inlineText(cell.inlines)).join(" | "),
+        )
+        .join("\n");
+  }
+}
+function blocksText(blocks: readonly Block[]): string {
+  return blocks.map(blockText).join("\n");
+}
+// The words a reader sees, for an accessible name or a title.
+export function markdownText(source: string): string {
+  return blocksText(parseMarkdown(source));
 }
 
 // Hook rows sit inside a paragraph and reply previews inside a button, where

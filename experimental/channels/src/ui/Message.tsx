@@ -41,7 +41,7 @@ import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
 import { DeliveryContext } from "./DeliveryContext.ts";
 import { Icon } from "./Icons.tsx";
-import { Markdown, MarkdownLine, prose } from "./Markdown.tsx";
+import { Markdown, MarkdownLine, markdownText } from "./Markdown.tsx";
 import { PeekControl, usePeek } from "./PeekContext.tsx";
 
 const PREVIEW = 480;
@@ -259,14 +259,16 @@ function Reference({
   let content: ReactNode = referenceCopy.earlier;
   if (reference.kind === "message") {
     const author = who(directory, reference.parent.author);
-    const [line = ""] = prose(reference.parent.body.text).split("\n", 1);
-    label = referenceCopy.label(author.name, line);
+    const [line = ""] = reference.parent.body.text.split("\n", 1);
+    label = referenceCopy.label(author.name, markdownText(line));
     content = (
       <>
         <span className="reply-ref-author">
           <Name person={author} />:
         </span>
-        <span className="reply-ref-text">{line}</span>
+        <span className="reply-ref-text">
+          <MarkdownLine source={line} />
+        </span>
       </>
     );
   }

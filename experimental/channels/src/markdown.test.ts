@@ -470,17 +470,54 @@ test("cutting at a source offset keeps whole elements", () => {
   ]);
   const table = "| a | b |\n|---|---|\n| 1 | 2 |\n| 3 | 4 |";
   assert.deepEqual(shape(cutBlocks(parseMarkdown(table), table.indexOf("4"))), [
-    [
-      "table:,",
-      ["a", "b"],
-      [
-        ["1", "2"],
-        ["3", ""],
-      ],
-    ],
+    ["table:,", ["a", "b"], [["1", "2"], ["3"]]],
   ]);
   assert.deepEqual(
     shape(cutBlocks(parseMarkdown(fenced), fenced.length)),
     shape(parseMarkdown(fenced)),
   );
+});
+
+test("no cut leaves an empty inline, cell or header behind", () => {
+  const source =
+    "# Plan **now**\n\nIntro **bold _both_** and `code` with [a link](https://a.test/x).\n\n- **one**\n  - nested *em*\n- two\n\n> **quoted** text\n\n| a | **b** |\n|---|:-:|\n| c | *d* |\n\n```js\nx()\n```\n";
+  const parsed = parseMarkdown(source);
+  const check = (nodes: readonly Inline[]) => {
+    for (const node of nodes) {
+      if (node.kind === "text" || node.kind === "code")
+        assert.ok(node.text.length > 0, "empty leaf");
+      else {
+        assert.ok(node.children.length > 0, `empty ${node.kind}`);
+        check(node.children);
+      }
+    }
+  };
+  const walk = (blocks: readonly Block[]) => {
+    for (const block of blocks) {
+      if (block.kind === "paragraph" || block.kind === "heading")
+        check(block.inlines);
+      else if (block.kind === "list")
+        for (const item of block.items) walk(item.blocks);
+      else if (block.kind === "quote") walk(block.blocks);
+      else if (block.kind === "table") {
+        assert.ok(block.head.cells.length > 0, "empty header");
+        for (const row of [block.head, ...block.rows])
+          for (const cell of row.cells) {
+            assert.ok(cell.inlines.length > 0, "empty cell");
+            check(cell.inlines);
+          }
+      }
+    }
+  };
+  let previous = "";
+  for (let limit = 0; limit <= source.length; limit++) {
+    const cut = cutBlocks(parsed, limit);
+    walk(cut);
+    const visible = texts(cut)
+      .map((node) => node.text)
+      .join("");
+    assert.ok(visible.startsWith(previous), `text shrank at ${limit}`);
+    previous = visible;
+  }
+  assert.deepEqual(shape(cutBlocks(parsed, source.length)), shape(parsed));
 });
