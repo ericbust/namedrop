@@ -372,7 +372,6 @@ export function ThreadPane({
                 },
                 startedAt,
               );
-              onReplyTo(null);
             }}
           />
         )}

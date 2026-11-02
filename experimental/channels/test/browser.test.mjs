@@ -1226,7 +1226,7 @@ test("FULL-THREAD: every row offers Reply in thread, by keyboard too, and the re
   await box.fill("About the answer");
   await ui.page.keyboard.press("Enter");
   await pane.getByText("About the answer", { exact: true }).first().waitFor();
-  assert.equal(await pane.getByText(/^Replying to/).count(), 0);
+  await pane.getByText(/^Replying to/).waitFor({ state: "detached" });
   await pane
     .locator('[data-message-id="parent"]')
     .getByRole("button", { name: "Reply in thread to You" })
@@ -1286,6 +1286,49 @@ test("FULL-THREAD: a coordination report thread names its agent, a nudge with no
     await pane.getByRole("combobox").getAttribute("aria-label"),
     "Start with @name to choose who gets this.",
   );
+});
+
+test("FULL-THREAD: a failed Reply in thread keeps its target, and the retry reuses its request id", async (t) => {
+  let calls = 0;
+  const ui = await open(
+    t,
+    (client) => replay(client, [replyRows()]),
+    undefined,
+    {
+      onPost: () =>
+        ++calls === 1 ? { status: 503, error: "Busy." } : { status: 200 },
+    },
+  );
+  await ui.live();
+  const timeline = ui.page.getByRole("region", { name: "Message history" });
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await timeline
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  const replying = pane.getByRole("status").getByText("Replying to You");
+  await replying.waitFor();
+  const box = pane.getByRole("combobox");
+  await box.fill("About the parent");
+  await ui.page.keyboard.press("Enter");
+  await pane.locator(".composer-error").waitFor();
+  assert.equal(await replying.count(), 1, "a failed send keeps the target");
+  await box.focus();
+  await ui.page.keyboard.press("Enter");
+  await replying.waitFor({ state: "detached" });
+  const sent = ui.posts.attempts
+    .filter((attempt) => attempt.body !== null)
+    .map(({ body }) => [body.request_id, body.in_reply_to]);
+  assert.equal(sent.length, 2);
+  assert.deepEqual(
+    sent.map(([, target]) => target),
+    ["parent", "parent"],
+    "the retry answers the chosen message",
+  );
+  assert.equal(sent[1][0], sent[0][0], "the retry reuses the request id");
 });
 
 test("MD-UI: a formatted agent reply renders lists, code and bold without markup or images", async (t) => {

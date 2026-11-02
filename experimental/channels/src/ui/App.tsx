@@ -508,6 +508,10 @@ export function App() {
           if (posted.current.size > POSTED_LIMIT && oldest !== undefined)
             posted.current.delete(oldest);
           dispatch({ type: "sent", requestId, messageId: result.messageId });
+          // A failed send keeps its target, so its retry answers the same message with the same request id.
+          setReplyTarget((target) =>
+            target?.messageId === outgoing.inReplyTo ? null : target,
+          );
           focusEvidence({
             type: "sent",
             key: outgoing.composer.key,
