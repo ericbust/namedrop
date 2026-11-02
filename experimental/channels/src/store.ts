@@ -1245,6 +1245,16 @@ export function participant(
 }
 // Who a thread reply goes to when its text names no one: every agent who wrote
 // in the thread or was sent a message in it, as the server reads the thread.
+// One name for the message a Reply in thread answers, on its button and in the thread.
+export function replyTargetName(
+  message: Message,
+  directory: Directory,
+): string {
+  if (message.kind === "nudge") return "Nudge";
+  if (message.kind === "hook") return "Hook";
+  return participantCopy(participant(directory, message.author)).name;
+}
+
 export function threadAgents(
   thread: ThreadGroup,
   directory: Directory,

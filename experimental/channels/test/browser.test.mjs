@@ -1281,7 +1281,7 @@ test("FULL-THREAD: a coordination report thread names its agent, a nudge with no
     .locator('[data-message-id="nudge"]')
     .getByRole("button", { name: "Reply in thread to Nudge" })
     .click();
-  await pane.getByRole("status").getByText("Replying to You").waitFor();
+  await pane.getByRole("status").getByText("Replying to Nudge").waitFor();
   assert.equal(
     await pane.getByRole("combobox").getAttribute("aria-label"),
     "Start with @name to choose who gets this.",

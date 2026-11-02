@@ -19,7 +19,6 @@ import type { CompletionContext } from "../complete.ts";
 import {
   absenceCopy,
   answerInPane,
-  participantCopy,
   repliesCopy,
   replyInThreadCopy,
   replyLabel,
@@ -41,9 +40,9 @@ import { chatOf } from "../route.ts";
 import {
   draftKey,
   exitFor,
-  participant,
   type RunIndex,
   recipients,
+  replyTargetName,
   sameComposer,
   type ThreadGroup,
   threadAgents,
@@ -323,7 +322,7 @@ export function ThreadPane({
           <Icon name="reply" className="icon-12" />
           <span>
             {replyInThreadCopy.replyingTo(
-              participantCopy(participant(directory, replyingTo.author)).name,
+              replyTargetName(replyingTo, directory),
             )}
           </span>
           <button

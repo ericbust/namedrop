@@ -39,7 +39,7 @@ import {
   type RoutePart,
   sameChat,
 } from "../route.ts";
-import { participant, type ReplyReference } from "../store.ts";
+import { participant, type ReplyReference, replyTargetName } from "../store.ts";
 import { terminalResult } from "../wire.ts";
 import { Avatar } from "./Avatar.tsx";
 import { DeliveryContext } from "./DeliveryContext.ts";
@@ -562,10 +562,7 @@ function SystemRow({
     >
       <Icon name={message.kind === "hook" ? "plug" : "bell"} />
       <div className="msg-content">
-        <ReplyInThread
-          message={message}
-          name={message.kind === "hook" ? "Hook" : "Nudge"}
-        />
+        <ReplyInThread message={message} directory={directory} />
         <p>
           <strong>{message.kind === "hook" ? "Hook" : "Nudge"}</strong>
           <span className="body" title={text === raw ? undefined : raw}>
@@ -582,13 +579,14 @@ function SystemRow({
 }
 function ReplyInThread({
   message,
-  name,
+  directory,
 }: {
   message: MessageRow;
-  name: string;
+  directory: Directory;
 }) {
   const actions = useContext(MessageActionsContext);
   if (actions === null) return null;
+  const name = replyTargetName(message, directory);
   return (
     <div className="msg-actions">
       <button
@@ -756,7 +754,7 @@ export const Message = memo(
           <Avatar alias={author.name} type={author.avatar} />
         )}
         <div className="msg-content">
-          <ReplyInThread message={message} name={author.name} />
+          <ReplyInThread message={message} directory={directory} />
           {(!grouped || showRecipients) && (
             <header className="msg-head">
               {!grouped && (
