@@ -10,20 +10,23 @@ Before you start, you need Herdr 0.7.5 or newer, Claude Code, Codex, and a brows
 2. In the setup tab, read the result and press Enter. Open a new terminal tab and run `namedrop doctor`. It reports no problems.
 3. Start a fresh Claude Code session in one pane. Ask it: `Name yourself @claude with Namedrop.`
 4. Start a fresh Codex session in another pane. Ask it: `Name yourself @codex with Namedrop.`
-5. Open Channels with `herdr plugin action invoke channels --plugin namedrop`. The page opens in your browser and shows this workspace as a channel, with `@claude` and `@codex` as members.
+5. Open Channels with `herdr plugin action invoke channels --plugin namedrop`. The page opens in your browser and shows this workspace as a channel, with `@claude` and `@codex` as members. If no browser opens, run `namedrop dashboard` in a shell tab and open the link it prints.
 6. In the channel, post `@claude Reply with one sentence about this repository.` The reply from `@claude` appears in the channel.
 7. Post `@codex Reply with one sentence about this repository.` The reply from `@codex` appears in the channel.
 8. Open the thread of one reply. Post a follow-up with no `@mention`, such as `Say that in five words.` The same agent answers in the thread.
 9. Post a message with no `@mention`, such as `Testing a plain post.` It stays in the channel, and no agent answers.
-10. Post `@claude Run the shell command touch channels-test.txt.` Claude Code asks for approval in its pane, and **Needs you** lists `@claude`. Open the item. It shows the conversation or the agent's pane. Decline the approval in the agent's pane. The item clears.
-11. Select the name `@codex` on a member chip or a message. **Peek** opens and shows the recent output of the `@codex` pane.
-12. Narrow the browser window below 600 pixels wide, or use the browser's device toolbar at 390 by 844. The channel list moves into a drawer behind a **Channels** button. Open a channel and a thread. Nothing overlaps or gets cut off.
-13. Switch your system to dark mode. The page switches to the dark theme without a reload. Check that every text is readable. Switch back to light mode.
-14. Create a new Herdr workspace and don't run Namedrop setup in it. In Channels, that workspace shows a **No agents here yet** guide, and the composer says why you can't post.
-15. Close the browser tab. Run `namedrop dashboard` from a shell tab. The page opens again.
+10. In the Claude Code pane, press Shift+Tab until the line under the prompt box reads `manual mode on`. In auto mode, Claude Code runs the next command without asking, and **Needs you** stays empty.
+11. Post `@claude Run the shell command touch channels-test.txt.` Claude Code asks for approval in its pane, and **Needs you** lists `@claude`. Open the item. It shows the conversation or the agent's pane.
+12. Approve the command in the Claude Code pane. The item clears, and `@claude` replies in the channel. Delete `channels-test.txt`. Don't decline the command. A declined request ends without a reply, and **Needs you** then shows **@claude didn't answer a request** until you clear it as described in [Switch back to `main`](#switch-back-to-main).
+13. Select the name `@codex` on a member chip or a message. **Peek** opens and shows the recent output of the `@codex` pane.
+14. Narrow the browser window below 600 pixels wide, or use the browser's device toolbar at 390 by 844. The channel list moves into a drawer behind a **Channels** button. Open a channel and a thread. Nothing overlaps or gets cut off.
+15. Switch your system to dark mode. The page switches to the dark theme without a reload. Check that every text is readable. Switch back to light mode.
+16. Create a new Herdr workspace and don't run Namedrop setup in it. In Channels, that workspace shows a **No agents here yet** guide, and the composer says why you can't post.
+17. Close the browser tab. Run `namedrop dashboard` from a shell tab. The page opens again.
 
 ## Switch back to `main`
 
-1. Finish active handoffs and exit your Claude Code and Codex sessions.
-2. Run the [reinstall steps](../README.md#reinstall-an-existing-installation), which install `--ref main`.
-3. Open a new terminal tab and run `namedrop doctor`. It reports no problems, and your names are still there.
+1. Run `namedrop doctor`. If it reports `ND-DELIVERY-003`, a request ended without a reply, for example a declined approval. To clear it, exit that agent and start a new session in the same pane. Then run `namedrop delivery acknowledge --input-json '{"attempt_id":"<source_id>","confirmed":true}'` with the `source_id` that Doctor shows. Run `namedrop doctor` again to check that the issue is gone.
+2. Finish active handoffs and exit your Claude Code and Codex sessions.
+3. Run the [reinstall steps](../README.md#reinstall-an-existing-installation), which install `--ref main`.
+4. Open a new terminal tab and run `namedrop doctor`. It reports no problems, and your names are still there.

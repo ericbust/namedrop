@@ -355,6 +355,12 @@ herdr plugin pane open --plugin namedrop --entrypoint setup
 
 Then open a new terminal tab, run `namedrop doctor`, and start fresh agent sessions. **Update Namedrop** follows the ref you installed, so it updates an experimental installation to newer `experimental` commits.
 
+If you already run an older `experimental` build, you get no update notice for this one, because the older update check can't read its `1.5.0-exp` version. Run the update by hand:
+
+```sh
+herdr plugin action invoke update --plugin namedrop
+```
+
 To switch back, run the same commands with `--ref main` in place of `--ref experimental`. Both branches use the same state schema, so your names and history carry over. A local checkout or an archive installation must follow the [migration guide](docs/operations.md#migrate-a-local-link-to-a-managed-installation) first.
 
 ### Open Channels
@@ -366,7 +372,7 @@ herdr plugin action invoke channels --plugin namedrop
 namedrop dashboard
 ```
 
-Both open the page in your browser on macOS, and on Linux when a display is available. Run `namedrop dashboard --no-open` to print the link only. The link works once. Run the command again for a new link.
+Both open the page in your browser on macOS, and on Linux when a display is available. If no browser opens, run `namedrop dashboard` in a shell tab and open the link it prints. Herdr runs the action in its own server process, so the action can't open a browser when that process has no display. Run `namedrop dashboard --no-open` to print the link only. The link works once. Run the command again for a new link.
 
 ### What to try
 
