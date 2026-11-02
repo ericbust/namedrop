@@ -547,8 +547,10 @@ mod tests {
     }
     #[test]
     fn rollback_of_an_absent_unchanged_file_succeeds() {
-        let path =
-            std::env::temp_dir().join(format!("nd21-never-created-{}.json", std::process::id()));
+        let path = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("nd21-never-created-{}.json", std::process::id()));
         let settings = Settings::read(&path).unwrap();
         settings.update().unwrap().rollback().unwrap();
     }
