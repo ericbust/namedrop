@@ -2402,7 +2402,7 @@ else:
         );
         assert_eq!(
             page.body,
-            include_str!("../src/dashboard/assets/index.html")
+            include_str!("../src/dashboard/channels/index.html")
         );
         assert_eq!(server.request("GET", "/api/session", &[], "").status, 401);
         let body = json!({"request_id":"http-first", "source":"@planner inspect"}).to_string();
