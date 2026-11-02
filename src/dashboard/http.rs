@@ -25,9 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-const INDEX_HTML: &str = include_str!("assets/index.html");
-const APP_JS: &str = include_str!("assets/app.js");
-const APP_CSS: &str = include_str!("assets/app.css");
+#[path = "channels_bundle.rs"]
+mod channels_bundle;
 const BODY_LIMIT: usize = 64 * 1024;
 const HEADER_LIMIT: u64 = 8 * 1024;
 const PING_EVERY: Duration = Duration::from_secs(15);
@@ -475,12 +474,7 @@ impl Assets {
     fn resolve(&self, path: &str) -> Option<ResolvedAsset> {
         match self {
             Self::Embedded => {
-                let bytes = match path {
-                    "/index.html" => INDEX_HTML.as_bytes(),
-                    "/assets/app.js" => APP_JS.as_bytes(),
-                    "/assets/app.css" => APP_CSS.as_bytes(),
-                    _ => return None,
-                };
+                let bytes = channels_bundle::get(path)?;
                 Some(ResolvedAsset {
                     body: AssetBody::Embedded(bytes),
                     length: bytes.len() as u64,
@@ -757,8 +751,9 @@ fn route(
                 _ => Err(Status::Unauthorized),
             };
         }
-        "/assets/app.js" => return Ok(Route::Asset(path.to_owned())),
-        "/assets/app.css" => return Ok(Route::Asset(path.to_owned())),
+        _ if path != "/index.html" && channels_bundle::get(path).is_some() => {
+            return Ok(Route::Asset(path.to_owned()));
+        }
         "/favicon.ico" if !directory => return Ok(Route::Favicon),
         _ => {}
     }

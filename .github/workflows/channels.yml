@@ -4,10 +4,14 @@ on:
   pull_request:
     paths:
       - 'experimental/channels/**'
+      - 'src/dashboard/channels/**'
+      - 'src/dashboard/channels_bundle.rs'
       - '.github/workflows/channels.yml'
   push:
     paths:
       - 'experimental/channels/**'
+      - 'src/dashboard/channels/**'
+      - 'src/dashboard/channels_bundle.rs'
       - '.github/workflows/channels.yml'
 
 permissions:
@@ -31,6 +35,7 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+      - run: npm run bundle:check
       - name: Run browser regressions with the runner's browser
         run: |
           for browser in google-chrome google-chrome-stable chromium chromium-browser; do

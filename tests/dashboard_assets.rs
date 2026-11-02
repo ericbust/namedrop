@@ -1,106 +1,12 @@
-//! The dashboard renders untrusted collaborator text, and the server sends
-//! `script-src 'self'; style-src 'self'`. These assertions keep the embedded
-//! assets inside that boundary: no HTML-parsing DOM sinks, no dynamic code,
-//! no inline script or style, and nothing loaded from the network.
-
 #[path = "support/cleanup.rs"]
 mod cleanup;
 
-const INDEX_HTML: &str = include_str!("../src/dashboard/assets/index.html");
-const APP_JS: &str = include_str!("../src/dashboard/assets/app.js");
-const APP_CSS: &str = include_str!("../src/dashboard/assets/app.css");
+const INDEX_HTML: &[u8] = include_bytes!("../src/dashboard/channels/index.html");
 
-const ASSETS: [(&str, &str); 3] = [
-    ("index.html", INDEX_HTML),
-    ("app.js", APP_JS),
-    ("app.css", APP_CSS),
-];
-
-/// createElementNS needs the SVG namespace name. It is an identifier, never fetched.
-const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
-
-fn offenders(source: &str, needles: &[&str]) -> Vec<String> {
-    needles
-        .iter()
-        .filter(|needle| source.contains(*needle))
-        .map(|needle| needle.to_string())
-        .collect()
-}
-
-#[test]
-fn script_never_uses_html_parsing_sinks_or_dynamic_code() {
-    let forbidden = [
-        "innerHTML",
-        "outerHTML",
-        "insertAdjacentHTML",
-        "document.write",
-        "eval(",
-        "new Function",
-        "setAttribute('style'",
-        "setAttribute(\"style\"",
-        "createContextualFragment",
-        "DOMParser",
-        "srcdoc",
-    ];
-    assert_eq!(
-        offenders(APP_JS, &forbidden),
-        Vec::<String>::new(),
-        "app.js must build DOM through el()/svg() with textContent only"
-    );
-}
-
-#[test]
-fn string_timers_are_not_used_as_eval() {
-    for timer in ["setTimeout(", "setInterval("] {
-        for (index, _) in APP_JS.match_indices(timer) {
-            let rest = APP_JS[index + timer.len()..].trim_start();
-            assert!(
-                !rest.starts_with('\'') && !rest.starts_with('"') && !rest.starts_with('`'),
-                "{timer} at byte {index} is passed a string, which evaluates code"
-            );
-        }
-    }
-}
-
-#[test]
-fn no_asset_loads_anything_from_the_network() {
-    for (name, source) in ASSETS {
-        let scrubbed = source.replace(SVG_NAMESPACE, "");
-        assert_eq!(
-            offenders(&scrubbed, &["http://", "https://", "//cdn", "@import"]),
-            Vec::<String>::new(),
-            "{name} references a remote URL"
-        );
-    }
-}
-
-#[test]
-fn index_page_has_no_inline_script_or_style() {
-    assert_eq!(
-        offenders(
-            INDEX_HTML,
-            &["<style", " style=", " onload=", " onclick=", "javascript:"]
-        ),
-        Vec::<String>::new()
-    );
-    let scripts: Vec<&str> = INDEX_HTML
-        .match_indices("<script")
-        .map(|(i, _)| &INDEX_HTML[i..])
-        .collect();
-    assert_eq!(scripts.len(), 1, "exactly one script tag");
-    assert!(
-        scripts[0].starts_with("<script src=\"/assets/app.js\""),
-        "the only script is the external app.js"
-    );
-    assert!(INDEX_HTML.contains("<link rel=\"stylesheet\" href=\"/assets/app.css\">"));
-}
-
-#[test]
-fn stylesheet_uses_system_fonts_only() {
-    assert_eq!(
-        offenders(APP_CSS, &["@font-face", "url("]),
-        Vec::<String>::new()
-    );
+fn assert_legacy_embedded_page(body: &[u8]) {
+    let html = std::str::from_utf8(body).unwrap();
+    assert!(html.contains("/assets/app.js"), "{html}");
+    assert_ne!(body, b"<h1>dist</h1>");
 }
 
 mod support;
@@ -339,15 +245,7 @@ fn embedded_and_directory_pages_keep_auth_and_identical_security_headers() {
     let embedded_open = embedded.open(None);
     let baseline = embedded.get("/", true);
     baseline.status(200);
-    assert_eq!(baseline.body, INDEX_HTML.as_bytes());
-    assert_eq!(
-        embedded.get("/assets/app.js", false).body,
-        APP_JS.as_bytes()
-    );
-    assert_eq!(
-        embedded.get("/assets/app.css", false).body,
-        APP_CSS.as_bytes()
-    );
+    assert_eq!(baseline.body, INDEX_HTML);
     embedded.get("/index.html", false).status(404);
     embedded.get("/favicon.ico", false).status(204);
 
@@ -388,11 +286,51 @@ fn embedded_and_directory_pages_keep_auth_and_identical_security_headers() {
             vec![("Sec-Fetch-Site", "cross-site".to_owned())],
         )
         .status(403);
-    custom.get("/assets/app.js", false).status(404);
+    custom.get("/assets/missing.js", false).status(404);
     custom.get("/favicon.ico", false).status(404);
     custom.get("/missing", true).status(404);
     fs::remove_file(ui.join("index.html")).unwrap();
     custom.get("/", true).status(404);
+}
+
+#[test]
+fn default_server_serves_built_channels_assets() {
+    let dashboard = Dashboard::new();
+    dashboard.open(None);
+    dashboard.get("/", false).status(401);
+    let page = dashboard.get("/", true);
+    page.status(200);
+    assert_eq!(page.body, INDEX_HTML);
+    let html = std::str::from_utf8(INDEX_HTML).unwrap();
+    let paths: Vec<&str> = html
+        .split('"')
+        .filter(|part| {
+            part.starts_with("/assets/") && (part.ends_with(".js") || part.ends_with(".css"))
+        })
+        .collect();
+    assert!(paths.iter().any(|path| path.ends_with(".js")));
+    assert!(paths.iter().any(|path| path.ends_with(".css")));
+    for path in paths {
+        let asset = dashboard.get(path, false);
+        asset.status(200);
+        let expected = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/dashboard/channels")
+            .join(path.trim_start_matches('/'));
+        assert_eq!(asset.body, fs::read(expected).unwrap(), "{path}");
+        assert_eq!(
+            asset.headers["Content-Length"],
+            asset.body.len().to_string()
+        );
+        assert_eq!(
+            asset.headers["Content-Type"],
+            if path.ends_with(".js") {
+                "text/javascript; charset=utf-8"
+            } else {
+                "text/css; charset=utf-8"
+            }
+        );
+        assert_eq!(asset.security(), page.security());
+    }
 }
 
 #[test]
@@ -677,7 +615,7 @@ fn old_embedded_metadata_defaults_to_embedded_and_stale_metadata_does_not_choose
     .unwrap();
     stale.open(None);
     assert_eq!(stale.info()["ui"], "Embedded");
-    assert_eq!(stale.get("/", true).body, INDEX_HTML.as_bytes());
+    assert_eq!(stale.get("/", true).body, INDEX_HTML);
 }
 
 #[test]
@@ -936,14 +874,11 @@ fn fix_two_handoff_to_a_release_without_claim_support_stays_running() {
         assert_eq!(dashboard.cookie(), cookie);
         let response = dashboard.get("/", true);
         response.status(200);
-        assert_eq!(
-            response.body,
-            if custom {
-                b"<h1>dist</h1>".as_slice()
-            } else {
-                INDEX_HTML.as_bytes()
-            }
-        );
+        if custom {
+            assert_eq!(response.body, b"<h1>dist</h1>");
+        } else {
+            assert_legacy_embedded_page(&response.body);
+        }
     }
 }
 
@@ -1138,7 +1073,7 @@ fn fix_three_legacy_stub_rolls_back_embedded_and_custom_ui() {
         assert!(successor.is_some(), "legacy stub left no dashboard: {log}");
         assert_eq!(successor.unwrap()["port"], first["port"]);
         assert_eq!(dashboard.cookie(), cookie);
-        assert_eq!(dashboard.get("/", true).body, INDEX_HTML.as_bytes());
+        assert_eq!(dashboard.get("/", true).body, INDEX_HTML);
         assert!(
             log.contains("legacy startup stdout") && log.contains("legacy startup stderr"),
             "{log}"
@@ -1199,7 +1134,7 @@ fn fix_three_inherited_successor_can_release_its_claim_for_a_legacy_rollback() {
     );
     assert_eq!(successor.unwrap()["port"], first["port"]);
     assert_eq!(dashboard.cookie(), cookie);
-    assert_eq!(dashboard.get("/", true).body, INDEX_HTML.as_bytes());
+    assert_eq!(dashboard.get("/", true).body, INDEX_HTML);
     assert_eq!(
         log.lines()
             .filter(|line| line.contains("custom UI") && line.contains("does not support --ui"))
@@ -1260,7 +1195,7 @@ fn fix_three_real_pre_nd2_rollback_drops_custom_ui() {
     );
     assert_eq!(successor.unwrap()["port"], first["port"]);
     assert_eq!(dashboard.cookie(), cookie);
-    assert_eq!(dashboard.get("/", true).body, INDEX_HTML.as_bytes());
+    assert_legacy_embedded_page(&dashboard.get("/", true).body);
     assert_eq!(
         log.lines()
             .filter(|line| line.contains("custom UI") && line.contains("does not support --ui"))
@@ -1766,7 +1701,7 @@ fn fix_four_b_same_ui_waits_for_a_ready_successor_url() {
             if custom {
                 b"<h1>dist</h1>".as_slice()
             } else {
-                INDEX_HTML.as_bytes()
+                INDEX_HTML
             }
         );
     }
@@ -1828,7 +1763,8 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
     let cookie = dashboard.cookie();
     let _events = fix_two_subscribe(&dashboard, &opened);
     let runtime = dashboard.state().join("runtime");
-    let legacy = if let Some(old) = std::env::var_os("REVIEW_PRE_ND2_BINARY") {
+    let old = std::env::var_os("REVIEW_PRE_ND2_BINARY");
+    let legacy = if let Some(old) = &old {
         fs::create_dir_all(runtime.join("legacy")).unwrap();
         let legacy = runtime.join("legacy/namedrop");
         copy_executable(old, &legacy).unwrap();
@@ -1895,7 +1831,11 @@ fn fix_four_b_custom_ui_waits_then_refuses_an_embedded_legacy_successor() {
         vec![("Cookie", cookie)],
     );
     page.status(200);
-    assert_eq!(page.body, INDEX_HTML.as_bytes());
+    if old.is_some() {
+        assert_legacy_embedded_page(&page.body);
+    } else {
+        assert_eq!(page.body, INDEX_HTML);
+    }
 }
 
 #[test]

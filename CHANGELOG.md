@@ -2,7 +2,9 @@
 
 Each release is a section here, newest first. The GitHub release for a version uses its section as the release notes. See [releasing](docs/releasing.md) for how versions are chosen.
 
-## Unreleased
+## [1.5.0-exp.1] - 2026-11-02
+
+Experimental Channels build for Linux and macOS testers.
 
 ### Fixed
 
@@ -16,6 +18,7 @@ Each release is a section here, newest first. The GitHub release for a version u
 
 ### Added
 
+- The Channels app opens from the workspace action **Open Namedrop Channels** or `namedrop dashboard`. Installed builds include the app, so using it does not require Node or npm.
 - Dashboard channels accept plain top-level posts. An isolated small-model router parses embedded mentions and chooses only the members addressed, without changing the text. Posts without known mentions make no model call. Plain operator thread follow-ups reach the thread's agents, while terminals need an explicit leading mention. Channel replies can wake local agents through embedded mentions, with bounded context and the existing reply allowance. Set `NAMEDROP_CHANNEL_ROUTER=off` to keep plain root posts unrouted. Routing explanations use a dashboard sidecar so the ledger stays at schema 6.
 - Channels attention items link to their conversations and offer a prefilled response or a named pane to inspect. Historical conversation links load their target directly, including requests outside the live message window.
 - The dashboard serves sanitized recent pane output at authenticated `GET /w/<key>/participants/<address_id>/screen` for agents and terminals. Concurrent requests for one pane share a bounded Herdr read. Retired or closed panes return 410.
@@ -32,6 +35,14 @@ Each release is a section here, newest first. The GitHub release for a version u
 - `namedrop dashboard --ui <dir>` serves a custom browser app from a directory under the dashboard's existing security headers. Rebuilt directories are read fresh, large assets stream with bounded memory, dotfiles stay private, and aliases of the app shell require the session cookie. Ancestors need only search permission; the UI directory needs read and search permission. The shared server keeps its UI setting through upgrades, supports handoff to older releases without claim inheritance, falls back to their embedded UI when they lack `--ui` with a logged explanation, and spawns the exact executable it probed. During a handoff, matching UI requests wait up to five seconds for a ready successor and apply its UI setting before returning a URL. Longer startups return restart guidance without a URL, initially different UI requests receive restart guidance immediately, and updates and package refreshes can proceed while the successor starts.
 
 - The dashboard's `/api/events` endpoint streams every live Herdr workspace over one authenticated connection. It sends changed workspaces as `space` events and closed workspaces as `gone` events. Dashboard frames now include a live `display_name` and a nullable `addressable_label` that identifies a workspace only when its label is unique.
+## [1.4.3] - 2026-11-01
+
+### Fixed
+
+- Sandboxed Codex agents can send, reply, acknowledge and complete deliveries, and read the current workspace's roster when the sandbox blocks Herdr's socket. Commands pass through Namedrop's delivery spool to a worker outside the sandbox, without broader network permissions.
+- Activation grants Codex write access only to Namedrop's delivery spool. The runtime and database remain outside the grant. Namedrop replaces its older broad grants and preserves user grants; unsafe broad user grants must be removed before activation. Deactivation removes only the grant Namedrop added. Start fresh Codex sessions after activation to load the grant.
+- A corrupt queued command or result no longer stops the worker from processing other commands. Namedrop removes the invalid record and keeps processing the queue.
+- Codex sandbox setup works through linked parent directories, including macOS's `/var` path. Linked configuration, ownership-record and lock files are still refused.
 
 ## [1.4.2] - 2026-10-28
 

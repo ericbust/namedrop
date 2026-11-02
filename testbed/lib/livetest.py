@@ -165,7 +165,7 @@ def launch_command(alias, mode, environ):
     return codex_command(environ.get("TESTBED_CODEX_CMD") or "codex", mode)
 
 
-Features = namedtuple("Features", "version hook_markers server_warning")
+Features = namedtuple("Features", "version full_version hook_markers server_warning")
 
 
 def features(version_text):
@@ -173,11 +173,11 @@ def features(version_text):
     if not found:
         testbed.fail("cannot read the installed Namedrop version: " + version_text)
     version = tuple(int(part) for part in found.groups())
-    return Features(version, version >= (1, 1, 0), version >= (1, 2, 0))
+    return Features(version, version_text, version >= (1, 1, 0), version >= (1, 2, 0))
 
 
 def version_text(feats):
-    return ".".join(map(str, feats.version))
+    return feats.full_version
 
 
 def choose_mode(requested, feats):

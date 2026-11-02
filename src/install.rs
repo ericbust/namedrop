@@ -14,6 +14,7 @@ use std::{
 use toml_edit::{DocumentMut, Item};
 
 mod claude_permissions;
+pub(crate) mod codex_sandbox;
 mod command;
 pub(crate) use claude_permissions::remove_claude_permissions;
 pub(crate) use command::install_shell_command;
@@ -118,9 +119,10 @@ pub fn disclosed_user_package_targets(
     let claude_settings = claude_permissions::settings_path(&config.claude(home_directory))
         .unwrap_or_else(|_| home_directory.join(".claude/settings.json"));
     format!(
-        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, shell command: {}, PATH entries in zsh/bash startup files",
+        "{packages}, Claude collaboration permissions: {}, Codex collaboration permissions: {}, Codex deferred-command writable root in {}, shell command: {}, PATH entries in zsh/bash startup files",
         claude_settings.display(),
         codex_home.join("rules/namedrop.rules").display(),
+        codex_home.join("config.toml").display(),
         home_directory.join(".local/bin/namedrop").display()
     )
 }
@@ -462,7 +464,13 @@ pub(crate) fn inspect_integration_package(
     runtime: AgentRuntime,
     state: &Path,
     config: AgentConfigDirectories<'_>,
+    worktree: Option<&Path>,
 ) -> Result<(), String> {
+    if runtime == AgentRuntime::Codex
+        && let Some(worktree) = worktree
+    {
+        codex_sandbox::check_worktree(state, worktree)?;
+    }
     let home = home.ok_or("no absolute user home directory is available")?;
     let executable = PathBuf::from(crate::collaboration_executable()?);
     let prepared = prepare_integration_package(home, runtime, &executable, state, config)?;
@@ -471,6 +479,9 @@ pub(crate) fn inspect_integration_package(
     }
     if let Some((path, contents)) = prepared.codex_policy {
         inspect_installed_file(&path, &contents, Some(0o600))?;
+    }
+    if runtime == AgentRuntime::Codex {
+        codex_sandbox::inspect(&config.codex(home), state)?;
     }
     if runtime == AgentRuntime::ClaudeCode {
         claude_permissions::inspect(&config.claude(home), &executable, state)?;
@@ -632,7 +643,7 @@ fn installed_instructions(
     );
     if runtime != AgentRuntime::ClaudeCode {
         return Ok(format!(
-            "{frontmatter}\n---\n{body}\nCodex: request elevated execution when required because Namedrop writes outside the workspace. Scoped installer rules load in the next session.\n"
+            "{frontmatter}\n---\n{body}\nCodex: Activation adds only Namedrop's deferred-commands directory to the writable roots; its runtime and database remain outside that grant. Use normal sandbox execution for send, reply, ack, complete, and the current-workspace address list. If the sandbox blocks Herdr, Namedrop queues these commands for its outside worker. A pending result has unknown commit status. Retry the exact command to recover its result. Start a new Codex session after activation to load the grant.\n"
         ));
     }
     Ok(format!(
@@ -1054,7 +1065,7 @@ fn forward_update_notice(runtime: AgentRuntime) -> String {
     // Validate both versions with shell builtins; wrapper bytes must remain
     // stable when only the release version changes.
     format!(
-        "case \"$output\" in\n  {})\n    versions=${{output##*'Namedrop '}}\n    versions=${{versions%{}}}\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      case \"$1\" in ''|*[!0-9.]*) return 1 ;; esac\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      for part do\n        case \"$part\" in ''|0[0-9]*) return 1 ;; esac\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    printf '%s' \"$output\"\n    ;;\nesac\n",
+        "case \"$output\" in\n  {})\n    versions=${{output##*'Namedrop '}}\n    versions=${{versions%{}}}\n    available=${{versions%%' is available (you have '*}}\n    installed=${{versions#*' is available (you have '}}\n    valid_version() {{\n      [ \"${{#1}}\" -le 32 ] || return 1\n      value=$1\n      serial=\n      case \"$value\" in\n        *-exp.*) serial=${{value#*-exp.}}; value=${{value%%-exp.*}}; [ -n \"$serial\" ] || return 1 ;;\n      esac\n      case \"$value\" in ''|*[!0-9.]*) return 1 ;; esac\n      IFS=.\n      set -- $value\n      [ \"$#\" -eq 3 ] || return 1\n      [ \"$value\" = \"$1.$2.$3\" ] || return 1\n      if [ -n \"$serial\" ]; then set -- \"$@\" \"$serial\"; fi\n      for part do\n        case \"$part\" in ''|*[!0-9]*|0[0-9]*) return 1 ;; esac\n        [ \"${{#part}}\" -le 20 ] || return 1\n        if [ \"${{#part}}\" -eq 20 ]; then\n          high=${{part%??????????}}\n          low=${{part#??????????}}\n          [ \"$high\" -lt 1844674407 ] || {{\n            [ \"$high\" -eq 1844674407 ] && [ \"$low\" -le 3709551615 ]\n          }} || return 1\n        fi\n      done\n    }}\n    valid_version \"$available\" && valid_version \"$installed\" || exit 0\n    printf '%s' \"$output\"\n    ;;\nesac\n",
         patterns.join("|"),
         shell_single_quote(&message_end),
     )

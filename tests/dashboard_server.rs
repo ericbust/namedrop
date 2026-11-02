@@ -417,8 +417,16 @@ fn pages_require_the_token_and_a_loopback_host() {
         assert!(landed.headers.contains(directive), "{}", landed.headers);
     }
     assert!(landed.headers.contains("X-Frame-Options: DENY\r\n"));
-    assert!(landed.body.contains("/assets/app.js"));
-    assert!(server.get("/assets/app.js", &[]).status.contains("200"));
+    let script = landed
+        .body
+        .split("src=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(script.starts_with("/assets/") && script.ends_with(".js"));
+    assert!(server.get(script, &[]).status.contains("200"));
     assert!(server.get("/favicon.ico", &[]).status.contains("204"));
     assert!(
         server
@@ -454,14 +462,14 @@ fn connections_past_the_cap_are_turned_away() {
     let admitted = eventually(Duration::from_secs(5), || {
         // A probe that lands before a slot frees is turned away like the
         // excess one, and its unread request makes that close a reset.
-        let mut stream = server.connect("/assets/app.js", &[]);
+        let mut stream = server.connect("/healthz", &[]);
         let mut raw = String::new();
         let outcome = stream.read_to_string(&mut raw);
         if raw.starts_with("HTTP/1.1 503") {
             return None;
         }
         outcome.unwrap();
-        Response::parse(&raw).status.contains("200").then_some(())
+        Response::parse(&raw).status.contains("401").then_some(())
     });
     assert!(admitted.is_some(), "slots free up once connections close");
 }
