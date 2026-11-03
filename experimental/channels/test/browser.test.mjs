@@ -4492,9 +4492,9 @@ test("UI-3: a reply in a thread with no agents stays in the box and says how to 
   assert.equal(posted.in_reply_to, "out");
 });
 
-test("UI-3: the recipient guard waits for a send attempt and the next keystroke clears it", async (t) => {
+test("UI-3: the thread recipient guard stays visible until an explicit recipient is chosen", async (t) => {
   const { ui, box, send, status } = await terminalThread(t);
-  const hint = "Enter to send · Shift+Enter for a new line";
+  const hint = "Start with @name to choose who gets this.";
   async function typeExpectingHint(text) {
     for (const character of text) {
       await box.pressSequentially(character);
@@ -4523,6 +4523,9 @@ test("UI-3: the recipient guard waits for a send attempt and the next keystroke 
   assert.equal(await ui.page.locator("article.pending").count(), 0);
   await typeExpectingHint("!");
   await box.fill("@shell hello");
+  await readsAs(status, "Enter sends only to @shell");
+  assert.equal(await status.locator(".composer-guard").count(), 0);
+  assert.equal(await send.isDisabled(), false);
   await box.press("Enter");
   await until(() => ui.posts.attempts.length === 1, "the addressed post");
   assert.equal(
@@ -6025,7 +6028,7 @@ test("UI-4: names in a message header open the drawer, which replaces the thread
   assert.equal(await drawer(ui).count(), 0);
 });
 
-test("UI-4: the drawer is 480 wide at 1440 and 400 at 1024, opening a row selects it, and nothing scrolls sideways", async (t) => {
+test("UI-4: the drawer shares conversation widths at 1440 and 1024, opening a row selects it, and nothing scrolls sideways", async (t) => {
   const ui = await open(t, (client) => replay(client, busyTeam()), undefined, {
     path: "/?view=activity",
     onScreen: () => ({ body: `${"x".repeat(900)}\n${"word ".repeat(300)}` }),
@@ -6037,10 +6040,10 @@ test("UI-4: the drawer is 480 wide at 1440 and 400 at 1024, opening a row select
   assert.equal(await row.getAttribute("aria-expanded"), "true");
   assert.equal(await focusedIn(drawer(ui)), true);
   for (const [width, height, expected] of [
-    [1440, 900, 480],
-    [1024, 700, 400],
+    [1440, 900, 400],
+    [1024, 700, 360],
   ]) {
-    await ui.page.setViewportSize({ width, height });
+    await resize(ui.page, width, height);
     const layout = await ui.page.evaluate(() => ({
       drawer: Math.round(
         document.querySelector("aside.peek").getBoundingClientRect().width,
@@ -8451,20 +8454,18 @@ test("CH-2: replies read as their own rows in time order, with a reference above
     0,
     "no references in the pane",
   );
-  assert.equal(
-    await pane.locator(".composer-to").textContent(),
-    "To @claude, @codex",
-  );
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   const box = pane.getByRole("combobox", { name: "Reply to @claude, @codex" });
+  assert.equal(await box.inputValue(), "@claude @codex ");
   await box.pressSequentially("thanks both");
   assert.equal(
     await pane.locator(".composer-status").textContent(),
-    "Enter to send · Shift+Enter for a new line",
+    "Enter sends only to @claude, @codex",
   );
   await box.press("Enter");
   await until(() => ui.posts.attempts.length === 1, "the reply");
   const posted = JSON.parse(ui.posts.attempts[0].raw);
-  assert.equal(posted.source, "thanks both", "sent as typed");
+  assert.equal(posted.source, "@claude @codex thanks both", "sent as typed");
   assert.equal(posted.in_reply_to, "r3");
   await ui.page.keyboard.press("Escape");
   await pane.waitFor({ state: "detached" });
@@ -9415,6 +9416,8 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   const pane = threadPane(ui);
   const box = pane.getByRole("combobox");
   await box.waitFor();
+  const suggestedReply = await box.inputValue();
+  assert.equal(suggestedReply, "@claude ");
   await pane.getByRole("button", { name: "Send this to @codex" }).click();
   await until(() => ui.posts.deliveries.length === 1, "the deliver POST");
   assert.equal(ui.posts.deliveries[0].path, deliverPath("p1"));
@@ -9426,7 +9429,11 @@ test("CH-fix-3 item 1: Send anyway in the thread pane delivers the post, focus m
   answered.release();
   assert.equal((await offerReads(button, "Sent to @codex")).focused, true);
   await readsAs(inTimeline, "Sent to @codex · 1 reply");
-  assert.equal(await box.inputValue(), "", "nothing is typed in the reply box");
+  assert.equal(
+    await box.inputValue(),
+    suggestedReply,
+    "delivery leaves the suggested reply untouched",
+  );
   assert.equal(ui.posts.attempts.length, 0, "no reply is posted");
 });
 

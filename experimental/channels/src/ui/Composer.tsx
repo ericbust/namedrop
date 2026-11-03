@@ -165,7 +165,11 @@ export function Composer({
   const [width, setWidth] = useState(0);
   const box = useRef<HTMLTextAreaElement>(null);
   const list = useRef<HTMLDivElement>(null);
-  const placedCaret = useRef<number | null>(null);
+  const placedCaret = useRef<number | null>(
+    !drafts.has(draftKey(composer)) && initialText.length > 0
+      ? initialText.length
+      : null,
+  );
   const fitted = useRef<string | null>(null);
   const typedAt = useRef<number | null>(null);
   const listId = useId();
