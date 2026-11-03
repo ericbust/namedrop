@@ -548,7 +548,7 @@ test("complete: the hint says where Enter sends the text", () => {
   for (const to of [[], ["@codex"]])
     assert.equal(
       composerHint({ kind: "thread", to }, "@codex hi"),
-      "Enter to send · Shift+Enter for a new line",
+      "Enter sends only to @codex",
     );
 });
 
@@ -655,7 +655,7 @@ test("complete: a leading name whose pane is closed says so, before its capitals
   );
   assert.equal(
     composerHint({ kind: "thread", to: [] }, "@ghost hi"),
-    "Enter to send · Shift+Enter for a new line",
+    "Enter sends only to @ghost",
   );
 });
 

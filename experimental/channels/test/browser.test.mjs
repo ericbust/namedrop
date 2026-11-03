@@ -1203,7 +1203,7 @@ function replyRows() {
   ];
   return value;
 }
-test("FULL-THREAD: every row offers Reply in thread, by keyboard too, and the reply answers that message", async (t) => {
+test("THREAD-R6: timeline rows offer Reply in thread by keyboard, thread rows do not, and the reply answers the selected message", async (t) => {
   const ui = await open(t, (client) => replay(client, [replyRows()]));
   await ui.live();
   const timeline = ui.page.getByRole("region", { name: "Message history" });
@@ -1237,37 +1237,142 @@ test("FULL-THREAD: every row offers Reply in thread, by keyboard too, and the re
     true,
   );
   assert.match(await box.getAttribute("aria-label"), /^Reply to @codex/);
-  await box.fill("About the parent");
+  await box.fill("@codex About the parent");
   await ui.page.keyboard.press("Enter");
-  await pane.getByText("About the parent", { exact: true }).first().waitFor();
   await pane
-    .locator('[data-message-id="answer"]')
-    .getByRole("button", { name: "Reply in thread to @codex" })
-    .click();
-  await pane.getByRole("status").getByText("Replying to @codex").waitFor();
-  await box.fill("About the answer");
-  await ui.page.keyboard.press("Enter");
-  await pane.getByText("About the answer", { exact: true }).first().waitFor();
-  await pane.getByText(/^Replying to/).waitFor({ state: "detached" });
-  await pane
-    .locator('[data-message-id="parent"]')
-    .getByRole("button", { name: "Reply in thread to You" })
-    .click();
-  await pane
-    .getByRole("button", { name: "Reply to the latest message instead" })
-    .click();
-  assert.equal(await pane.getByText(/^Replying to/).count(), 0);
-  await box.fill("Then the latest");
-  await ui.page.keyboard.press("Enter");
-  await pane.getByText("Then the latest", { exact: true }).first().waitFor();
+    .getByText("@codex About the parent", { exact: true })
+    .first()
+    .waitFor();
+  assert.equal(
+    await pane.getByRole("button", { name: /^Reply in thread to / }).count(),
+    0,
+    "rows already in the thread do not offer another thread action",
+  );
   const sent = ui.posts.attempts
     .filter((attempt) => attempt.body !== null)
     .map(({ body }) => [body.in_reply_to, body.source]);
-  assert.deepEqual(sent, [
-    ["parent", "About the parent"],
-    ["answer", "About the answer"],
-    ["answer", "Then the latest"],
-  ]);
+  assert.deepEqual(sent, [["parent", "@codex About the parent"]]);
+});
+
+test("THREAD-R6: editable participant mentions support keyboard subsets, multiple recipients and invitations", async (t) => {
+  const value = replyRows();
+  const agent = value.frame.participants.find(
+    (member) => member.address_id === CODEX,
+  );
+  assert.ok(agent);
+  value.frame.participants.push(
+    { ...agent, address_id: "agent-reviewer", alias: "@reviewer" },
+    { ...agent, address_id: "agent-scout", alias: "@scout" },
+  );
+  value.frame.messages[0].legs.push({
+    to: "agent-reviewer",
+    stage: { stage: "queued" },
+  });
+  const whole = `${"Long parent body ".repeat(300)}END OF PARENT`;
+  value.frame.messages[0].body = {
+    text: whole.slice(0, 2000),
+    truncated: true,
+  };
+  const ui = await open(t, (client) => replay(client, [value]), undefined, {
+    onBody: () => ({ text: whole, truncated: false }),
+  });
+  await ui.page.emulateMedia({ reducedMotion: "reduce" });
+  await ui.live();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  const pane = ui.page.getByRole("complementary", {
+    name: "Thread",
+    exact: true,
+  });
+  await ui.page.setViewportSize({ width: 1440, height: 900 });
+  const box = pane.getByRole("combobox");
+  assert.equal(await box.inputValue(), "@codex @reviewer ");
+  assert.equal(
+    await pane.getByRole("button", { name: /^Reply in thread to / }).count(),
+    0,
+  );
+  await pane.getByRole("button", { name: "Show more", exact: true }).click();
+  await pane.getByText(/END OF PARENT/).waitFor();
+  await box.fill("Only this agent");
+  await box.press("Enter");
+  assert.equal(await box.inputValue(), "Only this agent");
+  assert.equal(ui.posts.attempts.length, 0);
+  assert.equal(
+    await pane.getByRole("button", { name: "Send", exact: true }).isDisabled(),
+    true,
+  );
+  await pane
+    .getByText("Start with @name to choose who gets this.", { exact: true })
+    .waitFor();
+  await box.fill("@rev");
+  await box.press("Tab");
+  assert.equal(await box.inputValue(), "@reviewer ");
+  await box.press("End");
+  await box.pressSequentially("Only this agent");
+  await pane
+    .getByText("Enter sends only to @reviewer", { exact: true })
+    .waitFor();
+  await box.press("Enter");
+  await pane
+    .getByText("@reviewer Only this agent", { exact: true })
+    .first()
+    .waitFor();
+  await box.fill("@cod");
+  await box.press("Enter");
+  await box.pressSequentially("@rev");
+  await box.press("Tab");
+  await box.pressSequentially("Together");
+  await box.press("Enter");
+  await pane
+    .getByText("@codex @reviewer Together", { exact: true })
+    .first()
+    .waitFor();
+  await box.fill("@sco");
+  await box.press("Tab");
+  await box.pressSequentially("Join this thread");
+  await box.press("Enter");
+  await pane
+    .getByText("@scout Join this thread", { exact: true })
+    .first()
+    .waitFor();
+  assert.deepEqual(
+    ui.posts.attempts.map(({ body }) => [body.in_reply_to, body.source]),
+    [
+      ["parent", "@reviewer Only this agent"],
+      ["answer", "@codex @reviewer Together"],
+      ["answer", "@scout Join this thread"],
+    ],
+  );
+  await eventually(
+    async () => (await box.inputValue()) === "",
+    "the invitation receipt clears the sent draft",
+  );
+  const update = structuredClone(value);
+  update.frame.messages.push(
+    message("invited-scout", "Joining the conversation", {
+      thread_id: "exchange",
+      in_reply_to: "answer",
+      author: "agent-scout",
+      kind: "reply",
+      at_ms: 400,
+    }),
+  );
+  update.frame.threads[0].message_count = 3;
+  ui.connections[0].send("space", update);
+  await pane.locator('[data-message-id="invited-scout"]').waitFor();
+  await pane.getByRole("button", { name: "Close thread" }).click();
+  await ui.page
+    .getByRole("region", { name: "Message history" })
+    .locator('[data-message-id="parent"]')
+    .getByRole("button", { name: "Reply in thread to You" })
+    .click();
+  assert.equal(await box.inputValue(), "@codex @reviewer @scout ");
+  await ui.page.screenshot({ path: "/tmp/thread-r6-desktop.png" });
+  await ui.page.setViewportSize({ width: 390, height: 800 });
+  await ui.page.screenshot({ path: "/tmp/thread-r6-narrow.png" });
 });
 
 test("FULL-THREAD: a coordination report thread names its agent, a nudge with no agent asks for a mention, and phones show the button", async (t) => {
@@ -1291,12 +1396,15 @@ test("FULL-THREAD: a coordination report thread names its agent, a nudge with no
   await pane.getByRole("status").getByText("Replying to @codex").waitFor();
   const box = pane.getByRole("combobox");
   assert.match(await box.getAttribute("aria-label"), /^Reply to @codex/);
-  await box.fill("Ship the report");
+  await box.fill("@codex Ship the report");
   await ui.page.keyboard.press("Enter");
-  await pane.getByText("Ship the report", { exact: true }).first().waitFor();
+  await pane
+    .getByText("@codex Ship the report", { exact: true })
+    .first()
+    .waitFor();
   assert.deepEqual(
     ui.posts.attempts.map(({ body }) => [body.in_reply_to, body.source]),
-    [["report", "Ship the report"]],
+    [["report", "@codex Ship the report"]],
   );
   await pane.getByRole("button", { name: "Close thread" }).click();
   await timeline
@@ -1374,7 +1482,7 @@ test("FULL-THREAD: a failed Reply in thread keeps its target, and the retry reus
   const replying = pane.getByRole("status").getByText("Replying to You");
   await replying.waitFor();
   const box = pane.getByRole("combobox");
-  await box.fill("About the parent");
+  await box.fill("@codex About the parent");
   await ui.page.keyboard.press("Enter");
   await pane.locator(".composer-error").waitFor();
   assert.equal(await replying.count(), 1, "a failed send keeps the target");
@@ -1415,7 +1523,7 @@ test("FULL-THREAD: a reply the server finds no one for asks for a mention, not t
     .locator('[data-message-id="report"]')
     .getByRole("button", { name: "Reply in thread to @codex" })
     .click();
-  await pane.getByRole("combobox").fill("Ship the report");
+  await pane.getByRole("combobox").fill("@codex Ship the report");
   await ui.page.keyboard.press("Enter");
   const alert = pane.getByRole("alert");
   await alert.waitFor();
@@ -4218,13 +4326,18 @@ test("UI-3: a thread reply carries in_reply_to and goes as typed to the thread's
     exact: true,
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
-  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  assert.equal(await reply.inputValue(), "@codex ");
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   await reply.click();
   await reply.pressSequentially("thanks");
   await reply.press("Enter");
   await until(() => ui.posts.attempts.length === 1, "the reply");
   const first = JSON.parse(ui.posts.attempts[0].raw);
-  assert.equal(first.source, "thanks", "the server delivers it to @codex");
+  assert.equal(
+    first.source,
+    "@codex thanks",
+    "the server delivers it to @codex",
+  );
   assert.equal(first.in_reply_to, "answer");
   await pane.locator("article.pending").getByText("Sent").waitFor();
   assert.equal(await timeline.locator("article.pending").count(), 0);
@@ -4278,9 +4391,8 @@ test("UI-3: a thread reply to an agent in another workspace names it through its
   });
   const reply = pane.getByRole("combobox");
   await reply.waitFor();
-  assert.deepEqual(await pane.locator(".composer-to").allTextContents(), [
-    "To @lead · #alpha",
-  ]);
+  assert.equal(await reply.inputValue(), "#alpha @lead ");
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   assert.equal(
     await reply.getAttribute("aria-label"),
     "Reply to @lead · #alpha",
@@ -4292,7 +4404,11 @@ test("UI-3: a thread reply to an agent in another workspace names it through its
   const [attempt] = ui.posts.attempts;
   assert.equal(attempt.key, key(1));
   const body = JSON.parse(attempt.raw);
-  assert.equal(body.source, "thanks", "the server delivers it to @lead");
+  assert.equal(
+    body.source,
+    "#alpha @lead thanks",
+    "the server delivers it to @lead",
+  );
   assert.equal(body.in_reply_to, "answer");
 });
 
@@ -4344,7 +4460,7 @@ test("UI-3: a reply in a thread with no agents stays in the box and says how to 
   await box.click();
   assert.equal(
     await status.textContent(),
-    "Enter to send · Shift+Enter for a new line",
+    "Start with @name to choose who gets this.",
   );
   assert.equal(await pane.locator(".composer-to").count(), 0, "no To label");
   await box.pressSequentially("hello");
@@ -4548,7 +4664,7 @@ test("UI-3 fix2: refused drafts in two channels and a thread each retry with the
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
   await reply.click();
-  await reply.pressSequentially("@codex same");
+  await reply.fill("@codex same");
   await reply.press("Enter");
   await pane.locator(".composer").getByRole("alert").waitFor();
   assert.equal(new Set(requestIds(ui)).size, 3, "three drafts, three ids");
@@ -4594,7 +4710,7 @@ test("UI-3 fix3: a refused thread reply retried after a new reply arrives posts 
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
   await reply.click();
-  await reply.pressSequentially("@codex same");
+  await reply.fill("@codex same");
   await reply.press("Enter");
   await pane.locator(".composer").getByRole("alert").waitFor();
   const update = structuredClone(value);
@@ -4986,7 +5102,7 @@ test("UI-3 fix: a thread reply refused after the pane closed marks its parent, a
   );
   await marker.click();
   await pane.waitFor();
-  assert.equal(await reply.inputValue(), "thanks");
+  assert.equal(await reply.inputValue(), "@codex thanks");
   const error = pane.locator(".composer").getByRole("alert");
   await error.waitFor();
   assert.equal(await error.textContent(), "Unknown recipient @ghost.");
@@ -4999,7 +5115,7 @@ test("UI-3 fix: a thread reply refused after the pane closed marks its parent, a
   await reply.press("Enter");
   await until(() => ui.posts.attempts.length === 2, "the retry");
   assert.equal(new Set(requestIds(ui)).size, 1, "the retry reused its id");
-  assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "thanks");
+  assert.equal(JSON.parse(ui.posts.attempts[1].raw).source, "@codex thanks");
 });
 
 test("UI-3 fix: switching channels and closing a thread keep unsent text", async (t) => {
@@ -5036,7 +5152,7 @@ test("UI-3 fix: switching channels and closing a thread keep unsent text", async
   await pane.waitFor({ state: "detached" });
   await preview.click();
   await reply.waitFor();
-  assert.equal(await reply.inputValue(), "half a reply");
+  assert.equal(await reply.inputValue(), "@codex half a reply");
   assert.equal(await alpha.inputValue(), "@codex half a post");
   await ui.row(3).click();
   await gamma.waitFor();
@@ -5044,7 +5160,7 @@ test("UI-3 fix: switching channels and closing a thread keep unsent text", async
   assert.equal(ui.posts.attempts.length, 0);
 });
 
-test("UI-3 fix: the thread box says Write a reply while the To label names the recipients", async (t) => {
+test("UI-3 fix: the thread box says Write a reply while editable mentions name the recipients", async (t) => {
   const ui = await open(t, (client) => replay(client, [askThread()]));
   await ui.live();
   const timeline = ui.page.getByRole("region", { name: "Message history" });
@@ -5054,7 +5170,8 @@ test("UI-3 fix: the thread box says Write a reply while the To label names the r
     exact: true,
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
-  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  assert.equal(await reply.inputValue(), "@codex ");
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   assert.equal(await reply.getAttribute("placeholder"), "Write a reply");
   assert.equal(
     await ui.page
@@ -7105,7 +7222,7 @@ test("CH-fix-2 item 3: an item with no thread or no actions keeps the pane hint,
   );
 });
 
-test("CH-2: Respond targets its agent with the prefill, and plain text names every agent the reply reaches", async (t) => {
+test("CH-2: Respond targets its agent with the prefill, and removing its mention requires a new recipient", async (t) => {
   const { value, context } = actionableAttention();
   value.frame.participants.push({
     ...value.frame.participants[0],
@@ -7126,6 +7243,10 @@ test("CH-2: Respond targets its agent with the prefill, and plain text names eve
   );
   await ui.live();
   await ui.page
+    .getByRole("region", { name: "Attention needed" })
+    .getByRole("button", { name: /^Show message/ })
+    .click();
+  await ui.page
     .getByRole("button", { name: "Reply to @codex", exact: true })
     .click();
   const pane = ui.page.getByRole("complementary", {
@@ -7139,10 +7260,10 @@ test("CH-2: Respond targets its agent with the prefill, and plain text names eve
     "the Respond prefill",
   );
   await reply.fill("ok go ahead");
-  assert.equal(
-    await pane.locator(".composer-to").textContent(),
-    "To @codex, @claude",
-  );
+  assert.equal(await pane.locator(".composer-to").count(), 0);
+  await pane
+    .getByText("Start with @name to choose who gets this.", { exact: true })
+    .waitFor();
   assert.equal(
     await reply.getAttribute("aria-label"),
     "Reply to @codex, @claude",
@@ -7565,7 +7686,7 @@ test("DESIGN-R2 D2: a thread's kept-draft line lasts until that box changes, the
   await readsAs(status, kept);
   await reply.press("End");
   await ui.page.keyboard.type(" too");
-  await readsAs(status, "Enter to send · Shift+Enter for a new line");
+  await readsAs(status, "Start with @name to choose who gets this.");
   assert.equal(await reply.inputValue(), "my thread words too");
 });
 
@@ -10685,7 +10806,8 @@ test("UI-R4 review H Low 2: in a thread, a pasted U+FEFF before a leading name d
     exact: true,
   });
   const reply = pane.getByRole("combobox", { name: "Reply to @codex" });
-  assert.equal(await pane.locator(".composer-to").textContent(), "To @codex");
+  assert.equal(await reply.inputValue(), "@codex ");
+  assert.equal(await pane.locator(".composer-to").count(), 0);
   await reply.fill("﻿@claude look too");
   assert.equal(await pane.locator(".composer-to").count(), 0, "no To label");
   await reply.press("Enter");
