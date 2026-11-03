@@ -390,6 +390,13 @@ async function open(
         ? res.writeHead(404).end()
         : sendJson(res, 200, context);
     }
+    if (/^\/w\/[^/]+\/participants\/[^/]+\/live$/.test(url.pathname)) {
+      // Legacy fixtures exercise the preserved sanitized snapshot path.
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      return res.end(
+        `${JSON.stringify({ v: 1, seq: 1, kind: "unavailable", reason: "unsupported" })}\n`,
+      );
+    }
     const screen = /^\/w\/([^/]+)\/participants\/([^/]+)\/screen$/.exec(
       url.pathname,
     );
@@ -6170,6 +6177,12 @@ async function openPeekHarness(t) {
   const bundle = await peekHarnessBuild;
   const source = bundle.output.find((entry) => entry.type === "chunk").code;
   const server = createServer((req, res) => {
+    if (/\/participants\/[^/]+\/live$/.test(req.url)) {
+      res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+      return res.end(
+        `${JSON.stringify({ v: 1, seq: 1, kind: "unavailable", reason: "unsupported" })}\n`,
+      );
+    }
     res.writeHead(200, {
       "Content-Type": req.url === "/peek.js" ? "text/javascript" : "text/html",
     });

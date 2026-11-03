@@ -27,6 +27,8 @@ use std::{
 
 #[path = "channels_bundle.rs"]
 mod channels_bundle;
+#[path = "live_peek.rs"]
+mod live_peek;
 /// Caps an operator post and the full body Show more reads, so the page can
 /// always show at least what it could send.
 const BODY_LIMIT: usize = 64 * 1024;
@@ -39,7 +41,7 @@ const MAX_CONNECTIONS: usize = 64;
 // Followers occupy HTTP handlers too. Keep 48 connection slots for other routes.
 const MAX_SCREEN_REQUESTS: usize = 16;
 const SECURITY_HEADERS: &str = "Content-Security-Policy: default-src 'none'; script-src 'self'; \
-style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; \
+style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; \
 base-uri 'none'; form-action 'none'\r\nX-Frame-Options: DENY\r\n\
 X-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nCache-Control: no-store\r\n";
 
@@ -72,6 +74,7 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
     let open = Arc::new(AtomicUsize::new(0));
     let history_store = Arc::new(Mutex::new(HistoryStore::Unopened));
     let screens = Arc::new(ScreenReads::default());
+    let live = Arc::new(live_peek::LivePeeks::default());
     for mut stream in listener.incoming().flatten() {
         if stop.load(Ordering::Acquire) {
             break;
@@ -93,9 +96,10 @@ pub(crate) fn accept_loop(listener: TcpListener, front: Arc<Front>, stop: Arc<At
         let next_id = next_id.clone();
         let history_store = history_store.clone();
         let screens = screens.clone();
+        let live = live.clone();
         thread::spawn(move || {
             let _permit = permit;
-            let _ = serve_connection(stream, &front, &next_id, &history_store, &screens);
+            let _ = serve_connection(stream, &front, &next_id, &history_store, &screens, &live);
         });
     }
 }
@@ -647,6 +651,11 @@ enum Route {
         key: SpaceKey,
         address_id: String,
     },
+    Live {
+        key: SpaceKey,
+        address_id: String,
+        continuity: Option<String>,
+    },
     Events(SpaceKey),
     Messages {
         key: SpaceKey,
@@ -687,6 +696,14 @@ fn route(
         return Err(Status::MethodNotAllowed);
     }
     let path = request.path.as_str();
+    if request.method == "POST"
+        && matches!(
+            path.split('/').collect::<Vec<_>>().as_slice(),
+            ["", "w", _, "participants", _, "live"]
+        )
+    {
+        return Err(Status::MethodNotAllowed);
+    }
     if request.method == "POST" {
         authenticate_session(request, port, session)?;
         authenticate_mutation(request, session, host)?;
@@ -755,7 +772,8 @@ fn route(
         if segments.get(1) == Some(&"participants") {
             authenticate_session(request, port, session)?;
             authenticate_provenance(request, host)?;
-            let [key, "participants", address, "screen"] = segments.as_slice() else {
+            let [key, "participants", address, kind @ ("screen" | "live")] = segments.as_slice()
+            else {
                 return Err(Status::NotFound);
             };
             let key = SpaceKey::parse(key).ok_or(Status::NotFound)?;
@@ -763,7 +781,22 @@ fn route(
             if address_id.is_empty() || address_id.contains('/') {
                 return Err(Status::NotFound);
             }
-            return Ok(Route::Screen { key, address_id });
+            return if *kind == "live" {
+                if request
+                    .header("content-length")
+                    .is_some_and(|length| length != "0")
+                {
+                    return Err(Status::BadRequest);
+                }
+                let continuity = live_peek::continuity_query(request.query.as_deref())?;
+                Ok(Route::Live {
+                    key,
+                    address_id,
+                    continuity,
+                })
+            } else {
+                Ok(Route::Screen { key, address_id })
+            };
         }
     }
     match path {
@@ -1017,6 +1050,7 @@ fn serve_connection(
     next_id: &AtomicU64,
     history_store: &Mutex<HistoryStore>,
     screens: &ScreenReads,
+    live: &live_peek::LivePeeks,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
     let mut writer = stream.try_clone()?;
@@ -1163,6 +1197,18 @@ fn serve_connection(
                     respond_status(&mut writer, Status::Unavailable)
                 }
             }
+        }
+        Ok(Route::Live {
+            key,
+            address_id,
+            continuity,
+        }) => {
+            if !reader.buffer().is_empty() {
+                return respond_status(&mut writer, Status::BadRequest);
+            }
+            drop(reader);
+            drop(writer);
+            live.serve(stream, front, &key, &address_id, continuity.as_deref())
         }
         Ok(Route::Screen { key, address_id }) => {
             let _permit = match screens.try_admit() {

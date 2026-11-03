@@ -231,6 +231,13 @@ impl Cli {
         matches!(self.command, Command::DashboardServer { .. })
     }
 
+    pub fn dashboard_observer_terminal(&self) -> Option<&str> {
+        match &self.command {
+            Command::DashboardObserverGuard { terminal } => Some(terminal),
+            _ => None,
+        }
+    }
+
     pub fn is_reset_tour(&self) -> bool {
         matches!(
             self.command,
@@ -329,6 +336,8 @@ enum Command {
         #[arg(long, hide = true)]
         inherit_claim: bool,
     },
+    #[command(hide = true)]
+    DashboardObserverGuard { terminal: String },
     /// Runtime hooks installed for supported agents.
     #[command(hide = true)]
     Hook {
@@ -379,6 +388,7 @@ impl Command {
             Self::Event { command } => command.operation(),
             Self::Dashboard(_) => "dashboard",
             Self::DashboardServer { .. } => "dashboard.server",
+            Self::DashboardObserverGuard { .. } => "dashboard.observer-guard",
             Self::Hook { command } => command.operation(),
         }
     }

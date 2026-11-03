@@ -687,6 +687,21 @@ export const peekCopy = {
   refresh: "Refresh",
   close: "Close screen",
   tryAgain: "Try again",
+  live: "Live",
+  snapshot: "Text snapshot",
+  view: "Screen view",
+  liveRegion: "Read-only live terminal",
+  liveConnecting: "Connecting…",
+  liveReconnecting: "Reconnecting…",
+  liveEnded: "Live view ended",
+  liveReplaced:
+    "This pane changed. Reopen the member to see its current screen.",
+  liveMissing: "This member no longer has a screen in this workspace.",
+  liveSession:
+    "Session ended. Open Namedrop’s dashboard link again to keep reading.",
+  liveUnavailable:
+    "Live view isn’t available. Try again or choose Text snapshot.",
+  liveUnsupported: "Live view isn’t available. Showing a text snapshot.",
 };
 export const peekFailureCopy = {
   closed: (who) => ({

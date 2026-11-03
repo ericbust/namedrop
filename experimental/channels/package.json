@@ -9,11 +9,13 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types --test --test-isolation=none src/*.test.ts",
     "test:browser": "npm run build && node --test test/browser.test.mjs",
+    "test:live-peek": "npm run build && node --test test/live-peek.browser.mjs",
     "build": "vite build",
     "bundle": "npm run build && node bundle.mjs",
     "bundle:check": "npm run build && node bundle.mjs --check"
   },
   "dependencies": {
+    "@xterm/xterm": "6.0.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
   },

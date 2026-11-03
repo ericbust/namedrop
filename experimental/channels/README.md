@@ -20,7 +20,9 @@ npm run build
 `npm test` uses Node's built-in test runner with TypeScript stripping. It runs in
 one process so every test registers in the same runner. `npm run build` emits
 `dist/index.html` and external JavaScript and CSS. Fonts come from the system.
-No inline scripts, inline styles, or remote assets are needed under the dashboard CSP.
+Scripts and bundled styles load from the dashboard. xterm also creates inline
+styles, which the dashboard permits with `style-src 'self' 'unsafe-inline'`.
+Scripts remain restricted to `script-src 'self'`. No remote assets are required.
 
 Run the committed browser regressions from the same app directory. They build the
 actual app and serve an isolated local SSE fixture under the dashboard CSP.
@@ -138,11 +140,118 @@ unread marks while the view is shown.
 
 Member chips, names in message headers, and activity rows open the peek drawer in
 the thread pane's slot, so the drawer and a thread never show together. The drawer
-reads `GET /w/<key>/participants/<address>/screen` when it opens and when you
-select **Refresh** or **Try again**, never on a timer, and one read runs at a time.
-An agent in another workspace is read in its home channel under its own address.
-The screen text renders as plain text. Escape closes the drawer and returns focus
-to the control that opened it.
+opens in **Live** mode. An agent in another workspace is viewed in its home channel
+under its own address. Escape closes the drawer and returns focus to the control
+that opened it.
+
+Live shows a passive terminal projection with colors, cursor motion, and TUI
+redraws. Its grid is the observer's projected viewport, which can differ from the
+source PTY dimensions. Scroll the projection locally to see a wider grid. Opening
+or resizing Peek sends no terminal input, source resize, focus, or takeover command.
+The browser uses pinned xterm 6.0.0 without a terminal input bridge.
+
+Live displays terminal content rather than the Text snapshot route's redacted
+text. Select **Text snapshot** for that sanitized plain-text alternative. Text
+reads `GET /w/<key>/participants/<address>/screen` on selection and on **Refresh**
+or **Try again**, never on a timer. It retains the existing bounded snapshot
+cache, with one read at a time.
+
+Live retries eligible interruptions after 1, 2, and 4 seconds, at most three times
+per open observation. Each retry starts with a complete paint and retains the
+same continuity value. A confirmed unsupported Live capability before the first
+paint selects Text snapshot automatically. After Live establishes continuity,
+errors never trigger a silent snapshot read or follow a replacement target.
+In Live mode, **Try again** starts a deliberate new observation. Switching away
+from Live and back, or reopening Peek, also starts a new observation. A dashboard
+session failure or replacement clears the live terminal. An ended stream says
+**Live view ended**, without asserting that the agent exited.
+
+## Update an experimental installation
+
+An installation that follows the `experimental` ref updates on that ref. Run the
+existing **Update Namedrop** action, or invoke it from your Herdr shell:
+
+```sh
+herdr plugin action invoke update --plugin namedrop
+```
+
+After the update, refresh or reopen Channels and reopen Peek to use the new app.
+If the dashboard session has ended, run `namedrop dashboard` for a fresh one-time
+link. Updating from exp.6 to exp.7 does not require restarting agent sessions.
+
+## Live terminal stream v1
+
+The browser calls `observePeek({target, signal, apply, onState})` from
+`src/livePeek.ts`. That operation owns fetch parsing, continuity, retries, the
+30-second stream watchdog, and abort. `apply` receives reset or data updates as
+`Uint8Array` bytes and resolves after xterm drains each update. A large reset uses
+sequential writes of at most 64 KiB. The view becomes Live after the complete
+paint drains. Target changes, mode changes, and close abort the observation and
+dispose the emulator. Live bytes do not enter React or the Channels store.
+
+The endpoint is:
+
+```text
+GET /w/<key>/participants/<address>/live[?continuity=<opaque-value>]
+```
+
+It uses the dashboard session cookie and existing Host and provenance checks.
+The only query key is `continuity`; the endpoint accepts no body or terminal
+control commands. It returns `application/x-ndjson` with no-store and the
+dashboard security headers. Blank lines are heartbeats and have no sequence
+number. Each JSON record has `v: 1` and a positive, contiguous, response-local
+`seq` starting at 1.
+
+| `kind`        | Other fields                          | Meaning                                                                                                                                                                   |
+| ------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reset`       | `continuity`, `cols`, `rows`, `bytes` | Replace all emulator and decoder state with the complete base64 ANSI paint at this viewport size. A later full paint produces another reset, even at the same dimensions. |
+| `data`        | `bytes`                               | Apply ordered base64 ANSI bytes after a reset. Data may split UTF-8 or escape sequences across records.                                                                   |
+| `closed`      | `reason`                              | End with `ended`, `replaced`, or `missing`. Native diagnostic strings are not part of the contract.                                                                       |
+| `unavailable` | `reason`                              | End with `unsupported`, `busy`, `source_lost`, `invalid_source`, `slow_viewer`, or `server_stopping`.                                                                     |
+
+The viewport limits are 1 through 512 columns, 1 through 256 rows, and at most
+65,536 cells.
+Reset bytes decode to at most 1 MiB; data bytes decode to at most 64 KiB. An
+encoded record is at most 2 MiB. The server caps pending serialized output at
+2 MiB per viewer and admits at most eight viewers. It requires startup within
+five seconds, ends a pending write after two seconds without progress, and emits
+blank heartbeats every ten seconds when no content is pending. These are policy
+bounds, not memory or latency measurements.
+
+EOF without a final record is an interruption, even with a successful native
+exit status. Retryable conditions are an interruption, startup HTTP 503,
+`source_lost`, `slow_viewer`, and `server_stopping`. HTTP 401 or 403 ends the
+dashboard session path, 404 means the member is missing, and 410 refuses the
+current identity or continuity. HTTP 410, closure, unsupported capability,
+invalid source data, and an `unavailable` record with `busy` stop automatic
+retries. There is no replay cursor. A reconnect starts at sequence 1 and requires
+a fresh full paint.
+
+Continuity compares the authenticated namespace, address, active binding, native
+terminal identity, optional known sessions, and dashboard instance. It is an
+equality precondition, not authentication. The backend attaches only to the
+resolved immutable terminal ID and rechecks recorded and native identity.
+Observed changes end the view and discard unsent content. An automatic retry
+cannot discard continuity to follow a replacement or survive a dashboard restart.
+Reopening is an explicit read of the member's current terminal.
+
+This guarantee is terminal-scoped. A new process or agent session can reuse the
+same terminal before metadata reports the change. The stream does not provide
+atomic isolation between agent sessions, and already delivered bytes cannot be
+recalled.
+Missing optional session metadata alone does not prevent viewing a bound terminal.
+
+The current backend uses the Herdr TUI observer. Its private adapter validates native
+frames and converts full paints, ordered deltas, and endings into this browser
+contract. It owns observer processes and bounded I/O. A private compiled guard
+cleans up the observer even after dashboard parent death on a quiet terminal.
+A future herdr-core adapter can normalize its framed observer transport into the
+same browser API. This release implements the TUI adapter.
+
+Rust serialization owns the conformance samples in
+[`tests/fixtures/live_peek/streams.json`](../../tests/fixtures/live_peek/streams.json).
+Browser tests consume those records unchanged. They cover every ending and a
+reset/data/reset stream; parser tests enforce versions, ordering, and bounds.
 
 ## Post messages
 
