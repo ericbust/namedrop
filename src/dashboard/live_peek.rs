@@ -650,7 +650,7 @@ impl LivePeeks {
         };
         match post {
             InputPost::Text { text, .. } => {
-                send(&["pane", "send-text", &binding.pane_id, "--", &text])?;
+                send(&["pane", "send-text", &binding.pane_id, &text])?;
                 let current = recorded(&mut store, key, address)?;
                 let updated = native(&binding, Duration::from_millis(500))?;
                 if current != binding || updated != identity || !updated.accepts_input() {
