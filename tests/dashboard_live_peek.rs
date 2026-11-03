@@ -47,6 +47,22 @@ fn configure(f: &Fixture, response: Value) {
     fs::rename(temporary, f.root.join("observer.json")).unwrap();
 }
 
+fn configure_history(f: &Fixture, text: &str) {
+    fs::write(
+        f.root.join("history.json"),
+        serde_json::to_vec(text).unwrap(),
+    )
+    .unwrap();
+}
+
+fn history_invocations(f: &Fixture) -> Vec<Value> {
+    fs::read_to_string(f.root.join("history-reads.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
 fn invocations(f: &Fixture) -> Vec<Value> {
     fs::read_to_string(f.root.join("reads.jsonl"))
         .unwrap_or_default()
@@ -84,6 +100,7 @@ impl Server {
         )
         .unwrap();
         configure(f, json!({}));
+        configure_history(f, "");
         let shim = f.root.join("herdr");
         fs::write(&shim, r#"#!/usr/bin/python3
 import base64,json,os,subprocess,sys,time
@@ -117,7 +134,15 @@ if args[:3]==['terminal','session','observe']:
         while True:time.sleep(.05)
     if config.get('closed',True): print(json.dumps({'type':'terminal.closed','reason':'PRIVATE-NATIVE-REASON'}),flush=True)
     sys.exit(0)
-if args[:2]==['pane','read']:print('SANITIZED SNAPSHOT');sys.exit(0)
+if args[:2]==['pane','read']:
+    if '--lines' in args and args[args.index('--lines')+1]=='2200':
+        with open(os.path.join(root,'history-reads.jsonl'),'a') as log:
+            log.write(json.dumps({'args':args,'socket':os.environ.get('HERDR_SOCKET_PATH'),'pane':os.environ.get('HERDR_PANE_ID')})+'\n')
+        config=json.load(open(os.path.join(root,'observer.json')))
+        if config.get('history_mutate_metadata'):
+            json.dump(config['history_mutate_metadata'],open(os.path.join(root,'responses.json'),'w'))
+        os.write(1,json.load(open(os.path.join(root,'history.json'))).encode());sys.exit(0)
+    print('SANITIZED SNAPSHOT');sys.exit(0)
 responses=json.load(open(os.path.join(root,'responses.json')))
 key=' '.join(args)
 if key in responses:print(responses[key])
@@ -318,6 +343,71 @@ fn live_is_authenticated_targeted_ndjson_and_preserves_snapshot() {
             .body,
         "SANITIZED SNAPSHOT"
     );
+}
+
+#[test]
+fn recent_history_is_bounded_sanitized_and_sent_after_reset() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    configure(&f, json!({"quiet":true}));
+    let history = (0..2300)
+        .map(|i| format!("history-{i:04}\n"))
+        .collect::<String>()
+        + "\u{1b}[31mSECRET\u{1b}[0m\0tail\n";
+    configure_history(&f, &history);
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    assert_eq!(live.status, 200);
+    assert_eq!(live.record().unwrap()["kind"], "reset");
+    let event = live.record().unwrap();
+    assert_eq!(event["kind"], "history");
+    assert_eq!(event["seq"], 2);
+    let text = event["text"].as_str().unwrap();
+    assert!(!text.contains("history-0000"));
+    assert!(text.contains("history-0101"));
+    assert!(text.contains("SECRETtail"));
+    assert!(!text.contains('\u{1b}') && !text.contains('\0'));
+    assert!(text.len() <= 1024 * 1024);
+    assert!(text.lines().count() <= 2200);
+    let calls = history_invocations(&f);
+    assert!(!calls.is_empty());
+    assert_eq!(
+        calls[0]["args"],
+        json!([
+            "pane",
+            "read",
+            "pane-1-lead",
+            "--source",
+            "recent-unwrapped",
+            "--lines",
+            "2200"
+        ])
+    );
+    assert_eq!(calls[0]["socket"], "socket-a");
+    assert!(calls[0]["pane"].is_null());
+}
+
+#[test]
+fn history_from_a_replaced_native_session_is_never_sent() {
+    let f = Fixture::new();
+    let server = Server::start(&f);
+    let mut responses: Value =
+        serde_json::from_str(&fs::read_to_string(f.root.join("responses.json")).unwrap()).unwrap();
+    let mut panes: Value =
+        serde_json::from_str(responses["pane list --workspace w1"].as_str().unwrap()).unwrap();
+    panes["result"]["panes"][0]["terminal_id"] = json!("replacement");
+    responses["pane list --workspace w1"] = json!(panes.to_string());
+    configure(
+        &f,
+        json!({"quiet":true,"history_mutate_metadata":responses}),
+    );
+    configure_history(&f, "PRIVATE-OLD-HISTORY\n");
+    let mut live = server.live(&path("socket-a", "w1", "lead"));
+    assert_eq!(live.record().unwrap()["kind"], "reset");
+    let next = live.record().unwrap();
+    assert_eq!(next["kind"], "closed");
+    assert_eq!(next["reason"], "replaced");
+    assert!(!next.to_string().contains("PRIVATE-OLD-HISTORY"));
+    assert!(!history_invocations(&f).is_empty());
 }
 
 #[test]

@@ -1,6 +1,8 @@
 //! The private, receive-only terminal projection boundary for one HTTP viewer.
 use super::{
-    Front, SECURITY_HEADERS, Status, decode_query_value, respond_status, snapshot::SpaceKey,
+    Front, SECURITY_HEADERS, Status, decode_query_value, respond_status,
+    snapshot::{self, SpaceKey},
+    strip_terminal_sequences,
 };
 use crate::{
     HerdrCommandExecutor, ProcessHerdr, StateStore,
@@ -17,7 +19,12 @@ use std::{
         unix::process::CommandExt,
     },
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc::{self, Receiver},
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
@@ -28,6 +35,108 @@ const PENDING_LIMIT: usize = 2 * 1024 * 1024;
 const STARTUP: Duration = Duration::from_secs(5);
 const STALL: Duration = Duration::from_secs(2);
 const HEARTBEAT: Duration = Duration::from_secs(10);
+const HISTORY_LINES: usize = 2200;
+const HISTORY_BYTES: usize = 1024 * 1024;
+const HISTORY_REFRESH: Duration = Duration::from_secs(2);
+
+struct HistoryReader {
+    receiver: Receiver<String>,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl HistoryReader {
+    fn start(binding: &LiveBinding) -> io::Result<Self> {
+        let socket = binding.namespace.session_socket_id.clone();
+        let pane = binding.pane_id.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::clone(&stop);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let thread = thread::Builder::new()
+            .name("peek-history".into())
+            .spawn(move || {
+                let mut last = None;
+                while !cancelled.load(Ordering::Acquire) {
+                    let result = ProcessHerdr::default()
+                        .with_socket(Some(socket.clone()))
+                        .execute_bounded(
+                            &[
+                                "pane",
+                                "read",
+                                &pane,
+                                "--source",
+                                "recent-unwrapped",
+                                "--lines",
+                                "2200",
+                            ],
+                            Duration::from_secs(3),
+                            &cancelled,
+                            ENCODED_LIMIT,
+                        );
+                    if let Ok(output) = result {
+                        let clean = strip_terminal_sequences(&output.stdout);
+                        let safe = snapshot::SafeText::from_untrusted(&clean, usize::MAX).text;
+                        let text = newest_history(&safe);
+                        if !text.is_empty()
+                            && last.as_ref() != Some(&text)
+                            && sender.try_send(text.clone()).is_ok()
+                        {
+                            last = Some(text);
+                        }
+                    }
+                    if cancelled.load(Ordering::Acquire) {
+                        break;
+                    }
+                    thread::park_timeout(HISTORY_REFRESH);
+                }
+            })?;
+        Ok(Self {
+            receiver,
+            stop,
+            thread: Some(thread),
+        })
+    }
+}
+
+impl Drop for HistoryReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
+    }
+}
+
+fn newest_history(text: &str) -> String {
+    let skip = text.lines().count().saturating_sub(HISTORY_LINES);
+    let start = if skip == 0 {
+        0
+    } else {
+        text.match_indices('\n')
+            .nth(skip - 1)
+            .map_or(0, |(index, _)| index + 1)
+    };
+    let text = &text[start..];
+    let mut bytes = 0;
+    let mut encoded = 0;
+    let mut start = text.len();
+    for (index, ch) in text.char_indices().rev() {
+        let char_bytes = ch.len_utf8();
+        let json_bytes = match ch {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+            '\u{0}'..='\u{1f}' => 6,
+            _ => char_bytes,
+        };
+        if bytes + char_bytes > HISTORY_BYTES || encoded + json_bytes + 64 > ENCODED_LIMIT {
+            break;
+        }
+        bytes += char_bytes;
+        encoded += json_bytes;
+        start = index;
+    }
+    text[start..].to_owned()
+}
 
 #[derive(Default)]
 pub(super) struct LivePeeks {
@@ -622,6 +731,9 @@ impl LivePeeks {
                 true
             }
         };
+        let history = (!ending)
+            .then(|| HistoryReader::start(&binding).ok())
+            .flatten();
         let mut native_checked = Instant::now();
         let mut last_heartbeat = Instant::now();
         loop {
@@ -663,6 +775,32 @@ impl LivePeeks {
                     final_event = Some(Event::Unavailable {
                         reason: Unavailable::ServerStopping,
                     });
+                }
+                if final_event.is_none()
+                    && let Some(history) = history.as_ref()
+                    && let Ok(text) = history.receiver.try_recv()
+                {
+                    native_checked = Instant::now();
+                    match native(&binding, Duration::from_millis(500)) {
+                        Ok(current) if current == identity => {
+                            let line = Record::line(seq + 1, Event::History { text: &text });
+                            if line.is_ok_and(|line| output.pending + line.len() <= PENDING_LIMIT) {
+                                output
+                                    .record(&mut seq, Event::History { text: &text })
+                                    .map_err(|_| io::Error::other("live history output limit"))?;
+                            }
+                        }
+                        Err(Status::Unavailable) => {
+                            final_event = Some(Event::Unavailable {
+                                reason: Unavailable::SourceLost,
+                            });
+                        }
+                        _ => {
+                            final_event = Some(Event::Closed {
+                                reason: Closed::Replaced,
+                            });
+                        }
+                    }
                 }
                 if let Some(event) = final_event {
                     observer.stop();
@@ -762,6 +900,9 @@ enum Event<'a> {
     Data {
         bytes: &'a str,
     },
+    History {
+        text: &'a str,
+    },
     Closed {
         reason: Closed,
     },
@@ -839,7 +980,7 @@ fn decode(text: &str) -> Result<Vec<u8>, ()> {
     }
     let mut output = Vec::with_capacity((text.len() / 4 * 3).min(PAINT_LIMIT));
     let count = text.len() / 4;
-    for (i, part) in text.as_bytes().chunks_exact(4).enumerate() {
+    for (i, part) in text.as_bytes().as_chunks::<4>().0.iter().enumerate() {
         let a = digit(part[0])?;
         let b = digit(part[1])?;
         output.push(a << 2 | b >> 4);
@@ -1050,6 +1191,26 @@ mod tests {
     }
 
     #[test]
+    fn history_keeps_newest_lines_within_text_and_record_limits() {
+        let text = (0..2300)
+            .map(|i| format!("line-{i:04}\n"))
+            .collect::<String>();
+        let newest = newest_history(&text);
+        assert!(newest.starts_with("line-0100\n"));
+        assert_eq!(newest.lines().count(), HISTORY_LINES);
+        let newest = newest_history(text.trim_end_matches('\n'));
+        assert!(newest.starts_with("line-0100\n"));
+        assert_eq!(newest.lines().count(), HISTORY_LINES);
+
+        let escaped = "\"".repeat(HISTORY_BYTES);
+        let newest = newest_history(&escaped);
+        assert!(newest.len() <= HISTORY_BYTES);
+        assert!(Record::line(1, Event::History { text: &newest }).is_ok());
+        assert!(newest.len() < escaped.len());
+        assert!(newest.len() > escaped.len() - 100);
+    }
+
+    #[test]
     fn authoritative_browser_fixture_is_actual_serialization() {
         fn value(seq: u64, event: Event<'_>) -> Value {
             serde_json::from_slice(&Record::line(seq, event).unwrap()).unwrap()
@@ -1059,6 +1220,11 @@ mod tests {
             value(2,Event::Data{bytes:"G1szMW1SZWQ="}),
             value(3,Event::Reset{continuity:"fixture-continuity",cols:40,rows:10,bytes:"G1tITmV3"}),
             value(4,Event::Closed{reason:Closed::Ended})]})];
+        streams.push(json!({"name":"reset-history-data-ended","records":[
+            value(1,Event::Reset{continuity:"fixture-continuity",cols:120,rows:40,bytes:"G1syShtbSEhlbGxv"}),
+            value(2,Event::History{text:"recent line one\nrecent line two\n"}),
+            value(3,Event::Data{bytes:"G1szMW1SZWQ="}),
+            value(4,Event::Closed{reason:Closed::Ended})]}));
         for reason in [Closed::Replaced, Closed::Missing] {
             let name = match reason {
                 Closed::Ended => "ended",
