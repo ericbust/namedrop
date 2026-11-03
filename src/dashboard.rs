@@ -4,11 +4,19 @@ mod channel_service;
 mod coordination_review;
 mod http;
 mod hub;
+mod observer_guard;
 mod server_files;
 pub mod snapshot;
 mod thread_controls;
 
 pub(crate) use server_files::current_operator_session;
+
+/// Internal child entry point. A private stdin pipe ties an observer to its
+/// dashboard's lifetime, including a quiet terminal after dashboard SIGKILL.
+#[doc(hidden)]
+pub fn run_observer_guard(terminal: &str) -> std::process::ExitCode {
+    observer_guard::run(terminal)
+}
 
 use crate::{Clock, HerdrCommandExecutor, IdGenerator, LifecycleRuntime, StateNamespace};
 use serde::Deserialize;

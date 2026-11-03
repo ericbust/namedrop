@@ -1,10 +1,743 @@
 //! The private, receive-only terminal projection boundary for one HTTP viewer.
-use serde::Serialize;
+use super::{
+    Front, SECURITY_HEADERS, Status, decode_query_value, respond_status, snapshot::SpaceKey,
+};
+use crate::{
+    HerdrCommandExecutor, ProcessHerdr, StateStore,
+    store::dashboard::{LiveBinding, LiveMember},
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::VecDeque,
+    io::{self, Read, Write},
+    net::TcpStream,
+    os::{
+        fd::{AsRawFd, RawFd},
+        unix::process::CommandExt,
+    },
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::{Duration, Instant},
+};
 
 const ENCODED_LIMIT: usize = 2 * 1024 * 1024;
 const PAINT_LIMIT: usize = 1024 * 1024;
 const DATA_LIMIT: usize = 64 * 1024;
 const PENDING_LIMIT: usize = 2 * 1024 * 1024;
+const STARTUP: Duration = Duration::from_secs(5);
+const STALL: Duration = Duration::from_secs(2);
+const HEARTBEAT: Duration = Duration::from_secs(10);
+
+#[derive(Default)]
+pub(super) struct LivePeeks {
+    active: AtomicUsize,
+}
+struct Permit<'a>(&'a AtomicUsize);
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+pub(super) fn continuity_query(query: Option<&str>) -> Result<Option<String>, Status> {
+    let Some(query) = query else {
+        return Ok(None);
+    };
+    let Some(raw) = query
+        .strip_prefix("continuity=")
+        .filter(|raw| !raw.contains('&'))
+    else {
+        return Err(Status::BadRequest);
+    };
+    let value = decode_query_value(raw).ok_or(Status::BadRequest)?;
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(Status::BadRequest);
+    }
+    Ok(Some(value))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NativeIdentity {
+    terminal: String,
+    session: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PaneReply {
+    result: PaneResult,
+}
+#[derive(Deserialize)]
+struct PaneResult {
+    panes: Vec<Pane>,
+}
+#[derive(Deserialize)]
+struct Pane {
+    pane_id: String,
+    workspace_id: String,
+    terminal_id: String,
+    agent_session: Option<Session>,
+}
+#[derive(Deserialize)]
+struct Session {
+    value: String,
+}
+
+fn recorded(store: &mut StateStore, key: &SpaceKey, address: &str) -> Result<LiveBinding, Status> {
+    match store
+        .dashboard_live_member(key, address)
+        .map_err(|_| Status::Unavailable)?
+    {
+        LiveMember::Missing => Err(Status::NotFound),
+        LiveMember::Gone => Err(Status::Gone),
+        LiveMember::Bound(binding) => Ok(binding),
+    }
+}
+
+fn native(binding: &LiveBinding, budget: Duration) -> Result<NativeIdentity, Status> {
+    let result = ProcessHerdr::default()
+        .with_socket(Some(binding.namespace.session_socket_id.clone()))
+        .execute_bounded(
+            &[
+                "pane",
+                "list",
+                "--workspace",
+                binding.namespace.space_id.as_str(),
+            ],
+            budget.min(Duration::from_millis(500)),
+            &AtomicBool::new(false),
+            ENCODED_LIMIT,
+        )
+        .map_err(|_| Status::Unavailable)?;
+    let reply: PaneReply = serde_json::from_str(&result.stdout).map_err(|_| Status::Unavailable)?;
+    let mut matching = reply.result.panes.into_iter().filter(|pane| {
+        pane.pane_id == binding.pane_id && pane.workspace_id == binding.namespace.space_id.as_str()
+    });
+    let pane = matching.next().ok_or(Status::Gone)?;
+    if matching.next().is_some()
+        || pane.terminal_id.is_empty()
+        || pane.terminal_id.len() > 512
+        || pane.terminal_id.starts_with('-')
+        || pane
+            .terminal_id
+            .chars()
+            .any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err(Status::Unavailable);
+    }
+    let identity = NativeIdentity {
+        terminal: pane.terminal_id,
+        session: pane
+            .agent_session
+            .map(|s| s.value)
+            .filter(|s| !s.is_empty()),
+    };
+    if binding
+        .agent_session_id
+        .as_ref()
+        .zip(identity.session.as_ref())
+        .is_some_and(|(a, b)| a.as_str() != b)
+    {
+        return Err(Status::Gone);
+    }
+    Ok(identity)
+}
+
+fn continuity(
+    front: &Front,
+    address: &str,
+    binding: &LiveBinding,
+    native: &NativeIdentity,
+) -> String {
+    let mut hash = Sha256::new();
+    for value in [
+        "namedrop-live/v1",
+        front.instance.as_str(),
+        binding.namespace.session_socket_id.as_str(),
+        binding.namespace.space_id.as_str(),
+        address,
+        binding.binding_id.as_str(),
+        binding.pane_id.as_str(),
+        binding.pane_type.as_str(),
+        native.terminal.as_str(),
+    ] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    for session in [
+        binding.agent_session_id.as_ref().map(|s| s.as_str()),
+        native.session.as_deref(),
+    ] {
+        hash.update([u8::from(session.is_some())]);
+        if let Some(value) = session {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value.as_bytes());
+        }
+    }
+    crate::lower_hex(&hash.finalize())
+}
+
+struct Observer {
+    guard: Child,
+    liveness: Option<ChildStdin>,
+    stdout: ChildStdout,
+}
+impl Observer {
+    fn open(binding: &LiveBinding, identity: &NativeIdentity) -> io::Result<Self> {
+        let mut guard = Command::new(std::env::current_exe()?)
+            .arg("dashboard-observer-guard")
+            .arg(&identity.terminal)
+            .env("HERDR_SOCKET_PATH", &binding.namespace.session_socket_id)
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("HERDR_WORKSPACE_ID")
+            .env_remove("HERDR_TAB_ID")
+            .env_remove("HERDR_PLUGIN_STATE_DIR")
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let liveness = guard.stdin.take();
+        let stdout = guard
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("missing observer pipe"))?;
+        let mut observer = Self {
+            guard,
+            liveness,
+            stdout,
+        };
+        if let Err(error) = nonblocking(observer.stdout.as_raw_fd()) {
+            observer.stop();
+            return Err(error);
+        }
+        Ok(observer)
+    }
+    fn stop(&mut self) {
+        // EOF reaches the guard even on dashboard SIGKILL. It kills/reaps its
+        // separate observer group. We then reap the guard, without PTY signals.
+        self.liveness.take();
+        let _ = self.guard.wait();
+    }
+}
+impl Drop for Observer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn nonblocking(fd: RawFd) -> io::Result<()> {
+    // SAFETY: fcntl only reads/updates flags on this owned pipe/socket fd.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum NativeRecord {
+    #[serde(rename = "terminal.frame")]
+    Frame {
+        bytes: String,
+        encoding: String,
+        full: bool,
+        width: u16,
+        height: u16,
+        seq: u64,
+    },
+    #[serde(rename = "terminal.closed")]
+    Closed {},
+}
+struct Paint {
+    full: bool,
+    cols: u16,
+    rows: u16,
+    bytes: Vec<u8>,
+}
+#[derive(Default)]
+struct Normalizer {
+    seq: u64,
+    grid: Option<(u16, u16)>,
+}
+impl Normalizer {
+    fn frame(&mut self, record: NativeRecord) -> Result<Option<Paint>, ()> {
+        let NativeRecord::Frame {
+            bytes,
+            encoding,
+            full,
+            width,
+            height,
+            seq,
+        } = record
+        else {
+            return Ok(None);
+        };
+        if encoding != "ansi"
+            || Some(seq) != self.seq.checked_add(1)
+            || width == 0
+            || width > 512
+            || height == 0
+            || height > 256
+            || u32::from(width) * u32::from(height) > 65536
+            || (self.grid.is_none() && !full)
+            || (!full && self.grid != Some((width, height)))
+        {
+            return Err(());
+        }
+        let bytes = decode(&bytes)?;
+        self.seq = seq;
+        self.grid = Some((width, height));
+        Ok(Some(Paint {
+            full,
+            cols: width,
+            rows: height,
+            bytes,
+        }))
+    }
+}
+
+#[derive(Default)]
+struct Input {
+    buffer: Vec<u8>,
+    scanned: usize,
+    eof: bool,
+}
+impl Input {
+    fn next(&mut self, pipe: &mut ChildStdout) -> Result<Option<NativeRecord>, ()> {
+        if let Some(end) = self.buffer[self.scanned..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|n| n + self.scanned)
+        {
+            if end > ENCODED_LIMIT {
+                return Err(());
+            }
+            let record = serde_json::from_slice(&self.buffer[..end]).map_err(|_| ())?;
+            self.buffer.drain(..=end);
+            self.scanned = 0;
+            return Ok(Some(record));
+        }
+        if self.buffer.len() > ENCODED_LIMIT {
+            return Err(());
+        }
+        if self.eof {
+            // A killed/disconnected source may leave a partial record. No
+            // partial bytes are forwarded; reconnect starts from a full paint.
+            self.buffer.clear();
+            self.scanned = 0;
+            return Ok(None);
+        }
+        self.scanned = self.buffer.len();
+        if !self.eof {
+            let mut bytes = [0; 16384];
+            let budget = (ENCODED_LIMIT + 1 - self.buffer.len()).min(bytes.len());
+            match pipe.read(&mut bytes[..budget]) {
+                Ok(0) => self.eof = true,
+                Ok(n) => self.buffer.extend_from_slice(&bytes[..n]),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err(()),
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[derive(Default)]
+struct Output {
+    lines: VecDeque<(Vec<u8>, Option<u64>)>,
+    offset: usize,
+    pending: usize,
+    since_progress: Option<Instant>,
+    sent_seq: u64,
+    headers_sent: bool,
+}
+impl Output {
+    fn push(&mut self, bytes: Vec<u8>) -> Result<(), ()> {
+        self.push_line(bytes, None)
+    }
+    fn push_line(&mut self, bytes: Vec<u8>, seq: Option<u64>) -> Result<(), ()> {
+        if self.pending + bytes.len() > PENDING_LIMIT {
+            return Err(());
+        }
+        if self.pending == 0 {
+            self.since_progress = Some(Instant::now());
+        }
+        self.pending += bytes.len();
+        self.lines.push_back((bytes, seq));
+        Ok(())
+    }
+    fn paint(&mut self, paint: Paint, continuity: &str, seq: &mut u64) -> Result<(), ()> {
+        if paint.full {
+            let bytes = encode(&paint.bytes);
+            self.record(
+                seq,
+                Event::Reset {
+                    continuity,
+                    cols: paint.cols,
+                    rows: paint.rows,
+                    bytes: &bytes,
+                },
+            )
+        } else {
+            for chunk in paint.bytes.chunks(DATA_LIMIT) {
+                let bytes = encode(chunk);
+                self.record(seq, Event::Data { bytes: &bytes })?;
+            }
+            Ok(())
+        }
+    }
+    fn record(&mut self, seq: &mut u64, event: Event<'_>) -> Result<(), ()> {
+        *seq = seq
+            .checked_add(1)
+            .filter(|n| *n <= 9_007_199_254_740_991)
+            .ok_or(())?;
+        self.push_line(Record::line(*seq, event)?, Some(*seq))
+    }
+    fn discard_and_end(&mut self, seq: &mut u64, event: Event<'_>) -> Result<(), ()> {
+        if !self.headers_sent || self.offset != 0 {
+            return Err(());
+        }
+        self.lines.clear();
+        self.pending = 0;
+        self.since_progress = None;
+        *seq = self.sent_seq;
+        self.record(seq, event)
+    }
+    fn write(&mut self, socket: &mut TcpStream) -> io::Result<()> {
+        if let Some((line, seq)) = self.lines.front() {
+            match socket.write(&line[self.offset..]) {
+                Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+                Ok(n) => {
+                    self.offset += n;
+                    self.pending -= n;
+                    self.since_progress = Some(Instant::now());
+                    if self.offset == line.len() {
+                        if let Some(seq) = seq {
+                            self.sent_seq = *seq;
+                        }
+                        if line.starts_with(b"HTTP/") {
+                            self.headers_sent = true;
+                        }
+                        self.lines.pop_front();
+                        self.offset = 0;
+                    }
+                    if self.pending == 0 {
+                        self.since_progress = None;
+                    }
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if self.since_progress.is_some_and(|at| at.elapsed() >= STALL) {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        Ok(())
+    }
+}
+
+fn disconnected(socket: &TcpStream) -> bool {
+    match socket.peek(&mut [0]) {
+        Ok(_) => true, // EOF or unexpected input after the read-only request.
+        Err(e) => !matches!(
+            e.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+        ),
+    }
+}
+
+fn pause(socket: &TcpStream, pipe: RawFd, writing: bool) -> io::Result<()> {
+    let mut fds = [
+        libc::pollfd {
+            fd: socket.as_raw_fd(),
+            events: libc::POLLIN | if writing { libc::POLLOUT } else { 0 },
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: pipe,
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    // SAFETY: poll borrows the two valid descriptors owned by this handler.
+    if unsafe { libc::poll(fds.as_mut_ptr(), 2, 25) } < 0
+        && io::Error::last_os_error().kind() != io::ErrorKind::Interrupted
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+impl LivePeeks {
+    pub(super) fn serve(
+        &self,
+        mut socket: TcpStream,
+        front: &Front,
+        key: &SpaceKey,
+        address: &str,
+        expected: Option<&str>,
+    ) -> io::Result<()> {
+        let started = Instant::now();
+        socket.set_write_timeout(Some(Duration::from_secs(1)))?;
+        let Ok(_) = self
+            .active
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                (n < 8).then_some(n + 1)
+            })
+        else {
+            return respond_status(&mut socket, Status::Unavailable);
+        };
+        let _permit = Permit(&self.active);
+        let setup = (|| {
+            if front.restarting.load(Ordering::Acquire) || front.files.restarting() {
+                return Err(Status::Unavailable);
+            }
+            let mut store = StateStore::open_read_only(front.files.state())
+                .map_err(|_| Status::Unavailable)?
+                .ok_or(Status::NotFound)?;
+            store
+                .set_busy_timeout(Duration::from_millis(100))
+                .map_err(|_| Status::Unavailable)?;
+            let binding = recorded(&mut store, key, address)?;
+            let identity = native(&binding, STARTUP.saturating_sub(started.elapsed()))?;
+            let continuity = continuity(front, address, &binding, &identity);
+            if expected.is_some_and(|value| value != continuity) {
+                return Err(Status::Gone);
+            }
+            Ok((store, binding, identity, continuity))
+        })();
+        let (mut store, binding, identity, continuity) = match setup {
+            Ok(value) => value,
+            Err(status) => return respond_status(&mut socket, status),
+        };
+        let mut observer = match Observer::open(&binding, &identity) {
+            Ok(observer) => observer,
+            Err(_) => return respond_status(&mut socket, Status::Unavailable),
+        };
+        socket.set_nonblocking(true)?;
+        let mut input = Input::default();
+        let mut normalizer = Normalizer::default();
+        let mut seq = 0;
+        let mut output = Output::default();
+        // Validate the entire first full paint before committing HTTP headers.
+        let first = loop {
+            if started.elapsed() >= STARTUP
+                || front.restarting.load(Ordering::Acquire)
+                || front.files.restarting()
+            {
+                socket.set_nonblocking(false)?;
+                return respond_status(&mut socket, Status::Unavailable);
+            }
+            if disconnected(&socket) {
+                return Ok(());
+            }
+            match input.next(&mut observer.stdout) {
+                Ok(Some(record)) => match normalizer.frame(record) {
+                    Ok(Some(paint)) => break Ok(paint),
+                    Ok(None) => {
+                        break Err(Event::Closed {
+                            reason: Closed::Ended,
+                        });
+                    }
+                    Err(()) => {
+                        break Err(Event::Unavailable {
+                            reason: Unavailable::InvalidSource,
+                        });
+                    }
+                },
+                Err(()) => {
+                    break Err(Event::Unavailable {
+                        reason: Unavailable::InvalidSource,
+                    });
+                }
+                Ok(None) if input.eof => {
+                    // Only the exact CLI usage exit, with no output at all,
+                    // proves this fixed valid invocation is unsupported.
+                    observer.stop();
+                    let unsupported =
+                        observer.guard.wait()?.code() == Some(2) && normalizer.seq == 0;
+                    if unsupported {
+                        break Err(Event::Unavailable {
+                            reason: Unavailable::Unsupported,
+                        });
+                    }
+                    socket.set_nonblocking(false)?;
+                    return respond_status(&mut socket, Status::Unavailable);
+                }
+                Ok(None) => {}
+            }
+            pause(&socket, observer.stdout.as_raw_fd(), false)?;
+        };
+        // Never expose even the first paint until the logical and host identity
+        // were rechecked. These snapshots do not promise atomic session secrecy.
+        let rechecked = recorded(&mut store, key, address).and_then(|current| {
+            if current != binding {
+                return Err(Status::Gone);
+            }
+            native(&binding, STARTUP.saturating_sub(started.elapsed())).and_then(|current| {
+                if current == identity {
+                    Ok(())
+                } else {
+                    Err(Status::Gone)
+                }
+            })
+        });
+        if let Err(status) = rechecked {
+            socket.set_nonblocking(false)?;
+            return respond_status(&mut socket, status);
+        }
+        if started.elapsed() >= STARTUP {
+            socket.set_nonblocking(false)?;
+            return respond_status(&mut socket, Status::Unavailable);
+        }
+        output.push(format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\n{SECURITY_HEADERS}Connection: close\r\n\r\n").into_bytes()).map_err(|_|io::Error::other("live output limit"))?;
+        let mut ending = match first {
+            Ok(paint) => {
+                output
+                    .paint(paint, &continuity, &mut seq)
+                    .map_err(|_| io::Error::other("live output limit"))?;
+                false
+            }
+            Err(event) => {
+                output
+                    .record(&mut seq, event)
+                    .map_err(|_| io::Error::other("live output limit"))?;
+                true
+            }
+        };
+        let mut native_checked = Instant::now();
+        let mut last_heartbeat = Instant::now();
+        loop {
+            if disconnected(&socket) {
+                return Ok(());
+            }
+            if !ending {
+                let mut final_event = match recorded(&mut store, key, address) {
+                    Ok(current) if current == binding => None,
+                    Err(Status::NotFound) => Some(Event::Closed {
+                        reason: Closed::Missing,
+                    }),
+                    Err(Status::Unavailable) => Some(Event::Unavailable {
+                        reason: Unavailable::Busy,
+                    }),
+                    _ => Some(Event::Closed {
+                        reason: Closed::Replaced,
+                    }),
+                };
+                if native_checked.elapsed() >= Duration::from_secs(1) {
+                    native_checked = Instant::now();
+                    match native(&binding, Duration::from_millis(500)) {
+                        Ok(current) if current == identity => {}
+                        Err(Status::Unavailable) => {
+                            if final_event.is_none() {
+                                final_event = Some(Event::Unavailable {
+                                    reason: Unavailable::SourceLost,
+                                });
+                            }
+                        }
+                        _ => {
+                            final_event = Some(Event::Closed {
+                                reason: Closed::Replaced,
+                            })
+                        }
+                    }
+                }
+                if front.restarting.load(Ordering::Acquire) || front.files.restarting() {
+                    final_event = Some(Event::Unavailable {
+                        reason: Unavailable::ServerStopping,
+                    });
+                }
+                if let Some(event) = final_event {
+                    observer.stop();
+                    // End at the last complete record. A partially written line
+                    // can only end in EOF; the continuity retry then refuses it.
+                    if output.discard_and_end(&mut seq, event).is_err() {
+                        return Ok(());
+                    }
+                    ending = true;
+                } else {
+                    let event = match input.next(&mut observer.stdout) {
+                        Ok(Some(record)) => match normalizer.frame(record) {
+                            Ok(Some(paint)) => {
+                                if output.paint(paint, &continuity, &mut seq).is_err() {
+                                    observer.stop();
+                                    if output
+                                        .discard_and_end(
+                                            &mut seq,
+                                            Event::Unavailable {
+                                                reason: Unavailable::SlowViewer,
+                                            },
+                                        )
+                                        .is_err()
+                                    {
+                                        return Ok(());
+                                    }
+                                    ending = true;
+                                }
+                                None
+                            }
+                            Ok(None) => Some(Event::Closed {
+                                reason: Closed::Ended,
+                            }),
+                            Err(()) => Some(Event::Unavailable {
+                                reason: Unavailable::InvalidSource,
+                            }),
+                        },
+                        Err(()) => Some(Event::Unavailable {
+                            reason: Unavailable::InvalidSource,
+                        }),
+                        Ok(None) if input.eof => Some(Event::Unavailable {
+                            reason: Unavailable::SourceLost,
+                        }),
+                        Ok(None) => None,
+                    };
+                    if let Some(event) = event {
+                        observer.stop();
+                        if output.record(&mut seq, event).is_err() {
+                            return Ok(());
+                        }
+                        ending = true;
+                    }
+                }
+            }
+            if !ending && output.pending == 0 && last_heartbeat.elapsed() >= HEARTBEAT {
+                output
+                    .push(vec![b'\n'])
+                    .map_err(|_| io::Error::other("live output limit"))?;
+                last_heartbeat = Instant::now();
+            }
+            if output.write(&mut socket).is_err() {
+                return Ok(());
+            }
+            if ending && output.pending == 0 {
+                return Ok(());
+            }
+            pause(
+                &socket,
+                if ending {
+                    -1
+                } else {
+                    observer.stdout.as_raw_fd()
+                },
+                output.pending > 0,
+            )?;
+        }
+    }
+}
 
 #[derive(Serialize)]
 struct Record<'a> {
@@ -133,6 +866,159 @@ fn decode(text: &str) -> Result<Vec<u8>, ()> {
 mod tests {
     use super::*;
     use serde_json::{Value, json};
+
+    #[test]
+    fn normalization_checks_full_sequence_grid_and_decoded_limits() {
+        let frame = |seq, full, width, height, bytes| NativeRecord::Frame {
+            seq,
+            full,
+            width,
+            height,
+            bytes,
+            encoding: "ansi".into(),
+        };
+        let mut normalizer = Normalizer::default();
+        assert!(
+            normalizer
+                .frame(frame(1, false, 120, 40, encode(b"x")))
+                .is_err()
+        );
+        let initial = normalizer
+            .frame(frame(1, true, 120, 40, encode(b"x")))
+            .unwrap()
+            .unwrap();
+        assert!(initial.full);
+        assert!(
+            normalizer
+                .frame(frame(3, false, 120, 40, encode(b"gap")))
+                .is_err()
+        );
+        assert!(
+            normalizer
+                .frame(frame(2, false, 100, 40, encode(b"size")))
+                .is_err()
+        );
+        let replacement = normalizer
+            .frame(frame(2, true, 120, 40, encode(b"replacement")))
+            .unwrap()
+            .unwrap();
+        assert!(replacement.full);
+        for (width, height) in [(0, 40), (513, 40), (256, 257), (512, 256)] {
+            assert!(
+                Normalizer::default()
+                    .frame(frame(1, true, width, height, String::new()))
+                    .is_err()
+            );
+        }
+        assert!(
+            Normalizer::default()
+                .frame(frame(1, true, 512, 128, encode(&vec![0; PAINT_LIMIT])))
+                .is_ok()
+        );
+        assert!(
+            Normalizer::default()
+                .frame(frame(1, true, 1, 1, encode(&vec![0; PAINT_LIMIT + 1])))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn large_delta_splits_without_dropping_or_reordering_and_output_is_bounded() {
+        let bytes: Vec<_> = (0..PAINT_LIMIT).map(|i| (i % 251) as u8).collect();
+        let mut output = Output::default();
+        let mut seq = 0;
+        output
+            .paint(
+                Paint {
+                    full: false,
+                    cols: 120,
+                    rows: 40,
+                    bytes: bytes.clone(),
+                },
+                "c",
+                &mut seq,
+            )
+            .unwrap();
+        let mut joined = Vec::new();
+        for (i, (line, _)) in output.lines.iter().enumerate() {
+            let record: Value = serde_json::from_slice(line).unwrap();
+            assert_eq!(record["seq"], i + 1);
+            let chunk = decode(record["bytes"].as_str().unwrap()).unwrap();
+            assert!(chunk.len() <= DATA_LIMIT);
+            joined.extend(chunk);
+        }
+        assert_eq!(joined, bytes);
+        assert_eq!(seq, 16);
+        assert!(
+            output
+                .paint(
+                    Paint {
+                        full: true,
+                        cols: 120,
+                        rows: 40,
+                        bytes
+                    },
+                    "c",
+                    &mut seq
+                )
+                .is_err()
+        );
+        assert!(output.pending <= PENDING_LIMIT);
+        assert!(
+            Record::line(
+                1,
+                Event::Data {
+                    bytes: &"x".repeat(ENCODED_LIMIT)
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn query_and_discarded_output_do_not_broaden_identity_or_create_sequence_gaps() {
+        for query in ["", "other=x", "continuity=a&continuity=b", "continuity=ABC"] {
+            assert!(continuity_query(Some(query)).is_err());
+        }
+        assert!(continuity_query(None).unwrap().is_none());
+        assert_eq!(
+            continuity_query(Some(&format!("continuity={}", "a".repeat(64)))).unwrap(),
+            Some("a".repeat(64))
+        );
+        let mut output = Output {
+            headers_sent: true,
+            sent_seq: 3,
+            ..Output::default()
+        };
+        let mut seq = 3;
+        output
+            .record(&mut seq, Event::Data { bytes: "eA==" })
+            .unwrap();
+        output
+            .discard_and_end(
+                &mut seq,
+                Event::Closed {
+                    reason: Closed::Replaced,
+                },
+            )
+            .unwrap();
+        assert_eq!(seq, 4);
+        assert_eq!(output.lines.len(), 1);
+        let record: Value = serde_json::from_slice(&output.lines[0].0).unwrap();
+        assert_eq!(record["seq"], 4);
+        assert_eq!(record["kind"], "closed");
+        output.offset = 1;
+        assert!(
+            output
+                .discard_and_end(
+                    &mut seq,
+                    Event::Closed {
+                        reason: Closed::Replaced
+                    }
+                )
+                .is_err()
+        );
+    }
 
     #[test]
     fn base64_is_canonical_and_bounded() {

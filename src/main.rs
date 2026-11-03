@@ -137,6 +137,9 @@ fn main() -> ExitCode {
             );
         }
     };
+    if let Some(terminal) = cli.dashboard_observer_terminal() {
+        return namedrop::dashboard::run_observer_guard(terminal);
+    }
     let selected_state = cli
         .runtime
         .plugin_state

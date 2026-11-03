@@ -2,6 +2,7 @@
 //! deferred transaction. Context payloads, evidence and terminal output are
 //! never selected, so no later layer can render them.
 use super::*;
+use crate::{AgentSessionId, PaneBindingId};
 
 pub const MESSAGE_WINDOW: i64 = 150;
 pub const TERMINAL_RUN_WINDOW: i64 = 20;
@@ -165,6 +166,23 @@ pub enum ScreenPane {
     Bound(String),
 }
 
+/// Recorded identity for one authenticated live viewer. Native terminal identity
+/// is resolved separately on this namespace's socket and never comes from HTTP.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LiveBinding {
+    pub namespace: StateNamespace,
+    pub binding_id: PaneBindingId,
+    pub pane_id: String,
+    pub pane_type: crate::PaneType,
+    pub agent_session_id: Option<AgentSessionId>,
+}
+
+pub(crate) enum LiveMember {
+    Missing,
+    Gone,
+    Bound(LiveBinding),
+}
+
 const WINDOW_MESSAGE_IDS: &str = "SELECT message_id FROM collaboration_messages
      WHERE session_socket_id = ?1 AND worktree_id = ?2
      ORDER BY created_at_ms DESC, rowid DESC LIMIT ?3";
@@ -176,6 +194,42 @@ const LATEST_ATTEMPT: &str = "a.rowid = (
      ORDER BY latest.created_at_ms DESC, latest.rowid DESC LIMIT 1)";
 
 impl StateStore {
+    pub(crate) fn dashboard_live_member(
+        &mut self,
+        key: &crate::dashboard::snapshot::SpaceKey,
+        address: &str,
+    ) -> Result<LiveMember, StoreError> {
+        self.transaction(|tx| {
+            let Some(namespace) = tx.dashboard_spaces()?.into_iter()
+                .find(|space| crate::dashboard::snapshot::SpaceKey::of(&space.namespace) == *key)
+                .map(|space| space.namespace) else { return Ok(LiveMember::Missing); };
+            let row = tx.transaction.query_row(
+                "SELECT a.retired, a.pane_type, b.binding_id, b.pane_id,
+                    (SELECT NULLIF(o.agent_session_id, '') FROM agent_session_observations o
+                     WHERE o.session_socket_id = a.session_socket_id AND o.worktree_id = a.worktree_id
+                       AND o.address_id = a.address_id AND o.observed_at_ms >= b.bound_at_ms
+                     ORDER BY o.observed_at_ms DESC, o.rowid DESC LIMIT 1)
+                 FROM pane_addresses a LEFT JOIN pane_bindings b
+                   ON b.session_socket_id = a.session_socket_id AND b.worktree_id = a.worktree_id
+                  AND b.address_id = a.address_id AND b.active = 1
+                 WHERE a.session_socket_id = ?1 AND a.worktree_id = ?2 AND a.address_id = ?3",
+                params![namespace.session_socket_id, namespace.space_id.as_str(), address],
+                |row| Ok((row.get::<_,bool>(0)?,row.get::<_,String>(1)?,row.get::<_,Option<String>>(2)?,
+                    row.get::<_,Option<String>>(3)?,row.get::<_,Option<String>>(4)?)),
+            ).optional()?;
+            Ok(match row {
+                None => LiveMember::Missing,
+                Some((false, kind, Some(binding), Some(pane_id), session)) => LiveMember::Bound(LiveBinding {
+                    namespace, binding_id: PaneBindingId::new(binding), pane_id,
+                    pane_type: match kind.as_str() { "agent" => crate::PaneType::Agent, "terminal" => crate::PaneType::Terminal,
+                        _ => return Err(StoreError::invalid_input("Unsupported live member kind.")) },
+                    agent_session_id: session.map(AgentSessionId::new),
+                }),
+                Some(_) => LiveMember::Gone,
+            })
+        })
+    }
+
     pub fn dashboard_screen_pane(
         &mut self,
         namespace: &StateNamespace,
