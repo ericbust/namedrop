@@ -1,15 +1,170 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { chromium, firefox } from "playwright-core";
 
-const csp =
-  "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+// Decode the deliberately small static Rust literal used by the product.
+// Unsupported syntax must stop the oracle, never select a remembered policy.
+function securityHeaders(source) {
+  const definitions = [
+    ...source.matchAll(/^[ \t]*const\s+SECURITY_HEADERS\s*:/gm),
+  ];
+  assert.equal(
+    definitions.length,
+    1,
+    "Expected one unambiguous SECURITY_HEADERS definition",
+  );
+  // Support the current imports/constants prologue, not arbitrary Rust lexing.
+  // Refuse comment/raw-string/cfg ambiguity instead of reading an inactive example.
+  const prologue = source
+    .slice(0, definitions[0].index)
+    .replace(/\/\/[^\n]*/g, "");
+  assert.ok(
+    !/\/\*|\*\/|\b(?:r|br|cr)#*"|\b(?:cfg|cfg_attr)\s*\(/.test(prologue),
+    "Unsupported Rust prologue before SECURITY_HEADERS",
+  );
+  const unquotedPrologue = prologue.replace(/"(?:[^"\\]|\\[\s\S])*"/g, "");
+  assert.ok(
+    !/["']/.test(unquotedPrologue),
+    "Ambiguous string/character literal before SECURITY_HEADERS",
+  );
+  const declaration = source.slice(definitions[0].index);
+  const prefix = /^[ \t]*const\s+SECURITY_HEADERS\s*:\s*&str\s*=\s*"/.exec(
+    declaration,
+  );
+  assert.ok(
+    prefix,
+    "SECURITY_HEADERS must be one ordinary static Rust string literal",
+  );
+  let at = prefix[0].length;
+  let decoded = "";
+  let terminated = false;
+  while (at < declaration.length) {
+    const char = declaration[at++];
+    if (char === '"') {
+      terminated = true;
+      break;
+    }
+    if (char !== "\\") {
+      decoded += char;
+      continue;
+    }
+    const escaped = declaration[at++];
+    if (escaped === "\n" || (escaped === "\r" && declaration[at] === "\n")) {
+      if (escaped === "\r") at++;
+      while (/[ \t\r\n]/.test(declaration[at] ?? "!")) at++;
+      continue;
+    }
+    const escapes = { n: "\n", r: "\r", t: "\t", '"': '"', "\\": "\\" };
+    assert.ok(
+      Object.hasOwn(escapes, escaped),
+      "Unsupported Rust escape in SECURITY_HEADERS",
+    );
+    decoded += escapes[escaped];
+  }
+  assert.ok(
+    terminated && /^\s*;/.test(declaration.slice(at)),
+    "SECURITY_HEADERS must end after that string literal",
+  );
+  assert.ok(
+    decoded.endsWith("\r\n"),
+    "SECURITY_HEADERS must contain complete CRLF header lines",
+  );
+  const headers = {};
+  for (const line of decoded.slice(0, -2).split("\r\n")) {
+    const field = /^([A-Za-z0-9-]+):[ \t]*([\x20-\x7e\t]+)$/.exec(line);
+    assert.ok(field, "Malformed or unsupported SECURITY_HEADERS line");
+    const name = field[1].toLowerCase();
+    assert.ok(
+      !Object.hasOwn(headers, name),
+      "Duplicate SECURITY_HEADERS field",
+    );
+    headers[name] = field[2].trim();
+  }
+  const csp = headers["content-security-policy"];
+  assert.ok(
+    csp && !/[{}]/.test(csp),
+    "Expected one static enforced CSP, without runtime placeholders",
+  );
+  return { headers, csp, decoded };
+}
+
+const securitySource = new URL(
+  "../../../src/dashboard/http.rs",
+  import.meta.url,
+);
+const securitySourceText = await readFile(securitySource, "utf8");
+const productSecurity = securityHeaders(securitySourceText);
+const csp = productSecurity.csp;
+const securityEvidence = {
+  source: fileURLToPath(securitySource),
+  sourceSha256: createHash("sha256").update(securitySourceText).digest("hex"),
+  headersSha256: createHash("sha256")
+    .update(productSecurity.decoded)
+    .digest("hex"),
+};
+
+test("CSP extraction tracks test-local policy changes in the authoritative Rust definition", () => {
+  const marker = "oracle-local-marker; ";
+  const changedSource = securitySourceText.replace(
+    "Content-Security-Policy: ",
+    `Content-Security-Policy: ${marker}`,
+  );
+  assert.notEqual(changedSource, securitySourceText);
+  const changed = securityHeaders(changedSource);
+  assert.equal(changed.csp, `${marker}${csp}`);
+  assert.notEqual(
+    changed.csp,
+    csp,
+    "A stale copied fixture policy must not satisfy this check",
+  );
+  const flatSource = `const SECURITY_HEADERS: &str = ${JSON.stringify(productSecurity.decoded)};`;
+  assert.deepEqual(securityHeaders(flatSource), productSecurity);
+});
+
+test("CSP extraction fails closed on missing, ambiguous, malformed or unsupported source", () => {
+  const literal = (value) =>
+    `const SECURITY_HEADERS: &str = ${JSON.stringify(value)};`;
+  for (const source of [
+    "",
+    securitySourceText.replace(
+      "const SECURITY_HEADERS:",
+      "const OTHER_HEADERS:",
+    ),
+    `${securitySourceText}\n${literal(productSecurity.decoded)}`,
+    `/*\n${literal(productSecurity.decoded)}\n*/`,
+    `// ${literal(productSecurity.decoded)}`,
+    `const EXAMPLE: &str = r#"\n${literal(productSecurity.decoded)}\n"#;`,
+    `#[cfg(feature = "disabled")]\n${literal(productSecurity.decoded)}`,
+    'const SECURITY_HEADERS: &str = concat!("one", "two");',
+    'const SECURITY_HEADERS: &str = r#"Content-Security-Policy: none"#;',
+    'const SECURITY_HEADERS: &str = "unterminated',
+    String.raw`const SECURITY_HEADERS: &str = "unsupported\u{61}";`,
+    literal(
+      productSecurity.decoded.replace(
+        "Content-Security-Policy:",
+        "Content-Security-Policy-Report-Only:",
+      ),
+    ),
+    literal(`${productSecurity.decoded}Content-Security-Policy: ${csp}\r\n`),
+    literal("Content-Security-Policy: {runtime_policy}\r\n"),
+    literal("Content-Security-Policy: missing-crlf"),
+  ])
+    assert.throws(() => securityHeaders(source));
+});
+
 // Diagnostic runs cannot emit the gate's success token. The default oracle
 // always uses the product CSP; this isolates style compatibility from other defects.
 const styleDiagnostic = process.env.LIVE_PEEK_STYLE_DIAGNOSTIC === "1";
+if (styleDiagnostic)
+  assert.ok(
+    /(?:^|;)\s*style-src 'self'(?=;|$)/.test(csp),
+    "Diagnostic supports only the original self-only style directive",
+  );
 const servedCsp = styleDiagnostic
   ? csp.replace("style-src 'self'", "style-src 'self' 'unsafe-inline'")
   : csp;
@@ -135,7 +290,8 @@ async function open(browser) {
       const body = await readFile(new URL(`../dist${path}`, import.meta.url));
       res.writeHead(200, {
         "Content-Type": types[extname(path)] ?? "application/octet-stream",
-        "Content-Security-Policy": servedCsp,
+        ...productSecurity.headers,
+        "content-security-policy": servedCsp,
         ...(isPage
           ? {
               "Set-Cookie":
@@ -191,7 +347,13 @@ async function open(browser) {
       return null;
     };
   });
-  await page.goto(`${origin}/w/${fixture.key}`);
+  const navigation = await page.goto(`${origin}/w/${fixture.key}`);
+  assert.ok(navigation);
+  assert.equal(
+    navigation.headers()["content-security-policy"],
+    servedCsp,
+    "Fixture response must serve the extracted product policy",
+  );
   await page.getByRole("heading", { name: "alpha", exact: true }).waitFor();
   const chip = (member) =>
     page.locator(`[data-address-id="${member}"] .member`);
@@ -253,6 +415,7 @@ test("live Peek product component, transport and CSP in real Chromium and Firefo
         ? "NON-GATING relaxed-style diagnostic"
         : "product CSP",
       csp: servedCsp,
+      securitySource: securityEvidence,
       version: browser.version(),
       executablePath,
       checks: [],
